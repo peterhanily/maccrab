@@ -158,6 +158,9 @@ enum DaemonSetup {
             "uptime_seconds": Int(Date().timeIntervalSince(startedAt)),
             "boot_phase": phase,
             "liveness": false,
+            // Independent schema from heartbeat_rich.json (which is at v5 with the
+            // prevention block). This boot-phase liveness payload is intentionally
+            // thinner; the dashboard reads schema_version informationally only.
             "schema_version": 4,
         ]
         guard let data = try? JSONSerialization.data(
@@ -583,8 +586,12 @@ enum DaemonSetup {
         // background load completes — a tiny window of missed lookup
         // for a multi-second startup win.
         let threatIntel = ThreatIntelFeed(cacheDir: supportDir + "/threat_intel")
+        // v1.19.1: the abuse.ch network refresh is opt-in (off by default).
+        // Local hydration + bundled IOCs still load; only the outbound fetch is
+        // gated. Capture a Sendable Bool for the detached task.
+        let threatIntelNetworkEnabled = config.threatIntelEnabled
         Task.detached(priority: .utility) {
-            await threatIntel.start()
+            await threatIntel.start(networkRefresh: threatIntelNetworkEnabled)
             await BundledThreatIntel.loadInto(threatIntel)
             // v1.12.6 Wave 9F: write the cache file to disk RIGHT NOW
             // so a dashboard launched before the initial network fetch
@@ -599,7 +606,7 @@ enum DaemonSetup {
             await threatIntel.persistCacheNow()
             let bundledStats = BundledThreatIntel.stats
             print("Bundled threat intel loaded (deferred): \(bundledStats.hashes) hashes, \(bundledStats.ips) IPs, \(bundledStats.domains) domains")
-            print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
+            print("Threat intel: bundled IOCs loaded; abuse.ch network refresh \(threatIntelNetworkEnabled ? "ENABLED" : "OFF by default (opt-in)")")
         }
 
         Self.logBootStep(label: "threat_intel_init", startedAt: startedAt)
@@ -1138,7 +1145,7 @@ enum DaemonSetup {
 
         // Package freshness checker -- queries registries for package age
         let packageChecker = PackageFreshnessChecker()
-        print("Package freshness checker active (npm, PyPI, Homebrew, Cargo)")
+        print("Package freshness checker ready (npm, PyPI, Homebrew, Cargo) — registry lookups \(config.packageFreshnessEnabled ? "ENABLED" : "OFF by default (opt-in)")")
 
         // Cross-process correlator -- links events across unrelated process trees
         let crossProcessCorrelator = CrossProcessCorrelator()
@@ -1490,7 +1497,10 @@ enum DaemonSetup {
         // through the privileged inbox IPC instead of a shared-writable dir).
         if fm.fileExists(atPath: userOverridesDir), isSecureDirectory(userOverridesDir) {
             do {
-                let userCount = try await ruleEngine.loadRules(from: userOverridesURL)
+                // v1.19.1 (audit): also gate per-FILE ownership — only files owned
+                // by the daemon's own uid may shadow a bundled rule, so a legacy
+                // non-daemon-owned file in the dir can't disable detection.
+                let userCount = try await ruleEngine.loadRules(from: userOverridesURL, requireOwnerUID: geteuid())
                 if userCount > 0 {
                     logger.info("Loaded \(userCount) user rule override(s) from \(userOverridesDir)")
                     print("Loaded \(userCount) user rule override(s)")
@@ -1545,7 +1555,10 @@ enum DaemonSetup {
                     // could silently disable detection.
                     if FileManager.default.fileExists(atPath: userOverridesDirForWatcher),
                        isOverlayDirSecure(userOverridesDirForWatcher) {
-                        if let overlayed = try? await ruleEngine.loadRules(from: URL(fileURLWithPath: userOverridesDirForWatcher)) {
+                        // v1.19.1 (audit): per-file ownership gate on the live-reload
+                        // path too — only daemon-owned override files may shadow a
+                        // bundled rule.
+                        if let overlayed = try? await ruleEngine.loadRules(from: URL(fileURLWithPath: userOverridesDirForWatcher), requireOwnerUID: geteuid()) {
                             total += overlayed
                         }
                     }
@@ -1770,6 +1783,15 @@ enum DaemonSetup {
         storage.campaignsRetentionDays = max(1, storage.campaignsRetentionDays)
         storage.campaignsMaxSizeMB    = max(50, storage.campaignsMaxSizeMB)
         state.storage = storage
+
+        // v1.19.1: seed the opt-in network-enrichment switches (off by default).
+        // DaemonTimers (vuln scan) and EventLoop (package freshness) read these
+        // live; the SIGHUP handler re-applies them so a dashboard toggle takes
+        // effect without a restart.
+        state.threatIntelEnabled     = config.threatIntelEnabled
+        state.vulnScanEnabled        = config.vulnScanEnabled
+        state.packageFreshnessEnabled = config.packageFreshnessEnabled
+        state.certTransparencyEnabled = config.certTransparencyEnabled
 
         // v1.12.0 post-audit (M-Cfg1): wire intent thresholds from
         // daemon_config.json onto DaemonState. Clamp to sane ranges

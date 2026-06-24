@@ -108,6 +108,15 @@ public actor OpenAIBackend: LLMBackend {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        // Zero-data-retention / no-train posture: the OpenAI Chat Completions
+        // API has NO documented request HEADER to opt out of retention or
+        // training. By default the API does not train on business/API data;
+        // stronger ZDR is an org/enrollment-level arrangement. The Responses
+        // API has a `store: false` BODY field, but this backend speaks
+        // Chat Completions and also targets OpenAI-COMPATIBLE gateways
+        // (Azure, vLLM, LocalAI) that may reject unknown fields — adding it
+        // could break those endpoints, so we do not. Posture is documented
+        // in PRIVACY.md instead. (Audit P1 finding 2.)
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 

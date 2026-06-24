@@ -27,9 +27,19 @@ struct PluginVisibilityTests {
     @Test("positive rule: an unregistered com.maccrab.* impersonator is residue when the built-in set is known")
     func positiveRule() {
         #expect(PluginVisibility.isResidue(pluginID: "com.maccrab.evil", builtinIDs: Self.builtins))
-        // Without a known built-in set the positive rule is OFF (don't false-hide a
-        // future legit first-party id); the denylist still governs.
+        // A registered first-party id is NOT residue.
+        #expect(!PluginVisibility.isResidue(pluginID: Self.builtins.first!, builtinIDs: Self.builtins))
+    }
+
+    @Test("SEC-DELTA-3: with an UNKNOWN (empty) built-in set the positive rule degrades OPEN (cosmetic filter, not a security boundary)")
+    func degradesOpenOnEmptyBuiltins() {
+        // The com.maccrab.* positive rule is OFF when the built-in set is
+        // unknown: pass a first-party-namespaced id through rather than hide a
+        // LEGITIMATE first-party plugin we just couldn't enumerate. The run-path
+        // gate (not this surface filter) is the real boundary. The denylist
+        // (test/fixture/.example + the rehearsal id) still governs regardless.
         #expect(!PluginVisibility.isResidue(pluginID: "com.maccrab.somethingnew", builtinIDs: []))
+        #expect(PluginVisibility.isResidue(pluginID: "com.maccrab.hosts-collector", builtinIDs: []))  // denylist still fires
     }
 
     @Test(".json trust entries + fixtures + test vendors are residue")

@@ -167,9 +167,14 @@ struct MCPProtocolHarnessTests {
             "suppress_alert", "suppress_campaign", "hunt", "get_security_score",
             "get_traces", "get_trace_detail",
             "export_session_bundle", "verify_session_bundle", "get_agent_session",
-            "forensics.search_artifacts",
+            "forensics_search_artifacts",   // MCP-3: advertised with underscore now
         ] {
             #expect(names.contains(required), "MCP tool missing from tools/list: \(required)")
+        }
+        // MCP-3: strict MCP clients require ^[a-zA-Z0-9_-]+$ — NO advertised
+        // tool name may contain a dot.
+        for n in names {
+            #expect(!n.contains("."), "advertised tool name contains a dot (strict-client incompatible): \(n)")
         }
     }
 
@@ -193,7 +198,7 @@ struct MCPProtocolHarnessTests {
         return content?.first?["text"] as? String ?? ""
     }
 
-    @Test("tools/list exposes forensics.create_case + dynamically-registered plugin tools")
+    @Test("tools/list exposes forensics_create_case + dynamically-registered plugin tools")
     func dynamicToolSurface() {
         let objs = drive([
             #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
@@ -201,8 +206,8 @@ struct MCPProtocolHarnessTests {
         ])
         let tools = (byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
         let names = Set((tools ?? []).compactMap { $0["name"] as? String })
-        // The new create-case meta-tool.
-        #expect(names.contains("forensics.create_case"))
+        // The create-case meta-tool (MCP-3: underscore name; dotted still accepted as an alias).
+        #expect(names.contains("forensics_create_case"))
         // Per-plugin tools projected from collector manifests' mcpTools.
         #expect(names.contains("macho_analyze_path"))
         #expect(names.contains("tcc_grants_for_service"))
@@ -302,6 +307,7 @@ struct MCPProtocolHarnessTests {
             "set_builtin_rule_setting", "set_daemon_config",
             "reload_rules", "refresh_threat_intel",
             "suppress_alert", "suppress_campaign",
+            "set_response_action",
         ]
         for n in observed {
             #expect(expectedGated.contains(n),

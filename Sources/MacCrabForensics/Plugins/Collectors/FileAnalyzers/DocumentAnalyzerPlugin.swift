@@ -67,7 +67,11 @@ public struct DocumentAnalyzerPlugin: Collector {
         var rejected = 0
         let now = Date()
         for url in urls where url.pathExtension.lowercased() == "pdf" {
-            guard let data = try? Data(contentsOf: url) else { continue }
+            // SEC-DELTA-1/2: reject symlinks + over-256MB before loading the PDF
+            // (the full bytes are needed for the /JS + /EmbeddedFile scan below,
+            // so we gate the size rather than stream).
+            guard FileAnalyzerIO.regularFileSize(url) != nil else { rejected += 1; continue }
+            guard let data = try? Data(contentsOf: url) else { rejected += 1; continue }
             let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             guard let pdf = PDFDocument(url: url) else { continue }
             let pageCount = pdf.pageCount

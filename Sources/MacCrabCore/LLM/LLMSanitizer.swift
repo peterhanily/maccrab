@@ -1,10 +1,22 @@
 // LLMSanitizer.swift
 // MacCrabCore
 //
-// Redacts sensitive data (usernames, private IPs, hostnames, API-key-
-// shaped tokens) from prompts before sending to cloud LLM APIs. Ollama
-// (local) bypasses this, but every cloud-backend call runs through
-// `sanitize()` first.
+// BEST-EFFORT redaction of sensitive data (real account usernames,
+// home paths, private AND public IPs, hostnames, computer names,
+// emails, CDHashes, API-key-shaped tokens) from prompts before sending
+// to cloud LLM APIs. Ollama (local) bypasses this, but every cloud-
+// backend call runs through `sanitize()` first.
+//
+// This is a heuristic scrubber, NOT a guarantee — novel data shapes can
+// still slip through. Cloud LLM is off by default and opt-in; treat the
+// sanitizer as defence-in-depth, not a contractual no-leak boundary.
+// PRIVACY.md documents the user-facing claim.
+//
+// Acquisition audit (cloud-LLM data-handling P1): the prior version
+// leaked (a) BARE usernames — only `/Users/<name>/` paths were stripped,
+// so a `User: adrian` line went through verbatim — and (b) PUBLIC IPs,
+// since only RFC-1918 / loopback / link-local / CGN ranges were masked.
+// Both are now redacted (see `liveUsernames` and `redactPublicIPs`).
 //
 // v1.6.7: expanded the token-shape coverage after the credential audit.
 // Previously the sanitizer caught usernames/hostnames/IPs/emails and
@@ -36,6 +48,32 @@ public enum LLMSanitizer {
     /// private one.
     private static let privateIPv6Regex = try! NSRegularExpression(
         pattern: #"\b(?:fe80|f[cd][0-9a-f]{2})(?::[0-9a-f]{0,4}){1,7}\b"#,
+        options: [.caseInsensitive]
+    )
+    /// ANY remaining IPv4 literal. Runs AFTER the private-IP pass, so by
+    /// the time this fires the RFC-1918 / loopback / link-local / CGN
+    /// addresses are already `[PRIVATE_IP]` placeholders — what's left
+    /// is routable/public. The audit found public IPs (e.g. a C2 dest
+    /// address in an alert) leaked verbatim to cloud LLMs because only
+    /// private ranges were masked. Each octet is constrained to 0-255 so
+    /// invalid quads (999.999.999.999) and >255-component build strings
+    /// (10.15.7.1000) are NOT eaten; three-group versions (`1.2.3`) don't match
+    /// the four-group anchor. A genuine 4-group all-<=255 version (`1.2.3.4`) is
+    /// syntactically indistinguishable from an IPv4 literal and IS redacted —
+    /// over-redaction biases SAFE for a cloud prompt (lose context, never leak).
+    private static let anyIPv4Regex = try! NSRegularExpression(
+        pattern: #"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"#
+    )
+    /// ANY remaining IPv6 literal — runs AFTER the private-IPv6 pass.
+    /// Matches a run of hex/colon characters that EITHER contains a `::`
+    /// (compressed form) OR is fully expanded with 7 colons (8 hextets).
+    /// The leading lookbehind/trailing lookahead anchor on `[0-9a-f:]`
+    /// (not `\b`, which is unreliable next to `:`) so the whole address
+    /// is grabbed. The `::`-or-full requirement deliberately excludes
+    /// `HH:MM:SS` clock times (3 colon groups, no `::`). Catches public /
+    /// global-unicast addresses (e.g. `2001:db8::1`) the private pass left.
+    private static let anyIPv6Regex = try! NSRegularExpression(
+        pattern: #"(?<![0-9a-f:])(?=[0-9a-f:]*::|(?:[0-9a-f]{1,4}:){6}[0-9a-f]{1,4})[0-9a-f:]*[0-9a-f](?![0-9a-f:])"#,
         options: [.caseInsensitive]
     )
     private static let emailRegex = try! NSRegularExpression(
@@ -99,6 +137,54 @@ public enum LLMSanitizer {
         return names.filter { $0.count >= 4 }
     }()
 
+    /// The machine's REAL local account names. The path regex above only
+    /// strips a name when it appears inside `/Users/<name>/`; the audit
+    /// found bare-username leaks too (e.g. `User: adrian` emitted by
+    /// `LLMPrompts.baselineAnomalyUser`, or a username embedded in a
+    /// process arg / log line). Redacting standalone occurrences of the
+    /// REAL account names — not a generic `\w+` regex — catches those
+    /// without nuking ordinary words.
+    ///
+    /// Derived from the home directories under `/Users` plus
+    /// `NSUserName()`. Gated to >= 3 chars and the shared/placeholder
+    /// accounts are dropped, so we never word-boundary-redact "Shared",
+    /// the `.localized` Spotlight dir, or a 1-2 char alias that would
+    /// collide with prose.
+    private static let liveUsernames: [String] = {
+        var names = Set<String>()
+        names.insert(NSUserName())
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Users") {
+            for entry in entries { names.insert(entry) }
+        }
+        // Skip placeholder dirs AND common security-vocabulary words that are
+        // sometimes used as account names — redacting every "admin"/"test"/"root"
+        // in a prompt to [USER] would gut the analysis text. (v1.19.1 audit P2.)
+        let skip: Set<String> = [
+            "shared", "guest", "localized", ".localized",
+            "admin", "administrator", "root", "user", "test", "dev", "ops",
+            "app", "build", "ci", "runner", "service", "daemon", "system",
+        ]
+        return names
+            .filter { $0.count >= 3 && !$0.hasPrefix(".") && !skip.contains($0.lowercased()) }
+            // Longest first so a username that is a prefix of another
+            // ("dan" vs "danielle") redacts the longer match first.
+            .sorted { $0.count > $1.count }
+    }()
+
+    /// Word-boundary regexes for each real account name, built once.
+    /// Word-boundary anchored so "danielle" doesn't get half-redacted by
+    /// a "dan" account, and so substrings inside larger identifiers are
+    /// left alone.
+    private static let usernameRegexes: [NSRegularExpression] = {
+        liveUsernames.compactMap { name in
+            let escaped = NSRegularExpression.escapedPattern(for: name)
+            return try? NSRegularExpression(
+                pattern: #"(?<![\w.])"# + escaped + #"(?![\w.])"#,
+                options: [.caseInsensitive]
+            )
+        }
+    }()
+
     /// CDHash values — 40-char hex strings preceded by `cdhash=` /
     /// `CDHash:` / `cd_hash:`. CDHash maps 1:1 to malware family in
     /// research datasets (i.e. leaking it tells an LLM exactly which
@@ -123,9 +209,12 @@ public enum LLMSanitizer {
         result = redactUserPaths(result)
         result = redactComputerNames(result)
         result = redactHostnames(result)
+        result = redactEmails(result)        // emails before usernames so the
+                                             // local-part isn't half-redacted
+        result = redactUsernames(result)     // bare account names (audit fix)
         result = redactPrivateIPs(result)
         result = redactPrivateIPv6(result)
-        result = redactEmails(result)
+        result = redactPublicIPs(result)     // any remaining routable IPs (audit fix)
         result = redactCDHashes(result)
         return result
     }
@@ -194,6 +283,36 @@ public enum LLMSanitizer {
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "[PRIVATE_IPV6]"
         )
+    }
+
+    /// Redact every account name in `liveUsernames`. Runs each name's
+    /// pre-built word-boundary regex; longest names first (the array is
+    /// pre-sorted) so a short name that is a prefix of a longer one
+    /// can't half-redact it.
+    private static func redactUsernames(_ text: String) -> String {
+        var result = text
+        for regex in usernameRegexes {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "[USER]"
+            )
+        }
+        return result
+    }
+
+    /// Redact any IPv4 / IPv6 literal still present after the private
+    /// passes — i.e. routable/public addresses. Runs LAST among the IP
+    /// passes so private-range placeholders are already in place.
+    private static func redactPublicIPs(_ text: String) -> String {
+        var result = anyIPv4Regex.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text),
+            withTemplate: "[PUBLIC_IP]"
+        )
+        result = anyIPv6Regex.stringByReplacingMatches(
+            in: result, range: NSRange(result.startIndex..., in: result),
+            withTemplate: "[PUBLIC_IPV6]"
+        )
+        return result
     }
 
     private static func redactEmails(_ text: String) -> String {

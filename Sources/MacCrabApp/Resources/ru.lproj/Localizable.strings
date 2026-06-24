@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Отслеживает доступ к учётным данным у ИИ-инструментов разработки, таких как Claude, Cursor и Copilot";
 "welcome.feature.prevention" = "Активное предотвращение";
 "welcome.feature.preventionDesc" = "Блокирует вредоносные домены, изолирует файлы и пресекает атаки на цепочку поставок";
-"welcome.feature.privacy" = "Конфиденциальность прежде всего";
-"welcome.feature.privacyDesc" = "Всё работает локально — данные никогда не покидают ваш компьютер";
+"welcome.feature.privacy" = "Конфиденциально по умолчанию";
+"welcome.feature.privacyDesc" = "По умолчанию работает на устройстве — ничего не покидает ваш Mac, пока вы не включите дополнительное обогащение";
 "welcome.setup.engineActive" = "Движок обнаружения активен";
 "welcome.setup.prevention" = "Включите предотвращение на вкладке «Предотвращение»";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "Обслуживание";
 "forensicsSettings.onDiskLocation" = "Расположение на диске";
 "forensicsSettings.trustedPublishers" = "Доверенные издатели";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "Сетевое обогащение (конфиденциальность)";
+"settings.netEnrichHelp" = "По умолчанию MacCrab работает на устройстве — ни одна из этих функций не делает сетевых запросов, пока вы их не включите. Локальное обнаружение (правила, последовательности, кампании, встроенная аналитика угроз) не затрагивается. Каждый запрос ниже обращается к публичной службе; включайте только то, что хотите.";
+"settings.enrich.threatIntel" = "Каналы аналитики угроз (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "Загружает списки IOC (URLhaus / MalwareBazaar / Feodo) каждые 4 часа. Только загрузка — ничего о вашем компьютере не отправляется.";
+"settings.enrich.vulnScan" = "Сканирование уязвимостей (osv.dev)";
+"settings.enrich.vulnScanDesc" = "Ищет CVE для установленных приложений/пакетов. Отправляет перечень вашего ПО (анонимно, но это список программ вашего компьютера).";
+"settings.enrich.packageFreshness" = "Актуальность пакетов (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "Проверяет возраст пакета при его установке. Запрос раскрывает имя устанавливаемого пакета.";
+"settings.enrich.certTransparency" = "Прозрачность сертификатов (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "Ищет сертификаты для доменов, к которым вы подключаетесь. Запрос раскрывает домен. Локальная проверка тайпсквоттинга выполняется в любом случае.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "Дополнительное сетевое обогащение";
+"enrich.intro" = "По умолчанию MacCrab полностью работает на устройстве — ничего о вашем Mac его не покидает. Обнаружение (правила, последовательности, кампании, встроенная аналитика угроз) работает офлайн. Каждый из этих четырёх необязательных запросов обращается к публичной службе для добавления дополнительного контекста. Они выключены, пока вы их не включите, и вы можете изменить это в любое время в Настройках.";
+"enrich.threatIntel" = "Каналы аналитики угроз (abuse.ch)";
+"enrich.threatIntelDetail" = "Загружает списки IOC каждые 4 ч. Только загрузка — ничего о вашем Mac не отправляется.";
+"enrich.vulnScan" = "Сканирование уязвимостей (osv.dev)";
+"enrich.vulnScanDetail" = "Ищет CVE для установленного ПО. Отправляет перечень вашего ПО (анонимно).";
+"enrich.packageFreshness" = "Актуальность пакетов (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "Проверяет возраст пакета при установке. Раскрывает имя устанавливаемого пакета.";
+"enrich.certTransparency" = "Прозрачность сертификатов (crt.sh)";
+"enrich.certTransparencyDetail" = "Ищет сертификаты для доменов, к которым вы подключаетесь. Раскрывает домен.";
+"enrich.keepOff" = "Оставить всё выключенным";
+"enrich.enable" = "Включить выбранное";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "Что это такое";
+"overview.factorWhy" = "Почему это важно";
+"overview.factorFix" = "Как исправить";
+"overview.factorLearnMore" = "Подробнее";
+"overview.factorExpandHint" = "Нажмите, чтобы узнать, что это значит и как это исправить";
+"overview.storeTitle" = "Магазин плагинов";
+"overview.storeBrowse" = "Обзор →";
+"overview.storeBrowsePrompt" = "Просмотрите подписанные криминалистические плагины в каталоге. Установки полностью изолированы.";
+"raveStore.thirdPartyCatalog.title" = "Подписанный каталог сторонних разработчиков";
+"raveStore.thirdPartyCatalog.body" = "На данный момент плагины сторонних разработчиков не опубликованы. Встроенные сканеры ниже включены в MacCrab и запускаются на этом Mac — не требуется установка.";

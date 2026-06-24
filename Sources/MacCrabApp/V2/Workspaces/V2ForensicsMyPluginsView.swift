@@ -17,6 +17,22 @@
 import SwiftUI
 import MacCrabForensics
 
+/// PERF-4: registerBuiltins is idempotent (id-keyed) but re-validates ~35
+/// built-in manifests on every call. The shared registry persists for the life
+/// of the process, so run the bootstrap at most ONCE rather than on every
+/// dashboard reload. Internal (not private) so other workspaces that read the
+/// registry — e.g. the Overview forensics card — can guarantee it's populated
+/// before counting without re-validating per tick.
+actor BuiltinBootstrapOnce {
+    static let shared = BuiltinBootstrapOnce()
+    private var done = false
+    func ensure() async {
+        guard !done else { return }
+        try? await MacCrabForensicsBootstrap.registerBuiltins()
+        done = true
+    }
+}
+
 struct V2ForensicsMyPluginsView: View {
     @State private var builtins: [PluginManifest] = []
     @State private var status: TierBBootstrap.Status? = nil
@@ -28,6 +44,7 @@ struct V2ForensicsMyPluginsView: View {
     @State private var reverifying = false
     @State private var actionMessage: String? = nil
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a plugin → inspector
+    @State private var pendingUninstall: String? = nil          // UX-5: confirm before uninstall
     @State private var builtinShowAll = false                   // pagination in the built-in section
     private let builtinPageSize = 8
 
@@ -62,6 +79,23 @@ struct V2ForensicsMyPluginsView: View {
         }
         .task { await reload() }
         .sheet(item: $detailModel) { PluginDetailInspector(model: $0) }
+        .confirmationDialog(
+            String(localized: "myPlugins.confirmRemove.title", defaultValue: "Remove this plugin?"),
+            isPresented: Binding(get: { pendingUninstall != nil },
+                                 set: { if !$0 { pendingUninstall = nil } }),
+            presenting: pendingUninstall
+        ) { id in
+            Button(String(localized: "myPlugins.remove", defaultValue: "Remove"), role: .destructive) {
+                Task { await remove(id) }
+                pendingUninstall = nil
+            }
+            Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {
+                pendingUninstall = nil
+            }
+        } message: { id in
+            Text(String(localized: "myPlugins.confirmRemove.message",
+                        defaultValue: "\(friendlyName(id)) will be uninstalled. This cannot be undone."))
+        }
     }
 
     /// Detail model for an installed (verified) plugin — manifest from its bundle,
@@ -163,22 +197,22 @@ struct V2ForensicsMyPluginsView: View {
                         pluginRow(name: friendlyName(v.pluginID),
                                   subtitle: "Verified · v\(v.version) · \(v.provenance.displayName)",
                                   icon: "checkmark.seal.fill", iconColor: .green,
-                                  remove: { Task { await remove(v.pluginID) } }) { detailModel = verifiedDetail(v) }
+                                  remove: { pendingUninstall = v.pluginID }) { detailModel = verifiedDetail(v) }
                     }
                     ForEach(visibleFailed, id: \.pluginID) { f in
                         pluginRow(name: friendlyName(f.pluginID),
                                   subtitle: "Failed · \(f.reason)",
                                   icon: "xmark.octagon.fill", iconColor: .red,
-                                  remove: { Task { await remove(f.pluginID) } }, detail: nil)
+                                  remove: { pendingUninstall = f.pluginID }, detail: nil)
                     }
                 }
             }
         }
     }
 
-    /// Dense, clear plugin row with a prominent Details button. The old rows were
-    /// spaced out with an invisible whole-row tap as the only detail affordance.
-    /// `detail` nil → no Details button / not tappable (failed installs);
+    /// Dense, clear plugin row with explicit Details / Remove buttons (UX-7
+    /// removed the invisible whole-row tap — buttons are the only affordance).
+    /// `detail` nil → no Details button (failed installs);
     /// `remove` nil → no Remove button (built-ins).
     private func pluginRow(name: String, subtitle: String, icon: String, iconColor: Color,
                            remove: (() -> Void)?, detail: (() -> Void)?) -> some View {
@@ -204,8 +238,8 @@ struct V2ForensicsMyPluginsView: View {
         .padding(.horizontal, 10).padding(.vertical, 7)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .onTapGesture { detail?() }
+        // UX-7: no whole-row tap — the explicit Details/Remove buttons are the
+        // affordances (the invisible row tap was unclear + double with Details).
     }
 
     private func scannerSubtitle(_ m: PluginManifest) -> String {
@@ -244,7 +278,7 @@ struct V2ForensicsMyPluginsView: View {
                     }
                     Spacer()
                     Button(role: .destructive) {
-                        Task { await remove(item.pluginID) }
+                        pendingUninstall = item.pluginID
                     } label: { Text(String(localized: "myPlugins.remove", defaultValue: "Remove")) }
                     .buttonStyle(.borderless).controlSize(.small)
                 }
@@ -269,23 +303,11 @@ struct V2ForensicsMyPluginsView: View {
 
     private func friendlyName(_ id: String) -> String { ScannerDisplay.name(forPluginID: id) }
 
-    private func provenanceLabel(_ p: PluginProvenance) -> some View {
-        Label(p.displayName, systemImage: p.symbolName)
-            .scaledSystem(10)
-            .foregroundStyle(p == .store ? Color.green : (p == .builtIn ? Color.blue : Color.orange))
-    }
-
-    private func provenance(for pluginID: String) -> PluginProvenance {
-        let receiptsDir = URL(fileURLWithPath: (installer.pluginsRootPath as NSString).deletingLastPathComponent)
-            .appendingPathComponent("plugin_receipts")
-        return PluginProvenance.forInstalled(pluginID: pluginID, receiptsDir: receiptsDir)
-    }
-
     // MARK: - Actions
 
     private func reload() async {
         loading = true
-        try? await MacCrabForensicsBootstrap.registerBuiltins()
+        await BuiltinBootstrapOnce.shared.ensure()   // PERF-4: bootstrap at most once per process
         builtins = await PluginRegistry.shared.manifests()
             .filter { $0.type == .collector || $0.type == .analyzer }
             .sorted { friendlyName($0.id) < friendlyName($1.id) }

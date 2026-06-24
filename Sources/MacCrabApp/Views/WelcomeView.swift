@@ -157,8 +157,8 @@ struct WelcomeView: View {
                     title: String(localized: "welcome.feature.prevention", defaultValue: "Active Prevention"),
                     description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Blocks malicious domains, quarantines files, and gates supply chain attacks"))
                 FeatureRow(icon: "lock.shield",
-                    title: String(localized: "welcome.feature.privacy", defaultValue: "Privacy First"),
-                    description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Everything runs locally \u{2014} no data ever leaves your machine"))
+                    title: String(localized: "welcome.feature.privacy", defaultValue: "Private by default"),
+                    description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Runs on-device by default \u{2014} nothing leaves your Mac unless you turn on optional enrichment"))
             }
             .padding(.horizontal, 20)
         }

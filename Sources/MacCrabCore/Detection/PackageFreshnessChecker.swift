@@ -409,7 +409,7 @@ public actor PackageFreshnessChecker {
                 name = arg.split(separator: "@").first.map(String.init) ?? arg
             }
 
-            guard !name.isEmpty, name != "." else { return nil }
+            guard !name.isEmpty, name != ".", isValidNpmName(name) else { return nil }
             return (name, .npm)
         }
     }
@@ -417,15 +417,38 @@ public actor PackageFreshnessChecker {
     // MARK: - pip Parsing
 
     private static func parsePipInstall(_ parts: [String]) -> [(name: String, registry: Registry)] {
-        guard parts.contains("install") else { return [] }
-        guard let installIdx = parts.firstIndex(of: "install") else { return [] }
+        // Must be a REAL pip invocation, not the word "install" appearing inside
+        // a `python -c "<code>"` string or other argv noise. The audit found
+        // `python3 -c '<json blob containing the token install>'` minting a
+        // CRITICAL "Fresh Package Installed" alert from garbage. (audit P1)
+        let cmd = (parts[0] as NSString).lastPathComponent
+        let pipArgs: [String]
+        if cmd == "python" || cmd == "python3" {
+            // Only `python -m pip install …` is a package install. A bare
+            // `python -c "<code>"` is code execution — never parse it as an
+            // install even if the code string contains the token "install".
+            guard let mIdx = parts.firstIndex(of: "-m"),
+                  mIdx + 1 < parts.count, parts[mIdx + 1] == "pip" else { return [] }
+            // A `-c`/`-` code-exec flag before the module flag means python ran
+            // a code string, not pip.
+            if mIdx > 1, parts[1..<mIdx].contains(where: { $0 == "-c" || $0 == "-" }) { return [] }
+            pipArgs = Array(parts[(mIdx + 2)...])
+        } else {
+            // pip / pip3: everything after the runner is pip's argv.
+            pipArgs = Array(parts.dropFirst())
+        }
 
-        let argStart = installIdx + 1
-        guard argStart < parts.count else { return [] }
+        // `install` must be the pip SUBCOMMAND — the first non-flag token — not
+        // an arbitrary later token (e.g. a package literally named after it).
+        guard let firstNonFlag = pipArgs.firstIndex(where: { !$0.hasPrefix("-") }),
+              pipArgs[firstNonFlag] == "install" else { return [] }
+
+        let argStart = firstNonFlag + 1
+        guard argStart < pipArgs.count else { return [] }
 
         // If -r or -e flags are present, skip the next argument (it's a file/path)
         var skipNext = false
-        return parts[argStart...].compactMap { arg -> (String, Registry)? in
+        return pipArgs[argStart...].compactMap { arg -> (String, Registry)? in
             if skipNext {
                 skipNext = false
                 return nil
@@ -445,9 +468,37 @@ public actor PackageFreshnessChecker {
                 name = arg
             }
 
-            guard !name.isEmpty, !name.contains("/") else { return nil }
+            guard !name.isEmpty, !name.contains("/"), isValidPackageName(name) else { return nil }
             return (name, .pypi)
         }
+    }
+
+    // MARK: - Package-name validation
+
+    /// Conservative package-name validator. PyPI / Homebrew / crates names are
+    /// short and use a restricted charset; anything else (JSON fragments, quotes,
+    /// shell metacharacters, whitespace survivors) is argv noise that must never
+    /// reach a live registry query nor escalate to a CRITICAL "fresh package"
+    /// alert. (PEP-508 names: start alphanumeric, body `[A-Za-z0-9._-]`.) (audit P1)
+    static func isValidPackageName(_ name: String) -> Bool {
+        guard (1...100).contains(name.count) else { return false }
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        guard name.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        guard let first = name.first, first.isLetter || first.isNumber else { return false }
+        return true
+    }
+
+    /// npm-aware name validator: allows an optional `@scope/` prefix, validating
+    /// both the scope and the package segment with `isValidPackageName`.
+    static func isValidNpmName(_ name: String) -> Bool {
+        if name.hasPrefix("@") {
+            guard let slash = name.firstIndex(of: "/") else { return false }
+            let scope = String(name[name.index(after: name.startIndex)..<slash])
+            let pkg = String(name[name.index(after: slash)...])
+            return isValidPackageName(scope) && isValidPackageName(pkg)
+        }
+        return isValidPackageName(name)
     }
 
     // MARK: - Homebrew Parsing
@@ -461,7 +512,7 @@ public actor PackageFreshnessChecker {
         guard argStart < parts.count else { return [] }
 
         return parts[argStart...].compactMap { arg -> (String, Registry)? in
-            guard !arg.hasPrefix("-") else { return nil }
+            guard !arg.hasPrefix("-"), isValidPackageName(arg) else { return nil }
             return (arg, isCask ? .homebrewCask : .homebrew)
         }
     }
@@ -488,7 +539,7 @@ public actor PackageFreshnessChecker {
                 skipNext = true
                 return nil
             }
-            guard !arg.hasPrefix("-") else { return nil }
+            guard !arg.hasPrefix("-"), isValidPackageName(arg) else { return nil }
             return (arg, .cargo)
         }
     }
@@ -797,8 +848,11 @@ public actor PackageFreshnessChecker {
         }
 
         guard let response = await fetchJSON(url: url, as: HomebrewResponse.self) else {
-            // 404 means the formula/cask doesn't exist in the public tap.
-            // This is suspicious — it might be a brand-new or fake tap.
+            // 404 means the formula/cask doesn't exist in the public tap — OR
+            // the registry was simply unreachable (fetchJSON returns nil for
+            // both). v1.19.1 (audit): not CRITICAL — same calibration as
+            // makeUnknownInfo. A missing formula is worth a MEDIUM note (private
+            // tap / typo / brand-new), not a cry-wolf CRITICAL "fresh package".
             return PackageInfo(
                 name: name,
                 registry: registry,
@@ -807,7 +861,7 @@ public actor PackageFreshnessChecker {
                 downloadCount: nil,
                 isFresh: false,
                 isLowPopularity: true,
-                riskLevel: .critical,
+                riskLevel: .medium,
                 description: "Homebrew \(endpoint) '\(name)' not found in public tap — unknown or brand new"
             )
         }
@@ -1053,7 +1107,14 @@ public actor PackageFreshnessChecker {
             downloadCount: nil,
             isFresh: false,
             isLowPopularity: true,
-            riskLevel: .critical,
+            // v1.19.1 (audit): "not found in registry" is NOT critical. fetchJSON
+            // returns nil for a true 404 AND for a transient network error/timeout,
+            // so this path conflates "package doesn't exist" with "couldn't reach
+            // the registry" — and private/workspace/monorepo packages 404 on the
+            // public registry constantly. A CRITICAL "fresh package" alert here was
+            // a cry-wolf FP. MEDIUM still surfaces it (the alert gate is >= .medium)
+            // without the false APT-grade severity.
+            riskLevel: .medium,
             description: description
         )
     }

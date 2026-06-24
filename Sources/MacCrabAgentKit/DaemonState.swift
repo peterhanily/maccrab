@@ -285,6 +285,17 @@ final class DaemonState {
     /// churn coexist with multi-year alert/campaign history.
     var storage: DaemonConfig.StorageConfig = DaemonConfig.StorageConfig()
 
+    /// v1.19.1: opt-in network-enrichment switches, OFF by default. Set by
+    /// DaemonSetup from config and re-applied live by the SIGHUP handler.
+    /// DaemonTimers (vuln scan) and EventLoop (package freshness) read these
+    /// live so toggling in the dashboard takes effect on the next sweep/event
+    /// without a restart; the threat-intel feed's network loop is started /
+    /// stopped directly via `threatIntel.setNetworkRefresh(_:)`.
+    var vulnScanEnabled: Bool = false
+    var packageFreshnessEnabled: Bool = false
+    var threatIntelEnabled: Bool = false
+    var certTransparencyEnabled: Bool = false
+
     // v1.12.0 post-audit (M-Cfg1): intent posterior thresholds from
     // daemon_config.json. EventLoop reads these instead of hardcoded
     // 0.85 / 3 so an operator can tune false-positive aggressiveness.

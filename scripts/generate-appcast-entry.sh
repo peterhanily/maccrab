@@ -125,7 +125,11 @@ if ! "$SPARKLE_BIN/sign_update" --verify "$DMG" "$ED_SIG" >/dev/null 2>&1; then
     echo "ERROR: the produced appcast edSignature failed sign_update --verify against the DMG. Aborting." >&2
     exit 1
 fi
-echo "  Appcast signature verified; signing key pairs with shipped SUPublicEDKey ${EXPECTED_PUB:0:8}…"
+# Status message → stderr ONLY. stdout is the appcast <item> XML that
+# release.sh captures verbatim into the published appcast file; printing
+# this confirmation to stdout would prepend a stray non-XML "signature
+# verified" line into every published entry.
+echo "  Appcast signature verified; signing key pairs with shipped SUPublicEDKey ${EXPECTED_PUB:0:8}…" >&2
 
 PUB_DATE=$(LC_TIME=en_US.UTF-8 date -u '+%a, %d %b %Y %H:%M:%S +0000')
 DMG_NAME=$(basename "$DMG")

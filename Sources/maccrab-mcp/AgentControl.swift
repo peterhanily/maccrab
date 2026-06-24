@@ -87,6 +87,11 @@ let agentToolCapability: [String: AgentCapability] = [
     // default) could still suppress up to the per-session budget.
     "suppress_alert": .response,
     "suppress_campaign": .response,
+    // Arming a response action (kill / quarantine / blockNetwork) is the most
+    // defense-affecting agent mutation, so it sits at the top tier. The map
+    // FAILS OPEN — any set_-prefixed tool absent here bypasses the gate — so
+    // this entry is load-bearing (and pinned by mutatingToolsAreGated).
+    "set_response_action": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +

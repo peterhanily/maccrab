@@ -267,4 +267,45 @@ struct ResponseActionCoverageTests {
             #expect(decoded.action == kind)
         }
     }
+
+    @Test("config decodes when requireConfirmation is omitted (the writers' on-disk shape)")
+    func omittedKeysDecodeToDefaults() throws {
+        // The dashboard ResponseActionsView + the CLI `actions` + the MCP
+        // set_response_action all OMIT requireConfirmation for non-destructive
+        // (and --no-confirm) actions, and JSONEncoder drops nil keys. With the
+        // synthesized decoder a non-optional Bool threw keyNotFound and aborted
+        // the WHOLE-file load, so the engine silently kept its old config and
+        // the just-set action never fired. Pin the tolerant decode.
+        let single = #"{"action":"notify","minimumSeverity":"high"}"#
+        let cfg = try JSONDecoder().decode(ResponseActionConfig.self, from: Data(single.utf8))
+        #expect(cfg.action == .notify)
+        #expect(cfg.requireConfirmation == false)   // omitted → default, not a decode failure
+
+        // Whole-file decode — the exact path loadConfig takes. The rule entry
+        // omits BOTH requireConfirmation AND minimumSeverity (defaults to .high).
+        let file = #"{"defaults":[{"action":"notify","minimumSeverity":"high"}],"rules":{"r":[{"action":"kill"}]}}"#
+        let decoded = try JSONDecoder().decode(ActionConfigFile.self, from: Data(file.utf8))
+        #expect(decoded.defaults?.first?.requireConfirmation == false)
+        #expect(decoded.rules?["r"]?.first?.action == .kill)
+        #expect(decoded.rules?["r"]?.first?.minimumSeverity == .high)
+    }
+
+    @Test("loadConfig activates an action whose file omits requireConfirmation")
+    func loadConfigActivatesOmittedKeyAction() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("actions.json").path
+        // Exactly what the CLI/MCP writer emits for a non-destructive default
+        // action: no requireConfirmation key.
+        let json = #"{"defaults":[{"action":"escalateNotification","minimumSeverity":"low"}]}"#
+        try json.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let engine = ResponseEngine(quarantineDir: dir.appendingPathComponent("q").path)
+        try await engine.loadConfig(from: configPath)   // must NOT throw
+
+        // The action loaded + is active: a .high alert (≥ .low) fires it.
+        await engine.execute(alert: makeAlert(severity: .high), event: makeProcEvent())
+        let log = await engine.getExecutionLog()
+        #expect(!log.isEmpty, "an omitted-requireConfirmation action must load AND fire")
+    }
 }

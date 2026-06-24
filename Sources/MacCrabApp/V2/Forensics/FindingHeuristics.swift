@@ -1,13 +1,18 @@
 // FindingHeuristics.swift
 //
-// rc.8 — presentation-layer severity for committed artifacts.
+// Presentation-layer severity for committed artifacts.
 // Built-in scanners (hosts-collector, launch-agents-collector,
 // etc.) emit raw rows; the operator needs a "this looks
-// normal" vs "this needs a look" distinction without waiting
-// for the posture analyzer (v1.18 scope).
+// normal" vs "this needs a look" distinction.
 //
-// Heuristics ONLY. Never decisive. Real severity comes from
-// analyzer plugins; this is the bridge until those exist.
+// Two tiers of authority:
+//   1. When an artifact carries an engine-computed severity —
+//      analyzer Finding.severity (posture.*) or the TCC
+//      risk_score — we RESPECT it (bandForPostureSeverity /
+//      bandForRiskScore). The engine's judgement wins.
+//   2. Otherwise we apply content-type heuristics below. These
+//      are never decisive — they bridge raw inventory rows that
+//      no analyzer has scored.
 
 import Foundation
 import MacCrabForensics
@@ -81,9 +86,17 @@ public enum FindingHeuristics {
         let summary = (a.record.summary ?? "").lowercased()
         let data = a.record.data
 
-        // Posture analyzer findings are real findings, not
-        // heuristics. Promote to attention by default.
+        // Posture/anomaly artifacts are REAL findings, not
+        // heuristics — they carry the analyzer's own computed
+        // severity in data["severity"] (Finding.Severity rawValue).
+        // Respect it instead of flattening every finding to
+        // attention (so a committed-critical and a committed-medium
+        // no longer display identically). Missing/unknown severity
+        // falls back to attention (surface, don't hide).
         if ct.hasPrefix("posture.") || ct.contains("anomaly") {
+            if case .string(let sev) = data["severity"] ?? .null {
+                return bandForPostureSeverity(sev)
+            }
             return .attention
         }
 
@@ -111,9 +124,17 @@ public enum FindingHeuristics {
             return .routine
         }
 
-        // TCC: grants of sensitive services are notable. Grants
-        // to Terminal.app / unsigned apps to FDA = attention.
+        // TCC: prefer the engine's deterministic per-grant
+        // risk_score (TCCRiskScoring) — the authoritative model that
+        // already folds in Apple-signing mitigation, unknown-team
+        // penalty, and high-value automation targets. The legacy
+        // service-membership heuristic below is now a fallback only
+        // for pre-risk_score artifacts.
         if ct.hasPrefix("tcc.") {
+            if case .integer(let rs) = data["risk_score"] ?? .null {
+                return bandForRiskScore(Int(rs))
+            }
+            // Fallback (artifacts without a computed risk_score).
             let service = stringValue(data["service"]).lowercased()
             let client  = stringValue(data["client"]).lowercased()
             let signed  = boolValue(data["client_signed"]) ?? true
@@ -221,6 +242,36 @@ public enum FindingHeuristics {
             return .attention
         }
         return .routine
+    }
+
+    // MARK: - Severity bands
+
+    /// Map an analyzer Finding.Severity rawValue (committed into
+    /// data["severity"] by PluginRunner.runAnalyzer) onto the
+    /// presentation severity. Keeps the engine's own judgement —
+    /// a critical posture finding shows critical, a medium shows
+    /// notable — instead of flattening everything to attention.
+    static func bandForPostureSeverity(_ raw: String) -> FindingSeverity {
+        switch raw.lowercased() {
+        case "critical":               return .critical
+        case "high":                   return .attention
+        case "medium":                 return .notable
+        case "low", "informational":   return .routine
+        default:                       return .attention   // unknown string: surface, don't hide
+        }
+    }
+
+    /// Map a TCCRiskScoring per-grant score [0...100] onto the
+    /// presentation severity. Calibrated to the named weights
+    /// (TCCRiskScoring.Weight): a single grant's effective range is
+    /// ~0–55 (full-disk-access 35 + unknown-team 20 = max; Apple
+    /// signing applies −20). `.critical` stays reserved for the
+    /// cross-artifact posture findings + malware matches — a lone
+    /// permission grant tops out at "needs review".
+    static func bandForRiskScore(_ score: Int) -> FindingSeverity {
+        if score >= 35 { return .attention }   // full-disk-access (35), or a sensitive service (accessibility/automation/screen-recording) combined with an unfamiliar team (+20)
+        if score >= 15 { return .notable }     // a lone sensitive grant (accessibility 30, screen-recording 25, camera/mic 20), or one mitigated by Apple-signing
+        return .routine                        // score 0 (addressbook/photos/calendars/…) or low
     }
 
     // MARK: - Value helpers

@@ -52,7 +52,6 @@ func printEvidenceUsage() {
 
     Equivalent legacy commands:
       maccrabctl case artifacts <case-id>        → evidence list --scan <case-id>
-      maccrabctl trace bundle export <case-id>   → evidence export --scan <case-id>
     """)
 }
 
@@ -86,29 +85,85 @@ private func evidenceList(args: [String]) async {
 }
 
 private func evidenceSearch(args: [String]) async {
-    guard let query = args.first else {
-        print("Usage: maccrabctl evidence search \"<query>\"")
+    guard let query = args.first, !query.hasPrefix("--") else {
+        print("Usage: maccrabctl evidence search \"<query>\" [--limit N]")
         exit(1)
     }
-    // v1.17 rc.1: cross-scan search lands in rc.3 alongside the
-    // wizard. For now hint at the existing per-case hunt.
-    print("evidence search: cross-scan search lands in v1.17.0-rc.3.")
-    print("Until then: maccrabctl hunt \(query) (event-side search) or")
-    print("            maccrabctl evidence list --scan <scan-id> (per-scan listing).")
-    exit(2)
+    var limit = 200
+    var i = 1
+    while i < args.count {
+        if args[i] == "--limit", i + 1 < args.count { limit = Int(args[i + 1]) ?? 200; i += 2 } else { i += 1 }
+    }
+    let needle = query.lowercased()
+    let mgr = makeCaseManager()
+    let cases: [CaseManifest]
+    do { cases = try await mgr.listCases() } catch {
+        print("Error listing scans: \(error)"); exit(1)
+    }
+    guard !cases.isEmpty else { print("No scans yet."); return }
+
+    var hits = 0
+    for c in cases {
+        // Best-effort: skip scans that don't open (e.g. an encrypted case whose
+        // key isn't available to this process) rather than aborting the search.
+        guard let handle = try? await mgr.openCase(id: c.id),
+              let rows = try? await handle.store.query(ArtifactQuery(caseID: c.id, limit: 10_000)) else { continue }
+        for a in rows {
+            let hay = ((a.record.summary ?? "") + " " + a.record.contentType + " " + a.record.sha256).lowercased()
+            guard hay.contains(needle) else { continue }
+            print("[\(c.id)] #\(a.id) \(a.record.contentType) — \(a.record.summary ?? "(no summary)")")
+            hits += 1
+            if hits >= limit { print("... (limit \(limit) reached)"); print("\n\(hits) match(es)."); return }
+        }
+    }
+    print(hits == 0 ? "No evidence matched \"\(query)\"." : "\n\(hits) match(es).")
 }
 
 private func evidenceShow(args: [String]) async {
-    guard args.first != nil else {
-        print("Usage: maccrabctl evidence show <evidence-id>")
+    var scanID: String? = nil
+    var evidenceID: Int64? = nil
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--scan" where i + 1 < args.count:
+            scanID = args[i + 1]; i += 2
+        default:
+            if evidenceID == nil, let n = Int64(args[i]) { evidenceID = n }
+            i += 1
+        }
+    }
+    guard let eid = evidenceID else {
+        print("Usage: maccrabctl evidence show [--scan <scan-id>] <evidence-id>")
         exit(1)
     }
-    print("evidence show: lands in v1.17.0-rc.3 alongside the unified Evidence tab.")
+    let mgr = makeCaseManager()
+    let scanIDs: [String]
+    if let s = scanID { scanIDs = [s] }
+    else { scanIDs = ((try? await mgr.listCases()) ?? []).map { $0.id } }
+
+    for sid in scanIDs {
+        guard let handle = try? await mgr.openCase(id: sid),
+              let rows = try? await handle.store.query(ArtifactQuery(caseID: sid, limit: 100_000)),
+              let a = rows.first(where: { $0.id == eid }) else { continue }
+        print("Evidence #\(a.id)  (scan \(sid))")
+        print("  content_type: \(a.record.contentType)")
+        print("  summary:      \(a.record.summary ?? "(none)")")
+        print("  observed_at:  \(ISO8601DateFormatter().string(from: a.record.observedAt))")
+        print("  privacy:      \(a.record.privacyClass.rawValue)")
+        print("  sha256:       \(a.record.sha256)")
+        if !a.record.data.isEmpty {
+            print("  data:")
+            for (k, v) in a.record.data.sorted(by: { $0.key < $1.key }) {
+                print("    \(k) = \(String(describing: v.foundationValue))")
+            }
+        }
+        return
+    }
+    print("Evidence #\(eid) not found\(scanID.map { " in scan \($0)" } ?? " in any scan").")
     exit(2)
 }
 
 private func evidenceExport(args: [String]) async {
-    print("evidence export: lands in v1.17.0-rc.3 alongside the .maccrabevidence bundle format.")
-    print("Until then: maccrabctl trace bundle export <case-id> produces a .maccrabtrace bundle.")
+    print("evidence export: not yet implemented.")
     exit(2)
 }

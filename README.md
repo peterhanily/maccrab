@@ -4,9 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-2446%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-2642%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-436%20%2B%2041%20seq%20%2B%206%20graph-blueviolet)]()
-[![Version](https://img.shields.io/badge/version-1.19.0-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.19.1-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -115,6 +115,8 @@ Once running, MacCrab gives you:
 
 MacCrab has **zero telemetry** and no phone-home behavior. All data is collected and stored locally in SQLite. Nothing leaves your machine unless you explicitly enable an optional feature (LLM backends, threat intel feeds, fleet telemetry, or a third-party forensic plugin you install that declares network egress -- such plugins run sandboxed and surface their read-set + network access for your consent before install) -- and when you do, the outbound path enforces a **TLS 1.2 floor**, applies **SPKI certificate pinning by default** for providers that ship pins (with a `MACCRAB_TLS_PINNING=off` operator opt-out for stale-pin recovery), and runs every payload through `LLMSanitizer` which redacts API keys, user paths, hostnames + computer names, RFC1918 / link-local / loopback IPs (v4 + v6), email addresses, and CDHashes before transmission. The full sanitiser scope is documented under [Detection Stack → LLM Reasoning Backends](#detection-stack).
 
+**Network threat-intel enrichment is off by default.** The feeds that make outbound requests -- abuse.ch (URLhaus / MalwareBazaar / Feodo Tracker), OSV / npm package checks, package-freshness lookups, and Certificate-Transparency lookups -- are **opt-in** and require explicit enablement (`threat_intel_enabled`, `vuln_scan_enabled`, `package_freshness_enabled`, `cert_transparency_enabled`; all default `false`). The bundled IOCs work offline until you turn a feed on, and local detection (rules, sequences, campaigns) is unaffected by these toggles.
+
 Read the full [Privacy Policy](PRIVACY.md).
 
 ---
@@ -141,6 +143,9 @@ Read the full [Security Policy](SECURITY.md).
 | [docs/suppressions.example.json](docs/suppressions.example.json) | Per-rule process allowlist format |
 | [PRIVACY.md](PRIVACY.md) | Data inventory — what's collected, what leaves, what's redacted |
 | [SECURITY.md](SECURITY.md) | Threat model, privilege boundaries, vulnerability disclosure |
+| [docs/AUTHORIZATION_MODEL.md](docs/AUTHORIZATION_MODEL.md) | Daemon control-plane authorization — inbox IPC, who can mutate the engine, audit log, self-protection alerts |
+| [docs/SUPPORTED_OS.md](docs/SUPPORTED_OS.md) | Supported macOS matrix — minimum (Ventura 13), tested target (macOS 26), macOS 27 risks |
+| [docs/DATA_SCHEMA_STABILITY.md](docs/DATA_SCHEMA_STABILITY.md) | On-disk SQLite schema stability statement — use the export interfaces, not direct DB reads |
 | [CHANGELOG.md](CHANGELOG.md) | Dated version history |
 
 ---
@@ -217,7 +222,7 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (43):**
+**Available tools (~80 tools live — ≈50 built-in plus the `forensics_*` plugin tools that register dynamically):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
@@ -246,6 +251,9 @@ Build the MCP binary with `swift build --target maccrab-mcp`.
 | `predict_next_technique` | (v1.12) Markov-1 forecast over MITRE tactics |
 | `score_text_style` | (v1.12) Stylometric / urgency / LLM-tells score on a commit message or PR body |
 | `get_intent_posterior` | (v1.12) Bayesian posterior over attacker goals for a tree key (MCP-local; see daemon alerts for live posterior) |
+| `list_response_actions` | List configured per-rule response actions and their current settings |
+| `set_response_action` | Adjust a rule's response action (audit-logged; requires the matching capability tier) |
+| `forensics_*` | Plugin tools registered dynamically from installed forensic plugins — e.g. `forensics_run_collector`, `forensics_run_analyzer`, `forensics_search_artifacts`, `forensics_timeline`, `forensics_explain_case` (underscore-named since v1.19.1; legacy `forensics.*` dotted names still accepted as aliases) |
 
 **Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
 
@@ -364,7 +372,7 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | **Prompt injection scanner** | Scans for injection patterns in files read by AI tools using forensicate.ai analysis |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
-22 dedicated AI safety detection rules in `Rules/ai_safety/`. Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
+32 dedicated AI safety detection rules in `Rules/ai_safety/`. Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
 
 </details>
 
@@ -392,7 +400,7 @@ This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/a
 
 MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured.
 
-**Outbound traffic posture** — every cloud-LLM request goes through `SecureURLSession`, which enforces a **TLS 1.2 minimum** floor and, when the provider has known SPKI pins configured, optional **certificate pinning** against SHA-256 SPKI hashes of the leaf or intermediate cert. Strict pinning is opt-in via `MACCRAB_TLS_PINNING=strict`; without it the system trust chain still applies and TLS 1.2 enforcement remains on for every provider.
+**Outbound traffic posture** — every cloud-LLM request goes through `SecureURLSession`, which enforces a **TLS 1.2 minimum** floor and applies **SPKI certificate pinning by default** for providers that ship pins, validating the SHA-256 SPKI hash of the leaf or intermediate cert. Set `MACCRAB_TLS_PINNING=off` or `=warn` to downgrade to warn-only (OS trust store) for stale-pin recovery; `=strict` is a no-op for hosts without configured pins. TLS 1.2 enforcement remains on for every provider regardless of the pinning mode.
 
 **Sanitiser scope** — `LLMSanitizer.sanitize(_:)` runs before any payload leaves the box and redacts:
 
@@ -531,7 +539,8 @@ tactics:
 | `TA0011` | Command and Control | 53 |
 | `TA0040` | Impact | 27 |
 | — | **Sequences** (temporal multi-step) | **41** |
-| — | **Total** | **478** |
+| — | **Graph** (multi-entity TraceGraph) | **6** |
+| — | **Total** | **483** |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -555,30 +564,23 @@ breakdown. To regenerate this section after editing rules: `make readme-coverage
 
 ## SwiftUI Dashboard
 
-A native status bar application with a sidebar navigation layout across 10 workspaces:
+A native status bar application whose dashboard is a workspace shell — a sidebar, top bar, and workspace area with a command bar / palette and a UIMode density toggle (**Basic / Standard / Advanced**) across 10 workspaces:
 
 <details>
-<summary><strong>All dashboard views (click to expand)</strong></summary>
+<summary><strong>All dashboard workspaces (click to expand)</strong></summary>
 
-| View | Description |
+| Workspace | Description |
 |------|-------------|
-| **Overview** | At-a-glance stats: events/sec, alert counts by severity, top processes, threat intel status |
-| **Alerts** | Real-time alert dashboard with severity filtering, bulk suppression, and incident grouping |
-| **Campaigns** | Higher-order attack chain detections: kill chains, alert storms, coordinated attacks |
-| **Events** | Live event stream with search, category filters, and process ancestry drill-down |
-| **Rules** | Rule browser with enable/disable toggles, MITRE tactic grouping, and rule wizard |
-| **Prevention** | Active response actions: kill, quarantine, network block, DNS sinkhole |
-| **AI Guard** | AI coding tool activity: credential fence alerts, boundary violations, MCP server monitoring |
-| **Browser Extensions** | Installed extension inventory with dangerous-permission risk scoring |
-| **Threat Intel** | abuse.ch feed status, IOC counts, custom intel import |
-| **Package Freshness** | Manual supply-chain risk check (npm, PyPI, Homebrew, Cargo) + supply-chain alerts |
-| **AI Analysis** | LLM-powered threat hunting, investigation summaries, defense recommendations |
-| **Integrations** | MISP, webhook, syslog, fleet configuration |
-| **Permissions** | TCC permission timeline visualization |
-| **ES Health** | Daemon status, database health, collector checklist, event throughput |
-| **Docs** | Built-in documentation and reference |
-
-Additional views: Settings > AI Backend (LLM provider configuration), Response Actions log.
+| **Overview** | At-a-glance system posture and shortcuts |
+| **Alerts** | Triage and route findings — multi-select, bulk suppress, inline actions |
+| **Events** | Live event stream with filter / search / drill-in |
+| **Investigation** | Trace graph + AI analysis |
+| **Forensics** | Scan this Mac, browse plugins, export evidence |
+| **Detection** | Rules, AI Guard, browser extensions, MCP |
+| **Prevention** | DNS sinkhole, network blocker, persistence guard, response actions |
+| **Intelligence** | IOC context, feeds, packages, integrations |
+| **System** | Platform health, permissions (TCC), trust, settings |
+| **Docs** | In-app documentation |
 
 </details>
 
@@ -691,7 +693,7 @@ v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a nativ
 - **SystemExtension activation** -- no more `sudo maccrabd`; open MacCrab.app and click Enable Protection. `sysextd` manages the lifecycle from there.
 - **Native ES client** -- `com.apple.developer.endpoint-security.client` approved under bundle ID `com.maccrab.agent`. The 3-level fallback chain (eslogger → kdebug → FSEvents) is still first-class for developer builds.
 - **Network-convergence hardening (1.3.4)** -- unresolved destination IPs no longer bucket benign HTTPS traffic under `:443`; new trusted-helper fan-out gate; 49-entry trusted-cloud suffix list.
-- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2539 tests in 457 suites**, FP regressions blocked at CI.
+- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2642 tests in 477 suites**, FP regressions blocked at CI.
 - **Noise reduction arc (1.2.1 → 1.2.4)** -- reference workstation dropped from 2,856 alerts/24h to ~3/day (99.9% reduction) without degrading detection fidelity.
 - **Notarized Developer ID distribution** -- signed DMG, Homebrew cask tap (`peterhanily/maccrab`), reproducible release pipeline.
 - **Sparkle auto-update (1.3.5)** -- EdDSA-signed `appcast.xml` served from Cloudflare Pages at `maccrab.com`; "Check for Updates…" in the status-bar menu and Settings.

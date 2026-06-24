@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (2539 tests in 457 suites)
+swift test                     # Unit tests (2642 tests in 477 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -35,7 +35,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing ~78 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing ~80 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics_*` plugin tools — incl. `forensics_run_analyzer` / `forensics_enrich` and `list_response_actions` / `set_response_action`; underscore-named since v1.19.1 for strict-MCP-client compatibility, with the legacy `forensics.*` dotted names still accepted as aliases)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -64,7 +64,7 @@ Rules/            436 single-event Sigma-compatible YAML rules (19 tactic direct
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (2539 tests in 457 suites)
+Tests/            Swift Testing unit tests (2642 tests in 477 suites)
 ```
 
 ## Detection Stack (5 tiers)
@@ -195,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (~78 live in this build; varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
+**Tools exposed (~80 live in this build; varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the `forensics_*` plugin tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
 
 | Tool | Purpose |
 |------|---------|

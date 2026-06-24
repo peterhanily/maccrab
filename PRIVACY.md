@@ -18,33 +18,113 @@ All data is collected and stored **locally** in `~/Library/Application Support/M
 
 ## What Leaves Your Machine
 
-**By default: nothing.** MacCrab has zero telemetry and no phone-home behavior.
+**With default settings, MacCrab makes no enrichment network calls.** There is
+zero telemetry and no phone-home behavior. The four network-enrichment feeds are
+**off by default** (opt-in, as of v1.19.1); the only outbound connection a stock
+install makes is the signed software-update check.
 
-The following **optional** features communicate externally only when explicitly enabled:
+### What MacCrab connects to
 
-### LLM Reasoning Backends (opt-in)
+Every outbound destination, its trigger, default state, what is sent, and how to
+turn it off:
 
-Enabled by setting `MACCRAB_LLM_PROVIDER` environment variable.
+| Destination | Trigger | Default | What is sent | What it reveals | Turn off |
+|---|---|---|---|---|---|
+| **abuse.ch** (URLhaus / MalwareBazaar / Feodo) | IOC feed refresh, every ~4h | **Off** | Nothing about your machine — **download only** | Nothing (GET of public IOC lists) | Settings → Network enrichment, or `threatIntelEnabled` |
+| **osv.dev** | CVE lookup, hourly when enabled | **Off** | Your installed-software inventory (anonymous) | Your installed software list | `vulnScanEnabled` |
+| **npm / PyPI / Homebrew / crates** registries | Package-freshness check, on install | **Off** | The package name being installed | The package **name** you install | `packageFreshnessEnabled` |
+| **crt.sh** | Certificate-Transparency lookup, on an observed destination domain | **Off** | The domain being looked up | The **domain** you connect to | `certTransparencyEnabled` |
+| **maccrab.com** (Sparkle appcast) | Update check (standard auto-update) | **On** | Nothing but the request itself; the update is EdDSA-signed | Your IP address only | Disable auto-update |
 
-| What is sent | What is NOT sent |
+Toggle the four enrichment feeds in **Settings → Network enrichment**, by
+`maccrabctl config set`, or by hand in `daemon_config.json` (keys
+`threat_intel_enabled`, `vuln_scan_enabled`, `package_freshness_enabled`,
+`cert_transparency_enabled`). Changes are honored live on `SIGHUP` — disabling a
+feed stops its egress without a restart. Local detection (rules, sequences,
+campaigns, bundled IOCs) is unaffected by these toggles and never makes a network
+request.
+
+The local typosquat check is **not** in this table because it runs entirely
+on-device and makes no network request.
+
+### Config-gated integrations (no setup → no calls)
+
+The following make **no** network calls unless you, the operator, explicitly
+configure a key or endpoint for them — there is no default destination:
+
+- **LLM reasoning backends** — Claude, OpenAI, Mistral, Gemini (Ollama is fully
+  local). See the section below.
+- **VirusTotal**, **Shodan**, **MISP** — IOC enrichment; require an API
+  key/endpoint.
+- **Fleet telemetry** — requires enrollment in a fleet server (see below).
+- **SIEM / webhook outputs** — Splunk HEC, Elastic, Datadog, syslog, S3, SFTP,
+  custom webhooks; require an explicit endpoint in `daemon_config.json`.
+
+The remaining **optional** features below communicate externally only when
+explicitly enabled or configured:
+
+### LLM Reasoning Backends (opt-in, OFF by default)
+
+Cloud AI analysis is **off by default** and must be explicitly opted into by
+setting the `MACCRAB_LLM_PROVIDER` environment variable (or choosing a cloud
+provider in Settings → AI Backend). With no provider configured, **nothing is
+sent anywhere** and all LLM features degrade gracefully. For full privacy, use
+the local **Ollama** backend — it runs on your machine and no prompt data
+leaves it.
+
+When a cloud backend is enabled, the data sent is **sanitized alert context**:
+rule titles, MITRE ATT&CK techniques, process trees, and redacted file paths.
+
+| What is sent (sanitized) | What is redacted (best-effort) |
 |-------------|-----------------|
-| Event metadata (process names, file paths) | Usernames (redacted to `[USER]`) |
-| Alert summaries | Private IP addresses (redacted to `[PRIVATE_IP]`) |
-| Detection context | Hostnames (redacted to `[HOST]`) |
-| | Email addresses (redacted to `[EMAIL]`) |
-| | API keys, passwords, tokens (redacted) |
+| Rule titles & detection context | Usernames — real account names + `/Users/<name>/` paths → `[USER]` |
+| MITRE ATT&CK techniques | Private **and** public IP addresses → `[PRIVATE_IP]` / `[PUBLIC_IP]` |
+| Process trees (names, redacted paths) | Hostnames & computer names → `[HOSTNAME]` / `[COMPUTER_NAME]` |
+| Alert summaries | Email addresses → `[EMAIL]` |
+| | API keys, passwords, tokens, CDHashes (redacted) |
 
-Sanitization is performed by `LLMSanitizer.swift` before any data leaves the machine. See `Sources/MacCrabCore/LLM/LLMSanitizer.swift` for the full implementation.
+Sanitization is performed by `LLMSanitizer.swift` before any data leaves the
+machine. See `Sources/MacCrabCore/LLM/LLMSanitizer.swift` for the full
+implementation.
 
-**Supported providers:** Ollama (fully local — no data leaves machine), Claude, OpenAI, Mistral, Gemini.
+> **Best-effort, not a guarantee.** The sanitizer is a heuristic scrubber that
+> redacts the patterns above; it cannot guarantee that every sensitive token in
+> a free-form log line is caught. If you require an absolute no-leak boundary,
+> use the local Ollama backend instead of a cloud provider.
 
-### Threat Intelligence Feeds (opt-in)
+**Supported providers:** Ollama (fully local — no data leaves machine), Claude
+(Anthropic), OpenAI, Mistral, Gemini (Google).
 
-When threat intel enrichment is active:
+#### Cloud sub-processors
 
-- **Queried:** File hashes (SHA-256), IP addresses, domain names
-- **Not sent:** Process names, command lines, user context, file contents
-- **Sources:** abuse.ch (URLhaus, MalwareBazaar, ThreatFox)
+When you enable a cloud LLM backend, your chosen provider acts as a
+sub-processor for the sanitized alert context you send. You select exactly one
+at a time:
+
+- **Anthropic** (Claude API)
+- **OpenAI** (or any OpenAI-compatible endpoint you configure, incl. Azure OpenAI)
+- **Google** (Gemini API)
+- **Mistral AI**
+
+These providers' standard APIs do not train on inputs/outputs by default, but
+none expose a per-request HTTP header to assert zero-data-retention or
+no-training — those are account/enrollment-level arrangements with the provider,
+not something MacCrab can set on the wire. MacCrab sends only the sanitized
+context above; review your provider's data-usage and retention terms before
+enabling, and prefer the local Ollama backend if you cannot accept any
+third-party data processing.
+
+### Threat Intelligence Feeds (opt-in, off by default)
+
+The bundled abuse.ch feeds (`threatIntelEnabled`, off by default) are
+**download-only** — MacCrab fetches public IOC lists; nothing about your machine
+is uploaded. When optional, key-gated reputation lookups (VirusTotal, Shodan,
+MISP) are configured, they additionally:
+
+- **Query:** File hashes (SHA-256), IP addresses, domain names
+- **Do NOT send:** Process names, command lines, user context, file contents
+- **Sources:** abuse.ch (URLhaus, MalwareBazaar, Feodo) for the download-only
+  feeds; VirusTotal / Shodan / MISP only when you supply an API key
 
 ### Fleet Telemetry (opt-in)
 

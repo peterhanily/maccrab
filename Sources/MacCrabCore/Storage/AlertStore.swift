@@ -858,6 +858,53 @@ public actor AlertStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// PERF-5: exact count of alerts since `since`, computed SQL-side (no row
+    /// materialization). Replaces counting via `alerts(…, limit: 5000).count`,
+    /// which silently UNDERCOUNTED once a busy host exceeded the 5000-row cap.
+    public func openAlertCount(since: Date, includeSuppressed: Bool = false) throws -> Int {
+        var sql = "SELECT COUNT(*) FROM alerts WHERE timestamp >= ?1"
+        if !includeSuppressed { sql += " AND suppressed = 0" }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, since.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed("Failed to count open alerts")
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// PERF-3: per-(bucket, severity) unsuppressed counts over the window
+    /// [endingAt - spanSeconds, endingAt), bucketed SQL-side so no alert rows
+    /// cross into Swift. Buckets are "steps ago" from `endingAt` (bucket 0 = the
+    /// most recent step), matching the dashboard's now-anchored histogram grid.
+    /// Uses idx_alerts_ts_severity. Returns one (bucketsAgo, severityRaw, count)
+    /// per occupied cell.
+    public func severityHistogram(
+        spanSeconds: TimeInterval, stepSeconds: TimeInterval, endingAt: Date
+    ) throws -> [(bucketsAgo: Int, severity: String, count: Int)] {
+        let endUnix = endingAt.timeIntervalSince1970
+        let startUnix = endUnix - spanSeconds
+        let sql = """
+            SELECT CAST((?1 - timestamp) / ?2 AS INTEGER) AS bucketsAgo, severity, COUNT(*) AS c
+            FROM alerts
+            WHERE suppressed = 0 AND timestamp >= ?3 AND timestamp < ?1
+            GROUP BY bucketsAgo, severity
+            ORDER BY bucketsAgo ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, endUnix)
+        sqlite3_bind_double(stmt, 2, stepSeconds)
+        sqlite3_bind_double(stmt, 3, startUnix)
+        var out: [(bucketsAgo: Int, severity: String, count: Int)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let bucketsAgo = Int(sqlite3_column_int64(stmt, 0))
+            guard let sevC = sqlite3_column_text(stmt, 1) else { continue }
+            out.append((bucketsAgo, String(cString: sevC), Int(sqlite3_column_int64(stmt, 2))))
+        }
+        return out
+    }
+
     /// Marks an alert as suppressed.
     ///
     /// - Parameter id: The alert's unique identifier.

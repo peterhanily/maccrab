@@ -24,6 +24,16 @@ enum SignalHandlers {
                     print("[SIGHUP] Reloading rules from: \(state.rulesURL.path)")
                     let singleCount = try await state.ruleEngine.reloadRules(from: state.rulesURL)
                     print("[SIGHUP] Single-event rules: \(singleCount)")
+                    // v1.19.1 (rc.9 review): re-apply the user_rules override overlay
+                    // after the base reload. reloadRules() FULLY REPLACES the ruleset,
+                    // so without this a `pkill -HUP` (the documented reload path) would
+                    // DROP operator overrides until the next file-watch tick / restart.
+                    // Same per-file daemon-owner gate as the startup + watcher load.
+                    let overlayDir = state.supportDir + "/user_rules"
+                    if FileManager.default.fileExists(atPath: overlayDir), isOverlayDirSecure(overlayDir),
+                       let overlaid = try? await state.ruleEngine.loadRules(from: URL(fileURLWithPath: overlayDir), requireOwnerUID: geteuid()), overlaid > 0 {
+                        print("[SIGHUP] Re-applied \(overlaid) user rule override(s)")
+                    }
                     let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir))
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
 
@@ -117,6 +127,20 @@ enum SignalHandlers {
                     newStorage.campaignsMaxSizeMB    = max(50, newStorage.campaignsMaxSizeMB)
                     state.storage = newStorage
 
+                    // v1.19.1: re-apply the opt-in network-enrichment switches
+                    // live. vuln-scan + package-freshness are read from state on
+                    // the next sweep/event; the threat-intel feed needs its
+                    // network loop started/stopped explicitly so a toggle halts
+                    // (or resumes) egress without a daemon restart.
+                    state.vulnScanEnabled = freshConfig.vulnScanEnabled
+                    state.packageFreshnessEnabled = freshConfig.packageFreshnessEnabled
+                    state.certTransparencyEnabled = freshConfig.certTransparencyEnabled
+                    if state.threatIntelEnabled != freshConfig.threatIntelEnabled {
+                        state.threatIntelEnabled = freshConfig.threatIntelEnabled
+                        await state.threatIntel.setNetworkRefresh(freshConfig.threatIntelEnabled)
+                        print("[SIGHUP] Threat-intel network refresh \(freshConfig.threatIntelEnabled ? "ENABLED" : "disabled (egress stopped)")")
+                    }
+
                     let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
                     let anyChange = old.eventsHotTierMinutes  != newStorage.eventsHotTierMinutes
                                  || old.eventsMaxSizeMB       != newStorage.eventsMaxSizeMB
@@ -151,14 +175,18 @@ enum SignalHandlers {
                     // land in ~/Library/.../actions.json; the loader probes
                     // both that path and the system path and prefers the
                     // most recent.
+                    // loadConfig probes BOTH this system path AND the user-home
+                    // actions.json and no-ops when neither exists, so call it
+                    // unconditionally. Gating on the SYSTEM file's existence
+                    // (the prior behavior) skipped reloads of CLI/MCP/dashboard
+                    // writes that land only in the user-home file on a clean
+                    // machine (P1 — the new `actions` feature's activation path).
                     let actionsPath = state.supportDir + "/actions.json"
-                    if FileManager.default.fileExists(atPath: actionsPath) {
-                        do {
-                            try await state.responseEngine.loadConfig(from: actionsPath)
-                            print("[SIGHUP] Response actions reloaded from \(actionsPath)")
-                        } catch {
-                            print("[SIGHUP] Response action reload failed: \(error)")
-                        }
+                    do {
+                        try await state.responseEngine.loadConfig(from: actionsPath)
+                        print("[SIGHUP] Response actions reloaded")
+                    } catch {
+                        print("[SIGHUP] Response action reload failed: \(error)")
                     }
 
                     // v1.9 Phase-3.4: pick up dashboard-written
@@ -172,14 +200,22 @@ enum SignalHandlers {
                         dbEncryption: state.dbEncryption
                     )
 
-                    // v1.10.0: SIGHUP also triggers a one-shot
-                    // threat-intel refresh. The dashboard's
-                    // "Refresh feeds" button signals SIGHUP via
-                    // maccrabctl rather than waiting on the 4-hour
+                    // v1.10.0: SIGHUP also triggers a one-shot threat-intel
+                    // refresh. The dashboard's "Refresh feeds" button signals
+                    // SIGHUP via maccrabctl rather than waiting on the 4-hour
                     // auto-refresh cadence.
-                    print("[SIGHUP] Refreshing threat intel feeds…")
-                    await state.threatIntel.refreshNow()
-                    print("[SIGHUP] Threat intel refresh complete")
+                    //
+                    // v1.19.1 (privacy): ONLY when threat-intel enrichment is
+                    // opted in. Without this gate every reload — enabling a
+                    // DIFFERENT feed, or even a storage-slider edit (which now
+                    // SIGHUPs) — fired an abuse.ch fetch the user never enabled.
+                    // refreshNow() is also self-guarding (no-op when the network
+                    // loop isn't running), so this is defense in depth.
+                    if freshConfig.threatIntelEnabled {
+                        print("[SIGHUP] Refreshing threat intel feeds…")
+                        await state.threatIntel.refreshNow()
+                        print("[SIGHUP] Threat intel refresh complete")
+                    }
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }

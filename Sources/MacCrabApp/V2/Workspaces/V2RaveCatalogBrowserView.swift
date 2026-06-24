@@ -242,7 +242,7 @@ struct V2RaveCatalogBrowserView: View {
             // state honest ("coming soon") so built-ins don't read as "the
             // catalog is live."
             if offeredEntries.isEmpty {
-                thirdPartyComingSoonBanner
+                thirdPartyCatalogBanner
             }
             Divider()
             HStack(spacing: 0) {
@@ -257,13 +257,13 @@ struct V2RaveCatalogBrowserView: View {
 
     // MARK: - Header
 
-    private var thirdPartyComingSoonBanner: some View {
+    private var thirdPartyCatalogBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "shippingbox").foregroundStyle(.secondary).scaledSystem(12)
             VStack(alignment: .leading, spacing: 1) {
-                Text(String(localized: "raveStore.thirdPartyComingSoon.title", defaultValue: "Third-party catalog — coming soon"))
+                Text(String(localized: "raveStore.thirdPartyCatalog.title", defaultValue: "Signed third-party catalog"))
                     .scaledSystem(11, weight: .semibold)
-                Text(String(localized: "raveStore.thirdPartyComingSoon.body", defaultValue: "The signed, vetted plugin catalog is on the way. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed."))
+                Text(String(localized: "raveStore.thirdPartyCatalog.body", defaultValue: "No third-party plugins are currently listed. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed."))
                     .scaledSystem(10).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
@@ -322,6 +322,7 @@ struct V2RaveCatalogBrowserView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Refresh")
+            .accessibilityLabel(String(localized: "common.refresh", defaultValue: "Refresh"))
         }
         .padding(.horizontal, 20).padding(.vertical, 16)
     }
@@ -419,10 +420,10 @@ struct V2RaveCatalogBrowserView: View {
             Text("Rave catalog")
                 .scaledSystem(12, weight: .semibold).tracking(2)
                 .foregroundStyle(raveCrabOrange)
-            Text("Coming soon")
+            Text("Signed plugin catalog")
                 .scaledSystem(30, weight: .bold)
                 .foregroundStyle(paneTitleColor)
-            Text("A signed, vetted catalog of forensic plugins you'll browse and install right from MacCrab. The catalog is verified on this Mac — we're putting the finishing touches on the first plugins. Your existing scanners and kits keep working in the meantime.")
+            Text("No third-party plugins are currently listed. The catalog is signed and verified on this Mac, and your built-in scanners and kits run here now — no install needed.")
                 .scaledSystem(13)
                 .foregroundStyle(paneSubtitleColor)
                 .multilineTextAlignment(.center)
@@ -433,7 +434,7 @@ struct V2RaveCatalogBrowserView: View {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
-                Label("Preview on rave.maccrab.com", systemImage: "safari")
+                Label("Open rave.maccrab.com", systemImage: "safari")
             }
             .buttonStyle(.bordered).tint(raveCrabOrange).controlSize(.small)
         }
@@ -1015,7 +1016,7 @@ struct V2RaveCatalogBrowserView: View {
                 badge("Pinned", icon: "checkmark.shield.fill", color: .green)
             }
         case .awaitingSignedBinary:
-            badge("Coming soon", icon: "hourglass", color: .secondary)
+            badge("Unavailable", icon: "hourglass", color: .secondary)
         case .preRelease:
             badge("Pre-release", icon: "clock.badge", color: .orange)
         case .versionFloorBlocked:

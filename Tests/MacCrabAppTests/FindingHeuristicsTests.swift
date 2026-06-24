@@ -31,10 +31,39 @@ struct FindingHeuristicsTests {
         FindingHeuristics.severity(for: art(ct, data: data, summary: summary))
     }
 
-    @Test("Posture / anomaly findings promote to attention")
+    @Test("Posture / anomaly without a severity field falls back to attention")
     func postureAnomaly() {
         #expect(sev("posture.unsigned_persistence") == .attention)
         #expect(sev("baseline.anomaly_score") == .attention)
+    }
+
+    @Test("Posture findings RESPECT the analyzer's committed severity")
+    func postureRespectsSeverity() {
+        // FIQ-2: a committed-critical and a committed-medium must no
+        // longer display identically.
+        #expect(sev("posture.high_privilege_unsigned_combo", ["severity": .string("critical")]) == .critical)
+        #expect(sev("posture.automation_to_sensitive_target", ["severity": .string("high")]) == .attention)
+        #expect(sev("posture.permissioned_persistence", ["severity": .string("medium")]) == .notable)
+        #expect(sev("posture.unsigned_persistence", ["severity": .string("low")]) == .routine)
+        #expect(sev("posture.analysis_unavailable_encrypted", ["severity": .string("informational")]) == .routine)
+        // Unknown severity string surfaces (doesn't hide) → attention.
+        #expect(sev("posture.future_type", ["severity": .string("weird")]) == .attention)
+    }
+
+    @Test("TCC keys off the engine risk_score when present, legacy fallback otherwise")
+    func tccRiskScore() {
+        // FIQ-6: bands calibrated to TCCRiskScoring.Weight (≥35 attention,
+        // ≥15 notable, else routine). Critical stays posture-only.
+        #expect(sev("tcc.grant", ["risk_score": .integer(55)]) == .attention)   // FDA + unknown team
+        #expect(sev("tcc.grant", ["risk_score": .integer(35)]) == .attention)   // boundary
+        #expect(sev("tcc.grant", ["risk_score": .integer(34)]) == .notable)
+        #expect(sev("tcc.grant", ["risk_score": .integer(15)]) == .notable)     // boundary
+        #expect(sev("tcc.grant", ["risk_score": .integer(14)]) == .routine)
+        #expect(sev("tcc.grant", ["risk_score": .integer(0)]) == .routine)       // addressbook/photos score 0
+        // risk_score wins even over a sensitive service name.
+        #expect(sev("tcc.grant", ["service": .string("camera"), "risk_score": .integer(0)]) == .routine)
+        // No risk_score → legacy service-membership fallback still applies.
+        #expect(sev("tcc.grant", ["service": .string("camera"), "client_signed": .bool(false)]) == .attention)
     }
 
     @Test("Launchd: unsigned or suspicious-path → attention, else routine")

@@ -38,6 +38,16 @@ public enum PluginVisibility {
         // Positive rule (only when the built-in set is known): com.maccrab.* is
         // first-party-only; an installed com.maccrab.* that isn't registered is
         // residue / impersonation.
+        //
+        // SEC-DELTA-3 (P3, intentionally NOT fail-closed): when builtinIDs is
+        // empty we DEGRADE OPEN — pass com.maccrab.* through rather than hide it.
+        // This is a COSMETIC surface filter, not a security boundary: the real
+        // boundary is the run-path gate (TierBCollectorExecutor fails closed
+        // without the signed trampoline), so a hypothetical impersonator shown
+        // in a list still cannot execute uncontained. Fail-closing here instead
+        // wrongly hides LEGITIMATE first-party rows whenever a caller can't
+        // enumerate the built-ins (e.g. SampleOutputLoader filtering real
+        // tcc-lite output), which is a worse, user-visible regression.
         if !builtinIDs.isEmpty, pluginID.hasPrefix("com.maccrab."), !builtinIDs.contains(pluginID) {
             return true
         }

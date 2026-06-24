@@ -54,6 +54,25 @@ public struct ResponseActionConfig: Codable, Sendable {
         self.requireConfirmation = requireConfirmation
         self.blockDurationSeconds = blockDurationSeconds
     }
+
+    /// Tolerant decode: only `action` is required on disk. The writers (the
+    /// dashboard ResponseActionsView + the CLI `actions` + the MCP
+    /// set_response_action) omit `requireConfirmation` (and may omit
+    /// minimumSeverity / scriptPath / blockDurationSeconds) when they are at
+    /// their default — and JSONEncoder drops nil keys. With the synthesized
+    /// decoder a single missing `requireConfirmation` threw keyNotFound and
+    /// aborted the WHOLE-file load, so the engine silently kept its old config
+    /// and the just-set action never fired. decodeIfPresent + defaults make an
+    /// omitted key mean "default" instead of "undecodable". `encode(to:)` stays
+    /// synthesized (it round-trips through this initializer).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.action = try c.decode(ResponseActionType.self, forKey: .action)
+        self.scriptPath = try c.decodeIfPresent(String.self, forKey: .scriptPath)
+        self.minimumSeverity = try c.decodeIfPresent(Severity.self, forKey: .minimumSeverity) ?? .high
+        self.requireConfirmation = try c.decodeIfPresent(Bool.self, forKey: .requireConfirmation) ?? false
+        self.blockDurationSeconds = try c.decodeIfPresent(Int.self, forKey: .blockDurationSeconds)
+    }
 }
 
 // MARK: - Response Engine

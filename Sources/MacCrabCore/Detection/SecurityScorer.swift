@@ -25,7 +25,14 @@ public actor SecurityScorer {
     }
 
     /// Calculate the current security score.
-    public func calculate() async -> ScoreResult {
+    ///
+    /// - Parameter recentCriticalHigh: count of critical/high alerts in the last 24h.
+    ///   When `nil` (the default), the scorer reads it from the on-disk AlertStore
+    ///   itself — mirroring how the other runtime factors self-probe — so callers that
+    ///   don't have a count handy (CLI `status`/`security`, MCP, dashboard) still get a
+    ///   real "Active Alerts" factor instead of the old placeholder. Callers that already
+    ///   loaded alerts can inject the count to skip the extra DB read.
+    public func calculate(recentCriticalHigh: Int? = nil) async -> ScoreResult {
         var factors: [Factor] = []
         var recommendations: [String] = []
 
@@ -87,9 +94,31 @@ public actor SecurityScorer {
         factors.append(Factor(name: "Processes from /tmp", category: "runtime", score: tmpScore, maxScore: 8, status: tmpCount == 0 ? "pass" : "fail", detail: tmpCount == 0 ? "No processes from temp directories" : "\(tmpCount) process(es) running from /tmp"))
         if tmpCount > 0 { recommendations.append("CRITICAL: \(tmpCount) processes running from /tmp — investigate immediately") }
 
-        // Active alerts? (10 points)
-        let alertPenalty = min(10, 0)  // Would need alert count from caller
-        factors.append(Factor(name: "Active Alerts", category: "runtime", score: 10 - alertPenalty, maxScore: 10, status: alertPenalty == 0 ? "pass" : "warn", detail: "Check dashboard for active alerts"))
+        // Active alerts? (10 points) — real factor: scale points down as recent
+        // critical/high alerts climb. 0 → 10/10; ~1 point lost per 2 alerts; floors at
+        // 0 once the count reaches the low dozens. Injected count wins; otherwise read
+        // from the AlertStore. A nil count (no readable store) is reported honestly as
+        // "unknown" rather than a fake full mark.
+        let criticalHighCount: Int?
+        if let injected = recentCriticalHigh {
+            criticalHighCount = injected
+        } else {
+            criticalHighCount = await recentCriticalHighFromStore()
+        }
+        if let count = criticalHighCount {
+            let alertScore = max(0, 10 - (count + 1) / 2)
+            let alertStatus: String = count == 0 ? "pass" : (alertScore == 0 ? "fail" : "warn")
+            let plural = count == 1 ? "" : "s"
+            let detail = count == 0
+                ? "No critical/high alerts in the last 24h"
+                : "\(count) critical/high alert\(plural) in the last 24h"
+            factors.append(Factor(name: "Active Alerts", category: "runtime", score: alertScore, maxScore: 10, status: alertStatus, detail: detail))
+            if count >= 10 { recommendations.append("Triage \(count) recent critical/high alerts — run: maccrabctl alerts") }
+        } else {
+            // Store unreadable (e.g. daemon not yet writing, or no permission): don't
+            // award a placeholder full mark. Give partial credit and say so.
+            factors.append(Factor(name: "Active Alerts", category: "runtime", score: 5, maxScore: 10, status: "warn", detail: "Alert history unavailable — could not read alert store"))
+        }
 
         // ES/eslogger active? (7 points)
         let esActive = isProcessRunning("eslogger") || isProcessRunning("maccrabd") || isProcessRunning("com.maccrab.agent")
@@ -133,6 +162,37 @@ public actor SecurityScorer {
         }
 
         return ScoreResult(totalScore: percentage, grade: grade, factors: factors, recommendations: recommendations)
+    }
+
+    /// Count critical+high alerts from the last 24h by reading the on-disk AlertStore
+    /// read-only. Resolves the data dir the same way the CLI does (prefer the root
+    /// `/Library/Application Support/MacCrab` when its `alerts.db` exists, else the
+    /// per-user dir). Returns nil when no store is readable so the caller can report
+    /// "unknown" rather than a placeholder full mark.
+    private func recentCriticalHighFromStore() async -> Int? {
+        let fm = FileManager.default
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first.map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        // Prefer whichever dir actually has a readable alerts.db (system first — that's
+        // where the root daemon writes on release builds).
+        let candidates = [systemDir, userDir].filter {
+            fm.isReadableFile(atPath: $0 + "/alerts.db")
+        }
+        guard let dir = candidates.first else { return nil }
+
+        // forceReadOnly: do NOT create dirs or chmod a daemon-owned file just to count.
+        guard let store = try? AlertStore(directory: dir, forceReadOnly: true) else { return nil }
+        let since = Date().addingTimeInterval(-24 * 3600)
+        // severity: .high returns high AND critical (Severity is ordered high+). Bound
+        // the fetch — the curve floors well before this, so we only need to distinguish
+        // 0 / a few / dozens.
+        guard let recent = try? await store.alerts(since: since, severity: .high, suppressed: false, limit: 500) else {
+            return nil
+        }
+        return recent.count
     }
 
     // MARK: - Checks

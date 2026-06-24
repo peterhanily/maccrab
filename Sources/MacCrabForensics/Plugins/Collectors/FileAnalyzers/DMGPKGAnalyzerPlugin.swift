@@ -91,7 +91,8 @@ public struct DMGPKGAnalyzerPlugin: Collector {
         for url in urls {
             let ext = url.pathExtension.lowercased()
             guard ext == "dmg" || ext == "pkg" else { continue }
-            guard let data = try? Data(contentsOf: url) else { continue }
+            guard FileAnalyzerIO.regularFileSize(url) != nil else { rejected += 1; continue }  // SEC-DELTA-1/2
+            guard let data = try? Data(contentsOf: url) else { rejected += 1; continue }
             let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             var fields: [String: JSONValue] = [
                 "path": .string(url.path),

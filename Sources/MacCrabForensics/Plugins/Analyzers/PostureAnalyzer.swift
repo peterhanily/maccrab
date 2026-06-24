@@ -47,6 +47,7 @@ public struct PostureAnalyzer: Analyzer {
             OutputSpec(contentType: "posture.automation_to_sensitive_target", privacyClass: .metadata, viewerHint: Self.findingHint),
             OutputSpec(contentType: "posture.high_privilege_unsigned_combo", privacyClass: .metadata, viewerHint: Self.findingHint),
             OutputSpec(contentType: "posture.permissioned_persistence", privacyClass: .metadata, viewerHint: Self.findingHint),
+            OutputSpec(contentType: "posture.analysis_unavailable_encrypted", privacyClass: .metadata, viewerHint: Self.findingHint),
         ],
         mcpTools: [],
         schemaVersion: 1,
@@ -85,11 +86,25 @@ public struct PostureAnalyzer: Analyzer {
         // we work with the case's plaintext store only.
         if caseContext.encryptionState == .encryptedKeychain ||
            caseContext.encryptionState == .encryptedPassword {
-            // Without the DEK in hand the Analyzer can't read the
-            // store. Surface as "no findings" rather than failing
-            // — caller (PluginRunner) can route Findings via the
-            // store handle directly in a follow-up.
-            return []
+            // The analyzer opens a fresh read-only SQLite connection
+            // (below) and does not yet have the case DEK, so it can't
+            // read an encrypted store. Rather than returning [] —
+            // which is indistinguishable from "analyzed, found
+            // nothing" and silently hides the gap — emit ONE honest
+            // informational finding so the operator (and the
+            // posture_findings MCP tool) sees that analysis was
+            // skipped, not clean. The real fix is to thread the
+            // already-open (decrypted) ArtifactStore handle through
+            // the Analyzer protocol; until then this surfaces the
+            // limitation instead of masking it.
+            return [Finding(
+                findingType: "posture.analysis_unavailable_encrypted",
+                severity: .informational,
+                title: "Posture analysis unavailable — encrypted case",
+                explanation: "This case is encrypted, and the posture analyzer cannot yet read an encrypted store (it opens a direct read-only connection without the case key). Any tcc.grant / launchd.entry artifacts were collected but NOT cross-referenced, so the absence of posture findings here does not mean the case is clean. Re-run posture analysis on a plaintext case, or this gap closes once the analyzer is handed the already-open decrypted store handle.",
+                backedBy: [],
+                confidence: .observed
+            )]
         }
 
         // Read tcc.grant + launchd.entry rows.

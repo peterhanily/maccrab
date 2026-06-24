@@ -55,7 +55,7 @@ struct V2KitDetailSheet: View {
                         .scaledSystem(11)
                         .foregroundStyle(.secondary)
                     if kit.encrypted {
-                        Label("Encrypted", systemImage: "lock.fill")
+                        Label(String(localized: "kit.encryptedBadge", defaultValue: "Encrypted"), systemImage: "lock.fill")
                             .labelStyle(.titleAndIcon)
                             .scaledSystem(10, weight: .medium)
                             .padding(.horizontal, 5).padding(.vertical, 1)
@@ -66,7 +66,7 @@ struct V2KitDetailSheet: View {
                 }
             }
             Spacer()
-            Button("Close") { isPresented = false }
+            Button(String(localized: "kit.close", defaultValue: "Close")) { isPresented = false }
                 .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
@@ -76,7 +76,7 @@ struct V2KitDetailSheet: View {
 
     private var kitOverview: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("What this kit does")
+            Text(String(localized: "kit.overviewHeader", defaultValue: "What this kit does"))
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
@@ -91,9 +91,9 @@ struct V2KitDetailSheet: View {
             Image(systemName: "lock.fill")
                 .foregroundStyle(.purple)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Encrypted scan")
+                Text(String(localized: "kit.encryptedTitle", defaultValue: "Encrypted scan"))
                     .scaledSystem(12, weight: .semibold)
-                Text("Some scanners in this kit extract personal data (messages, mail, call history). MacCrab stores those rows encrypted on disk and asks for your Keychain password once to unlock the encryption key. The plaintext data never leaves your Mac.")
+                Text(String(localized: "kit.encryptedBody", defaultValue: "Some scanners in this kit extract personal data (messages, mail, call history). MacCrab stores those rows encrypted on disk and asks for your Keychain password once to unlock the encryption key. The plaintext data never leaves your Mac."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -109,7 +109,7 @@ struct V2KitDetailSheet: View {
 
     private var scannerList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Scanners in this kit (\(kit.plugins.count))")
+            Text(String(localized: "kit.scannersHeader", defaultValue: "Scanners in this kit (\(kit.plugins.count))"))
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
@@ -126,7 +126,7 @@ struct V2KitDetailSheet: View {
                 Text(ScannerDisplay.name(forPluginID: ref.pluginID))
                     .scaledSystem(13, weight: .semibold)
                 if !ref.required {
-                    Text("Optional")
+                    Text(String(localized: "kit.optional", defaultValue: "Optional"))
                         .scaledSystem(9, weight: .medium)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color.secondary.opacity(0.15))
@@ -144,11 +144,11 @@ struct V2KitDetailSheet: View {
                     .scaledSystem(12)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                detailRow("Reads", fact.dataSources)
+                detailRow(String(localized: "kit.reads", defaultValue: "Reads"), fact.dataSources)
                 if !fact.tccRequirements.isEmpty {
-                    detailRow("Needs", fact.tccRequirements)
+                    detailRow(String(localized: "kit.needs", defaultValue: "Needs"), fact.tccRequirements)
                 }
-                detailRow("Emits", fact.emits.map { ScannerDisplay.name(forContentType: $0) })
+                detailRow(String(localized: "kit.emits", defaultValue: "Emits"), fact.emits.map { ScannerDisplay.name(forContentType: $0) })
                 HStack(spacing: 4) {
                     Image(systemName: fact.privacyClass == .metadata ? "checkmark.shield" : "lock.fill")
                         .scaledSystem(9)
@@ -163,7 +163,7 @@ struct V2KitDetailSheet: View {
                     .scaledSystem(12)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Detailed reference not yet documented — see the plugin manifest.")
+                Text(String(localized: "kit.notDocumented", defaultValue: "Detailed reference not yet documented — see the plugin manifest."))
                     .scaledSystem(10)
                     .foregroundStyle(.tertiary)
                     .italic()
@@ -197,11 +197,11 @@ struct V2KitDetailSheet: View {
 
     private var footer: some View {
         HStack {
-            Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s") · v\(kit.version) · \(kit.maintainer)")
+            Text(String(localized: "kit.footerSummary", defaultValue: "\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s") · v\(kit.version) · \(kit.maintainer)"))
                 .scaledSystem(11)
                 .foregroundStyle(.tertiary)
             Spacer()
-            Button("Run this kit") {
+            Button(String(localized: "kit.runThisKit", defaultValue: "Run this kit")) {
                 isPresented = false
                 onRun()
             }

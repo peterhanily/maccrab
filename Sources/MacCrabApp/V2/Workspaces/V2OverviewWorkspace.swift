@@ -2,6 +2,7 @@
 // Spec §7.1 — single-screen operational summary. No tabs.
 
 import SwiftUI
+import MacCrabCore
 import MacCrabForensics
 
 struct V2OverviewWorkspace: View {
@@ -18,6 +19,11 @@ struct V2OverviewWorkspace: View {
     @State private var forensicsBuiltinCount = 0
     @State private var forensicsInstalledCount = 0
     @State private var forensicsLastScan: CaseManifest? = nil
+    @State private var lastForensicsCardToken: Date? = nil   // PERF-1: mtime gate
+    // Click-to-explain: which security factor row is expanded to its guidance.
+    @State private var expandedFactorName: String? = nil
+    // Store news on the forensics/plugins card.
+    @State private var storeNews: [StoreNewsItem] = []
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -117,9 +123,9 @@ struct V2OverviewWorkspace: View {
         let s = protectionState
         let title: String = {
             switch s {
-            case .active:   return "Protected — system is secure"
-            case .degraded: return "Protection degraded — review System Health"
-            case .inactive: return "Protection inactive — daemon not detected"
+            case .active:   return String(localized: "overview.bannerTitleActive", defaultValue: "Protected — system is secure")
+            case .degraded: return String(localized: "overview.bannerTitleDegraded", defaultValue: "Protection degraded — review System Health")
+            case .inactive: return String(localized: "overview.bannerTitleInactive", defaultValue: "Protection inactive — daemon not detected")
             }
         }()
         let body: String = {
@@ -127,12 +133,12 @@ struct V2OverviewWorkspace: View {
             case .active:
                 let collectors = appState.heartbeat?.collectorHealth?.count ?? 0
                 return collectors == 0
-                    ? "Live data flowing · collectors active"
-                    : "Live data flowing · \(collectors) collectors active"
+                    ? String(localized: "overview.bannerBodyActiveNoCount", defaultValue: "Live data flowing · collectors active")
+                    : String(localized: "overview.bannerBodyActive", defaultValue: "Live data flowing · \(collectors) collectors active")
             case .degraded:
-                return "Live data is stale or score is low — open System health for details"
+                return String(localized: "overview.bannerBodyDegraded", defaultValue: "Live data is stale or score is low — open System health for details")
             case .inactive:
-                return "Start the System Extension or run `swift run maccrabd` to begin protection"
+                return String(localized: "overview.bannerBodyInactive", defaultValue: "Start the System Extension or run `swift run maccrabd` to begin protection")
             }
         }()
         let color: Color = {
@@ -200,27 +206,27 @@ struct V2OverviewWorkspace: View {
             // user flagged.
             Group {
             V2KpiCard(
-                title: "Security Grade",
+                title: String(localized: "overview.kpiSecurityGrade", defaultValue: "Security Grade"),
                 value: appState.securityGrade.isEmpty ? "—" : appState.securityGrade,
-                trend: appState.securityScore == 0 ? "scoring…" : "\(appState.securityScore) / 100",
+                trend: appState.securityScore == 0 ? String(localized: "overview.kpiScoring", defaultValue: "scoring…") : "\(appState.securityScore) / 100",
                 trendKind: securityGradeTrendKind,
                 icon: "checkmark.seal.fill",
                 iconColor: securityGradeIconColor,
                 footer: appState.securityFactors.isEmpty
-                    ? "Live system posture (SIP, FileVault, firewall, etc.)"
-                    : "\(appState.securityFactors.filter { $0.status == "pass" }.count) of \(appState.securityFactors.count) checks pass",
-                action: V2KpiAction("View factors") {
+                    ? String(localized: "overview.kpiPostureFooter", defaultValue: "Live system posture (SIP, FileVault, firewall, etc.)")
+                    : String(localized: "overview.kpiChecksPass", defaultValue: "\(appState.securityFactors.filter { $0.status == "pass" }.count) of \(appState.securityFactors.count) checks pass"),
+                action: V2KpiAction(String(localized: "overview.kpiViewFactors", defaultValue: "View factors")) {
                     showingSecurityFactors = true
                 }
             )
             V2KpiCard(
-                title: "Open Alerts",
+                title: String(localized: "overview.kpiOpenAlerts", defaultValue: "Open Alerts"),
                 value: "\(kpis.openAlerts24h)",
                 trend: openAlertsTrendLabel,
                 trendKind: openAlertsTrendKind,
                 icon: "bell.fill",
                 iconColor: V2Theme.high,
-                action: V2KpiAction("View Alerts") {
+                action: V2KpiAction(String(localized: "overview.kpiViewAlerts", defaultValue: "View Alerts")) {
                     state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
                 },
                 visual: kpis.eventsLast8Buckets.isEmpty
@@ -228,25 +234,25 @@ struct V2OverviewWorkspace: View {
                     : .sparkline(values: kpis.eventsLast8Buckets, color: V2Theme.high)
             )
             V2KpiCard(
-                title: "Active Campaigns",
+                title: String(localized: "overview.kpiActiveCampaigns", defaultValue: "Active Campaigns"),
                 value: "\(kpis.activeCampaigns)",
                 trend: campaignTrendLabel,
                 trendKind: kpis.activeCampaignsCritical > 0 ? .critical
                     : kpis.activeCampaignsHigh > 0 ? .high : .info,
                 icon: "flame.fill",
                 iconColor: kpis.activeCampaignsCritical > 0 ? V2Theme.critical : V2Theme.high,
-                action: V2KpiAction("View Campaigns") {
+                action: V2KpiAction(String(localized: "overview.kpiViewCampaigns", defaultValue: "View Campaigns")) {
                     state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns))
                 }
             )
             V2KpiCard(
-                title: "Event Rate",
+                title: String(localized: "overview.kpiEventRate", defaultValue: "Event Rate"),
                 value: formatRate(kpis.eventsPerSecond),
-                trend: "/sec · last 1m",
+                trend: String(localized: "overview.kpiEventRateTrend", defaultValue: "/sec · last 1m"),
                 trendKind: .info,
                 icon: "waveform.path",
                 iconColor: V2Theme.dataAccent,
-                action: V2KpiAction("View Events") {
+                action: V2KpiAction(String(localized: "overview.kpiViewEvents", defaultValue: "View Events")) {
                     state.goto(V2NavigationDestination(
                         workspace: .events, tab: nil
                     ))
@@ -256,26 +262,26 @@ struct V2OverviewWorkspace: View {
                     : .bars(values: kpis.eventsLast8Buckets, color: V2Theme.dataAccent)
             )
             V2KpiCard(
-                title: "AI Guard",
+                title: String(localized: "overview.kpiAIGuard", defaultValue: "AI Guard"),
                 value: aiGuardValue,
                 trend: aiGuardTrend,
                 trendKind: aiGuardTrendKind,
                 icon: "brain.head.profile",
                 iconColor: V2Theme.aiAccent,
-                action: V2KpiAction("View AI Guard") {
+                action: V2KpiAction(String(localized: "overview.kpiViewAIGuard", defaultValue: "View AI Guard")) {
                     state.goto(V2NavigationDestination(
                         workspace: .detection, tab: .detectionAIGuard
                     ))
                 }
             )
             V2KpiCard(
-                title: "Threat Intel",
+                title: String(localized: "overview.kpiThreatIntel", defaultValue: "Threat Intel"),
                 value: threatIntelValue,
                 trend: threatIntelTrend,
                 trendKind: threatIntelTrendKind,
                 icon: "globe.americas.fill",
                 iconColor: V2Theme.dataAccent,
-                action: V2KpiAction("View Intelligence") {
+                action: V2KpiAction(String(localized: "overview.kpiViewIntelligence", defaultValue: "View Intelligence")) {
                     state.goto(V2NavigationDestination(
                         workspace: .intelligence, tab: .intelligenceThreatIntel
                     ))
@@ -289,19 +295,19 @@ struct V2OverviewWorkspace: View {
 
     private var openAlertsTrendLabel: String {
         let d = kpis.openAlertsLast24hDelta
-        if d == 0 { return "no change vs prior 24h" }
-        return d > 0 ? "+\(d) vs prior 24h" : "\(d) vs prior 24h"
+        if d == 0 { return String(localized: "overview.openAlertsNoChange", defaultValue: "no change vs prior 24h") }
+        return d > 0 ? String(localized: "overview.openAlertsUp", defaultValue: "+\(d) vs prior 24h") : String(localized: "overview.openAlertsDown", defaultValue: "\(d) vs prior 24h")
     }
     private var openAlertsTrendKind: V2ChipKind {
         kpis.openAlertsLast24hDelta > 0 ? .warning : .healthy
     }
     private var campaignTrendLabel: String {
-        if kpis.activeCampaigns == 0 { return "none active" }
+        if kpis.activeCampaigns == 0 { return String(localized: "overview.campaignsNoneActive", defaultValue: "none active") }
         var parts: [String] = []
-        if kpis.activeCampaignsCritical > 0 { parts.append("\(kpis.activeCampaignsCritical) critical") }
-        if kpis.activeCampaignsHigh > 0     { parts.append("\(kpis.activeCampaignsHigh) high") }
-        if kpis.activeCampaignsMedium > 0   { parts.append("\(kpis.activeCampaignsMedium) medium") }
-        return parts.isEmpty ? "active" : parts.joined(separator: " · ")
+        if kpis.activeCampaignsCritical > 0 { parts.append(String(localized: "overview.campaignsCritical", defaultValue: "\(kpis.activeCampaignsCritical) critical")) }
+        if kpis.activeCampaignsHigh > 0     { parts.append(String(localized: "overview.campaignsHigh", defaultValue: "\(kpis.activeCampaignsHigh) high")) }
+        if kpis.activeCampaignsMedium > 0   { parts.append(String(localized: "overview.campaignsMedium", defaultValue: "\(kpis.activeCampaignsMedium) medium")) }
+        return parts.isEmpty ? String(localized: "overview.campaignsActive", defaultValue: "active") : parts.joined(separator: " · ")
     }
     private func formatRate(_ rate: Double) -> String {
         if rate >= 1000 { return String(format: "%.1fK", rate / 1000) }
@@ -320,7 +326,7 @@ struct V2OverviewWorkspace: View {
     private var aiGuardValue: String { "\(appState.aiSessions.count)" }
     private var aiGuardTrend: String {
         let n = appState.aiSessions.count
-        return n == 0 ? "no agent sessions" : (n == 1 ? "agent session" : "agent sessions")
+        return n == 0 ? String(localized: "overview.aiNoSessions", defaultValue: "no agent sessions") : (n == 1 ? String(localized: "overview.aiSessionSingular", defaultValue: "agent session") : String(localized: "overview.aiSessionPlural", defaultValue: "agent sessions"))
     }
     private var aiGuardTrendKind: V2ChipKind { appState.aiSessions.isEmpty ? .neutral : .ai }
 
@@ -330,11 +336,11 @@ struct V2OverviewWorkspace: View {
     }
     private var threatIntelValue: String { threatIntelTotal > 0 ? compactCount(threatIntelTotal) : "—" }
     private var threatIntelTrend: String {
-        guard threatIntelTotal > 0 else { return "no indicators loaded" }
-        guard let updated = appState.threatIntelStats.lastUpdate else { return "indicators loaded" }
+        guard threatIntelTotal > 0 else { return String(localized: "overview.intelNoIndicators", defaultValue: "no indicators loaded") }
+        guard let updated = appState.threatIntelStats.lastUpdate else { return String(localized: "overview.intelLoaded", defaultValue: "indicators loaded") }
         let rel = RelativeDateTimeFormatter()
         rel.unitsStyle = .abbreviated
-        return "updated \(rel.localizedString(for: updated, relativeTo: Date()))"
+        return String(localized: "overview.intelUpdated", defaultValue: "updated \(rel.localizedString(for: updated, relativeTo: Date()))")
     }
     private var threatIntelTrendKind: V2ChipKind {
         guard threatIntelTotal > 0 else { return .neutral }
@@ -348,9 +354,9 @@ struct V2OverviewWorkspace: View {
         let total = buckets.reduce(0) { $0 + $1.total }
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Alert volume — last \(rangeKey)")
+                Text(String(localized: "overview.alertVolumeTitle", defaultValue: "Alert volume — last \(rangeKey)"))
                     .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-                Text("· \(total) total")
+                Text(String(localized: "overview.alertVolumeTotal", defaultValue: "· \(total) total"))
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                 Spacer()
                 HStack(spacing: 4) {
@@ -380,12 +386,12 @@ struct V2OverviewWorkspace: View {
 
     private var histogramLegend: some View {
         HStack(spacing: 14) {
-            legendDot(color: V2Theme.critical, label: "Critical")
-            legendDot(color: V2Theme.high,     label: "High")
-            legendDot(color: V2Theme.medium,   label: "Medium")
-            legendDot(color: V2Theme.low,      label: "Low")
+            legendDot(color: V2Theme.critical, label: String(localized: "overview.legendCritical", defaultValue: "Critical"))
+            legendDot(color: V2Theme.high,     label: String(localized: "overview.legendHigh", defaultValue: "High"))
+            legendDot(color: V2Theme.medium,   label: String(localized: "overview.legendMedium", defaultValue: "Medium"))
+            legendDot(color: V2Theme.low,      label: String(localized: "overview.legendLow", defaultValue: "Low"))
             Spacer()
-            Text("Hover for details · click a bar to open Alerts for that window")
+            Text(String(localized: "overview.histogramHint", defaultValue: "Hover for details · click a bar to open Alerts for that window"))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.tertiaryText)
         }
@@ -416,7 +422,7 @@ struct V2OverviewWorkspace: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Range: \(label)")
+        .accessibilityLabel(String(localized: "overview.rangeChipA11y", defaultValue: "Range: \(label)"))
         .accessibilityAddTraits(on ? [.isSelected] : [])
     }
 
@@ -425,45 +431,96 @@ struct V2OverviewWorkspace: View {
     private var forensicsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Forensics & plugins").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "overview.forensicsTitle", defaultValue: "Forensics & plugins")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 Button { state.switchWorkspace(.forensics) } label: {
-                    Text("Open →").font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                    Text(String(localized: "overview.forensicsOpen", defaultValue: "Open →")).font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
                 }
                 .buttonStyle(.plain)
             }
             HStack(spacing: 24) {
-                forensicsStat("\(forensicsBuiltinCount)", "Built-in scanners")
-                forensicsStat("\(forensicsInstalledCount)", "Installed plugins")
+                forensicsStat("\(forensicsBuiltinCount)", String(localized: "overview.forensicsBuiltinScanners", defaultValue: "Built-in scanners"))
+                forensicsStat("\(forensicsInstalledCount)", String(localized: "overview.forensicsInstalledPlugins", defaultValue: "Installed plugins"))
             }
             if let s = forensicsLastScan {
                 HStack(spacing: 8) {
                     Image(systemName: "clock.arrow.circlepath").scaledSystem(11).foregroundStyle(V2Theme.mutedText)
-                    Text("Last scan: \(s.name)").font(V2Theme.body()).foregroundStyle(V2Theme.primaryText).lineLimit(1)
+                    Text(String(localized: "overview.forensicsLastScan", defaultValue: "Last scan: \(s.name)")).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText).lineLimit(1)
                     Spacer()
                     Text(V2TimeFormat.relative(s.createdAt)).font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
                 }
             } else {
-                Text("No scans yet — run one to inventory this Mac.")
+                Text(String(localized: "overview.forensicsNoScans", defaultValue: "No scans yet — run one to inventory this Mac."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
             }
             HStack(spacing: 8) {
                 Button {
                     state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsScans))
                 } label: {
-                    Label("Run a scan", systemImage: "play.fill")
+                    Label(String(localized: "overview.forensicsRunScan", defaultValue: "Run a scan"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent).controlSize(.small)
                 Button {
                     state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsMyPlugins))
                 } label: {
-                    Text("My plugins")
+                    Text(String(localized: "overview.forensicsMyPlugins", defaultValue: "My plugins"))
                 }
                 .controlSize(.small)
+            }
+
+            // --- Plugin store + news ---
+            Divider().padding(.vertical, 2)
+            HStack {
+                Text(String(localized: "overview.storeTitle", defaultValue: "Plugin store"))
+                    .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                Button {
+                    state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsCatalog))
+                } label: {
+                    Text(String(localized: "overview.storeBrowse", defaultValue: "Browse →"))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                }
+                .buttonStyle(.plain)
+            }
+            Text(storeStatusText).font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(storeNews) { item in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "sparkles").scaledSystem(11)
+                        .foregroundStyle(V2Theme.dataAccent).padding(.top, 2).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            // verbatim: never route news text through Text(_:)'s
+                            // LocalizedStringKey markdown/auto-link path.
+                            Text(verbatim: item.title).font(V2Theme.body()).fontWeight(.medium)
+                                .foregroundStyle(V2Theme.primaryText)
+                                .lineLimit(1).truncationMode(.tail)
+                            if let badge = item.badge {
+                                Text(verbatim: badge)
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(V2Theme.dataAccent.opacity(0.15))
+                                    .foregroundStyle(V2Theme.dataAccent)
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        Text(verbatim: item.summary).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                            .lineLimit(2).truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
         .v2Panel()
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One-line plugin-store status. We do NOT auto-fetch the catalog on Overview
+    /// (a network call) — the store is browse-on-demand, so this just invites the
+    /// user into the signed catalog.
+    private var storeStatusText: String {
+        String(localized: "overview.storeBrowsePrompt",
+               defaultValue: "Browse signed forensic plugins from the catalog. Installs run fully sandboxed.")
     }
 
     private func forensicsStat(_ value: String, _ label: String) -> some View {
@@ -474,10 +531,32 @@ struct V2OverviewWorkspace: View {
     }
 
     private func loadForensicsCard() async {
+        // PERF-1: this card shows built-in/installed scanner counts + the newest
+        // scan — all of which change only when the plugins dir or the cases dir
+        // changes. Gate the per-tick fan-out (manifests + installer.list +
+        // listCases-decodes-every-manifest) on those two dirs' mtime so the
+        // common 5s refresh tick is free, like the sibling threat-intel tile.
+        // The built-in registry is populated lazily; ensure it's bootstrapped
+        // (once per process — cheap after the first call) BEFORE we count, so a
+        // cold launch doesn't record builtinCount=0 and then lock it in via the
+        // mtime gate (registration bumps no directory mtime).
+        // Bundled (no-network) store news feed — set once; cheap to recompute.
+        if storeNews.isEmpty {
+            let news = StoreNews.bundled(appVersion: MacCrabVersion.current)
+            await MainActor.run { storeNews = news }
+        }
+        await BuiltinBootstrapOnce.shared.ensure()
+        let installer = PluginInstaller()
+        let fm = FileManager.default
+        let token = [CaseDirectoryLayout.defaultCasesRoot.path, installer.pluginsRootPath]
+            .map { (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date ?? .distantPast }
+            .max() ?? .distantPast
+        if let last = lastForensicsCardToken, token <= last { return }   // nothing changed → skip
+
         let mans = await PluginRegistry.shared.manifests()
         let builtinCount = mans.filter { $0.type == .collector || $0.type == .analyzer }.count
         let builtinIDs = Set(mans.map { $0.id })
-        let installed = OperatorVisibilityFilter.filter((try? await PluginInstaller().list()) ?? [], builtinIDs: builtinIDs)
+        let installed = OperatorVisibilityFilter.filter((try? await installer.list()) ?? [], builtinIDs: builtinIDs)
         var lastScan: CaseManifest? = nil
         let mgr = CaseManager(casesRoot: CaseDirectoryLayout.defaultCasesRoot, dekVault: KeychainDEKVault())
         if let raw = try? await mgr.listCases() {
@@ -487,20 +566,21 @@ struct V2OverviewWorkspace: View {
             forensicsBuiltinCount = builtinCount
             forensicsInstalledCount = installed.count
             forensicsLastScan = lastScan
+            lastForensicsCardToken = token
         }
     }
 
     private var recentActivityCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Recent activity").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "overview.recentActivityTitle", defaultValue: "Recent activity")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 Button {
                     state.goto(V2NavigationDestination(
                         workspace: .events, tab: nil
                     ))
                 } label: {
-                    Text("View all →").font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                    Text(String(localized: "overview.viewAll", defaultValue: "View all →")).font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
                 }
                 .buttonStyle(.plain)
             }
@@ -509,7 +589,7 @@ struct V2OverviewWorkspace: View {
                     activityRow(alert: alert)
                 }
                 if alerts.isEmpty {
-                    Text("No recent alerts.")
+                    Text(String(localized: "overview.noRecentAlerts", defaultValue: "No recent alerts."))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .padding(20)
@@ -554,7 +634,7 @@ struct V2OverviewWorkspace: View {
     private var quickActionsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Quick actions").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "overview.quickActionsTitle", defaultValue: "Quick actions")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
             }
             LazyVGrid(
@@ -562,23 +642,23 @@ struct V2OverviewWorkspace: View {
                 alignment: .leading,
                 spacing: 8
             ) {
-                quickAction("Search events", icon: "magnifyingglass") {
+                quickAction(String(localized: "overview.qaSearchEvents", defaultValue: "Search events"), icon: "magnifyingglass") {
                     state.switchWorkspace(.events)
                 }
-                quickAction("Open TraceGraph", icon: "point.3.connected.trianglepath.dotted") {
+                quickAction(String(localized: "overview.qaOpenTraceGraph", defaultValue: "Open TraceGraph"), icon: "point.3.connected.trianglepath.dotted") {
                     state.goto(V2NavigationDestination(workspace: .investigation, tab: .investigationTraceGraph))
                 }
-                quickAction("Create rule", icon: "plus.app.fill") {
+                quickAction(String(localized: "overview.qaCreateRule", defaultValue: "Create rule"), icon: "plus.app.fill") {
                     state.goto(V2NavigationDestination(workspace: .detection, tab: .detectionRules))
                     state.presentNewRuleTick += 1
                 }
-                quickAction("Intel feeds", icon: "globe.americas.fill") {
+                quickAction(String(localized: "overview.qaIntelFeeds", defaultValue: "Intel feeds"), icon: "globe.americas.fill") {
                     state.goto(V2NavigationDestination(workspace: .intelligence, tab: .intelligenceThreatIntel))
                 }
-                quickAction("System health", icon: "waveform.path.ecg") {
+                quickAction(String(localized: "overview.qaSystemHealth", defaultValue: "System health"), icon: "waveform.path.ecg") {
                     state.goto(V2NavigationDestination(workspace: .system, tab: .systemHealth))
                 }
-                quickAction("Integrations", icon: "powerplug.fill") {
+                quickAction(String(localized: "overview.qaIntegrations", defaultValue: "Integrations"), icon: "powerplug.fill") {
                     state.goto(V2NavigationDestination(workspace: .intelligence, tab: .intelligenceIntegrations))
                 }
             }
@@ -627,25 +707,25 @@ struct V2OverviewWorkspace: View {
                 }
                 .frame(width: 56, height: 56)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Security Grade")
+                    Text(String(localized: "overview.sheetSecurityGrade", defaultValue: "Security Grade"))
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
                     Text(appState.securityScore == 0
-                         ? "Scoring in progress…"
-                         : "\(appState.securityScore) / 100 across \(appState.securityFactors.count) checks")
+                         ? String(localized: "overview.sheetScoringInProgress", defaultValue: "Scoring in progress…")
+                         : String(localized: "overview.sheetScoreAcrossChecks", defaultValue: "\(appState.securityScore) / 100 across \(appState.securityFactors.count) checks"))
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                 }
                 Spacer()
-                Button("Done") { showingSecurityFactors = false }
+                Button(String(localized: "overview.sheetDone", defaultValue: "Done")) { showingSecurityFactors = false }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.bottom, 4)
 
             if appState.securityFactors.isEmpty {
                 V2EmptyState(
-                    title: "No factors yet",
-                    body: "The security scorer runs every 5 minutes. Wait a moment, then re-open this view.",
+                    title: String(localized: "overview.emptyFactorsTitle", defaultValue: "No factors yet"),
+                    body: String(localized: "overview.emptyFactorsBody", defaultValue: "The security scorer runs every 5 minutes. Wait a moment, then re-open this view."),
                     icon: "hourglass"
                 )
                 .v2Panel()
@@ -654,23 +734,47 @@ struct V2OverviewWorkspace: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(appState.securityFactors.indices, id: \.self) { idx in
                             let f = appState.securityFactors[idx]
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: factorIcon(f.status))
-                                    .foregroundStyle(factorColor(f.status))
-                                    .frame(width: 16)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text(f.name)
-                                            .scaledSystem(13, weight: .semibold)
-                                            .foregroundStyle(V2Theme.primaryText)
-                                        Spacer()
-                                        Text("\(f.score)/\(f.maxScore)")
-                                            .font(V2Theme.mono())
-                                            .foregroundStyle(V2Theme.mutedText)
+                            let isExpanded = expandedFactorName == f.name
+                            VStack(alignment: .leading, spacing: 0) {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        expandedFactorName = isExpanded ? nil : f.name
                                     }
-                                    Text(f.detail)
-                                        .font(V2Theme.meta())
-                                        .foregroundStyle(V2Theme.mutedText)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: factorIcon(f.status))
+                                            .foregroundStyle(factorColor(f.status))
+                                            .frame(width: 16)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack {
+                                                Text(f.name)
+                                                    .scaledSystem(13, weight: .semibold)
+                                                    .foregroundStyle(V2Theme.primaryText)
+                                                Spacer()
+                                                Text("\(f.score)/\(f.maxScore)")
+                                                    .font(V2Theme.mono())
+                                                    .foregroundStyle(V2Theme.mutedText)
+                                                Image(systemName: "chevron.right")
+                                                    .scaledSystem(10)
+                                                    .foregroundStyle(V2Theme.tertiaryText)
+                                                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                                    .accessibilityHidden(true)
+                                            }
+                                            Text(f.detail)
+                                                .font(V2Theme.meta())
+                                                .foregroundStyle(V2Theme.mutedText)
+                                        }
+                                        .contentShape(Rectangle())
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .help(String(localized: "overview.factorExpandHint", defaultValue: "Click for what this means and how to address it"))
+
+                                if isExpanded {
+                                    securityFactorGuideView(SecurityFactorGuide.forFactor(name: f.name, detail: f.detail))
+                                        .padding(.top, 10)
+                                        .padding(.leading, 26)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
                             }
                             .padding(10)
@@ -701,6 +805,42 @@ struct V2OverviewWorkspace: View {
         case "warn": return V2Theme.warning
         case "fail": return V2Theme.high
         default:     return V2Theme.mutedText
+        }
+    }
+
+    /// Inline "what this means + how to address it" for an expanded factor row,
+    /// ending in a Learn-more link to the authoritative Apple documentation.
+    @ViewBuilder
+    private func securityFactorGuideView(_ guide: SecurityFactorGuide) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            guideRow(String(localized: "overview.factorWhat", defaultValue: "What it is"), guide.what)
+            guideRow(String(localized: "overview.factorWhy", defaultValue: "Why it matters"), guide.why)
+            if let fix = guide.howToFix {
+                guideRow(String(localized: "overview.factorFix", defaultValue: "How to address"), fix)
+            }
+            if let url = guide.docURL {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.right.square").scaledSystem(11)
+                        Text(guide.docTitle ?? String(localized: "overview.factorLearnMore", defaultValue: "Learn more"))
+                    }
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.dataAccent)
+                }
+                .buttonStyle(.plain)
+                .help(url.absoluteString)
+            }
+        }
+    }
+
+    private func guideRow(_ label: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label.uppercased())
+                .font(V2Theme.meta()).fontWeight(.semibold)
+                .foregroundStyle(V2Theme.tertiaryText)
+            Text(text)
+                .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -906,7 +1046,7 @@ fileprivate struct V2AlertHistogram: View {
                 let span = lastEnd.timeIntervalSince(firstStart)
                 let t = firstStart.addingTimeInterval(span * Double(frac))
                 let primary = formatter.string(from: t)
-                let secondary = i == labelCount - 1 ? "now" : V2AlertHistogram.relative(seconds: -t.timeIntervalSinceNow)
+                let secondary = i == labelCount - 1 ? String(localized: "overview.histogramNow", defaultValue: "now") : V2AlertHistogram.relative(seconds: -t.timeIntervalSinceNow)
                 VStack(spacing: 0) {
                     Text(primary)
                         .scaledSystem(10, weight: .medium)
@@ -960,20 +1100,20 @@ fileprivate struct V2AlertHistogram: View {
             }
             Divider().background(V2Theme.panelBorder)
             HStack {
-                Text("Total")
+                Text(String(localized: "overview.popoverTotal", defaultValue: "Total"))
                     .scaledSystem(10, weight: .medium)
                     .foregroundStyle(V2Theme.mutedText)
                 Spacer()
-                Text("\(bucket.total) \(bucket.total == 1 ? "alert" : "alerts")")
+                Text("\(bucket.total) \(bucket.total == 1 ? String(localized: "overview.popoverAlertSingular", defaultValue: "alert") : String(localized: "overview.popoverAlertPlural", defaultValue: "alerts"))")
                     .scaledSystem(11, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                     .monospacedDigit()
             }
-            severityRow("Critical", count: bucket.critical, color: V2Theme.critical)
-            severityRow("High",     count: bucket.high,     color: V2Theme.high)
-            severityRow("Medium",   count: bucket.medium,   color: V2Theme.medium)
-            severityRow("Low",      count: bucket.low,      color: V2Theme.low)
-            Text("Click bar to open these alerts")
+            severityRow(String(localized: "overview.popoverCritical", defaultValue: "Critical"), count: bucket.critical, color: V2Theme.critical)
+            severityRow(String(localized: "overview.popoverHigh", defaultValue: "High"),     count: bucket.high,     color: V2Theme.high)
+            severityRow(String(localized: "overview.popoverMedium", defaultValue: "Medium"),   count: bucket.medium,   color: V2Theme.medium)
+            severityRow(String(localized: "overview.popoverLow", defaultValue: "Low"),      count: bucket.low,      color: V2Theme.low)
+            Text(String(localized: "overview.popoverClickHint", defaultValue: "Click bar to open these alerts"))
                 .scaledSystem(9)
                 .foregroundStyle(V2Theme.tertiaryText)
         }

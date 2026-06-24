@@ -38,7 +38,7 @@ struct MacCrabCtl {
             } else if args.count >= 3 && args[2] == "count" {
                 await countRules()
             } else {
-                print("Usage: maccrabctl rules [list|count]")
+                usageError("Usage: maccrabctl rules [list|count]")
             }
         case "events":
             if args.count >= 3 && args[2] == "tail" {
@@ -64,7 +64,7 @@ struct MacCrabCtl {
             } else if args.count >= 3 && args[2] == "stats" {
                 await eventStats()
             } else {
-                print("Usage: maccrabctl events [tail [N]|search <query>|stats]")
+                usageError("Usage: maccrabctl events [tail [N]|search <query>|stats]")
             }
         case "alerts":
             var limit = 20
@@ -87,7 +87,7 @@ struct MacCrabCtl {
             if args.count >= 4 {
                 compileRules(inputDir: args[2], outputDir: args[3])
             } else {
-                print("Usage: maccrabctl compile <input-rules-dir> <output-compiled-dir>")
+                usageError("Usage: maccrabctl compile <input-rules-dir> <output-compiled-dir>")
             }
         case "export":
             let format = args.count >= 3 ? args[2] : "json"
@@ -102,33 +102,50 @@ struct MacCrabCtl {
                 // survives SIGHUP rule reload and sysext restarts. The
                 // RuleEngine respects this on load.
                 setRuleEnabled(ruleId: args[3], enabled: args[2] == "enable")
+            } else if args.count >= 3 && (args[2] == "delete" || args[2] == "severity") {
+                // PARITY-04: rule delete / severity-override (CLI parity with the
+                // MCP delete_rule / set_builtin_rule_setting tools).
+                dispatchRuleMutate(args: Array(args.dropFirst(2)))
             } else {
-                print("Usage:")
-                print("  maccrabctl rule create [category]   # Scaffold a new rule YAML")
-                print("  maccrabctl rule enable <id>         # Re-enable a rule that was disabled")
-                print("  maccrabctl rule disable <id>        # Disable a noisy rule without deleting the YAML")
-                print("  Categories: process_creation, file_event, network_connection, tcc_event")
+                usageError("""
+                Usage:
+                  maccrabctl rule create [category]    # Scaffold a new rule YAML
+                  maccrabctl rule enable <id>          # Re-enable a rule that was disabled
+                  maccrabctl rule disable <id>         # Disable a noisy rule without deleting the YAML
+                  maccrabctl rule delete <id>          # Remove a user-authored rule (not maccrab.*)
+                  maccrabctl rule severity <id> <lvl>  # Override a rule's severity
+                  Categories: process_creation, file_event, network_connection, tcc_event
+                """)
             }
         case "suppress":
             if args.count >= 4 {
                 await suppressRule(ruleId: args[2], processPath: args[3])
             } else {
-                print("Usage: maccrabctl suppress <rule-id> <process-path>")
-                print("  Adds a process to the allowlist for a specific rule.")
+                usageError("""
+                Usage: maccrabctl suppress <rule-id> <process-path>
+                  Adds a process to the allowlist for a specific rule (v1 store).
+                  Note: this v1 store is independent of `maccrabctl allow` (v2 — TTL + audit);
+                  v1 suppressions do not appear in `allow list`. Prefer `allow` for TTL/audit.
+                """)
             }
         case "unsuppress":
             if args.count >= 3 {
                 let processPath = args.count >= 4 ? args[3] : nil
                 await unsuppressRule(ruleId: args[2], processPath: processPath)
             } else {
-                print("Usage: maccrabctl unsuppress <rule-id> [<process-path>]")
-                print("  Removes a specific process path, or all suppressions for the rule.")
+                usageError("""
+                Usage: maccrabctl unsuppress <rule-id> [<process-path>]
+                  Removes a specific process path, or all suppressions for the rule (v1 store).
+                """)
             }
         case "suppression":
             if args.count >= 3 && args[2] == "list" {
                 listSuppressions()
             } else {
-                print("Usage: maccrabctl suppression list")
+                usageError("""
+                Usage: maccrabctl suppression list
+                  Lists the v1 suppression store (independent of `allow`, the v2 TTL/audit store).
+                """)
             }
         case "campaigns":
             if args.count >= 3 && args[2] == "watch" {
@@ -158,10 +175,10 @@ struct MacCrabCtl {
                 } else if let pid = Int32(args[2]) {
                     await extractCDHash(pid: pid)
                 } else {
-                    print("Usage: maccrabctl cdhash <PID> | --all")
+                    usageError("Usage: maccrabctl cdhash <PID> | --all")
                 }
             } else {
-                print("Usage: maccrabctl cdhash <PID> | --all")
+                usageError("Usage: maccrabctl cdhash <PID> | --all")
             }
         case "tree-score":
             let limit = args.count >= 3 ? Int(args[2]) ?? 10 : 10
@@ -171,7 +188,7 @@ struct MacCrabCtl {
                 let suspiciousOnly = args.contains("--suspicious")
                 listMCPServers(suspiciousOnly: suspiciousOnly)
             } else {
-                print("Usage: maccrabctl mcp list [--suspicious]")
+                usageError("Usage: maccrabctl mcp list [--suspicious]")
             }
         case "extensions":
             let suspiciousOnly = args.contains("--suspicious")
@@ -226,7 +243,12 @@ struct MacCrabCtl {
         case "trace":
             await dispatchTrace(args: Array(args.dropFirst(2)))
         case "debug":
-            await dispatchDebug(args: Array(args.dropFirst(2)))
+            // CLI-5: diagnostic verb — hidden unless MACCRAB_DEV=1.
+            if devModeEnabled {
+                await dispatchDebug(args: Array(args.dropFirst(2)))
+            } else {
+                unknownCommand(command)
+            }
         case "intel":
             // Threat-intel maintenance subcommands (refresh / matches /
             // status). `refresh` drops a refresh-intel request into the
@@ -320,17 +342,52 @@ struct MacCrabCtl {
             // v1.14-1 — MCFP v1 static fingerprint.
             await dispatchFingerprint(args: Array(args.dropFirst(2)))
         case "mcfp":
-            // research/post-v15 — MCFP R2 corpus + diff + imposter
-            // tooling.
-            await dispatchMCFP(args: Array(args.dropFirst(2)))
+            // research/post-v15 — MCFP R2 corpus + diff + imposter tooling.
+            // CLI-5: hidden unless MACCRAB_DEV=1.
+            if devModeEnabled {
+                await dispatchMCFP(args: Array(args.dropFirst(2)))
+            } else {
+                unknownCommand(command)
+            }
+        case "actions":
+            // PARITY-01: response-action config (SECURITY-CRITICAL) — reads/writes
+            // the same actions.json the dashboard uses, then queues a reload via
+            // the privileged inbox (uid-501 can't HUP the root sysext).
+            await dispatchActions(args: Array(args.dropFirst(2)))
+        case "package":
+            // PARITY-02: supply-chain package intelligence (CLI parity with the
+            // MCP package tools: typosquat / content / metadata / attestation / intent).
+            await dispatchPackage(args: Array(args.dropFirst(2)))
+        case "ai-alerts":
+            var hours: Double = 24
+            var limit = 20
+            var idx = 2
+            while idx < args.count {
+                switch args[idx] {
+                case "--hours" where idx + 1 < args.count:
+                    hours = Double(args[idx + 1]) ?? 24; idx += 2
+                case "--limit" where idx + 1 < args.count:
+                    limit = Int(args[idx + 1]) ?? 20; idx += 2
+                default:
+                    idx += 1
+                }
+            }
+            await listAIAlerts(hours: hours, limit: limit)
+        case "scan-text":
+            await scanText(scanTextPayload(from: args))
+        case "config":
+            // PARITY-05: daemon-config get/set against the safe-key allow-list.
+            dispatchConfig(args: Array(args.dropFirst(2)))
+        case "session":
+            // PARITY-06: AI-agent session timeline + signed bundle export/verify
+            // (headless parity with the MCP agent-session tools).
+            await dispatchSession(args: Array(args.dropFirst(2)))
         case "version":
             printVersion()
         case "help", "-h", "--help":
             printUsage()
         default:
-            print("Unknown command: \(command)")
-            printUsage()
-            exit(1)
+            unknownCommand(command)
         }
     }
 

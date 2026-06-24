@@ -114,4 +114,52 @@ public enum V2DaemonControl {
         }
         return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
     }
+
+    // MARK: - user_overrides.json (merge-safe)
+
+    /// Merge-safe read-modify-write of the console user's `user_overrides.json`.
+    ///
+    /// The daemon reads ONE file for both the storage{} tuning block AND the
+    /// top-level network-enrichment privacy flags (DaemonConfig.applyUserOverrides
+    /// is uid-validated). A whole-file overwrite by one surface would clobber the
+    /// other group, so every writer must read the existing file, mutate ONLY its
+    /// own keys, and atomically write back. The app runs as the console user and
+    /// writes its OWN ~/Library copy — exactly the file applyUserOverrides scans.
+    @discardableResult
+    public static func writeUserOverrides(_ mutate: (inout [String: Any]) -> Void) -> Bool {
+        let dir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/user_overrides.json"
+        var obj: [String: Any] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+            // File EXISTS. If it's present but unparseable, ABORT — a
+            // single-group write onto {} would clobber the other group. Only a
+            // genuinely absent file legitimately starts from an empty object.
+            guard let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return false
+            }
+            obj = parsed
+        }
+        mutate(&obj)
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
+    }
+
+    /// Persist the four network-enrichment privacy flags (top-level, camelCase —
+    /// the shape DaemonConfig.applyUserOverrides reads) and ask the root sysext
+    /// to re-read live (cross-uid-safe inbox → self-SIGHUP, which re-applies all
+    /// four flags and stops/starts the threat-intel network loop without a
+    /// restart). Returns whether a live reload was requested; the file write
+    /// itself is durable and applies on the next daemon start regardless (so a
+    /// `false` means "saved, applies on next start", not "failed").
+    @discardableResult
+    public static func applyEnrichmentFlags(threatIntel: Bool, vulnScan: Bool, packageFreshness: Bool, certTransparency: Bool) -> Bool {
+        _ = writeUserOverrides { obj in
+            obj["threatIntelEnabled"]      = threatIntel
+            obj["vulnScanEnabled"]         = vulnScan
+            obj["packageFreshnessEnabled"] = packageFreshness
+            obj["certTransparencyEnabled"] = certTransparency
+        }
+        return reloadDetectionRules()
+    }
 }

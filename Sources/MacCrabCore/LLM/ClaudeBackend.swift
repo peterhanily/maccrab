@@ -66,6 +66,12 @@ public actor ClaudeBackend: LLMBackend {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("prompt-caching-2024-07-31", forHTTPHeaderField: "anthropic-beta")
+        // Zero-data-retention / no-train posture: Anthropic does NOT expose
+        // an HTTP request header to opt out of retention or training. By
+        // default the standard API does not train on inputs/outputs; ZDR is
+        // an account-level arrangement, not a per-request flag. Inventing a
+        // header here would be silently ignored at best. The user-facing
+        // claim is documented in PRIVACY.md instead. (Audit P1 finding 2.)
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 
@@ -148,6 +154,8 @@ public actor ClaudeBackend: LLMBackend {
             "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14",
             forHTTPHeaderField: "anthropic-beta"
         )
+        // No ZDR/no-train request header exists (see complete()); posture
+        // is documented in PRIVACY.md. (Audit P1 finding 2.)
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 120  // Thinking models run longer
 

@@ -27,7 +27,7 @@ extension MacCrabCtl {
             too; synthetic scoring/topology alerts explain the indicator set
             instead of predicates.
             """)
-            return
+            exit(1)
         }
         let alertID = args[2]
         let dataDir = maccrabDataDir()
@@ -39,12 +39,12 @@ extension MacCrabCtl {
             guard let found = try await store.alert(id: alertID) else {
                 print("No alert with id '\(alertID)' in \(dataDir)/alerts.db")
                 print("Tip: copy the ID from `maccrabctl alerts` (the first column).")
-                return
+                exit(1)
             }
             alert = found
         } catch {
             print("Error opening alert store: \(error)")
-            return
+            exit(1)
         }
 
         // 2. Header: what fired, when, where.
@@ -79,12 +79,12 @@ extension MacCrabCtl {
         guard let rulePath = findRuleFile(forRuleID: alert.ruleId, dataDir: dataDir) else {
             print("No compiled rule found for id \(alert.ruleId).")
             print("Expected under \(dataDir)/compiled_rules/ — is the engine running?")
-            return
+            exit(1)
         }
         guard let ruleData = try? Data(contentsOf: URL(fileURLWithPath: rulePath)),
               let ruleJSON = try? JSONSerialization.jsonObject(with: ruleData) as? [String: Any] else {
             print("Failed to parse compiled rule at \(rulePath)")
-            return
+            exit(1)
         }
 
         print("Rule file:   \(rulePath)")

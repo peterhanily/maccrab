@@ -47,7 +47,7 @@ struct V2ForensicsPastScansView: View {
                     deleteToast(msg)
                 }
                 if loading {
-                    ProgressView("Loading…")
+                    ProgressView(String(localized: "pastScans.loading", defaultValue: "Loading…"))
                         .frame(maxWidth: .infinity)
                         .padding(40)
                 } else if scans.isEmpty {
@@ -82,16 +82,16 @@ struct V2ForensicsPastScansView: View {
                 )
             }
         }
-        .alert("Delete this scan permanently?",
+        .alert(String(localized: "pastScans.deleteAlertTitle", defaultValue: "Delete this scan permanently?"),
                isPresented: Binding(
                    get: { pendingDelete != nil },
                    set: { if !$0 { pendingDelete = nil } }
                ),
                presenting: pendingDelete) { scan in
-            Button("Delete \(scan.name)", role: .destructive) {
+            Button(String(localized: "pastScans.deleteNamed", defaultValue: "Delete \(scan.name)"), role: .destructive) {
                 deleteScan(scan)
             }
-            Button("Cancel", role: .cancel) {
+            Button(String(localized: "pastScans.cancel", defaultValue: "Cancel"), role: .cancel) {
                 pendingDelete = nil
             }
         } message: { scan in
@@ -99,18 +99,18 @@ struct V2ForensicsPastScansView: View {
                 let bcf = ByteCountFormatter()
                 bcf.countStyle = .file
                 return bcf.string(fromByteCount: bytes)
-            } ?? "unknown size"
-            Text("This removes the scan + its evidence database (\(sizeStr)) from disk. You can't undo this. Exported CSV/JSON files are not affected.")
+            } ?? String(localized: "pastScans.unknownSize", defaultValue: "unknown size")
+            Text(String(localized: "pastScans.deleteMessage", defaultValue: "This removes the scan + its evidence database (\(sizeStr)) from disk. You can't undo this. Exported CSV/JSON files are not affected."))
         }
-        .alert("Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s") permanently?",
+        .alert(String(localized: "pastScans.bulkDeleteTitle", defaultValue: "Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s") permanently?"),
                isPresented: $pendingBulkDelete) {
-            Button("Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s")", role: .destructive) {
+            Button(String(localized: "pastScans.bulkDeleteConfirm", defaultValue: "Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s")"), role: .destructive) {
                 bulkDelete()
             }
-            Button("Cancel", role: .cancel) { }
+            Button(String(localized: "pastScans.cancel", defaultValue: "Cancel"), role: .cancel) { }
         } message: {
             let total = selectedIDs.reduce(Int64(0)) { $0 + (diskSizes[$1] ?? 0) }
-            Text("This removes the selected scans + their evidence databases (\(formattedBytes(total))) from disk. You can't undo this. Exported CSV/JSON files are not affected.")
+            Text(String(localized: "pastScans.bulkDeleteMessage", defaultValue: "This removes the selected scans + their evidence databases (\(formattedBytes(total))) from disk. You can't undo this. Exported CSV/JSON files are not affected."))
         }
     }
 
@@ -145,9 +145,9 @@ struct V2ForensicsPastScansView: View {
                 HiddenScans.restore(scan.id)
                 let bcf = ByteCountFormatter()
                 bcf.countStyle = .file
-                deleteResult = "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed))."
+                deleteResult = String(localized: "pastScans.deletedToast", defaultValue: "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed)).")
             } catch {
-                deleteResult = "Couldn't delete: \(error.localizedDescription)"
+                deleteResult = String(localized: "pastScans.deleteFailedToast", defaultValue: "Couldn't delete: \(error.localizedDescription)")
             }
             await reload()
         }
@@ -193,9 +193,9 @@ struct V2ForensicsPastScansView: View {
             let bcf = ByteCountFormatter()
             bcf.countStyle = .file
             if failed == 0 {
-                deleteResult = "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
+                deleteResult = String(localized: "pastScans.bulkDeletedToast", defaultValue: "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed)).")
             } else {
-                deleteResult = "Deleted \(ok), \(failed) failed · freed \(bcf.string(fromByteCount: freed))."
+                deleteResult = String(localized: "pastScans.bulkDeletedPartialToast", defaultValue: "Deleted \(ok), \(failed) failed · freed \(bcf.string(fromByteCount: freed)).")
             }
             selectedIDs = []
             selectionMode = false
@@ -208,28 +208,28 @@ struct V2ForensicsPastScansView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Past scans")
+                Text(String(localized: "pastScans.title", defaultValue: "Past scans"))
                     .font(.title2).fontWeight(.semibold)
                 Text(selectionMode
-                     ? "Select scans, then Delete selected. Click a row to toggle."
-                     : "Every scan run on this Mac, newest first. Click a scan to open it.")
+                     ? String(localized: "pastScans.subtitleSelecting", defaultValue: "Select scans, then Delete selected. Click a row to toggle.")
+                     : String(localized: "pastScans.subtitle", defaultValue: "Every scan run on this Mac, newest first. Click a scan to open it."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if !scans.isEmpty {
                 if selectionMode {
-                    Button("Cancel") {
+                    Button(String(localized: "pastScans.cancel", defaultValue: "Cancel")) {
                         selectionMode = false
                         selectedIDs = []
                     }
                     .buttonStyle(.borderless)
                     .scaledSystem(12)
                 } else {
-                    Button("Select") { selectionMode = true }
+                    Button(String(localized: "pastScans.select", defaultValue: "Select")) { selectionMode = true }
                         .buttonStyle(.borderless)
                         .scaledSystem(12)
-                    Text("\(scans.count) total")
+                    Text(String(localized: "pastScans.totalCount", defaultValue: "\(scans.count) total"))
                         .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                 }
@@ -241,7 +241,7 @@ struct V2ForensicsPastScansView: View {
     /// live selected count, and the destructive delete trigger.
     private var bulkBar: some View {
         HStack(spacing: 12) {
-            Button(selectedIDs.count == filtered.count && !filtered.isEmpty ? "Deselect all" : "Select all") {
+            Button(selectedIDs.count == filtered.count && !filtered.isEmpty ? String(localized: "pastScans.deselectAll", defaultValue: "Deselect all") : String(localized: "pastScans.selectAll", defaultValue: "Select all")) {
                 if selectedIDs.count == filtered.count {
                     selectedIDs = []
                 } else {
@@ -251,13 +251,13 @@ struct V2ForensicsPastScansView: View {
             .buttonStyle(.borderless)
             .scaledSystem(12)
             Spacer()
-            Text("\(selectedIDs.count) selected")
+            Text(String(localized: "pastScans.selectedCount", defaultValue: "\(selectedIDs.count) selected"))
                 .scaledSystem(11)
                 .foregroundStyle(.secondary)
             Button(role: .destructive) {
                 pendingBulkDelete = true
             } label: {
-                Label("Delete selected", systemImage: "trash")
+                Label(String(localized: "pastScans.deleteSelected", defaultValue: "Delete selected"), systemImage: "trash")
                     .scaledSystem(12)
             }
             .disabled(selectedIDs.isEmpty)
@@ -276,7 +276,7 @@ struct V2ForensicsPastScansView: View {
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("Dismiss") {
+            Button(String(localized: "pastScans.dismiss", defaultValue: "Dismiss")) {
                 deleteResult = nil
             }
             .buttonStyle(.borderless)
@@ -289,8 +289,8 @@ struct V2ForensicsPastScansView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("No scans yet.").font(.headline)
-            Text("Run a scan from the Run a scan tab. Each scan you complete will appear here.")
+            Text(String(localized: "pastScans.emptyTitle", defaultValue: "No scans yet.")).font(.headline)
+            Text(String(localized: "pastScans.emptyBody", defaultValue: "Run a scan from the Run a scan tab. Each scan you complete will appear here."))
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
         }
@@ -305,7 +305,7 @@ struct V2ForensicsPastScansView: View {
             Image(systemName: "magnifyingglass")
                 .scaledSystem(11)
                 .foregroundStyle(.tertiary)
-            TextField("Filter by scan name", text: $query)
+            TextField(String(localized: "pastScans.filterPlaceholder", defaultValue: "Filter by scan name"), text: $query)
                 .textFieldStyle(.plain)
                 .scaledSystem(12)
             if !query.isEmpty {
@@ -431,7 +431,7 @@ struct ForensicsScanRow: View {
                                     .foregroundStyle(.secondary)
                             }
                             if let bytes = diskBytes {
-                                Text("·")
+                                Text(verbatim: "·")
                                     .scaledSystem(11)
                                     .foregroundStyle(.tertiary)
                                 Text(formatSize(bytes))
@@ -442,7 +442,7 @@ struct ForensicsScanRow: View {
                     }
                     Spacer()
                     if !selectionMode {
-                        Text("View")
+                        Text(String(localized: "pastScans.view", defaultValue: "View"))
                             .scaledSystem(11)
                             .foregroundStyle(.tint)
                     }
@@ -454,15 +454,15 @@ struct ForensicsScanRow: View {
             if !selectionMode {
             Menu {
                 Button(action: onOpen) {
-                    Label("Open", systemImage: "eye")
+                    Label(String(localized: "pastScans.open", defaultValue: "Open"), systemImage: "eye")
                 }
                 Divider()
                 Button(role: .destructive, action: onDismiss) {
-                    Label("Dismiss from list", systemImage: "eye.slash")
+                    Label(String(localized: "pastScans.dismissFromList", defaultValue: "Dismiss from list"), systemImage: "eye.slash")
                 }
                 if let onDelete = onDeleteRequested {
                     Button(role: .destructive, action: onDelete) {
-                        Label("Delete permanently…", systemImage: "trash")
+                        Label(String(localized: "pastScans.deletePermanently", defaultValue: "Delete permanently…"), systemImage: "trash")
                     }
                 }
             } label: {
@@ -473,20 +473,20 @@ struct ForensicsScanRow: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 28)
-            .help("Actions")
+            .help(String(localized: "pastScans.actions", defaultValue: "Actions"))
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .contextMenu {
             Button(action: onOpen) {
-                Label("Open", systemImage: "eye")
+                Label(String(localized: "pastScans.open", defaultValue: "Open"), systemImage: "eye")
             }
             Button(role: .destructive, action: onDismiss) {
-                Label("Dismiss from list", systemImage: "eye.slash")
+                Label(String(localized: "pastScans.dismissFromList", defaultValue: "Dismiss from list"), systemImage: "eye.slash")
             }
             if let onDelete = onDeleteRequested {
                 Button(role: .destructive, action: onDelete) {
-                    Label("Delete permanently…", systemImage: "trash")
+                    Label(String(localized: "pastScans.deletePermanently", defaultValue: "Delete permanently…"), systemImage: "trash")
                 }
             }
         }
@@ -495,7 +495,7 @@ struct ForensicsScanRow: View {
     private func timeAgo(_ d: Date) -> String {
         let fmt = RelativeDateTimeFormatter()
         fmt.unitsStyle = .full
-        return "Started " + fmt.localizedString(for: d, relativeTo: Date())
+        return String(localized: "pastScans.started", defaultValue: "Started \(fmt.localizedString(for: d, relativeTo: Date()))")
     }
 
     private func formatSize(_ bytes: Int64) -> String {

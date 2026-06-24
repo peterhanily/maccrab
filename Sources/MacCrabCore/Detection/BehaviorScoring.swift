@@ -117,6 +117,11 @@ public actor BehaviorScoring {
     public static let weights: [String: Double] = [
         // Process indicators
         "unsigned_binary":              3.0,
+        // v1.19.1 (rc.9 review): a REDUCED-weight variant for legitimately-unsigned
+        // developer tooling (node_modules CLIs, Homebrew, the Swift/Xcode toolchain,
+        // AI agents). Benign dev tools shouldn't FP at 3.0, but a binary PLANTED on
+        // a dev path still accrues compound score with its other indicators.
+        "unsigned_dev_tooling":         1.0,
         "adhoc_signed":                 1.5,
         "executed_from_tmp":            4.0,
         "executed_from_downloads":      3.0,

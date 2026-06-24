@@ -30,6 +30,13 @@
   "event_tap_poll_interval": 30,
   "system_policy_poll_interval": 300,
 
+  "_comment_enrichment": "Network threat-intel enrichment (opt-in; v1.19.1). Each makes OUTBOUND requests and is OFF by default — local detection and bundled IOCs are unaffected. Honored live on SIGHUP.",
+  "_comment_enrichment2": "threat_intel_enabled: abuse.ch / URLhaus IOC feeds (download-only GET). vuln_scan_enabled: osv.dev CVE lookups (POSTs your installed-software inventory). package_freshness_enabled: npm/PyPI/Homebrew/crates checks (reveals package name). cert_transparency_enabled: crt.sh lookups (reveals destination domain).",
+  "threat_intel_enabled": false,
+  "vuln_scan_enabled": false,
+  "package_freshness_enabled": false,
+  "cert_transparency_enabled": false,
+
   "_comment_prompt_injection": "Minimum confidence (0-100) for prompt-injection patterns in AIGuard to alert.",
   "prompt_injection_confidence": 40,
 

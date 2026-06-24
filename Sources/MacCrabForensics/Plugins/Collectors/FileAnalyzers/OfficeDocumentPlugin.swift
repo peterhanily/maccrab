@@ -74,7 +74,8 @@ public struct OfficeDocumentPlugin: Collector {
             let ext = url.pathExtension.lowercased()
             let isOffice = ["docx", "docm", "xlsx", "xlsm", "pptx", "pptm"].contains(ext)
             guard isOffice else { continue }
-            guard let data = try? Data(contentsOf: url) else { continue }
+            guard FileAnalyzerIO.regularFileSize(url) != nil else { rejected += 1; continue }  // SEC-DELTA-1/2
+            guard let data = try? Data(contentsOf: url) else { rejected += 1; continue }
             let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             // List entries.
             let entryList = await runSubprocess("/usr/bin/unzip", args: ["-l", url.path])

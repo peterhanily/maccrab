@@ -95,9 +95,9 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
         case .installable:
             return nil
         case .awaitingSignedBinary:
-            return "Operator-signed binary required — this entry's signed release hasn't been published yet."
+            return "Operator-signed binary required — this entry has no published signed release."
         case .preRelease:
-            return "Pre-release — not yet available for one-click install."
+            return "Pre-release — not available for one-click install."
         case .versionFloorBlocked(let reason):
             return reason
         case .revoked(let reason):

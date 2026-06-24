@@ -77,9 +77,9 @@ assumes they might be hostile:
 - You can revoke a publisher, freeze the catalog, or locally disable all
   third-party execution at any time.
 
-The runnable third-party marketplace ships **fail-closed** and is gated on an
-independent security review before it opens. The technical detail is in
-[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8.
+Third-party plugin execution ships **fail-closed and is disabled by default** —
+no third-party plugin runs until an operator explicitly enables it. The technical
+detail is in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8.
 
 ---
 
@@ -130,7 +130,7 @@ require re-approval of the System Extension; major-version upgrades might
 `MacCrab.app` over the old one in `/Applications/`. The app handles sysext
 replacement via `OSSystemExtensionRequest(.replace)` on next launch.
 
-**Automatic in-app update** via Sparkle is planned for v1.4.
+**Automatic in-app update** via Sparkle is built in — accept the update prompt and the app replaces itself (and the system extension) on relaunch.
 
 ---
 
@@ -213,8 +213,6 @@ Yes. Four output formats ship out of the box:
 Splunk HEC, Elastic Bulk, Datadog Logs, and S3/SFTP can be configured via
 `daemon_config.json`'s `outputs[]` block (see
 `docs/daemon_config.example.json`).
-
-CEF export is planned for a future release.
 
 ---
 

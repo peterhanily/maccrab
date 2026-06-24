@@ -527,6 +527,35 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# MCP tool surface (MCP-2 / MCP-3 guards)
+# ---------------------------------------------------------------------
+
+section "MCP tool surface"
+
+MCP_MAIN="Sources/maccrab-mcp/main.swift"
+if [[ -f "$MCP_MAIN" ]]; then
+    # MCP-3: strict MCP clients require ^[a-zA-Z0-9_-]+$ — no ADVERTISED tool
+    # name may be dotted (legacy dotted names live only as dispatch aliases).
+    DOTTED=$(grep -c '"name": "forensics\.' "$MCP_MAIN" 2>/dev/null) || DOTTED=0
+    if [[ "$DOTTED" -eq 0 ]]; then
+        ok "no dotted forensics.* tool names advertised (strict-MCP-client safe)"
+    else
+        err "$MCP_MAIN advertises $DOTTED dotted forensics.* tool name(s) — rename to forensics_* (strict clients reject '.')"
+    fi
+    # MCP-2: no stale 'until v1.15 ships' / 'reserves the surface' framing in the
+    # agent-visible tool descriptions/notes (the internal v1.13a/b MARK comments
+    # are intentionally left and not matched here).
+    STALE=$(grep -cE 'until v1\.15 ships|reserves the surface|ships at v1\.15' "$MCP_MAIN" 2>/dev/null) || STALE=0
+    if [[ "$STALE" -eq 0 ]]; then
+        ok "no stale v1.13b/v1.15 tool-description framing"
+    else
+        err "$MCP_MAIN has $STALE stale version-framing string(s) in agent-visible descriptions"
+    fi
+else
+    warn "$MCP_MAIN not found — skipping MCP tool-surface checks"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

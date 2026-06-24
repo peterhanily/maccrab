@@ -84,7 +84,7 @@ extension MacCrabCtl {
                     return (stats, score)
                 }
                 .sorted { $0.score > $1.score }
-                .prefix(limit)
+                .prefix(max(0, limit))   // negative arg (e.g. `tree-score -1`) must not trap prefix(_:)
 
             if scored.isEmpty {
                 print("  No processes with significant behavioral signal.")

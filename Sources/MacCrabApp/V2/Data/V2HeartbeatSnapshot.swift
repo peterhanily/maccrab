@@ -27,6 +27,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// has no LLM backend wired; configured-but-not-healthy means enabled
     /// yet unreachable/misconfigured — previously invisible.
     public let llm: LLMHealth?
+    /// UX-3: live prevention-module state from the `prevention` block.
+    /// nil when the heartbeat predates this field (older daemon) → the
+    /// Prevention tab shows "status unavailable" rather than a false reading.
+    public let prevention: Prevention?
 
     public struct Collector: Sendable, Equatable, Hashable {
         public let name: String
@@ -43,6 +47,29 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
 
         public var lastTick: Date? {
             lastTickUnix.map(Date.init(timeIntervalSince1970:))
+        }
+    }
+
+    /// Live prevention state parsed from the heartbeat `prevention` block.
+    public struct Prevention: Sendable, Equatable {
+        public struct Module: Sendable, Equatable {
+            public let enabled: Bool
+            public let count: Int
+        }
+        public let sinkhole: Module
+        public let networkBlocker: Module
+        public let persistenceGuard: Module
+
+        init?(from raw: [String: Any]?) {
+            guard let raw else { return nil }
+            func module(_ key: String) -> Module {
+                let m = raw[key] as? [String: Any]
+                return Module(enabled: m?["enabled"] as? Bool ?? false,
+                              count: m?["count"] as? Int ?? 0)
+            }
+            sinkhole = module("sinkhole")
+            networkBlocker = module("network_blocker")
+            persistenceGuard = module("persistence_guard")
         }
     }
 
@@ -118,6 +145,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         let counts: [String: Int] = (raw["event_type_counts_1h"] as? [String: Any])?
             .compactMapValues { $0 as? Int } ?? [:]
         let llm = (raw["llm"] as? [String: Any]).map(LLMHealth.init(from:))
+        let prevention = Prevention(from: raw["prevention"] as? [String: Any])
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
             uptimeSeconds: raw["uptime_seconds"] as? Int ?? 0,
@@ -135,7 +163,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             // rather than crash.
             payloadTruncatedTotal: raw["payload_truncated_total"] as? Int ?? 0,
             esloggerDroppedTotal: raw["eslogger_dropped_total"] as? Int ?? 0,
-            llm: llm
+            llm: llm,
+            prevention: prevention
         )
     }
 }

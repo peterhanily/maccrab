@@ -97,7 +97,7 @@ public actor ThreatHunter {
         guard !terms.isEmpty else { return nil }
         let clauses = terms.prefix(5).map { term -> String in
             let e = term.replacingOccurrences(of: "'", with: "''")
-            return "(process_name LIKE '%\(e)%' OR process_path LIKE '%\(e)%' OR process_commandline LIKE '%\(e)%' OR file_path LIKE '%\(e)%')"
+            return "(process_name LIKE '%\(e)%' OR process_path LIKE '%\(e)%' OR process_commandline LIKE '%\(e)%' OR file_path LIKE '%\(e)%' OR network_dest_ip LIKE '%\(e)%')"
         }
         let sql = "SELECT * FROM events WHERE \(clauses.joined(separator: " OR ")) ORDER BY timestamp DESC LIMIT 100"
         let shown = terms.prefix(5).map { "'\($0)'" }.joined(separator: ", ")
@@ -289,8 +289,8 @@ public actor ThreatHunter {
             if !searchTerm.isEmpty && searchTerm.count > 1 {
                 // Search across multiple columns
                 let escaped = searchTerm.replacingOccurrences(of: "'", with: "''")
-                return ("SELECT * FROM events WHERE process_name LIKE '%\(escaped)%' OR process_path LIKE '%\(escaped)%' OR process_commandline LIKE '%\(escaped)%' OR file_path LIKE '%\(escaped)%' ORDER BY timestamp DESC LIMIT 100",
-                        "Searching for '\(searchTerm)' across process names, paths, command lines, and file paths")
+                return ("SELECT * FROM events WHERE process_name LIKE '%\(escaped)%' OR process_path LIKE '%\(escaped)%' OR process_commandline LIKE '%\(escaped)%' OR file_path LIKE '%\(escaped)%' OR network_dest_ip LIKE '%\(escaped)%' ORDER BY timestamp DESC LIMIT 100",
+                        "Searching for '\(searchTerm)' across process names, paths, command lines, file paths, and network IPs")
             }
         }
 

@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Övervakar AI-kodverktyg som Claude, Cursor och Copilot för åtkomst till autentiseringsuppgifter";
 "welcome.feature.prevention" = "Aktivt förebyggande";
 "welcome.feature.preventionDesc" = "Blockerar skadliga domäner, sätter filer i karantän och stoppar attacker mot leveranskedjan";
-"welcome.feature.privacy" = "Integritet först";
-"welcome.feature.privacyDesc" = "Allt körs lokalt — inga data lämnar någonsin din dator";
+"welcome.feature.privacy" = "Privat som standard";
+"welcome.feature.privacyDesc" = "Körs på enheten som standard — inget lämnar din Mac om du inte aktiverar valfri berikning";
 "welcome.setup.engineActive" = "Detekteringsmotorn är aktiv";
 "welcome.setup.prevention" = "Aktivera förebyggande under fliken Förebyggande";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "Underhåll";
 "forensicsSettings.onDiskLocation" = "Plats på disk";
 "forensicsSettings.trustedPublishers" = "Betrodda utgivare";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "Nätverksberikning (integritet)";
+"settings.netEnrichHelp" = "MacCrab körs lokalt på enheten som standard — ingen av dessa gör någon nätverksbegäran förrän du slår på dem. Den lokala detekteringen (regler, sekvenser, kampanjer, medföljande hotunderrättelser) påverkas inte. Varje sökning nedan når en offentlig tjänst; slå bara på det du vill ha.";
+"settings.enrich.threatIntel" = "Hotunderrättelseflöden (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "Laddar ner IOC-listor (URLhaus / MalwareBazaar / Feodo) var 4:e timme. Endast nedladdning — inget om din dator laddas upp.";
+"settings.enrich.vulnScan" = "Sårbarhetsskanning (osv.dev)";
+"settings.enrich.vulnScanDesc" = "Slår upp CVE:er för dina installerade appar/paket. Skickar din programvaruinventering (anonym, men det är din dators lista över programvara).";
+"settings.enrich.packageFreshness" = "Paketfärskhet (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "Kontrollerar ett pakets ålder när du installerar ett. Sökningen avslöjar namnet på paketet du installerar.";
+"settings.enrich.certTransparency" = "Certifikattransparens (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "Slår upp certifikat för domäner du ansluter till. Sökningen avslöjar domänen. Den lokala typosquat-kontrollen körs ändå.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "Valfri nätverksberikning";
+"enrich.intro" = "MacCrab körs helt lokalt på enheten som standard — inget om din Mac lämnar den. Detekteringen (regler, sekvenser, kampanjer, medföljande hotunderrättelser) fungerar offline. Var och en av dessa fyra valfria sökningar når en offentlig tjänst för att lägga till extra sammanhang. De är avstängda tills du slår på dem, och du kan ändra detta när som helst i Inställningar.";
+"enrich.threatIntel" = "Hotunderrättelseflöden (abuse.ch)";
+"enrich.threatIntelDetail" = "Laddar ner IOC-listor var 4:e timme. Endast nedladdning — inget om din Mac laddas upp.";
+"enrich.vulnScan" = "Sårbarhetsskanning (osv.dev)";
+"enrich.vulnScanDetail" = "Slår upp CVE:er för installerad programvara. Skickar din programvaruinventering (anonym).";
+"enrich.packageFreshness" = "Paketfärskhet (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "Kontrollerar ett pakets ålder vid installation. Avslöjar namnet på paketet du installerar.";
+"enrich.certTransparency" = "Certifikattransparens (crt.sh)";
+"enrich.certTransparencyDetail" = "Slår upp certifikat för domäner du ansluter till. Avslöjar domänen.";
+"enrich.keepOff" = "Håll allt avstängt";
+"enrich.enable" = "Aktivera valda";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "Vad det är";
+"overview.factorWhy" = "Varför det spelar roll";
+"overview.factorFix" = "Hur du åtgärdar det";
+"overview.factorLearnMore" = "Läs mer";
+"overview.factorExpandHint" = "Klicka för att se vad detta betyder och hur du åtgärdar det";
+"overview.storeTitle" = "Pluginkatalog";
+"overview.storeBrowse" = "Bläddra →";
+"overview.storeBrowsePrompt" = "Bläddra signerade forensikplugins från katalogen. Installationer körs helt sandlådade.";
+"raveStore.thirdPartyCatalog.title" = "Signerad tredjepartskatalog";
+"raveStore.thirdPartyCatalog.body" = "Ingen tredjepartsplugins är för närvarande listade. De inbyggda skannrarna nedan levereras tillsammans med MacCrab och körs på denna Mac nu — ingen installation behövs.";

@@ -57,6 +57,42 @@ struct AlertSinkTests {
 
     // MARK: - Tests
 
+    @Test("enrichWithAttribution derives D3FEND defenses + remediation from ATT&CK tactics")
+    func enrichDerivesD3FEND() {
+        // C2 tactic → outbound filtering + DNS blackholing (FIQ-3).
+        let c2 = Alert(
+            ruleId: "r", ruleTitle: "t", severity: .high, eventId: "e",
+            processPath: "/bin/x", processName: "x", description: "d",
+            mitreTactics: "attack.command_and_control", mitreTechniques: nil,
+            suppressed: false
+        )
+        let enriched = AlertSink.enrichWithAttribution(alert: c2, event: event())
+        #expect(enriched.d3fendTechniques == ["D3-OTF", "D3-DNSBA"])
+        #expect(enriched.remediationHint?.contains("D3-OTF") == true)
+
+        // A tactic with no clean preventive twin → nil (no fabricated hint).
+        let disc = Alert(
+            ruleId: "r", ruleTitle: "t", severity: .low, eventId: "e",
+            processPath: "/bin/x", processName: "x", description: "d",
+            mitreTactics: "attack.discovery", mitreTechniques: nil, suppressed: false
+        )
+        let enrichedDisc = AlertSink.enrichWithAttribution(alert: disc, event: event())
+        #expect(enrichedDisc.d3fendTechniques == nil)
+        #expect(enrichedDisc.remediationHint == nil)
+
+        // Caller-supplied values are preserved, never overwritten.
+        let preset = Alert(
+            ruleId: "r", ruleTitle: "t", severity: .high, eventId: "e",
+            processPath: "/bin/x", processName: "x", description: "d",
+            mitreTactics: "attack.command_and_control", mitreTechniques: nil,
+            suppressed: false,
+            d3fendTechniques: ["D3-CUSTOM"], remediationHint: "operator note"
+        )
+        let enrichedPreset = AlertSink.enrichWithAttribution(alert: preset, event: event())
+        #expect(enrichedPreset.d3fendTechniques == ["D3-CUSTOM"])
+        #expect(enrichedPreset.remediationHint == "operator note")
+    }
+
     @Test("submit(alert:event:) inserts the alert into AlertStore on first call")
     func submitInsertsFirst() async throws {
         let (sink, store, dir) = try await makeSink()

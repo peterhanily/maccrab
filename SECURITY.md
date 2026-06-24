@@ -131,8 +131,10 @@ documented in full as in-scope attacker #8 in
   global mach-lookup, no metadata side channel on crown-jewels.
 - Containment is **proved** by an adversarial corpus (`make test-corpus`) against
   the exact shipped runner, for both C and Swift fixtures.
-- The runnable third-party lane ships **fail-closed** and is GA-gated on the
-  publisher-key ceremony + an independent external pentest.
+- The runnable third-party lane ships **fail-closed and disabled by default**:
+  no third-party plugin executes until an operator explicitly establishes a
+  publisher trust anchor. Operators should independently review the lane before
+  enabling untrusted third-party code.
 
 ### Release & Distribution Chain
 

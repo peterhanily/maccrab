@@ -52,8 +52,8 @@ func dispatchPlugin(args: [String]) async {
             try await pluginDaemonStatus()
         case "status":
             try await pluginDaemonStatus()
-        // v1.17 rc.1: store-side commands. Stubbed until rc.4
-        // brings up the rave catalog fetcher + Sigstore verifier.
+        // Rave catalog store commands — refuse cleanly until the catalog
+        // index is published (install still works against a configured catalog).
         case "search":
             try await pluginSearchStub(args: rest)
         case "update":
@@ -221,18 +221,20 @@ func printPluginAliasWarning(_ oldName: String, _ newName: String) {
     FileHandle.standardError.write(Data(msg.utf8))
 }
 
-// MARK: - v1.17 rc.1 store stubs
+// MARK: - rave catalog store stubs
 //
-// search/update/pin all touch the rave catalog at rave.maccrab.com,
-// which doesn't yet have a publicly served catalog index. These
-// stubs return a clear "lands in rc.4" message so operators
-// (and any scripts) get a documented signal.
+// search/update/pin all need a publicly served rave catalog index
+// (rave.maccrab.com/catalog.json), which is not live yet. They refuse
+// cleanly (exit 2) rather than promise a version — installs still work
+// today via `plugin install <plugin-id>` / `<bundle>` against a
+// configured catalog. (CLI-2: de-versioned; full catalog-search is
+// follow-up once the catalog is published.)
 
 private func pluginSearchStub(args: [String]) async throws {
     let q = args.first ?? ""
-    print("plugin search: catalog lookup lands in v1.17.0-rc.4.")
-    print("Until then: maccrabctl plugin list --filter installed (for local).")
-    print("Search query was: \(q.isEmpty ? "(none)" : q)")
+    print("plugin search: not available — the rave catalog index is not published yet.")
+    print("For local plugins: maccrabctl plugin list")
+    if !q.isEmpty { print("(search query was: \(q))") }
     exit(2)
 }
 
@@ -241,8 +243,8 @@ private func pluginUpdateStub(args: [String]) async throws {
         print("Usage: maccrabctl plugin update <plugin-id> [--yes]")
         exit(1)
     }
-    print("plugin update: catalog lookup lands in v1.17.0-rc.4. (plugin-id: \(id))")
-    print("Until then: reinstall manually via maccrabctl plugin install <bundle>.")
+    print("plugin update: not available — the rave catalog index is not published yet. (plugin-id: \(id))")
+    print("Reinstall manually via: maccrabctl plugin install <plugin-id|bundle>.")
     exit(2)
 }
 
@@ -251,7 +253,7 @@ private func pluginPinStub(args: [String]) async throws {
         print("Usage: maccrabctl plugin pin <plugin-id>")
         exit(1)
     }
-    print("plugin pin: version pinning lands in v1.17.0-rc.4 alongside catalog lookup. (plugin-id: \(id))")
+    print("plugin pin: not available — version pinning needs the published rave catalog. (plugin-id: \(id))")
     exit(2)
 }
 
@@ -399,10 +401,44 @@ private func pluginRun(args: [String]) async throws {
         if findings.count > 20 {
             print("    ... \(findings.count - 20) more")
         }
-    case .enricher, .fingerprinter:
-        throw CaseCommandError.underlying(
-            "Plugin '\(id)' is type=\(registration.manifest.type.rawValue); use 'maccrabctl fingerprint' for fingerprinters or the forensics.* MCP tool surface for enrichers."
+    case .enricher:
+        guard case .string(let p)? = inputs.values["path"], !p.isEmpty else {
+            throw CaseCommandError.usage(
+                "Enricher '\(id)' needs --path <url-or-file> (e.g. --path https://example.com/ or --path /usr/bin/foo)")
+        }
+        let url: URL = p.contains("://") ? (URL(string: p) ?? URL(fileURLWithPath: p)) : URL(fileURLWithPath: p)
+        let (enrichment, invocationID) = try await runner.runEnricher(
+            id: id,
+            handle: handle,
+            subject: .path(url),
+            stage: .onDemand,
+            inputs: inputs
         )
+        print("Ran enricher \(id) on case \(resolvedCase)")
+        print("  Invocation id:        \(invocationID)")
+        if enrichment.fields.isEmpty {
+            print("  (no enrichment fields produced)")
+        } else {
+            print("  Fields:")
+            for (k, v) in enrichment.fields.sorted(by: { $0.key < $1.key }) {
+                print("    \(k) = \(describeEnrichmentValue(v))")
+            }
+        }
+    case .fingerprinter:
+        throw CaseCommandError.underlying(
+            "Plugin '\(id)' is a fingerprinter; use 'maccrabctl fingerprint' instead.")
+    }
+}
+
+/// Render an EnrichmentValue for CLI output.
+private func describeEnrichmentValue(_ v: EnrichmentValue) -> String {
+    switch v {
+    case .bool(let b):        return String(b)
+    case .integer(let i):     return String(i)
+    case .double(let d):      return String(d)
+    case .string(let s):      return s
+    case .stringArray(let a): return a.joined(separator: ", ")
+    case .nil:                return "(nil)"
     }
 }
 

@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "监控Claude、Cursor、Copilot等AI编程工具的凭据访问行为";
 "welcome.feature.prevention" = "主动预防";
 "welcome.feature.preventionDesc" = "阻止恶意域名、隔离文件并管控供应链攻击";
-"welcome.feature.privacy" = "隐私优先";
-"welcome.feature.privacyDesc" = "一切都在本地运行 — 数据绝不离开您的设备";
+"welcome.feature.privacy" = "默认隐私保护";
+"welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则数据不会离开您的 Mac";
 "welcome.setup.engineActive" = "检测引擎已激活";
 "welcome.setup.prevention" = "在“预防”标签页中启用预防";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "维护";
 "forensicsSettings.onDiskLocation" = "磁盘位置";
 "forensicsSettings.trustedPublishers" = "受信任的发布者";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "网络增强（隐私）";
+"settings.netEnrichHelp" = "MacCrab 默认在本机运行——在你开启之前，这些功能都不会发起任何网络请求。本地检测（规则、序列、攻击活动、内置威胁情报）不受影响。下方每项查询都会访问一个公共服务；只开启你需要的项。";
+"settings.enrich.threatIntel" = "威胁情报源（abuse.ch）";
+"settings.enrich.threatIntelDesc" = "每 4 小时下载一次 IOC 列表（URLhaus / MalwareBazaar / Feodo）。仅下载——不会上传任何关于你机器的信息。";
+"settings.enrich.vulnScan" = "漏洞扫描（osv.dev）";
+"settings.enrich.vulnScanDesc" = "查询已安装应用/软件包的 CVE。会发送你的软件清单（匿名，但这是你机器的软件列表）。";
+"settings.enrich.packageFreshness" = "软件包时效性（npm / PyPI / Homebrew / crates）";
+"settings.enrich.packageFreshnessDesc" = "在你安装软件包时检查其新旧程度。该查询会泄露你正在安装的软件包名称。";
+"settings.enrich.certTransparency" = "证书透明度（crt.sh）";
+"settings.enrich.certTransparencyDesc" = "查询你所连接域名的证书。该查询会泄露域名。本地的仿冒域名检查无论如何都会运行。";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "可选的网络增强";
+"enrich.intro" = "MacCrab 默认完全在本机运行——关于你 Mac 的任何信息都不会离开它。检测（规则、序列、攻击活动、内置威胁情报）可离线工作。这四项可选查询各自会访问一个公共服务以添加额外上下文。在你开启之前它们保持关闭，你可以随时在“设置”中更改。";
+"enrich.threatIntel" = "威胁情报源（abuse.ch）";
+"enrich.threatIntelDetail" = "每 4 小时下载一次 IOC 列表。仅下载——不会上传任何关于你 Mac 的信息。";
+"enrich.vulnScan" = "漏洞扫描（osv.dev）";
+"enrich.vulnScanDetail" = "查询已安装软件的 CVE。会发送你的软件清单（匿名）。";
+"enrich.packageFreshness" = "软件包时效性（npm / PyPI / …）";
+"enrich.packageFreshnessDetail" = "在安装时检查软件包的新旧程度。会泄露你安装的软件包名称。";
+"enrich.certTransparency" = "证书透明度（crt.sh）";
+"enrich.certTransparencyDetail" = "查询你所连接域名的证书。会泄露域名。";
+"enrich.keepOff" = "全部保持关闭";
+"enrich.enable" = "启用所选项";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "这是什么";
+"overview.factorWhy" = "为什么重要";
+"overview.factorFix" = "如何解决";
+"overview.factorLearnMore" = "了解更多";
+"overview.factorExpandHint" = "点击查看含义及解决方案";
+"overview.storeTitle" = "插件商店";
+"overview.storeBrowse" = "浏览 →";
+"overview.storeBrowsePrompt" = "浏览来自目录的已签名取证插件。安装运行于完整沙盒环境。";
+"raveStore.thirdPartyCatalog.title" = "已签名的第三方目录";
+"raveStore.thirdPartyCatalog.body" = "目前未列出任何第三方插件。下方内置扫描器已集成在MacCrab中，此刻已在您的Mac上运行 — 无需安装。";

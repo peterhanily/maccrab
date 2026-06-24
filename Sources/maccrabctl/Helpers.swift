@@ -85,11 +85,43 @@ func maccrabUserWritableDataDir() -> String {
 }
 
 extension MacCrabCtl {
-    static func printUsage() {
-        // LOCALIZE: All CLI usage/help strings below are candidates for future localization.
-        // In a CLI context without a resource bundle, NSLocalizedString is not practical.
-        // Mark strings with LOCALIZE comments for extraction tooling.
-        print("""
+
+    /// CLI-4: write a usage/argument error to stderr and exit non-zero, so
+    /// callers (scripts, CI) can detect a malformed invocation. Bare
+    /// `maccrabctl` and explicit `help` stay exit 0; this is for the
+    /// "wrong arguments to a real command" path.
+    static func usageError(_ message: String) -> Never {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        exit(1)
+    }
+
+    /// CLI-4: an unknown top-level command — stderr + usage + exit 1.
+    static func unknownCommand(_ command: String) -> Never {
+        FileHandle.standardError.write(Data(("Unknown command: \(command)\n").utf8))
+        printUsage()
+        exit(1)
+    }
+
+    /// CLI-5: research/diagnostic verbs (`debug`, `mcfp`) are hidden from the
+    /// operator surface unless MACCRAB_DEV=1. Keeps experimental tooling off
+    /// the shipped help + dispatch by default.
+    static var devModeEnabled: Bool {
+        ProcessInfo.processInfo.environment["MACCRAB_DEV"] == "1"
+    }
+
+    /// CLI-1: the canonical hidden-command set (dev-only; gated by
+    /// devModeEnabled). The usage/parity test asserts these never appear in
+    /// printed help.
+    static let hiddenCommands: Set<String> = ["debug", "mcfp"]
+
+    static func printUsage() { print(usageText()) }
+
+    /// The full help text. Extracted (CLI-1) so CLIUsageParityTests can assert
+    /// every dispatched top-level command (except the dev-hidden ones) is
+    /// documented here. LOCALIZE: candidate for future localization; in a CLI
+    /// without a resource bundle NSLocalizedString is impractical.
+    static func usageText() -> String {
+        return """
         maccrabctl - MacCrab Detection Engine CLI
 
         Usage: maccrabctl <command> [options]
@@ -100,6 +132,9 @@ extension MacCrabCtl {
           events search <q>   Full-text search over events
           events stats        Show event statistics
           alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)
+          ai-alerts [--hours H] [--limit N]  AI-Guard alerts (credential fence, boundary, injection, MCP)
+          scan-text <text>    Prompt-injection scan (Forensicate.ai); reads stdin if no arg
+                              (requires `pip install forensicate-ai`)
           campaigns [N]       Show last N campaigns (default: 10)
           campaigns watch     Live stream campaigns as they are detected
           watch               Live stream alerts as they happen
@@ -108,6 +143,9 @@ extension MacCrabCtl {
           rules list          List all loaded detection rules
           rules count         Count rules by category
           rule create [cat]   Generate a rule YAML template
+          rule enable|disable <id>   Toggle a rule without deleting its YAML
+          rule delete <id>    Remove a user-authored rule (not maccrab.*)
+          rule severity <id> <level>  Override a rule's severity (critical|high|medium|low|informational|default)
           compile <in> <out>  Compile Sigma YAML rules to JSON
 
         Response:
@@ -116,7 +154,17 @@ extension MacCrabCtl {
           suppression list        Show all configured suppressions
           allow <sub>             Allowlist v2 — TTL, scope, audit
                                   (add / list / remove / stats)
+          actions list            Show default + per-rule response actions
+          actions set [--rule R] --action A [--min-severity S] [--script P]
+                      [--confirm|--no-confirm] [--block-duration N]
+                                  Add/replace a response action (kill/quarantine/
+                                  blockNetwork default to confirmation-gated)
+          actions delete [--rule R] [--action A]  Remove response action(s)
           export [format] [N]     Export alerts (json|csv, default: json)
+
+        Config:
+          config get [<key>]      Show daemon_config.json value(s)
+          config set <key> <val>  Queue a daemon_config change (safe tunables only)
 
         Triage:
           why <alert_id>          Explain which rule fired, predicates + captured fields
@@ -130,11 +178,15 @@ extension MacCrabCtl {
           report [--hours N] [--output file]  Generate HTML incident report
 
         Forensic Scans:
-          scan <subcommand>       Scan this Mac (new / list / show / run /
-                                  allow-ai / mark-trusted-scheduled / delete)
+          scan <subcommand>       Scan this Mac (new / list / show / run / findings /
+                                  explain / timeline / allow-ai / mark-trusted-scheduled / delete)
           plugin <subcommand>     Plugin runtime (list / info / run)
+          package <subcommand>    Supply-chain package intelligence
+                                  (typosquat / content / metadata / attestation / intent)
+          session <subcommand>    AI-agent session timeline + signed bundle
+                                  (list / show / export / verify)
           (Run `maccrabctl scan help` or `maccrabctl plugin help` for detail.
-           `case` is a v1.17 alias for `scan`, removed in v1.19.)
+           `case` is a deprecated v1.17 alias for `scan`.)
           cdhash <PID>            Extract CDHash for a process
           cdhash --all            Extract CDHashes for all processes
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
@@ -144,6 +196,15 @@ extension MacCrabCtl {
           privacy [--hours H]  Privacy anomaly alerts (bulk egress, trackers, domain spikes)
           security            Full security posture breakdown with recommendations
           modules             List subsystems with maturity (stable / experimental / opt-in)
+
+        Investigation & maintenance:
+          trace <subcommand>      Causal TraceGraph (list / show / explain / graph /
+                                  export / verify / replay). See `trace help`.
+          intel <subcommand>      Threat-intel feeds (refresh / matches / status)
+          evidence <subcommand>   Forensic evidence (list / search / show / export)
+          rollup [--hours N]      Force the storage tier-rollup + prune sweep now
+          repair <subcommand>     Storage / index repair helpers
+          fingerprint <subcommand>  MCFP v1 static process fingerprint
 
         Other:
           version             Show version information
@@ -177,7 +238,12 @@ extension MacCrabCtl {
           maccrabctl allow list --expired
           maccrabctl deception deploy
           maccrabctl deception status
-        """)
+          maccrabctl actions list
+          maccrabctl config get statistical_z_threshold
+          maccrabctl package typosquat requests --registry pypi
+          maccrabctl session list
+          maccrabctl ai-alerts --hours 24
+        """
     }
 
     static func printVersion() {

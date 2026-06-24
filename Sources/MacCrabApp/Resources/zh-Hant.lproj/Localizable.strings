@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "監控 Claude、Cursor 和 Copilot 等 AI 程式設計工具的憑證存取行為";
 "welcome.feature.prevention" = "主動預防";
 "welcome.feature.preventionDesc" = "封鎖惡意網域、隔離檔案並管控供應鏈攻擊";
-"welcome.feature.privacy" = "隱私優先";
-"welcome.feature.privacyDesc" = "一切都在本機執行 — 資料絕不會離開您的電腦";
+"welcome.feature.privacy" = "預設隱私保護";
+"welcome.feature.privacyDesc" = "預設在裝置上執行 — 除非您開啟選用的增強功能，否則資料不會離開您的 Mac";
 "welcome.setup.engineActive" = "偵測引擎作用中";
 "welcome.setup.prevention" = "在「預防」分頁中啟用預防機制";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "維護";
 "forensicsSettings.onDiskLocation" = "磁碟上的位置";
 "forensicsSettings.trustedPublishers" = "信任的發佈者";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "網路增強（隱私）";
+"settings.netEnrichHelp" = "MacCrab 預設在本機運行——在你開啟之前，這些功能都不會發出任何網路請求。本機偵測（規則、序列、攻擊活動、內建威脅情報）不受影響。下方每項查詢都會存取一個公開服務；只開啟你需要的項目。";
+"settings.enrich.threatIntel" = "威脅情報來源（abuse.ch）";
+"settings.enrich.threatIntelDesc" = "每 4 小時下載一次 IOC 清單（URLhaus / MalwareBazaar / Feodo）。僅下載——不會上傳任何關於你機器的資訊。";
+"settings.enrich.vulnScan" = "漏洞掃描（osv.dev）";
+"settings.enrich.vulnScanDesc" = "查詢已安裝應用程式/套件的 CVE。會傳送你的軟體清單（匿名，但這是你機器的軟體列表）。";
+"settings.enrich.packageFreshness" = "套件時效性（npm / PyPI / Homebrew / crates）";
+"settings.enrich.packageFreshnessDesc" = "在你安裝套件時檢查其新舊程度。該查詢會洩漏你正在安裝的套件名稱。";
+"settings.enrich.certTransparency" = "憑證透明度（crt.sh）";
+"settings.enrich.certTransparencyDesc" = "查詢你所連線網域的憑證。該查詢會洩漏網域。本機的仿冒網域檢查無論如何都會執行。";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "選用的網路增強";
+"enrich.intro" = "MacCrab 預設完全在本機運行——關於你 Mac 的任何資訊都不會離開它。偵測（規則、序列、攻擊活動、內建威脅情報）可離線運作。這四項選用查詢各自會存取一個公開服務以加入額外脈絡。在你開啟之前它們保持關閉，你可以隨時在「設定」中變更。";
+"enrich.threatIntel" = "威脅情報來源（abuse.ch）";
+"enrich.threatIntelDetail" = "每 4 小時下載一次 IOC 清單。僅下載——不會上傳任何關於你 Mac 的資訊。";
+"enrich.vulnScan" = "漏洞掃描（osv.dev）";
+"enrich.vulnScanDetail" = "查詢已安裝軟體的 CVE。會傳送你的軟體清單（匿名）。";
+"enrich.packageFreshness" = "套件時效性（npm / PyPI / …）";
+"enrich.packageFreshnessDetail" = "在安裝時檢查套件的新舊程度。會洩漏你安裝的套件名稱。";
+"enrich.certTransparency" = "憑證透明度（crt.sh）";
+"enrich.certTransparencyDetail" = "查詢你所連線網域的憑證。會洩漏網域。";
+"enrich.keepOff" = "全部保持關閉";
+"enrich.enable" = "啟用所選項目";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "它是什麼";
+"overview.factorWhy" = "為什麼重要";
+"overview.factorFix" = "如何解決";
+"overview.factorLearnMore" = "深入了解";
+"overview.factorExpandHint" = "點按以查看意義及解決方式";
+"overview.storeTitle" = "外掛模組市集";
+"overview.storeBrowse" = "瀏覽 →";
+"overview.storeBrowsePrompt" = "瀏覽來自目錄的已簽署鑑識外掛模組。安裝會在完全沙盒環境中執行。";
+"raveStore.thirdPartyCatalog.title" = "已簽署的第三方目錄";
+"raveStore.thirdPartyCatalog.body" = "目前未列出第三方外掛模組。下方的內建掃描器內建於 MacCrab 內，現在就在此 Mac 上執行——無需安裝。";

@@ -7,6 +7,14 @@ import MacCrabCore
 
 public struct V2IntelligenceWorkspace: View {
     @ObservedObject var state: V2DashboardState
+
+    // v1.19.1: the four opt-in network-enrichment flags (off by default). Same
+    // `enrich.*` keys Settings + the first-run prompt bind, so all three
+    // surfaces stay in sync; changes push to the daemon via the inbox reload.
+    @AppStorage("enrich.threatIntel")      private var enrichThreatIntel: Bool = false
+    @AppStorage("enrich.vulnScan")         private var enrichVulnScan: Bool = false
+    @AppStorage("enrich.packageFreshness") private var enrichPackageFreshness: Bool = false
+    @AppStorage("enrich.certTransparency") private var enrichCertTransparency: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var feeds: [V2MockFeed] = []
     /// Last time any feed actually pulled fresh records — surfaced in
@@ -84,9 +92,11 @@ public struct V2IntelligenceWorkspace: View {
             // that lets PackageScanner's 5-min cache warm before the
             // refreshTick bump fires the next task body.
             let dataDirHint = (state.provider as? V2LiveDataProvider)?.dataDir
+            // PERF-2: one decode of feed_cache.json returns both rows + pull date
+            // (was two separate cachedIOCs decodes of the multi-MB cache per tick).
             let (feedsResult, pullResult) = await Task.detached(priority: .userInitiated) {
-                (V2LiveDataProvider.loadFeedsFromCache(preferring: dataDirHint),
-                 V2LiveDataProvider.lastSuccessfulPull(preferring: dataDirHint))
+                let r = V2LiveDataProvider.loadFeedsAndPull(preferring: dataDirHint)
+                return (r.feeds, r.pull)
             }.value
             await MainActor.run {
                 self.feeds = feedsResult
@@ -131,6 +141,7 @@ public struct V2IntelligenceWorkspace: View {
     private var threatIntelTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                enrichmentCard
                 apiKeysHelpCard
                 feedsSummaryRow
                 feedsTable
@@ -138,6 +149,61 @@ public struct V2IntelligenceWorkspace: View {
             }
             .padding(16)
         }
+    }
+
+    private var anyEnrichmentOn: Bool {
+        enrichThreatIntel || enrichVulnScan || enrichPackageFreshness || enrichCertTransparency
+    }
+
+    /// v1.19.1: enrichment opt-in/status card — the FIRST thing on the Threat
+    /// Intel tab. Both a status headline (all-off = "on-device only") and the
+    /// durable per-feed control. Binds the shared `enrich.*` keys and pushes to
+    /// the daemon via the cross-uid-safe inbox reload (stops/starts egress
+    /// live). Bare English literals: this V2 workspace is intentionally not
+    /// localized (see the note further down this file).
+    private var enrichmentCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: anyEnrichmentOn ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                .foregroundStyle(anyEnrichmentOn ? V2Theme.dataAccent : V2Theme.warning)
+                .scaledSystem(14)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(anyEnrichmentOn ? "Network enrichment" : "Enrichment is off — MacCrab is running on-device only")
+                    .font(V2Theme.sectionTitle())
+                    .foregroundStyle(V2Theme.primaryText)
+                Text("These optional lookups each reach a public service. Off by default — nothing about your Mac leaves it until you turn one on. Local detection (rules, sequences, campaigns, bundled IOCs) is unaffected.")
+                    .font(V2Theme.body())
+                    .foregroundStyle(V2Theme.mutedText)
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Threat-intel feeds — abuse.ch IOC lists (download-only)", isOn: $enrichThreatIntel)
+                        .onChange(of: enrichThreatIntel) { _ in pushEnrichment() }
+                    Toggle("Vulnerability scan — osv.dev CVE lookups (sends your software inventory)", isOn: $enrichVulnScan)
+                        .onChange(of: enrichVulnScan) { _ in pushEnrichment() }
+                    Toggle("Package freshness — npm/PyPI/Homebrew/crates (reveals package names)", isOn: $enrichPackageFreshness)
+                        .onChange(of: enrichPackageFreshness) { _ in pushEnrichment() }
+                    Toggle("Certificate transparency — crt.sh lookups (reveals domains you visit)", isOn: $enrichCertTransparency)
+                        .onChange(of: enrichCertTransparency) { _ in pushEnrichment() }
+                }
+                .font(V2Theme.body())
+                .padding(.top, 2)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .v2Panel()
+    }
+
+    private func pushEnrichment() {
+        let requested = V2DaemonControl.applyEnrichmentFlags(
+            threatIntel: enrichThreatIntel, vulnScan: enrichVulnScan,
+            packageFreshness: enrichPackageFreshness, certTransparency: enrichCertTransparency)
+        state.showToast(V2Toast(
+            kind: .info,
+            title: requested ? "Enrichment updated" : "Saved",
+            detail: requested ? "The engine re-read your enrichment settings."
+                              : "Will apply on next daemon start."))
     }
 
     /// Two-card "where do I add things?" panel. Pre-fix the dashboard
@@ -215,7 +281,7 @@ public struct V2IntelligenceWorkspace: View {
                     Text("Managed feeds")
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours, see the table below for status. To bring in commercial feeds, drop the IOCs into the threat_intel folder above; native VirusTotal / GreyNoise / OTX integrations are planned (vote at github.com/peterhanily/maccrab/issues — comment with the feed you need most).")
+                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours, see the table below for status. To bring in commercial feeds, drop their IOCs into the threat_intel folder above.")
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -223,9 +289,6 @@ public struct V2IntelligenceWorkspace: View {
                         feedChipButton(.urlhaus)
                         feedChipButton(.malwareBazaar)
                         feedChipButton(.feodoTracker)
-                        feedChipButton(.virusTotal)
-                        feedChipButton(.greyNoise)
-                        feedChipButton(.alienVaultOTX)
                     }
                 }
                 Spacer()
@@ -392,7 +455,7 @@ public struct V2IntelligenceWorkspace: View {
         .buttonStyle(.plain)
         .help(feed.isBuiltIn
               ? "Built-in. Click for details."
-              : "Planned. Click to save your API key now.")
+              : "Requires an API key. Click for details.")
         .sheet(item: $feedSheet) { selected in
             V2FeedConfigSheet(
                 feed: selected,
@@ -1001,7 +1064,7 @@ public struct V2IntelligenceWorkspace: View {
                     // markdown-style `**bold**` instead — SwiftUI Text
                     // initialized from LocalizedStringKey renders
                     // `**…**` as bold natively.
-                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Per-sink health checks are planned; for now status reflects 'configured' / 'running' / 'installed'.")
+                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Status reflects 'configured' / 'running' / 'installed'.")
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -1125,11 +1188,11 @@ public enum V2FeedConfig: String, Identifiable, CaseIterable {
     public var description: String {
         switch self {
         case .urlhaus:
-            return "abuse.ch URLhaus — community-curated malicious URL feed. Keyless, fetched every 4 hours by the daemon's ThreatIntelFeed actor. Always-on; can't be disabled per-feed (turn off the entire intel layer in Settings if needed)."
+            return "abuse.ch URLhaus — community-curated malicious URL feed. Keyless and download-only (nothing about your machine is uploaded). OFF by default — opt in to threat-intel enrichment to fetch every 4 hours; bundled IOCs work offline until then."
         case .malwareBazaar:
-            return "abuse.ch MalwareBazaar — SHA-256 hashes for known-bad samples. Keyless, fetched every 4 hours. Always-on."
+            return "abuse.ch MalwareBazaar — SHA-256 hashes for known-bad samples. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
         case .feodoTracker:
-            return "abuse.ch Feodo Tracker — IP addresses of active C2 infrastructure for Emotet, Dridex, TrickBot and similar bankers. Keyless, fetched every 4 hours. Always-on."
+            return "abuse.ch Feodo Tracker — IP addresses of active C2 infrastructure for Emotet, Dridex, TrickBot and similar bankers. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
         case .virusTotal:
             return "Multi-engine malware scanner with billions of samples + URL / domain / IP intel. Requires a free or paid API key from virustotal.com."
         case .greyNoise:
@@ -1201,7 +1264,7 @@ public struct V2FeedConfigSheet: View {
             if feed.isBuiltIn {
                 V2StatusChip("Built-in · always-on", kind: .healthy, icon: "checkmark.seal")
             } else {
-                V2StatusChip("Planned · accepting API keys now", kind: .info, icon: "clock")
+                V2StatusChip("Requires an API key", kind: .info, icon: "key")
             }
 
             Text(feed.description)
@@ -1236,7 +1299,7 @@ public struct V2FeedConfigSheet: View {
                             .foregroundStyle(V2Theme.critical)
                     }
                     if saved {
-                        Text("Saved to Keychain. The integration will pick it up automatically when it ships.")
+                        Text("Saved to Keychain.")
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.healthy)
                     }

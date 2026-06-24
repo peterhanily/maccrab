@@ -184,6 +184,23 @@ public indirect enum JSONValue: Codable, Sendable, Equatable {
         case .null: try c.encodeNil()
         }
     }
+
+    /// Recursively project this value into a JSONSerialization-
+    /// compatible Foundation value (String / Int / Double / Bool /
+    /// [Any] / [String: Any] / NSNull). Lets callers surface a stored
+    /// `data` payload as-is — e.g. the MCP server returning an
+    /// artifact's full structured content to an agent.
+    public var foundationValue: Any {
+        switch self {
+        case .string(let s):  return s
+        case .integer(let i): return Int(i)
+        case .double(let d):  return d
+        case .bool(let b):    return b
+        case .array(let a):   return a.map(\.foundationValue)
+        case .object(let o):  return o.mapValues(\.foundationValue)
+        case .null:           return NSNull()
+        }
+    }
 }
 
 /// Search parameters for `ArtifactStore.query(...)`.

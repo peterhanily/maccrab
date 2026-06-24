@@ -128,10 +128,17 @@ public final class TierBFileBroker: @unchecked Sendable {
 
     /// A request path is well-formed for the broker: absolute, no NUL, no `..`
     /// component, within the byte cap.
+    /// Depth ceiling for a brokered request path. Legitimate brokered reads are
+    /// shallow; a depth cap is cheaper than walking thousands of components in
+    /// safe-open (STAB-2) and bounds the per-component open-dir fd usage.
+    static let maxPathDepth = 64
+
     public static func isValidRequestPath(_ p: String, maxBytes: Int) -> Bool {
         guard !p.isEmpty, p.utf8.count <= maxBytes, p.hasPrefix("/") else { return false }
         if p.unicodeScalars.contains(where: { $0.value == 0 }) { return false }
-        for seg in p.split(separator: "/", omittingEmptySubsequences: true) where seg == ".." || seg == "." { return false }
+        let segs = p.split(separator: "/", omittingEmptySubsequences: true)
+        guard segs.count <= maxPathDepth else { return false }   // STAB-2
+        for seg in segs where seg == ".." || seg == "." { return false }
         return true
     }
 

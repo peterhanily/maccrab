@@ -312,158 +312,14 @@ public actor SecurityToolIntegrations {
         return tools
     }
 
-    // MARK: - BlockBlock Log Ingestion
-
-    public struct BlockBlockAlert: Sendable {
-        public let timestamp: String
-        public let item: String
-        public let process: String
-        public let action: String  // "allowed" or "blocked"
-        public let rawLine: String
-    }
-
-    /// Read and parse BlockBlock's log file for persistence alerts.
-    public func readBlockBlockLog(since: Date? = nil) -> [BlockBlockAlert] {
-        let logPath = "/Library/Objective-See/BlockBlock/BlockBlock.log"
-        guard let content = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
-
-        var alerts: [BlockBlockAlert] = []
-        for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            // BlockBlock log format varies, parse key fields
-            let alert = BlockBlockAlert(
-                timestamp: String(line.prefix(19)),
-                item: extractField(line, label: "item:") ?? extractField(line, label: "path:") ?? "",
-                process: extractField(line, label: "process:") ?? "",
-                action: line.lowercased().contains("blocked") ? "blocked" : "allowed",
-                rawLine: String(line.prefix(500))
-            )
-            if !alert.item.isEmpty {
-                alerts.append(alert)
-            }
-        }
-        return alerts
-    }
-
-    // MARK: - KnockKnock Scan
-
-    public struct KnockKnockItem: Sendable {
-        public let category: String
-        public let name: String
-        public let path: String
-        public let isTrusted: Bool
-    }
-
-    /// Run KnockKnock CLI scan and parse results.
-    /// Returns nil if KnockKnock is not installed.
-    public func runKnockKnockScan() async -> [KnockKnockItem]? {
-        let kkPath = "/Applications/KnockKnock.app/Contents/MacOS/KnockKnock"
-        guard FileManager.default.fileExists(atPath: kkPath) else { return nil }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: kkPath)
-        proc.arguments = ["-whosthere", "-pretty", "-skipVT"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch { return nil }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-
-        var items: [KnockKnockItem] = []
-        for (category, value) in json {
-            guard let entries = value as? [[String: Any]] else { continue }
-            for entry in entries {
-                let name = entry["name"] as? String ?? "Unknown"
-                let path = entry["path"] as? String ?? ""
-                let trusted = entry["isTrusted"] as? Bool ?? false
-                items.append(KnockKnockItem(category: category, name: name, path: path, isTrusted: trusted))
-            }
-        }
-        return items
-    }
-
-    // MARK: - Little Snitch Traffic Log
-
-    public struct LittleSnitchConnection: Sendable {
-        public let timestamp: String
-        public let direction: String
-        public let remoteHost: String
-        public let port: Int
-        public let process: String
-        public let denied: Bool
-        public let bytesIn: Int
-        public let bytesOut: Int
-    }
-
-    /// Read Little Snitch traffic log via CLI.
-    /// Returns nil if Little Snitch is not installed or CLI is not enabled.
-    public func readLittleSnitchTraffic(lines: Int = 1000) async -> [LittleSnitchConnection]? {
-        guard FileManager.default.fileExists(atPath: "/Applications/Little Snitch.app") else { return nil }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["littlesnitch", "log-traffic"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            // Read for a few seconds then terminate
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { proc.terminate() }
-            proc.waitUntilExit()
-        } catch { return nil }
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        var connections: [LittleSnitchConnection] = []
-
-        for line in output.components(separatedBy: "\n").prefix(lines) {
-            let fields = line.components(separatedBy: ",")
-            guard fields.count >= 12 else { continue }
-
-            connections.append(LittleSnitchConnection(
-                timestamp: fields[0],
-                direction: fields[1],
-                remoteHost: fields[4],
-                port: Int(fields[6]) ?? 0,
-                process: fields[10],
-                denied: (Int(fields[8]) ?? 0) > 0,
-                bytesIn: Int(fields[9]) ?? 0,
-                bytesOut: Int(fields[10]) ?? 0
-            ))
-        }
-        return connections.isEmpty ? nil : connections
-    }
-
-    // MARK: - Objective-See Unified Log
-
-    /// Read LuLu alerts from the unified log.
-    public func readLuLuLog(maxEntries: Int = 100) async -> [String]? {
-        guard isProcessRunning("LuLu") else { return nil }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/log")
-        proc.arguments = ["show", "--predicate", "subsystem == 'com.objective-see.lulu'", "--last", "1h", "--style", "compact"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch { return nil }
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let entries = output.components(separatedBy: "\n").filter { !$0.isEmpty }.prefix(maxEntries).map { String($0) }
-        return entries.isEmpty ? nil : entries
-    }
-
     // MARK: - .lsrules Export (User imports manually)
+    //
+    // NOTE: the BlockBlock / KnockKnock / Little Snitch / LuLu log-ingestion
+    // readers were removed — they had no consumer, no store, and no schema
+    // (nothing surfaced their output). `detectInstalledTools` (above) still
+    // reports each tool's presence/version, which IS wired into the
+    // Intelligence workspace. generateLSRules below is kept (it has a test
+    // and is a self-contained export primitive).
 
     /// Generate a Little Snitch .lsrules file from MacCrab's threat intel.
     /// Users subscribe to this file manually in Little Snitch.
@@ -519,12 +375,5 @@ public actor SecurityToolIntegrations {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: plistPath)),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
         return plist["CFBundleShortVersionString"] as? String
-    }
-
-    private func extractField(_ line: String, label: String) -> String? {
-        guard let range = line.range(of: label) else { return nil }
-        let after = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
-        let value = after.prefix(while: { $0 != "," && $0 != "\n" && $0 != "]" })
-        return value.isEmpty ? nil : String(value)
     }
 }

@@ -257,6 +257,10 @@ public actor RuleEngine {
     /// file must not silently shrink the active ruleset (the CrowdStrike
     /// Channel-File-291 class — content is code; validate before promoting).
     public private(set) var lastLoadFailedCount: Int = 0
+    /// v1.19.1 (audit): count of override files skipped by the per-file owner
+    /// gate on the last load — legacy non-daemon-owned overrides whose operator
+    /// tuning is no longer applied. Surfaced so status/dashboard can warn.
+    public private(set) var lastLoadSkippedByOwnerCount: Int = 0
 
     /// LRU cache of compiled `NSRegularExpression` instances keyed by pattern.
     /// On cache hit the entry is promoted; on eviction the least-recently-used
@@ -484,7 +488,7 @@ public actor RuleEngine {
     /// Returns the number of rules successfully loaded. Rules that fail to
     /// parse are logged and skipped.
     @discardableResult
-    public func loadRules(from directory: URL) throws -> Int {
+    public func loadRules(from directory: URL, requireOwnerUID: uid_t? = nil) throws -> Int {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
@@ -513,8 +517,26 @@ public actor RuleEngine {
         let decoder = JSONDecoder()
         var loaded = 0
         var failed = 0
+        var skippedByOwner = 0
 
         for file in jsonFiles {
+            // v1.19.1 (audit): per-FILE ownership gate for the override overlay.
+            // isSecureDirectory() validates the DIRECTORY, but a legacy file owned
+            // by a non-daemon uid INSIDE a root-owned dir can still be rewritten by
+            // that uid to shadow/disable a bundled rule on the next reload. When
+            // requireOwnerUID is set (the override overlay passes the daemon's
+            // euid), skip any file not owned by it — only the daemon/root may
+            // shadow bundled detections. Not counted as a load failure (it's a
+            // deliberate skip, not a decode error), so the reload-rollback guard
+            // doesn't trip.
+            if let needUID = requireOwnerUID {
+                let owner = ((try? fm.attributesOfItem(atPath: file.path))?[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+                if owner != needUID {
+                    skippedByOwner += 1
+                    logger.warning("Skipping rule override \(file.lastPathComponent): owned by uid \(owner), not the daemon uid \(needUID) — refusing to let a non-daemon file shadow a bundled rule")
+                    continue
+                }
+            }
             do {
                 let data = try Data(contentsOf: file)
                 let rule = try decoder.decode(CompiledRule.self, from: data)
@@ -538,6 +560,14 @@ public actor RuleEngine {
             }
         }
         lastLoadFailedCount = failed
+        lastLoadSkippedByOwnerCount = skippedByOwner
+        if skippedByOwner > 0 {
+            // v1.19.1 (audit): make the owner-gate skip VISIBLE in aggregate —
+            // legacy operator-authored overrides (uid != daemon) silently stop
+            // applying after the security fix. Surface a count + remediation hint
+            // (status/dashboard can read `lastLoadSkippedByOwnerCount`).
+            logger.warning("\(skippedByOwner) rule override(s) in \(directory.lastPathComponent) skipped — not owned by the daemon uid; operator tuning in them is NOT applied. Re-save them from the dashboard (Detection → Edit) to re-apply under the daemon's ownership.")
+        }
 
         // Pre-compile all regex patterns so that evaluateModifier never has to
         // compile on the hot path.

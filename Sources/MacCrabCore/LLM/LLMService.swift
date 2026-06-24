@@ -62,9 +62,7 @@ public actor LLMService {
         // as local, or every prompt would skip the sanitizer and leak
         // usernames/paths/IPs to the attacker host. Sanitization stays on
         // for all genuinely-remote endpoints.
-        let isLocalProvider = config.provider == .ollama
-            && LoopbackEndpoint.isLoopback(urlString: config.ollamaURL)
-        self.shouldSanitize = !isLocalProvider && config.sanitizeForCloud
+        self.shouldSanitize = Self.shouldSanitize(for: config)
         self.providerLabel = config.provider.rawValue
         switch config.provider {
         case .ollama:  self.modelLabel = config.ollamaModel
@@ -73,6 +71,21 @@ public actor LLMService {
         case .mistral: self.modelLabel = config.mistralModel
         case .gemini:  self.modelLabel = config.geminiModel
         }
+    }
+
+    /// Whether prompts must be run through `LLMSanitizer` before dispatch.
+    /// Local Ollama on a loopback URL bypasses it (no data leaves the host);
+    /// every genuinely-remote endpoint sanitizes when `sanitizeForCloud` is
+    /// on. `nonisolated static` so the local-vs-cloud decision is unit-tested
+    /// without building a backend or crossing the actor boundary.
+    nonisolated static func shouldSanitize(for config: LLMConfig) -> Bool {
+        // A remote Ollama at `http://127.0.0.1.evil.com` must NOT be treated
+        // as local, or every prompt would skip the sanitizer and leak
+        // usernames/paths/IPs to the attacker host — hence the strict
+        // loopback parse rather than a substring match.
+        let isLocalProvider = config.provider == .ollama
+            && LoopbackEndpoint.isLoopback(urlString: config.ollamaURL)
+        return !isLocalProvider && config.sanitizeForCloud
     }
 
     /// Reset the failure counter AND stamp the last-success time. Called on

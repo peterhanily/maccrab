@@ -65,7 +65,7 @@ struct V2ForensicsFindingsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 if loading {
-                    ProgressView("Loading findings…")
+                    ProgressView(String(localized: "findings.loading", defaultValue: "Loading findings…"))
                         .frame(maxWidth: .infinity)
                         .padding(40)
                 } else if groups.isEmpty {
@@ -90,15 +90,15 @@ struct V2ForensicsFindingsView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Findings")
+                Text(String(localized: "findings.title", defaultValue: "Findings"))
                     .font(.title2).fontWeight(.semibold)
-                Text("What scans have found on this Mac, grouped by scan.")
+                Text(String(localized: "findings.subtitle", defaultValue: "What scans have found on this Mac, grouped by scan."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if !groups.isEmpty {
-                Text("\(totalCount) total")
+                Text(String(localized: "findings.totalCount", defaultValue: "\(totalCount) total"))
                     .scaledSystem(11)
                     .foregroundStyle(.tertiary)
             }
@@ -111,8 +111,8 @@ struct V2ForensicsFindingsView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("No findings yet.").font(.headline)
-            Text("Run a scan from the Scans tab. Findings will appear here when scanners commit them.")
+            Text(String(localized: "findings.emptyTitle", defaultValue: "No findings yet.")).font(.headline)
+            Text(String(localized: "findings.emptyBody", defaultValue: "Run a scan from the Scans tab. Findings will appear here when scanners commit them."))
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
         }
@@ -124,7 +124,7 @@ struct V2ForensicsFindingsView: View {
 
     private var scannerFilterBar: some View {
         HStack(spacing: 8) {
-            chip("All", value: "all")
+            chip(String(localized: "findings.filterAll", defaultValue: "All"), value: "all")
             ForEach(allScanners, id: \.self) { id in
                 chip(friendlyScannerName(id), value: id)
             }
@@ -152,10 +152,10 @@ struct V2ForensicsFindingsView: View {
                 Text(g.scanName)
                     .scaledSystem(13, weight: .semibold)
                 Spacer()
-                Text("\(g.findings.count) finding\(g.findings.count == 1 ? "" : "s")")
+                Text(String(localized: "findings.findingCount", defaultValue: "\(g.findings.count) finding\(g.findings.count == 1 ? "" : "s")"))
                     .scaledSystem(11)
                     .foregroundStyle(.tertiary)
-                Text("·")
+                Text(verbatim: "·")
                     .scaledSystem(11)
                     .foregroundStyle(.tertiary)
                 Text(g.createdAt.formatted(date: .abbreviated, time: .shortened))
@@ -167,7 +167,7 @@ struct V2ForensicsFindingsView: View {
                 findingRow(f)
             }
             if g.findings.count > 25 {
-                Text("+ \(g.findings.count - 25) more · open the scan detail to see all")
+                Text(String(localized: "findings.moreOverflow", defaultValue: "+ \(g.findings.count - 25) more · open the scan detail to see all"))
                     .scaledSystem(10)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
@@ -189,7 +189,7 @@ struct V2ForensicsFindingsView: View {
                 .padding(.top, 2)
                 // v1.18.1: severity was icon-only here — VoiceOver read the
                 // raw symbol name; now it reads the severity it encodes.
-                .accessibilityLabel("\(sev.displayName) severity")
+                .accessibilityLabel(String(localized: "findings.severityA11y", defaultValue: "\(sev.displayName) severity"))
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.record.summary ?? friendlyContentType(a.record.contentType))
                     .scaledSystem(12, weight: seen ? .regular : .medium)
@@ -198,11 +198,11 @@ struct V2ForensicsFindingsView: View {
                     Text(sev.displayName)
                         .scaledSystem(9, weight: .medium)
                         .foregroundStyle(color(for: sev))
-                    Text("·").scaledSystem(10).foregroundStyle(.tertiary)
+                    Text(verbatim: "·").scaledSystem(10).foregroundStyle(.tertiary)
                     Text(friendlyScannerName(a.record.pluginID))
                         .scaledSystem(10)
                         .foregroundStyle(.secondary)
-                    Text("·").scaledSystem(10).foregroundStyle(.tertiary)
+                    Text(verbatim: "·").scaledSystem(10).foregroundStyle(.tertiary)
                     Text(a.record.observedAt.formatted(date: .omitted, time: .shortened))
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
@@ -213,12 +213,12 @@ struct V2ForensicsFindingsView: View {
                 Button {
                     copyAsJSON(a)
                 } label: {
-                    Label("Copy as JSON", systemImage: "doc.on.clipboard")
+                    Label(String(localized: "findings.copyAsJSON", defaultValue: "Copy as JSON"), systemImage: "doc.on.clipboard")
                 }
                 Button {
                     markSeen(a.id)
                 } label: {
-                    Label(seen ? "Already marked seen" : "Mark seen", systemImage: seen ? "checkmark.circle" : "eye")
+                    Label(seen ? String(localized: "findings.alreadyMarkedSeen", defaultValue: "Already marked seen") : String(localized: "findings.markSeen", defaultValue: "Mark seen"), systemImage: seen ? "checkmark.circle" : "eye")
                 }
                 .disabled(seen)
             } label: {
@@ -229,12 +229,12 @@ struct V2ForensicsFindingsView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 28)
-            .help("Actions")
+            .help(String(localized: "findings.actionsHelp", defaultValue: "Actions"))
         }
         .padding(.vertical, 4)
         .overlay(alignment: .trailing) {
             if copiedFindingID == a.id {
-                Text("Copied")
+                Text(String(localized: "findings.copied", defaultValue: "Copied"))
                     .scaledSystem(10, weight: .medium)
                     .foregroundStyle(.green)
                     .padding(.trailing, 36)
@@ -276,13 +276,13 @@ struct V2ForensicsFindingsView: View {
         let allFindings = groups.flatMap { $0.findings }
         let t = FindingHeuristics.tally(allFindings)
         return HStack(spacing: 16) {
-            severityChip("Critical", t.critical, .red, value: .critical)
-            severityChip("Needs review", t.attention, .orange, value: .attention)
-            severityChip("Notable", t.notable, .blue, value: .notable)
-            severityChip("Inventoried", t.routine, .secondary, value: .routine)
+            severityChip(String(localized: "findings.sevCritical", defaultValue: "Critical"), t.critical, .red, value: .critical)
+            severityChip(String(localized: "findings.sevNeedsReview", defaultValue: "Needs review"), t.attention, .orange, value: .attention)
+            severityChip(String(localized: "findings.sevNotable", defaultValue: "Notable"), t.notable, .blue, value: .notable)
+            severityChip(String(localized: "findings.sevInventoried", defaultValue: "Inventoried"), t.routine, .secondary, value: .routine)
             Spacer()
             if severityFilter != nil {
-                Button("Clear filter") { severityFilter = nil }
+                Button(String(localized: "findings.clearFilter", defaultValue: "Clear filter")) { severityFilter = nil }
                     .scaledSystem(11)
                     .buttonStyle(.borderless)
             }
@@ -297,7 +297,7 @@ struct V2ForensicsFindingsView: View {
             severityFilter = (severityFilter == value) ? nil : value
         } label: {
             VStack(alignment: .leading, spacing: 1) {
-                Text("\(count)")
+                Text(verbatim: "\(count)")
                     .scaledSystem(18, weight: .semibold, design: .rounded)
                     .foregroundStyle(count == 0 ? Color.secondary.opacity(0.6) : color)
                 Text(label)

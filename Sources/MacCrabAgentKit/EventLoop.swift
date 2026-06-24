@@ -520,7 +520,10 @@ enum EventLoop {
             }
 
             // === Package freshness check for install commands ===
-            if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
+            // v1.19.1: the registry GET reveals the package name being installed,
+            // so the freshness lookup is opt-in (off by default). Read the flag
+            // live from state so a SIGHUP toggle takes effect on the next event.
+            if state.packageFreshnessEnabled && enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
                 let packages = PackageFreshnessChecker.parseInstallCommand(enrichedEvent.process.commandLine)
                 if !packages.isEmpty {
                     let results = await state.packageChecker.checkPackages(packages)
@@ -953,7 +956,11 @@ enum EventLoop {
             if let net = enrichedEvent.network {
                 // Certificate Transparency check on destination domains
                 if let host = net.destinationHostname {
-                    if let ctResult = await state.ctMonitor.checkDomain(host), ctResult.isSuspicious {
+                    // v1.19.1: the crt.sh GET reveals the destination domain, so
+                    // it is opt-in (off by default). The local typosquat check
+                    // below makes NO network request and runs regardless.
+                    if state.certTransparencyEnabled,
+                       let ctResult = await state.ctMonitor.checkDomain(host), ctResult.isSuspicious {
                         await state.behaviorScoring.addIndicator(
                             BehaviorScoring.Indicator(name: "suspicious_certificate", weight: 4.0, detail: ctResult.reason ?? host),
                             forProcess: enrichedEvent.process.pid,
@@ -1210,10 +1217,29 @@ enum EventLoop {
             // === Behavioral scoring: process-level indicators ===
             let proc = enrichedEvent.process
             if proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {
-                await state.behaviorScoring.addIndicator(
-                    named: "unsigned_binary", detail: proc.executable,
-                    forProcess: proc.pid, path: proc.executable
-                )
+                // v1.19.1 (audit): legitimately-unsigned DEVELOPER tooling
+                // (node_modules CLIs like esbuild, the Swift/Xcode toolchain,
+                // Homebrew, AI agents) dominated the dev-endpoint false-positive
+                // rate via "unsigned == suspicious". The unsigned-binary indicator
+                // is for UNEXPECTED unsigned execs, not the dev toolchain — skip it
+                // on dev-tooling paths. Genuinely-suspicious unsigned binaries
+                // (in /tmp, downloads, random paths) are NOT dev-tooling paths and
+                // still get the full indicator, plus the /tmp-exec / persistence
+                // indicators below fire regardless, so real threats aren't blinded.
+                // rc.9 review: rather than fully SKIP on dev paths, add a REDUCED
+                // -weight variant (1.0 vs 3.0) so a malicious binary PLANTED in
+                // node_modules / homebrew still accrues compound score.
+                if CampaignDetector.isDevelopmentToolingPath(proc.executable) {
+                    await state.behaviorScoring.addIndicator(
+                        named: "unsigned_dev_tooling", detail: proc.executable,
+                        forProcess: proc.pid, path: proc.executable
+                    )
+                } else {
+                    await state.behaviorScoring.addIndicator(
+                        named: "unsigned_binary", detail: proc.executable,
+                        forProcess: proc.pid, path: proc.executable
+                    )
+                }
             }
             if proc.executable.contains("/tmp/") || proc.executable.contains("/private/tmp/") {
                 await state.behaviorScoring.addIndicator(

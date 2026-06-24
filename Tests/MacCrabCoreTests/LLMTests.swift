@@ -658,12 +658,15 @@ struct LLMSanitizerTests {
         #expect(!result.contains("john.smith"))
     }
 
-    @Test("Redacts private IPs")
+    @Test("Redacts private IPs (and public IPs too, post-audit)")
     func redactsPrivateIPs() {
         let input = "Connection from 192.168.1.100 to 8.8.8.8"
         let result = LLMSanitizer.sanitize(input)
         #expect(result.contains("[PRIVATE_IP]"))
-        #expect(result.contains("8.8.8.8")) // public IP preserved
+        // Audit P1 fix: public IPs are now redacted as well — they used to
+        // leak verbatim because only private ranges were masked.
+        #expect(result.contains("[PUBLIC_IP]"))
+        #expect(!result.contains("8.8.8.8"))
     }
 
     @Test("Redacts localhost")
@@ -696,11 +699,15 @@ struct LLMSanitizerTests {
         #expect(!result.contains("john@company.com"))
     }
 
-    @Test("Preserves public IPs")
-    func preservesPublicIPs() {
+    // Audit P1 (cloud-LLM data-handling): public IPs used to be preserved —
+    // a C2 destination address leaked to the cloud LLM verbatim. They are
+    // now redacted to [PUBLIC_IP].
+    @Test("Redacts public IPs (audit P1 fix)")
+    func redactsPublicIPs() {
         let input = "C2 callback to 185.123.45.67"
         let result = LLMSanitizer.sanitize(input)
-        #expect(result.contains("185.123.45.67"))
+        #expect(result.contains("[PUBLIC_IP]"))
+        #expect(!result.contains("185.123.45.67"))
     }
 }
 

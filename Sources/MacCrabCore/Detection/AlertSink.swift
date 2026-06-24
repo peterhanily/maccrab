@@ -218,6 +218,16 @@ public actor AlertSink {
         let aiSession = event.enrichments["ai_tool_session_id"]
         let parentExec = event.process.ancestors.first?.executable
         let sha256 = event.process.hashes?.sha256
+        // Deterministic, LLM-free "What To Do": map the alert's ATT&CK
+        // tactics to MacCrab's D3FEND prevention modules. Preserve any
+        // caller-supplied values (a richer LLM/IOC source already filled
+        // them); only fill nil fields.
+        let derivedDefense = D3FENDMapping.forTactics(alert.mitreTactics ?? "")
+        let d3fend = alert.d3fendTechniques
+            ?? (derivedDefense.isEmpty ? nil : derivedDefense.map { $0.id })
+        let remediation = alert.remediationHint
+            ?? (derivedDefense.isEmpty ? nil
+                : "Defensive options: " + derivedDefense.map { "\($0.name) (\($0.id))" }.joined(separator: "; "))
         return Alert(
             id: alert.id,
             timestamp: alert.timestamp,
@@ -234,8 +244,8 @@ public actor AlertSink {
             campaignId: alert.campaignId,
             hostContext: alert.hostContext,
             analyst: alert.analyst,
-            d3fendTechniques: alert.d3fendTechniques,
-            remediationHint: alert.remediationHint,
+            d3fendTechniques: d3fend,
+            remediationHint: remediation,
             llmInvestigation: alert.llmInvestigation,
             userId: alert.userId ?? event.process.userId,
             userName: alert.userName ?? Self.nilIfEmpty(event.process.userName),

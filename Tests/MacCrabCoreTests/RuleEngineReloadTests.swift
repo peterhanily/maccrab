@@ -49,6 +49,28 @@ struct RuleEngineReloadTests {
         #expect(await engine.ruleCount == 20)
     }
 
+    @Test("override overlay per-file ownership gate skips non-daemon-owned files (v1.19.1)")
+    func overlayOwnershipGate() async throws {
+        // The override overlay can DISABLE bundled detections; an audit found the
+        // directory was gated but not per-FILE ownership, so a legacy file owned
+        // by a non-daemon uid inside a root-owned dir could shadow a rule.
+        // requireOwnerUID closes that: only files owned by the daemon's uid load.
+        let dir = try makeRulesDir(count: 3)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let mine = geteuid()                         // the test runner owns the temp files
+        let notMine: uid_t = mine == 0 ? 99 : 0      // a uid that does NOT own them
+
+        // Requiring a DIFFERENT uid → every override file is skipped AND counted
+        // (so status/dashboard can surface that operator tuning was dropped).
+        let skipEngine = RuleEngine()
+        #expect(try await skipEngine.loadRules(from: dir, requireOwnerUID: notMine) == 0)
+        #expect(await skipEngine.lastLoadSkippedByOwnerCount == 3)
+        // Requiring the actual owner uid → all load.
+        #expect(try await RuleEngine().loadRules(from: dir, requireOwnerUID: mine) == 3)
+        // No gate (default) → all load — back-compat for the primary rules path.
+        #expect(try await RuleEngine().loadRules(from: dir, requireOwnerUID: nil) == 3)
+    }
+
     @Test("a single corrupt compiled rule rolls back to last-known-good (no silent N-1)")
     func corruptFileRollsBack() async throws {
         let dir = try makeRulesDir(count: 20)

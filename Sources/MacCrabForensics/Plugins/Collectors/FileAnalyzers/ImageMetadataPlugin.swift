@@ -75,6 +75,9 @@ public struct ImageMetadataPlugin: Collector {
         let now = Date()
         for url in targets {
             let path = url.path
+            // SEC-DELTA-1/2: reject symlinks + over-256MB files before any read
+            // (the path can be operator/agent-supplied or a ~/Downloads entry).
+            guard let size = FileAnalyzerIO.regularFileSize(url) else { rejected += 1; continue }
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] else { continue }
             let width = (props[kCGImagePropertyPixelWidth as String] as? Int) ?? 0
@@ -104,8 +107,7 @@ public struct ImageMetadataPlugin: Collector {
                 return !tags.isEmpty
             }()
 
-            guard let data = try? Data(contentsOf: url) else { continue }
-            let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            guard let sha = FileAnalyzerIO.streamingSHA256(url) else { rejected += 1; continue }
             var recordData: [String: JSONValue] = [
                 "path": .string(path),
                 "width": .integer(Int64(width)),
@@ -135,7 +137,7 @@ public struct ImageMetadataPlugin: Collector {
                 observedAt: now,
                 capturedAt: now,
                 summary: "Image \(url.lastPathComponent): \(width)x\(height) \(colorModel)\(geo)",
-                sizeBytes: Int64(data.count),
+                sizeBytes: Int64(size),
                 confidence: .observed,
                 privacyClass: .metadata,
                 actor: NSUserName(),

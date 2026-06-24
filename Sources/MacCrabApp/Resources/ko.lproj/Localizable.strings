@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Claude, Cursor, Copilot 등 AI 코딩 도구의 자격 증명 접근을 모니터링합니다";
 "welcome.feature.prevention" = "능동 예방";
 "welcome.feature.preventionDesc" = "악성 도메인을 차단하고, 파일을 격리하고, 공급망 공격을 게이트합니다";
-"welcome.feature.privacy" = "프라이버시 우선";
-"welcome.feature.privacyDesc" = "모든 것이 로컬에서 실행됩니다 — 어떤 데이터도 컴퓨터를 벗어나지 않습니다";
+"welcome.feature.privacy" = "기본적으로 비공개";
+"welcome.feature.privacyDesc" = "기본적으로 기기에서 실행됩니다 — 선택적 보강 기능을 켜지 않는 한 어떤 데이터도 Mac을 벗어나지 않습니다";
 "welcome.setup.engineActive" = "탐지 엔진 활성";
 "welcome.setup.prevention" = "예방 탭에서 예방 기능을 활성화하세요";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "유지 관리";
 "forensicsSettings.onDiskLocation" = "디스크 저장 위치";
 "forensicsSettings.trustedPublishers" = "신뢰할 수 있는 게시자";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "네트워크 강화 (개인정보 보호)";
+"settings.netEnrichHelp" = "MacCrab는 기본적으로 기기에서 작동합니다 — 켜기 전까지는 이 중 어느 것도 네트워크 요청을 하지 않습니다. 로컬 탐지(규칙, 시퀀스, 캠페인, 내장 위협 인텔)에는 영향이 없습니다. 아래 각 조회는 공개 서비스에 접속합니다. 원하는 항목만 켜세요.";
+"settings.enrich.threatIntel" = "위협 인텔 피드 (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "4시간마다 IOC 목록(URLhaus / MalwareBazaar / Feodo)을 다운로드합니다. 다운로드 전용 — 기기에 관한 정보는 업로드되지 않습니다.";
+"settings.enrich.vulnScan" = "취약점 검사 (osv.dev)";
+"settings.enrich.vulnScanDesc" = "설치된 앱/패키지의 CVE를 조회합니다. 소프트웨어 목록을 전송합니다(익명이지만 기기의 소프트웨어 목록입니다).";
+"settings.enrich.packageFreshness" = "패키지 최신성 (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "패키지를 설치할 때 그 연식을 확인합니다. 이 조회로 설치 중인 패키지 이름이 드러납니다.";
+"settings.enrich.certTransparency" = "인증서 투명성 (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "연결하는 도메인의 인증서를 조회합니다. 이 조회로 도메인이 드러납니다. 로컬 타이포스쿼트 검사는 어쨌든 실행됩니다.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "선택적 네트워크 강화";
+"enrich.intro" = "MacCrab는 기본적으로 완전히 기기에서 작동합니다 — Mac에 관한 어떤 정보도 외부로 나가지 않습니다. 탐지(규칙, 시퀀스, 캠페인, 내장 위협 인텔)는 오프라인에서 작동합니다. 이 네 가지 선택적 조회는 추가 맥락을 더하기 위해 각각 공개 서비스에 접속합니다. 켜기 전까지는 꺼져 있으며, 언제든지 설정에서 변경할 수 있습니다.";
+"enrich.threatIntel" = "위협 인텔 피드 (abuse.ch)";
+"enrich.threatIntelDetail" = "4시간마다 IOC 목록을 다운로드합니다. 다운로드 전용 — Mac에 관한 정보는 업로드되지 않습니다.";
+"enrich.vulnScan" = "취약점 검사 (osv.dev)";
+"enrich.vulnScanDetail" = "설치된 소프트웨어의 CVE를 조회합니다. 소프트웨어 목록을 전송합니다(익명).";
+"enrich.packageFreshness" = "패키지 최신성 (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "설치 시 패키지의 연식을 확인합니다. 설치하는 패키지 이름이 드러납니다.";
+"enrich.certTransparency" = "인증서 투명성 (crt.sh)";
+"enrich.certTransparencyDetail" = "연결하는 도메인의 인증서를 조회합니다. 도메인이 드러납니다.";
+"enrich.keepOff" = "모두 꺼진 상태로 유지";
+"enrich.enable" = "선택 항목 활성화";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "어떤 것인가";
+"overview.factorWhy" = "왜 중요한가";
+"overview.factorFix" = "어떻게 해결하는가";
+"overview.factorLearnMore" = "자세히 알아보기";
+"overview.factorExpandHint" = "클릭하여 의미와 해결 방법 확인";
+"overview.storeTitle" = "플러그인 스토어";
+"overview.storeBrowse" = "찾아보기 →";
+"overview.storeBrowsePrompt" = "카탈로그에서 서명된 포렌식 플러그인을 찾아보세요. 설치 후 완전히 샌드박스된 상태에서 실행됩니다.";
+"raveStore.thirdPartyCatalog.title" = "서명된 써드파티 카탈로그";
+"raveStore.thirdPartyCatalog.body" = "현재 나열된 써드파티 플러그인이 없습니다. 아래 내장 스캐너는 MacCrab 내부에 포함되어 있으며 이 Mac에서 실행됩니다. 설치가 필요 없습니다.";

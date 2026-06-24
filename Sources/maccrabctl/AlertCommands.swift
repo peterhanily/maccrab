@@ -74,7 +74,7 @@ extension MacCrabCtl {
                 print(String(data: data, encoding: .utf8) ?? "{}")
 
             default:
-                print("Unknown format: \(format). Use 'json' or 'csv'.")
+                usageError("Unknown export format: '\(format)'. Use 'json' or 'csv'.")
             }
         } catch {
             print("Error exporting alerts: \(error)")

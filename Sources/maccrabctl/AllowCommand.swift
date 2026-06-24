@@ -50,7 +50,7 @@ extension MacCrabCtl {
                     ttlSec = s
                 } else {
                     print("✗ Invalid --ttl value '\(args[idx + 1])' (use e.g. 7d, 24h, 30m)")
-                    return
+                    exit(1)
                 }
                 idx += 2
             case "--reason" where idx + 1 < args.count:
@@ -58,7 +58,7 @@ extension MacCrabCtl {
             default:
                 print("✗ Unknown flag: \(args[idx])")
                 printAllowUsage()
-                return
+                exit(1)
             }
         }
 
@@ -77,12 +77,12 @@ extension MacCrabCtl {
         } else {
             print("✗ Must provide at least one of: --rule, --path, --host")
             printAllowUsage()
-            return
+            exit(1)
         }
 
         if reason.isEmpty {
             print("✗ --reason is required (so analysts know why this allow exists)")
-            return
+            exit(1)
         }
 
         let expiresAt = ttlSec.map { Date(timeIntervalSinceNow: $0) }

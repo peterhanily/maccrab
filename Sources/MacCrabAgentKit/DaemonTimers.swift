@@ -204,7 +204,11 @@ enum DaemonTimers {
                 // Alert ID = "vuln-<cveId>" so INSERT OR REPLACE deduplicates
                 // at the DB level: same CVE updates the existing alert rather
                 // than creating duplicates on every hourly scan.
-                let vulns = await state.vulnScanner.scanInstalledApps()
+                //
+                // v1.19.1: the osv.dev lookup POSTs the installed-software
+                // inventory, so it is opt-in (off by default). Read the flag
+                // live from state so a SIGHUP toggle takes effect next sweep.
+                let vulns = state.vulnScanEnabled ? await state.vulnScanner.scanInstalledApps() : []
                 for vuln in vulns {
                     for v in vuln.vulnerabilities where v.severity == "critical" || v.severity == "high" {
                         logger.warning("Vulnerable app: \(vuln.appName) v\(vuln.installedVersion) -- \(v.cveId)")
@@ -1150,9 +1154,22 @@ enum DaemonTimers {
                 llmHealthDict = ["configured": false]
             }
 
+            // UX-3: live prevention-module state so the dashboard's Prevention
+            // tab can show real sinkhole / network-blocker / persistence-guard
+            // status instead of "unavailable". Each .stats() is a cheap actor read.
+            let sinkholeStats = await state.dnsSinkhole.stats()
+            let blockerStats = await state.networkBlocker.stats()
+            let guardStats = await state.persistenceGuard.stats()
+            let preventionDict: [String: Any] = [
+                "sinkhole": ["enabled": sinkholeStats.enabled, "count": sinkholeStats.domainCount],
+                "network_blocker": ["enabled": blockerStats.enabled, "count": blockerStats.blockedCount],
+                "persistence_guard": ["enabled": guardStats.enabled, "count": guardStats.protectedCount],
+            ]
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "llm": llmHealthDict,
+                "prevention": preventionDict,
                 "uptime_seconds": uptime,
                 "events_processed": events,
                 "alerts_emitted": alerts,
@@ -1173,7 +1190,7 @@ enum DaemonTimers {
                 // Wave 9K additions.
                 "payload_truncated_total": payloadTruncatedTotal,
                 "eslogger_dropped_total": esloggerDroppedTotal,
-                "schema_version": 4,
+                "schema_version": 5,
             ]
 
             // Metrics export — Prometheus-textfile-style JSON at a world-
@@ -1550,6 +1567,27 @@ enum DaemonTimers {
         "ultrasonic_enabled": "bool",
     ]
 
+    /// v1.19.1 (audit): detection-preserving safe ranges for agent-settable
+    /// NUMERIC config. Without clamping, an agent (or any console user via the
+    /// inbox) could set a threshold to a value that effectively DISABLES a tier
+    /// — the live audit caught `statistical_z_threshold` pushed to 99 (anomaly
+    /// tier off) with only an audit line, no alert. Requested values outside the
+    /// range are CLAMPED to the nearest bound AND raise a self-protection alert.
+    private static let agentConfigSafeRange: [String: (min: Double, max: Double)] = [
+        "behavior_alert_threshold":        (1, 50),
+        "behavior_critical_threshold":     (1, 100),
+        "statistical_z_threshold":         (1.0, 6.0),
+        "statistical_min_samples":         (10, 1000),
+        "prompt_injection_confidence":     (1, 95),
+        "intent_posterior_threshold":      (0.5, 0.99),
+        "usb_poll_interval":               (1, 300),
+        "clipboard_poll_interval":         (1, 60),
+        "browser_extension_poll_interval": (5, 600),
+        "rootkit_poll_interval":           (10, 600),
+        "event_tap_poll_interval":         (1, 300),
+        "system_policy_poll_interval":     (10, 1800),
+    ]
+
     private static func handleSetDaemonConfigRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
@@ -1571,7 +1609,7 @@ enum DaemonTimers {
                 continue
             }
             // Coerce + validate the value to the declared kind; reject mismatches.
-            let value: Any
+            var value: Any
             switch kind {
             case "bool":
                 guard let b = json["value"] as? Bool else {
@@ -1591,6 +1629,23 @@ enum DaemonTimers {
                 else {
                     auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
                     continue
+                }
+            }
+            // v1.19.1 (audit): clamp numeric thresholds to a detection-preserving
+            // range so an agent / console user can't disable a tier (e.g. the
+            // live-caught statistical_z_threshold=99). A clamp means the request
+            // tried to weaken detection past the safe bound — make it LOUD.
+            if let range = agentConfigSafeRange[key] {
+                let requested = (value as? Double) ?? Double(value as? Int ?? 0)
+                let clamped = Swift.min(Swift.max(requested, range.min), range.max)
+                if clamped != requested {
+                    value = (kind == "int") ? (Int(clamped.rounded()) as Any) : (clamped as Any)
+                    auditLogInbox(state: state, prefix: "set-daemon-config",
+                                  id: sanitizeAuditField(key), uid: uid,
+                                  result: "clamped \(requested)->\(clamped)")
+                    await emitSelfProtectionAlert(
+                        state: state, action: "Detection threshold clamped",
+                        detail: "Config '\(key)' was requested as \(requested), outside the detection-preserving range [\(range.min), \(range.max)] — clamped to \(clamped). A value past this bound weakens or disables a detection tier.")
                 }
             }
             // Merge into daemon_config.json (root-owned). Effect on next config
@@ -2150,6 +2205,25 @@ enum DaemonTimers {
         return uid
     }
 
+    /// v1.19.1 (audit): true if `uid` belongs to the macOS `admin` group
+    /// (gid 80). The control plane must accept mutating verbs only from an
+    /// ADMIN console user (or root) — on a shared / managed / kiosk Mac a
+    /// standard, non-admin user at the keyboard must not be able to suppress
+    /// alerts, install rules, or weaken config via the 1777 inbox.
+    static func isAdminUID(_ uid: uid_t) -> Bool {   // internal for @testable
+        guard let pw = getpwuid(uid) else { return false }
+        let name = String(cString: pw.pointee.pw_name)
+        let baseGID = Int32(bitPattern: pw.pointee.pw_gid)
+        var ngroups: Int32 = 64
+        var groups = [Int32](repeating: 0, count: Int(ngroups))
+        if getgrouplist(name, baseGID, &groups, &ngroups) == -1 {
+            // Buffer was too small; ngroups now holds the needed size — retry.
+            groups = [Int32](repeating: 0, count: Int(ngroups))
+            guard getgrouplist(name, baseGID, &groups, &ngroups) != -1 else { return false }
+        }
+        return groups.prefix(Int(ngroups)).contains(80)   // gid 80 == admin
+    }
+
     /// v1.10.2 (audit BLOCKER): the inbox dir at
     /// `/Library/Application Support/MacCrab/inbox/` is mode 1777 so
     /// any local user can drop request files. Without a UID gate at
@@ -2164,7 +2238,12 @@ enum DaemonTimers {
     static func isAuthorizedInboxRequest(uid: Int) -> Bool {
         if uid < 0 { return false }                  // stat failed
         if uid == 0 { return true }                  // root
-        if let console = consoleUserUID(), Int(console) == uid { return true }
+        // v1.19.1 (audit): the console user must ALSO be an admin to issue
+        // control verbs. Pre-fix any foreground console user — incl. a standard
+        // non-admin user on a shared/managed Mac — could suppress/delete alerts,
+        // suppress campaigns, install rules, or weaken config. Now: root, or the
+        // GUI console user AND that user is in the admin group.
+        if let console = consoleUserUID(), Int(console) == uid, isAdminUID(console) { return true }
         return false
     }
 
@@ -2419,12 +2498,22 @@ func runAdaptiveRollupSweep(
         // This ends the hourly full-VACUUM write-amplification the audit found
         // (which was driven by the evidence-cap bug keeping the DB permanently
         // over cap → Layer-3 firing every tick → totalPruned>0 → VACUUM every tick).
-        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) {
+        // v1.19.1 (audit): also defer the heavy full VACUUM under battery /
+        // thermal pressure. A whole-file rewrite (~3 min, a pinned core, hundreds
+        // of MB of writes) is non-urgent maintenance that shouldn't run on
+        // battery or while thermally throttled — incremental_vacuum already
+        // reclaimed pages above and the WAL is checkpointed below, so the cap
+        // still trends down; the full rebuild waits for AC / nominal thermal.
+        let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
+        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
             do {
                 try await eventStore.vacuum()
             } catch {
                 logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
             }
+        } else if dbSizeAfterIncremental > targetSizeMB && underPowerPressure {
+            logger.notice("Tier-rollup: deferring full VACUUM under power/thermal pressure (poll-multiplier \(PowerGate.pollIntervalMultiplier)); incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB. Checkpointing WAL; full rebuild will run on AC / nominal thermal.")
+            await eventStore.walCheckpoint()
         } else {
             logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB (target \(targetSizeMB) MB); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.")
             await eventStore.walCheckpoint()

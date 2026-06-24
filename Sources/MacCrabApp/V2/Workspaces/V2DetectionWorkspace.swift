@@ -7,6 +7,35 @@ import SwiftUI
 // override fields, post-v1.12.1).
 import MacCrabCore
 
+/// One row of the AI-Guard "tools observed" rollup (UX-1).
+struct AIToolRollupRow: Identifiable, Hashable {
+    let tool: String
+    let sessions: Int
+    let events: Int
+    let alerts: Int
+    let lastSeen: Date
+    var id: String { tool }
+}
+
+/// Roll a flat list of agent-session snapshots up by tool type. Pure +
+/// free so it's unit-testable without the SwiftUI view. Sorted most-alerting,
+/// then most-active, first.
+func aiToolRollup(_ sessions: [AgentSessionSnapshot]) -> [AIToolRollupRow] {
+    var byTool: [String: (sessions: Int, events: Int, alerts: Int, lastSeen: Date)] = [:]
+    for s in sessions {
+        let key = s.toolType.displayName
+        var agg = byTool[key] ?? (0, 0, 0, Date.distantPast)
+        agg.sessions += 1
+        agg.events += s.eventCount
+        agg.alerts += s.kindCounts.alerts
+        agg.lastSeen = max(agg.lastSeen, s.lastActivity)
+        byTool[key] = agg
+    }
+    return byTool
+        .map { AIToolRollupRow(tool: $0.key, sessions: $0.value.sessions, events: $0.value.events, alerts: $0.value.alerts, lastSeen: $0.value.lastSeen) }
+        .sorted { ($0.alerts, $0.events, $0.tool) > ($1.alerts, $1.events, $1.tool) }
+}
+
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
@@ -978,16 +1007,48 @@ public struct V2DetectionWorkspace: View {
     }
 
     private var aiGuardToolsTable: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let rows = aiToolRollup(appState.aiSessions)
+        return VStack(alignment: .leading, spacing: 8) {
             Text("AI tools observed").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            HStack(spacing: 8) {
-                Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
-                Text("AI tool inventory is collected by the daemon's AIGuard pipeline. The dashboard surface for it is not yet wired — inspect `~/Library/Application Support/MacCrab/agent_lineage.json` directly to view the captured tool calls.")
-                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            if rows.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
+                    Text("No AI tools observed yet. Tools appear here once the engine sees a coding agent (Claude Code, Cursor, …) and its activity.")
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .v2Panel()
+            } else {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Tool").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Sessions").frame(width: 80, alignment: .trailing)
+                        Text("Events").frame(width: 80, alignment: .trailing)
+                        Text("Alerts").frame(width: 70, alignment: .trailing)
+                        Text("Last seen").frame(width: 110, alignment: .trailing)
+                    }
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    ForEach(rows) { r in
+                        HStack {
+                            HStack(spacing: 6) {
+                                Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent).scaledSystem(11)
+                                Text(r.tool).foregroundStyle(V2Theme.primaryText)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("\(r.sessions)").frame(width: 80, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
+                            Text("\(r.events)").frame(width: 80, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
+                            Text("\(r.alerts)").frame(width: 70, alignment: .trailing)
+                                .foregroundStyle(r.alerts > 0 ? V2Theme.high : V2Theme.mutedText)
+                            Text(r.lastSeen, style: .relative).frame(width: 110, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
+                        }
+                        .font(V2Theme.body())
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                    }
+                }
+                .v2Panel()
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .v2Panel()
         }
     }
 
@@ -1021,9 +1082,25 @@ public struct V2DetectionWorkspace: View {
                                     .lineLimit(1).truncationMode(.middle)
                             }
                             Spacer()
-                            VStack(alignment: .trailing, spacing: 2) {
+                            VStack(alignment: .trailing, spacing: 4) {
                                 Text("\(s.eventCount) events").font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                                 Text(s.lastSeen, style: .relative).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                                // PARITY-06: per-row signed-bundle export. Shells the
+                                // bundled maccrabctl (single source of export truth;
+                                // forces .filesystemDegraded signing, CLI is unentitled).
+                                V2ActionButton("Export signed", icon: "square.and.arrow.up", style: .secondary, size: .compact,
+                                               tooltip: "Export a Merkle-rooted, ECDSA-P256-signed .maccrabsession bundle (events + alerts) for this session.") {
+                                    let sessionID = s.id
+                                    Task.detached(priority: .userInitiated) {
+                                        guard let ctl = Bundle.main.url(forResource: "maccrabctl", withExtension: nil, subdirectory: "bin")
+                                            ?? Bundle.main.url(forResource: "maccrabctl", withExtension: nil) else { return }
+                                        let p = Process()
+                                        p.executableURL = ctl
+                                        p.arguments = ["session", "export", sessionID]
+                                        try? p.run()
+                                        p.waitUntilExit()
+                                    }
+                                }
                             }
                         }
                         .padding(.vertical, 6).padding(.horizontal, 12)

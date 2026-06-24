@@ -73,7 +73,7 @@ struct V2ForensicsScansView: View {
                 }
                 runNewScanSection
                 if loading {
-                    ProgressView("Loading…")
+                    ProgressView(String(localized: "scans.loading", defaultValue: "Loading…"))
                         .frame(maxWidth: .infinity)
                         .padding(20)
                 } else if !recentlyRun.isEmpty {
@@ -120,23 +120,23 @@ struct V2ForensicsScansView: View {
                 )
             }
         }
-        .alert("Encrypted scan",
+        .alert(String(localized: "scans.encryptedScanTitle", defaultValue: "Encrypted scan"),
                isPresented: Binding(
                    get: { pendingEncryptedKit != nil },
                    set: { if !$0 { pendingEncryptedKit = nil } }
                ),
                presenting: pendingEncryptedKit) { kit in
-            Button("Run scan") {
+            Button(String(localized: "scans.runScan", defaultValue: "Run scan")) {
                 encryptedWarningSeen = true
                 let toRun = kit
                 pendingEncryptedKit = nil
                 Task { await runner.run(toRun) }
             }
-            Button("Cancel", role: .cancel) {
+            Button(String(localized: "scans.cancel", defaultValue: "Cancel"), role: .cancel) {
                 pendingEncryptedKit = nil
             }
         } message: { kit in
-            Text("This kit collects personal data (messages, mail, call history). MacCrab will store it encrypted on disk and the OS will ask for your Keychain password to unlock the encryption key. You'll only be asked once per session.")
+            Text(String(localized: "scans.encryptedScanMessage", defaultValue: "This kit collects personal data (messages, mail, call history). MacCrab will store it encrypted on disk and the OS will ask for your Keychain password to unlock the encryption key. You'll only be asked once per session."))
         }
         .sheet(isPresented: Binding(
             get: { detailKit != nil },
@@ -172,9 +172,9 @@ struct V2ForensicsScansView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Forensics")
+            Text(String(localized: "scans.headerTitle", defaultValue: "Forensics"))
                 .font(.title2).fontWeight(.semibold)
-            Text("Check this Mac for signs of compromise.")
+            Text(String(localized: "scans.headerSubtitle", defaultValue: "Check this Mac for signs of compromise."))
                 .scaledSystem(11)
                 .foregroundStyle(.secondary)
         }
@@ -188,9 +188,9 @@ struct V2ForensicsScansView: View {
                 .scaledSystem(18)
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 4) {
-                Text("MacCrab doesn't have Full Disk Access")
+                Text(String(localized: "scans.fdaTitle", defaultValue: "MacCrab doesn't have Full Disk Access"))
                     .scaledSystem(13, weight: .semibold)
-                Text("Most scanners read system databases (Messages, Mail, Safari, TCC, KnowledgeC) that macOS protects behind Full Disk Access. Without it your scans will come back with 'X scanners didn't run' for those entries.")
+                Text(String(localized: "scans.fdaBody", defaultValue: "Most scanners read system databases (Messages, Mail, Safari, TCC, KnowledgeC) that macOS protects behind Full Disk Access. Without it your scans will come back with 'X scanners didn't run' for those entries."))
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -198,12 +198,12 @@ struct V2ForensicsScansView: View {
                     Button {
                         PermissionsProbe.openSystemSettingsFullDiskAccess()
                     } label: {
-                        Label("Open System Settings", systemImage: "arrow.up.right.square")
+                        Label(String(localized: "scans.openSystemSettings", defaultValue: "Open System Settings"), systemImage: "arrow.up.right.square")
                             .scaledSystem(11)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    Button("Re-check") {
+                    Button(String(localized: "scans.recheck", defaultValue: "Re-check")) {
                         fdaStatus = PermissionsProbe.fullDiskAccess()
                     }
                     .scaledSystem(11)
@@ -213,12 +213,12 @@ struct V2ForensicsScansView: View {
                     Button {
                         fdaBannerDismissed = true
                     } label: {
-                        Text("Hide")
+                        Text(String(localized: "scans.hide", defaultValue: "Hide"))
                             .scaledSystem(10)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
-                    .help("Don't show this banner again on this Mac")
+                    .help(String(localized: "scans.hideBannerHelp", defaultValue: "Don't show this banner again on this Mac"))
                 }
                 .padding(.top, 4)
             }
@@ -233,13 +233,13 @@ struct V2ForensicsScansView: View {
     private var recentlyRunSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Recently run").font(.headline)
+                Text(String(localized: "scans.recentlyRun", defaultValue: "Recently run")).font(.headline)
                 Spacer()
                 if scans.count > Self.recentlyRunLimit, onShowAllScans != nil {
                     Button {
                         onShowAllScans?()
                     } label: {
-                        Text("See all \(scans.count) past scans →")
+                        Text(String(localized: "scans.seeAllPastScans", defaultValue: "See all \(scans.count) past scans →"))
                             .scaledSystem(11)
                     }
                     .buttonStyle(.borderless)
@@ -272,10 +272,10 @@ struct V2ForensicsScansView: View {
             // Recommended kits (the curated headline).
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(scans.isEmpty ? "Pick a kit to start a scan" : "Run a new scan")
+                    Text(scans.isEmpty ? String(localized: "scans.pickKitToStart", defaultValue: "Pick a kit to start a scan") : String(localized: "scans.runNewScan", defaultValue: "Run a new scan"))
                         .font(.headline)
                     Spacer()
-                    Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
+                    Text(String(localized: "scans.kitCount", defaultValue: "\(kits.count) kit\(kits.count == 1 ? "" : "s")"))
                         .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                 }
@@ -286,7 +286,7 @@ struct V2ForensicsScansView: View {
             // Issue #3: every scanner is individually runnable, sectioned by origin.
             if !builtinScanners.isEmpty {
                 let shown = scanBuiltinShowAll ? builtinScanners : Array(builtinScanners.prefix(scannerPageSize))
-                scannerSection("Built-in scanners", count: builtinScanners.count) {
+                scannerSection(String(localized: "scans.builtinScanners", defaultValue: "Built-in scanners"), count: builtinScanners.count) {
                     ForEach(shown, id: \.id) { m in
                         scannerRow(icon: scannerIcon(m.type), name: m.displayName,
                                    subtitle: scannerSubtitle(m),
@@ -294,7 +294,7 @@ struct V2ForensicsScansView: View {
                                    detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
                     }
                     if builtinScanners.count > scannerPageSize {
-                        Button(scanBuiltinShowAll ? "Show fewer" : "Show all \(builtinScanners.count)") {
+                        Button(scanBuiltinShowAll ? String(localized: "scans.showFewer", defaultValue: "Show fewer") : String(localized: "scans.showAllBuiltins", defaultValue: "Show all \(builtinScanners.count)")) {
                             withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinShowAll.toggle() }
                         }
                         .buttonStyle(.plain).scaledSystem(11, weight: .medium).foregroundStyle(.tint).padding(.top, 2)
@@ -302,12 +302,12 @@ struct V2ForensicsScansView: View {
                 }
             }
             if !thirdPartyScanners.isEmpty {
-                scannerSection("Third-party plugins", count: thirdPartyScanners.count) {
+                scannerSection(String(localized: "scans.thirdPartyPlugins", defaultValue: "Third-party plugins"), count: thirdPartyScanners.count) {
                     ForEach(thirdPartyScanners, id: \.pluginID) { p in
                         let m = thirdPartyManifests[p.pluginID]
                         scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
-                                   subtitle: (m?.description.isEmpty == false ? m!.description : "Third-party plugin"),
-                                   badge: "Third-party",
+                                   subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Third-party plugin")),
+                                   badge: String(localized: "scans.thirdPartyBadge", defaultValue: "Third-party"),
                                    detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
                     }
                 }
@@ -324,11 +324,11 @@ struct V2ForensicsScansView: View {
         let receiptsDir = URL(fileURLWithPath: (PluginInstaller().pluginsRootPath as NSString).deletingLastPathComponent)
             .appendingPathComponent("plugin_receipts")
         let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
-        var installed = "Installed"
+        var installed = String(localized: "scans.installed", defaultValue: "Installed")
         if let attrs = try? FileManager.default.attributesOfItem(atPath: p.installRoot),
            let d = attrs[.creationDate] as? Date {
             let f = DateFormatter(); f.dateStyle = .medium
-            installed = "Added \(f.string(from: d))"
+            installed = String(localized: "scans.addedDate", defaultValue: "Added \(f.string(from: d))")
         }
         return .thirdParty(pluginID: p.pluginID, publicKeyHex: p.publicKeyHex,
                            manifest: thirdPartyManifests[p.pluginID], provenance: prov, installedLabel: installed)
@@ -344,7 +344,7 @@ struct V2ForensicsScansView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.headline)
                 Spacer()
-                Text("\(count)").scaledSystem(11).foregroundStyle(.tertiary)
+                Text(String(localized: "scans.sectionCount", defaultValue: "\(count)")).scaledSystem(11).foregroundStyle(.tertiary)
             }
             VStack(spacing: 6) { rows() }
         }
@@ -368,13 +368,13 @@ struct V2ForensicsScansView: View {
                 Text(subtitle).scaledSystem(10).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
-            Button("Details", action: detail).buttonStyle(.bordered).controlSize(.small)
-            Button("Run", action: run).buttonStyle(.borderedProminent).controlSize(.small)
+            Button(String(localized: "scans.details", defaultValue: "Details"), action: detail).buttonStyle(.bordered).controlSize(.small)
+            Button(String(localized: "scans.run", defaultValue: "Run"), action: run).buttonStyle(.borderedProminent).controlSize(.small)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: detail)   // tap the row (not a button) → details
+        // UX-7: the explicit Details / Run buttons are the affordances; no
+        // invisible whole-row tap (it duplicated Details and was unclear).
     }
 
     private func scannerSubtitle(_ m: PluginManifest) -> String {
@@ -422,7 +422,7 @@ struct V2ForensicsScansView: View {
                         .foregroundStyle(.tint)
                         .cornerRadius(3)
                     if kit.encrypted {
-                        Label("Encrypted", systemImage: "lock.fill")
+                        Label(String(localized: "scans.encrypted", defaultValue: "Encrypted"), systemImage: "lock.fill")
                             .labelStyle(.titleAndIcon)
                             .scaledSystem(10, weight: .medium)
                             .padding(.horizontal, 6).padding(.vertical, 1)
@@ -434,7 +434,7 @@ struct V2ForensicsScansView: View {
                 Text(kit.description)
                     .scaledSystem(12)
                     .foregroundStyle(.secondary)
-                Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")\(kit.encrypted ? " · asks for your Keychain password" : "")")
+                Text(String(localized: "scans.kitScannerCount", defaultValue: "\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")\(kit.encrypted ? " · asks for your Keychain password" : "")"))
                     .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             }
@@ -447,11 +447,12 @@ struct V2ForensicsScansView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("How this kit works")
+            .help(String(localized: "scans.howKitWorksHelp", defaultValue: "How this kit works"))
+            .accessibilityLabel(String(localized: "scans.howKitWorks", defaultValue: "How this kit works"))
             Button {
                 runOrConfirm(kit)
             } label: {
-                Text("Run")
+                Text(String(localized: "scans.runKit", defaultValue: "Run"))
                     .frame(minWidth: 60)
             }
             .buttonStyle(.borderedProminent)
@@ -515,9 +516,9 @@ struct V2ForensicsScansView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Running \(kitName)…").scaledSystem(13, weight: .semibold)
+                        Text(String(localized: "scans.runningKit", defaultValue: "Running \(kitName)…")).scaledSystem(13, weight: .semibold)
                         Spacer()
-                        Text("Scanner \(completed + 1) / \(total)")
+                        Text(String(localized: "scans.scannerProgress", defaultValue: "Scanner \(completed + 1) / \(total)"))
                             .scaledSystem(11)
                             .foregroundStyle(.secondary)
                     }
@@ -528,17 +529,17 @@ struct V2ForensicsScansView: View {
                         Text(friendlyScannerName(currentPlugin))
                             .scaledSystem(11, weight: .medium)
                         if rows > 0 {
-                            Text("· \(rows) row\(rows == 1 ? "" : "s") collected so far")
+                            Text(String(localized: "scans.rowsCollected", defaultValue: "· \(rows) row\(rows == 1 ? "" : "s") collected so far"))
                                 .scaledSystem(11)
                                 .foregroundStyle(.secondary)
                         } else {
-                            Text("· starting…")
+                            Text(String(localized: "scans.startingDots", defaultValue: "· starting…"))
                                 .scaledSystem(11)
                                 .foregroundStyle(.tertiary)
                         }
                     }
                     if let sources = scannerSources(currentPlugin), !sources.isEmpty {
-                        Text("Reading: \(sources.first ?? "")")
+                        Text(String(localized: "scans.reading", defaultValue: "Reading: \(sources.first ?? "")"))
                             .scaledSystem(10)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -551,7 +552,7 @@ struct V2ForensicsScansView: View {
             } else if case .starting(let n) = runner.state {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Starting \(n)…").scaledSystem(13)
+                    Text(String(localized: "scans.startingKit", defaultValue: "Starting \(n)…")).scaledSystem(13)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -581,7 +582,7 @@ struct V2ForensicsScansView: View {
                     .foregroundStyle(headlineColor)
                     .scaledSystem(18)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(kitName) finished")
+                    Text(String(localized: "scans.kitFinished", defaultValue: "\(kitName) finished"))
                         .scaledSystem(13, weight: .semibold)
                     Text(tally.bannerSummary)
                         .scaledSystem(11)
@@ -589,13 +590,13 @@ struct V2ForensicsScansView: View {
                 }
                 Spacer()
                 if tally.attention + tally.critical > 0 {
-                    Button("Open findings") {
+                    Button(String(localized: "scans.openFindings", defaultValue: "Open findings")) {
                         openScanID = scanID
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                 }
-                Button("Dismiss") {
+                Button(String(localized: "scans.dismiss", defaultValue: "Dismiss")) {
                     runner.reset()
                 }
                 .buttonStyle(.borderless)
@@ -611,7 +612,7 @@ struct V2ForensicsScansView: View {
 
     private func skippedList(_ skipped: [KitRunner.SkippedPlugin]) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("\(skipped.count) scanner\(skipped.count == 1 ? "" : "s") didn't run:")
+            Text(String(localized: "scans.scannersDidntRun", defaultValue: "\(skipped.count) scanner\(skipped.count == 1 ? "" : "s") didn't run:"))
                 .scaledSystem(10, weight: .medium)
                 .foregroundStyle(.secondary)
             ForEach(skipped, id: \.pluginID) { s in
@@ -621,7 +622,7 @@ struct V2ForensicsScansView: View {
                         .foregroundStyle(.secondary)
                     Text(friendlyScannerName(s.pluginID))
                         .scaledSystem(10, weight: .medium)
-                    Text("— \(s.reason)")
+                    Text(String(localized: "scans.skippedReason", defaultValue: "— \(s.reason)"))
                         .scaledSystem(10)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -637,7 +638,7 @@ struct V2ForensicsScansView: View {
                 .foregroundStyle(.red)
                 .scaledSystem(18)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(kitName) failed")
+                Text(String(localized: "scans.kitFailed", defaultValue: "\(kitName) failed"))
                     .scaledSystem(13, weight: .semibold)
                 Text(err)
                     .scaledSystem(11)
@@ -645,7 +646,7 @@ struct V2ForensicsScansView: View {
                     .lineLimit(3)
             }
             Spacer()
-            Button("Dismiss") { runner.reset() }
+            Button(String(localized: "scans.dismissFailed", defaultValue: "Dismiss")) { runner.reset() }
                 .buttonStyle(.borderless)
         }
         .padding(12)

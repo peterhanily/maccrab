@@ -599,7 +599,7 @@ let tools: [[String: Any]] = [
     // Mac Context Plugin Platform (v1.13a / v1.13b)
     // ===================================================================
     [
-        "name": "forensics.list_plugins",
+        "name": "forensics_list_plugins",
         "description": "List every forensic plugin registered in MacCrabForensics. Optional `category` filters by plugin type (collector / enricher / fingerprinter / analyzer).",
         "inputSchema": [
             "type": "object",
@@ -609,8 +609,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.create_case",
-        "description": "Create a new forensic case to hold collected artifacts, and return its case_id. Plaintext (unencrypted) so an agent can reopen it headlessly. Run a collector against the returned case_id, then read results with forensics.search_artifacts / forensics.timeline.",
+        "name": "forensics_create_case",
+        "description": "Create a new forensic case to hold collected artifacts, and return its case_id. Plaintext (unencrypted) so an agent can reopen it headlessly. Run a collector against the returned case_id, then read results with forensics_search_artifacts / forensics_timeline.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -622,8 +622,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.run_collector",
-        "description": "Invoke a Collector plugin against a case. Optional `inputs` (e.g. {\"path\": \"/usr/bin/codesign\"}) targets path-driven analyzers; see each plugin's declared inputs via forensics.list_plugins. Returns the CollectionResult (artifacts committed / rejected / status).",
+        "name": "forensics_run_collector",
+        "description": "Invoke a Collector plugin against a case. Optional `inputs` (e.g. {\"path\": \"/usr/bin/codesign\"}) targets path-driven analyzers; see each plugin's declared inputs via forensics_list_plugins. Returns the CollectionResult (artifacts committed / rejected / status).",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -635,7 +635,32 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.search_artifacts",
+        "name": "forensics_run_analyzer",
+        "description": "Invoke an Analyzer plugin (e.g. com.maccrab.forensics.posture-analyzer) against a case. The analyzer cross-references the case's collected artifacts and commits its findings back as posture.* artifacts (each with severity + explanation + backed_by), which then appear via forensics_posture_findings. Returns the finding count + a capped preview.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "Analyzer plugin id, e.g. com.maccrab.forensics.posture-analyzer."],
+                "case_id": ["type": "string", "description": "Target case UUID."],
+            ],
+            "required": ["plugin_id", "case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_enrich",
+        "description": "Invoke an Enricher plugin (e.g. com.maccrab.enricher.threatintel-domain) against a path/URL subject. Enrichers return ephemeral key/value fields (e.g. threatintel.is_known_malicious, reputation, code-signing anomalies) — they do NOT commit artifacts. Returns the enrichment fields.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "Enricher plugin id, e.g. com.maccrab.enricher.threatintel-ip."],
+                "case_id": ["type": "string", "description": "Target case UUID."],
+                "path": ["type": "string", "description": "URL or file path subject, e.g. https://example.com/ or /usr/bin/foo."],
+            ],
+            "required": ["plugin_id", "case_id", "path"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_search_artifacts",
         "description": "Search a case's committed artifacts. Filters: contentType, observedAfter (ISO8601), observedBefore (ISO8601), limit. Returns metadata-class artifacts unconditionally; higher classes require case.ai_content_allowed=1.",
         "inputSchema": [
             "type": "object",
@@ -650,7 +675,7 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.get_artifact",
+        "name": "forensics_get_artifact",
         "description": "Fetch a single artifact by id within a case.",
         "inputSchema": [
             "type": "object",
@@ -662,8 +687,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.timeline",
-        "description": "Return a case's artifacts ordered by observed_at across all content types. Default 200 entries. (v1.13b extended meta-tool.)",
+        "name": "forensics_timeline",
+        "description": "Return a case's artifacts ordered by observed_at across all content types. Default 200 entries.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -674,8 +699,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.explain_case",
-        "description": "Summarize a case for an operator: name + creation date + encryption state + plugin invocation count + artifact totals by content type. (v1.13b extended meta-tool.)",
+        "name": "forensics_explain_case",
+        "description": "Summarize a case for an operator: name + creation date + encryption state + artifact totals by content type, a posture_summary (analyzer findings counted by severity, each with title + explanation), and top_tcc_risks (highest-scoring TCC grants with client/service/risk_reason).",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -685,8 +710,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.posture_findings",
-        "description": "Return findings emitted by the v1.15 posture Analyzer. v1.13b: returns an empty array — the Analyzer ships at v1.15, this tool reserves the surface.",
+        "name": "forensics_posture_findings",
+        "description": "Return the posture.* findings the posture Analyzer committed into a case (unsigned_persistence / unfamiliar_team_persistence / automation_to_sensitive_target / high_privilege_unsigned_combo / permissioned_persistence). Each finding carries severity + explanation + backed_by in its data. Empty until the posture analyzer has run on a case with tcc.grant + launchd.entry artifacts (via the dashboard's posture / IR scan or `maccrabctl plugin run com.maccrab.forensics.posture-analyzer --case <id>`).",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -703,7 +728,7 @@ let tools: [[String: Any]] = [
     // AI-agent integrations don't break.
     // ===================================================================
     [
-        "name": "forensics.list_installed_plugins",
+        "name": "forensics_list_installed_plugins",
         "description": "List installed third-party scanners with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified + failed buckets. Verified plugins include manifest version + publisher key prefix; failed plugins include reason (e.g. revoked key).",
         "inputSchema": [
             "type": "object",
@@ -711,8 +736,8 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
-        "name": "forensics.verify_installed_plugins",
-        "description": "Force re-verification of every installed third-party scanner against the current trust + revocation lists. Same payload as forensics.list_installed_plugins but bypasses the bootstrap cache.",
+        "name": "forensics_verify_installed_plugins",
+        "description": "Force re-verification of every installed third-party scanner against the current trust + revocation lists. Same payload as forensics_list_installed_plugins but bypasses the bootstrap cache.",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -771,7 +796,10 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "key": ["type": "string", "description": "an allowed daemon_config key (call with an invalid key to see the allow-list)"],
-                "value": ["description": "number or boolean matching the key's type"],
+                "value": [
+                    "description": "number, integer, or boolean matching the key's type (server coerces + validates per key)",
+                    "oneOf": [["type": "number"], ["type": "integer"], ["type": "boolean"]],
+                ] as [String: Any],
             ],
             "required": ["key", "value"],
         ] as [String: Any],
@@ -792,6 +820,27 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": ["rule_id": ["type": "string", "description": "the id of a user-authored rule"]],
             "required": ["rule_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "list_response_actions",
+        "description": "List the configured response actions — what the engine does when a rule fires (kill / quarantine / blockNetwork / script / notify / escalateNotification), as default actions and per-rule overrides. Read-only.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "set_response_action",
+        "description": "Add or replace a response action in actions.json — what the engine does when a rule fires. Requires the 'response' capability because kill / quarantine / blockNetwork act against the process or file that tripped the rule (defense-affecting). Omit rule_id to set a DEFAULT action (all rules). Destructive actions default to requiring operator confirmation (require_confirmation); they will NOT auto-execute unless you pass require_confirmation:false. Edits take effect on the engine's next reload (~5 s).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "rule_id": ["type": "string", "description": "rule id to attach the action to; omit for a default action applied to all rules"],
+                "action": ["type": "string", "description": "one of: log, notify, kill, quarantine, script, blockNetwork, escalateNotification", "enum": ["log", "notify", "kill", "quarantine", "script", "blockNetwork", "escalateNotification"]],
+                "min_severity": ["type": "string", "description": "only fire for alerts at/above this severity (default high)", "enum": ["critical", "high", "medium", "low", "informational"]],
+                "script_path": ["type": "string", "description": "required for action 'script': path to the script the engine runs (engine still enforces its root-owned-dir allowlist)"],
+                "require_confirmation": ["type": "boolean", "description": "true gates the action behind operator confirmation; defaults to true for kill/quarantine/blockNetwork"],
+                "block_duration_seconds": ["type": "integer", "description": "for blockNetwork: how long to keep the PF block (default 3600)"],
+            ],
+            "required": ["action"],
         ] as [String: Any],
     ],
 ]
@@ -844,6 +893,10 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleCreateRule(args)
     case "delete_rule":
         return handleDeleteRule(args)
+    case "list_response_actions":
+        return handleListResponseActions()
+    case "set_response_action":
+        return handleSetResponseAction(args)
     case "get_alerts":
         return await handleGetAlerts(args)
     case "get_events":
@@ -904,25 +957,29 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
     case "get_intent_posterior":
         return await handleGetIntentPosterior(args)
     // v1.13a / v1.13b — Mac Context Plugin Platform meta-tools.
-    case "forensics.list_plugins":
+    case "forensics_list_plugins":
         return await handleForensicsListPlugins(args)
-    case "forensics.create_case":
+    case "forensics_create_case":
         return await handleForensicsCreateCase(args)
-    case "forensics.run_collector":
+    case "forensics_run_collector":
         return await handleForensicsRunCollector(args)
-    case "forensics.search_artifacts":
+    case "forensics_run_analyzer":
+        return await handleForensicsRunAnalyzer(args)
+    case "forensics_enrich":
+        return await handleForensicsEnrich(args)
+    case "forensics_search_artifacts":
         return await handleForensicsSearchArtifacts(args)
-    case "forensics.get_artifact":
+    case "forensics_get_artifact":
         return await handleForensicsGetArtifact(args)
-    case "forensics.timeline":
+    case "forensics_timeline":
         return await handleForensicsTimeline(args)
-    case "forensics.explain_case":
+    case "forensics_explain_case":
         return await handleForensicsExplainCase(args)
-    case "forensics.posture_findings":
+    case "forensics_posture_findings":
         return await handleForensicsPostureFindings(args)
-    case "forensics.list_installed_plugins":
+    case "forensics_list_installed_plugins":
         return await handleTierBListPlugins()
-    case "forensics.verify_installed_plugins":
+    case "forensics_verify_installed_plugins":
         return await handleTierBVerify()
     // v1.17 rc.7 — legacy aliases (silent, no warning). Keep
     // through v1.18; remove in v1.19.
@@ -1806,16 +1863,35 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
     }
 }
 
+enum DaemonLiveness: String { case running = "Running", offline = "Offline", unknown = "Unknown" }
+
+/// MCP-5: liveness from HEARTBEAT RECENCY, not just a `-wal` sidecar. A `-wal`
+/// file can linger after a crash, so "WAL present ⇒ running" reported a dead
+/// daemon as Running. The daemon rewrites heartbeat.json frequently; a fresh
+/// one means Running, a stale one Offline. With no heartbeat at all we can't
+/// `kill(pid,0)` the root sysext (EPERM), so a lone `-wal` is ambiguous →
+/// Unknown rather than a false Running.
+func resolveDaemonLiveness(dataDir: String, now: Date = Date()) -> DaemonLiveness {
+    let fm = FileManager.default
+    if let m = (try? fm.attributesOfItem(atPath: dataDir + "/heartbeat.json"))?[.modificationDate] as? Date {
+        return now.timeIntervalSince(m) <= 300 ? .running : .offline   // 5-min window (matches the dashboard)
+    }
+    return fm.fileExists(atPath: dataDir + "/events.db-wal") ? .unknown : .offline
+}
+
 func handleGetStatus() async -> Any {
     let fm = FileManager.default
     let dbPath = dataDir + "/events.db"
     let dbExists = fm.fileExists(atPath: dbPath)
-    let walExists = fm.fileExists(atPath: dbPath + "-wal")
-    let daemonRunning = walExists  // WAL file = active writer
+    let liveness = resolveDaemonLiveness(dataDir: dataDir)
 
     var lines: [String] = ["MacCrab Status"]
     lines.append("═══════════════════════════════════")
-    lines.append("Daemon: \(daemonRunning ? "Running" : "Offline")")
+    switch liveness {
+    case .running: lines.append("Daemon: Running")
+    case .offline: lines.append("Daemon: Offline")
+    case .unknown: lines.append("Daemon: Unknown (no recent heartbeat; database has an active WAL)")
+    }
     lines.append("Database: \(dbExists ? dbPath : "Not found")")
 
     if dbExists {
@@ -2424,14 +2500,14 @@ private func pluginMCPTools() async -> [[String: Any]] {
     for m in await PluginRegistry.shared.manifests() where m.type == .collector {
         for t in m.mcpTools {
             var props: [String: Any] = [
-                "case_id": ["type": "string", "description": "Target case UUID. Create one with forensics.create_case."],
+                "case_id": ["type": "string", "description": "Target case UUID. Create one with forensics_create_case."],
             ]
             for spec in m.inputs where spec.type != .caseID {
                 props[spec.name] = ["type": jsonSchemaType(for: spec.type), "description": spec.description]
             }
             out.append([
                 "name": t.name,
-                "description": "\(t.description) [plugin \(m.id); commits \(t.exposesPrivacyClass.rawValue)-class artifacts into the case — read them with forensics.search_artifacts]",
+                "description": "\(t.description) [plugin \(m.id); commits \(t.exposesPrivacyClass.rawValue)-class artifacts into the case — read them with forensics_search_artifacts]",
                 "inputSchema": [
                     "type": "object",
                     "properties": props,
@@ -2454,19 +2530,19 @@ private func pluginForMCPTool(_ name: String) async -> PluginManifest? {
 /// Run a dynamically-registered plugin tool. It maps to the declaring
 /// collector plugin's run, with the tool's declared inputs threaded
 /// through. Requires `case_id` (the artifact destination); the artifacts
-/// are then read via forensics.search_artifacts / forensics.timeline.
+/// are then read via forensics_search_artifacts / forensics_timeline.
 func handlePluginMCPTool(name: String, manifest: PluginManifest, args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
         let optional = manifest.inputs.filter { $0.type != .caseID }.map { $0.name }
         let extra = optional.isEmpty ? "" : " Inputs: \(optional.joined(separator: ", "))."
-        return toolError("'\(name)' requires 'case_id' (create one with forensics.create_case).\(extra)")
+        return toolError("'\(name)' requires 'case_id' (create one with forensics_create_case).\(extra)")
     }
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
         let inputs = buildPluginInputs(from: args, specs: manifest.inputs)
-        let runner = PluginRunner()
+        let runner = PluginRunner(consent: makeMCPConsentManager())
         let (result, invocationID) = try await runner.runCollector(
             id: manifest.id,
             handle: handle,
@@ -2508,11 +2584,22 @@ func handleForensicsCreateCase(_ args: [String: Any]) async -> Any {
             "case_id": handle.caseID,
             "name": name,
             "encryption": "plaintext",
-            "next_steps": "Run a collector against this case — forensics.run_collector{plugin_id, case_id, inputs} or a per-plugin tool like macho_analyze_path{case_id, path} — then read results with forensics.search_artifacts / forensics.timeline.",
+            "next_steps": "Run a collector against this case — forensics_run_collector{plugin_id, case_id, inputs} or a per-plugin tool like macho_analyze_path{case_id, path} — then read results with forensics_search_artifacts / forensics_timeline.",
         ] as [String: Any])]]]
     } catch {
         return toolError("create_case failed: \(error)")
     }
+}
+
+/// MCP stdout carries ONLY newline-delimited JSON-RPC frames; any stray
+/// non-JSON line desyncs strict hosts (Claude Desktop). The plugin
+/// `LoggingConsentManager` default sink prints `consent: …` to STDOUT, which
+/// interleaved with real frames on the ~29 collector-backed tools (audit P1).
+/// Route those lines to STDERR so the protocol stream stays clean.
+private func makeMCPConsentManager() -> LoggingConsentManager {
+    LoggingConsentManager(sink: { line in
+        FileHandle.standardError.write(Data("consent: \(line)\n".utf8))
+    })
 }
 
 /// Encode a CommittedArtifact as the dict shape MCP tools return.
@@ -2533,6 +2620,21 @@ private func encodeArtifact(_ a: CommittedArtifact) -> [String: Any] {
     ]
     if let s = a.record.summary { out["summary"] = s }
     if let actor = a.record.actor { out["actor"] = actor }
+    // Surface the structured payload — the analyzer
+    // severity/explanation/backed_by, the tcc.grant risk_score/
+    // risk_reason, etc. Without this an agent saw only the one-line
+    // summary and the product's strongest interpretive output never
+    // reached its primary programmatic consumer. The bound on what
+    // leaves the server is the per-handler PRIVACY CEILING, not
+    // redaction: every caller already gated WHICH rows reach here
+    // (metadata always; content only when the case granted AI content
+    // access). Forensic-tool output is intentionally EXEMPT from
+    // sanitizeContent at dispatch (chain-of-custody — see the
+    // isForensicTool branch), so this `data` flows un-redacted by
+    // design, exactly like the existing `summary` / `actor` fields.
+    if !a.record.data.isEmpty {
+        out["data"] = a.record.data.mapValues { $0.foundationValue }
+    }
     return out
 }
 
@@ -2585,11 +2687,12 @@ func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
             "mcp_tools": m.mcpTools.map { t -> [String: Any] in
                 ["name": t.name, "description": t.description, "privacy_class": t.exposesPrivacyClass.rawValue]
             },
-            // Only collector plugins are runnable via the dynamic per-tool
-            // MCP surface today (their declared mcpTools appear in tools/list);
-            // other types declare tools that ship when their run-path lands.
-            "runnable_via_mcp": m.type == .collector,
-            // v1.19.0: forensics.list_plugins enumerates the Tier A first-party
+            // Collectors run via forensics_run_collector (+ their declared
+            // per-tool mcpTools in tools/list); analyzers via
+            // forensics_run_analyzer; enrichers via forensics_enrich.
+            // Fingerprinters have no MCP run-path (use the CLI).
+            "runnable_via_mcp": m.type == .collector || m.type == .analyzer || m.type == .enricher,
+            // v1.19.0: forensics_list_plugins enumerates the Tier A first-party
             // catalog shipped inside the app — all built-in by definition.
             "provenance": PluginProvenance.builtIn.rawValue,
         ]
@@ -2629,7 +2732,7 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
         // transient failure (constructionFailed / consent-denied / etc.) must
         // propagate, never silently re-route to a colliding installed Tier-B id.
         if await PluginRegistry.shared.registration(forID: pluginID) != nil {
-            let runner = PluginRunner()
+            let runner = PluginRunner(consent: makeMCPConsentManager())
             let (result, invocationID) = try await runner.runCollector(
                 id: pluginID, handle: handle, inputs: inputs)
             return payload(result, Int(invocationID), "first-party-builtin")
@@ -2660,6 +2763,83 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
         }
     } catch {
         return toolError("run_collector failed: \(error)")
+    }
+}
+
+func handleForensicsRunAnalyzer(_ args: [String: Any]) async -> Any {
+    guard let pluginID = args["plugin_id"] as? String,
+          let caseID = args["case_id"] as? String else {
+        return toolError("missing required arguments: plugin_id, case_id")
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        guard let reg = await PluginRegistry.shared.registration(forID: pluginID) else {
+            return toolError("analyzer not found: \(pluginID)")
+        }
+        guard reg.manifest.type == .analyzer else {
+            return toolError("plugin \(pluginID) is type=\(reg.manifest.type.rawValue), not analyzer")
+        }
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        let runner = PluginRunner(consent: makeMCPConsentManager())
+        let (findings, invID) = try await runner.runAnalyzer(id: pluginID, handle: handle)
+        let preview = findings.prefix(50).map { f -> [String: Any] in
+            ["finding_type": f.findingType, "severity": f.severity.rawValue, "title": f.title]
+        }
+        return ["content": [["type": "text", "text": jsonStringify([
+            "plugin_id": pluginID,
+            "case_id": caseID,
+            "invocation_id": Int(invID),
+            "findings_emitted": findings.count,
+            "findings": preview,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("run_analyzer failed: \(error)")
+    }
+}
+
+/// Project an EnrichmentValue into a JSONSerialization-compatible value.
+private func enrichmentValueToAny(_ v: EnrichmentValue) -> Any {
+    switch v {
+    case .bool(let b):        return b
+    case .integer(let i):     return i
+    case .double(let d):      return d
+    case .string(let s):      return s
+    case .stringArray(let a): return a
+    case .nil:                return NSNull()
+    }
+}
+
+func handleForensicsEnrich(_ args: [String: Any]) async -> Any {
+    guard let pluginID = args["plugin_id"] as? String,
+          let caseID = args["case_id"] as? String,
+          let path = args["path"] as? String, !path.isEmpty else {
+        return toolError("missing required arguments: plugin_id, case_id, path")
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        guard let reg = await PluginRegistry.shared.registration(forID: pluginID) else {
+            return toolError("enricher not found: \(pluginID)")
+        }
+        guard reg.manifest.type == .enricher else {
+            return toolError("plugin \(pluginID) is type=\(reg.manifest.type.rawValue), not enricher")
+        }
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        let url: URL = path.contains("://") ? (URL(string: path) ?? URL(fileURLWithPath: path)) : URL(fileURLWithPath: path)
+        let runner = PluginRunner(consent: makeMCPConsentManager())
+        let (enrichment, invID) = try await runner.runEnricher(
+            id: pluginID, handle: handle, subject: .path(url), stage: .onDemand)
+        var fields: [String: Any] = [:]
+        for (k, v) in enrichment.fields { fields[k] = enrichmentValueToAny(v) }
+        return ["content": [["type": "text", "text": jsonStringify([
+            "plugin_id": pluginID,
+            "case_id": caseID,
+            "invocation_id": Int(invID),
+            "fields": fields,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("enrich failed: \(error)")
     }
 }
 
@@ -2739,7 +2919,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
             return aiContentBlockedError(
                 caseID: row.id,
                 caseName: row.name,
-                tool: "forensics.get_artifact",
+                tool: "forensics_get_artifact",
                 classRaw: blocked.record.privacyClass.rawValue
             )
         }
@@ -2798,6 +2978,42 @@ func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
         for r in rows {
             byContentType[r.record.contentType, default: 0] += 1
         }
+
+        // Posture findings narrative (from the already-fetched rows; no
+        // re-query). The analyzer's severity + explanation are the most
+        // useful thing a case "explanation" can carry — surface them
+        // instead of leaving the agent with bare content-type counts.
+        let postureRows = rows.filter { $0.record.contentType.hasPrefix("posture.") }
+        var postureBySeverity: [String: Int] = [:]
+        var postureFindings: [[String: Any]] = []
+        for r in postureRows {
+            let sev: String = { if case .string(let s)? = r.record.data["severity"] { return s }; return "unknown" }()
+            postureBySeverity[sev, default: 0] += 1
+            var f: [String: Any] = ["content_type": r.record.contentType, "severity": sev]
+            if let t = r.record.summary { f["title"] = t }
+            if case .string(let e)? = r.record.data["explanation"] { f["explanation"] = e }
+            postureFindings.append(f)
+        }
+
+        // Highest-risk TCC grants by the engine's computed score.
+        let topTCC = rows
+            .filter { $0.record.contentType == "tcc.grant" }
+            .compactMap { r -> (Int, [String: Any])? in
+                guard case .integer(let score)? = r.record.data["risk_score"] else { return nil }
+                var item: [String: Any] = ["risk_score": Int(score)]
+                if case .string(let c)? = r.record.data["client"] { item["client"] = c }
+                if case .string(let s)? = r.record.data["service"] { item["service"] = s }
+                if case .array(let reasons)? = r.record.data["risk_reason"] {
+                    item["risk_reason"] = reasons.compactMap { v -> String? in
+                        if case .string(let rs) = v { return rs }; return nil
+                    }
+                }
+                return (Int(score), item)
+            }
+            .sorted { $0.0 > $1.0 }
+            .prefix(10)
+            .map { $0.1 }
+
         let summary: [String: Any] = [
             "case_id": row.id,
             "case_name": row.name,
@@ -2807,6 +3023,12 @@ func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
             "scheduled_trusted": row.scheduledTrusted,
             "artifact_total": rows.count,
             "artifacts_by_content_type": byContentType,
+            "posture_summary": [
+                "total": postureRows.count,
+                "by_severity": postureBySeverity,
+                "findings": postureFindings,
+            ] as [String: Any],
+            "top_tcc_risks": Array(topTCC),
         ]
         return ["content": [["type": "text", "text": jsonStringify(summary)]]]
     } catch {
@@ -2818,28 +3040,31 @@ func handleForensicsPostureFindings(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
         return toolError("missing required argument: case_id")
     }
-    // v1.13b: stub. The v1.15 posture Analyzer emits posture.*
-    // findings; until that lands, the tool returns an empty array
-    // with a note. Tool surface is reserved so consumers can wire
-    // against it now.
+    // Returns the posture.* findings the posture Analyzer committed
+    // back into the case as artifacts. Each finding carries its
+    // severity + explanation + backed_by in `data` (surfaced by
+    // encodeArtifact). The analyzer runs via the CLI
+    // (`maccrabctl plugin run com.maccrab.forensics.posture-analyzer --case <id>`)
+    // or the dashboard posture / IR scan; an MCP run path lands later.
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
-        // Query any committed `posture.*` artifacts — the v1.15
-        // Analyzer commits findings as artifacts with content_type
-        // posture.<finding_type>. v1.13b finds none; the response
-        // shape is forward-compatible.
+        // posture.* findings are metadata-class by construction
+        // (PluginRunner commits them as .metadata); cap at metadata
+        // defensively so this read can never surface a content-class
+        // artifact even if a future finding type were misclassified.
         let rows = try await handle.store.query(ArtifactQuery(
             caseID: caseID,
+            privacyClassAtMost: .metadata,
             limit: 10_000
         ))
         let findings = rows.filter { $0.record.contentType.hasPrefix("posture.") }.map(encodeArtifact)
         return ["content": [["type": "text", "text": jsonStringify([
             "findings": findings,
             "note": findings.isEmpty
-                ? "No findings yet. The v1.15 posture Analyzer emits posture.* artifacts; until v1.15 ships, this returns an empty array."
-                : "Findings emitted by the v1.15 posture Analyzer.",
+                ? "No posture findings in this case. Run the posture analyzer (`maccrabctl plugin run com.maccrab.forensics.posture-analyzer --case <id>`, or the dashboard posture / IR scan) on a case with tcc.grant + launchd.entry artifacts to generate them."
+                : "Posture findings, each with severity + explanation + backed_by in data.",
         ] as [String: Any])]]]
     } catch {
         return toolError("posture_findings failed: \(error)")
@@ -2932,10 +3157,18 @@ while let line = readLine(strippingNewline: true) {
         sendResponse(id: request.id, result: ["status": "ok"])
     case "tools/call":
         guard let params = request.params?.value as? [String: Any],
-              let toolName = params["name"] as? String else {
+              let rawToolName = params["name"] as? String else {
             sendError(id: request.id, code: -32602, message: "Missing tool name")
             continue
         }
+        // MCP-3: the forensics meta-tools are now advertised with underscores
+        // (forensics_create_case) because strict MCP clients reject '.' in tool
+        // names (^[a-zA-Z0-9_-]+$). Accept the legacy dotted names as aliases by
+        // normalizing here, so dispatch / isForensicTool / the call log all see
+        // the canonical underscore name regardless of which an agent sent.
+        let toolName = rawToolName.hasPrefix("forensics.")
+            ? "forensics_" + rawToolName.dropFirst("forensics.".count)
+            : rawToolName
         let args = params["arguments"] as? [String: Any] ?? [:]
         let reqId = request.id
 
@@ -2952,7 +3185,11 @@ while let line = readLine(strippingNewline: true) {
         // path (SEC-1) would break the round-trip. The path is the operator's
         // own bundle location, so it's exempt — unlike get_agent_session,
         // whose timeline is observability data that stays sanitized.
-        var isForensicTool = toolName.hasPrefix("forensics.")
+        // Forensic ARTIFACT reads are chain-of-custody evidence (paths/hashes
+        // must not be scrubbed). forensics_enrich is the exception — it returns
+        // reputation/telemetry key-values, NOT evidence — so it stays sanitized
+        // like a normal tool.
+        var isForensicTool = (toolName.hasPrefix("forensics_") && toolName != "forensics_enrich")   // normalized above
             || toolName == "export_session_bundle"
             || toolName == "verify_session_bundle"
         DispatchQueue.global().async {
@@ -2977,7 +3214,13 @@ while let line = readLine(strippingNewline: true) {
         // be scrubbed or chain-of-custody breaks. The privacy ceiling
         // already bounds what those tools return (metadata by default;
         // content only with an explicit `allow-ai --content` grant).
-        let response = isForensicTool ? result : sanitizeContent(result)
+        //
+        // MCP-4: but a forensic tool's ERROR text is not evidence — it can
+        // interpolate a raw $HOME/username (e.g. "case not found at /Users/x/…").
+        // So forensic SUCCESS results stay exempt; forensic ERROR results go
+        // through the sanitizer like everything else.
+        let isErrorResult = ((result as? [String: Any])?["isError"] as? Bool) ?? false
+        let response = (isForensicTool && !isErrorResult) ? result : sanitizeContent(result)
         sendResponse(id: reqId, result: response)
     default:
         sendError(id: request.id, code: -32601, message: "Method not found: \(request.method)")

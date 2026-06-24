@@ -244,10 +244,11 @@ an FDA/TCC host.
   metadata-stat / mach-lookup for both a C and a Swift fixture.
 
 **Residual risk:**
-- The runnable third-party lane is **GA-gated and ships fail-closed** until: the
-  publisher anchor is set (offline ceremony), the corpus passes against the exact
-  signed release build, and an **independent external pentest** of the lane
-  clears it. Until then no third-party plugin executes.
+- The runnable third-party lane **ships fail-closed and is disabled by default**:
+  no third-party plugin executes until an operator sets the publisher trust
+  anchor (offline). Operators should independently review the lane against the
+  exact signed build (the corpus must pass) before enabling untrusted third-party
+  code.
 - A check→spawn TOCTOU on the trampoline binary remains (same-uid only — no
   privilege crossing); an fd-pinned (`fexecve`-style) spawn is a tracked
   hardening.

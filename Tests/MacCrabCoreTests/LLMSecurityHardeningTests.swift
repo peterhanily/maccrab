@@ -98,10 +98,13 @@ struct SanitizerIPv6AndComputerTests {
         #expect(out2.contains("[PRIVATE_IPV6]"))
     }
 
-    @Test("Public IPv6 (2001:db8::) is NOT redacted")
+    // Audit P1 (cloud-LLM data-handling): public IPs used to leak — only
+    // private ranges were masked. They are now redacted to [PUBLIC_IPV6].
+    @Test("Public IPv6 (2001:db8::) IS redacted (audit P1 fix)")
     func publicIPv6() {
         let out = LLMSanitizer.sanitize("remote 2001:db8::beef connected")
-        #expect(out.contains("2001:db8"))
+        #expect(out.contains("[PUBLIC_IPV6]"))
+        #expect(!out.lowercased().contains("2001:db8"))
     }
 
     @Test("Mac ComputerName formats are redacted")

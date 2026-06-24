@@ -88,9 +88,9 @@ public struct V2SystemWorkspace: View {
         let dirNote = state.provider.dataDir.map { " · \($0)" } ?? ""
         let subtitle: String
         switch state.provider.mode {
-        case .live:    subtitle = "Reading from MacCrabCore stores\(dirNote)"
-        case .offline: subtitle = "No daemon data yet — start or approve the daemon, then click Reconnect"
-        case .mock:    subtitle = "Sample / mock data (dev build) — start the daemon and click Reconnect"
+        case .live:    subtitle = String(localized: "system.dataSourceLive", defaultValue: "Reading from MacCrabCore stores\(dirNote)")
+        case .offline: subtitle = String(localized: "system.dataSourceOffline", defaultValue: "No daemon data yet — start or approve the daemon, then click Reconnect")
+        case .mock:    subtitle = String(localized: "system.dataSourceMock", defaultValue: "Sample / mock data (dev build) — start the daemon and click Reconnect")
         }
         return HStack(spacing: 12) {
             ZStack {
@@ -103,7 +103,7 @@ public struct V2SystemWorkspace: View {
             .frame(width: 38, height: 38)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
-                    Text("Data source")
+                    Text(String(localized: "system.dataSourceTitle", defaultValue: "Data source"))
                         .scaledSystem(13, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                     V2StatusChip(state.provider.mode.label,
@@ -113,7 +113,7 @@ public struct V2SystemWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                 if let err = state.provider.lastErrorDescription {
-                    Text("Last error: \(err)")
+                    Text(String(localized: "system.lastError", defaultValue: "Last error: \(err)"))
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.warning)
                         .lineLimit(2)
@@ -121,7 +121,7 @@ public struct V2SystemWorkspace: View {
             }
             Spacer()
             if !isLive {
-                V2ActionButton("Reconnect", icon: "arrow.triangle.2.circlepath", style: .secondary) {
+                V2ActionButton(String(localized: "system.reconnect", defaultValue: "Reconnect"), icon: "arrow.triangle.2.circlepath", style: .secondary) {
                     Task { await state.connectLiveData() }
                 }
             }
@@ -142,49 +142,49 @@ public struct V2SystemWorkspace: View {
         let rate = h.map { String(format: "%.1f /s", $0.eventsPerSecond1h) } ?? "—"
         return HStack(spacing: 12) {
             metricCard(
-                title: "Daemon",
-                value: h == nil ? "Offline" : "Running",
-                trend: h.map { "uptime \($0.uptimeDisplay)" } ?? "no heartbeat",
+                title: String(localized: "system.metricDaemon", defaultValue: "Daemon"),
+                value: h == nil ? String(localized: "system.daemonOffline", defaultValue: "Offline") : String(localized: "system.daemonRunning", defaultValue: "Running"),
+                trend: h.map { String(localized: "system.daemonUptime", defaultValue: "uptime \($0.uptimeDisplay)") } ?? String(localized: "system.daemonNoHeartbeat", defaultValue: "no heartbeat"),
                 trendKind: h == nil ? .high : .healthy,
                 icon: h == nil ? "exclamationmark.shield.fill" : "checkmark.shield.fill",
                 iconColor: h == nil ? V2Theme.high : V2Theme.healthy
             )
             metricCard(
-                title: "Collectors",
+                title: String(localized: "system.metricCollectors", defaultValue: "Collectors"),
                 value: h == nil ? "—" : "\(collectorCount)",
-                trend: h == nil ? "—" : (allHealthy ? "all healthy" : "degraded"),
+                trend: h == nil ? "—" : (allHealthy ? String(localized: "system.collectorsAllHealthy", defaultValue: "all healthy") : String(localized: "system.collectorsDegraded", defaultValue: "degraded")),
                 trendKind: allHealthy ? .healthy : .warning,
                 icon: "antenna.radiowaves.left.and.right",
                 iconColor: allHealthy ? V2Theme.healthy : V2Theme.warning
             )
             metricCard(
-                title: "Event rate",
+                title: String(localized: "system.metricEventRate", defaultValue: "Event rate"),
                 value: rate,
-                trend: "1h rolling",
+                trend: String(localized: "system.eventRate1h", defaultValue: "1h rolling"),
                 trendKind: .info,
                 icon: "waveform.path",
                 iconColor: V2Theme.dataAccent
             )
             metricCard(
-                title: "Events (lifetime)",
+                title: String(localized: "system.metricEventsLifetime", defaultValue: "Events (lifetime)"),
                 value: eventsTotal,
-                trend: "since boot",
+                trend: String(localized: "system.sinceBootEvents", defaultValue: "since boot"),
                 trendKind: .info,
                 icon: "tray.full.fill",
                 iconColor: V2Theme.dataAccent
             )
             metricCard(
-                title: "Alerts (lifetime)",
+                title: String(localized: "system.metricAlertsLifetime", defaultValue: "Alerts (lifetime)"),
                 value: alertsTotal,
-                trend: "since boot",
+                trend: String(localized: "system.sinceBootAlerts", defaultValue: "since boot"),
                 trendKind: h == nil ? .neutral : .info,
                 icon: "bell.fill",
                 iconColor: V2Theme.high
             )
             metricCard(
-                title: "Memory",
+                title: String(localized: "system.metricMemory", defaultValue: "Memory"),
                 value: memMB,
-                trend: "resident",
+                trend: String(localized: "system.memoryResident", defaultValue: "resident"),
                 trendKind: .healthy,
                 icon: "memorychip.fill",
                 iconColor: V2Theme.healthy
@@ -201,9 +201,9 @@ public struct V2SystemWorkspace: View {
             // restart or tuning.
             if let truncated = h?.payloadTruncatedTotal, truncated > 0 {
                 metricCard(
-                    title: "Truncations",
+                    title: String(localized: "system.metricTruncations", defaultValue: "Truncations"),
                     value: fmtCount(truncated),
-                    trend: "64KB cap hits",
+                    trend: String(localized: "system.truncationsCapHits", defaultValue: "64KB cap hits"),
                     trendKind: .warning,
                     icon: "scissors",
                     iconColor: V2Theme.warning
@@ -211,9 +211,9 @@ public struct V2SystemWorkspace: View {
             }
             if let dropped = h?.esloggerDroppedTotal, dropped > 0 {
                 metricCard(
-                    title: "ES drops",
+                    title: String(localized: "system.metricEsDrops", defaultValue: "ES drops"),
                     value: fmtCount(dropped),
-                    trend: "buffer gaps",
+                    trend: String(localized: "system.esDropsBufferGaps", defaultValue: "buffer gaps"),
                     trendKind: .warning,
                     icon: "exclamationmark.triangle.fill",
                     iconColor: V2Theme.warning
@@ -233,7 +233,7 @@ public struct V2SystemWorkspace: View {
     /// is reporting (no mock fallback).
     private var collectorsTable: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Collectors").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "system.collectorsSection", defaultValue: "Collectors")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             let rows: [V2CollectorRow] = (heartbeat?.collectors ?? []).map { c in
                 V2CollectorRow(
                     id: c.name, name: c.name,
@@ -244,7 +244,7 @@ public struct V2SystemWorkspace: View {
             if rows.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "tray").foregroundStyle(V2Theme.mutedText)
-                    Text("No daemon heartbeat — start the System Extension or `swift run maccrabd` to see live collector health.")
+                    Text(String(localized: "system.collectorsEmpty", defaultValue: "No daemon heartbeat — start the System Extension or `swift run maccrabd` to see live collector health."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -253,18 +253,18 @@ public struct V2SystemWorkspace: View {
             } else {
                 V2DataTable(
                     columns: [
-                        V2DataColumn(id: "name", title: "Collector", width: .flexible(min: 200)) { c in
+                        V2DataColumn(id: "name", title: String(localized: "system.colCollector", defaultValue: "Collector"), width: .flexible(min: 200)) { c in
                             V2TableCellText(c.name)
                         },
-                        V2DataColumn(id: "status", title: "Status", width: .fixed(110)) { c in
-                            V2StatusChip(c.healthy ? "Healthy" : "Stalled",
+                        V2DataColumn(id: "status", title: String(localized: "system.colStatus", defaultValue: "Status"), width: .fixed(110)) { c in
+                            V2StatusChip(c.healthy ? String(localized: "system.collectorHealthy", defaultValue: "Healthy") : String(localized: "system.collectorStalled", defaultValue: "Stalled"),
                                          kind: c.healthy ? .healthy : .high)
                         },
-                        V2DataColumn(id: "events", title: "Events", width: .fixed(120)) { c in
+                        V2DataColumn(id: "events", title: String(localized: "system.colEvents", defaultValue: "Events"), width: .fixed(120)) { c in
                             V2TableCellText("\(fmtCount(c.eventCount))",
                                             primary: false, mono: true)
                         },
-                        V2DataColumn(id: "last", title: "Last tick", width: .fixed(120)) { c in
+                        V2DataColumn(id: "last", title: String(localized: "system.colLastTick", defaultValue: "Last tick"), width: .fixed(120)) { c in
                             V2TableCellText(
                                 c.lastTick.map(V2TimeFormat.relative) ?? "—",
                                 primary: false
@@ -315,18 +315,18 @@ public struct V2SystemWorkspace: View {
         let info = trustInfo
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Trust substrate").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "system.trustSubstrateSection", defaultValue: "Trust substrate")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
-                V2StatusChip(info?.modeLabel ?? "Not generated",
+                V2StatusChip(info?.modeLabel ?? String(localized: "system.trustNotGenerated", defaultValue: "Not generated"),
                              kind: info?.modeChipKind ?? .neutral,
                              icon: info == nil ? "questionmark.shield.fill" : "lock.shield.fill")
             }
-            Text("MacCrab signs and verifies trace bundles using an ECDSA P-256 keypair. Secure Enclave is preferred; falls back to filesystem when the SE is unavailable. The public key is exported on first run for fleet attestation.")
+            Text(String(localized: "system.trustSubstrateDesc", defaultValue: "MacCrab signs and verifies trace bundles using an ECDSA P-256 keypair. Secure Enclave is preferred; falls back to filesystem when the SE is unavailable. The public key is exported on first run for fleet attestation."))
                 .font(V2Theme.body())
                 .foregroundStyle(V2Theme.neutral)
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("FINGERPRINT").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
+                    Text(String(localized: "system.trustFingerprint", defaultValue: "FINGERPRINT")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
                     Text(info?.fingerprintShort ?? "—")
                         .font(V2Theme.mono())
                         .foregroundStyle(V2Theme.primaryText)
@@ -334,24 +334,24 @@ public struct V2SystemWorkspace: View {
                         .help(info?.fingerprintFull ?? "")
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("KEY SIZE").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
+                    Text(String(localized: "system.trustKeySize", defaultValue: "KEY SIZE")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
                     Text(info?.derSizeLabel ?? "—")
                         .font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("ACTIVATED").font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
+                    Text(String(localized: "system.trustActivated", defaultValue: "ACTIVATED")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)
                     Text(info?.activatedLabel ?? "—")
                         .font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
                 }
                 if info != nil {
                     Spacer()
-                    V2ActionButton("Copy public key", icon: "doc.on.doc", style: .ghost) {
+                    V2ActionButton(String(localized: "system.copyPublicKey", defaultValue: "Copy public key"), icon: "doc.on.doc", style: .ghost) {
                         if let info {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(info.pemString, forType: .string)
                             state.showToast(V2Toast(kind: .success,
-                                                    title: "Public key copied",
-                                                    detail: "PEM-formatted, paste into your fleet attestation tool"))
+                                                    title: String(localized: "system.publicKeyCopiedTitle", defaultValue: "Public key copied"),
+                                                    detail: String(localized: "system.publicKeyCopiedDetail", defaultValue: "PEM-formatted, paste into your fleet attestation tool")))
                         }
                     }
                 }
@@ -378,16 +378,16 @@ public struct V2SystemWorkspace: View {
         let blockingMissing = permissions.filter { $0.required && !$0.granted }.count
         let optionalMissing = permissions.filter { !$0.required && !$0.granted }.count
         return HStack(spacing: 12) {
-            metricCard(title: "Granted", value: "\(granted) / \(permissions.count)",
-                       trend: permissions.isEmpty ? "no data" : "required: \(required)",
+            metricCard(title: String(localized: "system.permGranted", defaultValue: "Granted"), value: "\(granted) / \(permissions.count)",
+                       trend: permissions.isEmpty ? String(localized: "system.permNoData", defaultValue: "no data") : String(localized: "system.permRequiredCount", defaultValue: "required: \(required)"),
                        trendKind: permissions.isEmpty ? .neutral : .healthy,
                        icon: "checkmark.shield.fill", iconColor: V2Theme.healthy)
-            metricCard(title: "Blocking missing", value: "\(blockingMissing)",
-                       trend: blockingMissing == 0 ? "none" : "investigate",
+            metricCard(title: String(localized: "system.permBlockingMissing", defaultValue: "Blocking missing"), value: "\(blockingMissing)",
+                       trend: blockingMissing == 0 ? String(localized: "system.permBlockingNone", defaultValue: "none") : String(localized: "system.permBlockingInvestigate", defaultValue: "investigate"),
                        trendKind: blockingMissing == 0 ? .healthy : .high,
                        icon: "lock.shield", iconColor: blockingMissing == 0 ? V2Theme.healthy : V2Theme.high)
-            metricCard(title: "Optional missing", value: "\(optionalMissing)",
-                       trend: optionalMissing == 0 ? "all set" : "feature off",
+            metricCard(title: String(localized: "system.permOptionalMissing", defaultValue: "Optional missing"), value: "\(optionalMissing)",
+                       trend: optionalMissing == 0 ? String(localized: "system.permOptionalAllSet", defaultValue: "all set") : String(localized: "system.permOptionalFeatureOff", defaultValue: "feature off"),
                        trendKind: .neutral,
                        icon: "questionmark.diamond", iconColor: V2Theme.neutral)
         }
@@ -395,21 +395,21 @@ public struct V2SystemWorkspace: View {
 
     private var permissionsTable: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("TCC permissions").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "system.tccSection", defaultValue: "TCC permissions")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             V2DataTable(
                 columns: [
-                    V2DataColumn(id: "name", title: "Service", width: .flexible(min: 220)) { p in
+                    V2DataColumn(id: "name", title: String(localized: "system.colService", defaultValue: "Service"), width: .flexible(min: 220)) { p in
                         V2TableCellText(p.service)
                     },
-                    V2DataColumn(id: "req", title: "Required", width: .fixed(110)) { p in
-                        V2StatusChip(p.required ? "Yes" : "No",
+                    V2DataColumn(id: "req", title: String(localized: "system.colRequired", defaultValue: "Required"), width: .fixed(110)) { p in
+                        V2StatusChip(p.required ? String(localized: "system.reqYes", defaultValue: "Yes") : String(localized: "system.reqNo", defaultValue: "No"),
                                      kind: p.required ? .high : .neutral)
                     },
-                    V2DataColumn(id: "granted", title: "Granted", width: .fixed(110)) { p in
-                        V2StatusChip(p.granted ? "Yes" : "No",
+                    V2DataColumn(id: "granted", title: String(localized: "system.colGranted", defaultValue: "Granted"), width: .fixed(110)) { p in
+                        V2StatusChip(p.granted ? String(localized: "system.grantedYes", defaultValue: "Yes") : String(localized: "system.grantedNo", defaultValue: "No"),
                                      kind: p.granted ? .healthy : .high)
                     },
-                    V2DataColumn(id: "desc", title: "Reason", width: .flexible(min: 280)) { p in
+                    V2DataColumn(id: "desc", title: String(localized: "system.colReason", defaultValue: "Reason"), width: .flexible(min: 280)) { p in
                         V2TableCellText(p.description, primary: false, lineLimit: 2)
                     },
                 ],
@@ -419,11 +419,11 @@ public struct V2SystemWorkspace: View {
             .frame(minHeight: 280)
             .overlay(alignment: .center) {
                 if permissions.isEmpty {
-                    Text("No permission probes available — daemon not running.")
+                    Text(String(localized: "system.tccEmpty", defaultValue: "No permission probes available — daemon not running."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
             }
-            V2ActionButton("Open Privacy & Security", icon: "arrow.up.right.square", style: .secondary) {
+            V2ActionButton(String(localized: "system.openPrivacySecurity", defaultValue: "Open Privacy & Security"), icon: "arrow.up.right.square", style: .secondary) {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
                     NSWorkspace.shared.open(url)
                 }
@@ -460,16 +460,16 @@ public struct V2SystemWorkspace: View {
             }
             .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Open MacCrab Settings")
+                Text(String(localized: "system.openSettingsTitle", defaultValue: "Open MacCrab Settings"))
                     .scaledSystem(15, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
-                Text("AI backend, notifications, polling, storage retention, response actions, and integrations all live in the canonical Settings window.")
+                Text(String(localized: "system.openSettingsDesc", defaultValue: "AI backend, notifications, polling, storage retention, response actions, and integrations all live in the canonical Settings window."))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            V2ActionButton("Open Settings", icon: "arrow.up.right.square", style: .primary) {
+            V2ActionButton(String(localized: "system.openSettingsButton", defaultValue: "Open Settings"), icon: "arrow.up.right.square", style: .primary) {
                 V2SettingsBridge.openSettings()
             }
         }
@@ -478,31 +478,31 @@ public struct V2SystemWorkspace: View {
 
     private var settingsShortcutsCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Keyboard").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            shortcutRow("⌘ ,", "Open Settings (this window's keyboard shortcut)")
-            shortcutRow("⌘ ⇧ P", "Command palette · Jump to anything")
-            shortcutRow("⌘ K",  "Command palette (alternative)")
-            shortcutRow("⌘ 1 – ⌘ 9", "Switch workspaces")
-            shortcutRow("⌘ [ / ⌘ ]", "Back / Forward")
-            shortcutRow("⌘ R", "Reload events (Events workspace)")
-            shortcutRow("Space", "Pause / resume event stream")
-            shortcutRow("⌥ ← / ⌥ →", "Previous / next trace (TraceGraph)")
-            shortcutRow("Esc", "Close palette / dismiss toast")
+            Text(String(localized: "system.keyboardSection", defaultValue: "Keyboard")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            shortcutRow("⌘ ,", String(localized: "system.shortcutOpenSettings", defaultValue: "Open Settings (this window's keyboard shortcut)"))
+            shortcutRow("⌘ ⇧ P", String(localized: "system.shortcutPalette", defaultValue: "Command palette · Jump to anything"))
+            shortcutRow("⌘ K",  String(localized: "system.shortcutPaletteAlt", defaultValue: "Command palette (alternative)"))
+            shortcutRow("⌘ 1 – ⌘ 9", String(localized: "system.shortcutSwitchWorkspaces", defaultValue: "Switch workspaces"))
+            shortcutRow("⌘ [ / ⌘ ]", String(localized: "system.shortcutBackForward", defaultValue: "Back / Forward"))
+            shortcutRow("⌘ R", String(localized: "system.shortcutReloadEvents", defaultValue: "Reload events (Events workspace)"))
+            shortcutRow("Space", String(localized: "system.shortcutPauseResume", defaultValue: "Pause / resume event stream"))
+            shortcutRow("⌥ ← / ⌥ →", String(localized: "system.shortcutPrevNextTrace", defaultValue: "Previous / next trace (TraceGraph)"))
+            shortcutRow("Esc", String(localized: "system.shortcutClosePalette", defaultValue: "Close palette / dismiss toast"))
         }
         .v2Panel()
     }
 
     private var quickJumpsCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Quick jumps").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "system.quickJumpsSection", defaultValue: "Quick jumps")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             HStack {
-                V2ActionButton("Permissions", icon: "lock.shield", style: .secondary) {
+                V2ActionButton(String(localized: "system.quickJumpPermissions", defaultValue: "Permissions"), icon: "lock.shield", style: .secondary) {
                     state.selectTab(.systemPermissions)
                 }
-                V2ActionButton("Health", icon: "waveform.path.ecg", style: .secondary) {
+                V2ActionButton(String(localized: "system.quickJumpHealth", defaultValue: "Health"), icon: "waveform.path.ecg", style: .secondary) {
                     state.selectTab(.systemHealth)
                 }
-                V2ActionButton("Docs", icon: "book.closed.fill", style: .secondary) {
+                V2ActionButton(String(localized: "system.quickJumpDocs", defaultValue: "Docs"), icon: "book.closed.fill", style: .secondary) {
                     state.goto(V2NavigationDestination(workspace: .docs))
                 }
                 Spacer()

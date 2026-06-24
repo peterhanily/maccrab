@@ -429,8 +429,8 @@
 "welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
 "welcome.feature.prevention" = "Active Prevention";
 "welcome.feature.preventionDesc" = "Blocks malicious domains, quarantines files, and gates supply chain attacks";
-"welcome.feature.privacy" = "Privacy First";
-"welcome.feature.privacyDesc" = "Everything runs locally — no data ever leaves your machine";
+"welcome.feature.privacy" = "Private by default";
+"welcome.feature.privacyDesc" = "Runs on-device by default — nothing leaves your Mac unless you turn on optional enrichment";
 "welcome.setup.engineActive" = "Detection engine active";
 "welcome.setup.prevention" = "Enable prevention in the Prevention tab";
 
@@ -642,7 +642,7 @@
 "settings.llmClaudeHelp" = "Get an API key from console.anthropic.com";
 "settings.llmClaudeKey" = "Anthropic API Key";
 "settings.llmClaudeModel" = "Model";
-"settings.llmCloudPrivacy" = "Sensitive data (usernames, private IPs, hostnames) is automatically redacted before sending.";
+"settings.llmCloudPrivacy" = "Cloud AI is off by default and opt-in. When enabled, sanitized alert context (rule titles, MITRE techniques, process trees, redacted paths) is sent to your chosen provider — Anthropic, OpenAI, Google, or Mistral. Best-effort redaction strips usernames, home paths, and private + public IPs, but it is not a guarantee. Use a local Ollama backend for full privacy.";
 "settings.llmEnable" = "AI Backend";
 "settings.llmEnabled" = "Enable AI-powered analysis";
 "settings.llmGeminiHelp" = "Get an API key from aistudio.google.com";
@@ -784,6 +784,7 @@
 "inspector.builtInSettings" = "Built-in settings";
 "inspector.criticalPath" = "Critical path";
 "inspector.cves" = "CVEs";
+"inspector.d3fend" = "D3FEND defenses";
 "inspector.description" = "Description";
 "inspector.detectionRule" = "Detection rule";
 "inspector.identity" = "Identity";
@@ -801,6 +802,7 @@
 "inspector.triggeringEvent" = "Triggering event";
 "inspector.updateCommand" = "Update command";
 "inspector.whatHappened" = "What happened";
+"inspector.whatToDo" = "What to do";
 "inspector.when" = "When";
 "raveDetail.requires" = "Requires";
 "raveDetail.signedBy" = "Signed by";
@@ -813,3 +815,41 @@
 "forensicsSettings.maintenance" = "Maintenance";
 "forensicsSettings.onDiskLocation" = "On-disk location";
 "forensicsSettings.trustedPublishers" = "Trusted publishers";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "Network enrichment (privacy)";
+"settings.netEnrichHelp" = "MacCrab is on-device by default — none of these make any network request until you turn them on. Local detection (rules, sequences, campaigns, bundled threat-intel) is unaffected. Each lookup below reaches a public service; turn on only what you want.";
+"settings.enrich.threatIntel" = "Threat-intel feeds (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "Download IOC lists (URLhaus / MalwareBazaar / Feodo) every 4 hours. Download-only — nothing about your machine is uploaded.";
+"settings.enrich.vulnScan" = "Vulnerability scan (osv.dev)";
+"settings.enrich.vulnScanDesc" = "Look up CVEs for your installed apps/packages. Sends your software inventory (anonymous, but it is your machine's software list).";
+"settings.enrich.packageFreshness" = "Package freshness (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "Check a package's age when you install one. The lookup reveals the package name you are installing.";
+"settings.enrich.certTransparency" = "Certificate transparency (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "Look up certificates for domains you connect to. The lookup reveals the domain. The local typosquat check still runs either way.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "Optional network enrichment";
+"enrich.intro" = "MacCrab runs fully on-device by default — nothing about your Mac leaves it. Detection (rules, sequences, campaigns, bundled threat-intel) works offline. These four optional lookups each reach a public service to add extra context. They stay off until you turn them on, and you can change this anytime in Settings.";
+"enrich.threatIntel" = "Threat-intel feeds (abuse.ch)";
+"enrich.threatIntelDetail" = "Download IOC lists every 4h. Download-only — nothing about your Mac is uploaded.";
+"enrich.vulnScan" = "Vulnerability scan (osv.dev)";
+"enrich.vulnScanDetail" = "Look up CVEs for installed software. Sends your software inventory (anonymous).";
+"enrich.packageFreshness" = "Package freshness (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "Check a package's age on install. Reveals the package name you install.";
+"enrich.certTransparency" = "Certificate transparency (crt.sh)";
+"enrich.certTransparencyDetail" = "Look up certs for domains you connect to. Reveals the domain.";
+"enrich.keepOff" = "Keep everything off";
+"enrich.enable" = "Enable selected";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "What it is";
+"overview.factorWhy" = "Why it matters";
+"overview.factorFix" = "How to address";
+"overview.factorLearnMore" = "Learn more";
+"overview.factorExpandHint" = "Click for what this means and how to address it";
+"overview.storeTitle" = "Plugin store";
+"overview.storeBrowse" = "Browse →";
+"overview.storeBrowsePrompt" = "Browse signed forensic plugins from the catalog. Installs run fully sandboxed.";
+"raveStore.thirdPartyCatalog.title" = "Signed third-party catalog";
+"raveStore.thirdPartyCatalog.body" = "No third-party plugins are currently listed. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed.";

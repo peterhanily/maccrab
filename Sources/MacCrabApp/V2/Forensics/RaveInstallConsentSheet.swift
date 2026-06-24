@@ -242,7 +242,7 @@ struct RaveInstallConsentSheet: View {
                           systemImage: "checkmark.seal.fill")
                         .font(.caption2).foregroundStyle(.green)
                 } else {
-                    Label("First-party plugin — not yet available for one-click install.",
+                    Label("First-party plugin — not available for one-click install.",
                           systemImage: "seal")
                         .font(.caption2).foregroundStyle(.secondary)
                 }

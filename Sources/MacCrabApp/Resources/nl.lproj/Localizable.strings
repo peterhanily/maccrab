@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Bewaakt AI-codeertools zoals Claude, Cursor en Copilot op toegang tot referenties";
 "welcome.feature.prevention" = "Actieve preventie";
 "welcome.feature.preventionDesc" = "Blokkeert kwaadaardige domeinen, isoleert bestanden en houdt aanvallen via de toeleveringsketen tegen";
-"welcome.feature.privacy" = "Privacy voorop";
-"welcome.feature.privacyDesc" = "Alles draait lokaal — gegevens verlaten nooit je Mac";
+"welcome.feature.privacy" = "Privé door ontwerp";
+"welcome.feature.privacyDesc" = "Draait standaard op het apparaat — niets verlaat je Mac tenzij je de optionele verrijking inschakelt";
 "welcome.setup.engineActive" = "Detectie-engine actief";
 "welcome.setup.prevention" = "Schakel preventie in op het tabblad Preventie";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "Onderhoud";
 "forensicsSettings.onDiskLocation" = "Locatie op schijf";
 "forensicsSettings.trustedPublishers" = "Vertrouwde uitgevers";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "Netwerkverrijking (privacy)";
+"settings.netEnrichHelp" = "MacCrab werkt standaard op het apparaat zelf — geen van deze opties doet een netwerkverzoek totdat je ze inschakelt. Lokale detectie (regels, reeksen, campagnes, meegeleverde threat-intel) wordt niet beïnvloed. Elke opzoeking hieronder bereikt een openbare dienst; schakel alleen in wat je wilt.";
+"settings.enrich.threatIntel" = "Threat-intel-feeds (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "Download elke 4 uur IOC-lijsten (URLhaus / MalwareBazaar / Feodo). Alleen downloaden — er wordt niets over je computer geüpload.";
+"settings.enrich.vulnScan" = "Kwetsbaarheidsscan (osv.dev)";
+"settings.enrich.vulnScanDesc" = "Zoekt CVE's op voor je geïnstalleerde apps/pakketten. Verzendt je software-inventaris (anoniem, maar het is de softwarelijst van je computer).";
+"settings.enrich.packageFreshness" = "Pakketversheid (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "Controleert de leeftijd van een pakket wanneer je er een installeert. De opzoeking onthult de naam van het pakket dat je installeert.";
+"settings.enrich.certTransparency" = "Certificaattransparantie (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "Zoekt certificaten op voor domeinen waarmee je verbinding maakt. De opzoeking onthult het domein. De lokale typosquat-controle draait sowieso.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "Optionele netwerkverrijking";
+"enrich.intro" = "MacCrab draait standaard volledig op het apparaat zelf — niets over je Mac verlaat hem. Detectie (regels, reeksen, campagnes, meegeleverde threat-intel) werkt offline. Deze vier optionele opzoekingen bereiken elk een openbare dienst om extra context toe te voegen. Ze blijven uit totdat je ze inschakelt, en je kunt dit op elk moment wijzigen in Instellingen.";
+"enrich.threatIntel" = "Threat-intel-feeds (abuse.ch)";
+"enrich.threatIntelDetail" = "Download elke 4 u IOC-lijsten. Alleen downloaden — er wordt niets over je Mac geüpload.";
+"enrich.vulnScan" = "Kwetsbaarheidsscan (osv.dev)";
+"enrich.vulnScanDetail" = "Zoekt CVE's op voor geïnstalleerde software. Verzendt je software-inventaris (anoniem).";
+"enrich.packageFreshness" = "Pakketversheid (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "Controleert de leeftijd van een pakket bij installatie. Onthult de naam van het pakket dat je installeert.";
+"enrich.certTransparency" = "Certificaattransparantie (crt.sh)";
+"enrich.certTransparencyDetail" = "Zoekt certificaten op voor domeinen waarmee je verbinding maakt. Onthult het domein.";
+"enrich.keepOff" = "Alles uitgeschakeld laten";
+"enrich.enable" = "Geselecteerde inschakelen";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "Wat het is";
+"overview.factorWhy" = "Waarom het belangrijk is";
+"overview.factorFix" = "Hoe op te lossen";
+"overview.factorLearnMore" = "Meer informatie";
+"overview.factorExpandHint" = "Klik voor uitleg en hoe op te lossen";
+"overview.storeTitle" = "Plugincatalogus";
+"overview.storeBrowse" = "Bladeren →";
+"overview.storeBrowsePrompt" = "Blader door ondertekende forensische plugins uit de catalogus. Installaties worden volledig sandboxed uitgevoerd.";
+"raveStore.thirdPartyCatalog.title" = "Ondertekende catalogus van derden";
+"raveStore.thirdPartyCatalog.body" = "Er zijn momenteel geen plugins van derden vermeld. De ingebouwde scanners hieronder worden meegeleverd met MacCrab en draaien nu op deze Mac — geen installatie nodig.";

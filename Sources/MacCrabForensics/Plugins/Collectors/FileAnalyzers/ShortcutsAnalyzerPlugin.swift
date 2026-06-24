@@ -68,7 +68,8 @@ public struct ShortcutsAnalyzerPlugin: Collector {
             let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
             let mtime = (attrs?[.modificationDate] as? Date) ?? now
             let name = url.deletingPathExtension().lastPathComponent
-            guard let data = try? Data(contentsOf: url) else { continue }
+            guard FileAnalyzerIO.regularFileSize(url) != nil else { rejected += 1; continue }  // SEC-DELTA-1/2
+            guard let data = try? Data(contentsOf: url) else { rejected += 1; continue }
             let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             let recordData: [String: JSONValue] = [
                 "name": .string(name),

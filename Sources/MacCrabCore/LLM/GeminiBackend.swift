@@ -71,6 +71,11 @@ public actor GeminiBackend: LLMBackend {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        // Zero-data-retention / no-train posture: the Gemini API has no
+        // documented request header to opt out of retention/training. Paid-
+        // tier API data is not used for training by default; retention is a
+        // project/account setting, not a per-request flag. Documented in
+        // PRIVACY.md. (Audit P1 finding 2.)
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 60
 

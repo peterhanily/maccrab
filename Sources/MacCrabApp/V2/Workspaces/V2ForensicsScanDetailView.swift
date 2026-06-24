@@ -57,7 +57,7 @@ struct V2ForensicsScanDetailView: View {
             if encryptionState != .plaintext && !unlocked {
                 encryptedNotice.padding(20)
             } else if loading {
-                ProgressView("Loading…")
+                ProgressView(String(localized: "scanDetail.loading", defaultValue: "Loading…"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = error {
                 Text(err).foregroundStyle(.red).scaledSystem(12).padding(20)
@@ -99,7 +99,7 @@ struct V2ForensicsScanDetailView: View {
             if !ctCounts.isEmpty {
                 exportMenu
             }
-            Button("Close") { isPresented = false }
+            Button(String(localized: "scanDetail.close", defaultValue: "Close")) { isPresented = false }
                 .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
@@ -110,27 +110,27 @@ struct V2ForensicsScanDetailView: View {
             Button {
                 Task { await exportNow(.csv) }
             } label: {
-                Label("Export as CSV", systemImage: "tablecells")
+                Label(String(localized: "scanDetail.exportAsCSV", defaultValue: "Export as CSV"), systemImage: "tablecells")
             }
             Button {
                 Task { await exportNow(.json) }
             } label: {
-                Label("Export as JSON", systemImage: "curlybraces")
+                Label(String(localized: "scanDetail.exportAsJSON", defaultValue: "Export as JSON"), systemImage: "curlybraces")
             }
             if case .exported(let url) = exportStatus {
                 Divider()
                 Button {
                     ArtifactExporter.revealInFinder(url)
                 } label: {
-                    Label("Reveal last export in Finder", systemImage: "doc.text.magnifyingglass")
+                    Label(String(localized: "scanDetail.revealLastExport", defaultValue: "Reveal last export in Finder"), systemImage: "doc.text.magnifyingglass")
                 }
             }
         } label: {
-            Label("Export", systemImage: "square.and.arrow.up")
+            Label(String(localized: "scanDetail.export", defaultValue: "Export"), systemImage: "square.and.arrow.up")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Export the scan's evidence")
+        .help(String(localized: "scanDetail.exportHelp", defaultValue: "Export the scan's evidence"))
         .disabled(exportStatus == .exporting)
     }
 
@@ -138,9 +138,9 @@ struct V2ForensicsScanDetailView: View {
 
     private var summaryCard: some View {
         HStack(spacing: 20) {
-            metric("Evidence rows", "\(totalRows)")
-            metric("Content types", "\(ctCounts.count)")
-            metric("State", encryptionState == .plaintext ? "Plaintext" : "Encrypted")
+            metric(String(localized: "scanDetail.metricEvidenceRows", defaultValue: "Evidence rows"), "\(totalRows)")
+            metric(String(localized: "scanDetail.metricContentTypes", defaultValue: "Content types"), "\(ctCounts.count)")
+            metric(String(localized: "scanDetail.metricState", defaultValue: "State"), encryptionState == .plaintext ? String(localized: "scanDetail.statePlaintext", defaultValue: "Plaintext") : String(localized: "scanDetail.stateEncrypted", defaultValue: "Encrypted"))
             Spacer()
             exportStatusView
         }
@@ -162,14 +162,14 @@ struct V2ForensicsScanDetailView: View {
         case .exporting:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Exporting…").scaledSystem(10).foregroundStyle(.secondary)
+                Text(String(localized: "scanDetail.exporting", defaultValue: "Exporting…")).scaledSystem(10).foregroundStyle(.secondary)
             }
         case .exported(let url):
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .scaledSystem(11)
-                Text("Saved to ~/Downloads/\(url.lastPathComponent)")
+                Text(String(localized: "scanDetail.savedTo", defaultValue: "Saved to ~/Downloads/\(url.lastPathComponent)"))
                     .scaledSystem(10)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -190,7 +190,7 @@ struct V2ForensicsScanDetailView: View {
     private var contentTypeSidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Content types")
+                Text(String(localized: "scanDetail.contentTypesHeader", defaultValue: "Content types"))
                     .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
@@ -260,7 +260,7 @@ struct V2ForensicsScanDetailView: View {
     private var viewerArea: some View {
         if let ct = selectedContentType ?? ctCounts.first?.contentType {
             if loadingCT == ct && loadedArtifacts[ct] == nil {
-                ProgressView("Loading \(ScannerDisplay.name(forContentType: ct))…")
+                ProgressView(String(localized: "scanDetail.loadingContentType", defaultValue: "Loading \(ScannerDisplay.name(forContentType: ct))…"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ArtifactViewerDispatcher(
@@ -279,13 +279,13 @@ struct V2ForensicsScanDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").foregroundStyle(.tint)
-                Text("This scan is encrypted")
+                Text(String(localized: "scanDetail.encryptedTitle", defaultValue: "This scan is encrypted"))
                     .scaledSystem(13, weight: .semibold)
             }
-            Text("Unlocking reads the scan's data encryption key from your macOS Keychain. macOS will ask for your password the first time MacCrab accesses it.")
+            Text(String(localized: "scanDetail.encryptedBody", defaultValue: "Unlocking reads the scan's data encryption key from your macOS Keychain. macOS will ask for your password the first time MacCrab accesses it."))
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
-            Button("Unlock + show evidence") {
+            Button(String(localized: "scanDetail.unlockShowEvidence", defaultValue: "Unlock + show evidence")) {
                 Task {
                     unlocked = true
                     await initialLoad()
@@ -300,7 +300,7 @@ struct V2ForensicsScanDetailView: View {
     }
 
     private var emptyEvidence: some View {
-        Text("This scan didn't commit any evidence rows. The scanners ran but found nothing to record, or finished before producing output.")
+        Text(String(localized: "scanDetail.emptyEvidence", defaultValue: "This scan didn't commit any evidence rows. The scanners ran but found nothing to record, or finished before producing output."))
             .scaledSystem(12)
             .foregroundStyle(.secondary)
             .padding(20)
@@ -339,7 +339,7 @@ struct V2ForensicsScanDetailView: View {
                 await loadCT(first)
             }
         } catch {
-            self.error = "Could not load evidence: \(error)"
+            self.error = String(localized: "scanDetail.couldNotLoad", defaultValue: "Could not load evidence: \(error)")
             ctCounts = []
         }
     }
@@ -369,7 +369,7 @@ struct V2ForensicsScanDetailView: View {
     private func exportNow(_ format: ArtifactExporter.Format) async {
         exportStatus = .exporting
         guard let handle = caseHandle else {
-            exportStatus = .failed("No open case handle.")
+            exportStatus = .failed(String(localized: "scanDetail.noOpenCaseHandle", defaultValue: "No open case handle."))
             return
         }
         do {

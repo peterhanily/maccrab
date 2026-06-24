@@ -3,6 +3,75 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.1] — 2026-06-23
+
+A forensic-insight, parity, and polish release. The detection engine now
+surfaces what it computes — to the dashboard, the CLI, and AI agents alike —
+and every interface can drive the core security operations.
+
+### Added
+- Forensic findings now carry their full detail (severity, explanation, backing
+  evidence, TCC risk score) through the MCP tools, the dashboard, and the new
+  `maccrabctl scan findings` / `scan explain` / `scan timeline` commands.
+- Response actions are now configurable from the CLI (`maccrabctl actions`) and
+  MCP (`list_response_actions` / `set_response_action`), not just the dashboard.
+- New CLI commands for parity with the MCP surface: `package` (supply-chain
+  analysis), `ai-alerts`, `scan-text`, `config get/set`, `rule delete` /
+  `rule severity`, `session` (signed agent-session export/verify), and
+  `evidence search` / `evidence show`.
+- AI-Guard "tools observed" table, a live prevention-status strip, and humanized,
+  clickable MITRE ATT&CK + D3FEND references on alerts.
+- Forensic enrichers (threat-intel, code-signing, reputation) are now runnable
+  via MCP (`forensics_enrich`) and the CLI, and analyzers via
+  `forensics_run_analyzer`.
+
+### Changed
+- MCP forensic tools are now underscore-named (`forensics_run_collector`, …) for
+  compatibility with strict MCP clients; the legacy dotted names still work.
+- Dashboard severity now reflects the engine's computed values instead of a flat
+  heuristic; eight high-traffic dashboard surfaces are fully localizable.
+- Alert counts are exact (no longer capped/undercounted on busy hosts); several
+  dashboard refresh paths are gated so the auto-refresh tick is cheaper.
+
+### Fixed
+- Response actions set via any interface now reliably take effect (a config-decode
+  edge previously dropped them on reload).
+- File-analysis collectors are bounded (size cap + streaming hash) and never
+  follow symlinks.
+- Campaign correlation no longer labels routine developer tooling (node_modules
+  CLIs, the Xcode/Swift toolchain, Homebrew, AI coding agents) as multi-stage
+  attacks, and a single alert carrying several MITRE tags is no longer titled a
+  "kill chain" — a chain now requires at least two contributing alerts. Genuine
+  multi-stage activity and critical-severity events still escalate.
+- Supply-chain package detection no longer mints alerts from the word "install"
+  appearing inside an unrelated command (e.g. `python3 -c "…"`); extracted
+  package names are validated before any registry lookup.
+- The canonical `scan` namespace now dispatches `findings` / `explain` /
+  `timeline` / `artifacts` (previously only the deprecated `case` alias did).
+- `maccrabctl scan new` now creates a case out of the box: the CLI defaults to a
+  plaintext (metadata-tier) case — encrypted cases need the dashboard app's
+  keychain — with a clear note, and `--encrypt` gives actionable guidance instead
+  of a raw `-34018`.
+- The MCP server keeps stdout to pure JSON-RPC frames (plugin consent lines now
+  go to stderr), so strict hosts no longer desync.
+- `maccrabctl campaigns` / `tree-score` no longer crash on a negative count
+  argument; `rollup` reports storage deltas correctly; CLI `hunt` searches
+  network destination IPs; error paths in `cdhash` / `why` / `allow add` exit
+  non-zero for scripting.
+- The Security Score's "active alerts" factor reflects the real recent
+  critical/high volume instead of a placeholder; `report` humanizes ATT&CK
+  technique names and separates non-MITRE extensions from the official taxonomy.
+
+### Security
+- Plugin uninstall is now confirmation-gated; forensic tool error messages are
+  sanitized; daemon status reports liveness from heartbeat recency.
+
+### Removed
+- Unused Objective-See log-ingestion readers (BlockBlock / KnockKnock /
+  Little Snitch / LuLu) from the security-tool integration layer. Detection of
+  those tools (name + version) is unchanged; only the never-wired log parsers
+  were removed. The `.lsrules` threat-intel export is retained.
+
 ## [1.19.0] — 2026-06-17
 
 A detection-quality and trust release: far fewer false alerts, an
@@ -46,9 +115,8 @@ end-to-end-verified plugin catalog, and bounded storage.
 - **Honest first-run dashboard.** Before the engine has produced data
   (a fresh install, or before the system extension is approved), the
   dashboard shows an empty/offline state instead of sample data.
-- **Plugin catalog shows only active, installable plugins**, with a
-  clear pre-launch ("coming soon") state until plugins are published —
-  matching the website.
+- **Plugin catalog shows only active, installable plugins**, with the
+  in-app browser verifying trust end to end.
 - **Bundled threat-intelligence set curated to verified indicators**;
   current indicators are delivered by the live feeds, reducing false
   positives.

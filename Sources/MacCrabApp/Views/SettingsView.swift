@@ -34,6 +34,14 @@ struct SettingsView: View {
     @AppStorage("agentCapConfig") private var agentCapConfig: Bool = false
     @AppStorage("agentCapAuthoring") private var agentCapAuthoring: Bool = false
     @AppStorage("agentCapResponse") private var agentCapResponse: Bool = false
+    // v1.19.1 network-enrichment privacy opt-ins. All OFF by default — MacCrab
+    // is on-device by default; nothing about your machine leaves it until you
+    // flip one of these. The daemon defaults match (DaemonConfig defaults are
+    // false), and these same keys back the first-run prompt + the Intel card.
+    @AppStorage("enrich.threatIntel")      private var enrichThreatIntel: Bool = false
+    @AppStorage("enrich.vulnScan")         private var enrichVulnScan: Bool = false
+    @AppStorage("enrich.packageFreshness") private var enrichPackageFreshness: Bool = false
+    @AppStorage("enrich.certTransparency") private var enrichCertTransparency: Bool = false
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
     // Launch at login is backed by macOS's ServiceManagement framework —
     // the @AppStorage value mirrors the registration state, so we can
@@ -540,6 +548,47 @@ struct SettingsView: View {
                             }
                         }
                         .onChange(of: agentCapResponse) { _ in syncAgentCapabilities() }
+                    }
+                    .padding(8)
+                }
+
+                GroupBox(String(localized: "settings.netEnrich", defaultValue: "Network enrichment (privacy)")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(String(localized: "settings.netEnrichHelp", defaultValue: "MacCrab is on-device by default — none of these make any network request until you turn them on. Local detection (rules, sequences, campaigns, bundled threat-intel) is unaffected. Each lookup below reaches a public service; turn on only what you want."))
+                            .font(.caption).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle(isOn: $enrichThreatIntel) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.enrich.threatIntel", defaultValue: "Threat-intel feeds (abuse.ch)"))
+                                Text(String(localized: "settings.enrich.threatIntelDesc", defaultValue: "Download IOC lists (URLhaus / MalwareBazaar / Feodo) every 4 hours. Download-only — nothing about your machine is uploaded."))
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        .onChange(of: enrichThreatIntel) { _ in syncEnrichmentOverrides() }
+                        Toggle(isOn: $enrichVulnScan) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.enrich.vulnScan", defaultValue: "Vulnerability scan (osv.dev)"))
+                                Text(String(localized: "settings.enrich.vulnScanDesc", defaultValue: "Look up CVEs for your installed apps/packages. Sends your software inventory (anonymous, but it is your machine's software list)."))
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        .onChange(of: enrichVulnScan) { _ in syncEnrichmentOverrides() }
+                        Toggle(isOn: $enrichPackageFreshness) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.enrich.packageFreshness", defaultValue: "Package freshness (npm / PyPI / Homebrew / crates)"))
+                                Text(String(localized: "settings.enrich.packageFreshnessDesc", defaultValue: "Check a package's age when you install one. The lookup reveals the package name you are installing."))
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        .onChange(of: enrichPackageFreshness) { _ in syncEnrichmentOverrides() }
+                        Toggle(isOn: $enrichCertTransparency) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.enrich.certTransparency", defaultValue: "Certificate transparency (crt.sh)"))
+                                Text(String(localized: "settings.enrich.certTransparencyDesc", defaultValue: "Look up certificates for domains you connect to. The lookup reveals the domain. The local typosquat check still runs either way."))
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        .onChange(of: enrichCertTransparency) { _ in syncEnrichmentOverrides() }
                     }
                     .padding(8)
                 }
@@ -1380,48 +1429,36 @@ struct SettingsView: View {
     /// file can never perturb security-sensitive settings (thresholds,
     /// outputs, LLM provider).
     private func syncStorageOverrides() {
-        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
-        let path = configDir + "/user_overrides.json"
-
-        let payload: [String: Any] = [
-            "storage": [
-                "eventsHotTierMinutes":  eventsHotTierMinutes,
-                "eventsMaxSizeMB":       eventsMaxSizeMB,
-                "alertsRetentionDays":   alertsRetentionDays,
-                "alertsMaxSizeMB":       alertsMaxSizeMB,
+        // v1.19.1: route through the merge-safe shared writer so this storage
+        // block no longer clobbers the top-level network-enrichment flags that
+        // share user_overrides.json, and reload via the cross-uid-safe inbox
+        // path. (The old bare `pkill -HUP com.maccrab.agent` here was EPERM
+        // against the root sysext + hardened-runtime-blocked, so it never
+        // actually reloaded release builds — reloadDetectionRules() fixes that.)
+        _ = V2DaemonControl.writeUserOverrides { obj in
+            obj["storage"] = [
+                "eventsHotTierMinutes":   eventsHotTierMinutes,
+                "eventsMaxSizeMB":        eventsMaxSizeMB,
+                "alertsRetentionDays":    alertsRetentionDays,
+                "alertsMaxSizeMB":        alertsMaxSizeMB,
                 "campaignsRetentionDays": campaignsRetentionDays,
-                "campaignsMaxSizeMB":    campaignsMaxSizeMB,
+                "campaignsMaxSizeMB":     campaignsMaxSizeMB,
             ]
-        ]
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.prettyPrinted, .sortedKeys]
-        ) else { return }
-
-        // Atomic write so the daemon's overlay reader never catches
-        // a half-written file during the 50 ms between slider moves.
-        let tmp = path + ".tmp"
-        do {
-            try data.write(to: URL(fileURLWithPath: tmp))
-            _ = try? FileManager.default.removeItem(atPath: path)
-            try FileManager.default.moveItem(atPath: tmp, toPath: path)
-        } catch {
-            return
         }
+        _ = V2DaemonControl.reloadDetectionRules()
+    }
 
-        // Nudge the sysext to reload. Best-effort: if the sysext
-        // isn't running or pkill isn't permitted we silently fall
-        // through — the new value will still land the next time
-        // the daemon starts or on the next hourly tick (the size-
-        // cap timer now reads `state.maxDatabaseSizeMB` live, but
-        // only the SIGHUP path reloads it from disk).
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "com.maccrab.agent"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        try? task.run()
+    /// v1.19.1: persist the four opt-in network-enrichment flags + ask the
+    /// daemon to re-read live. All four surfaces (this Settings section, the
+    /// first-run prompt, the Intel card) bind the SAME @AppStorage("enrich.*")
+    /// keys and funnel through this one helper so state can't diverge.
+    private func syncEnrichmentOverrides() {
+        _ = V2DaemonControl.applyEnrichmentFlags(
+            threatIntel: enrichThreatIntel,
+            vulnScan: enrichVulnScan,
+            packageFreshness: enrichPackageFreshness,
+            certTransparency: enrichCertTransparency
+        )
     }
 
     /// v1.11.0 RC2 ship-blocker fix: 500ms debounce around

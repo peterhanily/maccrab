@@ -31,6 +31,11 @@ struct MacCrabApp: App {
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @State private var showWelcome = false
+    // v1.19.1: one-time opt-in prompt for the (off-by-default) network
+    // enrichment feeds. Shown once after first-run setup, or once for returning
+    // installs that predate it. Dismissing it enables NOTHING.
+    @AppStorage("hasSeenEnrichmentPrompt") private var hasSeenEnrichmentPrompt = false
+    @State private var showEnrichmentPrompt = false
     /// O3c (S2-07): a parsed, validated `maccrab://install/...` deep link
     /// awaiting operator consent. Non-nil presents the consent sheet; the
     /// scheme handler NEVER installs without this explicit confirm step.
@@ -124,10 +129,22 @@ struct MacCrabApp: App {
                     LaunchAtLogin.reconcile(preferenceEnabled: launchAtLogin)
                     if !hasCompletedSetup {
                         showWelcome = true
+                    } else if !hasSeenEnrichmentPrompt {
+                        // Returning install that predates the prompt — show the
+                        // one-time enrichment opt-in directly (no Welcome to
+                        // chain it after).
+                        showEnrichmentPrompt = true
                     }
                 }
-                .sheet(isPresented: $showWelcome) {
+                .sheet(isPresented: $showWelcome, onDismiss: {
+                    // First-run setup done — now show the one-time enrichment
+                    // opt-in (chained so the two sheets never overlap).
+                    if !hasSeenEnrichmentPrompt { showEnrichmentPrompt = true }
+                }) {
                     WelcomeView(isPresented: $showWelcome, sysextManager: sysextManager)
+                }
+                .sheet(isPresented: $showEnrichmentPrompt) {
+                    EnrichmentOptInView(isPresented: $showEnrichmentPrompt)
                 }
                 // Pause AppState's 10-second DB poll when the dashboard
                 // window is hidden or the app is backgrounded. MacCrab is

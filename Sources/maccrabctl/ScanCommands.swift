@@ -44,6 +44,12 @@ func dispatchScan(args: [String]) async {
         await scanRunAll(args: rest)
     case "export":
         await scanExport(args: rest)
+    // The forensic read loop (findings / explain / timeline / artifacts) and the
+    // AI-disclosure verbs are part of the canonical `scan` namespace, not just
+    // the deprecated `case` alias. Delegate to the shared CaseCommands handlers
+    // so `maccrabctl scan findings <id>` works as `--help` advertises.
+    case "findings", "explain", "timeline", "artifacts", "allow-ai", "mark-trusted-scheduled":
+        await dispatchCase(args: [sub] + rest)
     case "delete":
         await dispatchCase(args: ["delete"] + rest)
     case "help", "-h", "--help":
@@ -67,7 +73,8 @@ func printScanUsage() {
                                         Preselects an appropriate plugin set
                                         + privacy ceiling.
         [--window <dur>]                Bound the scan's evidence window.
-        [--no-encrypt]                  Plaintext scan (rare; metadata only).
+        [--encrypt]                     Attempt an encrypted case (dashboard only;
+                                        the CLI is metadata-tier plaintext by default).
       list                              List scans (newest first).
       show <scan-id>                    Show scan metadata + run history.
       run <scan-id>                     Run one or more plugins on a scan.
@@ -119,19 +126,12 @@ private func scanRun(args: [String]) async {
 }
 
 private func scanRunAll(args: [String]) async {
-    // v1.17 rc.1: scan run-all is a placeholder that hints at
-    // the unified plugin invocation. Full implementation lands
-    // in rc.3 alongside the wizard.
-    print("scan run-all: not yet implemented (lands in v1.17.0-rc.3 alongside the 'Start a scan' wizard).")
-    print("Until then: maccrabctl scan run <scan-id> --plugin <plugin-id> per plugin.")
+    print("scan run-all: not yet implemented.")
+    print("Run plugins individually: maccrabctl scan run <scan-id> --plugin <plugin-id>.")
     exit(2)
 }
 
 private func scanExport(args: [String]) async {
-    // v1.17 rc.1: scan export hints at the evidence bundle flow
-    // that lands in rc.3 (the .maccrabevidence container is the
-    // rename of the existing .maccrabtrace bundle format).
-    print("scan export: not yet implemented (lands in v1.17.0-rc.3).")
-    print("Until then: maccrabctl trace bundle export <case-id> produces a .maccrabtrace bundle.")
+    print("scan export: not yet implemented.")
     exit(2)
 }

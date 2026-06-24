@@ -58,6 +58,18 @@ struct TierBFileBrokerTests {
         #expect(TierBFileBroker.resolve("/a/toolong", policy: small) == nil)   // over cap
     }
 
+    @Test("STAB-2: a path deeper than the component ceiling is rejected; a shallow one isn't")
+    func depthCeiling() {
+        let big = 8192
+        // 65 components > maxPathDepth (64) → rejected, even within the byte cap.
+        let deep = "/" + Array(repeating: "a", count: TierBFileBroker.maxPathDepth + 1).joined(separator: "/")
+        #expect(!TierBFileBroker.isValidRequestPath(deep, maxBytes: big))
+        // Exactly at the ceiling → allowed.
+        let atCap = "/" + Array(repeating: "a", count: TierBFileBroker.maxPathDepth).joined(separator: "/")
+        #expect(TierBFileBroker.isValidRequestPath(atCap, maxBytes: big))
+        #expect(TierBFileBroker.isValidRequestPath("/a/b/c", maxBytes: big))
+    }
+
     @Test("relativeComponents is component-wise (no string-prefix false positives)")
     func relComponents() {
         #expect(TierBFileBroker.relativeComponents(of: "/a/b/c", under: "/a/b") == ["c"])

@@ -45,7 +45,11 @@ func runRollup(olderThanHours: Double, dbPathOverride: String? = nil) async {
         let elapsed = Date().timeIntervalSince(started)
         print("Tier rollup: complete")
         print("  Pruned: \(pruned) events older than \(Int(olderThanHours))h")
-        print("  Size:   \(beforeSize) MB → \(afterSize) MB (\(beforeSize - afterSize) MB freed)")
+        // afterSize can exceed beforeSize (WAL drain / vacuum repack on a busy
+        // DB), so report the signed delta honestly: "freed" only when it shrank.
+        let delta = beforeSize - afterSize
+        let deltaStr = delta >= 0 ? "-\(delta) MB freed" : "+\(-delta) MB grew"
+        print("  Size:   \(beforeSize) MB → \(afterSize) MB (\(deltaStr))")
         print("  Took:   \(String(format: "%.2f", elapsed))s")
     } catch {
         print("Tier rollup FAILED: \(error.localizedDescription)")

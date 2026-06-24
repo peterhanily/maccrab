@@ -76,6 +76,30 @@ struct V2HeartbeatSnapshotTests {
         #expect(snap.eventsPerSecond1h == 0.0)
     }
 
+    // MARK: - prevention block (UX-3)
+
+    @Test("prevention block decodes three modules; absent → nil; partial → safe defaults")
+    func preventionDecode() {
+        let raw: [String: Any] = [
+            "sinkhole": ["enabled": true, "count": 5],
+            "network_blocker": ["enabled": false, "count": 0],
+            "persistence_guard": ["enabled": true, "count": 3],
+        ]
+        let p = V2HeartbeatSnapshot.Prevention(from: raw)
+        #expect(p?.sinkhole.enabled == true)
+        #expect(p?.sinkhole.count == 5)
+        #expect(p?.networkBlocker.enabled == false)
+        #expect(p?.persistenceGuard.count == 3)
+        // Older daemon (no prevention block) → nil so the UI shows
+        // "status unavailable" instead of a false reading, no crash.
+        #expect(V2HeartbeatSnapshot.Prevention(from: nil) == nil)
+        // Malformed/partial block → safe defaults, never a crash.
+        let partial = V2HeartbeatSnapshot.Prevention(from: ["sinkhole": ["enabled": true]])
+        #expect(partial?.sinkhole.enabled == true)
+        #expect(partial?.sinkhole.count == 0)
+        #expect(partial?.networkBlocker.enabled == false)
+    }
+
     // MARK: - readFreshest behavior
 
     @Test("readFreshest returns nil when no candidate heartbeat exists")
@@ -111,7 +135,8 @@ struct V2HeartbeatSnapshotTests {
             collectors: [],
             payloadTruncatedTotal: 0,
             esloggerDroppedTotal: 0,
-            llm: nil
+            llm: nil,
+            prevention: nil
         )
     }
 }

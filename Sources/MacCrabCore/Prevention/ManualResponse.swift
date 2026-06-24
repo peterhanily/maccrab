@@ -17,6 +17,13 @@
 //
 // All three throw typed errors so the UI can show actionable feedback
 // instead of generic "failed" toasts.
+//
+// STATUS (ORPH-5): this is a documented-reserved, safety-gated, tested API.
+// It is intentionally not wired to a one-click dashboard affordance yet —
+// the Prevention workspace is review/configure-only, and the automated,
+// rule-driven ResponseEngine is the shipping containment path. Kept (not
+// removed) because the implementation + tests are complete; a confirm-gated
+// manual-trigger UI is deferred feature work, not dead code.
 
 import Foundation
 import Darwin

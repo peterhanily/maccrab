@@ -45,6 +45,10 @@ public actor MistralBackend: LLMBackend {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        // Zero-data-retention / no-train posture: the Mistral API has no
+        // documented request header to opt out of retention/training;
+        // it is governed by the account/plan terms, not a per-request flag.
+        // Documented in PRIVACY.md. (Audit P1 finding 2.)
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 

@@ -137,6 +137,12 @@ public actor ThreatIntelFeed {
     /// Whether auto-update is running.
     private var isRunning = false
 
+    /// v1.19.1: count of network-fetch attempts (incremented at the top of
+    /// updateAllFeeds). Lets tests assert a disabled feed performs ZERO
+    /// outbound fetches — the off-by-default privacy invariant. Internal so
+    /// `@testable import` can read it.
+    private(set) var networkFetchAttempts = 0
+
     /// Per-category caps. Bound the cache so a runaway feed (or a
     /// hypothetical malicious mirror) can't drive unbounded heap or
     /// disk growth. Beyond the cap the oldest-by-`lastSeenInFeed`
@@ -224,9 +230,7 @@ public actor ThreatIntelFeed {
     // MARK: - Public API
 
     /// Start auto-updating feeds in the background.
-    public func start() async {
-        isRunning = true
-
+    public func start(networkRefresh: Bool = true) async {
         // v1.12.6 Wave 9F: load cache + operator drop-ins BEFORE
         // returning so DaemonSetup's subsequent `BundledThreatIntel.
         // loadInto(...)` + `persistCacheNow()` see the hydrated state.
@@ -236,6 +240,11 @@ public actor ThreatIntelFeed {
         // bundled-only IOCs (losing network feed data from prior
         // boots). Awaiting these two steps inline is cheap (single
         // file read + dir scan); the network fetch stays async.
+        //
+        // v1.19.1: this LOCAL hydration always runs — it makes NO network
+        // request — so detection has bundled + cached + operator-drop-in IOCs
+        // even when network refresh is off. Only the periodic abuse.ch fetch
+        // (`updateAllFeeds`) is gated by the opt-in `networkRefresh` flag.
         await loadCachedFeeds()
 
         // v1.9 Phase-5.7 (TI-M7): wire the operator's drop-in
@@ -246,17 +255,32 @@ public actor ThreatIntelFeed {
         // the age-eviction (source == "Custom" survives).
         loadCustomIOCFiles()
 
-        // Periodic network refresh in a background Task — does not
-        // block the daemon's setup chain.
+        if networkRefresh {
+            startNetworkRefresh()
+        }
+    }
+
+    /// Launch the periodic abuse.ch network-refresh loop (immediate fetch, then
+    /// every `updateInterval`). Idempotent: a call while already running is a
+    /// no-op. The actual OUTBOUND request lives only in `updateAllFeeds()`.
+    private func startNetworkRefresh() {
+        guard !isRunning else { return }
+        isRunning = true
         Task {
             await updateAllFeeds()
-
             while isRunning {
                 try? await Task.sleep(nanoseconds: UInt64(updateInterval * 1_000_000_000))
                 guard isRunning else { break }
                 await updateAllFeeds()
             }
         }
+    }
+
+    /// v1.19.1: live toggle for the opt-in network refresh. Enabling starts the
+    /// loop (with an immediate fetch); disabling halts it so egress stops
+    /// without a daemon restart. Wired from the SIGHUP config-reload handler.
+    public func setNetworkRefresh(_ enabled: Bool) {
+        if enabled { startNetworkRefresh() } else { isRunning = false }
     }
 
     /// v1.12.6 Wave 9F: persist the current in-memory IOC set to
@@ -282,6 +306,12 @@ public actor ThreatIntelFeed {
     /// "Refresh Now" button so analysts don't have to wait the full
     /// 4 h cadence after editing custom IOCs or after a feed outage.
     public func refreshNow() async {
+        // v1.19.1: a no-op when the opt-in network refresh isn't running
+        // (threat-intel disabled → isRunning false). This gates EVERY caller —
+        // the SIGHUP handler, the refresh-intel inbox request, and the
+        // dashboard's "Refresh Now" button — so none of them can egress to
+        // abuse.ch while threat-intel enrichment is off.
+        guard isRunning else { return }
         await updateAllFeeds()
     }
 
@@ -627,6 +657,7 @@ public actor ThreatIntelFeed {
     // MARK: - Feed Updates
 
     private func updateAllFeeds() async {
+        networkFetchAttempts += 1   // v1.19.1: every outbound-fetch attempt (privacy invariant test seam)
         logger.info("Updating threat intelligence feeds…")
         var totalNew = 0
         var anySuccess = false

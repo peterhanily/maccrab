@@ -510,6 +510,38 @@ public actor CampaignDetector {
         return isAutoUpdater(processPath: path)
     }
 
+    /// v1.19.1 (HN-audit): developer-tooling / package-manager runtime paths
+    /// whose binaries routinely span multiple MITRE tactics on a clean dev box
+    /// (node_modules CLIs — esbuild / workerd / wrangler — the Swift+Xcode
+    /// toolchain incl. swiftpm-testing-helper, Homebrew Cellar, the Rust
+    /// toolchain, and AI coding agents under ~/.local / ~/.claude). Distinct
+    /// from `isKnownBenignProcess` (Apple daemons + updaters): these are
+    /// user-space dev tools, but their multi-tactic base rate is high enough
+    /// that letting their sub-CRITICAL alerts feed campaign correlation minted
+    /// the audit's "esbuild is a 3-tactic C2 chain" / "workerd is a Persistent
+    /// Threat Actor" FPs on the launch audience's own machines. CRITICAL alerts
+    /// STILL feed — a genuine compromise of a dev tool (real credential theft,
+    /// not a 404-package guess) must still escalate.
+    public static func isDevelopmentToolingPath(_ processPath: String?) -> Bool {
+        guard let path = processPath else { return false }
+        let needles = [
+            "/node_modules/", "/.npm/", "/.pnpm/", "/.yarn/", "/.nvm/",
+            "/Xcode.app/", "/Library/Developer/", "swiftpm-testing-helper",
+            "/.build/", "/DerivedData/",
+            "/Cellar/", "/opt/homebrew/",
+            "/.cargo/", "/.rustup/",
+            "/.local/share/claude", "/.claude/",
+            "/.vscode/", "/.cursor/",
+        ]
+        return needles.contains { path.contains($0) }
+    }
+
+    /// True when a dev-tooling alert is below CRITICAL and so must not feed
+    /// campaign tactic-counting (see `isDevelopmentToolingPath`).
+    private func isSubCriticalDevTooling(_ alert: AlertSummary) -> Bool {
+        alert.severity < .critical && Self.isDevelopmentToolingPath(alert.processPath)
+    }
+
     /// v1.19 (S1-T4): true when an alert must NOT contribute a tactic toward a
     /// kill-chain / coordinated-attack campaign because its subject is trusted
     /// (notarized Developer-ID / first-party / Apple platform binary) OR the
@@ -550,7 +582,21 @@ public actor CampaignDetector {
             // alerts from tactic-counting (HIGH/CRITICAL still feed). Stops the
             // FP kill-chains on swiftpm-testing-helper / Xcode helpers / agents.
             && !isLowSignalTrustedOrAgent($0)
+            // v1.19.1 (HN-audit): exclude sub-CRITICAL alerts from dev-tooling
+            // paths (node_modules / Xcode / homebrew / AI agents) — their
+            // multi-tactic base rate minted "esbuild is an APT" chains.
+            && !isSubCriticalDevTooling($0)
         }
+        // v1.19.1 (HN-audit): a kill chain is multi-STAGE — require at least two
+        // distinct contributing alerts. A single alert that carries multiple
+        // MITRE tactic tags is one event, not a chain; titling it a
+        // "Malware Installation Chain" was the audit's "1 alert → APT" FP.
+        // EXCEPTION (rc.9 review): a single CRITICAL multi-tactic alert (e.g. a
+        // confirmed credential+persistence+C2 match) is severe enough to escalate
+        // to a campaign on its own — it gets the campaign-tier LLM deep
+        // investigation. A single SUB-critical multi-tag alert is still not a chain.
+        let hasCriticalContributor = tacticContributingAlerts.contains { $0.severity == .critical }
+        guard tacticContributingAlerts.count >= 2 || hasCriticalContributor else { return nil }
         let allTactics = Set(tacticContributingAlerts.flatMap(\.tactics).map(normalizeTactic))
         guard allTactics.count >= 2 else { return nil }
 
@@ -759,6 +805,11 @@ public actor CampaignDetector {
             && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
             && !Self.isKnownBenignProcess(processPath: $0.processPath)
             && !isLowSignalTrustedOrAgent($0)
+            // v1.19.1 (HN-audit): same dev-tooling carve-out as checkKillChain —
+            // sub-CRITICAL alerts from node_modules / Xcode / homebrew / AI agents
+            // minted CRITICAL "Persistent Threat Actor" campaigns (workerd,
+            // swiftpm-testing-helper, Claude Code). CRITICAL still feeds.
+            && !isSubCriticalDevTooling($0)
         }
 
         // v1.17.4 / CAMP-1: an AI coding tool legitimately querying the

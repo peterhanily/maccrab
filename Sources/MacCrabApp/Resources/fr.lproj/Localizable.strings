@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Surveille l'accès aux identifiants par les outils de codage IA comme Claude, Cursor et Copilot";
 "welcome.feature.prevention" = "Prévention active";
 "welcome.feature.preventionDesc" = "Bloque les domaines malveillants, met les fichiers en quarantaine et contrôle les attaques de la chaîne d'approvisionnement";
-"welcome.feature.privacy" = "Confidentialité avant tout";
-"welcome.feature.privacyDesc" = "Tout s'exécute localement — aucune donnée ne quitte jamais votre machine";
+"welcome.feature.privacy" = "Confidentiel par défaut";
+"welcome.feature.privacyDesc" = "Fonctionne sur l'appareil par défaut — rien ne quitte votre Mac sauf si vous activez l'enrichissement facultatif";
 "welcome.setup.engineActive" = "Moteur de détection actif";
 "welcome.setup.prevention" = "Activez la prévention dans l'onglet Prévention";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "Maintenance";
 "forensicsSettings.onDiskLocation" = "Emplacement sur le disque";
 "forensicsSettings.trustedPublishers" = "Éditeurs approuvés";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "Enrichissement réseau (confidentialité)";
+"settings.netEnrichHelp" = "MacCrab fonctionne sur l'appareil par défaut — aucune de ces options n'effectue de requête réseau tant que vous ne l'activez pas. La détection locale (règles, séquences, campagnes, renseignements sur les menaces fournis) n'est pas affectée. Chaque recherche ci-dessous atteint un service public ; n'activez que ce que vous souhaitez.";
+"settings.enrich.threatIntel" = "Flux de renseignements sur les menaces (abuse.ch)";
+"settings.enrich.threatIntelDesc" = "Télécharge les listes d'IOC (URLhaus / MalwareBazaar / Feodo) toutes les 4 heures. Téléchargement seul — rien concernant votre machine n'est envoyé.";
+"settings.enrich.vulnScan" = "Analyse de vulnérabilités (osv.dev)";
+"settings.enrich.vulnScanDesc" = "Recherche les CVE de vos applis/paquets installés. Envoie l'inventaire de vos logiciels (anonyme, mais c'est la liste des logiciels de votre machine).";
+"settings.enrich.packageFreshness" = "Fraîcheur des paquets (npm / PyPI / Homebrew / crates)";
+"settings.enrich.packageFreshnessDesc" = "Vérifie l'ancienneté d'un paquet lors de son installation. La recherche révèle le nom du paquet que vous installez.";
+"settings.enrich.certTransparency" = "Transparence des certificats (crt.sh)";
+"settings.enrich.certTransparencyDesc" = "Recherche les certificats des domaines auxquels vous vous connectez. La recherche révèle le domaine. La vérification locale de typosquat s'exécute de toute façon.";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "Enrichissement réseau optionnel";
+"enrich.intro" = "MacCrab fonctionne entièrement sur l'appareil par défaut — rien concernant votre Mac ne le quitte. La détection (règles, séquences, campagnes, renseignements sur les menaces fournis) fonctionne hors ligne. Ces quatre recherches optionnelles atteignent chacune un service public pour ajouter du contexte. Elles restent désactivées jusqu'à ce que vous les activiez, et vous pouvez modifier cela à tout moment dans les Réglages.";
+"enrich.threatIntel" = "Flux de renseignements sur les menaces (abuse.ch)";
+"enrich.threatIntelDetail" = "Télécharge les listes d'IOC toutes les 4 h. Téléchargement seul — rien concernant votre Mac n'est envoyé.";
+"enrich.vulnScan" = "Analyse de vulnérabilités (osv.dev)";
+"enrich.vulnScanDetail" = "Recherche les CVE des logiciels installés. Envoie l'inventaire de vos logiciels (anonyme).";
+"enrich.packageFreshness" = "Fraîcheur des paquets (npm / PyPI / …)";
+"enrich.packageFreshnessDetail" = "Vérifie l'ancienneté d'un paquet à l'installation. Révèle le nom du paquet que vous installez.";
+"enrich.certTransparency" = "Transparence des certificats (crt.sh)";
+"enrich.certTransparencyDetail" = "Recherche les certificats des domaines auxquels vous vous connectez. Révèle le domaine.";
+"enrich.keepOff" = "Tout laisser désactivé";
+"enrich.enable" = "Activer la sélection";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "Ce que c'est";
+"overview.factorWhy" = "Pourquoi c'est important";
+"overview.factorFix" = "Comment y remédier";
+"overview.factorLearnMore" = "En savoir plus";
+"overview.factorExpandHint" = "Cliquez pour comprendre et comment y remédier";
+"overview.storeTitle" = "Catalogue de plugins";
+"overview.storeBrowse" = "Parcourir →";
+"overview.storeBrowsePrompt" = "Parcourez les plugins forensiques signés du catalogue. Les installations s'exécutent entièrement isolées.";
+"raveStore.thirdPartyCatalog.title" = "Catalogue tiers signé";
+"raveStore.thirdPartyCatalog.body" = "Aucun plugin tiers n'est actuellement répertorié. Les scanners intégrés ci-dessous sont inclus dans MacCrab et s'exécutent sur ce Mac maintenant — aucune installation requise.";

@@ -447,22 +447,35 @@ public final class V2LiveDataProvider: V2DataProvider {
             default:    return (21_600,   1_800)
             }
         }()
-        let alerts = (try? await alertStore.alerts(
-            since: now.addingTimeInterval(-totalSpan),
-            severity: nil, suppressed: false, limit: 10_000
-        )) ?? []
         let count = Int(totalSpan / bucketSpan)
+        // PERF-3: bucket SQL-side (GROUP BY bucket, severity) so no alert rows
+        // materialize into Swift. severityHistogram returns "steps ago" from now,
+        // which maps to the now-anchored grid below (grid i=count-1 is newest).
+        let cells = (try? await alertStore.severityHistogram(
+            spanSeconds: totalSpan, stepSeconds: bucketSpan, endingAt: now)) ?? []
+        var byAgo: [Int: (c: Int, h: Int, m: Int, l: Int)] = [:]
+        for cell in cells {
+            // A row exactly at the window's start edge buckets to `count`
+            // (spanSeconds/stepSeconds); fold it into the oldest visible bucket
+            // so it isn't silently dropped from the chart (the old in-Swift
+            // bucketing placed it in the oldest bucket too).
+            let ago = min(cell.bucketsAgo, count - 1)
+            var agg = byAgo[ago] ?? (0, 0, 0, 0)
+            switch cell.severity {
+            case "critical": agg.c += cell.count
+            case "high":     agg.h += cell.count
+            case "medium":   agg.m += cell.count
+            case "low":      agg.l += cell.count
+            default: break
+            }
+            byAgo[ago] = agg
+        }
         return (0..<count).map { i in
             let end = now.addingTimeInterval(-bucketSpan * Double(count - i - 1))
             let start = end.addingTimeInterval(-bucketSpan)
-            let inBucket = alerts.filter { $0.timestamp >= start && $0.timestamp < end }
-            return V2OverviewBucket(
-                start: start, end: end,
-                critical: inBucket.filter { $0.severity == .critical }.count,
-                high:     inBucket.filter { $0.severity == .high     }.count,
-                medium:   inBucket.filter { $0.severity == .medium   }.count,
-                low:      inBucket.filter { $0.severity == .low      }.count
-            )
+            let agg = byAgo[count - 1 - i] ?? (0, 0, 0, 0)
+            return V2OverviewBucket(start: start, end: end,
+                                    critical: agg.c, high: agg.h, medium: agg.m, low: agg.l)
         }
     }
 
@@ -473,16 +486,11 @@ public final class V2LiveDataProvider: V2DataProvider {
         var openAlerts = 0
         var prevAlerts = 0
         if let alertStore {
-            let recent = (try? await alertStore.alerts(
-                since: now.addingTimeInterval(-day),
-                severity: nil, suppressed: false, limit: 5000
-            )) ?? []
-            openAlerts = recent.count
-            let previous = (try? await alertStore.alerts(
-                since: now.addingTimeInterval(-2 * day),
-                severity: nil, suppressed: false, limit: 5000
-            )) ?? []
-            prevAlerts = previous.count - openAlerts
+            // PERF-5: exact COUNT(*) instead of materializing up to 5000 rows
+            // just to count them — and it no longer undercounts past 5000.
+            openAlerts = (try? await alertStore.openAlertCount(since: now.addingTimeInterval(-day))) ?? 0
+            let prevTotal = (try? await alertStore.openAlertCount(since: now.addingTimeInterval(-2 * day))) ?? 0
+            prevAlerts = prevTotal - openAlerts
         }
         // Active campaigns + severity breakdown.
         var campCount = 0
@@ -560,10 +568,22 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// appear without waiting for `connectLiveData()` to flip the
     /// provider to live mode.
     nonisolated public static func loadFeedsFromCache(preferring preferred: String? = nil) -> [V2MockFeed] {
+        loadFeedsAndPull(preferring: preferred).feeds
+    }
+
+    /// PERF-2: decode the (multi-MB) threat-intel cache ONCE and return BOTH
+    /// the feed rows and the last-successful-pull date. The Intelligence
+    /// workspace previously called loadFeedsFromCache + lastSuccessfulPull
+    /// separately, decoding feed_cache.json twice per refresh tick.
+    nonisolated public static func loadFeedsAndPull(preferring preferred: String? = nil) -> (feeds: [V2MockFeed], pull: Date?) {
         let dirs = candidateThreatIntelCacheDirs(preferring: preferred)
         guard let iocs = dirs.lazy.compactMap({ ThreatIntelFeed.cachedIOCs(at: $0) }).first else {
-            return []
+            return ([], nil)
         }
+        return (feedRows(from: iocs), iocs.lastSuccessfulPull)
+    }
+
+    private nonisolated static func feedRows(from iocs: ThreatIntelFeed.IOCSet) -> [V2MockFeed] {
         let totalHashes = iocs.hashes.count
         let totalIPs = iocs.ips.count
         let totalDomains = iocs.domains.count

@@ -11,7 +11,7 @@ extension MacCrabCtl {
             let allRecent = try await store.alerts(since: Date.distantPast, limit: 500)
             let campaigns = allRecent
                 .filter { $0.ruleId.hasPrefix("maccrab.campaign.") }
-                .prefix(limit)
+                .prefix(max(0, limit))   // negative arg (e.g. `campaigns -1`) must not trap prefix(_:)
 
             if campaigns.isEmpty {
                 print("No campaigns recorded.")

@@ -6,6 +6,13 @@
 
 import Foundation
 import CSQLCipher
+import os
+
+/// v1.19.1 (audit): a real os.Logger so the newer-than-binary (downgrade/skew)
+/// warning surfaces even though every primary store calls `run()` without the
+/// optional `logger:` callback — relying on the callback alone made the warning
+/// a silent no-op for EventStore/AlertStore/CampaignStore/TraceStore.
+private let migratorLog = Logger(subsystem: "com.maccrab.agent", category: "schema-migrator")
 
 // MARK: - Migration
 
@@ -111,9 +118,24 @@ public enum SchemaMigrator {
         // Non-idempotent ops (DROP, INSERT, UPDATE in a migration body) would
         // need per-store version tracking — none of our migrations use them.
         let sorted = migrations.sorted(by: { $0.version < $1.version })
-        let alreadyAtOrAhead = current >= latest
-        if alreadyAtOrAhead {
-            logger?("DB user_version=\(current) at-or-ahead of v\(latest); re-applying \(sorted.count) migration(s) idempotently (no counter change)")
+        if current > latest {
+            // v1.19.1 (audit): the DB was written by a NEWER binary than this one
+            // — a Sparkle/MDM downgrade or a rolled-back update onto an existing
+            // evidence store. Our migrations are additive (ADD COLUMN /
+            // CREATE … IF NOT EXISTS), so re-applying them is safe and the old
+            // binary's column-explicit reads/writes still work; but this build may
+            // not understand columns/semantics a newer one added, so surface the
+            // version skew LOUDLY rather than treating it as routine. (A caller
+            // that wants to hard-refuse can check for current > latest and throw
+            // SchemaMigrationError.unknownVersion.)
+            let msg = "DB user_version=\(current) EXCEEDS this binary's latest known v\(latest) — running an OLDER MacCrab against a newer-schema database (downgrade/rollback / mixed-version fleet?). Proceeding additively; upgrade to the build that wrote this DB if you see schema errors."
+            // Log via BOTH the optional callback AND os.Logger.warning — the
+            // primary stores pass no callback, so the os.Logger is what actually
+            // surfaces this version-skew to `log show` / fleet telemetry.
+            logger?("WARNING: \(msg)")
+            migratorLog.warning("\(msg, privacy: .public)")
+        } else if current == latest {
+            logger?("DB user_version=\(current) at v\(latest); re-applying \(sorted.count) migration(s) idempotently (no counter change)")
         } else {
             logger?("Migrating schema from v\(current) to v\(latest)")
         }

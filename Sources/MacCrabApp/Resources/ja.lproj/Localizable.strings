@@ -423,8 +423,8 @@
 "welcome.feature.aiDesc" = "Claude、Cursor、CopilotなどのAIコーディングツールの認証情報アクセスを監視します";
 "welcome.feature.prevention" = "アクティブな予防";
 "welcome.feature.preventionDesc" = "悪意のあるドメインをブロックし、ファイルを隔離し、サプライチェーン攻撃を制御します";
-"welcome.feature.privacy" = "プライバシー第一";
-"welcome.feature.privacyDesc" = "すべてローカルで動作 — データがマシンの外に出ることはありません";
+"welcome.feature.privacy" = "デフォルトでプライベート";
+"welcome.feature.privacyDesc" = "デフォルトではデバイス上で動作 — 任意のエンリッチメントを有効にしない限り、Mac の外にデータが出ることはありません";
 "welcome.setup.engineActive" = "検出エンジンは稼働中";
 "welcome.setup.prevention" = "予防タブで予防を有効にしてください";
 
@@ -789,3 +789,41 @@
 "forensicsSettings.maintenance" = "メンテナンス";
 "forensicsSettings.onDiskLocation" = "ディスク上の場所";
 "forensicsSettings.trustedPublishers" = "信頼済みの発行元";
+
+/* v1.19.1 — Network enrichment (privacy) opt-in: Settings GroupBox */
+"settings.netEnrich" = "ネットワーク強化（プライバシー）";
+"settings.netEnrichHelp" = "MacCrab はデフォルトでデバイス上で動作します。オンにするまで、これらはいずれもネットワークリクエストを行いません。ローカル検出（ルール、シーケンス、キャンペーン、同梱の脅威インテル）には影響しません。以下の各照会は公開サービスにアクセスします。必要なものだけをオンにしてください。";
+"settings.enrich.threatIntel" = "脅威インテルフィード（abuse.ch）";
+"settings.enrich.threatIntelDesc" = "IOC リスト（URLhaus / MalwareBazaar / Feodo）を 4 時間ごとにダウンロードします。ダウンロードのみ — お使いのマシンに関する情報はアップロードされません。";
+"settings.enrich.vulnScan" = "脆弱性スキャン（osv.dev）";
+"settings.enrich.vulnScanDesc" = "インストール済みのアプリ／パッケージの CVE を照会します。ソフトウェア一覧を送信します（匿名ですが、お使いのマシンのソフトウェアリストです）。";
+"settings.enrich.packageFreshness" = "パッケージの新しさ（npm / PyPI / Homebrew / crates）";
+"settings.enrich.packageFreshnessDesc" = "パッケージをインストールする際にその古さを確認します。この照会により、インストールするパッケージ名が明らかになります。";
+"settings.enrich.certTransparency" = "証明書の透明性（crt.sh）";
+"settings.enrich.certTransparencyDesc" = "接続先のドメインの証明書を照会します。この照会によりドメインが明らかになります。ローカルのタイポスクワットチェックはいずれにせよ実行されます。";
+
+/* v1.19.1 — Network enrichment (privacy) first-run opt-in prompt (EnrichmentOptInView) */
+"enrich.title" = "オプションのネットワーク強化";
+"enrich.intro" = "MacCrab はデフォルトで完全にデバイス上で動作します。お使いの Mac に関する情報は一切外部に出ません。検出（ルール、シーケンス、キャンペーン、同梱の脅威インテル）はオフラインで機能します。これら 4 つのオプション照会は、追加のコンテキストを得るためにそれぞれ公開サービスにアクセスします。オンにするまでは無効のままで、いつでも設定で変更できます。";
+"enrich.threatIntel" = "脅威インテルフィード（abuse.ch）";
+"enrich.threatIntelDetail" = "IOC リストを 4 時間ごとにダウンロードします。ダウンロードのみ — お使いの Mac に関する情報はアップロードされません。";
+"enrich.vulnScan" = "脆弱性スキャン（osv.dev）";
+"enrich.vulnScanDetail" = "インストール済みソフトウェアの CVE を照会します。ソフトウェア一覧を送信します（匿名）。";
+"enrich.packageFreshness" = "パッケージの新しさ（npm / PyPI / …）";
+"enrich.packageFreshnessDetail" = "インストール時にパッケージの古さを確認します。インストールするパッケージ名が明らかになります。";
+"enrich.certTransparency" = "証明書の透明性（crt.sh）";
+"enrich.certTransparencyDetail" = "接続先のドメインの証明書を照会します。ドメインが明らかになります。";
+"enrich.keepOff" = "すべてオフのままにする";
+"enrich.enable" = "選択した項目を有効にする";
+
+/* v1.19.1 — security-factor guide + plugin store/news */
+"overview.factorWhat" = "それは何か";
+"overview.factorWhy" = "なぜ重要か";
+"overview.factorFix" = "対処方法";
+"overview.factorLearnMore" = "詳細を表示";
+"overview.factorExpandHint" = "クリックすると意味と対処方法が表示されます";
+"overview.storeTitle" = "プラグインストア";
+"overview.storeBrowse" = "参照 →";
+"overview.storeBrowsePrompt" = "カタログから署名済みのフォレンジックプラグインを参照します。インストールは完全にサンドボックス化されて実行されます。";
+"raveStore.thirdPartyCatalog.title" = "署名済みサードパーティカタログ";
+"raveStore.thirdPartyCatalog.body" = "現在リストされているサードパーティプラグインはありません。以下の組み込みスキャナーはMacCrab内に付属しており、このMacで実行されます — インストール不要です。";

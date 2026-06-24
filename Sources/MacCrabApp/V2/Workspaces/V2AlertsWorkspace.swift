@@ -884,7 +884,17 @@ struct V2AlertsWorkspace: View {
             HStack(spacing: 8) {
                 V2StatusChip(alert.severity.label, kind: alert.severity.chipKind)
                 ForEach(alert.mitre, id: \.self) { code in
-                    V2StatusChip(code, kind: .neutral, icon: "doc.plaintext")
+                    // FIQ-7: humanize + link the bare ATT&CK code. Chip shows
+                    // the normalized code, the full technique name is the
+                    // tooltip, and clicking opens the canonical ATT&CK page.
+                    if let urlString = ATTACKRef.url(forCode: code), let url = URL(string: urlString) {
+                        Link(destination: url) {
+                            V2StatusChip(ATTACKRef.normalize(code) ?? code, kind: .neutral, icon: "doc.plaintext")
+                        }
+                        .help(ATTACKRef.display(forCode: code))
+                    } else {
+                        V2StatusChip(code, kind: .neutral, icon: "doc.plaintext")
+                    }
                 }
             }
             // v1.18: parse the snapshotted triggering event(s) once; reused by
@@ -952,14 +962,33 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             }
-            // Note: the Remediation (`remediationHint`) and D3FEND
-            // (`d3fendTechniques`) inspector sections were removed
-            // before v1.10.0 GA — the underlying Alert fields exist
-            // on the model but `AlertStore` doesn't persist them
-            // (see `Alert.swift:55-57` for the v2-schema-migration
-            // TODO). Keeping inspector sections that only ever
-            // rendered to nothing was actively confusing; both come
-            // back in v1.11 when the metadata_json migration lands.
+            // Deterministic, LLM-free "What To Do": AlertStore persists
+            // remediation_hint + d3fend_techniques (schema v3) and
+            // AlertSink fills them from the alert's ATT&CK tactics, so
+            // even a no-LLM operator gets actionable guidance. The
+            // D3FEND chips link out to the technique reference.
+            if let hint = alert.remediationHint, !hint.isEmpty {
+                V2InspectorSection(String(localized: "inspector.whatToDo", defaultValue: "What to do")) {
+                    Text(hint)
+                        .font(V2Theme.body())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            if !alert.d3fendTechniques.isEmpty {
+                V2InspectorSection(String(localized: "inspector.d3fend", defaultValue: "D3FEND defenses")) {
+                    FlowingChips(items: alert.d3fendTechniques, kind: .info) { tech in
+                        // Use the shared, verified id→technique URL (the raw
+                        // dotted code 404s; D3FENDMapping holds the canonical
+                        // slug). Unknown ids fall back to the D3FEND matrix.
+                        let urlString = D3FENDMapping.ref(forID: tech)?.url ?? "https://d3fend.mitre.org/"
+                        if let url = URL(string: urlString) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
             if let summary = alert.llmSummary, !summary.isEmpty {
                 V2InspectorSection(String(localized: "inspector.aiAnalysis", defaultValue: "AI analysis")) {
                     VStack(alignment: .leading, spacing: 6) {

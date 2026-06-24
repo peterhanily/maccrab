@@ -256,7 +256,7 @@ public actor ReportGenerator {
                     <td class="mono">\(timestampFormatter.string(from: alert.timestamp))</td>
                     <td>\(escapeHTML(alert.ruleTitle))</td>
                     <td class="mono">\(escapeHTML(alert.processName))</td>
-                    <td class="mono">\(escapeHTML(alert.mitreTechniques))</td>
+                    <td>\(humanizeTechniques(alert.mitreTechniques))</td>
                     <td>\(escapeHTML(alert.description))</td>
                 </tr>
                 """
@@ -269,8 +269,13 @@ public actor ReportGenerator {
         }
         html += "</section>"
 
-        // MITRE ATT&CK Coverage
-        if !data.summary.tacticsDistribution.isEmpty {
+        // MITRE ATT&CK Coverage. Only the 14 official Enterprise tactics belong in
+        // this table; MacCrab's non-MITRE pseudo-tactics (ai_safety, supply_chain, …)
+        // are reported separately below so the official taxonomy isn't misrepresented.
+        let officialTactics = data.summary.tacticsDistribution.filter { isOfficialMitreTactic($0.tactic) }
+        let extensionTactics = data.summary.tacticsDistribution.filter { !isOfficialMitreTactic($0.tactic) }
+
+        if !officialTactics.isEmpty {
             html += """
             <section class="card">
                 <h2>MITRE ATT&amp;CK Coverage</h2>
@@ -284,7 +289,40 @@ public actor ReportGenerator {
                     </thead>
                     <tbody>
             """
-            for entry in data.summary.tacticsDistribution {
+            for entry in officialTactics {
+                html += """
+                    <tr>
+                        <td>\(escapeHTML(entry.tactic))</td>
+                        <td>\(entry.count)</td>
+                    </tr>
+                """
+            }
+            html += """
+                    </tbody>
+                </table>
+                </div>
+            </section>
+            """
+        }
+
+        // MacCrab extensions (non-MITRE pseudo-tactics) — labeled distinctly so they
+        // are never mistaken for official MITRE ATT&CK tactics.
+        if !extensionTactics.isEmpty {
+            html += """
+            <section class="card">
+                <h2>MacCrab Extensions <span class="muted">(non-MITRE)</span></h2>
+                <p class="muted">MacCrab-specific detection categories, not part of the official MITRE ATT&amp;CK taxonomy.</p>
+                <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Alert Count</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+            for entry in extensionTactics {
                 html += """
                     <tr>
                         <td>\(escapeHTML(entry.tactic))</td>
@@ -479,6 +517,43 @@ public actor ReportGenerator {
             .replacingOccurrences(of: "'", with: "&#39;")
     }
 
+    /// The 14 official MITRE ATT&CK Enterprise tactics (normalized to the lowercase
+    /// snake_case form MacCrab tags use, e.g. "attack.credential_access" → "credential_access").
+    /// Tactic tags NOT in this set (e.g. "ai_safety", "supply_chain", "cve", "wireless")
+    /// are MacCrab extensions, not official MITRE — so they're reported separately rather
+    /// than blended into the MITRE coverage table.
+    private static let officialMitreTactics: Set<String> = [
+        "reconnaissance", "resource_development", "initial_access", "execution",
+        "persistence", "privilege_escalation", "defense_evasion", "credential_access",
+        "discovery", "lateral_movement", "collection", "command_and_control",
+        "exfiltration", "impact",
+    ]
+
+    /// Strip the "attack." prefix from a tactic tag for classification/display.
+    private func tacticBareName(_ tactic: String) -> String {
+        let t = tactic.trimmingCharacters(in: .whitespaces).lowercased()
+        return t.hasPrefix("attack.") ? String(t.dropFirst("attack.".count)) : t
+    }
+
+    private func isOfficialMitreTactic(_ tactic: String) -> Bool {
+        Self.officialMitreTactics.contains(tacticBareName(tactic))
+    }
+
+    /// Humanize a CSV of MITRE ATT&CK technique codes ("attack.t1059.004,attack.t1027")
+    /// into "T1059.004 — Command and Scripting Interpreter; T1027 — Obfuscated Files or
+    /// Information", keeping the bare code visible (operators grep for it). Codes that
+    /// don't parse as techniques pass through unchanged. Returns "" for empty input.
+    /// Output is HTML-escaped (callers must NOT double-escape).
+    private func humanizeTechniques(_ csv: String) -> String {
+        let parts = csv.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return "" }
+        return parts
+            .map { escapeHTML(ATTACKRef.display(forCode: $0)) }
+            .joined(separator: "; ")
+    }
+
     private func severityCSSClass(_ severity: String) -> String {
         switch severity.lowercased() {
         case "critical": return "badge-critical"
@@ -523,8 +598,9 @@ public actor ReportGenerator {
             items += "<li><strong>Dominant Rule:</strong> \"\(escapeHTML(topRule.name))\" accounts for \(topRule.count) of \(summary.totalAlerts) alerts. Verify this rule is not generating excessive noise and refine its conditions.</li>"
         }
 
-        if !summary.tacticsDistribution.isEmpty && summary.tacticsDistribution.count >= 3 {
-            items += "<li><strong>Multi-Tactic Activity:</strong> Alerts span \(summary.tacticsDistribution.count) MITRE ATT&amp;CK tactics, which may indicate a multi-stage attack. Correlate these tactics to assess kill-chain coverage.</li>"
+        let officialTacticCount = summary.tacticsDistribution.filter { isOfficialMitreTactic($0.tactic) }.count
+        if officialTacticCount >= 3 {
+            items += "<li><strong>Multi-Tactic Activity:</strong> Alerts span \(officialTacticCount) MITRE ATT&amp;CK tactics, which may indicate a multi-stage attack. Correlate these tactics to assess kill-chain coverage.</li>"
         }
 
         if summary.totalAlerts == 0 {
