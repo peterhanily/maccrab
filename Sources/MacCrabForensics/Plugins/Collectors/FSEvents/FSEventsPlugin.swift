@@ -83,12 +83,28 @@ public struct FSEventsPlugin: Collector {
         var rejected = 0
         let now = Date()
 
-        // /.fseventsd at the root volume + per-volume FSEvents
-        // directories. Read the root for now; cross-volume
-        // discovery lands later (requires statfs walking).
-        let roots = ["/.fseventsd"]
+        // Pre-Catalina the store was /.fseventsd at the volume root. Since the
+        // read-only-system + Data-volume split it lives under the Data volume,
+        // so probe that first; also pick up mounted/external volumes under
+        // /Volumes. Dedupe by resolved path so a firmlinked root (where
+        // /.fseventsd resolves to the Data store) isn't counted twice.
+        let candidates = ["/System/Volumes/Data/.fseventsd", "/.fseventsd"]
+            + ((try? FileManager.default.contentsOfDirectory(atPath: "/Volumes")) ?? [])
+                .map { "/Volumes/\($0)/.fseventsd" }
+        var roots: [String] = []
+        var seenRoots = Set<String>()
+        for c in candidates where FileManager.default.fileExists(atPath: c) {
+            let resolved = URL(fileURLWithPath: c).resolvingSymlinksInPath().path
+            if seenRoots.insert(resolved).inserted { roots.append(c) }
+        }
+        if roots.isEmpty {
+            notes.append("no .fseventsd store found (checked the Data volume + /Volumes)")
+        }
 
         for root in roots {
+            // The store is root-owned 0700; a non-root collector without Full
+            // Disk Access gets EPERM at the read below, surfacing as a read
+            // failure rather than a false "not present".
             guard FileManager.default.fileExists(atPath: root) else {
                 notes.append("\(root) not present")
                 continue

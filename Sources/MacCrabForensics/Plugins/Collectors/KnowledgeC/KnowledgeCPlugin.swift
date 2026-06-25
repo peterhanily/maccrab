@@ -31,7 +31,7 @@ public struct KnowledgeCPlugin: Collector {
                     fieldRoles: [
                         "observed_at": .timestamp,
                         "stream_name": .title,
-                        "bundle_id": .identifier,
+                        "value_string": .identifier,
                     ],
                     chart: ChartHint(chartType: .histogram, bucketField: "observed_at")
                 )

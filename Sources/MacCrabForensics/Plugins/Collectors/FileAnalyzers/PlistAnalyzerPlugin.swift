@@ -51,17 +51,22 @@ public struct PlistAnalyzerPlugin: Collector {
     public init() async throws {}
 
     public func collect(case caseContext: CaseContext, window: TimeWindow?, output: any CollectorOutput) async throws -> CollectionResult {
-        // Default dogfood set — operator-supplied input lands when
-        // PluginRunner threads invocation args through.
-        let defaults = [
-            "/System/Library/LaunchDaemons/com.apple.notifyd.plist",
-            "/Library/Preferences/com.apple.PowerManagement.plist",
-        ].filter { FileManager.default.fileExists(atPath: $0) }
+        // Operator-supplied path wins (mirrors ImageMetadataPlugin); otherwise
+        // fall back to a small dogfood set so a bare run still shows output.
+        let targets: [String]
+        if case .string(let p)? = caseContext.inputs.values["path"], !p.isEmpty {
+            targets = [p]
+        } else {
+            targets = [
+                "/System/Library/LaunchDaemons/com.apple.notifyd.plist",
+                "/Library/Preferences/com.apple.PowerManagement.plist",
+            ].filter { FileManager.default.fileExists(atPath: $0) }
+        }
 
         var committed = 0
         var rejected = 0
         let now = Date()
-        for path in defaults {
+        for path in targets {
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
             var format: PropertyListSerialization.PropertyListFormat = .xml
             guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format) else {

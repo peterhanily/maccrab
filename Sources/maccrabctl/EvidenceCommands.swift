@@ -164,6 +164,44 @@ private func evidenceShow(args: [String]) async {
 }
 
 private func evidenceExport(args: [String]) async {
-    print("evidence export: not yet implemented.")
-    exit(2)
+    var scanID: String? = nil
+    var output: String? = nil
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--scan" where i + 1 < args.count: scanID = args[i + 1]; i += 2
+        case "--output" where i + 1 < args.count: output = args[i + 1]; i += 2
+        default:
+            if scanID == nil, !args[i].hasPrefix("--") { scanID = args[i] }
+            i += 1
+        }
+    }
+    guard let sid = scanID else {
+        print("Usage: maccrabctl evidence export --scan <scan-id> [--output <path>.maccrabevidence]")
+        exit(1)
+    }
+    await exportEvidenceBundle(scanID: sid, output: output)
+}
+
+/// Shared by `evidence export` and `scan export`: open the case, query every
+/// artifact, and write a signed-shape .maccrabevidence bundle.
+func exportEvidenceBundle(scanID: String, output: String?) async {
+    let mgr = makeCaseManager()
+    guard let handle = try? await mgr.openCase(id: scanID) else {
+        print("No such scan: \(scanID)")
+        exit(2)
+    }
+    guard let rows = try? await handle.store.query(ArtifactQuery(caseID: scanID, limit: 1_000_000)) else {
+        print("Could not read artifacts for scan \(scanID).")
+        exit(2)
+    }
+    let outURL = output.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        ?? EvidenceBundleExporter.defaultOutputURL(caseID: scanID)
+    do {
+        let written = try EvidenceBundleExporter.export(caseID: scanID, artifacts: rows, to: outURL)
+        print("Exported \(rows.count) artifact(s) → \(written.path)")
+    } catch {
+        print("Export failed: \(error)")
+        exit(2)
+    }
 }

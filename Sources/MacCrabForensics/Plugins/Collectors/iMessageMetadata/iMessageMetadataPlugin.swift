@@ -37,11 +37,10 @@ public struct iMessageMetadataPlugin: Collector {
                 viewerHint: ViewerHint(
                     viewer: .chart,
                     fieldRoles: [
-                        "handle_id": .title,
+                        "id": .title,
                         "service": .subtitle,
-                        "message_count": .count,
                     ],
-                    chart: ChartHint(chartType: .bar, groupField: "handle_id")
+                    chart: ChartHint(chartType: .bar, groupField: "id")
                 )
             ),
             OutputSpec(
@@ -53,8 +52,6 @@ public struct iMessageMetadataPlugin: Collector {
                         "chat_identifier": .title,
                         "display_name": .subtitle,
                         "is_group": .status,
-                        "message_count": .count,
-                        "last_message_at": .timestamp,
                     ]
                 )
             ),

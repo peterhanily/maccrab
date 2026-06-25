@@ -59,13 +59,21 @@ public struct OfficeDocumentPlugin: Collector {
     public init() async throws {}
 
     public func collect(case caseContext: CaseContext, window: TimeWindow?, output: any CollectorOutput) async throws -> CollectionResult {
-        let downloads = NSHomeDirectory() + "/Downloads"
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: URL(fileURLWithPath: downloads),
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
-            return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["~/Downloads not accessible"], status: .partial)
+        // Operator-supplied path wins (mirrors ImageMetadataPlugin); otherwise
+        // default-scan ~/Downloads.
+        let urls: [URL]
+        if case .string(let p)? = caseContext.inputs.values["path"], !p.isEmpty {
+            urls = [URL(fileURLWithPath: p)]
+        } else {
+            let downloads = NSHomeDirectory() + "/Downloads"
+            guard let found = try? FileManager.default.contentsOfDirectory(
+                at: URL(fileURLWithPath: downloads),
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else {
+                return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["~/Downloads not accessible"], status: .partial)
+            }
+            urls = found
         }
         var committed = 0
         var rejected = 0
@@ -134,7 +142,10 @@ public struct OfficeDocumentPlugin: Collector {
     static func xmlValue(from xml: String, tagSuffix: String) -> String {
         // Match: `<...:tagSuffix>VALUE</...:tagSuffix>` or
         // `<tagSuffix>VALUE</tagSuffix>`.
-        let pattern = "<(?:[a-zA-Z0-9_]+:)?\(tagSuffix)>([^<]*)</(?:[a-zA-Z0-9_]+:)?\(tagSuffix)>"
+        // Allow attributes in the opening tag (\b[^>]*) — OOXML always writes
+        // <dcterms:created xsi:type="dcterms:W3CDTF">…</dcterms:created>, so a
+        // bare `…tagSuffix>` pattern never matched created/modified.
+        let pattern = "<(?:[a-zA-Z0-9_]+:)?\(tagSuffix)\\b[^>]*>([^<]*)</(?:[a-zA-Z0-9_]+:)?\(tagSuffix)>"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return "" }
         let ns = xml as NSString
         let matches = regex.matches(in: xml, range: NSRange(location: 0, length: ns.length))

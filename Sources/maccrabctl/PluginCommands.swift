@@ -55,11 +55,11 @@ func dispatchPlugin(args: [String]) async {
         // Rave catalog store commands — refuse cleanly until the catalog
         // index is published (install still works against a configured catalog).
         case "search":
-            try await pluginSearchStub(args: rest)
+            try await pluginSearch(args: rest)
         case "update":
-            try await pluginUpdateStub(args: rest)
+            try await pluginUpdate(args: rest)
         case "pin":
-            try await pluginPinStub(args: rest)
+            try await pluginPin(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -223,37 +223,65 @@ func printPluginAliasWarning(_ oldName: String, _ newName: String) {
 
 // MARK: - rave catalog store stubs
 //
-// search/update/pin all need a publicly served rave catalog index
-// (rave.maccrab.com/catalog.json), which is not live yet. They refuse
-// cleanly (exit 2) rather than promise a version — installs still work
-// today via `plugin install <plugin-id>` / `<bundle>` against a
-// configured catalog. (CLI-2: de-versioned; full catalog-search is
-// follow-up once the catalog is published.)
+// `search` is live (fetches + Ed25519-verifies the published catalog). `update`
+// and `pin` are not yet wired — they return honest, accurate messages (the
+// catalog IS live; install works via `plugin install <id>`).
 
-private func pluginSearchStub(args: [String]) async throws {
-    let q = args.first ?? ""
-    print("plugin search: not available — the rave catalog index is not published yet.")
-    print("For local plugins: maccrabctl plugin list")
-    if !q.isEmpty { print("(search query was: \(q))") }
-    exit(2)
+private func pluginSearch(args: [String]) async throws {
+    var query = ""
+    var catalogBase: String? = nil
+    var i = 0
+    while i < args.count {
+        if args[i] == "--catalog-base", i + 1 < args.count { catalogBase = args[i + 1]; i += 2 }
+        else { if !args[i].hasPrefix("--") { query = args[i] }; i += 1 }
+    }
+    let base = catalogBase
+        ?? ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
+        ?? "https://rave.maccrab.com/"
+    let fetcher = try PluginCatalogFetcher(catalogBase: base)
+    let entries: [PluginCatalogFetcher.CatalogListEntry]
+    do {
+        entries = try await fetcher.listCatalog()
+    } catch {
+        print("plugin search: could not fetch or verify the rave catalog: \(error)")
+        exit(2)
+    }
+    let q = query.lowercased()
+    let matches = q.isEmpty ? entries : entries.filter {
+        $0.id.lowercased().contains(q)
+            || $0.displayName.lowercased().contains(q)
+            || $0.shortDescription.lowercased().contains(q)
+    }
+    if matches.isEmpty {
+        print(q.isEmpty ? "The rave catalog is empty." : "No catalog plugins match '\(query)'.")
+        return
+    }
+    print("Rave catalog — \(matches.count) plugin\(matches.count == 1 ? "" : "s"):\n")
+    for e in matches {
+        print("  \(e.id)  v\(e.currentVersion)  [\(e.channel)]")
+        if !e.displayName.isEmpty { print("    \(e.displayName)") }
+        if !e.shortDescription.isEmpty { print("    \(e.shortDescription)") }
+        print("")
+    }
+    print("Install with: maccrabctl plugin install <id>")
 }
 
-private func pluginUpdateStub(args: [String]) async throws {
+private func pluginUpdate(args: [String]) async throws {
     guard let id = args.first else {
         print("Usage: maccrabctl plugin update <plugin-id> [--yes]")
         exit(1)
     }
-    print("plugin update: not available — the rave catalog index is not published yet. (plugin-id: \(id))")
-    print("Reinstall manually via: maccrabctl plugin install <plugin-id|bundle>.")
+    print("plugin update is not yet wired. The rave catalog is live and carries current_version —")
+    print("update by reinstalling the latest:  maccrabctl plugin install \(id) --force")
     exit(2)
 }
 
-private func pluginPinStub(args: [String]) async throws {
+private func pluginPin(args: [String]) async throws {
     guard let id = args.first else {
         print("Usage: maccrabctl plugin pin <plugin-id>")
         exit(1)
     }
-    print("plugin pin: not available — version pinning needs the published rave catalog. (plugin-id: \(id))")
+    print("plugin pin is not yet wired (version pinning is a local operation; tracked as a follow-up). Plugin: \(id)")
     exit(2)
 }
 
@@ -747,7 +775,11 @@ private func pluginInstall(args: [String]) async throws {
     }
     print("  Root:            \(installed.installRoot)")
     print("  Publisher key:   \(installed.publicKeyHex.prefix(16))…")
-    print("  Trusted:         \(trustOnInstall ? "yes (added on install)" : "no (run 'maccrabctl plugin trust <hex>' to trust)")")
+    // Report ACTUAL persisted trust, not the user's --trust-on-install flag: an
+    // official catalog entry whose signer pin verified is auto-trusted (its key is
+    // added to the trust store), so the flag alone would mislead.
+    let isTrusted = await PluginInstaller().currentTrustedKeys().contains(installed.publicKeyHex)
+    print("  Trusted:         \(isTrusted ? "yes" : "no (run 'maccrabctl plugin trust \(installed.publicKeyHex.prefix(16))…' to trust)")")
 }
 
 // Treat as a plugin-id if it looks like reverse-DNS and contains no path

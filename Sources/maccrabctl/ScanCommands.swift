@@ -103,35 +103,77 @@ private func scanRun(args: [String]) async {
         scanID = args[0]
         i = 1
     }
+    var passthrough: [String] = []
     while i < args.count {
         switch args[i] {
         case "--plugin" where i + 1 < args.count:
             pluginIDs.append(args[i + 1]); i += 2
         default:
-            i += 1
+            // Forward any other `--key value` pair to the plugin dispatcher
+            // (e.g. `--path <file>` for file-analyzer plugins). Pre-this they
+            // were silently dropped, so an operator path never reached the plugin.
+            if args[i].hasPrefix("--"), i + 1 < args.count, !args[i + 1].hasPrefix("--") {
+                passthrough.append(args[i]); passthrough.append(args[i + 1]); i += 2
+            } else {
+                i += 1
+            }
         }
     }
     guard let resolvedID = scanID else {
-        print("Usage: maccrabctl scan run <scan-id> --plugin <plugin-id> [--plugin ...]")
+        print("Usage: maccrabctl scan run <scan-id> --plugin <plugin-id> [--plugin ...] [--path <file>]")
         exit(1)
     }
     guard !pluginIDs.isEmpty else {
         print("Specify at least one --plugin <plugin-id>")
         exit(1)
     }
-    // Delegate per-plugin to the existing plugin run dispatcher.
+    // Delegate per-plugin to the existing plugin run dispatcher, forwarding any
+    // passthrough flags (--path, etc.) into PluginInvocationInputs.
     for pluginID in pluginIDs {
-        await dispatchPlugin(args: ["run", pluginID, "--case", resolvedID])
+        await dispatchPlugin(args: ["run", pluginID, "--case", resolvedID] + passthrough)
     }
 }
 
 private func scanRunAll(args: [String]) async {
-    print("scan run-all: not yet implemented.")
-    print("Run plugins individually: maccrabctl scan run <scan-id> --plugin <plugin-id>.")
-    exit(2)
+    guard let scanID = args.first, !scanID.hasPrefix("--") else {
+        print("Usage: maccrabctl scan run-all <scan-id>")
+        exit(1)
+    }
+    // Register the built-ins so the registry is populated, then run every
+    // applicable plugin: collectors first, then analyzers (which read the
+    // artifacts collectors just committed). Enrichers are excluded — they
+    // require an explicit --path input, so they aren't part of a bare run-all.
+    try? await MacCrabForensicsBootstrap.registerBuiltins()
+    let manifests = await PluginRegistry.shared.manifests()
+    let ordered = manifests.filter { $0.type == .collector } + manifests.filter { $0.type == .analyzer }
+    guard !ordered.isEmpty else {
+        print("No built-in collectors or analyzers are registered.")
+        exit(1)
+    }
+    print("Running \(ordered.count) applicable plugins on case \(scanID) (enrichers need --path; run them individually)…\n")
+    for m in ordered {
+        print("── \(m.id) ──")
+        await dispatchPlugin(args: ["run", m.id, "--case", scanID])
+        print("")
+    }
 }
 
 private func scanExport(args: [String]) async {
-    print("scan export: not yet implemented.")
-    exit(2)
+    var scanID: String? = nil
+    var output: String? = nil
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--output" where i + 1 < args.count: output = args[i + 1]; i += 2
+        default:
+            if scanID == nil, !args[i].hasPrefix("--") { scanID = args[i] }
+            i += 1
+        }
+    }
+    guard let sid = scanID else {
+        print("Usage: maccrabctl scan export <scan-id> [--output <path>.maccrabevidence]")
+        exit(1)
+    }
+    // Shared implementation with `evidence export` (EvidenceCommands.swift).
+    await exportEvidenceBundle(scanID: sid, output: output)
 }

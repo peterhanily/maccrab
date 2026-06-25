@@ -35,13 +35,10 @@ public struct CodesignResolveEnricher: Enricher {
         tccRequirements: [],
         inputs: [],
         outputs: [],
-        mcpTools: [
-            MCPToolDescriptor(
-                name: "codesign_resolve",
-                description: "Return the codesign posture (team_id, signing_status, notarized, hardened_runtime, bundle_id) for a binary at a path.",
-                exposesPrivacyClass: .metadata
-            ),
-        ],
+        // No mcpTools: this is an enricher, and the MCP dispatcher only routes
+        // collector-typed plugins' tools — a tool declared here would be
+        // advertised-but-undispatched. Matches the other 6 enrichers.
+        mcpTools: [],
         schemaVersion: 1,
         stability: .preview
     )

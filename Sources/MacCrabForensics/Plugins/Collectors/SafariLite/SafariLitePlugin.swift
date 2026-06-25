@@ -47,9 +47,8 @@ public struct SafariLitePlugin: Collector {
                     viewer: .timeline,
                     fieldRoles: [
                         "observed_at": .timestamp,
-                        "url": .link,
-                        "filename": .title,
-                        "origin_url": .subtitle,
+                        "url": .title,
+                        "destination_path": .subtitle,
                     ]
                 )
             ),
@@ -59,12 +58,11 @@ public struct SafariLitePlugin: Collector {
                 viewerHint: ViewerHint(
                     viewer: .table,
                     fieldRoles: [
-                        "name": .title,
+                        "display_name": .title,
                         "bundle_identifier": .identifier,
-                        "version": .subtitle,
-                        "signed": .status,
+                        "enabled": .status,
                     ],
-                    columns: ["name", "bundle_identifier", "version", "signed"]
+                    columns: ["display_name", "bundle_identifier", "archive_file_name", "enabled"]
                 )
             ),
         ],

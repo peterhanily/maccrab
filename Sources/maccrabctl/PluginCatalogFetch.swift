@@ -188,6 +188,46 @@ struct PluginCatalogFetcher {
         catch { throw PluginCatalogFetchError.catalogPublicKeyInvalid(reason: "Curve25519 rejected key: \(error)") }
     }
 
+    /// A catalog entry's display fields, for `plugin search`. Captures more than
+    /// the install path's CatalogIndexEntry (which only needs current_version).
+    struct CatalogListEntry: Sendable {
+        let id: String
+        let displayName: String
+        let shortDescription: String
+        let currentVersion: String
+        let channel: String
+    }
+
+    /// Fetch + Ed25519-verify the catalog index, then return its entries for
+    /// discovery/search. Uses the SAME fetch+verify gate as installPluginByID,
+    /// so a tampered or wrong-key catalog fails closed here too.
+    func listCatalog() async throws -> [CatalogListEntry] {
+        let catalogURL = catalogBase.appendingPathComponent("catalog.json")
+        let catalogData = try await fetch(url: catalogURL)
+        let catalogSig = try await fetch(url: catalogBase.appendingPathComponent("catalog.json.sig"))
+        try verify(data: catalogData, signature: catalogSig, url: catalogURL)
+        guard let json = try? JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
+              let plugins = json["plugins"] as? [String: [String: Any]] else {
+            throw PluginCatalogFetchError.catalogParseFailed(reason: "catalog.json missing 'plugins' map")
+        }
+        return plugins.map { id, e in
+            CatalogListEntry(
+                id: id,
+                displayName: (e["display_name"] as? String) ?? id,
+                shortDescription: (e["short_description"] as? String) ?? "",
+                currentVersion: (e["current_version"] as? String) ?? "?",
+                channel: (e["channel"] as? String) ?? "official")
+        }.sorted { $0.id < $1.id }
+    }
+
+    /// Display names of the registered first-party (built-in) plugins — the set
+    /// the namespace guard checks an entry's display name against for confusables.
+    /// Bootstraps the registry first (idempotent).
+    private static func firstPartyDisplayNames() async -> [String] {
+        try? await MacCrabForensicsBootstrap.registerBuiltins()
+        return await PluginRegistry.shared.manifests().map { $0.displayName }
+    }
+
     func installPluginByID(
         pluginID: String,
         version: String? = nil,
@@ -195,13 +235,13 @@ struct PluginCatalogFetcher {
         force: Bool,
         allowUnpinnedPrerelease: Bool = false
     ) async throws -> InstalledPlugin {
-        // Step 0: reserved-namespace hard refusal (even from a signed catalog) —
-        // com.maccrab.* is first-party-only; a confusable/impersonating id never
-        // installs through the enforced path.
-        if RaveNamespaceGuard.isReservedNamespace(pluginID) {
-            throw PluginCatalogFetchError.catalogParseFailed(
-                reason: "Refusing to install '\(pluginID)': the com.maccrab.* namespace is reserved for first-party plugins.")
-        }
+        // Reserved-namespace / impersonation enforcement is in Step 3.1, AFTER the
+        // per-plugin entry is fetched + Ed25519-verified — so it can honor the
+        // entry's signed trust_tier. A legitimate first-party com.maccrab.* entry
+        // installs; a non-first-party impersonator (or confusable name) is refused.
+        // (Pre-1.19.2 this was an unconditional Step-0 refusal that rejected even a
+        // signed first-party catalog entry — the dashboard showed a green Install
+        // pill that then failed on hand-off to this command.)
         // Step 1: catalog index + signature.
         let catalogURL = catalogBase.appendingPathComponent("catalog.json")
         let catalogSigURL = catalogBase.appendingPathComponent("catalog.json.sig")
@@ -277,6 +317,29 @@ struct PluginCatalogFetcher {
         try verify(data: entryData, signature: entrySig, url: entryURL)
 
         let parsed = try parseCatalogEntry(data: entryData)
+
+        // Step 3.1: reserved-namespace / impersonation gate on the now
+        // signature-verified entry. trust_tier comes ONLY from the Ed25519-verified
+        // entry bytes (never the unverified index), so a legitimate first-party
+        // com.maccrab.* installs while a non-first-party impersonator or a name
+        // confusably close to a built-in is refused. Mirrors the dashboard display
+        // gate (RaveCatalogEntryState.compute → RaveNamespaceGuard.evaluate).
+        switch RaveNamespaceGuard.evaluate(
+            id: pluginID,
+            displayName: parsed.displayName,
+            isFirstParty: parsed.trustTier == "first-party",
+            firstPartyDisplayNames: await Self.firstPartyDisplayNames()
+        ) {
+        case .ok:
+            break
+        case .reservedNamespaceImpersonation(let id):
+            throw PluginCatalogFetchError.catalogParseFailed(
+                reason: "Refusing to install '\(id)': the com.maccrab.* namespace is reserved for first-party plugins, and this entry's signed trust_tier is not first-party.")
+        case .confusableDisplayName(let name, let matchesFirstParty):
+            throw PluginCatalogFetchError.catalogParseFailed(
+                reason: "Refusing to install: display name '\(name)' is confusably close to first-party '\(matchesFirstParty)'.")
+        }
+
         guard let versionEntry = parsed.versions[resolvedVersion] else {
             throw PluginCatalogFetchError.versionNotFound(id: pluginID, version: resolvedVersion)
         }
@@ -297,7 +360,11 @@ struct PluginCatalogFetcher {
         }
 
         // Step 4: resolve binary URL (RFC6570-ish; {tag} {file} only).
-        let zipFile = "\(pluginID).zip"
+        // {file}: catalog-driven when the version block carries a filename (so app
+        // + store can't drift); otherwise derive the ceremony's package-plugin.sh
+        // convention "<id>.maccrabplugin.zip" — NOT the legacy "<id>.zip", which
+        // 404'd against the published artifact.
+        let zipFile = versionEntry.filename ?? "\(pluginID).maccrabplugin.zip"
         var rendered = parsed.releaseURLTemplate
             .replacingOccurrences(of: "{tag}", with: versionEntry.tag)
             .replacingOccurrences(of: "{file}", with: zipFile)
@@ -389,11 +456,20 @@ struct PluginCatalogFetcher {
             allowUnpinnedPrerelease: allowUnpinnedPrerelease
         )
 
-        // Step 7: delegate to existing verified install path.
+        // Step 7: delegate to the verified install path. When the entry carried a
+        // signer_public_key_sha256 pin, Step 6.5 (enforceSignerPin) already proved
+        // the bundle's key is the one the Ed25519-verified catalog endorsed — a
+        // full chain (bundled catalog.pub → catalog → entry pin → bundle key). Per
+        // O1b that endorsement REPLACES TOFU/--trust-on-install on official
+        // channels, so trust the bundle's key automatically; otherwise (a pinless
+        // pre-release installed with --allow-unpinned) require explicit
+        // --trust-on-install. Without this, a correctly-signed first-party catalog
+        // plugin fails with "publisher key … is not in the trust store".
+        let catalogEndorsedSigner = parsed.signerPublicKeySHA256 != nil
         let installer = PluginInstaller()
         let result = try await installer.install(
             sourceDir: bundleDir,
-            trustOnInstall: trustOnInstall,
+            trustOnInstall: trustOnInstall || catalogEndorsedSigner,
             force: force
         )
         // Install succeeded — advance the anti-rollback high-water mark so a
@@ -569,6 +645,12 @@ struct PluginCatalogFetcher {
         /// Plugin role from the catalog ("collector"/"analyzer"). #7: must match
         /// the installed bundle manifest's kind when both declare one. nil when absent.
         let kind: String?
+        /// Operator-signed display name + trust tier from the (Ed25519-verified)
+        /// per-plugin entry bytes. trustTier == "first-party" is the authoritative
+        /// signal that lets a legitimate first-party com.maccrab.* id install while
+        /// still refusing a non-first-party impersonator (mirrors the display gate).
+        let displayName: String
+        let trustTier: String?
     }
     private struct ParsedVersion {
         let tag: String
@@ -577,6 +659,10 @@ struct PluginCatalogFetcher {
         /// pre-ceremony entries; asserted against the extracted bundle when real.
         let signatureSHA256: String?
         let manifestSHA256: String?
+        /// Optional catalog-driven artifact filename for the {file} URL slot.
+        /// When absent the client derives "<id>.maccrabplugin.zip" (the ceremony's
+        /// package-plugin.sh convention) — catalog-driven wins so app/store can't drift.
+        let filename: String?
     }
 
     private func parseCatalogIndex(data: Data) throws -> CatalogIndex {
@@ -625,7 +711,8 @@ struct PluginCatalogFetcher {
                 tag: tag,
                 artifactSHA256: artifactHash,
                 signatureSHA256: (fields["signature_sha256"] as? String)?.lowercased(),
-                manifestSHA256: (fields["manifest_sha256"] as? String)?.lowercased()
+                manifestSHA256: (fields["manifest_sha256"] as? String)?.lowercased(),
+                filename: fields["filename"] as? String
             )
         }
         // O1b publisher-key pin. Validate shape (^[0-9a-f]{64}$) so a
@@ -651,13 +738,17 @@ struct PluginCatalogFetcher {
         let metadata = json["metadata"] as? [String: Any]
         let minMaccrabVersion = metadata?["min_maccrab_version"] as? String
         let kind = json["kind"] as? String
+        let displayName = (json["display_name"] as? String) ?? ""
+        let trustTier = json["trust_tier"] as? String
         return ParsedEntry(
             releaseURLTemplate: urlTemplate,
             versions: versions,
             signerPublicKeySHA256: signerKey,
             status: status,
             minMaccrabVersion: minMaccrabVersion,
-            kind: kind
+            kind: kind,
+            displayName: displayName,
+            trustTier: trustTier
         )
     }
 }

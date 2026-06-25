@@ -73,16 +73,22 @@ public struct DMGPKGAnalyzerPlugin: Collector {
     public init() async throws {}
 
     public func collect(case caseContext: CaseContext, window: TimeWindow?, output: any CollectorOutput) async throws -> CollectionResult {
-        // Default scan: ~/Downloads — operators routinely keep
-        // installers there.
-        let downloads = NSHomeDirectory() + "/Downloads"
-        guard FileManager.default.fileExists(atPath: downloads),
-              let urls = try? FileManager.default.contentsOfDirectory(
-                at: URL(fileURLWithPath: downloads),
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-              ) else {
-            return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["~/Downloads not accessible"], status: .partial)
+        // Operator-supplied path wins (mirrors ImageMetadataPlugin); otherwise
+        // default-scan ~/Downloads, where operators routinely keep installers.
+        let urls: [URL]
+        if case .string(let p)? = caseContext.inputs.values["path"], !p.isEmpty {
+            urls = [URL(fileURLWithPath: p)]
+        } else {
+            let downloads = NSHomeDirectory() + "/Downloads"
+            guard FileManager.default.fileExists(atPath: downloads),
+                  let found = try? FileManager.default.contentsOfDirectory(
+                    at: URL(fileURLWithPath: downloads),
+                    includingPropertiesForKeys: [.fileSizeKey],
+                    options: [.skipsHiddenFiles]
+                  ) else {
+                return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["~/Downloads not accessible"], status: .partial)
+            }
+            urls = found
         }
         var committed = 0
         var rejected = 0

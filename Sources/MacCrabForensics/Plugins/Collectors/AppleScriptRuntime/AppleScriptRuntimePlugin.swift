@@ -46,9 +46,9 @@ public struct AppleScriptRuntimePlugin: Collector {
                     viewer: .transcript,
                     fieldRoles: [
                         "observed_at": .timestamp,
-                        "source_app": .sender,
-                        "command_snippet": .body,
-                        "target_app": .subtitle,
+                        "parent_executable": .sender,
+                        "command_line": .body,
+                        "runtime": .subtitle,
                     ]
                 )
             ),

@@ -47,9 +47,9 @@ public struct TCCLitePlugin: Collector {
                         "service": .title,
                         "client": .path,
                         "auth_value": .status,
-                        "last_modified": .timestamp,
+                        "observed_at": .timestamp,
                     ],
-                    columns: ["service", "client", "auth_value", "last_modified"]
+                    columns: ["service", "client", "auth_value", "observed_at"]
                 )
             ),
             OutputSpec(
@@ -59,8 +59,8 @@ public struct TCCLitePlugin: Collector {
                     viewer: .table,
                     fieldRoles: [
                         "service": .title,
-                        "granted_count": .count,
-                        "denied_count": .count,
+                        "allowed": .count,
+                        "denied": .count,
                     ]
                 )
             ),

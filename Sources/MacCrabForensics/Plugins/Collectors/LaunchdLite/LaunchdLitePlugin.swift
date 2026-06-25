@@ -22,7 +22,7 @@ public struct LaunchdLitePlugin: Collector {
         id: "com.maccrab.forensics.launchd-lite",
         version: "1.0.0",
         displayName: "launchd-lite",
-        description: "Inventory every launchd plist on disk (LaunchAgents + LaunchDaemons + StartupItems). Each program_path is codesign-enriched so team_id + signing_status land on the artifact alongside the persistence-point metadata. BAM (BackgroundItems-v9.btm) parse is deferred to a follow-up sub-slice.",
+        description: "Inventory every launchd plist on disk (LaunchAgents + LaunchDaemons + StartupItems). Each program_path is codesign-enriched so team_id + signing_status land on the artifact alongside the persistence-point metadata. BAM (BackgroundItems-v9.btm) login items are also parsed and emitted as launchd.bam_entry artifacts.",
         type: .collector,
         runtime: .tierA,
         tccRequirements: [.fullDiskAccess],
@@ -47,10 +47,10 @@ public struct LaunchdLitePlugin: Collector {
                         "domain": .subtitle,
                         "run_at_load": .status,
                         "runs_as_root": .severity,
-                        "signing_status": .status,
-                        "team_id": .identifier,
+                        "codesign.signing_status": .status,
+                        "codesign.team_id": .identifier,
                     ],
-                    columns: ["label", "domain", "program_path", "run_at_load", "runs_as_root", "signing_status", "team_id"]
+                    columns: ["label", "domain", "program_path", "run_at_load", "runs_as_root", "codesign.signing_status", "codesign.team_id"]
                 )
             ),
             OutputSpec(
@@ -59,10 +59,11 @@ public struct LaunchdLitePlugin: Collector {
                 viewerHint: ViewerHint(
                     viewer: .table,
                     fieldRoles: [
-                        "bundle_id": .identifier,
-                        "path": .path,
-                        "last_active": .timestamp,
-                    ]
+                        "display_name": .title,
+                        "identifier": .identifier,
+                        "type_token": .status,
+                    ],
+                    columns: ["display_name", "identifier", "type_token"]
                 )
             ),
         ],

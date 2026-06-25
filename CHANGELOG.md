@@ -3,6 +3,19 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.2] — 2026-06-25
+
+A plugin-store and forensics-fidelity release.
+
+### Plugin store
+- Installing signed first-party plugins from the catalog now works end to end — browse, install, signature-verify, and trust in one step.
+- New `maccrabctl plugin search` lists the signed catalog.
+
+### Forensics
+- **Evidence export.** `maccrabctl scan export` and `evidence export` write a `.maccrabevidence` bundle — the case's artifacts plus an integrity hash, verifiable offline.
+- **Built-in collector fixes.** FSEvents now reads the modern Data-volume store location (it was looking at a path that no longer exists on current macOS); the plist / DMG-PKG / Office file-analyzers honor an operator-supplied path; Office documents now extract their created/modified timestamps; Biome enumerates the current stream layout.
+- Forensic artifact tables render their fields correctly across the dashboard.
+
 ## [1.19.1] — 2026-06-23
 
 A forensic-insight, parity, and polish release. The detection engine now

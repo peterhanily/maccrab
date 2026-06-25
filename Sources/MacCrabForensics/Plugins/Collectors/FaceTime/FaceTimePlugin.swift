@@ -32,11 +32,11 @@ public struct FaceTimePlugin: Collector {
                         "observed_at": .timestamp,
                         "peer_address": .title,
                         "service_provider": .subtitle,
-                        "originated": .sender,
+                        "originated_by_user": .sender,
                         "duration_seconds": .count,
                         "answered": .status,
                     ],
-                    columns: ["observed_at", "peer_address", "originated", "answered", "duration_seconds"]
+                    columns: ["observed_at", "peer_address", "originated_by_user", "answered", "duration_seconds"]
                 )
             ),
         ],

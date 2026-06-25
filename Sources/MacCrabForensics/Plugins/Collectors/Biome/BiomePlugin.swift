@@ -32,8 +32,8 @@ public struct BiomePlugin: Collector {
                     fieldRoles: [
                         "observed_at": .timestamp,
                         "stream_name": .title,
-                        "value": .subtitle,
-                        "source_app": .identifier,
+                        "path": .path,
+                        "file_count": .count,
                     ]
                 )
             ),
@@ -46,9 +46,32 @@ public struct BiomePlugin: Collector {
     public init() async throws {}
 
     public func collect(case caseContext: CaseContext, window: TimeWindow?, output: any CollectorOutput) async throws -> CollectionResult {
-        let root = NSHomeDirectory() + "/Library/Biome/Streams/public"
-        guard let entries = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: root), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-            return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["Biome streams root not present"], status: .partial)
+        // macOS 15+/26 keeps streams under category subdirs (restricted/, and
+        // sometimes public/) — NOT a single hardcoded "public". Enumerate every
+        // category and gather the stream dirs beneath each.
+        let fm = FileManager.default
+        let streamsRoot = NSHomeDirectory() + "/Library/Biome/Streams"
+        guard let categories = try? fm.contentsOfDirectory(
+            at: URL(fileURLWithPath: streamsRoot),
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else {
+            // Distinguish "no access" (path exists but unreadable → likely needs
+            // Full Disk Access) from genuinely absent.
+            var rootIsDir: ObjCBool = false
+            let note = fm.fileExists(atPath: streamsRoot, isDirectory: &rootIsDir)
+                ? "Biome streams unreadable — likely needs Full Disk Access"
+                : "Biome streams not present"
+            return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: [note], status: .partial)
+        }
+        var entries: [URL] = []
+        for cat in categories {
+            var catIsDir: ObjCBool = false
+            guard fm.fileExists(atPath: cat.path, isDirectory: &catIsDir), catIsDir.boolValue else { continue }
+            if let streams = try? fm.contentsOfDirectory(
+                at: cat, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) {
+                entries.append(contentsOf: streams)
+            }
         }
         var committed = 0
         var rejected = 0
