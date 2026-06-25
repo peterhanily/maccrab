@@ -91,6 +91,16 @@ public actor ResponseEngine {
     /// Global default actions (applied to all rules unless overridden).
     private var defaultActions: [ResponseActionConfig] = []
 
+    /// Rule ids that must NEVER arm a response action — not even the global
+    /// default. The rule-update channel populates this with its pushed
+    /// (detection-only) rule ids, so a signed-but-hostile pushed corpus can add
+    /// detections but can never reach kill / quarantine / blockNetwork.
+    public var detectionOnlyRuleIDs: Set<String> = []
+
+    /// Replace the detection-only id set (called by the reload path with the
+    /// engine's current pushed-rule ids).
+    public func setDetectionOnlyRuleIDs(_ ids: Set<String>) { detectionOnlyRuleIDs = ids }
+
     /// Action execution log for auditing.
     private var executionLog: [(timestamp: Date, ruleId: String, action: ResponseActionType, target: String, success: Bool)] = []
 
@@ -221,6 +231,10 @@ public actor ResponseEngine {
 
     /// Execute all configured response actions for an alert.
     public func execute(alert: Alert, event: Event) async {
+        // Detection-only rules (e.g. those pushed via the signed rule-update
+        // channel) never arm an action — not even the global default. This is
+        // the response-side half of the pushed-rule trust boundary.
+        if detectionOnlyRuleIDs.contains(alert.ruleId) { return }
         let actions = ruleActions[alert.ruleId] ?? defaultActions
         guard !actions.isEmpty else { return }
 

@@ -162,6 +162,17 @@ extension ConditionNode: Codable {
 }
 
 /// A fully compiled detection rule loaded from JSON.
+/// Provenance of a loaded rule. Drives the rule-update channel's trust boundary.
+public enum RuleSource: String, Codable, Sendable, Hashable {
+    /// Shipped in the app bundle / `compiled_rules` base, or an operator
+    /// `user_rules` overlay. Can arm response actions.
+    case bundled
+    /// Delivered out-of-band via the signed rule-update channel. Detection-only:
+    /// additive (cannot override a bundled/user id) and never arms a response
+    /// action.
+    case pushed
+}
+
 public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
     public let id: String
     public let title: String
@@ -191,11 +202,21 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
     /// True when the rule is parked as deprecated content.
     public var isDeprecated: Bool { status?.lowercased() == "deprecated" }
 
+    /// Where this rule came from. Set by the loader (NOT decoded from JSON, so a
+    /// pushed bundle cannot forge a `.bundled` origin), default `.bundled`.
+    /// `.pushed` rules are DETECTION-ONLY: they are loaded additive-only (they
+    /// can never shadow/override a bundled or user rule's id) and they never arm
+    /// response actions. This is the trust boundary of the rule-update channel —
+    /// a signed-but-hostile pushed corpus still cannot silence a built-in
+    /// detection or inherit an operator's kill/quarantine action.
+    public var source: RuleSource = .bundled
+
     private enum CodingKeys: String, CodingKey {
         case id, title, description, level, tags, logsource, predicates
         case condition, falsepositives, enabled, status
         case conditionTree = "condition_tree"
         case suppressibleRaw = "suppressible"
+        // `source` is intentionally absent — set by the loader, never decoded.
     }
 
     public init(
@@ -583,6 +604,57 @@ public actor RuleEngine {
         return loaded
     }
 
+    /// Ids of rules currently loaded from the signed rule-update channel
+    /// (`.pushed`). Exposed so the response engine can refuse to arm any action
+    /// for them (detection-only). Reset by `reloadRules`.
+    public private(set) var pushedRuleIDs: Set<String> = []
+
+    /// Load DETECTION-ONLY rules delivered by the signed rule-update channel.
+    ///
+    /// ADDITIVE-ONLY containment: a pushed rule whose id already exists (a
+    /// bundled or user rule) is IGNORED. A pushed corpus can therefore ADD new
+    /// detections but can NEVER shadow, override, disable, or re-severity an
+    /// existing rule — and, being a new id, can never inherit an operator's
+    /// response-action configuration. Each accepted rule is tagged `.pushed`.
+    /// A missing directory is a no-op (the common "no pushed corpus" case).
+    /// Returns the number of rules added. Call AFTER the bundled + user rules
+    /// are loaded, so existing ids are known.
+    @discardableResult
+    public func loadPushedRules(from directory: URL) throws -> Int {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
+            return 0
+        }
+        let contents = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let jsonFiles = contents.filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+        let decoder = JSONDecoder()
+        var added = 0
+        var shadowed = 0
+        for file in jsonFiles {
+            guard let data = try? Data(contentsOf: file),
+                  var rule = try? decoder.decode(CompiledRule.self, from: data) else { continue }
+            // The trust boundary: never let a pushed rule take over an existing id.
+            if allRules[rule.id] != nil {
+                shadowed += 1
+                logger.warning("Pushed rule \(rule.id, privacy: .public) IGNORED — an existing rule already owns that id (pushed rules are additive-only)")
+                continue
+            }
+            rule.source = .pushed
+            allRules[rule.id] = rule
+            ruleIndex[rule.logsource.category, default: []].append(rule)
+            pushedRuleIDs.insert(rule.id)
+            added += 1
+            for predicate in rule.predicates where predicate.modifier == .regex {
+                for pattern in predicate.values { _ = cachedRegex(for: pattern) }
+            }
+        }
+        if added > 0 || shadowed > 0 {
+            logger.info("Pushed rules: \(added) added, \(shadowed) ignored (id already owned) from \(directory.path)")
+        }
+        return added
+    }
+
     /// Reload rules, replacing all existing rules. Intended as a SIGHUP handler.
     ///
     /// The reload is safe-to-fail: if `loadRules` throws (e.g. the rules
@@ -601,6 +673,7 @@ public actor RuleEngine {
         let snapshotRegex  = regexCache
         let snapshotRegexSeq = regexAccessSeq
         let snapshotRegexCounter = regexAccessCounter
+        let snapshotPushed = pushedRuleIDs
 
         // Pre-fix: cache was wiped BEFORE load. During the (potentially
         // 100s ms long) loadRules call, concurrent evaluate() calls saw
@@ -617,6 +690,10 @@ public actor RuleEngine {
             // a separate dict, gets repopulated by loadRules' inserts.
             ruleIndex.removeAll()
             allRules.removeAll()
+            // Pushed rules are not loaded from `directory`; the caller re-applies
+            // them via loadPushedRules after a successful base reload, so clear
+            // the set now and let it be repopulated (or restored on rollback).
+            pushedRuleIDs.removeAll()
             count = try loadRules(from: directory)
         } catch {
             // Restore previous state — engine must never be left empty.
@@ -625,6 +702,7 @@ public actor RuleEngine {
             regexCache      = snapshotRegex
             regexAccessSeq  = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
+            pushedRuleIDs   = snapshotPushed
             logger.error("Rule reload failed, previous rules restored: \(error)")
             throw error
         }
@@ -643,6 +721,7 @@ public actor RuleEngine {
             regexCache         = snapshotRegex
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
+            pushedRuleIDs      = snapshotPushed
             logger.error("Rule reload rejected: \(failed) file(s) failed to decode; restored \(snapshotRules.count) last-known-good rules")
             throw RuleEngineError.partialLoadFailure(failed: failed, loaded: count)
         }
@@ -659,6 +738,7 @@ public actor RuleEngine {
             regexCache         = snapshotRegex
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
+            pushedRuleIDs      = snapshotPushed
             logger.fault("Rule reload rejected: incoming \(count) rules is below \(Int(self.reloadMinCountFraction * 100))% of the prior \(snapshotRules.count); restored last-known-good (suspected truncated content bundle)")
             throw RuleEngineError.ruleCountRegression(loaded: count, previous: snapshotRules.count)
         }
