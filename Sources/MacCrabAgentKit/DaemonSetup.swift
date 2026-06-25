@@ -835,7 +835,7 @@ enum DaemonSetup {
         await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: true)
         await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "MCPMonitor", expectedIntervalSeconds: 60, eventDriven: true)
-        await collectorRegistry.register(name: "TEMPESTMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "SDRDeviceMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         print("Collector registry initialized — 16 collectors tracked")
 
         // Trust substrate -- ECDSA P-256 keypair for trace-bundle
@@ -962,13 +962,12 @@ enum DaemonSetup {
             print("EDR/RMM monitor active (deferred — CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
         }
 
-        // TEMPEST / Van Eck phreaking monitor — SDR device detection + display anomalies.
-        // v1.12.0 RC21 (TURBO): IOKit enumeration + DRM display probe;
-        // defer.
-        let tempestMonitor = TEMPESTMonitor(pollInterval: 60)
+        // SDR device + display-hotplug monitor (USB SDR enumeration + display
+        // hotplug anomalies; no electromagnetic analysis).
+        let sdrDeviceMonitor = SDRDeviceMonitor(pollInterval: 60)
         Task.detached(priority: .utility) {
-            await tempestMonitor.start()
-            print("TEMPEST monitor active (deferred, SDR device detection, display anomaly monitoring)")
+            await sdrDeviceMonitor.start()
+            print("SDR device monitor active (deferred — SDR device + display-hotplug detection)")
         }
 
         // Library inventory -- scans for injected dylibs
@@ -1706,7 +1705,7 @@ enum DaemonSetup {
             rootkitDetector: rootkitDetector,
             tccMonitor: tccMonitor,
             edrMonitor: edrMonitor,
-            tempestMonitor: tempestMonitor,
+            sdrDeviceMonitor: sdrDeviceMonitor,
             fsEventsCollector: fsEventsCollector,
             collector: collector,
             esloggerCollector: esloggerCollector,

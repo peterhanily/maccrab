@@ -775,7 +775,7 @@ public enum V2MockRepository {
               throughput: 0.5, lag: 2, errors: 0, lastEvent: now(-30)),
         .init(id: "c-9", name: "USB", status: .healthy,
               throughput: 0.0, lag: 10, errors: 0, lastEvent: now(-7 * 60 * 60)),
-        .init(id: "c-10", name: "TEMPEST", status: .healthy,
+        .init(id: "c-10", name: "SDR Device", status: .healthy,
               throughput: 0.0, lag: 60, errors: 0, lastEvent: now(-12 * 60 * 60)),
     ]
 

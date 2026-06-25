@@ -380,18 +380,18 @@ enum MonitorTasks {
             }
         }
 
-        // TEMPEST / Van Eck phreaking monitoring task
-        await supervisor.start("tempest") {
-            for await tempestEvent in state.tempestMonitor.events {
-                await state.collectorRegistry.recordTick(name: "TEMPESTMonitor")
+        // SDR device + display-hotplug monitoring task (no electromagnetic analysis)
+        await supervisor.start("sdr_device") {
+            for await sdrEvent in state.sdrDeviceMonitor.events {
+                await state.collectorRegistry.recordTick(name: "SDRDeviceMonitor")
                 let alert = Alert(
-                    ruleId: "maccrab.tempest.\(tempestEvent.type.rawValue)",
-                    ruleTitle: tempestEvent.title,
-                    severity: tempestEvent.severity,
+                    ruleId: "maccrab.sdr_device.\(sdrEvent.type.rawValue)",
+                    ruleTitle: sdrEvent.title,
+                    severity: sdrEvent.severity,
                     eventId: UUID().uuidString,
                     processPath: nil,
-                    processName: "TEMPESTMonitor",
-                    description: "\(tempestEvent.description)\n\n\(tempestEvent.detail)",
+                    processName: "SDRDeviceMonitor",
+                    description: "\(sdrEvent.description)\n\n\(sdrEvent.detail)",
                     mitreTactics: "attack.collection",
                     mitreTechniques: "attack.t1040",
                     suppressed: false
@@ -401,38 +401,41 @@ enum MonitorTasks {
                         await state.notifier.notify(alert: alert)
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                print("[TEMPEST] \(tempestEvent.type.rawValue): \(tempestEvent.title)")
+                print("[SDR] \(sdrEvent.type.rawValue): \(sdrEvent.title)")
 
-                // LLM analysis for TEMPEST events (non-blocking)
+                // LLM analysis for SDR device / display-hotplug events (non-blocking)
                 if let llm = state.llmService {
-                    let title = tempestEvent.title
-                    let desc = tempestEvent.description
-                    let detail = tempestEvent.detail
+                    let title = sdrEvent.title
+                    let desc = sdrEvent.description
+                    let detail = sdrEvent.detail
                     let alertId = alert.id
                     Task {
                         if let analysis = await llm.query(
                             systemPrompt: """
-                                You are a TEMPEST/EMSEC (electromagnetic security) specialist. \
-                                A potential Van Eck phreaking indicator has been detected. Explain \
-                                the threat, what an attacker could see or capture, and specific \
-                                countermeasures. Keep under 200 words. Include both the risk \
-                                assessment and practical steps the user can take RIGHT NOW.
+                                You are a physical-security analyst. MacCrab has detected either a \
+                                software-defined-radio (SDR) device connected by USB, or an anomalous \
+                                display hotplug pattern. This is EQUIPMENT / BEHAVIOR detection only — \
+                                MacCrab does NOT perform any RF or electromagnetic analysis, so do NOT \
+                                claim eavesdropping is confirmed. Explain what the detected item is, the \
+                                benign explanations to rule out first (legitimate SDR use, a faulty \
+                                cable/dock/driver), and only then the security scenario it could \
+                                indicate, with practical verification steps. Keep under 200 words.
                                 """,
                             userPrompt: "Detection: \(title)\nDetail: \(desc)\nTechnical: \(detail)",
                             maxTokens: 512, temperature: 0.2
                         ) {
                             let analysisAlert = Alert(
-                                ruleId: "maccrab.llm.tempest-analysis",
-                                ruleTitle: "AI TEMPEST Analysis: \(title)",
+                                ruleId: "maccrab.llm.sdr-analysis",
+                                ruleTitle: "AI SDR Device Analysis: \(title)",
                                 severity: .informational,
                                 eventId: alertId,
-                                processPath: nil, processName: "TEMPESTMonitor",
+                                processPath: nil, processName: "SDRDeviceMonitor",
                                 description: analysis.response,
                                 mitreTactics: nil, mitreTechniques: nil,
                                 suppressed: false
                             )
                             do { _ = try await state.alertSink.submit(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            print("[LLM] TEMPEST analysis generated for: \(title)")
+                            print("[LLM] SDR device analysis generated for: \(title)")
                         }
                     }
                 }

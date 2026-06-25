@@ -126,9 +126,9 @@ public struct ModuleStatus: Sendable {
         .init(id: "ultrasonic-monitor", name: "Ultrasonic / DolphinAttack",
               category: "collector", maturity: .optIn,
               summary: "Audio-injection detection. Requires microphone permission. Off by default."),
-        .init(id: "tempest-monitor", name: "TEMPEST / Van Eck",
+        .init(id: "sdr-device-monitor", name: "SDR Device / Display Hotplug",
               category: "collector", maturity: .optIn,
-              summary: "SDR device + display anomaly detection. Research-grade."),
+              summary: "Flags known SDR USB devices and rapid display hotplug. No electromagnetic analysis."),
 
         // ─── AI Guard (experimental cluster) ────────────────────────
         .init(id: "ai-tool-registry", name: "AI tool registry",

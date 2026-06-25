@@ -114,7 +114,7 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 | BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
 | MCPMonitor | MCP server configs across AI tools | Startup |
 | GitSecurityMonitor | Git credential-helper abuse, SSH-agent hijack, malicious git hooks | Real-time |
-| TEMPESTMonitor | Van Eck phreaking: SDR devices + display anomalies | 60s |
+| SDRDeviceMonitor | SDR USB devices + rapid display hotplug (no electromagnetic analysis) | 60s |
 
 ## EDR/RMM Tool Detection
 
@@ -127,15 +127,15 @@ The EDRMonitor proactively scans for 30+ tools across 5 categories:
 
 Each discovery includes vendor, category, and capability list. Insider threat tools push OS notifications.
 
-## TEMPEST / Van Eck Phreaking Detection
+## SDR Device and Display-Hotplug Detection
 
-The TEMPESTMonitor detects indicators of electromagnetic eavesdropping (Van Eck phreaking) against display output:
+The `SDRDeviceMonitor` flags two physical-access **precursors** — by enumeration only. **It performs no electromagnetic / RF analysis** (no spectrum capture, no EDID/timing reconstruction, no Van Eck phreaking detection). It identifies *equipment that could be misused* and *anomalous display behavior*, both of which warrant a look, not a conclusion:
 
-- **17 known SDR devices**: RTL-SDR, HackRF, USRP B200/B210, BladeRF, Airspy, LimeSDR, SDRplay, FunCube
-- **Display anomaly detection**: Phantom hotplug, rapid connect/disconnect cycling (HDMI tap insertion)
-- **LLM EMSEC analysis**: Auto-generated electromagnetic security assessment with countermeasures
+- **17 known SDR devices** (by USB VID/PID): RTL-SDR, HackRF, USRP B200/B210, BladeRF, Airspy, LimeSDR, SDRplay, FunCube. Detection = "this radio is connected," not "an attack is happening" — SDRs have many legitimate uses.
+- **Display hotplug anomalies**: rapid connect/disconnect cycling (which *could* accompany an inline HDMI/DisplayPort tap, but is far more often a faulty cable, dock, or driver).
+- **LLM analysis**: an advisory assessment framed as equipment/behavior verification, explicitly not an eavesdropping confirmation.
 
-References: Deep-TEMPEST (arXiv:2407.09717), NATO SDIP-27 TEMPEST zones.
+Background reading on the broader threat class (NOT implemented here): Deep-TEMPEST (arXiv:2407.09717), NATO SDIP-27 TEMPEST zones.
 
 ## LLM Agent Integration
 
@@ -179,7 +179,7 @@ Or configure via `daemon_config.json` or Settings > AI Backend in the dashboard.
 | Sequence analysis | Sequence rule fires | 0.2 |
 | Security score | Hourly (if score < 90) | 0.3 |
 | Baseline anomaly | Novel process lineage | 0.3 |
-| TEMPEST analysis | SDR device or display anomaly detected | 0.2 |
+| SDR device analysis | SDR device or display hotplug detected | 0.2 |
 | Threat hunting | `maccrabctl hunt "query"` | 0.1 |
 | Report narrative | `maccrabctl report` | 0.3 |
 

@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-2672%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-436%20%2B%2041%20seq%20%2B%206%20graph-blueviolet)]()
+[![Rules](https://img.shields.io/badge/rules-483%20(90%20stable%2C%20rest%20experimental)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.19.3-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -21,9 +21,9 @@
 > most of the current release cadence. See
 > [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
 
-MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
+MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
 
-**Positioning:** MacCrab is a research, investigation, and power-user tool. It is not a drop-in replacement for a commercial managed EDR — fleet management, 24/7 SOC response, and vendor-curated detection-content pipelines are out of scope. If you want endpoint visibility you can read, modify, and audit yourself, that's what MacCrab is for.
+**Positioning — and why not a commercial EDR.** MacCrab is a research, investigation, and power-user tool, **not** a drop-in replacement for a managed EDR. Commercial EDRs bring a decade of global adversary telemetry, vendor-curated detection content, 24/7 SOC response, and fleet orchestration — backed by a company and an SLA. MacCrab trades all of that for **transparency** (you read every rule), **auditability** (you can modify them), **local-only operation** (no console, no data egress), and **zero cost** — with real tradeoffs you should know up front: no global adversary corpus, no managed response, most of the rule corpus is still **experimental** (see [coverage](docs/COVERAGE.md)), and a **single-maintainer supply chain** (see [Supply-chain security](docs/SUPPLY_CHAIN_SECURITY.md)). Use MacCrab if you want to operate and understand your own detection logic; use a commercial EDR if you need managed threat hunting and fleet-scale coordination.
 
 **Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine **and is OK running alpha software.**
 
@@ -94,7 +94,7 @@ Once running, MacCrab gives you:
 
 | Capability | MacCrab | Santa | osquery | Commercial EDR |
 |------------|:-------:|:-----:|:-------:|:--------------:|
-| Real-time kernel events (90+ ES types) | Yes | Exec only | Scheduled | Yes |
+| Real-time kernel events (90+ ES types)[^es] | Yes | Exec only | Scheduled | Yes |
 | Sigma-compatible rules | **Yes** | No | No | Varies |
 | Temporal sequence detection | **Yes** | No | No | Some |
 | Behavioral scoring | **Yes** | No | No | Yes |
@@ -108,6 +108,8 @@ Once running, MacCrab gives you:
 | Runs entirely local | **Yes** | **Yes** | **Yes** | No |
 | Open source | **Yes** | **Yes** | **Yes** | No |
 | Infrastructure required | **None** | Sync server | Fleet server | Cloud console |
+
+[^es]: **Coverage depends on the build.** Signed Homebrew/DMG **releases** run as a native Endpoint Security System Extension with the full 90+ event types. **Building from source** requires Apple's `com.apple.developer.endpoint-security.client` entitlement, which most developers don't have — so a source build falls back through `eslogger` (a subset of ES event types, root required) → `kdebug`/`fs_usage` (process-exec + file events only, root) → FSEvents (file changes only, non-root). The fallback chain works but the coverage delta is large; the comparison row reflects a release build. See [Signing and Distribution](#signing-and-distribution).
 
 ---
 
@@ -127,7 +129,30 @@ MacCrab's detection engine runs as a System Extension (a sandboxed userspace pro
 
 To report a vulnerability, **do not open a public issue** -- email maccrab@peterhanily.com instead.
 
+**Supply chain.** Releases are a single-maintainer pipeline: one Developer ID signing identity and one Sparkle EdDSA auto-update key, both in the maintainer's keychain. That's a real single point of failure — [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md) documents the current state honestly, the post-compromise incident playbook, and the hardening roadmap; [docs/TRUST.md](docs/TRUST.md) shows how to independently verify any release.
+
 Read the full [Security Policy](SECURITY.md).
+
+---
+
+## Storage Footprint and Performance
+
+MacCrab stores everything locally in SQLite, and on an actively-used machine that adds up. Be aware of the on-disk footprint before you run it on a space-constrained Mac.
+
+**Disk (steady-state caps, active machine):**
+
+| Store | Cap | Notes |
+|-------|----:|-------|
+| `events.db` | ~350 MB | The event working set is bounded by `events_hot_tier_minutes` (default 30 min), but the **file** also carries `alert_evidence` (~100 MB sub-cap) and the FTS5 search index (~60 MB on a busy host), so the file floor is ~300–350 MB regardless. |
+| `alerts.db` | 100 MB | Alerts + analyst metadata. |
+| `campaigns.db` | 50 MB | Detected attack campaigns. |
+| `tracegraph.db` | 250 MB | Causal-graph entity/edge substrate. |
+
+That's roughly **~750 MB of disk allocation on an active machine** (it's much smaller on a lightly-used one). This is disk, not RAM — the daemon's resident memory is far smaller. All caps are tunable under the `storage` block in `daemon_config.json`.
+
+> **History:** Before v1.18, `tracegraph.db` had no retention sweep and could grow without bound — it was **field-observed at 17 GB**. v1.18 added time-based retention, a size cap, and an orphan sweep; v1.19 made all caps configurable. If you ran a pre-v1.18 build, a one-time prune reclaims the space on first launch.
+
+**Power and CPU:** the engine is event-driven and idles cheaply, but on a busy host the Unified Log collector, periodic SQLite WAL checkpoints, and FTS5 re-indexing do real work. MacCrab gates background-intensive work under battery/thermal pressure (`PowerGate`). On a battery-critical or low-disk Mac you can disable optional monitors (clipboard, USB, ultrasonic, EDR scan, etc.) in `daemon_config.json`.
 
 ---
 
@@ -301,7 +326,7 @@ MacCrab evaluates events through a 5-tier detection hierarchy:
 <details>
 <summary><strong>Event Sources (click to expand)</strong></summary>
 
-MacCrab ingests from 19 real-time event sources, covering kernel-level process activity through application-layer permissions. The top-level collectors include:
+MacCrab ingests from 16 real-time collectors (the full list, with poll intervals, is in the [Monitors and Collectors](#monitors--collectors) table below), covering kernel-level process activity through application-layer permissions. The primary sources:
 
 | Source | What it captures |
 |--------|------------------|
@@ -315,7 +340,7 @@ MacCrab ingests from 19 real-time event sources, covering kernel-level process a
 | **FSEvents fallback** | File system event stream for coverage when ES file events are unavailable |
 | **eslogger / kdebug** | Fallback ES event streams when the native ES client is unavailable |
 
-See the Monitors and Collectors table below for the full list including USB, clipboard, ultrasonic, rootkit, browser extension, MCP, EDR/RMM, and TEMPEST/SDR monitors.
+See the Monitors and Collectors table below for the full list including USB, clipboard, ultrasonic, rootkit, browser extension, MCP, EDR/RMM, and an SDR-device monitor.
 
 </details>
 
@@ -339,7 +364,7 @@ See the Monitors and Collectors table below for the full list including USB, cli
 | SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
 | BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
 | MCPMonitor | MCP server configs across AI tools | Startup |
-| TEMPESTMonitor | Van Eck phreaking: SDR devices + display anomalies | 60s |
+| SDRDeviceMonitor | SDR USB devices + rapid display hotplug (no electromagnetic analysis) | 60s |
 
 </details>
 
@@ -520,7 +545,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **483 rules** (436 single-event + 41 sequence + 6 graph)
+release ships **483 rules** (436 single-event + 41 sequence + 6 graph) — of which **90 are marked stable** and the remainder are **experimental** (or deprecated). "Experimental" means the detection logic works but is still being tuned against field false-positives; see [docs/COVERAGE.md](docs/COVERAGE.md) for the per-rule stable/experimental/deprecated matrix
 covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
@@ -541,6 +566,7 @@ tactics:
 | — | **Sequences** (temporal multi-step) | **41** |
 | — | **Graph** (multi-entity TraceGraph) | **6** |
 | — | **Total** | **483** |
+| — | *Maturity* | *90 stable · rest experimental/deprecated — see [COVERAGE.md](docs/COVERAGE.md)* |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -723,7 +749,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 - Crash report mining for exploitation indicators
 - Power/thermal anomaly detection (crypto mining, C2 beacons)
 - CDHash extraction for process integrity verification
-- TEMPEST / Van Eck phreaking detection (17 SDR devices, display anomaly monitoring)
+- SDR-device + display-hotplug detection (17 known SDR USB devices; equipment/behavior flags only — no electromagnetic analysis)
 - EDR/RMM tool discovery (30+ tools across 5 categories)
 - 14 language localizations for the dashboard
 

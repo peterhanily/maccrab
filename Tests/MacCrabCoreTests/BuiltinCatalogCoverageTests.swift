@@ -53,7 +53,7 @@ struct BuiltinCatalogCoverageTests {
         "maccrab.usb.connected",
         "maccrab.browser.installed",
         "maccrab.ultrasonic.nuit",
-        "maccrab.tempest.sdr-device",
+        "maccrab.sdr_device.sdr_device",
         "maccrab.edr.remote-access",
         "maccrab.git.credential-helper",
         "maccrab.llm.behavior-analysis",

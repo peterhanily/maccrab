@@ -168,13 +168,13 @@ struct SystemPolicyMonitorTests {
     }
 }
 
-// MARK: - TEMPEST Monitor
+// MARK: - SDR Device Monitor
 
-@Suite("TEMPEST Monitor")
-struct TEMPESTMonitorTests {
+@Suite("SDR Device Monitor")
+struct SDRDeviceMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
-        let monitor = TEMPESTMonitor()
+        let monitor = SDRDeviceMonitor()
         try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
             try await Task.sleep(for: .milliseconds(100))
         }

@@ -1,35 +1,42 @@
-// TEMPESTMonitor.swift
+// SDRDeviceMonitor.swift
 // MacCrabCore
 //
-// Detects indicators of Van Eck phreaking / TEMPEST electromagnetic
-// eavesdropping attacks. Monitors for:
+// Detects two physical-access precursors, by enumeration only:
 //
-// 1. SDR hardware (RTL-SDR, HackRF, USRP, BladeRF, etc.) connected via USB
-// 2. Display anomalies (phantom hotplug, EDID changes, timing shifts)
-// 3. Unauthorized Thunderbolt devices (potential signal interception hardware)
+// 1. Known software-defined-radio (SDR) hardware (RTL-SDR, HackRF, USRP,
+//    BladeRF, etc.) connected via USB — matched against a fixed VID/PID list.
+// 2. Suspicious display hotplug patterns (rapid connect/disconnect cycling)
+//    that *could* accompany an inline HDMI/DisplayPort tap.
 //
-// References:
-// - Deep-TEMPEST (2024): https://arxiv.org/html/2407.09717v1
-// - DisplayPort eavesdropping: Cambridge Computer Lab
-// - NATO SDIP-27 TEMPEST zones
-// - Soft TEMPEST countermeasures: Cambridge Computer Lab
+// IMPORTANT — what this is NOT: there is NO electromagnetic / RF signal
+// analysis here. No spectrum capture, no EDID/timing reconstruction, no Van Eck
+// phreaking detection. This monitor flags *equipment that could be misused* and
+// *anomalous display behavior* — both of which are precursors that warrant a
+// look, not confirmation of an active eavesdropping attack. An SDR is a
+// general-purpose radio with many legitimate uses; a display hotplug can be a
+// faulty cable, dock, or driver. Treat every alert here as "verify this," not
+// "you are being eavesdropped on."
+//
+// Background reading on the broader threat class (NOT implemented here):
+// Deep-TEMPEST (arXiv:2407.09717); NATO SDIP-27 TEMPEST zones.
 
 import Foundation
 import os.log
 import CoreGraphics
 
-/// Monitors for indicators of TEMPEST / Van Eck phreaking electromagnetic
-/// eavesdropping attacks against this machine's display output.
-public actor TEMPESTMonitor {
+/// Enumerates known SDR USB devices and watches for suspicious display hotplug
+/// patterns. Equipment + behavior detection only — performs no electromagnetic
+/// signal analysis (see file header).
+public actor SDRDeviceMonitor {
 
-    private let logger = Logger(subsystem: "com.maccrab", category: "tempest-monitor")
+    private let logger = Logger(subsystem: "com.maccrab", category: "sdr-device-monitor")
 
     /// How often to scan for USB SDR devices (default: 60 seconds).
     private let pollInterval: TimeInterval
 
     /// AsyncStream continuation for emitting discoveries.
-    private var continuation: AsyncStream<TEMPESTEvent>.Continuation?
-    private let _events: AsyncStream<TEMPESTEvent>
+    private var continuation: AsyncStream<SDRDeviceEvent>.Continuation?
+    private let _events: AsyncStream<SDRDeviceEvent>
 
     /// Known SDR devices already reported (avoid re-alerting).
     private var reportedDevices: Set<String> = []
@@ -44,7 +51,7 @@ public actor TEMPESTMonitor {
 
     // MARK: - Types
 
-    public struct TEMPESTEvent: Sendable {
+    public struct SDRDeviceEvent: Sendable {
         public let type: EventType
         public let severity: Severity
         public let title: String
@@ -66,46 +73,47 @@ public actor TEMPESTMonitor {
         case sdrDeviceDetected = "sdr_device"
         case displayAnomaly = "display_anomaly"
         case thunderboltAnomaly = "thunderbolt_anomaly"
-        case tempestRisk = "tempest_risk"
+        case sdrRisk = "sdr_risk"
     }
 
     // MARK: - SDR Device Database
 
-    /// Known SDR devices used for TEMPEST/Van Eck attacks.
-    /// VID/PID pairs with device info.
+    /// Known SDR devices, by USB VID/PID. The `coverage` note describes the
+    /// radio's tuning range as a fact about the hardware — NOT a claim that an
+    /// attack is occurring. Detection here means "this equipment is present."
     private static let knownSDRDevices: [(vid: Int, pid: Int, name: String, vendor: String, freqRange: String, risk: String)] = [
-        // RTL-SDR family (most common, $25)
-        (0x0bda, 0x2832, "RTL-SDR (RTL2832U)", "Realtek", "24 MHz - 1.766 GHz", "Can capture HDMI emissions at 324 MHz"),
-        (0x0bda, 0x2838, "RTL-SDR (RTL2838)", "Realtek", "24 MHz - 1.766 GHz", "Can capture HDMI emissions at 324 MHz"),
-        // HackRF One ($350)
-        (0x1d50, 0x6089, "HackRF One", "Great Scott Gadgets", "1 MHz - 6 GHz", "Full TEMPEST attack capability — covers all display emission frequencies"),
-        // Ettus USRP family ($1,500+) — used in Deep-TEMPEST paper
-        (0x2500, 0x0020, "USRP B210", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR — used in Deep-TEMPEST paper for HDMI reconstruction"),
-        (0x2500, 0x0021, "USRP B200-mini", "Ettus/NI", "70 MHz - 6 GHz", "Exact hardware used in Deep-TEMPEST (arXiv:2407.09717)"),
-        (0x2500, 0x0022, "USRP B205-mini", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR"),
-        (0x2500, 0x0200, "USRP B200", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR"),
-        // Nuand BladeRF ($480)
-        (0x2cf0, 0x5246, "BladeRF", "Nuand", "47 MHz - 6 GHz", "Full spectrum SDR — TEMPEST capable"),
-        (0x2cf0, 0x5250, "BladeRF 2.0 Micro", "Nuand", "47 MHz - 6 GHz", "Full spectrum SDR — TEMPEST capable"),
-        // Airspy ($200)
-        (0x1d50, 0x60a1, "Airspy R2/Mini", "Airspy", "24 MHz - 1.8 GHz", "Covers HDMI emission frequencies"),
-        // LimeSDR ($300)
-        (0x1d50, 0x6108, "LimeSDR", "Lime Microsystems", "100 kHz - 3.8 GHz", "Full TEMPEST capability"),
-        (0x0403, 0x601f, "LimeSDR Mini", "Lime Microsystems", "10 MHz - 3.5 GHz", "TEMPEST capable"),
-        // SDRplay ($120-$260)
-        (0x1df7, 0x2500, "SDRplay RSP1", "SDRplay", "1 kHz - 2 GHz", "Covers HDMI emission frequencies"),
-        (0x1df7, 0x3000, "SDRplay RSP1A", "SDRplay", "1 kHz - 2 GHz", "Covers HDMI emission frequencies"),
-        (0x1df7, 0x3010, "SDRplay RSPduo", "SDRplay", "1 kHz - 2 GHz", "Dual-tuner — simultaneous monitoring"),
+        // RTL-SDR family (most common, ~$25)
+        (0x0bda, 0x2832, "RTL-SDR (RTL2832U)", "Realtek", "24 MHz - 1.766 GHz", "Low-cost wideband receiver; legitimate uses are common."),
+        (0x0bda, 0x2838, "RTL-SDR (RTL2838)", "Realtek", "24 MHz - 1.766 GHz", "Low-cost wideband receiver; legitimate uses are common."),
+        // HackRF One (~$350)
+        (0x1d50, 0x6089, "HackRF One", "Great Scott Gadgets", "1 MHz - 6 GHz", "Wide-range transceiver popular with researchers and hobbyists."),
+        // Ettus USRP family (~$1,500+) — the hardware class used in the Deep-TEMPEST paper
+        (0x2500, 0x0020, "USRP B210", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR."),
+        (0x2500, 0x0021, "USRP B200-mini", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR."),
+        (0x2500, 0x0022, "USRP B205-mini", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR."),
+        (0x2500, 0x0200, "USRP B200", "Ettus/NI", "70 MHz - 6 GHz", "Research-grade SDR."),
+        // Nuand BladeRF (~$480)
+        (0x2cf0, 0x5246, "BladeRF", "Nuand", "47 MHz - 6 GHz", "Full-spectrum SDR transceiver."),
+        (0x2cf0, 0x5250, "BladeRF 2.0 Micro", "Nuand", "47 MHz - 6 GHz", "Full-spectrum SDR transceiver."),
+        // Airspy (~$200)
+        (0x1d50, 0x60a1, "Airspy R2/Mini", "Airspy", "24 MHz - 1.8 GHz", "Wideband receiver."),
+        // LimeSDR (~$300)
+        (0x1d50, 0x6108, "LimeSDR", "Lime Microsystems", "100 kHz - 3.8 GHz", "Full-range SDR transceiver."),
+        (0x0403, 0x601f, "LimeSDR Mini", "Lime Microsystems", "10 MHz - 3.5 GHz", "SDR transceiver."),
+        // SDRplay (~$120-$260)
+        (0x1df7, 0x2500, "SDRplay RSP1", "SDRplay", "1 kHz - 2 GHz", "Wideband receiver."),
+        (0x1df7, 0x3000, "SDRplay RSP1A", "SDRplay", "1 kHz - 2 GHz", "Wideband receiver."),
+        (0x1df7, 0x3010, "SDRplay RSPduo", "SDRplay", "1 kHz - 2 GHz", "Dual-tuner receiver."),
         // FunCube Dongle
-        (0x04d8, 0xfb56, "FunCube Dongle Pro", "FunCube", "64 MHz - 1.7 GHz", "Covers HDMI emission frequencies"),
-        (0x04d8, 0xfb31, "FunCube Dongle Pro+", "FunCube", "150 kHz - 1.9 GHz", "Covers HDMI emission frequencies"),
+        (0x04d8, 0xfb56, "FunCube Dongle Pro", "FunCube", "64 MHz - 1.7 GHz", "Receiver dongle."),
+        (0x04d8, 0xfb31, "FunCube Dongle Pro+", "FunCube", "150 kHz - 1.9 GHz", "Receiver dongle."),
     ]
 
     // MARK: - Init
 
     public init(pollInterval: TimeInterval = 60) {
         self.pollInterval = pollInterval
-        var capturedContinuation: AsyncStream<TEMPESTEvent>.Continuation!
+        var capturedContinuation: AsyncStream<SDRDeviceEvent>.Continuation!
         self._events = AsyncStream { c in
             capturedContinuation = c
         }
@@ -114,15 +122,15 @@ public actor TEMPESTMonitor {
 
     // MARK: - Public API
 
-    /// AsyncStream of TEMPEST-related events.
-    public nonisolated var events: AsyncStream<TEMPESTEvent> {
+    /// AsyncStream of SDR-device + display-hotplug events.
+    public nonisolated var events: AsyncStream<SDRDeviceEvent> {
         _events
     }
 
     /// Start monitoring.
     public func start() {
         guard scanTask == nil else { return }
-        logger.info("TEMPEST monitor starting (SDR device scan every \(self.pollInterval)s)")
+        logger.info("SDR device monitor starting (USB SDR scan every \(self.pollInterval)s)")
 
         // Record initial display state
         knownDisplays = Set(currentDisplayIDs())
@@ -161,20 +169,21 @@ public actor TEMPESTMonitor {
                     if !reportedDevices.contains(key) {
                         reportedDevices.insert(key)
 
-                        let event = TEMPESTEvent(
+                        let event = SDRDeviceEvent(
                             type: .sdrDeviceDetected,
-                            severity: .critical,
-                            title: "SDR Device Detected: \(sdr.name)",
+                            severity: .high,
+                            title: "SDR Device Connected: \(sdr.name)",
                             description: """
-                                A Software Defined Radio (\(sdr.name) by \(sdr.vendor)) has been \
-                                connected to this machine. SDR devices can be used for Van Eck \
-                                phreaking — capturing electromagnetic emissions from HDMI/DisplayPort \
-                                cables to reconstruct screen content. Frequency range: \(sdr.freqRange).
+                                A software-defined radio (\(sdr.name) by \(sdr.vendor)) has been \
+                                connected to this machine (tuning range \(sdr.freqRange)). This is \
+                                equipment detection, not confirmation of an attack — SDRs have many \
+                                legitimate uses. If you didn't connect it, investigate who has had \
+                                physical access. MacCrab does NOT perform any RF/emissions analysis.
                                 """,
-                            detail: "\(sdr.risk). Location: \(device.locationID)"
+                            detail: "\(sdr.risk) Location: \(device.locationID)"
                         )
                         continuation?.yield(event)
-                        logger.critical("TEMPEST: SDR device detected — \(sdr.name) (\(sdr.vendor))")
+                        logger.notice("SDR: device connected — \(sdr.name) (\(sdr.vendor))")
                     }
                 }
             }
@@ -194,30 +203,31 @@ public actor TEMPESTMonitor {
         if !newDisplays.isEmpty || !removedDisplays.isEmpty {
             displayEventCount += 1
 
-            // Rapid hotplug cycling is suspicious (HDMI tap being connected)
+            // Rapid hotplug cycling is anomalous (could be an inline tap being
+            // connected — but also a flaky cable, dock, or driver).
             let timeSinceLastChange = now.timeIntervalSince(lastDisplayChange)
             if timeSinceLastChange < 5.0 && displayEventCount > 2 {
-                let event = TEMPESTEvent(
+                let event = SDRDeviceEvent(
                     type: .displayAnomaly,
-                    severity: .high,
+                    severity: .medium,
                     title: "Rapid Display Hotplug Activity",
                     description: """
-                        Multiple display connect/disconnect events detected within \
-                        \(String(format: "%.1f", timeSinceLastChange)) seconds. This pattern \
-                        can indicate an HDMI/DisplayPort signal interception device (tap) being \
-                        connected between your machine and display. An attacker could use this to \
-                        split your video signal for electromagnetic analysis.
+                        Multiple display connect/disconnect events occurred within \
+                        \(String(format: "%.1f", timeSinceLastChange)) seconds. This pattern *can* \
+                        accompany an inline HDMI/DisplayPort signal-splitting device, but it is far \
+                        more often a faulty cable, a dock waking, or a display driver glitch. Verify \
+                        your cabling/dock before treating this as a security event.
                         """,
                     detail: "Events in window: \(displayEventCount). New: \(newDisplays). Removed: \(removedDisplays)"
                 )
                 continuation?.yield(event)
-                logger.warning("TEMPEST: Rapid display hotplug detected (\(self.displayEventCount) events)")
+                logger.notice("SDR: rapid display hotplug detected (\(self.displayEventCount) events)")
             }
 
             // Unknown display connected
             for displayID in newDisplays {
                 let name = displayName(for: displayID)
-                logger.info("TEMPEST: Display connected — ID \(displayID), name: \(name)")
+                logger.info("SDR: display connected — ID \(displayID), name: \(name)")
             }
 
             lastDisplayChange = now
