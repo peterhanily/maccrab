@@ -118,6 +118,8 @@ struct PluginDetailInspector: View {
                     provenanceBadge
                     Text("v\(model.version)").scaledSystem(11).foregroundStyle(.tertiary)
                 }
+                Text(model.provenance.explanation)
+                    .scaledSystem(10).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
@@ -125,11 +127,13 @@ struct PluginDetailInspector: View {
     }
 
     private var provenanceBadge: some View {
-        Text(model.provenance.displayName)
+        let c: Color = model.provenance == .store ? .blue : (model.provenance == .builtIn ? .green : .orange)
+        return Label(model.provenance.forensicsLabel, systemImage: model.provenance.symbolName)
+            .labelStyle(.titleAndIcon)
             .scaledSystem(9, weight: .semibold)
             .padding(.horizontal, 6).padding(.vertical, 1)
-            .background(Color.secondary.opacity(0.15)).cornerRadius(3)
-            .foregroundStyle(.secondary)
+            .background(c.opacity(0.15)).cornerRadius(3)
+            .foregroundStyle(c)
     }
 
     // MARK: - Capabilities

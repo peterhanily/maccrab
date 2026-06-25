@@ -25,6 +25,30 @@ public enum PluginProvenance: String, Sendable, Codable, CaseIterable {
         }
     }
 
+    /// Forensics-UI label — clearer about WHERE a plugin came from than the bare
+    /// "Third-party" (which reads as ambiguous). A non-store install is an
+    /// operator sideload, so we call it that.
+    public var forensicsLabel: String {
+        switch self {
+        case .builtIn:    return "Built-in"
+        case .thirdParty: return "Sideloaded"
+        case .store:      return "Store"
+        }
+    }
+
+    /// One-line explanation shown in the plugin detail sheet so a user knows
+    /// exactly what the provenance means.
+    public var explanation: String {
+        switch self {
+        case .builtIn:
+            return "Ships inside MacCrab.app — first-party, verified at build time."
+        case .store:
+            return "Installed from the rave store — signature-verified against the signed catalog."
+        case .thirdParty:
+            return "Sideloaded — you trusted this publisher's key directly; not from the store."
+        }
+    }
+
     /// SF Symbol the dashboard renders next to the label.
     public var symbolName: String {
         switch self {

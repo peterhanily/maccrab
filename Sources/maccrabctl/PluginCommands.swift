@@ -211,7 +211,7 @@ private func pluginList(args: [String] = []) async {
                 print("Installed plugins:")
                 for p in installed {
                     let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
-                    print("  \(p.pluginID)  [\(prov.displayName)]  key=\(p.publicKeyHex.prefix(16))…")
+                    print("  \(p.pluginID)  [\(prov.forensicsLabel)]  key=\(p.publicKeyHex.prefix(16))…")
                     print("    Root: \(p.installRoot)")
                 }
             }

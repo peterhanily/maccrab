@@ -323,7 +323,8 @@ struct V2ForensicsScansView: View {
                                    subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Installed plugin")),
                                    badge: upd
                                        ? String(localized: "scans.updateBadge", defaultValue: "Update → v\(availableVersions[p.pluginID] ?? "")")
-                                       : String(localized: "scans.thirdPartyBadge", defaultValue: "Installed"),
+                                       : nil,
+                                   provenance: provenance(for: p),
                                    detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
                     }
                     Button { Task { await reverifyAll() } } label: {
@@ -407,10 +408,21 @@ struct V2ForensicsScansView: View {
 
     /// Build the third-party detail model (provenance from receipts, "added" date
     /// from the install-root creation time).
-    private func thirdPartyDetail(_ p: InstalledPlugin) -> PluginDetailModel {
+    /// Provenance for an installed plugin, catalog-corroborated. The signed
+    /// install receipt is authoritative, but it can fail to write on some install
+    /// paths — so a trusted plugin whose id is present in the live signed catalog
+    /// is classified as Store regardless, instead of mislabeling it Sideloaded.
+    private func provenance(for p: InstalledPlugin) -> PluginProvenance {
         let receiptsDir = URL(fileURLWithPath: (PluginInstaller().pluginsRootPath as NSString).deletingLastPathComponent)
             .appendingPathComponent("plugin_receipts")
-        let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
+        let receiptProv = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
+        if receiptProv == .store { return .store }
+        if availableVersions[p.pluginID] != nil { return .store }  // in the signed catalog
+        return receiptProv  // .thirdParty (sideloaded)
+    }
+
+    private func thirdPartyDetail(_ p: InstalledPlugin) -> PluginDetailModel {
+        let prov = provenance(for: p)
         var installed = String(localized: "scans.installed", defaultValue: "Installed")
         if let attrs = try? FileManager.default.attributesOfItem(atPath: p.installRoot),
            let d = attrs[.creationDate] as? Date {
@@ -438,6 +450,7 @@ struct V2ForensicsScansView: View {
     }
 
     private func scannerRow(icon: String, name: String, subtitle: String, badge: String?,
+                            provenance: PluginProvenance? = nil,
                             detail: @escaping () -> Void, run: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon).scaledSystem(16).foregroundStyle(.tint)
@@ -445,6 +458,16 @@ struct V2ForensicsScansView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(name).scaledSystem(12, weight: .semibold)
+                    if let provenance {
+                        let c: Color = provenance == .store ? .blue : (provenance == .builtIn ? .green : .orange)
+                        Label(provenance.forensicsLabel, systemImage: provenance.symbolName)
+                            .labelStyle(.titleAndIcon)
+                            .scaledSystem(9, weight: .semibold)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(c.opacity(0.15)).cornerRadius(3)
+                            .foregroundStyle(c)
+                            .help(provenance.explanation)
+                    }
                     if let badge {
                         Text(badge).scaledSystem(9, weight: .medium)
                             .padding(.horizontal, 5).padding(.vertical, 1)
