@@ -48,6 +48,7 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case revocationsParseFailed(reason: String)
     case pluginRevoked(id: String, version: String, reason: String, code: String)
     case versionFloor(reason: String)
+    case downgradeRefused(id: String, installed: String, target: String)
 
     var description: String {
         switch self {
@@ -93,6 +94,8 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Refusing to install \(id)@\(version): revoked by the signed revocation list [\(code)] — \(reason)."
         case .versionFloor(let reason):
             return reason
+        case .downgradeRefused(let id, let installed, let target):
+            return "Refusing to downgrade \(id): installed v\(installed), requested v\(target). Plugin updates are forward-only (anti-rollback). Uninstall first if a downgrade is genuinely intended."
         }
     }
 }
@@ -284,6 +287,22 @@ struct PluginCatalogFetcher {
             throw PluginCatalogFetchError.pluginNotInCatalog(id: pluginID)
         }
         let resolvedVersion = version ?? entry.currentVersion
+
+        // Forward-only guard (per-plugin anti-rollback): refuse a strict DOWNGRADE
+        // of an already-installed plugin. The catalog_serial high-water mark
+        // (Step 1.5) only proves catalog FRESHNESS, not that `resolvedVersion` is
+        // >= what's installed — so an explicit `--version <older> --force` could
+        // otherwise roll a plugin back to a known-vulnerable (but not formally
+        // revoked) release. Equal/newer is allowed (reinstall / repair / update).
+        // Skips silently if the plugin isn't installed or either version is
+        // unparseable — the revocation + signer-pin gates still apply regardless.
+        if let installedVersion = await Self.installedManifestVersion(pluginID: pluginID),
+           let target = MacCrabSemver(resolvedVersion),
+           let current = MacCrabSemver(installedVersion),
+           target < current {
+            throw PluginCatalogFetchError.downgradeRefused(
+                id: pluginID, installed: installedVersion, target: resolvedVersion)
+        }
 
         // Step 2.5 (O2): fetch + verify + anti-rollback the signed revocation
         // list, then refuse the install if THIS id@version is revoked —
@@ -611,6 +630,16 @@ struct PluginCatalogFetcher {
         }
         let records = RevocationEnforcer.reconcileQuarantine(installed: refs, against: list)
         try await installer.applyQuarantine(records)
+    }
+
+    /// The installed version of `pluginID` (from its bundle manifest), or nil if
+    /// the plugin isn't installed / the manifest can't be read. Used by the
+    /// forward-only downgrade guard.
+    static func installedManifestVersion(pluginID: String) async -> String? {
+        let installer = PluginInstaller()
+        guard let installed = try? await installer.list(),
+              let p = installed.first(where: { $0.pluginID == pluginID }) else { return nil }
+        return (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version
     }
 
     // MARK: - Catalog parsing

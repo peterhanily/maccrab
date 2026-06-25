@@ -151,4 +151,77 @@ struct PluginInstallerTests {
         let installed = try await installer.install(sourceDir: src, trustOnInstall: true)
         #expect(installed.pluginID == "com.test.tier-b.fixture")
     }
+
+    // MARK: - Version pins (v1.19.3)
+
+    @Test("pin round-trip: pin → pinnedVersion → currentPins → unpin")
+    func pinRoundTrip() async throws {
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        var v = await installer.pinnedVersion(id: "com.test.x")
+        #expect(v == nil)
+        try await installer.pinPlugin(id: "com.test.x", version: "1.2.3")
+        v = await installer.pinnedVersion(id: "com.test.x")
+        #expect(v == "1.2.3")
+        let pins = await installer.currentPins()
+        #expect(pins["com.test.x"] == "1.2.3")
+        // Isolation: a different id is unaffected.
+        let other = await installer.pinnedVersion(id: "com.test.y")
+        #expect(other == nil)
+        // Overwrite is idempotent.
+        try await installer.pinPlugin(id: "com.test.x", version: "1.3.0")
+        v = await installer.pinnedVersion(id: "com.test.x")
+        #expect(v == "1.3.0")
+        try await installer.unpinPlugin(id: "com.test.x")
+        v = await installer.pinnedVersion(id: "com.test.x")
+        #expect(v == nil)
+        let empty = await installer.currentPins()
+        #expect(empty.isEmpty)
+    }
+
+    @Test("pin file is not surfaced as an installed plugin")
+    func pinFileNotListed() async throws {
+        let (src, _) = try Self.freshSignedBundle()
+        defer { try? FileManager.default.removeItem(at: src) }
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        _ = try await installer.install(sourceDir: src, trustOnInstall: true)
+        try await installer.pinPlugin(id: "com.test.tier-b.fixture", version: "1.0")
+        let list = try await installer.list()
+        #expect(list.count == 1)
+        #expect(list[0].pluginID == "com.test.tier-b.fixture")
+    }
+
+    // MARK: - Atomic install (v1.19.3)
+
+    @Test("force-reinstall replaces in place and leaves no .tmp residue")
+    func forceReinstallNoTmpResidue() async throws {
+        let (src, _) = try Self.freshSignedBundle()
+        defer { try? FileManager.default.removeItem(at: src) }
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        _ = try await installer.install(sourceDir: src, trustOnInstall: true)
+        _ = try await installer.install(sourceDir: src, trustOnInstall: true, force: true)
+        let list = try await installer.list()
+        #expect(list.count == 1)
+        // The atomic-swap temp dir must not linger in the plugins root.
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: installer.pluginsRootPath)) ?? []
+        #expect(!entries.contains(where: { $0.contains(".tmp.") }))
+    }
+
+    @Test("list() ignores a stray .tmp. directory (crash-interrupted swap)")
+    func listIgnoresStrayTmp() async throws {
+        let (src, _) = try Self.freshSignedBundle()
+        defer { try? FileManager.default.removeItem(at: src) }
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        _ = try await installer.install(sourceDir: src, trustOnInstall: true)
+        // Simulate a crash mid-swap leaving a temp dir behind.
+        let stray = URL(fileURLWithPath: installer.pluginsRootPath)
+            .appendingPathComponent("com.test.tier-b.fixture.tmp.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stray, withIntermediateDirectories: true)
+        let list = try await installer.list()
+        #expect(list.count == 1)
+        #expect(list[0].pluginID == "com.test.tier-b.fixture")
+    }
 }

@@ -92,6 +92,11 @@ let agentToolCapability: [String: AgentCapability] = [
     // FAILS OPEN — any set_-prefixed tool absent here bypasses the gate — so
     // this entry is load-bearing (and pinned by mutatingToolsAreGated).
     "set_response_action": .response,
+    // Updating an installed plugin replaces executable code on disk (via the
+    // verified install path). Forward-only + signer-pinned, but still
+    // code-changing, so it sits at the top tier. (The read-only
+    // forensics_check_plugin_updates is intentionally absent — it never mutates.)
+    "forensics_install_plugin_update": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +

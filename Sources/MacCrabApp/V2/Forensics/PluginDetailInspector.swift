@@ -72,6 +72,12 @@ struct PluginDetailInspector: View {
     let model: PluginDetailModel
     /// Optional run handler — shows a "Run on this Mac" button when present.
     var onRun: (() -> Void)? = nil
+    /// Optional manage handlers — present for installed (non-built-in) plugins so
+    /// this sheet is the single Run + manage surface (the unified inventory).
+    var onVerify: (() -> Void)? = nil
+    /// Optional update handler — present only when a newer catalog version exists.
+    var onUpdate: (() -> Void)? = nil
+    var onUninstall: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -167,7 +173,7 @@ struct PluginDetailInspector: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 8) {
             if model.runnable, let onRun {
                 Button {
                     onRun(); dismiss()
@@ -176,7 +182,19 @@ struct PluginDetailInspector: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
+            if let onUpdate {
+                Button { onUpdate() } label: { Label("Update", systemImage: "arrow.up.circle.fill") }
+                    .tint(.blue)
+            }
+            if let onVerify {
+                Button { onVerify() } label: { Label("Verify", systemImage: "checkmark.shield") }
+            }
             Spacer()
+            if let onUninstall {
+                Button(role: .destructive) { onUninstall(); dismiss() } label: {
+                    Label("Uninstall", systemImage: "trash")
+                }
+            }
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)

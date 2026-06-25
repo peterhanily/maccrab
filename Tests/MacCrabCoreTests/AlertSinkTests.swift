@@ -258,3 +258,310 @@ struct AlertSinkTests {
         #expect(stats.suppressed == 1)
     }
 }
+
+// MARK: - FP recalibration (v1.19.3)
+
+/// Pin the dev-tooling / self-noise down-weight applied at the AlertSink
+/// chokepoint. Contract: noisy attack-chain alerts on trusted dev-tooling
+/// lineage (or MacCrab's own processes) are DOWN-WEIGHTED to informational —
+/// never dropped — while must-fire credential-theft / honeyfile detections are
+/// PRESERVED at full severity. Exercised through `submit(alert:)` and read back
+/// from the store so the test covers the real emission path.
+@Suite("AlertSink FP recalibration")
+struct AlertSinkRecalibrationTests {
+
+    private func storedSeverity(after alert: Alert) async throws -> Severity {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        _ = try await sink.submit(alert: alert)
+        let stored = try await store.alerts(forEventId: alert.eventId)
+        return stored.first?.severity ?? alert.severity
+    }
+
+    private func alert(
+        ruleId: String = "test.rule",
+        ruleTitle: String = "Test rule",
+        severity: Severity,
+        processPath: String?,
+        mitreTactics: String? = nil,
+        parentExecutable: String? = nil
+    ) -> Alert {
+        Alert(
+            ruleId: ruleId, ruleTitle: ruleTitle, severity: severity,
+            eventId: UUID().uuidString, processPath: processPath,
+            processName: processPath.map { ($0 as NSString).lastPathComponent },
+            description: "d", mitreTactics: mitreTactics, mitreTechniques: nil,
+            suppressed: false, parentExecutable: parentExecutable
+        )
+    }
+
+    @Test("dev-tooling attack-chain high → low (visible, not hidden)")
+    func devToolingHighDownweighted() async throws {
+        let a = alert(
+            ruleId: "d1a2b3c4-0506", ruleTitle: "Curl Fetch Then Exec",
+            severity: .high,
+            processPath: "/Users/x/proj/node_modules/.bin/esbuild",
+            mitreTactics: "attack.command_and_control"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("dev-tooling critical credential-access PRESERVED (must-fire)")
+    func devToolingCredentialPreserved() async throws {
+        let a = alert(
+            ruleTitle: "AI Tool Reads Credentials Then Network",
+            severity: .critical,
+            processPath: "/Users/x/proj/node_modules/.bin/tool",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+    }
+
+    @Test("dev-tooling honeyfile PRESERVED (must-fire)")
+    func devToolingHoneyfilePreserved() async throws {
+        let a = alert(
+            ruleTitle: "Honeyfile Accessed", severity: .high,
+            processPath: "/opt/homebrew/bin/something",
+            mitreTactics: "attack.collection"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("gh reading its own GitHub token → down-weighted (self-credential tool)")
+    func ghGitHubTokenDownweighted() async throws {
+        let a = alert(
+            ruleTitle: "🦀 AI Tool Accessed GitHub Token", severity: .high,
+            processPath: "/opt/homebrew/Cellar/gh/2.86.0/bin/gh",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("non-dev-tooling high is UNCHANGED")
+    func nonDevToolingUnchanged() async throws {
+        let a = alert(
+            ruleTitle: "Suspicious Exec", severity: .high,
+            processPath: "/Applications/Evil.app/Contents/MacOS/Evil",
+            mitreTactics: "attack.execution"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("MacCrab self-process noise → low")
+    func selfNoiseDownweighted() async throws {
+        let a = alert(
+            ruleTitle: "Cross-Process Attack Chain", severity: .high,
+            processPath: "/Applications/MacCrab.app/Contents/Resources/bin/maccrab-mcp",
+            mitreTactics: "attack.execution"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("Tier-B verified trampoline staging path is self-noise")
+    func tierBTrampolineSelfNoise() async throws {
+        let a = alert(
+            ruleTitle: "Non-System Binary Lacks Notarization", severity: .medium,
+            processPath: "/private/var/folders/hf/X/T/maccrab-tier-b-verified-4F4CCE5E",
+            mitreTactics: "attack.defense_evasion"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("dev-tooling lineage via PARENT executable down-weights")
+    func parentLineageDevToolingDownweighted() async throws {
+        let a = alert(
+            ruleTitle: "Curl Fetch Then Exec", severity: .high,
+            processPath: "/usr/bin/curl",
+            mitreTactics: "attack.command_and_control",
+            parentExecutable: "/Users/x/proj/node_modules/.bin/esbuild"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("non-dev-tooling credential theft (real infostealer) is UNCHANGED")
+    func realCredentialTheftUnchanged() async throws {
+        // A *different* process (not gh) reading credentials, off any dev path —
+        // exactly what must keep escalating.
+        let a = alert(
+            ruleTitle: "🦀 AI Tool Accessed GitHub Token", severity: .critical,
+            processPath: "/tmp/.hidden/stealer",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+    }
+
+    // MARK: - Must-fire classes preserved on dev paths (v1.19.3 adversarial review)
+
+    @Test("dev-tooling IMPACT (ransomware / disk wipe) PRESERVED")
+    func devToolingImpactPreserved() async throws {
+        let a = alert(
+            ruleTitle: "Disk Wipe or Overwrite Command", severity: .critical,
+            processPath: "/opt/homebrew/lib/node_modules/evil/bin/wipe",
+            mitreTactics: "attack.impact"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+    }
+
+    @Test("dev-tooling DEFENSE-EVASION (SIP / Gatekeeper disable) PRESERVED")
+    func devToolingDefenseEvasionPreserved() async throws {
+        let a = alert(
+            ruleTitle: "SIP Disabled", severity: .critical,
+            processPath: "/opt/homebrew/bin/installer",
+            mitreTactics: "attack.defense_evasion"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+    }
+
+    @Test("dev-tooling PERSISTENCE (launchd) PRESERVED")
+    func devToolingPersistencePreserved() async throws {
+        let a = alert(
+            ruleTitle: "LaunchAgent Created by Unsigned Process", severity: .high,
+            processPath: "/Users/x/proj/node_modules/.bin/postinstall",
+            mitreTactics: "attack.persistence"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("dev-tooling EXFILTRATION PRESERVED")
+    func devToolingExfiltrationPreserved() async throws {
+        let a = alert(
+            ruleTitle: "Archive Created and Uploaded", severity: .high,
+            processPath: "/Users/x/.local/share/claude/bin/agent",
+            mitreTactics: "attack.exfiltration"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    // MARK: - Campaign meta-alerts skip dev-tooling recalibration
+
+    @Test("campaign meta-alert on a dev-tool contributor is NOT down-weighted")
+    func campaignMetaAlertPreserved() async throws {
+        let a = alert(
+            ruleId: "maccrab.campaign.kill_chain", ruleTitle: "Kill Chain Detected",
+            severity: .critical,
+            processPath: "/opt/homebrew/bin/workerd",
+            mitreTactics: "attack.execution"
+        )
+        #expect(try await storedSeverity(after: a) == .critical)
+    }
+
+    // MARK: - Anti-spoofing (P0): self-noise gate must be path-anchored
+
+    @Test("spoofed /tmp/maccrabd is NOT treated as self-noise")
+    func spoofedMaccrabdNotSelfNoise() async throws {
+        // An attacker drops a binary literally named maccrabd in a world-writable
+        // dir. It is NOT on a dev-tooling path and NOT a real install location, so
+        // it must keep its full severity (the pre-anchoring code wrongly hid it).
+        #expect(AlertSink.isMacCrabSelfNoise("/tmp/maccrabd") == false)
+        #expect(AlertSink.isMacCrabSelfNoise("/var/tmp/maccrab-mcp") == false)
+        #expect(AlertSink.isMacCrabSelfNoise("/Users/x/Downloads/maccrabctl") == false)
+        let a = alert(
+            ruleTitle: "Unsigned Binary Execution from /tmp", severity: .high,
+            processPath: "/tmp/maccrabd",
+            mitreTactics: "attack.execution"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("spoofed /tmp tier-B path is NOT treated as self-noise")
+    func spoofedTierBNotSelfNoise() async throws {
+        #expect(AlertSink.isMacCrabSelfNoise("/tmp/maccrab-tier-b-verified-FAKE/payload") == false)
+        // Legitimate per-user temp path still matches.
+        #expect(AlertSink.isMacCrabSelfNoise("/private/var/folders/hf/X/T/maccrab-tier-b-verified-REAL/bin") == true)
+    }
+
+    @Test("real install + dev-build self-noise paths still match")
+    func realSelfNoisePathsMatch() async throws {
+        #expect(AlertSink.isMacCrabSelfNoise("/Applications/MacCrab.app/Contents/Resources/bin/maccrabd") == true)
+        #expect(AlertSink.isMacCrabSelfNoise("/Users/x/maccrab/.build/arm64-apple-macosx/debug/maccrabctl") == true)
+        #expect(AlertSink.isMacCrabSelfNoise("/Library/SystemExtensions/ABC/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent") == true)
+    }
+
+    // MARK: - Parent lineage lifted from the EVENT (production reorder fix)
+
+    /// Proves the recalibration-after-enrichment reorder: the alert's own path is
+    /// benign (/usr/bin/curl), the dev-tool lineage lives ONLY on the triggering
+    /// event's parent. Pre-reorder, parentExecutable was nil at recalibration and
+    /// this would have stayed high.
+    @Test("dev-tooling parent from the triggering event down-weights")
+    func parentFromEventDownweights() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-recal-evt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let sink = AlertSink(alertStore: store, deduplicator: AlertDeduplicator(suppressionWindow: 60))
+        let a = alert(
+            ruleTitle: "Curl Fetch Then Exec", severity: .high,
+            processPath: "/usr/bin/curl",
+            mitreTactics: "attack.command_and_control"
+        )
+        let ev = makeEvent(processName: "curl", processPath: "/usr/bin/curl",
+                           commandLine: "curl http://x",
+                           parentPath: "/Users/x/proj/node_modules/.bin/esbuild")
+        _ = try await sink.submit(alert: a, event: ev)
+        let stored = try await store.alerts(forEventId: a.eventId)
+        #expect(stored.first?.severity == .low)
+    }
+
+    // MARK: - Browser self-credential (narrow self-access; system keychain stays loud)
+
+    @Test("trusted browser reading its OWN credential store → low")
+    func browserOwnCredentialStoreDownweighted() async throws {
+        let a = alert(
+            ruleTitle: "🦀 AI Tool Accessed Browser Credential Store", severity: .high,
+            processPath: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/149/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("browser credential-file access then upload (own-store sync) → low")
+    func browserCredFileUploadDownweighted() async throws {
+        let a = alert(
+            ruleTitle: "Credential File Access Followed by Network Upload", severity: .high,
+            processPath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            mitreTactics: "attack.credential_access,attack.exfiltration"
+        )
+        #expect(try await storedSeverity(after: a) == .low)
+    }
+
+    @Test("browser touching the SYSTEM login.keychain stays LOUD")
+    func browserSystemKeychainPreserved() async throws {
+        let a = alert(
+            ruleTitle: "login.keychain or System.keychain Database Opened by Non-Apple Process",
+            severity: .high,
+            processPath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("browser 'Keychain Database' access stays LOUD")
+    func browserKeychainDatabasePreserved() async throws {
+        let a = alert(
+            ruleTitle: "🦀 AI Tool Accessed Keychain Database", severity: .high,
+            processPath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+
+    @Test("non-browser AI tool (claude CLI) reading creds then network stays LOUD")
+    func claudeCliCredentialPreserved() async throws {
+        // ~/.local/share/claude is a dev-tooling path but NOT a browser; the
+        // dev-tooling must-fire carve-out preserves credential-access. This is
+        // the AIGuard's core detection and must keep escalating.
+        let a = alert(
+            ruleTitle: "AI Tool Reads Credentials Then Makes Network Connection",
+            severity: .high,
+            processPath: "/Users/x/.local/share/claude/versions/2.1.186/bin/claude",
+            mitreTactics: "attack.credential_access"
+        )
+        #expect(try await storedSeverity(after: a) == .high)
+    }
+}

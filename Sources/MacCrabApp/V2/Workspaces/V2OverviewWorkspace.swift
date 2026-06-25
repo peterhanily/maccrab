@@ -460,12 +460,7 @@ struct V2OverviewWorkspace: View {
                     Label(String(localized: "overview.forensicsRunScan", defaultValue: "Run a scan"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent).controlSize(.small)
-                Button {
-                    state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsMyPlugins))
-                } label: {
-                    Text(String(localized: "overview.forensicsMyPlugins", defaultValue: "My plugins"))
-                }
-                .controlSize(.small)
+                // "My plugins" merged into Run a scan (v1.19.3) — one inventory.
             }
 
             // --- Plugin store + news ---

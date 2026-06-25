@@ -90,8 +90,6 @@ struct V2ForensicsWorkspace: View {
             V2ForensicsFindingsView()
         case .forensicsCatalog:
             V2RaveCatalogBrowserView(state: state)
-        case .forensicsMyPlugins:
-            V2ForensicsMyPluginsView()
         default:
             V2ForensicsScansView(state: state, onShowAllScans: {
                 state.selectedTabs[.forensics] = .forensicsPastScans

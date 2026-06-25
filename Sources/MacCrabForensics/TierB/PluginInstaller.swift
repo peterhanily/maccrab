@@ -359,17 +359,29 @@ public actor PluginInstaller {
             throw InstallError.verifyFailed(reason: "\(error)")
         }
 
-        // Copy bundle into pluginsRoot/<pluginID>/.
+        // Copy bundle into pluginsRoot/<pluginID>/ via an atomic swap: the
+        // failure-prone copy lands in a sibling temp dir FIRST, so a failed
+        // copy (disk full / permission denied) can never leave the
+        // previously-installed plugin removed-but-not-replaced. Only after the
+        // copy succeeds do we remove the old dir and rename the temp into place
+        // (a same-volume rename, effectively atomic).
         let destURL = pluginsRoot.appendingPathComponent(pluginID)
-        if fm.fileExists(atPath: destURL.path) {
-            if !force {
-                throw InstallError.destinationAlreadyExists(path: destURL.path)
-            }
-            try? fm.removeItem(at: destURL)
+        let alreadyInstalled = fm.fileExists(atPath: destURL.path)
+        if alreadyInstalled && !force {
+            throw InstallError.destinationAlreadyExists(path: destURL.path)
+        }
+        let tmpURL = pluginsRoot.appendingPathComponent("\(pluginID).tmp.\(UUID().uuidString)")
+        do {
+            try fm.copyItem(at: sourceDir, to: tmpURL)
+        } catch {
+            try? fm.removeItem(at: tmpURL)
+            throw InstallError.ioError(message: error.localizedDescription)
         }
         do {
-            try fm.copyItem(at: sourceDir, to: destURL)
+            if alreadyInstalled { try fm.removeItem(at: destURL) }
+            try fm.moveItem(at: tmpURL, to: destURL)
         } catch {
+            try? fm.removeItem(at: tmpURL)
             throw InstallError.ioError(message: error.localizedDescription)
         }
         // 0o700 on the install dir; 0o755 on the binary so it can
@@ -409,7 +421,7 @@ public actor PluginInstaller {
         guard fm.fileExists(atPath: pluginsRoot.path) else { return [] }
         let entries = try fm.contentsOfDirectory(atPath: pluginsRoot.path)
         var results: [InstalledPlugin] = []
-        for entry in entries.sorted() where !entry.hasSuffix(".json") {
+        for entry in entries.sorted() where !entry.hasSuffix(".json") && !entry.contains(".tmp.") {
             let dir = pluginsRoot.appendingPathComponent(entry)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
@@ -689,6 +701,68 @@ public actor PluginInstaller {
         // public), but the *integrity* of the list is part of the
         // security boundary. A world-readable file invites
         // mode-mistake escalation paths.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: path
+        )
+    }
+
+    // MARK: - Version pins (operator-frozen plugins; update-inhibitor ONLY)
+
+    /// File holding operator pins: plugin-id → frozen version. A pin EXCLUDES the
+    /// plugin from update offers and refuses auto-update — purely a convenience
+    /// for holding a plugin at a known version (e.g. staging / reproducing an
+    /// issue). A pin NEVER affects revocation: a pinned plugin that later gets
+    /// revoked is STILL quarantined, because the revocation reconcile sweep
+    /// (`applyQuarantine` / `reconcileInstalledQuarantine`) ignores pins entirely.
+    ///   pinned-versions.json  {"pins": {"<plugin-id>": "<version>", ...}}
+    private var pinsPath: String {
+        pluginsRoot.appendingPathComponent("pinned-versions.json").path
+    }
+
+    /// Current pin map (plugin-id → frozen version). Missing/garbage file → empty.
+    public func currentPins() async -> [String: String] {
+        Self.readPins(path: pinsPath)
+    }
+
+    /// The pinned version for `pluginID`, or nil when unpinned.
+    public func pinnedVersion(id: String) async -> String? {
+        Self.readPins(path: pinsPath)[id]
+    }
+
+    /// Freeze `pluginID` at `version`. Idempotent (overwrites any prior pin).
+    public func pinPlugin(id: String, version: String) async throws {
+        try ensureRoot()
+        try await Self.mutatePins(path: pinsPath) { $0[id] = version }
+    }
+
+    /// Remove the pin for `pluginID` (no-op if not pinned).
+    public func unpinPlugin(id: String) async throws {
+        try ensureRoot()
+        try await Self.mutatePins(path: pinsPath) { $0.removeValue(forKey: id) }
+    }
+
+    private static func readPins(path: String) -> [String: String] {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pins = obj["pins"] as? [String: String] else {
+            return [:]
+        }
+        return pins
+    }
+
+    private static func mutatePins(
+        path: String,
+        _ change: (inout [String: String]) -> Void
+    ) async throws {
+        var pins = readPins(path: path)
+        change(&pins)
+        let payload: [String: Any] = ["pins": pins]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: path

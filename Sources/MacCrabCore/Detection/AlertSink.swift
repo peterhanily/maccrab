@@ -74,6 +74,117 @@ public actor AlertSink {
         return alert
     }
 
+    /// True when the alert's ACTOR is one of MacCrab's own binaries (app
+    /// bundle, dev `.build`, sysext, CLI, MCP server) or the Tier-B
+    /// verified-execution trampoline's scratch path. Path-based mirror of
+    /// `NoiseFilter.isMacCrabProcess`, usable where only the alert (not the
+    /// Event) is in hand. Real self-tamper is covered by the SelfDefense /
+    /// code-signing path, so behavioral / cross-process / sequence alerts where
+    /// MacCrab is the actor are self-noise.
+    static func isMacCrabSelfNoise(_ processPath: String?) -> Bool {
+        guard let path = processPath else { return false }
+        // Installed locations: the app bundle and the system extension. Anchored
+        // PREFIXES — never a bare suffix that an attacker's /tmp/maccrabd could
+        // satisfy (the v1.19.3 down-weight also covers direct emissions that
+        // bypass NoiseFilter, so the path test is the only gate here).
+        if path.hasPrefix("/Applications/MacCrab.app/") { return true }
+        if path.hasPrefix("/Library/SystemExtensions/") && path.contains("com.maccrab.agent") { return true }
+        // Dev builds: the CLI / daemon / MCP binaries, but ONLY when they sit
+        // inside a SwiftPM build dir or a built .app — not an arbitrary path
+        // that merely ends in /maccrabd.
+        let isOurBinaryName = path.hasSuffix("/maccrabd")
+            || path.hasSuffix("/maccrabctl") || path.hasSuffix("/maccrab-mcp")
+        if isOurBinaryName && (path.contains("/.build/") || path.contains("/DerivedData/") || path.contains("/maccrab.app/")) {
+            return true
+        }
+        // Tier-B sandbox trampoline staging the verified plugin binary — anchored
+        // to the per-user temp dir (/var/folders/.../T/, mode 0700), NOT
+        // world-writable /tmp where an attacker could drop a same-named payload.
+        if path.contains("/var/folders/") && path.contains("maccrab-tier-b-verified-") { return true }
+        return false
+    }
+
+    /// FP recalibration (v1.19.3): DOWN-WEIGHT (never drop) two noise classes so
+    /// they surface for review instead of screaming high/critical. The floor is
+    /// `.low` (NOT `.informational`) so down-weighted alerts stay visible in the
+    /// default dashboard / notification views — quieted, not hidden.
+    ///   1. Self-noise — alerts whose actor is one of MacCrab's own binaries
+    ///      (self-tamper is covered by SelfDefense, not behavioral alerts).
+    ///   2. Trusted development-tooling lineage — routine bundler/runtime
+    ///      behavior (esbuild/workerd/node fetch+exec, etc.).
+    /// PRESERVED at full severity (must-fire) on dev paths: credential-access,
+    /// keychain, honeyfile, and the catastrophic-if-real classes a malicious
+    /// package is a primary delivery vector for — impact (ransomware / disk
+    /// wipe), defense-evasion (SIP / Gatekeeper disable), persistence (launchd),
+    /// and exfiltration. The ONLY credential exception is a self-credential tool
+    /// reading its OWN credential (the GitHub CLI `gh` reading the GitHub token
+    /// is its job, not theft; a real token thief is a different process).
+    /// Campaign meta-alerts are skipped entirely — their severity is correlation-
+    /// derived, not from one process, and dev-tooling FPs are already filtered at
+    /// the contributing-alert level. Single sink chokepoint so every engine is
+    /// covered uniformly; runs AFTER enrichment so the parent-lineage check sees
+    /// the parent executable lifted from the event.
+    private func recalibrateDevToolingSeverity(_ alert: Alert) -> Alert {
+        func downweighted(_ note: String) -> Alert {
+            var copy = alert
+            copy.severity = .low
+            copy.description = alert.description.map { "\($0) — \(note)" } ?? note
+            return copy
+        }
+
+        // (1) MacCrab self-noise — any severity above the floor, regardless of
+        // alert type (own-process behavioral/chain alerts are noise).
+        if alert.severity > .low, Self.isMacCrabSelfNoise(alert.processPath) {
+            return downweighted("Severity reduced — MacCrab's own process; self-tamper is covered by integrity/code-signing checks, not behavioral alerts.")
+        }
+
+        // (2) Campaign meta-alerts: severity is correlation-derived; do not
+        // down-weight on a single contributing process's path.
+        if alert.ruleId.hasPrefix("maccrab.campaign.") { return alert }
+
+        // (3) Trusted browser reading its OWN credential store (passwords /
+        // cookies / sync) — routine, and the dominant credential FP on a
+        // workstation. Down-weight, but keep SYSTEM keychain access LOUD
+        // (login./System.keychain is indistinguishable from theft) and ONLY for
+        // a trusted browser/Electron actor — so a non-browser (e.g. the `claude`
+        // CLI under ~/.local) reading credentials then beaconing still escalates.
+        if alert.severity > .low, let p = alert.processPath,
+           NoiseFilter.isTrustedBrowserHelper(path: p) {
+            let blob = "\(alert.ruleTitle) \(alert.description ?? "")".lowercased()
+            let isCredential = blob.contains("credential")
+                || (alert.mitreTactics ?? "").lowercased().contains("credential")
+            let isSystemKeychain = blob.contains("login.keychain") || blob.contains("system.keychain")
+                || blob.contains("keychain database") || blob.contains("keychain db")
+            if isCredential && !isSystemKeychain {
+                return downweighted("Severity reduced — trusted browser accessing its own credential store (routine password/cookie sync); system-keychain access is still escalated.")
+            }
+        }
+
+        // (4) Development-tooling lineage — high/critical only.
+        guard alert.severity >= .high else { return alert }
+        guard CampaignDetector.isDevelopmentToolingPath(alert.processPath)
+            || CampaignDetector.isDevelopmentToolingPath(alert.parentExecutable) else { return alert }
+        let tac = (alert.mitreTactics ?? "").lowercased()
+        let title = alert.ruleTitle.lowercased()
+        let rid = alert.ruleId.lowercased()
+        // Self-credential tool: a tool reading its OWN credential domain. Kept
+        // deliberately narrow (gh ↔ GitHub token) so we never weaken detection
+        // of a *different* process stealing that credential.
+        let basename = (alert.processPath.map { ($0 as NSString).lastPathComponent } ?? "").lowercased()
+        let isSelfCredentialTool = basename == "gh" && title.contains("github token")
+        let isCredentialClass = tac.contains("credential") || title.contains("credential")
+            || title.contains("keychain") || rid.contains("credential")
+        let isHoneyfile = title.contains("honey") || rid.contains("honey")
+        // Catastrophic-if-real classes: a malicious package is a primary delivery
+        // vector for exactly these, so they must keep escalating on dev paths.
+        let isCatastrophic = tac.contains("impact") || tac.contains("defense_evasion")
+            || tac.contains("persistence") || tac.contains("exfiltration")
+        if (isCredentialClass || isHoneyfile || isCatastrophic) && !isSelfCredentialTool {
+            return alert  // preserve must-fire / high-signal classes at full severity
+        }
+        return downweighted("Severity reduced — trusted development-tooling lineage (\(alert.processName ?? "dev tool")); routine build/runtime activity, surfaced for review not escalation.")
+    }
+
     // v1.8.0: when an alert is committed, snapshot the surrounding ±60s of
     // events into `alert_evidence` so the dashboard's alert detail can show
     // "what was happening when this fired?" even after the 24h hot tier
@@ -110,17 +221,19 @@ public actor AlertSink {
     @discardableResult
     public func submit(alert: Alert, event: Event) async throws -> Bool {
         // v1.18: built-in maccrab.* rule mute / severity override.
-        guard let alert = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
+        guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         let dedupKey = event.process.executable
         // Atomic check+record closes the TOCTOU window where two concurrent
         // submits with the same key could both pass shouldSuppress between
         // each other's recordAlert. AlertDeduplicator is an actor so a
         // single method invocation is serialized.
-        if await deduplicator.shouldSuppressAndRecord(ruleId: alert.ruleId, processPath: dedupKey) {
+        if await deduplicator.shouldSuppressAndRecord(ruleId: settled.ruleId, processPath: dedupKey) {
             suppressedCount += 1
             return false
         }
-        let enriched = Self.enrichWithAttribution(alert: alert, event: event)
+        // v1.19.3 FP recalibration runs AFTER enrichment so the dev-tooling
+        // lineage check sees the parent executable lifted from the event.
+        let enriched = recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: settled, event: event))
         try await alertStore.insert(alert: enriched)
         insertedCount += 1
         await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
@@ -139,17 +252,19 @@ public actor AlertSink {
     @discardableResult
     public func submit(alert: Alert) async throws -> Bool {
         // v1.18: built-in maccrab.* rule mute / severity override.
-        guard let alert = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
-        let dedupKey = alert.processPath ?? alert.ruleId
+        guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
+        let dedupKey = settled.processPath ?? settled.ruleId
         // Atomic check+record closes the TOCTOU window where two concurrent
         // submits with the same key could both pass shouldSuppress between
         // each other's recordAlert. AlertDeduplicator is an actor so a
         // single method invocation is serialized.
-        if await deduplicator.shouldSuppressAndRecord(ruleId: alert.ruleId, processPath: dedupKey) {
+        if await deduplicator.shouldSuppressAndRecord(ruleId: settled.ruleId, processPath: dedupKey) {
             suppressedCount += 1
             return false
         }
-        let enriched = Self.enrichWithHostOnly(alert: alert)
+        // v1.19.3 FP recalibration (no event context — parent comes from the
+        // alert as-supplied by the caller, if any).
+        let enriched = recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: settled))
         try await alertStore.insert(alert: enriched)
         insertedCount += 1
         await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
@@ -171,14 +286,17 @@ public actor AlertSink {
     /// unchanged.
     public func insertEngineBatch(alerts: [Alert], event: Event? = nil) async throws {
         guard !alerts.isEmpty else { return }
+        // v1.19.3 FP recalibration runs AFTER enrichment (so the dev-tooling
+        // lineage check sees each alert's parent executable) and here too so the
+        // engine batch path shares the same chokepoint as direct emissions.
         let toInsert: [Alert]
         if let event {
             // All alerts in a batch share one triggering event — encode the
             // snapshot ONCE rather than per alert.
             let snapshot = EventSnapshot.encode([event])
-            toInsert = alerts.map { Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot) }
+            toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot)) }
         } else {
-            toInsert = alerts.map { Self.enrichWithHostOnly(alert: $0) }
+            toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: $0)) }
         }
         try await alertStore.insert(alerts: toInsert)
         insertedCount += toInsert.count

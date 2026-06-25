@@ -1,21 +1,21 @@
 {
-  "version": "1.19.2",
-  "release_date": "2026-06-25T12:15:23Z",
+  "version": "1.19.3",
+  "release_date": "2026-06-25T18:16:49Z",
   "toolchain": "Xcode 26.4.1 Build version 17E202",
   "rules": 483,
   "rules_single": 436,
   "rules_sequence": 41,
   "rules_graph": 6,
   "builtins": 46,
-  "tests": 2645,
-  "test_suites": 478,
+  "tests": 2672,
+  "test_suites": 479,
   "dmg": {
-    "filename": "MacCrab-v1.19.2.dmg",
-    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.19.2/MacCrab-v1.19.2.dmg",
-    "sha256": "6e85b7ea88e1998f77c6e761868917b6005618bcb9f003585b76ad1ef2e97fb2",
-    "size_bytes": 89235828
+    "filename": "MacCrab-v1.19.3.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.19.3/MacCrab-v1.19.3.dmg",
+    "sha256": "240f4a9a55cb930f1f6a6055e01322e2cb52b207a10270a656b5b543cc249846",
+    "size_bytes": 89267183
   },
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.19.2",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.19.3",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0"
 }

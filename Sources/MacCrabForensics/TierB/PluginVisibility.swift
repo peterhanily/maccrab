@@ -22,7 +22,12 @@ public enum PluginVisibility {
     /// *installed* `com.maccrab.*` that is NOT a registered built-in is
     /// impersonation / leftover residue. The denylist below catches outside vendors
     /// and the known rehearsal id regardless of `builtinIDs`.
-    public static func isResidue(pluginID: String, builtinIDs: Set<String> = []) -> Bool {
+    public static func isResidue(
+        pluginID: String,
+        builtinIDs: Set<String> = [],
+        publicKeyHex: String? = nil,
+        trustedKeyHexes: Set<String> = []
+    ) -> Bool {
         // Non-plugin directory entries the installer can surface (trust JSON, etc.).
         if pluginID.hasSuffix(".json") { return true }
         // Outside-vendor test / research / fixture / example denylist.
@@ -49,18 +54,39 @@ public enum PluginVisibility {
         // enumerate the built-ins (e.g. SampleOutputLoader filtering real
         // tcc-lite output), which is a worse, user-visible regression.
         if !builtinIDs.isEmpty, pluginID.hasPrefix("com.maccrab."), !builtinIDs.contains(pluginID) {
+            // EXCEPTION: a legitimately-installed first-party STORE plugin lives in
+            // com.maccrab.* but is not a registered built-in (e.g. posture-pro). It
+            // is NOT residue when its publisher key is trusted — trust is only
+            // established by the verified catalog install (which refuses
+            // NON-first-party com.maccrab.*) or an explicit operator TOFU. So a
+            // trusted com.maccrab.* is a real first-party install; hiding it (the
+            // pre-fix behavior) dropped its row from the run UI → no Run button.
+            if let k = publicKeyHex, !k.isEmpty, trustedKeyHexes.contains(k) { return false }
             return true
         }
         return false
     }
 
-    public static func isOperatorVisible(pluginID: String, builtinIDs: Set<String> = []) -> Bool {
-        !isResidue(pluginID: pluginID, builtinIDs: builtinIDs)
+    public static func isOperatorVisible(
+        pluginID: String,
+        builtinIDs: Set<String> = [],
+        publicKeyHex: String? = nil,
+        trustedKeyHexes: Set<String> = []
+    ) -> Bool {
+        !isResidue(pluginID: pluginID, builtinIDs: builtinIDs,
+                   publicKeyHex: publicKeyHex, trustedKeyHexes: trustedKeyHexes)
     }
 
     /// Operator-visible installed plugins (drops residue). `builtinIDs` enables the
     /// positive `com.maccrab.*` rule; the denylist applies regardless.
-    public static func filterInstalled(_ installed: [InstalledPlugin], builtinIDs: Set<String> = []) -> [InstalledPlugin] {
-        installed.filter { isOperatorVisible(pluginID: $0.pluginID, builtinIDs: builtinIDs) }
+    public static func filterInstalled(
+        _ installed: [InstalledPlugin],
+        builtinIDs: Set<String> = [],
+        trustedKeyHexes: Set<String> = []
+    ) -> [InstalledPlugin] {
+        installed.filter {
+            !isResidue(pluginID: $0.pluginID, builtinIDs: builtinIDs,
+                       publicKeyHex: $0.publicKeyHex, trustedKeyHexes: trustedKeyHexes)
+        }
     }
 }

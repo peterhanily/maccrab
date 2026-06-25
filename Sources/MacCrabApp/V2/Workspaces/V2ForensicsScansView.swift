@@ -15,6 +15,7 @@
 
 import SwiftUI
 import MacCrabForensics
+import MacCrabCore
 
 struct V2ForensicsScansView: View {
     /// Injected so the Catalog's "Run on this Mac" can route a single-scanner
@@ -43,6 +44,18 @@ struct V2ForensicsScansView: View {
     private let scannerPageSize = 8
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
+    // Unified inventory (v1.19.3): manage installed plugins here too (was the
+    // separate "My Plugins" tab). Re-verify all + per-plugin uninstall + update.
+    @State private var pendingUninstall: String? = nil
+    @State private var reverifying = false
+    // Update surfacing (v1.19.3): catalog current_version per installed id, so a
+    // newer version shows an "Update" pill here, not only in the Catalog tab. The
+    // update itself reuses the Catalog's verified consent flow (RaveInstallConsentSheet
+    // → bundled maccrabctl install --force). Empty when offline / catalog unreachable.
+    @State private var availableVersions: [String: String] = [:]
+    @State private var installLink: RaveInstallLink? = nil
+    @State private var pendingIsUpdate = false
+    @State private var pendingInstalledVersion: String? = nil
 
     private static let recentlyRunLimit = 3
 
@@ -302,20 +315,94 @@ struct V2ForensicsScansView: View {
                 }
             }
             if !thirdPartyScanners.isEmpty {
-                scannerSection(String(localized: "scans.thirdPartyPlugins", defaultValue: "Third-party plugins"), count: thirdPartyScanners.count) {
+                scannerSection(String(localized: "scans.thirdPartyPlugins", defaultValue: "Installed plugins"), count: thirdPartyScanners.count) {
                     ForEach(thirdPartyScanners, id: \.pluginID) { p in
                         let m = thirdPartyManifests[p.pluginID]
+                        let upd = updateAvailable(for: p.pluginID)
                         scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
-                                   subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Third-party plugin")),
-                                   badge: String(localized: "scans.thirdPartyBadge", defaultValue: "Third-party"),
+                                   subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Installed plugin")),
+                                   badge: upd
+                                       ? String(localized: "scans.updateBadge", defaultValue: "Update → v\(availableVersions[p.pluginID] ?? "")")
+                                       : String(localized: "scans.thirdPartyBadge", defaultValue: "Installed"),
                                    detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
                     }
+                    Button { Task { await reverifyAll() } } label: {
+                        Label(reverifying
+                              ? String(localized: "scans.reverifying", defaultValue: "Re-verifying…")
+                              : String(localized: "scans.reverifyAll", defaultValue: "Re-verify all installed"),
+                              systemImage: "checkmark.shield")
+                    }
+                    .buttonStyle(.plain).scaledSystem(11).foregroundStyle(.tint).disabled(reverifying)
+                    .padding(.top, 2)
                 }
             }
         }
         .sheet(item: $detailModel) { m in
-            PluginDetailInspector(model: m, onRun: m.runnable ? { runScanner(id: m.id) } : nil)
+            // Unified Run + manage surface: built-ins run only; installed plugins
+            // also expose Verify (re-verify all) + Uninstall (was "My Plugins").
+            PluginDetailInspector(
+                model: m,
+                onRun: m.runnable ? { runScanner(id: m.id) } : nil,
+                onVerify: m.provenance != .builtIn ? { Task { await reverifyAll() } } : nil,
+                onUpdate: (m.provenance != .builtIn && updateAvailable(for: m.id)) ? { updateAction(m.id) } : nil,
+                onUninstall: m.provenance != .builtIn ? { pendingUninstall = m.id } : nil)
         }
+        .sheet(item: $installLink) { link in
+            // Reuse the Catalog tab's verified consent flow for an in-place update.
+            RaveInstallConsentSheet(
+                link: link,
+                onClose: {
+                    installLink = nil
+                    pendingIsUpdate = false
+                    pendingInstalledVersion = nil
+                    Task { await reload() }
+                },
+                isUpdate: pendingIsUpdate,
+                installedVersion: pendingInstalledVersion)
+        }
+        .confirmationDialog(
+            String(localized: "scans.uninstall.confirm", defaultValue: "Uninstall this plugin?"),
+            isPresented: Binding(get: { pendingUninstall != nil }, set: { if !$0 { pendingUninstall = nil } }),
+            presenting: pendingUninstall
+        ) { id in
+            Button(String(localized: "scans.uninstall.button", defaultValue: "Uninstall"), role: .destructive) {
+                Task { await remove(id); pendingUninstall = nil }
+            }
+            Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) { pendingUninstall = nil }
+        } message: { id in
+            Text(String(localized: "scans.uninstall.message", defaultValue: "\(id) will be removed from this Mac. This cannot be undone."))
+        }
+    }
+
+    private func reverifyAll() async {
+        reverifying = true
+        _ = await TierBBootstrap().refresh()
+        await reload()
+        reverifying = false
+    }
+
+    /// True when the signed catalog's current_version for `pluginID` is newer
+    /// than the installed manifest version (semver). False when offline, not in
+    /// the catalog, or already current.
+    private func updateAvailable(for pluginID: String) -> Bool {
+        guard let current = availableVersions[pluginID],
+              let installed = thirdPartyManifests[pluginID]?.version else { return false }
+        // satisfiesFloor(running: installed, floor: current) == false ⇒ installed < current.
+        return MacCrabSemverCompare.satisfiesFloor(running: installed, floor: current) == false
+    }
+
+    /// Drive the Catalog tab's verified consent flow (RaveInstallConsentSheet →
+    /// bundled maccrabctl install --force) for an in-place update.
+    private func updateAction(_ pluginID: String) {
+        pendingIsUpdate = true
+        pendingInstalledVersion = thirdPartyManifests[pluginID]?.version
+        detailModel = nil
+        installLink = RaveInstallLink(kind: .plugin, id: pluginID)
+    }
+
+    private func remove(_ pluginID: String) async {
+        try? await PluginInstaller().uninstall(pluginID: pluginID)
+        await reload()
     }
 
     /// Build the third-party detail model (provenance from receipts, "added" date
@@ -673,7 +760,11 @@ struct V2ForensicsScansView: View {
             .sorted { $0.displayName < $1.displayName }
         let builtinIDs = Set(mans.map { $0.id })
         let rawInstalled = (try? await PluginInstaller().list()) ?? []
-        let visible = OperatorVisibilityFilter.filter(rawInstalled, builtinIDs: builtinIDs)
+        // Trusted keys let the visibility filter keep a legit first-party STORE
+        // install (com.maccrab.* but not a built-in, e.g. posture-pro) instead of
+        // dropping it as impersonation residue — otherwise it has no run row.
+        let trustedKeys = await PluginInstaller().currentTrustedKeys()
+        let visible = OperatorVisibilityFilter.filter(rawInstalled, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeys)
             .sorted { $0.pluginID < $1.pluginID }
         thirdPartyScanners = visible
         var tpm: [String: TierBManifest] = [:]
@@ -681,6 +772,20 @@ struct V2ForensicsScansView: View {
             if let m = try? TierBManifest.load(fromBundlePath: p.installRoot) { tpm[p.pluginID] = m }
         }
         thirdPartyManifests = tpm
+        // v1.19.3: surface "update available" — fetch the signed catalog's
+        // current_version per id (best-effort; empty when offline so no badges
+        // show). The update itself reuses the Catalog tab's verified consent flow.
+        if !visible.isEmpty {
+            do {
+                var av: [String: String] = [:]
+                for e in try await RaveCatalogClient().fetchEntries() { av[e.id] = e.currentVersion }
+                availableVersions = av
+            } catch {
+                availableVersions = [:]
+            }
+        } else {
+            availableVersions = [:]
+        }
         do {
             let mgr = CaseManager(
                 casesRoot: CaseDirectoryLayout.defaultCasesRoot,

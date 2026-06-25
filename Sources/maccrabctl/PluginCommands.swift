@@ -4,6 +4,7 @@
 
 import Foundation
 import MacCrabForensics
+import MacCrabCore
 
 func dispatchPlugin(args: [String]) async {
     guard let sub = args.first else {
@@ -58,6 +59,8 @@ func dispatchPlugin(args: [String]) async {
             try await pluginSearch(args: rest)
         case "update":
             try await pluginUpdate(args: rest)
+        case "check-updates":
+            try await pluginCheckUpdates(args: rest)
         case "pin":
             try await pluginPin(args: rest)
         case "help", "-h", "--help":
@@ -102,11 +105,14 @@ func printPluginUsage() {
         [--version <semver>]          Pin to a specific version.
       install --local <path>          Sideload an unvetted local bundle.
                                       Persistent "Sideloaded · Unverified" badge.
-      update <plugin-id>              Update to the catalog's current_version.
-                                      [--yes] permitted ONLY for patch updates
-                                      with no capability / TCC / network /
-                                      privacy / signing-identity change.
-      pin <plugin-id>                 Freeze at current installed version.
+      update <plugin-id>              Update to the catalog's current_version
+                                      (forward-only; downgrades refused). Patch
+                                      updates apply directly; minor/major require
+                                      [--yes]. Refused while pinned.
+      check-updates [--json]          Report installed plugins whose catalog
+                                      current_version is newer (+ pin state).
+      pin <plugin-id> [--unpin]       Freeze at the installed version (skip
+                                      updates). Never blocks revocation.
       uninstall <plugin-id>           Remove an installed plugin.
       verify [<plugin-id>]            Verify all installed (or one by id) against
                                       the current trust + revocation lists.
@@ -188,8 +194,9 @@ private func pluginList(args: [String] = []) async {
             // Hide dev/test/rehearsal residue by default (same classifier the
             // dashboard + MCP use); `--include-residue` shows it for engineering.
             let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
+            let trustedKeys = await installer.currentTrustedKeys()
             let installed = includeResidue ? rawInstalled
-                : PluginVisibility.filterInstalled(rawInstalled, builtinIDs: builtinIDs)
+                : PluginVisibility.filterInstalled(rawInstalled, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeys)
             if installed.isEmpty {
                 if filter == "installed" {
                     print("No third-party plugins installed.")
@@ -267,22 +274,200 @@ private func pluginSearch(args: [String]) async throws {
 }
 
 private func pluginUpdate(args: [String]) async throws {
-    guard let id = args.first else {
+    var id: String? = nil
+    var yes = false
+    var catalogBase: String? = nil
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        if a == "--yes" { yes = true; i += 1 }
+        else if a == "--catalog-base", i + 1 < args.count { catalogBase = args[i + 1]; i += 2 }
+        else { if !a.hasPrefix("--"), id == nil { id = a }; i += 1 }
+    }
+    guard let id else {
         print("Usage: maccrabctl plugin update <plugin-id> [--yes]")
         exit(1)
     }
-    print("plugin update is not yet wired. The rave catalog is live and carries current_version —")
-    print("update by reinstalling the latest:  maccrabctl plugin install \(id) --force")
-    exit(2)
+
+    let installer = PluginInstaller()
+    guard let installed = try? await installer.list(),
+          let inst = installed.first(where: { $0.pluginID == id }) else {
+        print("plugin update: '\(id)' is not installed. Install it first: maccrabctl plugin install \(id)")
+        exit(1)
+    }
+    guard let installedVersion = (try? TierBManifest.load(fromBundlePath: inst.installRoot))?.version else {
+        print("plugin update: cannot read the installed version of '\(id)' (manifest unreadable).")
+        exit(2)
+    }
+
+    // A pinned plugin is held at its installed version — refuse the update and
+    // tell the operator how to unpin. (A pin never blocks revocation.)
+    if let pin = await installer.pinnedVersion(id: id) {
+        print("plugin update: '\(id)' is pinned to v\(pin). Unpin first: maccrabctl plugin pin \(id) --unpin")
+        exit(2)
+    }
+
+    let base = catalogBase
+        ?? ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
+        ?? "https://rave.maccrab.com/"
+    let fetcher = try PluginCatalogFetcher(catalogBase: base)
+    let entries: [PluginCatalogFetcher.CatalogListEntry]
+    do {
+        entries = try await fetcher.listCatalog()
+    } catch {
+        print("plugin update: could not fetch or verify the rave catalog: \(error)")
+        exit(2)
+    }
+    guard let entry = entries.first(where: { $0.id == id }) else {
+        print("plugin update: '\(id)' is not in the catalog.")
+        exit(2)
+    }
+    let target = entry.currentVersion
+
+    guard let instSV = MacCrabSemver(installedVersion), let tgtSV = MacCrabSemver(target) else {
+        print("plugin update: unparseable version (installed v\(installedVersion), catalog v\(target)).")
+        exit(2)
+    }
+    if tgtSV <= instSV {
+        print("'\(id)' is already up to date (installed v\(installedVersion), catalog v\(target)).")
+        return
+    }
+
+    // Patch (same major.minor) may auto-apply with --yes; minor/major require
+    // explicit confirmation because they can change behavior or requested
+    // capabilities.
+    let isPatch = tgtSV.major == instSV.major && tgtSV.minor == instSV.minor
+    let kind = tgtSV.major != instSV.major ? "MAJOR" : (tgtSV.minor != instSV.minor ? "minor" : "patch")
+    if !isPatch && !yes {
+        print("A \(kind) update is available for '\(id)': v\(installedVersion) → v\(target).")
+        print("Minor/major updates can change behavior or requested capabilities. Confirm with:")
+        print("  maccrabctl plugin update \(id) --yes")
+        exit(2)
+    }
+
+    print("Updating \(id): v\(installedVersion) → v\(target) (\(kind))…")
+    do {
+        // force: true to replace in place; the full verified install path re-runs
+        // (signer pin, artifact sha, anti-rollback, fresh revocation check). The
+        // forward-only guard passes because target > installed.
+        let result = try await fetcher.installPluginByID(
+            pluginID: id, version: target, trustOnInstall: false, force: true
+        )
+        print("✓ Updated \(result.pluginID) to v\(target).")
+    } catch {
+        print("plugin update failed: \(error)")
+        exit(2)
+    }
+}
+
+private func pluginCheckUpdates(args: [String]) async throws {
+    var json = false
+    var catalogBase: String? = nil
+    var i = 0
+    while i < args.count {
+        if args[i] == "--json" { json = true; i += 1 }
+        else if args[i] == "--catalog-base", i + 1 < args.count { catalogBase = args[i + 1]; i += 2 }
+        else { i += 1 }
+    }
+    let installer = PluginInstaller()
+    let installed = (try? await installer.list()) ?? []
+    let pins = await installer.currentPins()
+
+    let base = catalogBase
+        ?? ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
+        ?? "https://rave.maccrab.com/"
+    let fetcher = try PluginCatalogFetcher(catalogBase: base)
+    var catalog: [String: String] = [:]
+    var catalogError: String? = nil
+    do {
+        for e in try await fetcher.listCatalog() { catalog[e.id] = e.currentVersion }
+    } catch {
+        catalogError = "\(error)"
+    }
+
+    struct Row { let id: String; let installed: String; let available: String?; let pinned: String?; let updateAvailable: Bool }
+    var rows: [Row] = []
+    for p in installed {
+        let inst = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? "?"
+        let avail = catalog[p.pluginID]
+        let pinned = pins[p.pluginID]
+        var updateAvailable = false
+        if pinned == nil, let avail, let a = MacCrabSemver(avail), let c = MacCrabSemver(inst), a > c {
+            updateAvailable = true
+        }
+        rows.append(Row(id: p.pluginID, installed: inst, available: avail, pinned: pinned, updateAvailable: updateAvailable))
+    }
+
+    if json {
+        var arr: [[String: Any]] = []
+        for r in rows {
+            arr.append([
+                "plugin_id": r.id,
+                "installed_version": r.installed,
+                "available_version": r.available ?? NSNull(),
+                "is_pinned": r.pinned != nil,
+                "pinned_to": r.pinned ?? NSNull(),
+                "update_available": r.updateAvailable,
+            ])
+        }
+        var payload: [String: Any] = ["plugins": arr, "count": arr.count]
+        if let catalogError { payload["catalog_error"] = catalogError }
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        print(String(data: data, encoding: .utf8) ?? "{}")
+        return
+    }
+
+    if let catalogError {
+        print("check-updates: could not fetch or verify the rave catalog: \(catalogError)")
+        exit(2)
+    }
+    let updatable = rows.filter { $0.updateAvailable }
+    if installed.isEmpty {
+        print("No third-party plugins installed.")
+        return
+    }
+    if updatable.isEmpty {
+        print("All \(installed.count) installed plugin\(installed.count == 1 ? "" : "s") up to date.")
+    } else {
+        print("Updates available:\n")
+        for r in updatable {
+            print("  \(r.id)  v\(r.installed) → v\(r.available ?? "?")")
+        }
+        print("\nUpdate with: maccrabctl plugin update <id>")
+    }
+    let pinnedRows = rows.filter { $0.pinned != nil }
+    if !pinnedRows.isEmpty {
+        print("\nPinned (held, not auto-updated):")
+        for r in pinnedRows { print("  \(r.id)  pinned v\(r.pinned ?? "?") (installed v\(r.installed))") }
+    }
 }
 
 private func pluginPin(args: [String]) async throws {
-    guard let id = args.first else {
-        print("Usage: maccrabctl plugin pin <plugin-id>")
+    var id: String? = nil
+    var unpin = false
+    for a in args {
+        if a == "--unpin" { unpin = true }
+        else if !a.hasPrefix("--"), id == nil { id = a }
+    }
+    guard let id else {
+        print("Usage: maccrabctl plugin pin <plugin-id> [--unpin]")
         exit(1)
     }
-    print("plugin pin is not yet wired (version pinning is a local operation; tracked as a follow-up). Plugin: \(id)")
-    exit(2)
+    let installer = PluginInstaller()
+    guard let installed = try? await installer.list(),
+          let inst = installed.first(where: { $0.pluginID == id }) else {
+        print("plugin pin: '\(id)' is not installed.")
+        exit(1)
+    }
+    if unpin {
+        try await installer.unpinPlugin(id: id)
+        print("✓ Unpinned '\(id)'. It will be offered updates again.")
+        return
+    }
+    let version = (try? TierBManifest.load(fromBundlePath: inst.installRoot))?.version ?? "?"
+    try await installer.pinPlugin(id: id, version: version)
+    print("✓ Pinned '\(id)' at v\(version). It will not be auto-updated until unpinned (maccrabctl plugin pin \(id) --unpin).")
+    print("  Note: a pin never blocks revocation — a pinned plugin that gets revoked is still quarantined.")
 }
 
 private func pluginInfo(args: [String]) async throws {
@@ -479,7 +664,7 @@ private func describeEnrichmentValue(_ v: EnrichmentValue) -> String {
 /// production caller. Fail-closed: a non-installed id, a third-party bundle, or
 /// the unset publisher anchor all refuse here. The spawn (FirstPartyTierBRunner)
 /// runs in maccrabctl, which ignores SIGPIPE.
-private func runTierBCollector(id: String, handle: CaseHandle, window: TimeWindow?) async throws {
+private func runTierBCollector(id: String, handle: CaseHandle, window: MacCrabForensics.TimeWindow?) async throws {
     // Defense-in-depth catalog-context flags for the execution gate.
     let ctx = TierBCollectorExecutor.catalogContextFromEnv()
 

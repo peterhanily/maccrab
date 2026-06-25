@@ -743,6 +743,26 @@ let tools: [[String: Any]] = [
             "properties": [:] as [String: Any],
         ] as [String: Any],
     ],
+    [
+        "name": "forensics_check_plugin_updates",
+        "description": "Read-only. For each installed third-party scanner, report installed_version, the catalog's available_version, whether an update_available, and pin state (is_pinned / pinned_to). Verifies the signed rave catalog before comparing. Returns {plugins:[...], count}.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [:] as [String: Any],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_install_plugin_update",
+        "description": "Apply the catalog's current_version for an installed plugin via the FULL verified install path (Ed25519 catalog+entry verify, artifact sha-pin, signer-key pin, anti-rollback, fresh revocation check). Forward-only (downgrades refused); refused while pinned. Requires the 'response' capability AND confirm:true. Audit-logged.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "The installed plugin id to update."] as [String: Any],
+                "confirm": ["type": "boolean", "description": "Must be true to apply (replaces the installed plugin)."] as [String: Any],
+            ] as [String: Any],
+            "required": ["plugin_id", "confirm"],
+        ] as [String: Any],
+    ],
     // ===================================================================
     // v1.18 — Agent control-plane (customizable skill). All mutating tools
     // are OFF BY DEFAULT and require a human-enabled capability tier (config
@@ -981,6 +1001,10 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleTierBListPlugins()
     case "forensics_verify_installed_plugins":
         return await handleTierBVerify()
+    case "forensics_check_plugin_updates":
+        return handleCheckPluginUpdates()
+    case "forensics_install_plugin_update":
+        return handleInstallPluginUpdate(args)
     // v1.17 rc.7 — legacy aliases (silent, no warning). Keep
     // through v1.18; remove in v1.19.
     case "tierb.list_plugins":
@@ -1015,6 +1039,79 @@ func handleTierBVerify() async -> Any {
     return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status, builtinIDs: builtinIDs))]]]
 }
 
+// MARK: - Plugin updates (v1.19.3)
+// Thin wrappers over the canonical verified maccrabctl install path, so the
+// trust chain (Ed25519 verify, signer pin, anti-rollback, fresh revocation
+// check, forward-only downgrade refusal, pin) lives in ONE place rather than
+// being duplicated into the MCP server.
+
+/// Resolve a binary that ships alongside this maccrab-mcp executable
+/// (Contents/Resources/bin/<name> in a release, .build/<config>/<name> in dev).
+func resolveSiblingBinary(_ name: String) -> String? {
+    let fm = FileManager.default
+    if let exe = Bundle.main.executablePath {
+        let sib = URL(fileURLWithPath: exe).deletingLastPathComponent().appendingPathComponent(name)
+        if fm.isExecutableFile(atPath: sib.path) { return sib.path }
+    }
+    let arg0 = CommandLine.arguments.first ?? ""
+    if arg0.contains("/") {
+        let sib = URL(fileURLWithPath: arg0).resolvingSymlinksInPath()
+            .deletingLastPathComponent().appendingPathComponent(name)
+        if fm.isExecutableFile(atPath: sib.path) { return sib.path }
+    }
+    return nil
+}
+
+/// Run maccrabctl with `args`, capturing stdout/stderr. Returns nil if the
+/// binary can't be located or fails to launch. Outputs are small (a JSON line /
+/// a status message), so draining then waiting is safe.
+func runMaccrabctl(_ args: [String]) -> (status: Int32, stdout: String, stderr: String)? {
+    guard let bin = resolveSiblingBinary("maccrabctl") else { return nil }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: bin)
+    p.arguments = args
+    let outPipe = Pipe(); let errPipe = Pipe()
+    p.standardOutput = outPipe
+    p.standardError = errPipe
+    do { try p.run() } catch { return nil }
+    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus,
+            String(data: outData, encoding: .utf8) ?? "",
+            String(data: errData, encoding: .utf8) ?? "")
+}
+
+func handleCheckPluginUpdates() -> Any {
+    guard let r = runMaccrabctl(["plugin", "check-updates", "--json"]) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    // The CLI emits a JSON object even on a catalog error (carries catalog_error).
+    if let data = r.stdout.data(using: .utf8),
+       (try? JSONSerialization.jsonObject(with: data)) != nil {
+        return ["content": [["type": "text", "text": r.stdout]]]
+    }
+    return toolError("check-updates failed: \(r.stderr.isEmpty ? r.stdout : r.stderr)")
+}
+
+func handleInstallPluginUpdate(_ args: [String: Any]) -> Any {
+    guard let id = args["plugin_id"] as? String, !id.isEmpty else {
+        return toolError("forensics_install_plugin_update requires 'plugin_id'.")
+    }
+    guard (args["confirm"] as? Bool) == true else {
+        return toolError("Pass confirm:true to apply the update — it replaces the installed plugin via the verified install path.")
+    }
+    auditLog("forensics_install_plugin_update", details: "plugin_id=\(id) ppid=\(getppid())")
+    guard let r = runMaccrabctl(["plugin", "update", id, "--yes"]) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 {
+        return ["content": [["type": "text", "text": jsonStringify(["success": true, "plugin_id": id, "output": msg])]]]
+    }
+    return toolError("plugin update failed: \(msg)")
+}
+
 // tierb.run_installed (subprocess spawn) is research-only and
 // remains on the `research/post-v15` branch. v1.16 ships
 // tierb.list_plugins + tierb.verify (the discovery surface);
@@ -1023,13 +1120,23 @@ func handleTierBVerify() async -> Any {
 private func tierBStatusPayload(_ status: TierBBootstrap.Status, builtinIDs: Set<String> = []) -> [String: Any] {
     let isoFmt = ISO8601DateFormatter()
     // Hide dev/test/rehearsal residue from agents, same classifier the dashboard uses.
-    func visible(_ id: String) -> Bool { PluginVisibility.isOperatorVisible(pluginID: id, builtinIDs: builtinIDs) }
+    // A plugin in `status.verified` passed signature verification against the trust
+    // store, so its key is trusted by definition — feed those keys as the trusted
+    // set so a legit first-party STORE install (com.maccrab.* non-built-in, e.g.
+    // posture-pro) is shown, not dropped as impersonation residue.
+    let trustedKeys = Set(status.verified.map { $0.publicKeyHex })
+    // key defaults to "" for failed/quarantined summaries (no key, and a com.maccrab.*
+    // that did NOT verify is genuine impersonation residue → stays hidden).
+    func visible(_ id: String, _ key: String = "") -> Bool {
+        PluginVisibility.isOperatorVisible(pluginID: id, builtinIDs: builtinIDs,
+                                           publicKeyHex: key, trustedKeyHexes: trustedKeys)
+    }
     return [
         "plugins_root": status.pluginsRoot,
         "verified_at": isoFmt.string(from: status.verifiedAt),
         "trusted_key_count": status.trustedKeyCount,
         "revoked_key_count": status.revokedKeyCount,
-        "verified": status.verified.filter { visible($0.pluginID) }.map { v -> [String: Any] in
+        "verified": status.verified.filter { visible($0.pluginID, $0.publicKeyHex) }.map { v -> [String: Any] in
             [
                 "plugin_id": v.pluginID,
                 "version": v.version,

@@ -53,8 +53,8 @@ public enum OperatorVisibilityFilter {
     /// Delegates to the shared classifier. Pass `builtinIDs` (registry ids) to
     /// enable the positive `com.maccrab.*`-impersonation rule; the denylist
     /// (com.acme.*, the rehearsal id, .json trust files, …) applies regardless.
-    public static func filter(_ installed: [InstalledPlugin], builtinIDs: Set<String> = []) -> [InstalledPlugin] {
-        PluginVisibility.filterInstalled(installed, builtinIDs: builtinIDs)
+    public static func filter(_ installed: [InstalledPlugin], builtinIDs: Set<String> = [], trustedKeyHexes: Set<String> = []) -> [InstalledPlugin] {
+        PluginVisibility.filterInstalled(installed, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeyHexes)
     }
 
     /// Filter for CaseManifest entries. Used by Scans tab.

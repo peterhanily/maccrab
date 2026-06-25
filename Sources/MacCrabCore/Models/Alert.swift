@@ -39,8 +39,9 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// Name of the process that triggered the alert.
     public let processName: String?
 
-    /// Free-text description of the alert.
-    public let description: String?
+    /// Free-text description of the alert. Mutable so the AlertSink can append
+    /// a recalibration note when an alert is down-weighted (v1.19.3).
+    public var description: String?
 
     /// Comma-separated MITRE ATT&CK tactic identifiers (e.g. `"TA0003,TA0005"`).
     public let mitreTactics: String?

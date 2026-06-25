@@ -3,6 +3,23 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.3] — 2026-06-25
+
+A plugin-lifecycle and signal-quality release.
+
+### Plugin updates
+- `maccrabctl plugin update <id>` updates an installed plugin through the full signature-verified path; patch updates apply directly, minor/major require confirmation. Forward-only — downgrades are refused.
+- The dashboard shows an "Update available" badge and an Update button for installed plugins in Run a scan.
+- New `maccrabctl plugin check-updates` reports installed plugins with a newer catalog version; `maccrabctl plugin pin <id>` freezes a plugin at its installed version (a pin never blocks a revocation).
+
+### Detection
+- Routine developer-tooling activity (bundlers, package-manager runtimes, language toolchains, AI coding tools) is down-weighted to low severity for review instead of raising high/critical noise. Credential and keychain access, ransomware, security-tool tampering, persistence, and AI-tool credential exfiltration still escalate at full severity, including on developer paths.
+- MacCrab's own background processes no longer generate alerts about themselves.
+
+### Forensics
+- Installed plugins are managed in one place (Run a scan): run, verify, update, or uninstall. The separate "My Plugins" tab was removed.
+- Fixed a case where an installed store plugin had no Run control.
+
 ## [1.19.2] — 2026-06-25
 
 A plugin-store and forensics-fidelity release.
