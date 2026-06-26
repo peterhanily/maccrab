@@ -545,7 +545,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **483 rules** (436 single-event + 41 sequence + 6 graph) — of which **90 are marked stable** and the remainder are **experimental** (or deprecated). "Experimental" means the detection logic works but is still being tuned against field false-positives; see [docs/COVERAGE.md](docs/COVERAGE.md) for the per-rule stable/experimental/deprecated matrix
+release ships **483 rules** (436 single-event + 41 sequence + 6 graph)
 covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
@@ -556,9 +556,9 @@ tactics:
 | `TA0003` | Persistence | 101 |
 | `TA0004` | Privilege Escalation | 43 |
 | `TA0005` | Defense Evasion | 127 |
-| `TA0006` | Credential Access | 86 |
+| `TA0006` | Credential Access | 85 |
 | `TA0007` | Discovery | 37 |
-| `TA0008` | Lateral Movement | 26 |
+| `TA0008` | Lateral Movement | 25 |
 | `TA0009` | Collection | 38 |
 | `TA0010` | Exfiltration | 34 |
 | `TA0011` | Command and Control | 53 |
@@ -566,7 +566,6 @@ tactics:
 | — | **Sequences** (temporal multi-step) | **41** |
 | — | **Graph** (multi-entity TraceGraph) | **6** |
 | — | **Total** | **483** |
-| — | *Maturity* | *90 stable · rest experimental/deprecated — see [COVERAGE.md](docs/COVERAGE.md)* |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
