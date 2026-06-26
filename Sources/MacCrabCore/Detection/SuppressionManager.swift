@@ -38,6 +38,19 @@ public enum SuppressionScope: Sendable, Hashable {
         }
     }
 
+    /// True for scopes that silence MANY rules at once — a general "trust this
+    /// rule / process / host" allowlist. Must-fire critical detections (active
+    /// C2 / credential theft) are exempt from these broad scopes so a general
+    /// allowlist can't accidentally hide a live attack; the narrow,
+    /// rule-specific scopes (`.rulePath` / `.ruleHash`) stay honored for FP
+    /// management. See `SuppressionManager.isSuppressed(match:…)`.
+    public var isBroad: Bool {
+        switch self {
+        case .rule, .path, .host: return true
+        case .rulePath, .ruleHash: return false
+        }
+    }
+
     /// Human-readable one-line summary for UI and CLI tables.
     public var summary: String {
         switch self {
@@ -237,6 +250,33 @@ public actor SuppressionManager {
     public func isSuppressed(ruleId: String, processPath: String) -> Bool {
         matchingSuppression(ruleId: ruleId, processPath: processPath,
                             processSHA256: nil, hostname: nil) != nil
+    }
+
+    /// Match-aware suppression check. Honours the same scope rules as
+    /// `isSuppressed(ruleId:processPath:)`, with one exception: a BROAD scope
+    /// (`.rule` / `.path` / `.host`) does NOT silence a must-fire critical
+    /// (active C2 / credential theft) match — only a narrow `.rulePath` /
+    /// `.ruleHash` entry can. This stops a general "trust this process/host"
+    /// allowlist from accidentally hiding a live attack, while still allowing
+    /// explicit, rule-specific false-positive management. Mirrors the
+    /// rule-engine rule that a critical can't be muted by swiping it away.
+    public func isSuppressed(
+        match: RuleMatch,
+        processPath: String,
+        processSHA256: String? = nil,
+        hostname: String? = nil
+    ) -> Bool {
+        guard let entry = matchingSuppression(
+            ruleId: match.ruleId,
+            processPath: processPath,
+            processSHA256: processSHA256,
+            hostname: hostname
+        ) else { return false }
+        if entry.scope.isBroad, NoiseFilter.resistsBroadSuppression(match) {
+            logger.notice("Broad suppression (\(entry.scope.kind, privacy: .public)) NOT applied to must-fire critical rule=\(match.ruleId, privacy: .public) — broad allowlists can't silence active C2 / credential-theft")
+            return false
+        }
+        return true
     }
 
     /// Richer check that considers every scope type. Returns the matching

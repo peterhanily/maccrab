@@ -26,7 +26,9 @@ enum MonitorTasks {
                     // unknown-process / warm-up / trusted-browser gates.
                     NoiseFilter.apply(&matches, event: enriched, isWarmingUp: state.isWarmingUp)
                     for match in matches {
-                        if await state.suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
+                        // Match-aware: broad allowlists can't silence a must-fire
+                        // critical (active C2 / credential-theft) detection.
+                        if await state.suppressionManager.isSuppressed(match: match, processPath: enriched.process.executable) { continue }
                         let effective = await state.deduplicator.effectiveSeverity(
                             ruleId: match.ruleId, original: match.severity)
                         let alert = Alert(

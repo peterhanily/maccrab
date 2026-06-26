@@ -1854,8 +1854,11 @@ enum EventLoop {
                 var batchAlerts: [Alert] = []
 
                 for match in matches {
-                    // Suppression + deduplication checks
-                    if await state.suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
+                    // Suppression + deduplication checks. Match-aware: a broad
+                    // path/host/rule allowlist can't silence a must-fire critical
+                    // (active C2 / credential-theft) detection — only an explicit
+                    // rule+process entry can.
+                    if await state.suppressionManager.isSuppressed(match: match, processPath: enrichedEvent.process.executable) {
                         continue
                     }
                     // v1.6.21 BLOCKER fix: atomic check+record closes a TOCTOU

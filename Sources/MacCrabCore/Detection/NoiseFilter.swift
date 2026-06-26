@@ -277,6 +277,19 @@ public enum NoiseFilter {
         }
     }
 
+    /// True when a match must survive a BROAD operator suppression scope: a
+    /// CRITICAL execution/C2 or credential-theft detection. A general
+    /// `.path`/`.host`/`.rule` allowlist ("trust this process/host") may quiet
+    /// ordinary noise but must never silence an active C2 or credential-theft
+    /// critical — the operator-foot-gun the v1.20 review flagged. Narrow,
+    /// rule-specific entries (`.rulePath` / `.ruleHash`) remain honored for FP
+    /// management, mirroring the rule-engine rule that a critical can't be
+    /// muted by swiping it away. Consumed by `SuppressionManager.isSuppressed`.
+    static func resistsBroadSuppression(_ match: RuleMatch) -> Bool {
+        guard match.severity >= .critical else { return false }
+        return isExecutionMatch(match) || isCredentialTheftMatch(match)
+    }
+
     /// Execution / C2 ATT&CK techniques whose matches survive the Gate-7
     /// Apple-platform-binary suppressor. These rules fire on a malicious pattern
     /// in the SUBJECT's own commandline (a LOLBin abuse of an Apple-shipped
