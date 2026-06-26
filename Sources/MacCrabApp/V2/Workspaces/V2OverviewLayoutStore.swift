@@ -80,7 +80,36 @@ final class V2OverviewLayoutStore: ObservableObject {
         var id: String
         var visible: Bool
         var span: Int
+
+        init(id: String, visible: Bool, span: Int) {
+            self.id = id; self.visible = visible; self.span = span
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, visible, span }
+
+        /// Resilient decode: a missing or wrong-typed field defaults instead of
+        /// throwing, so a layout written by a DIFFERENT app version (a field
+        /// added/removed later) still decodes. A hard decode failure here would
+        /// otherwise discard the user's entire saved layout on upgrade.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.id = (try? c.decode(String.self, forKey: .id)) ?? ""
+            self.visible = (try? c.decode(Bool.self, forKey: .visible)) ?? true
+            self.span = (try? c.decode(Int.self, forKey: .span)) ?? 1
+        }
     }
+
+    /// Versioned on-disk envelope. New saves write this; `load` still accepts the
+    /// legacy bare `[Item]` array written by v1.20 builds. The `version` anchors
+    /// any future schema migration.
+    private struct StoredLayout: Codable { var version: Int; var items: [Item] }
+    private static let schemaVersion = 1
+
+    /// Retired widget id → its replacement, so RENAMING a widget in a future
+    /// version preserves the user's saved order / visibility / size instead of
+    /// dropping the old id and re-appending the new one at the end. Empty today;
+    /// add an entry whenever a `V2OverviewWidget.rawValue` changes.
+    static let renamedWidgetIDs: [String: String] = [:]
 
     @Published private(set) var items: [Item]
 
@@ -179,18 +208,41 @@ final class V2OverviewLayoutStore: ObservableObject {
     // MARK: Persistence
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(items) else { return }
+        let stored = StoredLayout(version: Self.schemaVersion, items: items)
+        guard let data = try? JSONEncoder().encode(stored) else { return }
         defaults.set(data, forKey: Self.userDefaultsKey)
     }
 
-    /// Decode + migrate: keep known ids in their stored order, clamp invalid
-    /// spans, append any catalog widgets the stored layout doesn't know about.
+    /// Decode + migrate, tolerant of cross-version drift. Reads either the
+    /// versioned envelope or the legacy bare `[Item]` array; decodes each row
+    /// independently so one bad row never discards the whole layout; applies any
+    /// id rename; keeps known ids in their stored order with clamped spans; and
+    /// appends catalog widgets the stored layout doesn't know about.
     private static func load(from defaults: UserDefaults) -> [Item]? {
         guard let data = defaults.data(forKey: userDefaultsKey),
-              let stored = try? JSONDecoder().decode([Item].self, from: data) else { return nil }
+              let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        // Envelope {version, items:[…]} OR the legacy bare [...] array.
+        let rawItems: [Any]
+        if let obj = root as? [String: Any], let arr = obj["items"] as? [Any] {
+            rawItems = arr
+        } else if let arr = root as? [Any] {
+            rawItems = arr
+        } else {
+            return nil
+        }
+        let decoder = JSONDecoder()
         var migrated: [Item] = []
         var seen = Set<String>()
-        for item in stored {
+        for raw in rawItems {
+            // Decode each row independently — skip a corrupt row, keep the rest.
+            // A row MUST be a JSON object: `JSONSerialization.data(withJSONObject:)`
+            // raises an *uncatchable* NSObjC exception (not a Swift error `try?`
+            // can swallow) on a scalar/array/null top-level value, so guard the
+            // type FIRST rather than crash the app on a tampered/garbled plist.
+            guard let dict = raw as? [String: Any],
+                  let rowData = try? JSONSerialization.data(withJSONObject: dict),
+                  var item = try? decoder.decode(Item.self, from: rowData) else { continue }
+            if let renamed = renamedWidgetIDs[item.id] { item.id = renamed }   // rename migration
             guard let w = V2OverviewWidget(rawValue: item.id), !seen.contains(item.id) else { continue }
             seen.insert(item.id)
             migrated.append(Item(id: item.id, visible: item.visible, span: w.clampSpan(item.span)))

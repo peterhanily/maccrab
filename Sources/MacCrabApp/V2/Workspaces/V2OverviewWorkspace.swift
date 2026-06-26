@@ -68,9 +68,14 @@ struct V2OverviewWorkspace: View {
                         .widgetSpan(entry.span)
                     }
                 }
-                if editing && layout.allHidden {
-                    Text(String(localized: "overview.customize.allHidden",
-                                defaultValue: "All widgets are hidden. Use “Add widget” to bring some back."))
+                if layout.allHidden {
+                    // Keep the dashboard recoverable even outside edit mode — point
+                    // the user at Customize → Add widget rather than show a blank area.
+                    Text(editing
+                         ? String(localized: "overview.customize.allHidden",
+                                   defaultValue: "All widgets are hidden. Use “Add widget” to bring some back.")
+                         : String(localized: "overview.customize.allHiddenIdle",
+                                   defaultValue: "All widgets are hidden. Open “Customize” to add some back."))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                         .frame(maxWidth: .infinity, alignment: .center).padding(.vertical, 24)
                 }

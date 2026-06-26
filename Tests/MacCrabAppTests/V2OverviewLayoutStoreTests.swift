@@ -117,6 +117,70 @@ struct V2OverviewLayoutStoreTests {
         #expect(b.span(for: V2OverviewWidget.kpiThreatIntel.rawValue) == 2)
     }
 
+    // MARK: Cross-update durability (a saved layout must survive app upgrades)
+
+    private func write(_ root: Any, to d: UserDefaults) throws {
+        d.set(try JSONSerialization.data(withJSONObject: root), forKey: "v2.overview.layout")
+    }
+
+    @Test("upgrade: a layout saved by v1.20 (legacy bare [Item] array) still loads")
+    func legacyBareArrayLoads() throws {
+        let d = freshDefaults()
+        try write([
+            ["id": V2OverviewWidget.forensics.rawValue, "visible": false, "span": 4],
+            ["id": V2OverviewWidget.kpiOpenAlerts.rawValue, "visible": true, "span": 2],
+        ], to: d)
+        let store = V2OverviewLayoutStore(defaults: d)
+        #expect(store.hiddenWidgets.contains(.forensics))                    // hidden decision kept
+        #expect(store.span(for: V2OverviewWidget.kpiOpenAlerts.rawValue) == 2) // resized span kept
+        #expect(store.visibleOrdered.first?.widget == .kpiOpenAlerts)         // order kept
+    }
+
+    @Test("save writes the versioned envelope (anchors future migrations)")
+    func saveWritesVersionedEnvelope() throws {
+        let d = freshDefaults()
+        let store = V2OverviewLayoutStore(defaults: d)
+        store.hide(V2OverviewWidget.quickActions.rawValue)   // triggers a save
+        let data = try #require(d.data(forKey: "v2.overview.layout"))
+        let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(root?["version"] as? Int == 1)
+        #expect(root?["items"] is [Any])
+    }
+
+    @Test("forward-compat: an unknown extra field on an item doesn't reset the layout")
+    func extraFieldTolerated() throws {
+        let d = freshDefaults()
+        try write(["version": 99, "items": [
+            ["id": V2OverviewWidget.kpiThreatIntel.rawValue, "visible": false, "span": 1,
+             "futureField": ["nested": 1], "anotherNewKnob": "x"],
+        ]], to: d)
+        let store = V2OverviewLayoutStore(defaults: d)
+        #expect(store.hiddenWidgets.contains(.kpiThreatIntel))               // decoded despite extra fields
+        #expect(store.items.count == V2OverviewWidget.allCases.count)        // not a reset
+    }
+
+    @Test("a single corrupt row is skipped — the rest of the layout survives (no full reset)")
+    func corruptRowSkipped() throws {
+        let d = freshDefaults()
+        try write([
+            "garbage-not-an-object",                                          // bad row → skipped
+            ["id": V2OverviewWidget.forensics.rawValue, "visible": false, "span": 4],
+            ["visible": true],                                                // no id → dropped
+        ], to: d)
+        let store = V2OverviewLayoutStore(defaults: d)
+        #expect(store.hiddenWidgets.contains(.forensics))                    // good row survived
+        #expect(store.items.count == V2OverviewWidget.allCases.count)        // missing appended, not reset
+    }
+
+    @Test("missing item fields default (visible=true, span clamped) rather than failing")
+    func missingFieldsDefault() throws {
+        let d = freshDefaults()
+        try write(["version": 1, "items": [["id": V2OverviewWidget.kpiAIGuard.rawValue]]], to: d)
+        let store = V2OverviewLayoutStore(defaults: d)
+        #expect(!store.hiddenWidgets.contains(.kpiAIGuard))                  // visible defaulted true
+        #expect(store.span(for: V2OverviewWidget.kpiAIGuard.rawValue) == 1) // span defaulted + clamped
+    }
+
     @Test("migration: drops unknown ids, appends new catalog widgets, clamps bad spans")
     func migration() throws {
         let d = freshDefaults()
