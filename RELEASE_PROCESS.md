@@ -9,11 +9,9 @@ vulnerability-disclosure path).
 
 Required reading for anyone who plans to cut a release tag.
 
-Key-rotation procedures live in `docs/runbooks/`:
-- `sparkle-key-rotation.md` — Sparkle EdDSA dual-key transition (bridge release).
-- `rave-catalog-key-rotation.md` — air-gapped rave catalog Ed25519 rotation.
-- `cloudflare-token-rotation.md` — `SITE_REPO_TOKEN` rotation, **with a hard
-  2026-06-30 expiry deadline** and a publish dry-run gate.
+Key and token rotation (Sparkle EdDSA, rave catalog Ed25519, the site publish
+token) is handled by the release operator following internal runbooks kept
+outside this public repo.
 
 ## Why this document exists
 

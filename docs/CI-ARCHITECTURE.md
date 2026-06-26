@@ -4,9 +4,9 @@ How MacCrab's continuous integration and release build pipeline is
 structured, why it is split the way it is, and what each piece is
 trusted (or not trusted) to do.
 
-Companion docs: `RELEASE_PROCESS.md` (the end-to-end signing/notarize
-pipeline), `RELEASE_CHECKLIST.md` (pre-flight gates), and the rotation
-runbooks under `docs/runbooks/`.
+Companion doc: `RELEASE_PROCESS.md` (the end-to-end signing/notarize
+pipeline). Key/token rotation is handled by the release operator following
+internal runbooks kept outside this public repo.
 
 ## Design principle: signing stays on the trusted Mac
 
@@ -168,7 +168,3 @@ clean-machine version of the same checks.
 ## Related
 
 - `RELEASE_PROCESS.md` — the full local signing/notarize/publish flow.
-- `RELEASE_CHECKLIST.md` — pre-flight gates, incl. toolchain pin.
-- `docs/runbooks/sparkle-key-rotation.md`
-- `docs/runbooks/rave-catalog-key-rotation.md`
-- `docs/runbooks/cloudflare-token-rotation.md`

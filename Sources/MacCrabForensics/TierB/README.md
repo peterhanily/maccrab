@@ -53,8 +53,7 @@ The runnable third-party lane ships **fail-closed** until:
 
 Tracked hardenings (not fail-open): fd-pinned (`fexecve`-style) trampoline spawn
 to close the check→spawn TOCTOU; a runtime fetch of a fresh signed revocation
-list (today runtime revocation is staleness-driven). See
-`docs/RAVE_MVP_B_RELEASE.md` and `plans/2026-06-17-thirdparty-marketplace.md`.
+list (today runtime revocation is staleness-driven).
 
 ## Files
 

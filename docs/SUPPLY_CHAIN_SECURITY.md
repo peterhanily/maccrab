@@ -204,7 +204,7 @@ Sparkle supports `minimumAutoupdateVersion` and `minimumSystemVersion` XML attri
 
 If only the Cloudflare/GitHub appcast access is compromised (e.g., the PAT was leaked but the Sparkle key is safe):
 
-1. **Immediately rotate SITE_REPO_TOKEN** (see `docs/runbooks/cloudflare-token-rotation.md`).
+1. **Immediately rotate SITE_REPO_TOKEN** (operator runbook, kept private).
    - Revoke the old PAT on GitHub.
    - Generate a new fine-grained PAT with the same scope.
    - Update `~/.maccrab-release-env` on the build Mac.
@@ -232,9 +232,9 @@ If only the Cloudflare/GitHub appcast access is compromised (e.g., the PAT was l
   - Fails loudly and halts the release if any key doesn't match.
   - (This test already exists; confirm it runs on every release.)
 
-- [ ] **Runbook:** Document the Sparkle EdDSA key rotation procedure in full:
-  - Write `docs/runbooks/sparkle-key-rotation.md` (exists as of June 2026; confirm it matches this playbook).
-  - Include pre-flight checklist (key is reachable, public key matches shipped value), bridge release steps (cut with NEW key embedded, OLD key signed), and rollback instructions.
+- [x] **Runbook:** The Sparkle EdDSA key rotation procedure is documented in full
+  in an operator-only runbook (kept outside this public repo): pre-flight
+  checklist, dual-key bridge-release steps, and rollback.
 
 - [ ] **Verify the appcast signature verification code in Sparkle:**
   - Confirm that `sign_update --verify <dmg> <signature>` returns 0 if the signature is valid against the DMG.
@@ -375,7 +375,5 @@ If the sole operator becomes unavailable (incapacitation, departure, loss of bui
 
 - [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) — full end-to-end release pipeline and secret inventory.
 - [`docs/TRUST.md`](docs/TRUST.md) — end-user verification procedures (SHA256, code signature, notarization, Sparkle signature).
-- [`docs/runbooks/sparkle-key-rotation.md`](docs/runbooks/sparkle-key-rotation.md) — detailed Sparkle key rotation procedure (dual-key bridge release).
-- [`docs/runbooks/cloudflare-token-rotation.md`](docs/runbooks/cloudflare-token-rotation.md) — GitHub PAT rotation for appcast publishing.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting policy and threat model.
 - [`Xcode/project.yml`](../Xcode/project.yml) — canonical source for Developer ID, Sparkle key, and version.
