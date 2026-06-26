@@ -45,6 +45,14 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     /// Automatically true for cloud providers; false for local Ollama.
     public var sanitizeForCloud: Bool = true
 
+    /// Strict no-leak mode (opt-in). The sanitizer is best-effort regex and
+    /// CANNOT guarantee no novel sensitive shape slips through. When this is on,
+    /// a cloud LLM call is REFUSED if the sanitized prompt still contains
+    /// high-entropy / unparseable content that looks like it could be a secret —
+    /// trading some analysis coverage for a hard no-leak boundary. Default false
+    /// (best-effort). Only meaningful with a cloud provider + sanitizeForCloud.
+    public var strictSanitize: Bool = false
+
     /// Enable/disable the LLM subsystem entirely.
     public var enabled: Bool = true
 
@@ -69,7 +77,7 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     private enum CodingKeys: String, CodingKey {
         case provider, ollamaURL, ollamaModel, claudeModel
         case openaiURL, openaiModel, mistralModel, geminiModel
-        case sanitizeForCloud, enabled, agenticInvestigationEnabled
+        case sanitizeForCloud, strictSanitize, enabled, agenticInvestigationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -83,6 +91,7 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
         mistralModel = try c.decodeIfPresent(String.self, forKey: .mistralModel) ?? "mistral-small-latest"
         geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.0-flash"
         sanitizeForCloud = try c.decodeIfPresent(Bool.self, forKey: .sanitizeForCloud) ?? true
+        strictSanitize = try c.decodeIfPresent(Bool.self, forKey: .strictSanitize) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         agenticInvestigationEnabled = try c.decodeIfPresent(Bool.self, forKey: .agenticInvestigationEnabled) ?? false
     }

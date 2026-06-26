@@ -92,6 +92,22 @@ implementation.
 > a free-form log line is caught. If you require an absolute no-leak boundary,
 > use the local Ollama backend instead of a cloud provider.
 
+**Known gaps (best-effort mode).** The sanitizer can miss: custom / non-vendor
+API-key shapes not in its pattern set; secrets at line boundaries inside long
+multi-paragraph context; base64 / certificate-chain blobs; and internationalized
+usernames. Past releases have fixed real misses here (e.g. bare usernames and
+public IPs in v1.6.7), which is exactly why it is documented as best-effort.
+
+**Strict mode (opt-in, hard no-leak boundary on a cloud provider).** Set
+`"strictSanitize": true` under the `llm` block in `daemon_config.json`. When on,
+MacCrab **refuses** to send a cloud LLM prompt if the sanitized text still
+contains residual high-entropy, secret-shaped content the patterns may have
+missed — it would rather skip the AI analysis for that one alert than risk
+leaking a novel secret shape. The tradeoff is coverage: some complex alerts won't
+be LLM-analyzed. A 95%-analyzed baseline with a hard boundary beats a
+100%-analyzed one that might leak. (Local Ollama remains the strongest option —
+nothing leaves the machine at all.)
+
 **Supported providers:** Ollama (fully local — no data leaves machine), Claude
 (Anthropic), OpenAI, Mistral, Gemini (Google).
 

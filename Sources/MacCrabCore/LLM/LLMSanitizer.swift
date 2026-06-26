@@ -196,6 +196,31 @@ public enum LLMSanitizer {
     )
 
     /// Sanitize a prompt payload for cloud API submission.
+    /// Best-effort detector for content the regex sanitizer may have MISSED —
+    /// a long, high-entropy token that looks like a credential / key / hash and
+    /// is not a redaction placeholder. Used by strict mode (`LLMConfig
+    /// .strictSanitize`) to REFUSE a cloud LLM call rather than risk leaking a
+    /// novel secret shape the patterns don't cover. Deliberately conservative:
+    /// it flags only clear high-entropy runs (>= 24 chars, high character
+    /// diversity, mixed case + digits), so ordinary prose / paths / log lines
+    /// pass through.
+    public static func hasResidualSensitiveContent(_ text: String) -> Bool {
+        for raw in text.split(whereSeparator: { $0.isWhitespace }) {
+            let t = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`,;:()[]{}<>"))
+            guard t.count >= 24 else { continue }
+            if t.contains("REDACTED") { continue }                 // already redacted
+            let isTokenCharset = t.allSatisfy {
+                $0.isLetter || $0.isNumber || $0 == "+" || $0 == "/" || $0 == "=" || $0 == "_" || $0 == "-" || $0 == "."
+            }
+            guard isTokenCharset else { continue }
+            let distinct = Set(t.lowercased()).count
+            let hasUpper = t.contains { $0.isUppercase }
+            let hasDigit = t.contains { $0.isNumber }
+            if distinct >= 16 && hasUpper && hasDigit { return true }
+        }
+        return false
+    }
+
     public static func sanitize(_ text: String) -> String {
         // API keys FIRST — `CommandSanitizer` below catches
         // `--api-key=…` and `key=sk-…` by replacing the *whole*

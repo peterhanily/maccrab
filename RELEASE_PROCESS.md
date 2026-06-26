@@ -83,6 +83,18 @@ on the build Mac (Apple Silicon, macOS 14+).
 
 `swift test`. 1490 tests across 284 suites (v1.12.0 baseline). Failure blocks ship.
 
+### Step 1b — false-positive baseline (detection quality gate)
+
+Detection content is code — a rule that regresses into a false-positive storm
+ships a real problem. Before a GA, collect a per-rule FP baseline on **≥3 benign
+machines** (varied macOS versions / workloads), run for a measurement window
+(detection-only), then `make benchmark-fp` on each (see
+[BENCHMARK.md](BENCHMARK.md)). Compare per-rule rates to the prior release: any
+rule that materially regresses (e.g. >50% higher FP/day) without a root-cause
+explanation **blocks the release** or is documented in `CHANGELOG.md` with the
+mitigation. After GA, publish the aggregated baseline as `docs/FP_BASELINES_<ver>.md`.
+This is the gate that makes "we measured the FP rate" a fact, not a claim.
+
 ### Step 2 — rule compilation
 
 `python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/compiled_rules`.

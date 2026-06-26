@@ -24,6 +24,9 @@ public actor LLMService {
     private let backend: any LLMBackend
     private let cache: LLMCache
     private let shouldSanitize: Bool
+    /// Strict no-leak mode — refuse a cloud call if the sanitized prompt still
+    /// has residual high-entropy content (LLMConfig.strictSanitize).
+    private let strictSanitize: Bool
 
     /// Rate limiting: minimum interval between calls (seconds). Injectable
     /// (default 5.0, production unchanged) so tests can drive multi-call paths
@@ -63,6 +66,7 @@ public actor LLMService {
         // usernames/paths/IPs to the attacker host. Sanitization stays on
         // for all genuinely-remote endpoints.
         self.shouldSanitize = Self.shouldSanitize(for: config)
+        self.strictSanitize = config.strictSanitize
         self.providerLabel = config.provider.rawValue
         switch config.provider {
         case .ollama:  self.modelLabel = config.ollamaModel
@@ -194,6 +198,17 @@ public actor LLMService {
 
         let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
         let finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
+
+        // Strict no-leak mode: if we're sending to a cloud endpoint and the
+        // sanitized prompt STILL has residual high-entropy content the best-effort
+        // regex may have missed, refuse the call rather than risk leaking a novel
+        // secret shape. Trades analysis coverage for a hard no-leak boundary.
+        if shouldSanitize && strictSanitize &&
+            (LLMSanitizer.hasResidualSensitiveContent(finalSystem) ||
+             LLMSanitizer.hasResidualSensitiveContent(finalUser)) {
+            logger.warning("LLM strict mode: refusing cloud call — sanitized prompt still has residual high-entropy content")
+            return nil
+        }
 
         // Check cache
         if useCache {

@@ -132,3 +132,22 @@ struct LLMSanitizerAuditTests {
         #expect(LLMService.shouldSanitize(for: config) == true)
     }
 }
+
+@Suite("LLMSanitizer: strict-mode residual detector")
+struct LLMSanitizerStrictModeTests {
+
+    @Test("flags an unredacted high-entropy secret-shaped token")
+    func flagsHighEntropyToken() {
+        #expect(LLMSanitizer.hasResidualSensitiveContent("auth=Ab3Xk9Qz7Lm2Pw5Rt8Yn1Dv4Fg6Hj0Kc") == true)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("ya29.A0ARrdaMxKp9QwErTy7uIoP3aSdFgHjKlZxCvBnM") == true)
+    }
+
+    @Test("does NOT flag ordinary prose, paths, or already-redacted text")
+    func ignoresBenign() {
+        #expect(LLMSanitizer.hasResidualSensitiveContent("The process curl downloaded a file then executed it.") == false)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("/Users/alice/Documents/project/src/main.swift was modified") == false)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("api key was [REDACTED] before sending") == false)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("") == false)
+        #expect(LLMSanitizer.hasResidualSensitiveContent("a short word list with normal english only") == false)
+    }
+}
