@@ -242,6 +242,15 @@ struct V2OverviewWorkspace: View {
     /// widgets back, reset to defaults, and finish.
     private var customizeToolbar: some View {
         HStack(spacing: 8) {
+            if editing {
+                Label(String(localized: "overview.customize.hint",
+                             defaultValue: "Drag a card to rearrange · use the controls on each card to resize or hide it"),
+                      systemImage: "hand.draw")
+                    .labelStyle(.titleAndIcon)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .lineLimit(1).truncationMode(.tail)
+            }
             Spacer()
             if editing {
                 if !layout.hiddenWidgets.isEmpty {

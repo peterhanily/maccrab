@@ -6,6 +6,7 @@
 // suppressed in edit mode so a drag never accidentally navigates away.
 
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
 struct V2OverviewWidgetTile<Content: View>: View {
@@ -31,10 +32,15 @@ struct V2OverviewWidgetTile<Content: View>: View {
             }
             .opacity(isDragging ? 0.4 : 1)
             .animation(.easeInOut(duration: 0.15), value: isDragging)
+            // Grab/move cursor while customizing, so it's obvious the card is draggable.
+            .onHover { inside in
+                guard editing else { NSCursor.arrow.set(); return }
+                (inside ? NSCursor.openHand : NSCursor.arrow).set()
+            }
     }
 
     private var editChrome: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             // Full-card catcher: intercepts taps (so card buttons don't fire),
             // is the drag source, and is the drop target for live reordering.
             Color.black.opacity(0.001)
@@ -49,6 +55,17 @@ struct V2OverviewWidgetTile<Content: View>: View {
                 )
 
             HStack(spacing: 6) {
+                // Visible drag affordance (left) — signals the whole card is draggable.
+                // Decorative: hit-testing off so it doesn't block the drag catcher beneath.
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .scaledSystem(11, weight: .semibold)
+                    .foregroundStyle(V2Theme.mutedText)
+                    .frame(width: 22, height: 22)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(V2Theme.panelBorder, lineWidth: 1))
+                    .help(String(localized: "overview.customize.dragHint", defaultValue: "Drag anywhere on this card to move it"))
+                    .allowsHitTesting(false)
+                Spacer()
                 if widget.allowedSpans.count > 1 {
                     chromeButton(
                         "arrow.left.and.right.square",

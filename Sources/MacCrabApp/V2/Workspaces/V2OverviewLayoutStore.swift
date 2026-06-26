@@ -164,6 +164,10 @@ final class V2OverviewLayoutStore: ObservableObject {
     func move(_ id: String, before target: String) {
         guard id != target,
               let from = items.firstIndex(where: { $0.id == id }) else { return }
+        // Already immediately before the target? Skip — re-inserting at the same
+        // spot churns @Published + animates a no-op, which makes a live drag over
+        // a reflowing grid feel jumpy (the "issues dragging" report).
+        if from + 1 < items.count, items[from + 1].id == target { return }
         let moved = items.remove(at: from)
         guard let to = items.firstIndex(where: { $0.id == target }) else {
             items.insert(moved, at: from)   // target vanished — undo
