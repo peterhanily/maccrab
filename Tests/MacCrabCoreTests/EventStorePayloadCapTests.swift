@@ -176,6 +176,36 @@ struct EventStorePayloadCapTests {
         #expect(stored.process.commandLine.hasSuffix("bytes>"))
     }
 
+    @Test("insertEvent Pass 3: oversized enrichment is truncated and the row stays VALID, readable JSON")
+    func pass3EnrichmentStripKeepsRowReadable() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Force the Pass-3 fail-open: small args + small commandLine, but a
+        // 200 KB ENRICHMENT value. Pass 1 (per-arg) and Pass 2 (commandLine
+        // collapse) can't shrink it — only enrichment truncation can.
+        //
+        // Regression guard: the previous fail-open byte-SLICED the encoded
+        // JSON and appended a tail marker, producing syntactically invalid
+        // JSON. queryEvents() decodes raw_json and `catch { continue }`s, so
+        // the row was silently dropped on READ — fetchOnly() would then see 0
+        // rows and trap. This test only passes if Pass 3 stores VALID JSON.
+        var event = makeEvent(args: ["small"])
+        event.enrichments["agent_evidence_json"] = String(repeating: "E", count: 200_000)
+
+        try await store.insert(event: event)
+
+        // The row MUST round-trip — proves raw_json is valid, decodable JSON.
+        let stored = try await fetchOnly(store)
+        #expect(stored.enrichments["payload.truncated"] == "true")
+        // The oversized enrichment was replaced with a size marker.
+        #expect(stored.enrichments["agent_evidence_json"]?.hasPrefix("<truncated:") == true)
+        #expect(await store.payloadTruncatedTotal() == 1)
+        // And the stored row fits under the cap after the strip.
+        let bytes = try JSONEncoder().encode(stored).count
+        #expect(bytes <= EventStore.maxRawJsonBytes)
+    }
+
     @Test("insertEvent keeps stored raw_json under maxRawJsonBytes after truncation")
     func storedRowFitsUnderCap() async throws {
         // We can't directly read the raw_json column from outside the

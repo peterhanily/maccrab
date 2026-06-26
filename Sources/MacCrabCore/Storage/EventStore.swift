@@ -889,11 +889,11 @@ public actor EventStore {
     ///   2. If still oversized, also collapse `process.commandLine` to a
     ///      marker (recovers events whose mass lives in the joined string
     ///      rather than per-arg).
-    ///   3. As a last-resort fail-open, truncate the raw JSON string
-    ///      itself to `maxRawJsonBytes - margin` and append a tail
-    ///      marker. The row will no longer JSON-parse cleanly — downstream
-    ///      decoders are expected to read the truncation enrichments
-    ///      first and skip raw_json reconstruction.
+    ///   3. As a last-resort fail-open, replace oversized `enrichments`
+    ///      values with markers and RE-ENCODE (largest-first, stop as soon
+    ///      as it fits). The result is always valid, decodable JSON — never
+    ///      a byte-sliced string — so `queryEvents()` can still surface the
+    ///      row instead of silently dropping it on a decode error.
     ///
     /// Always sets `payload.truncated = "true"` and
     /// `payload.original_bytes = "<N>"` on the resulting event so the FTS
@@ -954,37 +954,50 @@ public actor EventStore {
             return TruncatedPayload(event: mutated, string: s)
         }
 
-        // Pass 3 (fail-open): brute-force truncate the JSON string. We
-        // never block insert — better to land a partially-readable row
-        // than to lose the event and the truncation signal entirely.
-        let tail = "<...truncated>"
-        let margin = tail.utf8.count + 16
-        let target = max(0, Self.maxRawJsonBytes - margin)
-        let rawString: String
-        if let data = try? encoder.encode(mutated),
-           let s = String(data: data, encoding: .utf8) {
-            rawString = s
-        } else {
-            // Should be unreachable — mutated is built from sanitizedEvent
-            // which encoded successfully above. Fall back to a stub.
-            rawString = "{\"payload\":\"unencodable\"}"
-        }
-        // Slice on UTF-8 byte boundary — may land mid-codepoint, so walk
-        // back a few bytes until we hit valid UTF-8. Bounded by `margin`.
-        let utf8Bytes = Array(rawString.utf8)
-        var sliceEnd = min(target, utf8Bytes.count)
-        var truncated = ""
-        while sliceEnd > 0 {
-            if let s = String(data: Data(utf8Bytes.prefix(sliceEnd)), encoding: .utf8) {
-                truncated = s
-                break
+        // Pass 3 (fail-open): structured enrichment truncation + re-encode.
+        //
+        // The earlier implementation byte-SLICED the encoded JSON string and
+        // appended a tail marker. That produced SYNTACTICALLY INVALID JSON:
+        // `queryEvents()` decodes raw_json into an `Event` and `catch { continue }`s
+        // on failure, so every sliced row — and its truncation signal — was
+        // silently dropped on READ, becoming permanently invisible to the
+        // dashboard/analytics (a live audit found such rows in events.db).
+        //
+        // After Pass 1+2 collapsed `args` and `commandLine`, the residual mass
+        // lives in oversized ENRICHMENT values (captured file content, agent
+        // evidence, env blocks). Replace those with markers, cheapest-first
+        // (largest value first, stop as soon as it fits), and re-encode:
+        // `JSONEncoder` always emits valid JSON, so the row stays decodable and
+        // the `payload.truncated` / `payload.original_bytes` markers survive.
+        var stripped = mutated
+        let bigEnrichmentKeys = stripped.enrichments
+            .filter { $0.value.utf8.count > Self.argTruncationThreshold }
+            .sorted { $0.value.utf8.count > $1.value.utf8.count }
+            .map(\.key)
+        for key in bigEnrichmentKeys {
+            let n = stripped.enrichments[key]?.utf8.count ?? 0
+            stripped.enrichments[key] = "<truncated:\(n) bytes>"
+            if let encoded = try? encoder.encode(stripped),
+               encoded.count <= Self.maxRawJsonBytes,
+               let s = String(data: encoded, encoding: .utf8) {
+                log.warning("Payload truncation fell through to enrichment-strip path for event \(sanitizedEvent.id.uuidString, privacy: .public) (\(originalBytes) bytes)")
+                return TruncatedPayload(event: stripped, string: s)
             }
-            sliceEnd -= 1
         }
-        truncated.append(tail)
 
-        log.warning("Payload truncation fell through to fail-open path for event \(sanitizedEvent.id.uuidString, privacy: .public) (\(originalBytes) bytes)")
-        return TruncatedPayload(event: mutated, string: truncated)
+        // Residual mass is in some other field (pathological). The stripped
+        // event is still VALID, decodable JSON and now far smaller than the
+        // original — store it even if marginally over the soft cap. A valid
+        // oversized row beats an invalid truncated one that reads as nothing.
+        if let encoded = try? encoder.encode(stripped),
+           let s = String(data: encoded, encoding: .utf8) {
+            log.warning("Payload truncation fell through to fail-open path for event \(sanitizedEvent.id.uuidString, privacy: .public) (\(originalBytes) bytes, residual \(encoded.count))")
+            return TruncatedPayload(event: stripped, string: s)
+        }
+
+        // Unreachable: `stripped` derives from an Event that already encoded
+        // above. Keep a VALID minimal stub rather than risk an invalid row.
+        return TruncatedPayload(event: stripped, string: "{\"payload\":\"unencodable\"}")
     }
 
     /// Rebuild a `ProcessInfo` with new `commandLine` and `args` fields,

@@ -1290,7 +1290,7 @@ enum EventLoop {
             if let bridge = state.causalGraphBridge {
                 let materialized = await bridge.process(enrichedEvent)
                 if !materialized.isEmpty,
-                   let evaluator = state.graphEvaluator,
+                   let evaluator = state.currentGraphEvaluator(),
                    let store = state.causalStore {
                     let traceList = materialized
                     let anchorEventId = enrichedEvent.id.uuidString

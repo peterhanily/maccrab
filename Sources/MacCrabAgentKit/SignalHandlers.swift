@@ -63,7 +63,7 @@ enum SignalHandlers {
                     // and SIGHUPed would still see the old rules
                     // fire silently — inconsistent with
                     // ruleEngine.reloadRules which fully replaces.
-                    state.graphEvaluator = GraphRuleEvaluator(rules: graphRules)
+                    state.setGraphEvaluator(GraphRuleEvaluator(rules: graphRules))
                     print("[SIGHUP] Graph rules: \(graphRules.count)")
                     await state.suppressionManager.load()
                     let stats = await state.suppressionManager.stats()

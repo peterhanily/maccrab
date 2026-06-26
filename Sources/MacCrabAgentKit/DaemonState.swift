@@ -204,15 +204,25 @@ final class DaemonState {
     /// evaluator itself holds rules as `let`, so we rebuild rather
     /// than mutate.
     ///
-    /// TODO(v1.12.1) Sec-R5-N4: This `var` on a non-actor `final
-    /// class DaemonState` is technically a data race — SIGHUP writes
-    /// from `.main` queue (SignalHandlers.swift), EventLoop reads
-    /// from a detached Task. Benign on Darwin (pointer-aligned
-    /// reference swap is atomic) but Swift 6 strict-concurrency will
-    /// flag it. Fix: wrap in `OSAllocatedUnfairLock<GraphRuleEvaluator?>`
-    /// or make DaemonState an actor. Deferred from v1.12.0 because
-    /// the runtime behaviour is correct today.
-    var graphEvaluator: GraphRuleEvaluator?
+    /// Sec-R5-N4 fix: SIGHUP writes this from the `.main` queue
+    /// (SignalHandlers.swift) while EventLoop reads it from a detached
+    /// Task — a data race on the bare `var` (benign on Darwin where the
+    /// reference swap is atomic, but a real race Swift 6 strict-concurrency
+    /// flags, and a use-after-free risk if the old evaluator is released
+    /// mid-read). Guarded by an unfair lock, mirroring `inboxPollerLock`.
+    /// Access via `withGraphEvaluator` / `setGraphEvaluator`.
+    private let graphEvaluatorLock = OSAllocatedUnfairLock<GraphRuleEvaluator?>(initialState: nil)
+
+    /// Thread-safe read of the current graph evaluator (returns a retained
+    /// reference, so a concurrent SIGHUP swap can't release it mid-use).
+    func currentGraphEvaluator() -> GraphRuleEvaluator? {
+        graphEvaluatorLock.withLock { $0 }
+    }
+
+    /// Thread-safe replace of the graph evaluator (SIGHUP rule reload).
+    func setGraphEvaluator(_ evaluator: GraphRuleEvaluator?) {
+        graphEvaluatorLock.withLock { $0 = evaluator }
+    }
 
     // MARK: - Intent posterior (v1.12.0)
     /// Bayesian belief network maintaining a posterior over attacker
@@ -552,7 +562,7 @@ final class DaemonState {
         self.ruleGenerator = ruleGenerator
         self.causalGraphBridge = causalGraphBridge
         self.causalStore = causalStore
-        self.graphEvaluator = graphEvaluator
+        graphEvaluatorLock.withLock { $0 = graphEvaluator }
         self.bayesianIntent = bayesianIntent
         self.intentClassifier = intentClassifier
         self.promptIntentBridge = promptIntentBridge
