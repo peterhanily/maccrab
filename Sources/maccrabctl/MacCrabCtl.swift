@@ -338,6 +338,9 @@ struct MacCrabCtl {
             // v1.13a-1 Mac Context Plugin Platform — plugin runtime.
             // v1.17 adds search/info/update/pin/verify/status.
             await dispatchPlugin(args: Array(args.dropFirst(2)))
+        case "rules":
+            // v1.20 — signed rule-update channel (app-decoupled detection rules).
+            await dispatchRules(args: Array(args.dropFirst(2)))
         case "fingerprint":
             // v1.14-1 — MCFP v1 static fingerprint.
             await dispatchFingerprint(args: Array(args.dropFirst(2)))

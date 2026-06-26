@@ -39,14 +39,21 @@ public struct RaveTrustState: Sendable, Equatable {
     /// consent warns when the only revocation data we hold is older than the
     /// ceiling (we may not know a plugin was revoked since).
     public var revocationsVerifiedAt: Date?
+    /// Highest serial ever accepted from a signature-verified rules manifest
+    /// (the detection rule-update channel — separate anti-rollback mark from the
+    /// plugin catalog so the two channels can't replay against each other).
+    /// `nil` means first-seen.
+    public var rulesManifestSerial: Int?
 
     public init(
         catalogSerial: Int? = nil,
         revocationsSerial: Int? = nil,
-        revocationsVerifiedAt: Date? = nil
+        revocationsVerifiedAt: Date? = nil,
+        rulesManifestSerial: Int? = nil
     ) {
         self.catalogSerial = catalogSerial
         self.revocationsSerial = revocationsSerial
+        self.rulesManifestSerial = rulesManifestSerial
         self.revocationsVerifiedAt = revocationsVerifiedAt
     }
 }
@@ -116,7 +123,8 @@ public struct RaveTrustStateStore: Sendable {
         // timestamp degrades to "never verified" → the staleness ceiling warns).
         let verifiedAt = (obj["revocations_verified_at"] as? String)
             .flatMap { ISO8601DateFormatter().date(from: $0) }
-        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt)
+        let rulesSerial = (obj["rules_manifest_serial"] as? NSNumber)?.intValue
+        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt, rulesManifestSerial: rulesSerial)
     }
 
     /// Atomically persist the state, locking the file to 0o600.
@@ -130,6 +138,7 @@ public struct RaveTrustStateStore: Sendable {
         if let v = state.revocationsVerifiedAt {
             payload["revocations_verified_at"] = ISO8601DateFormatter().string(from: v)
         }
+        if let rm = state.rulesManifestSerial { payload["rules_manifest_serial"] = rm }
         let data = try JSONSerialization.data(
             withJSONObject: payload,
             options: [.prettyPrinted, .sortedKeys]
@@ -155,6 +164,22 @@ public struct RaveTrustStateStore: Sendable {
     /// Pure decision against the revocations high-water mark. (Stage 2.)
     public func evaluateRevocations(incoming: Int) -> RaveSerialDecision {
         Self.decide(stored: load().revocationsSerial, incoming: incoming)
+    }
+
+    /// Pure decision against the rules-manifest high-water mark (rule-update
+    /// channel anti-rollback). Does NOT persist; caller advances only after fully
+    /// accepting the manifest.
+    public func evaluateRulesManifest(incoming: Int) -> RaveSerialDecision {
+        Self.decide(stored: load().rulesManifestSerial, incoming: incoming)
+    }
+
+    /// Advance the persisted rules-manifest high-water mark (idempotent; never
+    /// lowers). Call only after the manifest has been fully verified + accepted.
+    public func recordRulesManifest(serial: Int) throws {
+        var state = load()
+        if let stored = state.rulesManifestSerial, stored >= serial { return }
+        state.rulesManifestSerial = serial
+        try save(state)
     }
 
     /// Advance the persisted catalog high-water mark to `serial` if it is

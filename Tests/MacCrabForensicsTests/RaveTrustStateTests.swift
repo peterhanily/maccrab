@@ -183,4 +183,32 @@ struct RaveTrustStateTests {
         try store.recordRevocations(serial: 1, verifiedAt: Date())
         #expect(!store.revocationFreshness().isStale) // just verified → fresh
     }
+
+    // MARK: - Rules-manifest channel (rule-update channel anti-rollback)
+
+    @Test("rules-manifest serial: first-seen accepted, monotonic, rollback rejected, persisted")
+    func rulesManifestSerial() throws {
+        let store = Self.freshStore()
+        #expect(store.evaluateRulesManifest(incoming: 5) == .firstSeen)
+        try store.recordRulesManifest(serial: 5)
+        #expect(store.evaluateRulesManifest(incoming: 6) == .accepted)
+        #expect(store.evaluateRulesManifest(incoming: 5) == .accepted)         // equal: not a rollback
+        #expect(store.evaluateRulesManifest(incoming: 4) == .rollback(stored: 5, incoming: 4))
+        try store.recordRulesManifest(serial: 4)                               // record never lowers
+        #expect(store.load().rulesManifestSerial == 5)
+        try store.recordRulesManifest(serial: 9)
+        #expect(store.load().rulesManifestSerial == 9)
+    }
+
+    @Test("rules-manifest serial is independent of the catalog serial (separate channels)")
+    func rulesSerialIndependentOfCatalog() throws {
+        let store = Self.freshStore()
+        try store.recordCatalog(serial: 100)
+        try store.recordRulesManifest(serial: 3)
+        // Advancing one channel must not move the other.
+        #expect(store.load().catalogSerial == 100)
+        #expect(store.load().rulesManifestSerial == 3)
+        #expect(store.evaluateRulesManifest(incoming: 2) == .rollback(stored: 3, incoming: 2))
+        #expect(store.evaluateCatalog(incoming: 50) == .rollback(stored: 100, incoming: 50))
+    }
 }
