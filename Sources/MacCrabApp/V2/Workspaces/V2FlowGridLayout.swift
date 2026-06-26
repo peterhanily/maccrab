@@ -26,7 +26,8 @@ struct V2FlowGridLayout: Layout {
     var rowSpacing: CGFloat = 12    // vertical gap between rows
 
     /// One placed item: which subview, its origin, and the size it was given.
-    private struct Placement {
+    /// Internal (not private) so the cached layout can be stored in `Cache`.
+    struct Placement {
         let index: Int
         let frame: CGRect
     }
@@ -89,21 +90,31 @@ struct V2FlowGridLayout: Layout {
     /// Remembers the width measured in `sizeThatFits` so `placeSubviews` lays
     /// out against the *same* width — otherwise the height we reported (for the
     /// proposed width) and the arrangement we place (for bounds.width) could
-    /// diverge and misalign the grid.
-    struct Cache { var width: CGFloat? }
+    /// diverge and misalign the grid. It also caches the resolved placements so
+    /// `placeSubviews` reuses the measurement `sizeThatFits` already did (each
+    /// `layout()` call measures every subview — content cards aren't free), as
+    /// long as the width and subview count still match.
+    struct Cache { var width: CGFloat?; var count: Int = 0; var placements: [Placement] = [] }
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let width = proposal.replacingUnspecifiedDimensions(by: .init(width: 600, height: 0)).width
+        let (placements, height) = layout(subviews: subviews, totalWidth: width)
         cache.width = width
-        let (_, height) = layout(subviews: subviews, totalWidth: width)
+        cache.count = subviews.count
+        cache.placements = placements
         return CGSize(width: width, height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         let width = cache.width ?? bounds.width
-        let (placements, _) = layout(subviews: subviews, totalWidth: width)
+        let placements: [Placement]
+        if cache.width == width, cache.count == subviews.count, !cache.placements.isEmpty {
+            placements = cache.placements                                   // reuse sizeThatFits' work
+        } else {
+            placements = layout(subviews: subviews, totalWidth: width).placements
+        }
         for p in placements {
             // Bottom-align within the row cell so items of unequal height (e.g. a
             // fixed-height KPI tile beside a taller card) line up along their

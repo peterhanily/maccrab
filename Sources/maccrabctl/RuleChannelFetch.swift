@@ -175,7 +175,7 @@ struct RuleChannelFetcher {
         let m = try await fetchVerifiedManifest()
         let installed = trustState.load().rulesManifestSerial
         return UpdateStatus(installedSerial: installed, availableSerial: m.serial, corpusVersion: m.corpusVersion,
-                            updateAvailable: installed == nil || m.serial > installed!, ruleCount: m.rules.count)
+                            updateAvailable: installed.map { m.serial > $0 } ?? true, ruleCount: m.rules.count)
     }
 
     /// Fetch → verify → anti-rollback → version-floor → validate → atomic-swap the

@@ -559,7 +559,13 @@ struct PluginCatalogFetcher {
     // MARK: - HTTP
 
     private func fetch(url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        // Always pull fresh. The catalog AND revocations.json are anti-rollback
+        // protected by serial, and a stale CACHED copy would mask a newly
+        // published serial — for revocations that means a just-revoked plugin
+        // could keep being treated as trusted. Never serve these from cache.
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw PluginCatalogFetchError.httpFetchFailed(url: url, status: -1)
         }
