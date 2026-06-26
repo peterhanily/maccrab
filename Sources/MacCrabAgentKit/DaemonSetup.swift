@@ -1509,6 +1509,18 @@ enum DaemonSetup {
             }
         }
 
+        // Rule-update channel (v1.20): load DETECTION-ONLY rules pushed out-of-band
+        // into <rules>/pushed. Loaded LAST so they can only ADD detections (a
+        // pushed rule whose id already exists is ignored), and the response engine
+        // is told to never arm an action for them. See RuleEngine.loadPushedRules.
+        let pushedRulesURL = URL(fileURLWithPath: effectiveRulesDir + "/pushed")
+        if let pushedCount = try? await ruleEngine.loadPushedRules(from: pushedRulesURL), pushedCount > 0 {
+            logger.info("Loaded \(pushedCount) pushed (detection-only) rule(s) from \(pushedRulesURL.path)")
+            print("Loaded \(pushedCount) pushed (detection-only) rule(s)")
+        }
+        let bootPushedIDs = await ruleEngine.pushedRuleIDs
+        await responseEngine.setDetectionOnlyRuleIDs(bootPushedIDs)
+
         // Load sequence rules (use same effective dir as single-event rules)
         let sequenceRulesDir = effectiveRulesDir + "/sequences"
         try? FileManager.default.createDirectory(atPath: sequenceRulesDir, withIntermediateDirectories: true)

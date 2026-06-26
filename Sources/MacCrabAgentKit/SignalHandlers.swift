@@ -34,6 +34,15 @@ enum SignalHandlers {
                        let overlaid = try? await state.ruleEngine.loadRules(from: URL(fileURLWithPath: overlayDir), requireOwnerUID: geteuid()), overlaid > 0 {
                         print("[SIGHUP] Re-applied \(overlaid) user rule override(s)")
                     }
+                    // Re-apply pushed (detection-only) rules — reloadRules cleared
+                    // the pushed set; load them additive-only and refresh the
+                    // response-engine detection-only gate.
+                    let pushedDir = URL(fileURLWithPath: state.rulesURL.path + "/pushed")
+                    if let pushed = try? await state.ruleEngine.loadPushedRules(from: pushedDir), pushed > 0 {
+                        print("[SIGHUP] Re-applied \(pushed) pushed (detection-only) rule(s)")
+                    }
+                    let reloadedPushedIDs = await state.ruleEngine.pushedRuleIDs
+                    await state.responseEngine.setDetectionOnlyRuleIDs(reloadedPushedIDs)
                     let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir))
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
 
