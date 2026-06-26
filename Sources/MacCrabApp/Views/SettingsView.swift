@@ -34,6 +34,9 @@ struct SettingsView: View {
     @AppStorage("agentCapConfig") private var agentCapConfig: Bool = false
     @AppStorage("agentCapAuthoring") private var agentCapAuthoring: Bool = false
     @AppStorage("agentCapResponse") private var agentCapResponse: Bool = false
+    // Confirm-on-enable gate for the defense-affecting tier (an agent granted
+    // this can disable ES introspection → reduce detection). Security-critical.
+    @State private var confirmAgentResponseTier = false
     // v1.19.1 network-enrichment privacy opt-ins. All OFF by default — MacCrab
     // is on-device by default; nothing about your machine leaves it until you
     // flip one of these. The daemon defaults match (DaemonConfig defaults are
@@ -547,9 +550,30 @@ struct SettingsView: View {
                                     .font(.caption).foregroundColor(.orange)
                             }
                         }
-                        .onChange(of: agentCapResponse) { _ in syncAgentCapabilities() }
+                        .onChange(of: agentCapResponse) { newValue in
+                            // Enabling the defense-affecting tier requires an explicit
+                            // confirm (it lets an agent reduce detection); disabling is free.
+                            if newValue { confirmAgentResponseTier = true }
+                            else { syncAgentCapabilities() }
+                        }
                     }
                     .padding(8)
+                }
+                .confirmationDialog(
+                    String(localized: "settings.agentTier.confirmTitle",
+                           defaultValue: "Let an AI agent change defense-affecting settings?"),
+                    isPresented: $confirmAgentResponseTier, titleVisibility: .visible
+                ) {
+                    Button(String(localized: "settings.agentTier.confirmGrant",
+                                  defaultValue: "Grant — I control this agent"), role: .destructive) {
+                        syncAgentCapabilities()
+                    }
+                    Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {
+                        agentCapResponse = false   // revert the toggle
+                    }
+                } message: {
+                    Text(String(localized: "settings.agentTier.confirmBody",
+                                defaultValue: "An agent granted this tier can turn OFF Endpoint Security introspection and other event capture — reducing MacCrab's detection. Every change is audit-logged. Grant only if you fully control this agent."))
                 }
 
                 GroupBox(String(localized: "settings.netEnrich", defaultValue: "Network enrichment (privacy)")) {

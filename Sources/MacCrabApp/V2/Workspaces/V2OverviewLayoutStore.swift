@@ -179,6 +179,17 @@ final class V2OverviewLayoutStore: ObservableObject {
     /// Persist the current order (called once when a drag ends).
     func commit() { save() }
 
+    /// Accessibility reorder (VoiceOver / keyboard can't drag): swap a widget
+    /// with its previous / next sibling and persist immediately.
+    func moveEarlier(_ id: String) {
+        guard let i = items.firstIndex(where: { $0.id == id }), i > 0 else { return }
+        items.swapAt(i, i - 1); save()
+    }
+    func moveLater(_ id: String) {
+        guard let i = items.firstIndex(where: { $0.id == id }), i + 1 < items.count else { return }
+        items.swapAt(i, i + 1); save()
+    }
+
     /// Cycle a widget to its next allowed span (the resize control).
     func cycleSpan(_ id: String) {
         guard let idx = items.firstIndex(where: { $0.id == id }),

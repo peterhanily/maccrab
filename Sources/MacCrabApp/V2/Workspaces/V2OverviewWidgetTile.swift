@@ -15,6 +15,7 @@ struct V2OverviewWidgetTile<Content: View>: View {
     @ObservedObject var store: V2OverviewLayoutStore
     @Binding var draggingID: String?
     @ViewBuilder var content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isDragging: Bool { draggingID == widget.rawValue }
 
@@ -31,11 +32,28 @@ struct V2OverviewWidgetTile<Content: View>: View {
                 }
             }
             .opacity(isDragging ? 0.4 : 1)
-            .animation(.easeInOut(duration: 0.15), value: isDragging)
+            // Honor Reduce Motion — no opacity-lift animation for users who opt out.
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isDragging)
             // Grab/move cursor while customizing, so it's obvious the card is draggable.
             .onHover { inside in
                 guard editing else { NSCursor.arrow.set(); return }
                 (inside ? NSCursor.openHand : NSCursor.arrow).set()
+            }
+            // VoiceOver / keyboard can't drag — expose reorder/resize/hide as
+            // accessibility actions while customizing.
+            .accessibilityActions {
+                if editing {
+                    Button(String(localized: "overview.customize.a11yMoveEarlier", defaultValue: "Move \(widget.displayName) earlier")) {
+                        store.moveEarlier(widget.rawValue)
+                    }
+                    Button(String(localized: "overview.customize.a11yMoveLater", defaultValue: "Move \(widget.displayName) later")) {
+                        store.moveLater(widget.rawValue)
+                    }
+                    if widget.allowedSpans.count > 1 {
+                        Button(String(localized: "overview.customize.resize", defaultValue: "Resize")) { store.cycleSpan(widget.rawValue) }
+                    }
+                    Button(String(localized: "overview.customize.hide", defaultValue: "Hide")) { store.hide(widget.rawValue) }
+                }
             }
     }
 

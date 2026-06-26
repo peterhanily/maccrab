@@ -297,13 +297,28 @@ struct RaveInstallConsentSheet: View {
             }
 
             // C-B: a non-first-party install requires explicit acknowledgement.
+            // Emphasised as an orange warning block (matching the install-block /
+            // non-official patterns above) so the FINAL consent gate for running
+            // third-party code doesn't read as just another caption among the
+            // disclosures — it's the decision the whole sheet builds toward.
             if f.requiresThirdPartyConsent {
-                Toggle(isOn: $thirdPartyAck) {
-                    Text(String(localized: "rave.consent.thirdPartyAck", defaultValue: "This is not a first-party MacCrab plugin. I trust “\(f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity)” and understand it runs sandboxed — reading only what it declares (brokered), with no network or process launch unless declared."))
-                        .font(.caption)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                        Text(String(localized: "rave.consent.thirdPartyAck.title", defaultValue: "Third-party plugin — your consent required"))
+                            .font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                    }
+                    Toggle(isOn: $thirdPartyAck) {
+                        Text(String(localized: "rave.consent.thirdPartyAck", defaultValue: "This is not a first-party MacCrab plugin. I trust “\(f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity)” and understand it runs sandboxed — reading only what it declares (brokered), with no network or process launch unless declared."))
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
                 }
-                .toggleStyle(.checkbox)
-                .padding(.top, 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.orange.opacity(0.10))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                .cornerRadius(6)
             }
 
             Text(String(localized: "rave.consent.resolvedFromCatalog",

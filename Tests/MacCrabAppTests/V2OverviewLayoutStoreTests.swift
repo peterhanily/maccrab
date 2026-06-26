@@ -58,6 +58,32 @@ struct V2OverviewLayoutStoreTests {
         #expect(store.visibleOrdered.dropFirst().first?.widget == .kpiSecurityGrade)
     }
 
+    @Test("moveEarlier / moveLater swap with the adjacent sibling and persist (a11y reorder)")
+    func accessibilityReorder() {
+        let d = freshDefaults()
+        let store = V2OverviewLayoutStore(defaults: d)
+        let order = V2OverviewWidget.allCases
+        let second = order[1].rawValue          // kpiOpenAlerts
+        // Move the 2nd widget earlier → it becomes first; the former first is 2nd.
+        store.moveEarlier(second)
+        #expect(store.items.first?.id == second)
+        #expect(store.items[1].id == order[0].rawValue)
+        // Persists immediately (no commit needed — unlike a live drag).
+        #expect(V2OverviewLayoutStore(defaults: d).items.first?.id == second)
+        // Move it back later → original order restored.
+        store.moveLater(second)
+        #expect(store.items.map { $0.id } == order.map { $0.rawValue })
+    }
+
+    @Test("moveEarlier on the first / moveLater on the last is a no-op (boundary)")
+    func accessibilityReorderBoundary() {
+        let store = V2OverviewLayoutStore(defaults: freshDefaults())
+        let before = store.items.map { $0.id }
+        store.moveEarlier(before.first!)   // already first
+        store.moveLater(before.last!)      // already last
+        #expect(store.items.map { $0.id } == before)
+    }
+
     @Test("cycleSpan walks the widget's allowed spans and wraps")
     func resize() {
         let store = V2OverviewLayoutStore(defaults: freshDefaults())
