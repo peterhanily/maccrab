@@ -44,6 +44,21 @@ int maccrab_tierb_send_status(int sock, unsigned char status) {
     return n < 0 ? -1 : 0;
 }
 
+// SCM_RIGHTS payload length, hardened against a malformed/hostile peer:
+//  (1) refuse to underflow when cmsg_len < CMSG_LEN(0) — a truncated cmsg would
+//      otherwise wrap size_t to a huge value → a wild buffer over-read + closing
+//      garbage descriptors; and
+//  (2) clamp to the control bytes actually received (msg_controllen), since a
+//      MSG_CTRUNC reply can leave cmsg_len claiming more fds than the buffer holds.
+static size_t scm_payload_len(struct msghdr *msg, struct cmsghdr *c) {
+    if (c->cmsg_len < CMSG_LEN(0)) return 0;
+    size_t plen = (size_t)c->cmsg_len - CMSG_LEN(0);
+    char *data = (char *)CMSG_DATA(c);
+    char *ctl_end = (char *)msg->msg_control + msg->msg_controllen;
+    size_t avail = (data < ctl_end) ? (size_t)(ctl_end - data) : 0;
+    return plen < avail ? plen : avail;
+}
+
 int maccrab_tierb_recv_fd(int sock, int *out_fd) {
     if (out_fd) *out_fd = -1;
 
@@ -75,7 +90,7 @@ int maccrab_tierb_recv_fd(int sock, int *out_fd) {
     if (msg.msg_flags & MSG_CTRUNC) {
         for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c != NULL; c = CMSG_NXTHDR(&msg, c)) {
             if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
-                size_t plen = c->cmsg_len - CMSG_LEN(0);
+                size_t plen = scm_payload_len(&msg, c);   // underflow-safe + buffer-clamped
                 for (size_t i = 0; i < plen / sizeof(int); i++) {
                     int fd; memcpy(&fd, CMSG_DATA(c) + i * sizeof(int), sizeof(int)); close(fd);
                 }
@@ -89,7 +104,7 @@ int maccrab_tierb_recv_fd(int sock, int *out_fd) {
             // Count the descriptors carried in this cmsg; keep the first, close
             // the rest (we never send more than one, so this only fires on a
             // malformed/hostile peer — fail safe by not leaking).
-            size_t payload_len = c->cmsg_len - CMSG_LEN(0);
+            size_t payload_len = scm_payload_len(&msg, c);
             size_t count = payload_len / sizeof(int);
             for (size_t i = 0; i < count; i++) {
                 int fd;
