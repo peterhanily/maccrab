@@ -3,6 +3,19 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.2] — 2026-06-26
+
+A stability and hardening release.
+
+### Dashboard
+- Overview customization is clearer and smoother to use: a drag handle, a grab cursor, and an in-mode hint make it obvious you can rearrange, resize, and hide panels, and reordering no longer jumps.
+
+### Security
+- Hardened the forensic plugin sandbox's file-descriptor broker against a malformed control message from a compromised plugin (bounds-checked the parser).
+
+### Tooling
+- Added operator tooling to author and sign out-of-band rule-update manifests — the sender side of the signed, app-decoupled rule channel.
+
 ## [1.20.1] — 2026-06-26
 
 A maintenance release — no user-facing changes from v1.20.0.
