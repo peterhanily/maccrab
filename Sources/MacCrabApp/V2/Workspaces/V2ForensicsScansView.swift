@@ -4,7 +4,8 @@
 //   1. Header
 //   2. FDA banner (only when access is denied)
 //   3. Runner status — running / done / failed
-//   4. Kit picker (the headline action of this tab)
+//   4. Scanner inventory — Built-in scanners + Installed plugins,
+//      each a collapsible (expanded-by-default) list; one click runs any
 //   5. Recently run — at most 3 scans, with "See all" link to
 //      the Past scans tab
 //
@@ -30,10 +31,8 @@ struct V2ForensicsScansView: View {
     @StateObject private var runner = KitRunner()
     @State private var scans: [CaseManifest] = []
     @State private var loading = true
-    @State private var kits: [Kit] = []
     @State private var openScanID: String? = nil
     @State private var pendingEncryptedKit: Kit? = nil
-    @State private var detailKit: Kit? = nil
     @State private var fdaStatus: FullDiskAccessStatus = .unknown
     // Issue #3: the full scanner inventory, sectioned built-in vs third-party.
     @State private var builtinScanners: [PluginManifest] = []
@@ -41,10 +40,10 @@ struct V2ForensicsScansView: View {
     @State private var thirdPartyManifests: [String: TierBManifest] = [:]
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a scanner → inspector
     @State private var scanBuiltinShowAll = false
-    // Built-in scanners are collapsed by default: the curated kits above are the
-    // recommended path and already bundle these, so a flat 30+ list read as
-    // duplicative clutter. One click expands the à-la-carte individual scanners.
-    @State private var scanBuiltinExpanded = false
+    // The Run-a-scan tab is the à-la-carte scanner inventory: built-in scanners
+    // and installed plugins, each a collapsible section that starts expanded.
+    @State private var scanBuiltinExpanded = true
+    @State private var scanInstalledExpanded = true
     private let scannerPageSize = 8
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
@@ -154,21 +153,6 @@ struct V2ForensicsScansView: View {
             }
         } message: { kit in
             Text(String(localized: "scans.encryptedScanMessage", defaultValue: "This kit collects personal data (messages, mail, call history). MacCrab will store it encrypted on disk and the OS will ask for your Keychain password to unlock the encryption key. You'll only be asked once per session."))
-        }
-        .sheet(isPresented: Binding(
-            get: { detailKit != nil },
-            set: { if !$0 { detailKit = nil } }
-        )) {
-            if let kit = detailKit {
-                V2KitDetailSheet(
-                    kit: kit,
-                    isPresented: Binding(
-                        get: { detailKit != nil },
-                        set: { if !$0 { detailKit = nil } }
-                    ),
-                    onRun: { runOrConfirm(kit) }
-                )
-            }
         }
     }
 
@@ -282,43 +266,21 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    // MARK: - Run a new scan (kits)
+    // MARK: - Run a new scan
 
     private var runNewScanSection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // Recommended kits (the curated headline).
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(scans.isEmpty ? String(localized: "scans.pickKitToStart", defaultValue: "Pick a kit to start a scan") : String(localized: "scans.runNewScan", defaultValue: "Run a new scan"))
-                        .font(.headline)
-                    Spacer()
-                    Text(String(localized: "scans.kitCount", defaultValue: "\(kits.count) kit\(kits.count == 1 ? "" : "s")"))
-                        .scaledSystem(11)
-                        .foregroundStyle(.tertiary)
-                }
-                VStack(spacing: 10) {
-                    ForEach(kits, id: \.id) { kit in kitCard(kit) }
-                }
-            }
-            // Individual built-in scanners — collapsed by default (the kits above
-            // are the recommended path and bundle these). One click to run any à
-            // la carte.
+            // Built-in scanners — the curated forensic collectors/analyzers that
+            // ship with MacCrab. Expanded by default; collapsible.
             if !builtinScanners.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinExpanded.toggle() }
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Image(systemName: scanBuiltinExpanded ? "chevron.down" : "chevron.right")
-                                .scaledSystem(10).foregroundStyle(.secondary)
-                            Text(String(localized: "scans.builtinScanners", defaultValue: "Built-in scanners")).font(.headline)
-                            Text(String(localized: "scans.builtinScannersHint", defaultValue: "run one individually")).scaledSystem(11).foregroundStyle(.tertiary)
-                            Spacer()
-                            Text(String(localized: "scans.sectionCount", defaultValue: "\(builtinScanners.count)")).scaledSystem(11).foregroundStyle(.tertiary)
+                    scanDisclosureHeader(
+                        String(localized: "scans.builtinScanners", defaultValue: "Built-in scanners"),
+                        hint: String(localized: "scans.builtinScannersHint", defaultValue: "run one individually"),
+                        count: builtinScanners.count,
+                        expanded: scanBuiltinExpanded) {
+                            withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinExpanded.toggle() }
                         }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
                     if scanBuiltinExpanded {
                         let shown = scanBuiltinShowAll ? builtinScanners : Array(builtinScanners.prefix(scannerPageSize))
                         VStack(spacing: 6) {
@@ -338,27 +300,40 @@ struct V2ForensicsScansView: View {
                     }
                 }
             }
+            // Installed plugins — third-party scanners from the rave store or
+            // sideloaded. Expanded by default; collapsible.
             if !thirdPartyScanners.isEmpty {
-                scannerSection(String(localized: "scans.thirdPartyPlugins", defaultValue: "Installed plugins"), count: thirdPartyScanners.count) {
-                    ForEach(thirdPartyScanners, id: \.pluginID) { p in
-                        let m = thirdPartyManifests[p.pluginID]
-                        let upd = updateAvailable(for: p.pluginID)
-                        scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
-                                   subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Installed plugin")),
-                                   badge: upd
-                                       ? String(localized: "scans.updateBadge", defaultValue: "Update → v\(availableVersions[p.pluginID] ?? "")")
-                                       : nil,
-                                   provenance: provenance(for: p),
-                                   detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
+                VStack(alignment: .leading, spacing: 8) {
+                    scanDisclosureHeader(
+                        String(localized: "scans.thirdPartyPlugins", defaultValue: "Installed plugins"),
+                        hint: "",
+                        count: thirdPartyScanners.count,
+                        expanded: scanInstalledExpanded) {
+                            withAnimation(.easeInOut(duration: 0.15)) { scanInstalledExpanded.toggle() }
+                        }
+                    if scanInstalledExpanded {
+                        VStack(spacing: 6) {
+                            ForEach(thirdPartyScanners, id: \.pluginID) { p in
+                                let m = thirdPartyManifests[p.pluginID]
+                                let upd = updateAvailable(for: p.pluginID)
+                                scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
+                                           subtitle: (m?.description.isEmpty == false ? m!.description : String(localized: "scans.thirdPartyPluginSubtitle", defaultValue: "Installed plugin")),
+                                           badge: upd
+                                               ? String(localized: "scans.updateBadge", defaultValue: "Update → v\(availableVersions[p.pluginID] ?? "")")
+                                               : nil,
+                                           provenance: provenance(for: p),
+                                           detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
+                            }
+                            Button { Task { await reverifyAll() } } label: {
+                                Label(reverifying
+                                      ? String(localized: "scans.reverifying", defaultValue: "Re-verifying…")
+                                      : String(localized: "scans.reverifyAll", defaultValue: "Re-verify all installed"),
+                                      systemImage: "checkmark.shield")
+                            }
+                            .buttonStyle(.plain).scaledSystem(11).foregroundStyle(.tint).disabled(reverifying)
+                            .padding(.top, 2)
+                        }
                     }
-                    Button { Task { await reverifyAll() } } label: {
-                        Label(reverifying
-                              ? String(localized: "scans.reverifying", defaultValue: "Re-verifying…")
-                              : String(localized: "scans.reverifyAll", defaultValue: "Re-verify all installed"),
-                              systemImage: "checkmark.shield")
-                    }
-                    .buttonStyle(.plain).scaledSystem(11).foregroundStyle(.tint).disabled(reverifying)
-                    .padding(.top, 2)
                 }
             }
         }
@@ -462,15 +437,24 @@ struct V2ForensicsScansView: View {
         else if let p = thirdPartyScanners.first(where: { $0.pluginID == id }) { runThirdPartyScanner(p) }
     }
 
-    private func scannerSection<Content: View>(_ title: String, count: Int, @ViewBuilder _ rows: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
+    /// Collapsible section header (chevron + title + optional hint + count) shared
+    /// by the Built-in scanners and Installed plugins lists.
+    private func scanDisclosureHeader(_ title: String, hint: String, count: Int,
+                                      expanded: Bool, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .scaledSystem(10).foregroundStyle(.secondary)
                 Text(title).font(.headline)
+                if !hint.isEmpty {
+                    Text(hint).scaledSystem(11).foregroundStyle(.tertiary)
+                }
                 Spacer()
                 Text(String(localized: "scans.sectionCount", defaultValue: "\(count)")).scaledSystem(11).foregroundStyle(.tertiary)
             }
-            VStack(spacing: 6) { rows() }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private func scannerRow(icon: String, name: String, subtitle: String, badge: String?,
@@ -538,65 +522,6 @@ struct V2ForensicsScansView: View {
         runOrConfirm(Kit.adHoc(pluginID: p.pluginID, name: name, encrypted: encrypted))
     }
 
-    private func kitCard(_ kit: Kit) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: kit.category.sfSymbol)
-                .scaledSystem(22)
-                .foregroundStyle(.tint)
-                .frame(width: 28, alignment: .center)
-                .accessibilityHidden(true) // decorative — title text follows
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(kit.name)
-                        .scaledSystem(13, weight: .semibold)
-                    Text(kit.category.displayName)
-                        .scaledSystem(10, weight: .medium)
-                        .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(Color.accentColor.opacity(0.15))
-                        .foregroundStyle(.tint)
-                        .cornerRadius(3)
-                    if kit.encrypted {
-                        Label(String(localized: "scans.encrypted", defaultValue: "Encrypted"), systemImage: "lock.fill")
-                            .labelStyle(.titleAndIcon)
-                            .scaledSystem(10, weight: .medium)
-                            .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(Color.purple.opacity(0.15))
-                            .foregroundStyle(.purple)
-                            .cornerRadius(3)
-                    }
-                }
-                Text(kit.description)
-                    .scaledSystem(12)
-                    .foregroundStyle(.secondary)
-                Text(String(localized: "scans.kitScannerCount", defaultValue: "\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")\(kit.encrypted ? " · asks for your Keychain password" : "")"))
-                    .scaledSystem(10)
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer()
-            Button {
-                detailKit = kit
-            } label: {
-                Image(systemName: "info.circle")
-                    .scaledSystem(14)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help(String(localized: "scans.howKitWorksHelp", defaultValue: "How this kit works"))
-            .accessibilityLabel(String(localized: "scans.howKitWorks", defaultValue: "How this kit works"))
-            Button {
-                runOrConfirm(kit)
-            } label: {
-                Text(String(localized: "scans.runKit", defaultValue: "Run"))
-                    .frame(minWidth: 60)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(isRunnerBusy)
-        }
-        .padding(14)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
-    }
-
     /// Encrypted-kit confirmation gate: once-per-profile alert
     /// the first time the operator runs a kit that asks for
     /// Keychain access, then direct run thereafter.
@@ -632,13 +557,6 @@ struct V2ForensicsScansView: View {
             pendingEncryptedKit = kit
         } else {
             Task { await runner.run(kit) }
-        }
-    }
-
-    private var isRunnerBusy: Bool {
-        switch runner.state {
-        case .starting, .running: return true
-        default: return false
         }
     }
 
@@ -796,11 +714,9 @@ struct V2ForensicsScansView: View {
 
     private func reload() async {
         loading = true
-        kits = KitLoader.loadBundledKits()
-        // The full scanner inventory (Issue #3): built-in collectors/analyzers +
+        // The full scanner inventory: built-in collectors/analyzers +
         // operator-visible third-party plugins (residue filtered via the shared
-        // classifier). Kits stay the recommended headline; these are the
-        // individually-runnable scanners.
+        // classifier) — the two individually-runnable scanner lists.
         let mans = await PluginRegistry.shared.manifests()
         builtinScanners = mans
             .filter { $0.type == .collector || $0.type == .analyzer }
