@@ -29,6 +29,7 @@ struct V2OverviewWorkspace: View {
     @StateObject private var layout = V2OverviewLayoutStore()
     @State private var editing = false
     @State private var draggingID: String? = nil
+    @State private var dropTargeted = false   // drag is over the dashboard area
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -75,11 +76,20 @@ struct V2OverviewWorkspace: View {
                 }
             }
             .padding(16)
-            // Catch drops that land in gaps (or a cancelled drag) so a half-
-            // finished reorder never leaves a card stuck in its dragging state.
-            .onDrop(of: [UTType.text], isTargeted: nil) { _ in
+            // Catch drops that land in gaps between cards. Persist once at drag-end.
+            .onDrop(of: [UTType.text], isTargeted: $dropTargeted) { _ in
                 draggingID = nil
+                layout.commit()
                 return false
+            }
+            // When the drag leaves the dashboard (e.g. released outside the
+            // window) clear the dragging state, otherwise a card could stay
+            // stuck faded. Persist wherever the reorder ended up.
+            .onChange(of: dropTargeted) { targeted in
+                if !targeted && draggingID != nil {
+                    draggingID = nil
+                    layout.commit()
+                }
             }
         }
         .sheet(isPresented: $showingSecurityFactors) {

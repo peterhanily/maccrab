@@ -93,6 +93,7 @@ private struct WidgetReorderDropDelegate: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
 
     func performDrop(info: DropInfo) -> Bool {
+        store.commit()          // persist the reorder once, at drag-end
         draggingID = nil
         return true
     }

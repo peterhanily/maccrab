@@ -86,18 +86,31 @@ struct V2FlowGridLayout: Layout {
         return (placements, totalHeight)
     }
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    /// Remembers the width measured in `sizeThatFits` so `placeSubviews` lays
+    /// out against the *same* width — otherwise the height we reported (for the
+    /// proposed width) and the arrangement we place (for bounds.width) could
+    /// diverge and misalign the grid.
+    struct Cache { var width: CGFloat? }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let width = proposal.replacingUnspecifiedDimensions(by: .init(width: 600, height: 0)).width
+        cache.width = width
         let (_, height) = layout(subviews: subviews, totalWidth: width)
         return CGSize(width: width, height: height)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let (placements, _) = layout(subviews: subviews, totalWidth: bounds.width)
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let width = cache.width ?? bounds.width
+        let (placements, _) = layout(subviews: subviews, totalWidth: width)
         for p in placements {
+            // Bottom-align within the row cell so items of unequal height (e.g. a
+            // fixed-height KPI tile beside a taller card) line up along their
+            // bottoms instead of leaving a gap under the shorter one.
             subviews[p.index].place(
-                at: CGPoint(x: bounds.minX + p.frame.minX, y: bounds.minY + p.frame.minY),
-                anchor: .topLeading,
+                at: CGPoint(x: bounds.minX + p.frame.minX, y: bounds.minY + p.frame.maxY),
+                anchor: .bottomLeading,
                 proposal: .init(width: p.frame.width, height: p.frame.height)
             )
         }

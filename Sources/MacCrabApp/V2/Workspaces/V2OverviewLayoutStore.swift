@@ -129,6 +129,9 @@ final class V2OverviewLayoutStore: ObservableObject {
     // MARK: Mutations
 
     /// Move `id` to just before `target` in display order (drag-reorder).
+    /// Does NOT persist — a single drag fires this on every hover step, so the
+    /// caller persists once at drag-end via `commit()`, keeping synchronous
+    /// UserDefaults writes off the animation path.
     func move(_ id: String, before target: String) {
         guard id != target,
               let from = items.firstIndex(where: { $0.id == id }) else { return }
@@ -138,8 +141,10 @@ final class V2OverviewLayoutStore: ObservableObject {
             return
         }
         items.insert(moved, at: to)
-        save()
     }
+
+    /// Persist the current order (called once when a drag ends).
+    func commit() { save() }
 
     /// Cycle a widget to its next allowed span (the resize control).
     func cycleSpan(_ id: String) {

@@ -81,6 +81,30 @@ struct V2OverviewLayoutStoreTests {
         #expect(store.items.allSatisfy { $0.visible })
     }
 
+    @Test("reorder persists only after commit (one write per drag, not per hover-step)")
+    func reorderCommit() {
+        let d = freshDefaults()
+        let a = V2OverviewLayoutStore(defaults: d)
+        a.move(V2OverviewWidget.forensics.rawValue, before: V2OverviewWidget.kpiSecurityGrade.rawValue)
+        // Mid-drag (not committed) → a freshly-loaded store still sees defaults.
+        #expect(V2OverviewLayoutStore(defaults: d).visibleOrdered.first?.widget == .kpiSecurityGrade)
+        a.commit()   // drag ends
+        #expect(V2OverviewLayoutStore(defaults: d).visibleOrdered.first?.widget == .forensics)
+    }
+
+    @Test("clampSpan picks the smaller span on a distance tie")
+    func clampTie() throws {
+        // alertHistogram allows [2, 4]; a stored span of 3 is equidistant — the
+        // nearest-tie must resolve to the SMALLER span (2), not the larger.
+        let d = freshDefaults()
+        let stored: [V2OverviewLayoutStore.Item] = [
+            .init(id: V2OverviewWidget.alertHistogram.rawValue, visible: true, span: 3),
+        ]
+        d.set(try JSONEncoder().encode(stored), forKey: "v2.overview.layout")
+        let store = V2OverviewLayoutStore(defaults: d)
+        #expect(store.span(for: V2OverviewWidget.alertHistogram.rawValue) == 2)
+    }
+
     @Test("layout persists across store instances sharing the same defaults")
     func persistenceRoundTrip() {
         let d = freshDefaults()
