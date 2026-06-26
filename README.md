@@ -81,11 +81,13 @@ make app
 Once running, MacCrab gives you:
 
 - **Real-time alerts** -- macOS notifications and a live alert dashboard when suspicious activity is detected (shell spawned by browser, unsigned binary persistence, credential access, etc.)
-- **A SwiftUI menubar dashboard** with 10 workspaces -- security overview, alert triage with bulk actions, live event stream, campaign timelines, rule browser, AI Guard status, and more
+- **A customizable SwiftUI menubar dashboard** with 10 workspaces -- a security Overview you arrange to taste (show/hide, drag, and resize panels; your layout persists across updates), alert triage with bulk actions, live event stream, campaign timelines, rule browser, AI Guard status, and more
 - **CLI threat hunting** -- `maccrabctl hunt "show processes connecting to unusual ports"` for natural-language queries against your event data
 - **Behavioral scoring** -- even if no single rule fires at critical severity, accumulated suspicious indicators across a process tree will still trigger an alert
 - **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
 - **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 5 other AI tools for credential access, project boundary escapes, and prompt injection
+- **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
+- **Out-of-band rule updates** -- new detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`); pushed rules are detection-only and can never override a built-in rule
 - **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
 
 ---
@@ -171,6 +173,9 @@ That's roughly **~750 MB of disk allocation on an active machine** (it's much sm
 | [docs/AUTHORIZATION_MODEL.md](docs/AUTHORIZATION_MODEL.md) | Daemon control-plane authorization — inbox IPC, who can mutate the engine, audit log, self-protection alerts |
 | [docs/SUPPORTED_OS.md](docs/SUPPORTED_OS.md) | Supported macOS matrix — minimum (Ventura 13), tested target (macOS 26), macOS 27 risks |
 | [docs/DATA_SCHEMA_STABILITY.md](docs/DATA_SCHEMA_STABILITY.md) | On-disk SQLite schema stability statement — use the export interfaces, not direct DB reads |
+| [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md) | Authoring a sandboxed forensic plugin for the Rave store — manifest, least-privilege read-set, signing |
+| [docs/TRUST.md](docs/TRUST.md) | End-user verification — SHA256, code signature, notarization, Sparkle signature, and the plugin trust chain |
+| [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md) | How releases and plugins are signed, and the supply-chain threat model |
 | [CHANGELOG.md](CHANGELOG.md) | Dated version history |
 
 ---
@@ -247,7 +252,7 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (~80 tools live — ≈50 built-in plus the `forensics_*` plugin tools that register dynamically):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
+**Available tools (~55 built-in, plus `forensics_*` plugin tools that register dynamically when forensic plugins are installed):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
@@ -589,14 +594,14 @@ breakdown. To regenerate this section after editing rules: `make readme-coverage
 
 ## SwiftUI Dashboard
 
-A native status bar application whose dashboard is a workspace shell — a sidebar, top bar, and workspace area with a command bar / palette and a UIMode density toggle (**Basic / Standard / Advanced**) across 10 workspaces:
+A native status bar application whose dashboard is a workspace shell — a sidebar, top bar, and workspace area with a command bar / palette and a UIMode density toggle (**Basic / Standard / Advanced**) across 10 workspaces. The **Overview is customizable**: click *Customize* to show/hide, drag-reorder, and resize panels; your layout is saved and persists across app updates.
 
 <details>
 <summary><strong>All dashboard workspaces (click to expand)</strong></summary>
 
 | Workspace | Description |
 |------|-------------|
-| **Overview** | At-a-glance system posture and shortcuts |
+| **Overview** | At-a-glance system posture and shortcuts — a customizable panel grid (show/hide, drag, resize; layout persists) |
 | **Alerts** | Triage and route findings — multi-select, bulk suppress, inline actions |
 | **Events** | Live event stream with filter / search / drill-in |
 | **Investigation** | Trace graph + AI analysis |
@@ -611,7 +616,38 @@ A native status bar application whose dashboard is a workspace shell — a sideb
 
 ---
 
+## Forensic Plugins & the Rave Store
+
+Beyond live detection, MacCrab's **Forensics** workspace runs forensic scanners on
+this Mac — built-in collectors and analyzers plus optional community plugins.
+
+- **[Rave store](https://rave.maccrab.com)** — browse and install signed community
+  forensic plugins. Every plugin is Ed25519-signed, runs **fully sandboxed**
+  (a least-privilege `sandbox_init` profile + a brokered file-descriptor model),
+  and declares its read-set + network access so you consent **before** install.
+- **[maccrab-plugin-reference](https://github.com/peterhanily/maccrab-plugin-reference)**
+  — what a good plugin looks like: reproducible, least-privilege, author-signed.
+  Copy it to start your own.
+- **[maccrab-rave-submissions](https://github.com/peterhanily/maccrab-rave-submissions)**
+  — the community submission + vetting path. Submit a plugin there for review.
+
+The trust model is the same one MacCrab applies to itself: signed, anti-rollback,
+revocable, and sandboxed. See [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md)
+and [docs/TRUST.md](docs/TRUST.md).
+
+---
+
 ## What's New
+
+<details open>
+<summary><strong>v1.20 — customizable dashboard, signed out-of-band rule updates, live Rave plugin store (2026-06)</strong></summary>
+
+- **Customizable Overview dashboard** — show/hide, drag-reorder, and resize panels; the layout persists across app updates and is resilient to a corrupted preferences file.
+- **Signed out-of-band rule channel** — detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`). Pushed rules are Ed25519-verified, version-floored, additive-only (never shadow a built-in), and **detection-only** (never arm a response action).
+- **Forensics: simpler "Run a scan"** (built-in scanners + installed plugins as two collapsible lists) and at-a-glance plugin provenance (Built-in / Store / Sideloaded). The **[Rave plugin store](https://rave.maccrab.com)** is live.
+- **Privacy & hardening** — a strict no-leak mode for cloud LLM backends, a false-positive-rate benchmark harness, and a sandbox fd-broker hardening fix (v1.20.2).
+
+</details>
 
 <details>
 <summary><strong>v1.12 — supply-chain detection wave, intent posterior, TURBO daemon boot, in-dashboard Sigma editor (2026-05)</strong></summary>
