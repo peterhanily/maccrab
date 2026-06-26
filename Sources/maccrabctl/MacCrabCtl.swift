@@ -33,12 +33,17 @@ struct MacCrabCtl {
         case "status":
             await showStatus()
         case "rules":
+            // `rules list|count` inspect the LOADED corpus; everything else
+            // (update / check-updates / status) is the v1.20 signed rule-update
+            // channel. Both MUST live under this single case — a second
+            // `case "rules"` later in this switch is dead (first match wins),
+            // which silently shadowed the whole channel CLI.
             if args.count >= 3 && args[2] == "list" {
                 await listRules()
             } else if args.count >= 3 && args[2] == "count" {
                 await countRules()
             } else {
-                usageError("Usage: maccrabctl rules [list|count]")
+                await dispatchRules(args: Array(args.dropFirst(2)))
             }
         case "events":
             if args.count >= 3 && args[2] == "tail" {
@@ -338,9 +343,6 @@ struct MacCrabCtl {
             // v1.13a-1 Mac Context Plugin Platform — plugin runtime.
             // v1.17 adds search/info/update/pin/verify/status.
             await dispatchPlugin(args: Array(args.dropFirst(2)))
-        case "rules":
-            // v1.20 — signed rule-update channel (app-decoupled detection rules).
-            await dispatchRules(args: Array(args.dropFirst(2)))
         case "fingerprint":
             // v1.14-1 — MCFP v1 static fingerprint.
             await dispatchFingerprint(args: Array(args.dropFirst(2)))

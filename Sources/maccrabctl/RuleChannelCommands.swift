@@ -44,6 +44,8 @@ func printRulesUsage() {
                                        rules manifest into compiled_rules/pushed.
       check-updates [--json]           Report whether a newer rules corpus exists.
       status                           Show the installed pushed-rules state.
+      list                             List the rules currently loaded by the engine.
+      count                            Count the rules currently loaded by the engine.
 
     Trust: the manifest is Ed25519-signed (separate rules.pub key), anti-rollback
     (monotonic serial), version-floored, and every rule is re-validated before

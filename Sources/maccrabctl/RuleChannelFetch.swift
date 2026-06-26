@@ -107,7 +107,13 @@ struct RuleChannelFetcher {
     // MARK: - Fetch + verify
 
     private func fetch(url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        // Always pull fresh: the manifest is re-published frequently and the
+        // anti-rollback serial only works if we actually SEE the newest one.
+        // URLSession.shared's default cache will otherwise serve a stale
+        // manifest for the same URL, silently masking a just-published update.
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw RuleChannelError.httpFetchFailed(url: url, status: -1)
         }
