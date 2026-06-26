@@ -3,6 +3,24 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] — 2026-06-26
+
+A dashboard-customization and rule-delivery release.
+
+### Dashboard
+- The Overview is now a customizable dashboard: show or hide any panel, drag to rearrange, and resize panels to a 1–4 column width. Your layout is saved and persists across app updates (and is resilient to a corrupted preferences file). The protection-status banner stays pinned. The Event Rate and Threat Intel panels are back.
+
+### Forensics
+- "Run a scan" is simplified to two clear lists — Built-in scanners and Installed plugins — each collapsible and expanded by default. The kit picker was removed.
+- Forensic plugins now show their provenance at a glance: Built-in, Store, or Sideloaded.
+
+### Detection
+- Detection rules can be updated out-of-band from a signed channel, separately from the app, so new rules ship without an app update or restart. Pushed rules are Ed25519 signature-verified, anti-rollback protected, and strictly detection-only — they never trigger response actions and never override a built-in rule (`maccrabctl rules update`).
+
+### Privacy & hardening
+- Cloud LLM backends gain a strict no-leak mode that refuses a request if any sensitive content survives sanitization.
+- A false-positive-rate benchmark harness lets the per-rule FP rate be measured on a real machine.
+
 ## [1.19.3] — 2026-06-25
 
 A plugin-lifecycle and signal-quality release.
