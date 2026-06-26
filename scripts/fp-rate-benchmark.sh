@@ -33,7 +33,7 @@ done
 if [[ -z "$DB" ]]; then
   for cand in "/Library/Application Support/MacCrab/alerts.db" \
               "$HOME/Library/Application Support/MacCrab/alerts.db"; do
-    [[ -f "$cand" ]] && { DB="$cand"; break; }
+    [[ -r "$cand" ]] && { DB="$cand"; break; }
   done
 fi
 [[ -n "$DB" && -f "$DB" ]] || { echo "ERROR: alerts.db not found (pass --db PATH)" >&2; exit 1; }

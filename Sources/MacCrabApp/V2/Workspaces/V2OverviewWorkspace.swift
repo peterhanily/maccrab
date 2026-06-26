@@ -246,22 +246,6 @@ struct V2OverviewWorkspace: View {
                 }
             )
             V2KpiCard(
-                title: String(localized: "overview.kpiEventRate", defaultValue: "Event Rate"),
-                value: formatRate(kpis.eventsPerSecond),
-                trend: String(localized: "overview.kpiEventRateTrend", defaultValue: "/sec · last 1m"),
-                trendKind: .info,
-                icon: "waveform.path",
-                iconColor: V2Theme.dataAccent,
-                action: V2KpiAction(String(localized: "overview.kpiViewEvents", defaultValue: "View Events")) {
-                    state.goto(V2NavigationDestination(
-                        workspace: .events, tab: nil
-                    ))
-                },
-                visual: kpis.eventsLast8Buckets.isEmpty
-                    ? nil
-                    : .bars(values: kpis.eventsLast8Buckets, color: V2Theme.dataAccent)
-            )
-            V2KpiCard(
                 title: String(localized: "overview.kpiAIGuard", defaultValue: "AI Guard"),
                 value: aiGuardValue,
                 trend: aiGuardTrend,
@@ -271,19 +255,6 @@ struct V2OverviewWorkspace: View {
                 action: V2KpiAction(String(localized: "overview.kpiViewAIGuard", defaultValue: "View AI Guard")) {
                     state.goto(V2NavigationDestination(
                         workspace: .detection, tab: .detectionAIGuard
-                    ))
-                }
-            )
-            V2KpiCard(
-                title: String(localized: "overview.kpiThreatIntel", defaultValue: "Threat Intel"),
-                value: threatIntelValue,
-                trend: threatIntelTrend,
-                trendKind: threatIntelTrendKind,
-                icon: "globe.americas.fill",
-                iconColor: V2Theme.dataAccent,
-                action: V2KpiAction(String(localized: "overview.kpiViewIntelligence", defaultValue: "View Intelligence")) {
-                    state.goto(V2NavigationDestination(
-                        workspace: .intelligence, tab: .intelligenceThreatIntel
                     ))
                 }
             )
@@ -309,19 +280,7 @@ struct V2OverviewWorkspace: View {
         if kpis.activeCampaignsMedium > 0   { parts.append(String(localized: "overview.campaignsMedium", defaultValue: "\(kpis.activeCampaignsMedium) medium")) }
         return parts.isEmpty ? String(localized: "overview.campaignsActive", defaultValue: "active") : parts.joined(separator: " · ")
     }
-    private func formatRate(_ rate: Double) -> String {
-        if rate >= 1000 { return String(format: "%.1fK", rate / 1000) }
-        if rate >= 10   { return String(format: "%.0f", rate) }
-        return String(format: "%.1f", rate)
-    }
-
-    // MARK: - AI Guard + Threat Intel tiles (bound to live AppState, not '—')
-
-    private func compactCount(_ n: Int) -> String {
-        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
-        if n >= 1_000     { return String(format: "%.1fk", Double(n) / 1_000) }
-        return "\(n)"
-    }
+    // MARK: - AI Guard tile (bound to live AppState)
 
     private var aiGuardValue: String { "\(appState.aiSessions.count)" }
     private var aiGuardTrend: String {
@@ -329,25 +288,6 @@ struct V2OverviewWorkspace: View {
         return n == 0 ? String(localized: "overview.aiNoSessions", defaultValue: "no agent sessions") : (n == 1 ? String(localized: "overview.aiSessionSingular", defaultValue: "agent session") : String(localized: "overview.aiSessionPlural", defaultValue: "agent sessions"))
     }
     private var aiGuardTrendKind: V2ChipKind { appState.aiSessions.isEmpty ? .neutral : .ai }
-
-    private var threatIntelTotal: Int {
-        let s = appState.threatIntelStats
-        return s.hashes + s.ips + s.domains + s.urls
-    }
-    private var threatIntelValue: String { threatIntelTotal > 0 ? compactCount(threatIntelTotal) : "—" }
-    private var threatIntelTrend: String {
-        guard threatIntelTotal > 0 else { return String(localized: "overview.intelNoIndicators", defaultValue: "no indicators loaded") }
-        guard let updated = appState.threatIntelStats.lastUpdate else { return String(localized: "overview.intelLoaded", defaultValue: "indicators loaded") }
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return String(localized: "overview.intelUpdated", defaultValue: "updated \(rel.localizedString(for: updated, relativeTo: Date()))")
-    }
-    private var threatIntelTrendKind: V2ChipKind {
-        guard threatIntelTotal > 0 else { return .neutral }
-        guard let updated = appState.threatIntelStats.lastUpdate else { return .neutral }
-        // 6h freshness ceiling, matching V2LiveDataProvider's staleness rule.
-        return Date().timeIntervalSince(updated) < 6 * 3600 ? .healthy : .warning
-    }
 
     private var postureTimelineCard: some View {
         let buckets = histogramBuckets

@@ -741,8 +741,8 @@ declare -a BOUNDED_FIELD_ALLOWLIST=(
     # Bounded by event-taps installed in the system.
     "EventTapMonitor.swift:knownTaps"
     # Bounded by SDR / display hardware connected.
-    "TEMPESTMonitor.swift:reportedDevices"
-    "TEMPESTMonitor.swift:knownDisplays"
+    "SDRDeviceMonitor.swift:reportedDevices"
+    "SDRDeviceMonitor.swift:knownDisplays"
     # Bounded by per-rule TCC revocation history; follow-up in v1.7.4.
     "TCCRevocation.swift:revocationHistory"
     # Bounded by sleeping-process count; follow-up in v1.7.4.

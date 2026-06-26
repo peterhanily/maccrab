@@ -41,6 +41,10 @@ struct V2ForensicsScansView: View {
     @State private var thirdPartyManifests: [String: TierBManifest] = [:]
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a scanner → inspector
     @State private var scanBuiltinShowAll = false
+    // Built-in scanners are collapsed by default: the curated kits above are the
+    // recommended path and already bundle these, so a flat 30+ list read as
+    // duplicative clutter. One click expands the à-la-carte individual scanners.
+    @State private var scanBuiltinExpanded = false
     private let scannerPageSize = 8
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
@@ -296,21 +300,41 @@ struct V2ForensicsScansView: View {
                     ForEach(kits, id: \.id) { kit in kitCard(kit) }
                 }
             }
-            // Issue #3: every scanner is individually runnable, sectioned by origin.
+            // Individual built-in scanners — collapsed by default (the kits above
+            // are the recommended path and bundle these). One click to run any à
+            // la carte.
             if !builtinScanners.isEmpty {
-                let shown = scanBuiltinShowAll ? builtinScanners : Array(builtinScanners.prefix(scannerPageSize))
-                scannerSection(String(localized: "scans.builtinScanners", defaultValue: "Built-in scanners"), count: builtinScanners.count) {
-                    ForEach(shown, id: \.id) { m in
-                        scannerRow(icon: scannerIcon(m.type), name: m.displayName,
-                                   subtitle: scannerSubtitle(m),
-                                   badge: nil,
-                                   detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
-                    }
-                    if builtinScanners.count > scannerPageSize {
-                        Button(scanBuiltinShowAll ? String(localized: "scans.showFewer", defaultValue: "Show fewer") : String(localized: "scans.showAllBuiltins", defaultValue: "Show all \(builtinScanners.count)")) {
-                            withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinShowAll.toggle() }
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinExpanded.toggle() }
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Image(systemName: scanBuiltinExpanded ? "chevron.down" : "chevron.right")
+                                .scaledSystem(10).foregroundStyle(.secondary)
+                            Text(String(localized: "scans.builtinScanners", defaultValue: "Built-in scanners")).font(.headline)
+                            Text(String(localized: "scans.builtinScannersHint", defaultValue: "run one individually")).scaledSystem(11).foregroundStyle(.tertiary)
+                            Spacer()
+                            Text(String(localized: "scans.sectionCount", defaultValue: "\(builtinScanners.count)")).scaledSystem(11).foregroundStyle(.tertiary)
                         }
-                        .buttonStyle(.plain).scaledSystem(11, weight: .medium).foregroundStyle(.tint).padding(.top, 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if scanBuiltinExpanded {
+                        let shown = scanBuiltinShowAll ? builtinScanners : Array(builtinScanners.prefix(scannerPageSize))
+                        VStack(spacing: 6) {
+                            ForEach(shown, id: \.id) { m in
+                                scannerRow(icon: scannerIcon(m.type), name: m.displayName,
+                                           subtitle: scannerSubtitle(m),
+                                           badge: nil,
+                                           detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
+                            }
+                            if builtinScanners.count > scannerPageSize {
+                                Button(scanBuiltinShowAll ? String(localized: "scans.showFewer", defaultValue: "Show fewer") : String(localized: "scans.showAllBuiltins", defaultValue: "Show all \(builtinScanners.count)")) {
+                                    withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinShowAll.toggle() }
+                                }
+                                .buttonStyle(.plain).scaledSystem(11, weight: .medium).foregroundStyle(.tint).padding(.top, 2)
+                            }
+                        }
                     }
                 }
             }
@@ -787,7 +811,10 @@ struct V2ForensicsScansView: View {
         // install (com.maccrab.* but not a built-in, e.g. posture-pro) instead of
         // dropping it as impersonation residue — otherwise it has no run row.
         let trustedKeys = await PluginInstaller().currentTrustedKeys()
+        // A built-in already appears under "Built-in scanners"; never also list it
+        // under "Installed plugins" (the duplication the user saw).
         let visible = OperatorVisibilityFilter.filter(rawInstalled, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeys)
+            .filter { !builtinIDs.contains($0.pluginID) }
             .sorted { $0.pluginID < $1.pluginID }
         thirdPartyScanners = visible
         var tpm: [String: TierBManifest] = [:]

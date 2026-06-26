@@ -107,13 +107,13 @@ struct V2RaveCatalogBrowserView: View {
         RaveCatalogClient.offeredEntries(entries)
     }
 
-    /// Built-ins (local first-party scanners) + offered catalog entries, for
-    /// DISPLAY only (browse/search/sort/detail). Built-ins are NOT in `entries`,
-    /// so they never touch stateByID / compute / the trust strip / the offer set.
+    /// The Catalog shows ONLY installable rave-store plugins. Built-in scanners
+    /// are NOT listed here — they ship with the app and live in "Run a scan", so
+    /// mixing them into a "store" browser read as confusing ("which are actually
+    /// from the store?"). `builtinEntries` is still fetched for the empty-state
+    /// accounting + dedup safety, just not displayed.
     private var displayEntries: [RaveCatalogEntry] {
-        // De-dup on id, built-in wins (see mergedDisplayEntries). offeredEntries
-        // is untouched, so the verified-catalog accounting is unaffected.
-        RaveCatalogClient.mergedDisplayEntries(builtins: builtinEntries, offered: offeredEntries)
+        offeredEntries
     }
 
     private func isBuiltin(_ e: RaveCatalogEntry) -> Bool {
@@ -224,10 +224,10 @@ struct V2RaveCatalogBrowserView: View {
     private var paneState: PaneState {
         if loading { return .loading }
         if error != nil { return errorIsTrust ? .trustError : .offline }
-        // Built-ins (local, always-available) widen verifiedEmpty → live. They
-        // can never reach trustError/offline (those return above), so a
-        // verification failure is never masked by showing built-ins.
-        return (offeredEntries.isEmpty && builtinEntries.isEmpty) ? .verifiedEmpty : .live
+        // Catalog = installable rave-store plugins only. Built-ins are NOT listed
+        // here (they're in Run a scan), so an empty STORE reads as verifiedEmpty
+        // even though built-in scanners exist on the machine.
+        return offeredEntries.isEmpty ? .verifiedEmpty : .live
     }
 
     /// The live store chrome (header + sidebar + grid + detail) — shown only

@@ -1573,6 +1573,16 @@ enum DaemonSetup {
                             total += overlayed
                         }
                     }
+                    // v1.20 audit fix: re-apply pushed (detection-only) rules and
+                    // refresh the response-engine gate. reloadRules cleared the
+                    // pushed set, so without this a user-rules edit (every ~5s tick)
+                    // silently dropped every pushed rule + left the detection-only
+                    // gate stale until SIGHUP/restart. Mirrors boot + SIGHUP.
+                    if let pushed = try? await ruleEngine.loadPushedRules(from: liveCompiledRulesURL.appendingPathComponent("pushed")), pushed > 0 {
+                        total += pushed
+                    }
+                    let tickPushedIDs = await ruleEngine.pushedRuleIDs
+                    await responseEngine.setDetectionOnlyRuleIDs(tickPushedIDs)
                     logger.notice("Rules reloaded after user-rules tick: \(total) active rule(s)")
                 } catch {
                     logger.warning("Reload after user-rules tick failed: \(error.localizedDescription)")
