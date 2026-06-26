@@ -3,6 +3,14 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.1] — 2026-06-26
+
+A maintenance release — no user-facing changes from v1.20.0.
+
+### Internal
+- Realigned the release pipeline's pre-flight safeguards (Settings→daemon binding classification, the SQLite schema-migrator's idempotent-re-run marker) so the full automated release runs end-to-end with every check green.
+- Made the release publisher resilient to a stale site/tap credential so the Sparkle appcast and release manifest always publish from the live credential.
+
 ## [1.20.0] — 2026-06-26
 
 A dashboard-customization and rule-delivery release.

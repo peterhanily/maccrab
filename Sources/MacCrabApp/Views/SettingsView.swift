@@ -1450,7 +1450,7 @@ struct SettingsView: View {
 
     /// v1.19.1: persist the four opt-in network-enrichment flags + ask the
     /// daemon to re-read live. All four surfaces (this Settings section, the
-    /// first-run prompt, the Intel card) bind the SAME @AppStorage("enrich.*")
+    /// first-run prompt, the Intel card) bind the SAME enrich.* AppStorage
     /// keys and funnel through this one helper so state can't diverge.
     private func syncEnrichmentOverrides() {
         _ = V2DaemonControl.applyEnrichmentFlags(

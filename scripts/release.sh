@@ -46,8 +46,15 @@ _maccrab_git_pat() { printf 'protocol=https\nhost=github.com\n\n' | git credenti
 _MACCRAB_PAT="$(_maccrab_git_pat || true)"
 if [ -n "${_MACCRAB_PAT:-}" ]; then
     export GH_TOKEN="${GH_TOKEN:-$_MACCRAB_PAT}"
-    export SITE_REPO_TOKEN="${SITE_REPO_TOKEN:-$_MACCRAB_PAT}"
-    echo "  ✓ GitHub tokens available (GH_TOKEN/SITE_REPO_TOKEN; Keychain git credential used as fallback)"
+    # The Keychain git credential is what `git push` already uses successfully
+    # for BOTH maccrab and maccrab-site / homebrew-maccrab, so it's the reliable
+    # source for the publish-to-other-repo tokens. The standalone SITE_REPO_TOKEN
+    # in ~/.maccrab-release-env rotted in the field (dead PAT → 401 → the appcast
+    # / release.json publish silently failed, the v1.20.0 GA hit exactly this).
+    # PREFER the live credential over a possibly-stale env value, not the reverse.
+    export SITE_REPO_TOKEN="$_MACCRAB_PAT"
+    export TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-$_MACCRAB_PAT}"
+    echo "  ✓ GitHub tokens available (Keychain git credential preferred for site/tap publish)"
 fi
 unset _MACCRAB_PAT
 

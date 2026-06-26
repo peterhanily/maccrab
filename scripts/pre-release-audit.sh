@@ -139,6 +139,13 @@ else
         "webhookDiscordURL:syncWebhookConfig"
         "webhookPagerDutyKey:syncWebhookConfig"
         "webhookMinSeverity:syncWebhookConfig"
+        # v1.19.1 opt-in network-enrichment privacy flags → user_overrides.json
+        # (top-level camelCase) via syncEnrichmentOverrides() → applyEnrichmentFlags();
+        # DaemonConfig.applyUserOverrides reads them. They DO reach the daemon.
+        "enrich.threatIntel:syncEnrichmentOverrides"
+        "enrich.vulnScan:syncEnrichmentOverrides"
+        "enrich.packageFreshness:syncEnrichmentOverrides"
+        "enrich.certTransparency:syncEnrichmentOverrides"
         # v1.18 agent-control capability tiers → set-agent-capabilities-*.json
         # dropped into the privileged inbox by syncAgentCapabilities(); the root
         # daemon consumes it and writes mcp_capabilities.json. They DO round-trip

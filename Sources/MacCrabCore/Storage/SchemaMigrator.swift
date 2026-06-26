@@ -135,6 +135,11 @@ public enum SchemaMigrator {
             logger?("WARNING: \(msg)")
             migratorLog.warning("\(msg, privacy: .public)")
         } else if current == latest {
+            // at-or-ahead case: the per-database counter is already at THIS
+            // store's latest (a co-resident store bumped it first), so re-apply
+            // every migration idempotently with bumpVersion=false instead of
+            // skipping them — the v1.7.6 fix for the silently-dropped-migration
+            // crash. (apply() handles bumpVersion; markers asserted by Pass 10.)
             logger?("DB user_version=\(current) at v\(latest); re-applying \(sorted.count) migration(s) idempotently (no counter change)")
         } else {
             logger?("Migrating schema from v\(current) to v\(latest)")
