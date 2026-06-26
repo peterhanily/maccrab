@@ -4,6 +4,7 @@
 import SwiftUI
 import MacCrabCore
 import MacCrabForensics
+import UniformTypeIdentifiers
 
 struct V2OverviewWorkspace: View {
 
@@ -24,6 +25,10 @@ struct V2OverviewWorkspace: View {
     @State private var expandedFactorName: String? = nil
     // Store news on the forensics/plugins card.
     @State private var storeNews: [StoreNewsItem] = []
+    // Customizable dashboard: which widgets show, in what order, at what size.
+    @StateObject private var layout = V2OverviewLayoutStore()
+    @State private var editing = false
+    @State private var draggingID: String? = nil
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -48,16 +53,34 @@ struct V2OverviewWorkspace: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                customizeToolbar
+                // Protection status is pinned: a security tool should never let
+                // the user hide whether they're protected.
                 protectionBanner
-                kpiRow
-                postureTimelineCard
-                HStack(alignment: .top, spacing: 12) {
-                    recentActivityCard
-                    quickActionsCard
+                // Everything else is a movable / resizable / hideable widget.
+                V2FlowGridLayout(columns: 4, spacing: 8, rowSpacing: 12) {
+                    ForEach(layout.visibleOrdered) { entry in
+                        V2OverviewWidgetTile(widget: entry.widget, editing: editing,
+                                             store: layout, draggingID: $draggingID) {
+                            renderWidget(entry.widget)
+                        }
+                        .widgetSpan(entry.span)
+                    }
                 }
-                forensicsCard
+                if editing && layout.allHidden {
+                    Text(String(localized: "overview.customize.allHidden",
+                                defaultValue: "All widgets are hidden. Use “Add widget” to bring some back."))
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                        .frame(maxWidth: .infinity, alignment: .center).padding(.vertical, 24)
+                }
             }
             .padding(16)
+            // Catch drops that land in gaps (or a cancelled drag) so a half-
+            // finished reorder never leaves a card stuck in its dragging state.
+            .onDrop(of: [UTType.text], isTargeted: nil) { _ in
+                draggingID = nil
+                return false
+            }
         }
         .sheet(isPresented: $showingSecurityFactors) {
             securityFactorsSheet
@@ -198,70 +221,197 @@ struct V2OverviewWorkspace: View {
         .buttonStyle(.plain)
     }
 
-    private var kpiRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            // Each card stretches to match the tallest one so the row
-            // bottoms line up. Without this, cards with footers/visuals
-            // were taller than ones without — the misalignment the
-            // user flagged.
-            Group {
-            V2KpiCard(
-                title: String(localized: "overview.kpiSecurityGrade", defaultValue: "Security Grade"),
-                value: appState.securityGrade.isEmpty ? "—" : appState.securityGrade,
-                trend: appState.securityScore == 0 ? String(localized: "overview.kpiScoring", defaultValue: "scoring…") : "\(appState.securityScore) / 100",
-                trendKind: securityGradeTrendKind,
-                icon: "checkmark.seal.fill",
-                iconColor: securityGradeIconColor,
-                footer: appState.securityFactors.isEmpty
-                    ? String(localized: "overview.kpiPostureFooter", defaultValue: "Live system posture (SIP, FileVault, firewall, etc.)")
-                    : String(localized: "overview.kpiChecksPass", defaultValue: "\(appState.securityFactors.filter { $0.status == "pass" }.count) of \(appState.securityFactors.count) checks pass"),
-                action: V2KpiAction(String(localized: "overview.kpiViewFactors", defaultValue: "View factors")) {
-                    showingSecurityFactors = true
+    // MARK: - Customizable layout
+
+    /// Top-right controls: enter Customize mode, or (while editing) add hidden
+    /// widgets back, reset to defaults, and finish.
+    private var customizeToolbar: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            if editing {
+                if !layout.hiddenWidgets.isEmpty {
+                    Menu {
+                        ForEach(layout.hiddenWidgets, id: \.self) { w in
+                            Button(w.displayName) { withAnimation { layout.show(w.rawValue) } }
+                        }
+                    } label: {
+                        Label(String(localized: "overview.customize.add", defaultValue: "Add widget"), systemImage: "plus")
+                            .font(V2Theme.meta())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-            )
-            V2KpiCard(
-                title: String(localized: "overview.kpiOpenAlerts", defaultValue: "Open Alerts"),
-                value: "\(kpis.openAlerts24h)",
-                trend: openAlertsTrendLabel,
-                trendKind: openAlertsTrendKind,
-                icon: "bell.fill",
-                iconColor: V2Theme.high,
-                action: V2KpiAction(String(localized: "overview.kpiViewAlerts", defaultValue: "View Alerts")) {
-                    state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
-                },
-                visual: kpis.eventsLast8Buckets.isEmpty
-                    ? nil
-                    : .sparkline(values: kpis.eventsLast8Buckets, color: V2Theme.high)
-            )
-            V2KpiCard(
-                title: String(localized: "overview.kpiActiveCampaigns", defaultValue: "Active Campaigns"),
-                value: "\(kpis.activeCampaigns)",
-                trend: campaignTrendLabel,
-                trendKind: kpis.activeCampaignsCritical > 0 ? .critical
-                    : kpis.activeCampaignsHigh > 0 ? .high : .info,
-                icon: "flame.fill",
-                iconColor: kpis.activeCampaignsCritical > 0 ? V2Theme.critical : V2Theme.high,
-                action: V2KpiAction(String(localized: "overview.kpiViewCampaigns", defaultValue: "View Campaigns")) {
-                    state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns))
+                Button(String(localized: "overview.customize.reset", defaultValue: "Reset")) {
+                    withAnimation { layout.reset() }
                 }
-            )
-            V2KpiCard(
-                title: String(localized: "overview.kpiAIGuard", defaultValue: "AI Guard"),
-                value: aiGuardValue,
-                trend: aiGuardTrend,
-                trendKind: aiGuardTrendKind,
-                icon: "brain.head.profile",
-                iconColor: V2Theme.aiAccent,
-                action: V2KpiAction(String(localized: "overview.kpiViewAIGuard", defaultValue: "View AI Guard")) {
-                    state.goto(V2NavigationDestination(
-                        workspace: .detection, tab: .detectionAIGuard
-                    ))
+                .buttonStyle(.bordered).controlSize(.small)
+                Button(String(localized: "overview.customize.done", defaultValue: "Done")) {
+                    draggingID = nil
+                    withAnimation { editing = false }
                 }
-            )
+                .buttonStyle(.borderedProminent).controlSize(.small)
+            } else {
+                Button { withAnimation { editing = true } } label: {
+                    Label(String(localized: "overview.customize.button", defaultValue: "Customize"), systemImage: "slider.horizontal.3")
+                        .font(V2Theme.meta())
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .help(String(localized: "overview.customize.help", defaultValue: "Show, hide, resize and rearrange dashboard widgets"))
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: 124)
+    }
+
+    @ViewBuilder
+    private func renderWidget(_ widget: V2OverviewWidget) -> some View {
+        switch widget {
+        case .kpiSecurityGrade:   securityGradeTile
+        case .kpiOpenAlerts:      openAlertsTile
+        case .kpiActiveCampaigns: activeCampaignsTile
+        case .kpiAIGuard:         aiGuardTile
+        case .kpiEventRate:       eventRateTile
+        case .kpiThreatIntel:     threatIntelTile
+        case .alertHistogram:     postureTimelineCard
+        case .recentActivity:     recentActivityCard
+        case .quickActions:       quickActionsCard
+        case .forensics:          forensicsCard
+        }
+    }
+
+    // MARK: - KPI tiles (each an independent, movable/resizable widget)
+
+    /// Uniform tile sizing so KPI cards keep their shape and fill their grid cell.
+    private func kpiTile<V: View>(_ card: V) -> some View {
+        card.frame(maxWidth: .infinity, minHeight: 124, maxHeight: 124)
+    }
+
+    private var securityGradeTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiSecurityGrade", defaultValue: "Security Grade"),
+            value: appState.securityGrade.isEmpty ? "—" : appState.securityGrade,
+            trend: appState.securityScore == 0 ? String(localized: "overview.kpiScoring", defaultValue: "scoring…") : "\(appState.securityScore) / 100",
+            trendKind: securityGradeTrendKind,
+            icon: "checkmark.seal.fill",
+            iconColor: securityGradeIconColor,
+            footer: appState.securityFactors.isEmpty
+                ? String(localized: "overview.kpiPostureFooter", defaultValue: "Live system posture (SIP, FileVault, firewall, etc.)")
+                : String(localized: "overview.kpiChecksPass", defaultValue: "\(appState.securityFactors.filter { $0.status == "pass" }.count) of \(appState.securityFactors.count) checks pass"),
+            action: V2KpiAction(String(localized: "overview.kpiViewFactors", defaultValue: "View factors")) {
+                showingSecurityFactors = true
+            }
+        ))
+    }
+
+    private var openAlertsTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiOpenAlerts", defaultValue: "Open Alerts"),
+            value: "\(kpis.openAlerts24h)",
+            trend: openAlertsTrendLabel,
+            trendKind: openAlertsTrendKind,
+            icon: "bell.fill",
+            iconColor: V2Theme.high,
+            action: V2KpiAction(String(localized: "overview.kpiViewAlerts", defaultValue: "View Alerts")) {
+                state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
+            },
+            visual: kpis.eventsLast8Buckets.isEmpty
+                ? nil
+                : .sparkline(values: kpis.eventsLast8Buckets, color: V2Theme.high)
+        ))
+    }
+
+    private var activeCampaignsTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiActiveCampaigns", defaultValue: "Active Campaigns"),
+            value: "\(kpis.activeCampaigns)",
+            trend: campaignTrendLabel,
+            trendKind: kpis.activeCampaignsCritical > 0 ? .critical
+                : kpis.activeCampaignsHigh > 0 ? .high : .info,
+            icon: "flame.fill",
+            iconColor: kpis.activeCampaignsCritical > 0 ? V2Theme.critical : V2Theme.high,
+            action: V2KpiAction(String(localized: "overview.kpiViewCampaigns", defaultValue: "View Campaigns")) {
+                state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns))
+            }
+        ))
+    }
+
+    private var aiGuardTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiAIGuard", defaultValue: "AI Guard"),
+            value: aiGuardValue,
+            trend: aiGuardTrend,
+            trendKind: aiGuardTrendKind,
+            icon: "brain.head.profile",
+            iconColor: V2Theme.aiAccent,
+            action: V2KpiAction(String(localized: "overview.kpiViewAIGuard", defaultValue: "View AI Guard")) {
+                state.goto(V2NavigationDestination(
+                    workspace: .detection, tab: .detectionAIGuard
+                ))
+            }
+        ))
+    }
+
+    private var eventRateTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiEventRate", defaultValue: "Event Rate"),
+            value: formatRate(kpis.eventsPerSecond),
+            trend: String(localized: "overview.kpiEventRateTrend", defaultValue: "/sec · last 1m"),
+            trendKind: .info,
+            icon: "waveform.path",
+            iconColor: V2Theme.dataAccent,
+            action: V2KpiAction(String(localized: "overview.kpiViewEvents", defaultValue: "View Events")) {
+                state.goto(V2NavigationDestination(
+                    workspace: .events, tab: nil
+                ))
+            },
+            visual: kpis.eventsLast8Buckets.isEmpty
+                ? nil
+                : .bars(values: kpis.eventsLast8Buckets, color: V2Theme.dataAccent)
+        ))
+    }
+
+    private var threatIntelTile: some View {
+        kpiTile(V2KpiCard(
+            title: String(localized: "overview.kpiThreatIntel", defaultValue: "Threat Intel"),
+            value: threatIntelValue,
+            trend: threatIntelTrend,
+            trendKind: threatIntelTrendKind,
+            icon: "globe.americas.fill",
+            iconColor: V2Theme.dataAccent,
+            action: V2KpiAction(String(localized: "overview.kpiViewIntelligence", defaultValue: "View Intelligence")) {
+                state.goto(V2NavigationDestination(
+                    workspace: .intelligence, tab: .intelligenceThreatIntel
+                ))
+            }
+        ))
+    }
+
+    private func formatRate(_ rate: Double) -> String {
+        if rate >= 1000 { return String(format: "%.1fK", rate / 1000) }
+        if rate >= 10   { return String(format: "%.0f", rate) }
+        return String(format: "%.1f", rate)
+    }
+
+    private func compactCount(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000     { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
+    }
+    private var threatIntelTotal: Int {
+        let s = appState.threatIntelStats
+        return s.hashes + s.ips + s.domains + s.urls
+    }
+    private var threatIntelValue: String { threatIntelTotal > 0 ? compactCount(threatIntelTotal) : "—" }
+    private var threatIntelTrend: String {
+        guard threatIntelTotal > 0 else { return String(localized: "overview.intelNoIndicators", defaultValue: "no indicators loaded") }
+        guard let updated = appState.threatIntelStats.lastUpdate else { return String(localized: "overview.intelLoaded", defaultValue: "indicators loaded") }
+        let rel = RelativeDateTimeFormatter()
+        rel.unitsStyle = .abbreviated
+        return String(localized: "overview.intelUpdated", defaultValue: "updated \(rel.localizedString(for: updated, relativeTo: Date()))")
+    }
+    private var threatIntelTrendKind: V2ChipKind {
+        guard threatIntelTotal > 0 else { return .neutral }
+        guard let updated = appState.threatIntelStats.lastUpdate else { return .neutral }
+        // 6h freshness ceiling, matching V2LiveDataProvider's staleness rule.
+        return Date().timeIntervalSince(updated) < 6 * 3600 ? .healthy : .warning
     }
 
     private var openAlertsTrendLabel: String {
@@ -599,7 +749,7 @@ struct V2OverviewWorkspace: View {
             }
         }
         .v2Panel()
-        .frame(width: 320)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func quickAction(_ label: String, icon: String, action: @escaping () -> Void) -> some View {

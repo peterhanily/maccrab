@@ -1,0 +1,199 @@
+// V2OverviewLayoutStore.swift
+// Customizable Overview dashboard: the catalog of available widgets + the
+// user's persisted layout (which widgets are shown, in what order, at what
+// size). The Protection banner is pinned (always shown, always first) and is
+// intentionally NOT part of this model — a security tool should never let the
+// user hide whether they're protected.
+
+import SwiftUI
+
+/// The widgets the Overview dashboard can host, in their default order.
+/// `rawValue` is the stable id persisted to disk.
+enum V2OverviewWidget: String, CaseIterable {
+    case kpiSecurityGrade
+    case kpiOpenAlerts
+    case kpiActiveCampaigns
+    case kpiAIGuard
+    case kpiEventRate
+    case kpiThreatIntel
+    case alertHistogram
+    case recentActivity
+    case quickActions
+    case forensics
+
+    /// User-facing name shown in the Customize controls.
+    var displayName: String {
+        switch self {
+        case .kpiSecurityGrade:   return String(localized: "overview.widget.securityGrade", defaultValue: "Security Grade")
+        case .kpiOpenAlerts:      return String(localized: "overview.widget.openAlerts", defaultValue: "Open Alerts")
+        case .kpiActiveCampaigns: return String(localized: "overview.widget.activeCampaigns", defaultValue: "Active Campaigns")
+        case .kpiAIGuard:         return String(localized: "overview.widget.aiGuard", defaultValue: "AI Guard")
+        case .kpiEventRate:       return String(localized: "overview.widget.eventRate", defaultValue: "Event Rate")
+        case .kpiThreatIntel:     return String(localized: "overview.widget.threatIntel", defaultValue: "Threat Intel")
+        case .alertHistogram:     return String(localized: "overview.widget.alertVolume", defaultValue: "Alert Volume")
+        case .recentActivity:     return String(localized: "overview.widget.recentActivity", defaultValue: "Recent Activity")
+        case .quickActions:       return String(localized: "overview.widget.quickActions", defaultValue: "Quick Actions")
+        case .forensics:          return String(localized: "overview.widget.forensics", defaultValue: "Forensics & Plugins")
+        }
+    }
+
+    /// Column spans the widget may snap to, on the dashboard's 4-column grid.
+    /// KPI tiles are 1–2 columns; content cards are 2 or 4 (half / full width).
+    var allowedSpans: [Int] {
+        switch self {
+        case .kpiSecurityGrade, .kpiOpenAlerts, .kpiActiveCampaigns,
+             .kpiAIGuard, .kpiEventRate, .kpiThreatIntel:
+            return [1, 2]
+        case .alertHistogram, .forensics:
+            return [2, 4]
+        case .recentActivity, .quickActions:
+            return [2, 4]
+        }
+    }
+
+    var defaultSpan: Int {
+        switch self {
+        case .alertHistogram, .forensics: return 4
+        case .recentActivity, .quickActions: return 2
+        default: return 1
+        }
+    }
+
+    /// True for the fixed-height KPI tiles (so the grid can normalise their height).
+    var isKPITile: Bool { allowedSpans == [1, 2] }
+
+    /// Nearest allowed span to `n` (used when migrating a persisted span that is
+    /// no longer valid, e.g. after the allowed set changes).
+    func clampSpan(_ n: Int) -> Int {
+        allowedSpans.min(by: { abs($0 - n) < abs($1 - n) }) ?? defaultSpan
+    }
+}
+
+/// The persisted layout: visibility + order + per-widget size. Mutations save
+/// immediately to UserDefaults. Unknown ids are dropped and newly-added catalog
+/// widgets are appended on load, so upgrades never lose or crash the layout.
+/// All mutations are UI-driven (button actions, drop callbacks) and therefore
+/// already run on the main thread.
+final class V2OverviewLayoutStore: ObservableObject {
+
+    struct Item: Codable, Equatable, Identifiable {
+        var id: String
+        var visible: Bool
+        var span: Int
+    }
+
+    @Published private(set) var items: [Item]
+
+    private static let userDefaultsKey = "v2.overview.layout"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        items = Self.load(from: defaults) ?? Self.defaults()
+    }
+
+    // MARK: Defaults
+
+    private static func defaults() -> [Item] {
+        V2OverviewWidget.allCases.map { Item(id: $0.rawValue, visible: true, span: $0.defaultSpan) }
+    }
+
+    // MARK: Derived
+
+    struct VisibleWidget: Identifiable {
+        let widget: V2OverviewWidget
+        let span: Int
+        var id: String { widget.rawValue }
+    }
+
+    /// Visible widgets, in display order, resolved to their catalog case + span.
+    var visibleOrdered: [VisibleWidget] {
+        items.compactMap { item in
+            guard item.visible, let w = V2OverviewWidget(rawValue: item.id) else { return nil }
+            return VisibleWidget(widget: w, span: item.span)
+        }
+    }
+
+    /// Hidden widgets (catalog order) — offered in the "Add widget" menu.
+    var hiddenWidgets: [V2OverviewWidget] {
+        let hidden = Set(items.filter { !$0.visible }.map { $0.id })
+        return V2OverviewWidget.allCases.filter { hidden.contains($0.rawValue) }
+    }
+
+    var allHidden: Bool { items.allSatisfy { !$0.visible } }
+
+    func span(for id: String) -> Int {
+        items.first(where: { $0.id == id })?.span ?? (V2OverviewWidget(rawValue: id)?.defaultSpan ?? 1)
+    }
+
+    // MARK: Mutations
+
+    /// Move `id` to just before `target` in display order (drag-reorder).
+    func move(_ id: String, before target: String) {
+        guard id != target,
+              let from = items.firstIndex(where: { $0.id == id }) else { return }
+        let moved = items.remove(at: from)
+        guard let to = items.firstIndex(where: { $0.id == target }) else {
+            items.insert(moved, at: from)   // target vanished — undo
+            return
+        }
+        items.insert(moved, at: to)
+        save()
+    }
+
+    /// Cycle a widget to its next allowed span (the resize control).
+    func cycleSpan(_ id: String) {
+        guard let idx = items.firstIndex(where: { $0.id == id }),
+              let w = V2OverviewWidget(rawValue: id) else { return }
+        let spans = w.allowedSpans
+        let current = spans.firstIndex(of: items[idx].span) ?? 0
+        items[idx].span = spans[(current + 1) % spans.count]
+        save()
+    }
+
+    func hide(_ id: String) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        items[idx].visible = false
+        save()
+    }
+
+    /// Re-show a hidden widget (appended to the end, so it's easy to find).
+    func show(_ id: String) {
+        guard let from = items.firstIndex(where: { $0.id == id }) else { return }
+        var item = items.remove(at: from)
+        item.visible = true
+        items.append(item)
+        save()
+    }
+
+    func reset() {
+        items = Self.defaults()
+        save()
+    }
+
+    // MARK: Persistence
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        defaults.set(data, forKey: Self.userDefaultsKey)
+    }
+
+    /// Decode + migrate: keep known ids in their stored order, clamp invalid
+    /// spans, append any catalog widgets the stored layout doesn't know about.
+    private static func load(from defaults: UserDefaults) -> [Item]? {
+        guard let data = defaults.data(forKey: userDefaultsKey),
+              let stored = try? JSONDecoder().decode([Item].self, from: data) else { return nil }
+        var migrated: [Item] = []
+        var seen = Set<String>()
+        for item in stored {
+            guard let w = V2OverviewWidget(rawValue: item.id), !seen.contains(item.id) else { continue }
+            seen.insert(item.id)
+            migrated.append(Item(id: item.id, visible: item.visible, span: w.clampSpan(item.span)))
+        }
+        // Append catalog widgets missing from the stored layout (visible by default).
+        for w in V2OverviewWidget.allCases where !seen.contains(w.rawValue) {
+            migrated.append(Item(id: w.rawValue, visible: true, span: w.defaultSpan))
+        }
+        return migrated.isEmpty ? nil : migrated
+    }
+}
