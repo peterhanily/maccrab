@@ -1,4 +1,4 @@
-.PHONY: build test test-corpus compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts
+.PHONY: build test test-corpus compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts benchmark-fp
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -77,6 +77,12 @@ test-full:
 
 test-fp:
 	./scripts/false-positive-test.sh
+
+# Measure per-rule false-positive RATE over a window of accumulated alerts on a
+# benign machine. Run MacCrab normally (detection-only) for the window, then this.
+# See BENCHMARK.md for methodology + docs/CONTRIBUTING_FP_DATA.md to contribute.
+benchmark-fp:
+	./scripts/fp-rate-benchmark.sh --days 28
 
 test-integration:
 	./scripts/integration-test.sh
