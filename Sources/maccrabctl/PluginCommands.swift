@@ -228,11 +228,11 @@ func printPluginAliasWarning(_ oldName: String, _ newName: String) {
     FileHandle.standardError.write(Data(msg.utf8))
 }
 
-// MARK: - rave catalog store stubs
+// MARK: - rave catalog store commands
 //
-// `search` is live (fetches + Ed25519-verifies the published catalog). `update`
-// and `pin` are not yet wired — they return honest, accurate messages (the
-// catalog IS live; install works via `plugin install <id>`).
+// `search` is live (fetches + Ed25519-verifies the published catalog); `install`,
+// `update`, and `pin` are fully wired (dispatched above to pluginUpdate/pluginPin,
+// each re-enforcing every fail-closed trust gate).
 
 private func pluginSearch(args: [String]) async throws {
     var query = ""

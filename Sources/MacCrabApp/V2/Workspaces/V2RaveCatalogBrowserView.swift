@@ -943,7 +943,20 @@ struct V2RaveCatalogBrowserView: View {
             Text("Install")
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
-            if st.showsInstallPill {
+            if isInstalledAndCurrent(e) {
+                // Already installed at the catalog's current version — show status,
+                // NOT a live Install pill. A fresh install here would re-run
+                // `maccrabctl plugin install <id>` without --force and fail with
+                // "destination already exists". (Updates still flow to the pill
+                // below, where updateAvailable() arms the --force re-install.)
+                Button {} label: {
+                    Label(String(localized: "rave.install.installed", defaultValue: "Installed"),
+                          systemImage: "checkmark.circle.fill")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(true)
+            } else if st.showsInstallPill {
                 let isUpdate = updateAvailable(for: e)
                 Button {
                     // Construct the id-only install link and let the SAME
@@ -1065,6 +1078,14 @@ struct V2RaveCatalogBrowserView: View {
     private func updateAvailable(for e: RaveCatalogEntry) -> Bool {
         guard let installedVer = installedByID[e.id] else { return false }
         return isUpdateAvailable(installed: installedVer, current: e.currentVersion)
+    }
+
+    /// Installed at the catalog's current version (nothing to do). Suppresses the
+    /// live Install pill so the store never offers a fresh install that would fail
+    /// "destination already exists".
+    private func isInstalledAndCurrent(_ e: RaveCatalogEntry) -> Bool {
+        guard let installedVer = installedByID[e.id] else { return false }
+        return !isUpdateAvailable(installed: installedVer, current: e.currentVersion)
     }
 
     /// Trust-state detail row: signer-pin status + (when blocked/revoked) the

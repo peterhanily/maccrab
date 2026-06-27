@@ -385,9 +385,22 @@ public actor RuleEngine {
     public struct TelemetrySnapshot: Codable, Sendable {
         public let writtenAt: Date
         public let stats: [RuleStats]
-        public init(writtenAt: Date, stats: [RuleStats]) {
+        /// Rule ids the engine auto-disabled at RUNTIME (pathological/ReDoS guard).
+        /// The dashboard rebuilds rule state from compiled_rules/ on disk, where a
+        /// runtime auto-disable never lands — so without this it shows a silenced
+        /// detection as enabled. Decode-safe: snapshots predating the field → [].
+        public let autoDisabledRuleIds: [String]
+        public init(writtenAt: Date, stats: [RuleStats], autoDisabledRuleIds: [String] = []) {
             self.writtenAt = writtenAt
             self.stats = stats
+            self.autoDisabledRuleIds = autoDisabledRuleIds
+        }
+        private enum CodingKeys: String, CodingKey { case writtenAt, stats, autoDisabledRuleIds }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.writtenAt = try c.decode(Date.self, forKey: .writtenAt)
+            self.stats = try c.decode([RuleStats].self, forKey: .stats)
+            self.autoDisabledRuleIds = (try? c.decode([String].self, forKey: .autoDisabledRuleIds)) ?? []
         }
     }
 
@@ -403,7 +416,8 @@ public actor RuleEngine {
         defer { snapshotWriteInFlight = false }
         let snapshot = TelemetrySnapshot(
             writtenAt: Date(),
-            stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount }
+            stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount },
+            autoDisabledRuleIds: Array(autoDisabledRules).sorted()
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         let tmp = path + ".tmp"

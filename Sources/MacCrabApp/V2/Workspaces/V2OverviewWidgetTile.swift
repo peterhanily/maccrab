@@ -39,6 +39,12 @@ struct V2OverviewWidgetTile<Content: View>: View {
                 guard editing else { NSCursor.arrow.set(); return }
                 (inside ? NSCursor.openHand : NSCursor.arrow).set()
             }
+            // While customizing, collapse the tile into a SINGLE VoiceOver element
+            // (its buttons are blocked by the edit catcher anyway). Without this the
+            // accessibilityActions attach to a container VoiceOver never focuses on a
+            // content card — they surfaced only on the button-less KPI tiles. Combining
+            // also gives the chrome Resize/Hide controls reachable, labelled actions.
+            .accessibilityElement(children: editing ? .combine : .contain)
             // VoiceOver / keyboard can't drag — expose reorder/resize/hide as
             // accessibility actions while customizing.
             .accessibilityActions {

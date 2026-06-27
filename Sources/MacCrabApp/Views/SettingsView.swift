@@ -543,18 +543,27 @@ struct SettingsView: View {
                             }
                         }
                         .onChange(of: agentCapAuthoring) { _ in syncAgentCapabilities() }
-                        Toggle(isOn: $agentCapResponse) {
+                        // Enabling this tier requires an explicit confirm (it lets an
+                        // agent reduce detection). The binding does NOT commit on
+                        // turn-ON — it only raises the dialog — so dismissing the
+                        // dialog any way (Esc, click-outside, Cancel) leaves the toggle
+                        // OFF rather than stuck ON-but-never-granted. Grant commits it.
+                        Toggle(isOn: Binding(
+                            get: { agentCapResponse },
+                            set: { wantOn in
+                                if wantOn {
+                                    confirmAgentResponseTier = true
+                                } else {
+                                    agentCapResponse = false
+                                    syncAgentCapabilities()
+                                }
+                            }
+                        )) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.agentTier.response", defaultValue: "Change defense-affecting config"))
                                 Text(String(localized: "settings.agentTier.responseDesc", defaultValue: "Toggle ES introspection / file-open subscriptions and ultrasonic. Disabling these reduces detection — grant with care."))
                                     .font(.caption).foregroundColor(.orange)
                             }
-                        }
-                        .onChange(of: agentCapResponse) { newValue in
-                            // Enabling the defense-affecting tier requires an explicit
-                            // confirm (it lets an agent reduce detection); disabling is free.
-                            if newValue { confirmAgentResponseTier = true }
-                            else { syncAgentCapabilities() }
                         }
                     }
                     .padding(8)
@@ -566,10 +575,11 @@ struct SettingsView: View {
                 ) {
                     Button(String(localized: "settings.agentTier.confirmGrant",
                                   defaultValue: "Grant — I control this agent"), role: .destructive) {
+                        agentCapResponse = true     // commit ONLY on explicit grant
                         syncAgentCapabilities()
                     }
                     Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {
-                        agentCapResponse = false   // revert the toggle
+                        agentCapResponse = false   // defensive: never granted, stay OFF
                     }
                 } message: {
                     Text(String(localized: "settings.agentTier.confirmBody",

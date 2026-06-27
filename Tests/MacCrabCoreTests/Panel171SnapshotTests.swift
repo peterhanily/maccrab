@@ -50,6 +50,33 @@ struct Panel171SnapshotTests {
         #expect(beta?.lastFiredAt == nil)
     }
 
+    @Test("TelemetrySnapshot carries auto-disabled rule ids (dashboard visibility)")
+    func telemetryAutoDisabledRoundTrip() throws {
+        let snap = RuleEngine.TelemetrySnapshot(
+            writtenAt: Date(), stats: [],
+            autoDisabledRuleIds: ["rule.pathological.b", "rule.pathological.a"]
+        )
+        let path = NSTemporaryDirectory() + "maccrab-rt-autodis-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try JSONEncoder().encode(snap).write(to: URL(fileURLWithPath: path))
+        let loaded = RuleEngine.readTelemetrySnapshot(at: path)
+        #expect(loaded?.autoDisabledRuleIds.sorted() == ["rule.pathological.a", "rule.pathological.b"])
+    }
+
+    @Test("TelemetrySnapshot decode is backward-compatible: old JSON without the field → []")
+    func telemetryAutoDisabledBackwardCompat() throws {
+        // A snapshot written by a build predating the field has no
+        // autoDisabledRuleIds key. It must still decode (with an empty set)
+        // rather than failing and blanking the whole rule view.
+        let legacy = #"{"writtenAt": 700000000, "stats": []}"#
+        let path = NSTemporaryDirectory() + "maccrab-rt-legacy-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try legacy.data(using: .utf8)!.write(to: URL(fileURLWithPath: path))
+        let loaded = RuleEngine.readTelemetrySnapshot(at: path)
+        #expect(loaded != nil)
+        #expect(loaded?.autoDisabledRuleIds == [])
+    }
+
     @Test("RuleEngine.RuleStats meanExecNs handles zero evaluations")
     func meanExecGuardsZeroDivisor() {
         let s = RuleEngine.RuleStats(ruleId: "x", evaluationCount: 0, fireCount: 0, totalExecNs: 0)

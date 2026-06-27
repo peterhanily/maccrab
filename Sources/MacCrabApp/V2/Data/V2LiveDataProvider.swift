@@ -277,11 +277,17 @@ public final class V2LiveDataProvider: V2DataProvider {
 
         let mapped = await Task.detached(priority: .userInitiated) {
             var telemetry: [String: RuleEngine.RuleStats] = [:]
+            var autoDisabled: Set<String> = []
             if let snapshot = RuleEngine.readTelemetrySnapshot(at: telemetryPath) {
                 for s in snapshot.stats { telemetry[s.ruleId] = s }
+                // Runtime auto-disabled rules (pathological/ReDoS guard) — the
+                // on-disk CompiledRule still reads enabled, so without this the
+                // dashboard would show a silenced detection as active.
+                autoDisabled = Set(snapshot.autoDisabledRuleIds)
             }
             return rules.map { rule in
-                V2LiveDataProvider.toV2Rule(rule, stats: telemetry[rule.id])
+                V2LiveDataProvider.toV2Rule(rule, stats: telemetry[rule.id],
+                                            autoDisabled: autoDisabled.contains(rule.id))
             }
         }.value
 
@@ -1705,7 +1711,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         )
     }
 
-    nonisolated private static func toV2Rule(_ r: CompiledRule, stats: RuleEngine.RuleStats? = nil) -> V2MockRule {
+    nonisolated private static func toV2Rule(_ r: CompiledRule, stats: RuleEngine.RuleStats? = nil, autoDisabled: Bool = false) -> V2MockRule {
         // MITRE-shaped tags look like "attack.t1059" / "attack.execution".
         let mitre = r.tags
             .filter { $0.hasPrefix("attack.t") }
@@ -1720,7 +1726,9 @@ public final class V2LiveDataProvider: V2DataProvider {
             category: r.logsource.category,
             severity: toV2Severity(r.level),
             mitre: mitre.isEmpty ? [] : mitre,
-            isEnabled: r.enabled,
+            // A runtime auto-disable (pathological/ReDoS guard) overrides the
+            // on-disk enabled flag — the detection is actually silenced.
+            isEnabled: r.enabled && !autoDisabled,
             lastFired: stats?.lastFiredAt,
             firesLastWeek: Int(stats?.fireCount ?? 0),
             isCustom: isCustom,
