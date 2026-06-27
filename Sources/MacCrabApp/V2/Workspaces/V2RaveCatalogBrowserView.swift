@@ -48,6 +48,10 @@ struct V2RaveCatalogBrowserView: View {
     /// The currently-installed version, passed to the consent sheet for an update
     /// so it can disclose the vOLD → vNEW diff (P6.2).
     @State private var pendingInstalledVersion: String?
+    // Remove (uninstall) flow for an installed plugin.
+    @State private var removeTarget: RaveCatalogEntry? = nil
+    @State private var removing = false
+    @State private var removeError: String? = nil
     /// Phase-0 honest catalog states. Set on each reload so the pane can tell
     /// loading / offline / trust-failure / verified-but-empty / live apart, and
     /// surface the trust the verified fetch already earns (serial + revocation
@@ -216,6 +220,19 @@ struct V2RaveCatalogBrowserView: View {
                 },
                 isUpdate: pendingIsUpdate,
                 installedVersion: pendingInstalledVersion)
+        }
+        .confirmationDialog(
+            removeTarget.map { String(localized: "raveStore.remove.confirmTitle", defaultValue: "Remove \($0.displayName)?") } ?? "",
+            isPresented: Binding(get: { removeTarget != nil }, set: { if !$0 { removeTarget = nil } }),
+            titleVisibility: .visible,
+            presenting: removeTarget
+        ) { target in
+            Button(String(localized: "raveStore.remove", defaultValue: "Remove"), role: .destructive) {
+                performRemove(target)
+            }
+            Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {}
+        } message: { _ in
+            Text(String(localized: "raveStore.remove.confirmBody", defaultValue: "This uninstalls the plugin from this Mac. You can reinstall it from the catalog at any time."))
         }
     }
 
@@ -922,36 +939,24 @@ struct V2RaveCatalogBrowserView: View {
             Text(String(localized: "raveStore.install.section", defaultValue: "Install"))
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
-            if isInstalledAndCurrent(e) {
-                // Already installed at the catalog's current version — show status,
-                // NOT a live Install pill. A fresh install here would re-run
-                // `maccrabctl plugin install <id>` without --force and fail with
-                // "destination already exists". (Updates still flow to the pill
-                // below, where updateAvailable() arms the --force re-install.)
-                Button {} label: {
-                    Label(String(localized: "rave.install.installed", defaultValue: "Installed"),
-                          systemImage: "checkmark.circle.fill")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(true)
+            if installedByID[e.id] != nil {
+                // Installed — show status + (Update if a newer version is in the
+                // catalog) + Remove. Never a fresh-install pill, which would run
+                // `maccrabctl plugin install <id>` without --force and fail
+                // "destination already exists".
+                installedActions(e)
             } else if st.showsInstallPill {
-                let isUpdate = updateAvailable(for: e)
                 Button {
                     // Construct the id-only install link and let the SAME
                     // consent flow the URL handler uses resolve it from the
                     // pinned catalog (signer pin + version floor + consent +
                     // receipt). No bypass: this only OPENS the verified path.
-                    // The update case re-installs over the existing copy (--force);
-                    // every trust gate is still re-enforced by maccrabctl. Capture
-                    // the decision now so the sheet matches what this pill showed.
-                    pendingIsUpdate = isUpdate
-                    pendingInstalledVersion = isUpdate ? installedByID[e.id] : nil
+                    pendingIsUpdate = false
+                    pendingInstalledVersion = nil
                     installLink = RaveInstallLink(kind: .plugin, id: e.id)
                 } label: {
-                    Label(isUpdate ? String(localized: "rave.install.updateTo", defaultValue: "Update to v\(e.currentVersion)")
-                                   : String(localized: "rave.install.install", defaultValue: "Install"),
-                          systemImage: isUpdate ? "arrow.up.circle" : "checkmark.shield")
+                    Label(String(localized: "rave.install.install", defaultValue: "Install"),
+                          systemImage: "checkmark.shield")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -971,6 +976,96 @@ struct V2RaveCatalogBrowserView: View {
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                 }
+            }
+        }
+    }
+
+    /// Actions for an already-installed plugin: an up-to-date / update-available
+    /// status line, an Update pill when the catalog has a newer version (the
+    /// --force re-install via the verified consent path), and a Remove button.
+    @ViewBuilder
+    private func installedActions(_ e: RaveCatalogEntry) -> some View {
+        let installedVer = installedByID[e.id] ?? ""
+        let canUpdate = updateAvailable(for: e)
+        HStack(spacing: 5) {
+            Image(systemName: canUpdate ? "arrow.up.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(canUpdate ? .blue : .green)
+            Text(canUpdate
+                 ? String(localized: "raveStore.installed.updateAvailable", defaultValue: "Installed v\(installedVer) · update available")
+                 : String(localized: "raveStore.installed.upToDate", defaultValue: "Installed v\(installedVer) · up to date"))
+                .scaledSystem(11)
+        }
+        HStack(spacing: 8) {
+            if canUpdate {
+                Button {
+                    pendingIsUpdate = true
+                    pendingInstalledVersion = installedVer
+                    installLink = RaveInstallLink(kind: .plugin, id: e.id)
+                } label: {
+                    Label(String(localized: "rave.install.updateTo", defaultValue: "Update to v\(e.currentVersion)"),
+                          systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            Button(role: .destructive) {
+                removeTarget = e
+            } label: {
+                if removing && removeTarget?.id == e.id {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label(String(localized: "raveStore.remove", defaultValue: "Remove"), systemImage: "trash")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(removing)
+        }
+        if let removeError {
+            Text(removeError)
+                .scaledSystem(10).foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Uninstall the plugin via the bundled maccrabctl, then refresh the catalog
+    /// so the card returns to its installable state.
+    private func performRemove(_ e: RaveCatalogEntry) {
+        removing = true
+        removeError = nil
+        Task {
+            let r = await runUninstall(id: e.id)
+            removing = false
+            if r.ok {
+                await reload()
+            } else {
+                removeError = r.output.isEmpty ? "Uninstall failed." : r.output
+            }
+        }
+    }
+
+    private func runUninstall(id: String) async -> (ok: Bool, output: String) {
+        guard let cli = RaveInstallConsentSheet.bundledMaccrabctlPath() else {
+            return (false, "Bundled maccrabctl not found.")
+        }
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global().async {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: cli)
+                p.arguments = ["plugin", "uninstall", id]
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = pipe
+                do {
+                    try p.run()
+                } catch {
+                    cont.resume(returning: (false, "Failed to launch maccrabctl: \(error.localizedDescription)"))
+                    return
+                }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                let out = String(data: data, encoding: .utf8) ?? ""
+                cont.resume(returning: (p.terminationStatus == 0, out))
             }
         }
     }
@@ -1057,14 +1152,6 @@ struct V2RaveCatalogBrowserView: View {
     private func updateAvailable(for e: RaveCatalogEntry) -> Bool {
         guard let installedVer = installedByID[e.id] else { return false }
         return isUpdateAvailable(installed: installedVer, current: e.currentVersion)
-    }
-
-    /// Installed at the catalog's current version (nothing to do). Suppresses the
-    /// live Install pill so the store never offers a fresh install that would fail
-    /// "destination already exists".
-    private func isInstalledAndCurrent(_ e: RaveCatalogEntry) -> Bool {
-        guard let installedVer = installedByID[e.id] else { return false }
-        return !isUpdateAvailable(installed: installedVer, current: e.currentVersion)
     }
 
     /// Trust-state detail row: signer-pin status + (when blocked/revoked) the

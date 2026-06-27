@@ -61,10 +61,25 @@ struct V2FlowGridLayout: Layout {
                 rowEnd += 1
             }
 
-            // Measure the row (each item sized to its span width), take max height.
+            // Natural per-item widths from their spans.
+            var widths = rowSpans.map { width(forSpan: $0, colWidth: colWidth) }
+            // Justify a partially-filled MULTI-item row to the full width, so a
+            // resize/reorder can never leave a ragged horizontal GAP at the row's
+            // end. Items grow proportionally to their spans. A single-item row is
+            // left at its natural size — don't balloon a lone tile to full width.
+            if rowSpans.count >= 2, usedCols < columns {
+                let gaps = CGFloat(rowSpans.count - 1) * spacing
+                let natural = widths.reduce(0, +)
+                let target = totalWidth - gaps
+                if natural > 0, target > natural {
+                    let scale = target / natural
+                    widths = widths.map { $0 * scale }
+                }
+            }
+
+            // Measure the row at the (possibly justified) widths; take max height.
             var heights: [CGFloat] = []
-            for (offset, span) in rowSpans.enumerated() {
-                let w = width(forSpan: span, colWidth: colWidth)
+            for (offset, w) in widths.enumerated() {
                 let h = subviews[rowStart + offset].sizeThatFits(.init(width: w, height: nil)).height
                 heights.append(h)
             }
@@ -72,8 +87,7 @@ struct V2FlowGridLayout: Layout {
 
             // Place the row.
             var x: CGFloat = 0
-            for (offset, span) in rowSpans.enumerated() {
-                let w = width(forSpan: span, colWidth: colWidth)
+            for (offset, w) in widths.enumerated() {
                 placements.append(Placement(index: rowStart + offset,
                                             frame: CGRect(x: x, y: y, width: w, height: rowHeight)))
                 x += w + spacing
