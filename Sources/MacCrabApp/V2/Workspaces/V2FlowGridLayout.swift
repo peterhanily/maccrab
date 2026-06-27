@@ -41,69 +41,43 @@ struct V2FlowGridLayout: Layout {
         CGFloat(span) * colWidth + CGFloat(span - 1) * spacing
     }
 
-    /// Pack subviews into rows and resolve every frame for a given total width.
+    /// Masonry pack: each widget keeps its NATURAL height and drops into the
+    /// column-group (its span's worth of adjacent columns) whose current bottom is
+    /// lowest — i.e. the shortest gap. Because items aren't forced to a
+    /// shared row height, a tall card next to a short one never leaves the dead
+    /// space a row-based layout would (the gaps that kept reappearing). A
+    /// full-width (span = columns) item lands below everything and resets the
+    /// shelf. Order is preserved (we iterate in order, leftmost column wins ties).
     private func layout(subviews: Subviews, totalWidth: CGFloat) -> (placements: [Placement], totalHeight: CGFloat) {
         let colWidth = columnWidth(for: totalWidth)
         var placements: [Placement] = []
-        var y: CGFloat = 0
+        // Running bottom (y just past the last item + rowSpacing) of each column.
+        var colBottoms = Array(repeating: CGFloat(0), count: columns)
 
-        // Dense pack (like CSS grid-auto-flow: dense): fill each row left-to-
-        // right, pulling the EARLIEST remaining item that fits the leftover
-        // columns. This backfills the hole a wide item would otherwise leave
-        // when it wraps, so a resize/reorder/window-resize can't strand a ragged
-        // gap at any width. Order is preserved except where a later item is
-        // pulled up to fill a gap. (Span > columns is clamped, so an empty row
-        // always accepts the first remaining item — guaranteed progress.)
-        var remaining = Array(subviews.indices)
-        while !remaining.isEmpty {
-            var rowIdx: [Int] = []
-            var rowSpans: [Int] = []
-            var usedCols = 0
-            var i = 0
-            while i < remaining.count && usedCols < columns {
-                let span = min(max(1, subviews[remaining[i]][WidgetSpanKey.self]), columns)
-                if usedCols + span <= columns {
-                    rowIdx.append(remaining[i])
-                    rowSpans.append(span)
-                    usedCols += span
-                    remaining.remove(at: i)   // pulled in; the next item shifts into i
-                } else {
-                    i += 1                    // doesn't fit here — try a later item
+        for index in subviews.indices {
+            let span = min(max(1, subviews[index][WidgetSpanKey.self]), columns)
+            // Pick the start column (0...columns-span) that places this item
+            // highest. Ties keep the leftmost column (iterate ascending, strict <).
+            var bestStart = 0
+            var bestTop = CGFloat.greatestFiniteMagnitude
+            for start in 0...(columns - span) {
+                var top: CGFloat = 0
+                for c in start..<(start + span) { top = max(top, colBottoms[c]) }
+                if top < bestTop {
+                    bestTop = top
+                    bestStart = start
                 }
             }
 
-            // If a row still ends short (no remaining item could fill it) AND it
-            // holds more than one item, justify it to the full width so there's
-            // no ragged edge. A lone tile is left natural (don't balloon it).
-            var widths = rowSpans.map { width(forSpan: $0, colWidth: colWidth) }
-            if rowSpans.count >= 2, usedCols < columns {
-                let gaps = CGFloat(rowSpans.count - 1) * spacing
-                let natural = widths.reduce(0, +)
-                let target = totalWidth - gaps
-                if natural > 0, target > natural {
-                    let scale = target / natural
-                    widths = widths.map { $0 * scale }
-                }
-            }
-
-            // Measure the row at the (possibly justified) widths; take max height.
-            var heights: [CGFloat] = []
-            for (k, w) in widths.enumerated() {
-                heights.append(subviews[rowIdx[k]].sizeThatFits(.init(width: w, height: nil)).height)
-            }
-            let rowHeight = heights.max() ?? 0
-
-            // Place the row.
-            var x: CGFloat = 0
-            for (k, w) in widths.enumerated() {
-                placements.append(Placement(index: rowIdx[k],
-                                            frame: CGRect(x: x, y: y, width: w, height: rowHeight)))
-                x += w + spacing
-            }
-            y += rowHeight + rowSpacing
+            let w = width(forSpan: span, colWidth: colWidth)
+            let x = CGFloat(bestStart) * (colWidth + spacing)
+            let h = subviews[index].sizeThatFits(.init(width: w, height: nil)).height
+            placements.append(Placement(index: index, frame: CGRect(x: x, y: bestTop, width: w, height: h)))
+            let newBottom = bestTop + h + rowSpacing
+            for c in bestStart..<(bestStart + span) { colBottoms[c] = newBottom }
         }
 
-        let totalHeight = max(0, y - rowSpacing)   // trailing rowSpacing not counted
+        let totalHeight = max(0, (colBottoms.max() ?? 0) - rowSpacing)   // trailing rowSpacing not counted
         return (placements, totalHeight)
     }
 
@@ -136,12 +110,12 @@ struct V2FlowGridLayout: Layout {
             placements = layout(subviews: subviews, totalWidth: width).placements
         }
         for p in placements {
-            // Bottom-align within the row cell so items of unequal height (e.g. a
-            // fixed-height KPI tile beside a taller card) line up along their
-            // bottoms instead of leaving a gap under the shorter one.
+            // Top-align at the masonry slot: each item is its own natural height
+            // (frame.height), so there is no shared-row stretching and no dead
+            // space under a shorter card.
             subviews[p.index].place(
-                at: CGPoint(x: bounds.minX + p.frame.minX, y: bounds.minY + p.frame.maxY),
-                anchor: .bottomLeading,
+                at: CGPoint(x: bounds.minX + p.frame.minX, y: bounds.minY + p.frame.minY),
+                anchor: .topLeading,
                 proposal: .init(width: p.frame.width, height: p.frame.height)
             )
         }
