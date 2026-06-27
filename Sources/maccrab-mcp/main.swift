@@ -763,6 +763,80 @@ let tools: [[String: Any]] = [
             "required": ["plugin_id", "confirm"],
         ] as [String: Any],
     ],
+    // --- Forensics CLI<->MCP parity (v1.20.x): cases / catalog / lifecycle ---
+    [
+        "name": "forensics_list_cases",
+        "description": "Read-only. List all forensic cases on this Mac (id, name, created time, encryption state). Use this to discover case ids for the other forensics_* tools. Returns {cases:[...], count}.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "forensics_run_all",
+        "description": "Run every applicable built-in scanner (collectors then analyzers) on a case, like `maccrabctl scan run-all`. Read-only forensic collection (no defense-affecting change). Requires 'case_id'.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string", "description": "The case id (from forensics_list_cases / forensics_create_case)."] as [String: Any],
+                "scheduled": ["type": "boolean", "description": "Run only scanners marked safe for scheduled/unattended runs."] as [String: Any],
+            ] as [String: Any],
+            "required": ["case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_search_catalog",
+        "description": "Read-only. Search the signed rave plugin catalog for INSTALLABLE third-party scanners (Ed25519-verified before listing), like `maccrabctl plugin search`. Returns matches; an empty query lists the catalog.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Substring to match against plugin id / name / tags (optional)."] as [String: Any],
+            ] as [String: Any],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_install_plugin",
+        "description": "Install a third-party scanner from the signed catalog by id, via the FULL verified install path (Ed25519 catalog+entry verify, artifact sha-pin, signer-key pin, anti-rollback, revocation check). Requires the 'response' capability AND confirm:true. Audit-logged. (Local sideload stays CLI-only by design.)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "The catalog plugin id to install."] as [String: Any],
+                "confirm": ["type": "boolean", "description": "Must be true to install (adds executable scanner code)."] as [String: Any],
+            ] as [String: Any],
+            "required": ["plugin_id", "confirm"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_uninstall_plugin",
+        "description": "Remove an installed third-party scanner from this Mac, like `maccrabctl plugin uninstall`. Requires the 'response' capability AND confirm:true. Audit-logged.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "The installed plugin id to remove."] as [String: Any],
+                "confirm": ["type": "boolean", "description": "Must be true to uninstall."] as [String: Any],
+            ] as [String: Any],
+            "required": ["plugin_id", "confirm"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics_pin_plugin",
+        "description": "Pin an installed plugin to its current version (no auto-update), or unpin it. Requires the 'response' capability. Audit-logged.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "The installed plugin id."] as [String: Any],
+                "unpin": ["type": "boolean", "description": "true to remove an existing pin; omit/false to pin."] as [String: Any],
+            ] as [String: Any],
+            "required": ["plugin_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_daemon_config",
+        "description": "Read-only. Report the effective daemon_config.json values (all keys, or one if 'key' is given), like `maccrabctl config get`. The companion to set_daemon_config.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "key": ["type": "string", "description": "A single config key to read (optional; omit for all)."] as [String: Any],
+            ] as [String: Any],
+        ] as [String: Any],
+    ],
     // ===================================================================
     // v1.18 — Agent control-plane (customizable skill). All mutating tools
     // are OFF BY DEFAULT and require a human-enabled capability tier (config
@@ -1005,6 +1079,20 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return handleCheckPluginUpdates()
     case "forensics_install_plugin_update":
         return handleInstallPluginUpdate(args)
+    case "forensics_list_cases":
+        return await handleForensicsListCases()
+    case "forensics_run_all":
+        return handleForensicsRunAll(args)
+    case "forensics_search_catalog":
+        return handleForensicsSearchCatalog(args)
+    case "forensics_install_plugin":
+        return handleForensicsInstallPlugin(args)
+    case "forensics_uninstall_plugin":
+        return handleForensicsUninstallPlugin(args)
+    case "forensics_pin_plugin":
+        return handleForensicsPinPlugin(args)
+    case "get_daemon_config":
+        return handleGetDaemonConfig(args)
     // v1.17 rc.7 — legacy aliases (silent, no warning). Keep
     // through v1.18; remove in v1.19.
     case "tierb.list_plugins":
@@ -1110,6 +1198,105 @@ func handleInstallPluginUpdate(_ args: [String: Any]) -> Any {
         return ["content": [["type": "text", "text": jsonStringify(["success": true, "plugin_id": id, "output": msg])]]]
     }
     return toolError("plugin update failed: \(msg)")
+}
+
+// MARK: - Forensics CLI<->MCP parity (cases / catalog / plugin lifecycle / config)
+
+func handleForensicsListCases() async -> Any {
+    do {
+        let cases = try await forensicsCaseManager().listCases()
+        let rows = cases.map { c -> [String: Any] in
+            ["id": c.id, "name": c.name,
+             "created_at_ms": c.createdAtMillis,
+             "encryption": "\(c.encryptionState)"]
+        }
+        return ["content": [["type": "text", "text": jsonStringify(["cases": rows, "count": rows.count])]]]
+    } catch {
+        return toolError("list_cases failed: \(error)")
+    }
+}
+
+func handleForensicsRunAll(_ args: [String: Any]) -> Any {
+    guard let id = args["case_id"] as? String, !id.isEmpty else {
+        return toolError("forensics_run_all requires 'case_id'.")
+    }
+    var argv = ["scan", "run-all", id]
+    if (args["scheduled"] as? Bool) == true { argv.append("--scheduled") }
+    guard let r = runMaccrabctl(argv) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": msg.isEmpty ? "run-all complete." : msg]]] }
+    return toolError("run-all failed: \(msg)")
+}
+
+func handleForensicsSearchCatalog(_ args: [String: Any]) -> Any {
+    let query = (args["query"] as? String) ?? ""
+    guard let r = runMaccrabctl(["plugin", "search", query]) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": msg.isEmpty ? "(no matches)" : msg]]] }
+    return toolError("catalog search failed: \(msg)")
+}
+
+func handleForensicsInstallPlugin(_ args: [String: Any]) -> Any {
+    guard let id = args["plugin_id"] as? String, !id.isEmpty else {
+        return toolError("forensics_install_plugin requires 'plugin_id' (a catalog plugin id).")
+    }
+    guard (args["confirm"] as? Bool) == true else {
+        return toolError("Pass confirm:true to install — it adds executable scanner code via the verified install path.")
+    }
+    auditLog("forensics_install_plugin", details: "plugin_id=\(id) ppid=\(getppid())")
+    guard let r = runMaccrabctl(["plugin", "install", id, "--yes"]) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": jsonStringify(["success": true, "plugin_id": id, "output": msg])]]] }
+    return toolError("plugin install failed: \(msg)")
+}
+
+func handleForensicsUninstallPlugin(_ args: [String: Any]) -> Any {
+    guard let id = args["plugin_id"] as? String, !id.isEmpty else {
+        return toolError("forensics_uninstall_plugin requires 'plugin_id'.")
+    }
+    guard (args["confirm"] as? Bool) == true else {
+        return toolError("Pass confirm:true to uninstall the plugin from this Mac.")
+    }
+    auditLog("forensics_uninstall_plugin", details: "plugin_id=\(id) ppid=\(getppid())")
+    guard let r = runMaccrabctl(["plugin", "uninstall", id]) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": jsonStringify(["success": true, "plugin_id": id, "output": msg])]]] }
+    return toolError("plugin uninstall failed: \(msg)")
+}
+
+func handleForensicsPinPlugin(_ args: [String: Any]) -> Any {
+    guard let id = args["plugin_id"] as? String, !id.isEmpty else {
+        return toolError("forensics_pin_plugin requires 'plugin_id'.")
+    }
+    let unpin = (args["unpin"] as? Bool) == true
+    auditLog("forensics_pin_plugin", details: "plugin_id=\(id) unpin=\(unpin) ppid=\(getppid())")
+    var argv = ["plugin", "pin", id]
+    if unpin { argv.append("--unpin") }
+    guard let r = runMaccrabctl(argv) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": jsonStringify(["success": true, "plugin_id": id, "pinned": !unpin, "output": msg])]]] }
+    return toolError("plugin pin failed: \(msg)")
+}
+
+func handleGetDaemonConfig(_ args: [String: Any]) -> Any {
+    var argv = ["config", "get"]
+    if let key = args["key"] as? String, !key.isEmpty { argv.append(key) }
+    guard let r = runMaccrabctl(argv) else {
+        return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
+    }
+    let msg = (r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+    if r.status == 0 { return ["content": [["type": "text", "text": msg.isEmpty ? "(no config)" : msg]]] }
+    return toolError("config get failed: \(msg)")
 }
 
 // tierb.run_installed (subprocess spawn) is research-only and

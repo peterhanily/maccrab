@@ -97,6 +97,13 @@ let agentToolCapability: [String: AgentCapability] = [
     // code-changing, so it sits at the top tier. (The read-only
     // forensics_check_plugin_updates is intentionally absent — it never mutates.)
     "forensics_install_plugin_update": .response,
+    // Plugin lifecycle (parity with the CLI). Install/uninstall change executable
+    // scanner code on disk; pin changes update policy. All code/config-changing,
+    // so the top tier — matching forensics_install_plugin_update. Install +
+    // uninstall additionally require confirm:true in their handlers.
+    "forensics_install_plugin": .response,
+    "forensics_uninstall_plugin": .response,
+    "forensics_pin_plugin": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +
