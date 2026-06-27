@@ -238,12 +238,6 @@ struct V2RaveCatalogBrowserView: View {
             if !usingOfficial {
                 nonOfficialBanner
             }
-            // Only built-ins are showing — keep the third-party catalog's empty
-            // state honest ("coming soon") so built-ins don't read as "the
-            // catalog is live."
-            if offeredEntries.isEmpty {
-                thirdPartyCatalogBanner
-            }
             Divider()
             HStack(spacing: 0) {
                 sidebar
@@ -257,36 +251,21 @@ struct V2RaveCatalogBrowserView: View {
 
     // MARK: - Header
 
-    private var thirdPartyCatalogBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "shippingbox").foregroundStyle(.secondary).scaledSystem(12)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(String(localized: "raveStore.thirdPartyCatalog.title", defaultValue: "Signed third-party catalog"))
-                    .scaledSystem(11, weight: .semibold)
-                Text(String(localized: "raveStore.thirdPartyCatalog.body", defaultValue: "No third-party plugins are currently listed. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed."))
-                    .scaledSystem(10).foregroundStyle(.secondary).lineLimit(2)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 20).padding(.vertical, 8)
-        .background(Color.secondary.opacity(0.08))
-    }
-
     private var nonOfficialBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .scaledSystem(12)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Using a non-official catalog")
+                Text(String(localized: "raveStore.nonOfficial.title", defaultValue: "Using a non-official catalog"))
                     .scaledSystem(11, weight: .semibold)
-                Text("Source: \(baseURL.isEmpty ? "(unknown)" : baseURL) · plugins fetched here haven't been vetted by the official rave team. Use only for local development + testing.")
+                Text(String(localized: "raveStore.nonOfficial.body", defaultValue: "Source: \(baseURL.isEmpty ? "(unknown)" : baseURL) · plugins fetched here haven't been vetted by the official rave team. Use only for local development + testing."))
                     .scaledSystem(10)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
             Spacer()
-            Button("Settings") {
+            Button(String(localized: "common.settings", defaultValue: "Settings")) {
                 if let url = URL(string: "maccrab://settings/forensics") {
                     NSWorkspace.shared.open(url)
                 }
@@ -308,9 +287,9 @@ struct V2RaveCatalogBrowserView: View {
                 .background(Color.accentColor.opacity(0.12))
                 .cornerRadius(8)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Plugin catalog")
+                Text(String(localized: "raveStore.header.title", defaultValue: "Plugin catalog"))
                     .font(.title2).fontWeight(.semibold)
-                Text(baseURL.isEmpty ? "rave.maccrab.com" : baseURL)
+                Text(verbatim: baseURL.isEmpty ? "rave.maccrab.com" : baseURL)
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
                 trustStrip
@@ -321,7 +300,7 @@ struct V2RaveCatalogBrowserView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .help("Refresh")
+            .help(String(localized: "common.refresh", defaultValue: "Refresh"))
             .accessibilityLabel(String(localized: "common.refresh", defaultValue: "Refresh"))
         }
         .padding(.horizontal, 20).padding(.vertical, 16)
@@ -356,7 +335,7 @@ struct V2RaveCatalogBrowserView: View {
         ravePane {
             RaveCrabView().frame(width: 150, height: 125)
             ProgressView().controlSize(.small).tint(raveCrabOrange)
-            Text("Checking the signed catalog…")
+            Text(String(localized: "raveStore.loading", defaultValue: "Checking the signed catalog…"))
                 .scaledSystem(13)
                 .foregroundStyle(paneSubtitleColor)
         }
@@ -365,10 +344,10 @@ struct V2RaveCatalogBrowserView: View {
     private var offlinePane: some View {
         ravePane {
             RaveCrabView().frame(width: 150, height: 125)
-            Text("Rave catalog")
+            Text(String(localized: "raveStore.title", defaultValue: "Rave catalog"))
                 .scaledSystem(12, weight: .semibold).tracking(2)
                 .foregroundStyle(raveCrabOrange)
-            Text("Can't reach the catalog")
+            Text(String(localized: "raveStore.offline.title", defaultValue: "Can't reach the catalog"))
                 .scaledSystem(26, weight: .bold)
                 .foregroundStyle(paneTitleColor)
             Text(offlineDetailText)
@@ -377,7 +356,7 @@ struct V2RaveCatalogBrowserView: View {
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
             Button { Task { await reload() } } label: {
-                Label("Retry", systemImage: "arrow.clockwise")
+                Label(String(localized: "common.retry", defaultValue: "Retry"), systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent).tint(raveCrabOrange).controlSize(.large)
         }
@@ -388,13 +367,13 @@ struct V2RaveCatalogBrowserView: View {
             Image(systemName: "lock.shield.fill")
                 .scaledSystem(46)
                 .foregroundStyle(raveCrabOrange)
-            Text("Rave catalog")
+            Text(String(localized: "raveStore.title", defaultValue: "Rave catalog"))
                 .scaledSystem(12, weight: .semibold).tracking(2)
                 .foregroundStyle(raveCrabOrange)
-            Text("Catalog failed verification")
+            Text(String(localized: "raveStore.trustError.title", defaultValue: "Catalog failed verification"))
                 .scaledSystem(24, weight: .bold)
                 .foregroundStyle(paneTitleColor)
-            Text("MacCrab refused to show it — the catalog's signature or freshness check didn't pass, so nothing from it is trusted or installable. This is the safe outcome, not a bug. Your installed scanners and kits keep working.")
+            Text(String(localized: "raveStore.trustError.body", defaultValue: "MacCrab refused to show it — the catalog's signature or freshness check didn't pass, so nothing from it is trusted or installable. This is the safe outcome, not a bug. Your installed scanners and kits keep working."))
                 .scaledSystem(13)
                 .foregroundStyle(paneSubtitleColor)
                 .multilineTextAlignment(.center)
@@ -408,7 +387,7 @@ struct V2RaveCatalogBrowserView: View {
                     .textSelection(.enabled)
             }
             Button { Task { await reload() } } label: {
-                Label("Try again", systemImage: "arrow.clockwise")
+                Label(String(localized: "common.tryAgain", defaultValue: "Try again"), systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent).tint(raveCrabOrange).controlSize(.large)
         }
@@ -417,13 +396,13 @@ struct V2RaveCatalogBrowserView: View {
     private var verifiedEmptyPane: some View {
         ravePane {
             RaveCrabView().frame(width: 180, height: 150)
-            Text("Rave catalog")
+            Text(String(localized: "raveStore.title", defaultValue: "Rave catalog"))
                 .scaledSystem(12, weight: .semibold).tracking(2)
                 .foregroundStyle(raveCrabOrange)
-            Text("Signed plugin catalog")
+            Text(String(localized: "raveStore.empty.title", defaultValue: "Signed plugin catalog"))
                 .scaledSystem(30, weight: .bold)
                 .foregroundStyle(paneTitleColor)
-            Text("No third-party plugins are currently listed. The catalog is signed and verified on this Mac, and your built-in scanners and kits run here now — no install needed.")
+            Text(String(localized: "raveStore.empty.body", defaultValue: "No third-party plugins are currently listed. The catalog is signed and verified on this Mac, and your built-in scanners and kits run here now — no install needed."))
                 .scaledSystem(13)
                 .foregroundStyle(paneSubtitleColor)
                 .multilineTextAlignment(.center)
@@ -434,7 +413,7 @@ struct V2RaveCatalogBrowserView: View {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
-                Label("Open rave.maccrab.com", systemImage: "safari")
+                Label(String(localized: "raveStore.empty.openSite", defaultValue: "Open rave.maccrab.com"), systemImage: "safari")
             }
             .buttonStyle(.bordered).tint(raveCrabOrange).controlSize(.small)
         }
@@ -560,7 +539,7 @@ struct V2RaveCatalogBrowserView: View {
                     .frame(width: 14)
                 Text(label).scaledSystem(12)
                 Spacer()
-                Text("\(count)")
+                Text(verbatim: "\(count)")
                     .scaledSystem(10)
                     .foregroundStyle(.secondary)
             }
@@ -615,7 +594,7 @@ struct V2RaveCatalogBrowserView: View {
             .cornerRadius(6)
             .frame(maxWidth: 260)
 
-            Text("\(visibleEntries.count) of \(displayEntries.count)")
+            Text(verbatim: "\(visibleEntries.count) of \(displayEntries.count)")
                 .scaledSystem(10).foregroundStyle(.secondary)
                 .monospacedDigit()
 
@@ -682,7 +661,7 @@ struct V2RaveCatalogBrowserView: View {
                             .foregroundStyle(.secondary)
                     }
                     HStack(spacing: 5) {
-                        Text("v\(e.currentVersion)")
+                        Text(verbatim: "v\(e.currentVersion)")
                             .scaledSystem(10)
                             .foregroundStyle(.tertiary)
                         statusBadge(state(for: e))
@@ -720,10 +699,10 @@ struct V2RaveCatalogBrowserView: View {
             Image(systemName: "arrow.left.circle")
                 .scaledSystem(30)
                 .foregroundStyle(.tertiary)
-            Text("Select a scanner")
+            Text(String(localized: "raveStore.detail.empty.title", defaultValue: "Select a scanner"))
                 .scaledSystem(13, weight: .medium)
                 .foregroundStyle(.secondary)
-            Text("Click a card on the left to see what it does + how to install.")
+            Text(String(localized: "raveStore.detail.empty.body", defaultValue: "Click a card on the left to see what it does + how to install."))
                 .scaledSystem(11)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -940,7 +919,7 @@ struct V2RaveCatalogBrowserView: View {
     private func installAction(_ e: RaveCatalogEntry) -> some View {
         let st = state(for: e)
         return VStack(alignment: .leading, spacing: 6) {
-            Text("Install")
+            Text(String(localized: "raveStore.install.section", defaultValue: "Install"))
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
             if isInstalledAndCurrent(e) {
@@ -976,7 +955,7 @@ struct V2RaveCatalogBrowserView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                Text("Opens the verified install path: signer-pin + version-floor checks, then your explicit confirmation.")
+                Text(String(localized: "raveStore.install.hint", defaultValue: "Opens the verified install path: signer-pin + version-floor checks, then your explicit confirmation."))
                     .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             } else {

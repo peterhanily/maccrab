@@ -176,6 +176,17 @@ final class V2OverviewLayoutStore: ObservableObject {
         items.insert(moved, at: to)
     }
 
+    /// Drag-reorder: move `id` to the END of the display order. The per-tile drop
+    /// delegates can only insert BEFORE a target, so without this a widget can
+    /// never become last via drag (you'd drop in the open area past the last row).
+    /// Like `move`, does NOT persist — the caller commits once at drag-end.
+    func moveToEnd(_ id: String) {
+        guard let from = items.firstIndex(where: { $0.id == id }),
+              from != items.count - 1 else { return }   // already last
+        let moved = items.remove(at: from)
+        items.append(moved)
+    }
+
     /// Persist the current order (called once when a drag ends).
     func commit() { save() }
 

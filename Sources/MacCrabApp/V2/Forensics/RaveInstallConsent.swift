@@ -170,26 +170,26 @@ public struct RaveInstallConsentResolver: Sendable {
         // mirror does not earn the default-trusted posture.
         let isFirstParty = (entry.trustTier == "first-party") && official
 
-        // C-E: refresh revocations if our local copy is stale (best-effort — a
-        // failed refresh while offline keeps the prior state), then read the
+        // C-E: fetch + reconcile the revocation list (best-effort — a failed fetch
+        // while offline yields nil and keeps the prior state), then read the
         // freshness so the sheet can warn that "not revoked" may be out of date.
-        _ = try? await client.refreshRevocationsIfStale()
+        let revocations = try? await client.fetchAndReconcileRevocations()
         let freshness = await client.revocationFreshness()
 
         // Mirror the catalog browser's install gating (storefront honesty): the
         // deep-link path must NOT offer Confirm or a "reviewed & signed"
         // affirmation for a pre-release / awaiting-signed-binary / floor-blocked
-        // / impersonating entry. Reuse the SAME pure policy the browser uses —
-        // RaveCatalogEntryState.compute — which also applies the C-F
-        // namespace/confusable guard the deep-link path previously skipped.
-        // (Revocation stays enforced fail-closed downstream by the CLI install
-        // path; the consent sheet keys honesty off availability + impersonation.)
+        // / revoked / impersonating entry. Reuse the SAME pure policy the browser
+        // uses — RaveCatalogEntryState.compute — passing the REAL revocation list
+        // (the CLI still re-enforces fail-closed at install, but the sheet now
+        // shows a revoked entry as non-installable instead of letting the user
+        // click through to a raw CLI revocation error).
         let firstPartyNames = entries
             .filter { $0.trustTier == "first-party" }
             .map { $0.displayName }
         let state = RaveCatalogEntryState.compute(
             entry: entry,
-            revocations: nil,
+            revocations: revocations,
             firstPartyDisplayNames: firstPartyNames,
             floorCheck: client.checkVersionFloor
         )

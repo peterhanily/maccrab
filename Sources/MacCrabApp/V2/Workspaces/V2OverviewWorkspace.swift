@@ -81,11 +81,18 @@ struct V2OverviewWorkspace: View {
                 }
             }
             .padding(16)
-            // Catch drops that land in gaps between cards. Persist once at drag-end.
+            // Catch drops that land in the open area (gaps between cards / below
+            // the last row): move the dragged widget to the END. The per-tile drop
+            // delegates only insert BEFORE a target, so releasing past the last
+            // card is the natural — and only — way to make a widget last. Persist
+            // once at drag-end.
             .onDrop(of: [UTType.text], isTargeted: $dropTargeted) { _ in
+                if let dragged = draggingID {
+                    withAnimation(.easeInOut(duration: 0.18)) { layout.moveToEnd(dragged) }
+                }
                 draggingID = nil
                 layout.commit()
-                return false
+                return true
             }
             // When the drag leaves the dashboard (e.g. released outside the
             // window) clear the dragging state, otherwise a card could stay
