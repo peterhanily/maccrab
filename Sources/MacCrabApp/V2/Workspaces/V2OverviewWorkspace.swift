@@ -25,6 +25,7 @@ struct V2OverviewWorkspace: View {
     @State private var expandedFactorName: String? = nil
     // Store news on the forensics/plugins card.
     @State private var storeNews: [StoreNewsItem] = []
+    @State private var ruleTitles: [String: String] = [:]   // ruleId → title (Top Firing Rules)
     // Customizable dashboard: which widgets show, in what order, at what size.
     @StateObject private var layout = V2OverviewLayoutStore()
     @State private var editing = false
@@ -140,6 +141,18 @@ struct V2OverviewWorkspace: View {
             await appState.refreshThreatIntelStats()
             await appState.refreshAgentLineage()
             await loadForensicsCard()
+
+            // Rule titles for the Top Firing Rules widget — telemetry carries
+            // only ids (built-in maccrab.* + compiled-rule UUIDs), so without a
+            // title join the card shows raw UUIDs. Load once, and only when the
+            // widget is actually visible (the live rules() read touches disk).
+            if ruleTitles.isEmpty,
+               layout.visibleOrdered.contains(where: { $0.widget == .topRules }) {
+                let rs = await state.provider.rules()
+                await MainActor.run {
+                    ruleTitles = Dictionary(rs.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+                }
+            }
         }
     }
 
@@ -850,8 +863,11 @@ struct V2OverviewWorkspace: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Humanize a rule id for display: drop the maccrab. prefix and underscores.
+    /// Human title for a rule id: prefer the joined title (built-in + compiled),
+    /// else fall back to a cleaned-up id (drop the maccrab. prefix + underscores)
+    /// so the card never shows a raw UUID.
     private func ruleDisplayName(_ id: String) -> String {
+        if let t = ruleTitles[id], !t.isEmpty { return t }
         var s = id
         if s.hasPrefix("maccrab.") { s = String(s.dropFirst("maccrab.".count)) }
         s = s.replacingOccurrences(of: "_", with: " ")
@@ -860,12 +876,15 @@ struct V2OverviewWorkspace: View {
 
     // MARK: - Crabby (the animated MacCrab mascot)
 
-    /// Derive Crabby's mood from live posture so he reacts to events.
+    /// Derive Crabby's mood from ACTIVE CAMPAIGNS (correlated, current threats) —
+    /// deliberately NOT from raw open-alert counts or the posture score, so old
+    /// or benign rule firings (and a merely-imperfect security score) don't keep
+    /// him stuck in a panic. He only panics for a genuinely active critical
+    /// campaign; watches on an active high campaign; otherwise calm/happy.
     private var crabMood: V2CrabWidget.Mood {
-        let score = appState.securityScore
-        if kpis.activeCampaignsCritical > 0 || (score > 0 && score < 50) { return .critical }
-        if kpis.openAlerts24h > 0 || kpis.activeCampaigns > 0 { return .alert }
-        if score >= 90 { return .happy }
+        if kpis.activeCampaignsCritical > 0 { return .critical }
+        if kpis.activeCampaignsHigh > 0 || kpis.activeCampaigns > 0 { return .alert }
+        if appState.securityScore >= 90 && kpis.openAlerts24h == 0 { return .happy }
         return .calm
     }
 

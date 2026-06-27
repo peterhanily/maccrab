@@ -16,13 +16,15 @@ struct V2CrabWidget: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// Scuttle speed (radians/sec-ish) — calmer when safe, frantic on critical.
+    /// Scuttle speed (radians/sec-ish) — a gentle amble when safe, livelier (but
+    /// not frantic) on critical. Deliberately slow: a full left↔right cycle is
+    /// ~25 s when calm.
     private var speed: Double {
         switch mood {
-        case .calm: return 0.6
-        case .happy: return 1.1
-        case .alert: return 1.8
-        case .critical: return 3.2
+        case .calm: return 0.25
+        case .happy: return 0.40
+        case .alert: return 0.55
+        case .critical: return 0.85
         }
     }
 
@@ -53,10 +55,10 @@ struct V2CrabWidget: View {
             return String(localized: "overview.crab.quipCalm", defaultValue: "Just scuttling about. Quiet on this Mac so far…")
         case .alert:
             return String(localized: "overview.crab.quipAlert",
-                          defaultValue: "Ooh — \(openAlerts) open alert\(openAlerts == 1 ? "" : "s"). Keeping my eyestalks up.")
+                          defaultValue: "Hmm — something's stirring on this Mac. Keeping my eyestalks up.")
         case .critical:
             return String(localized: "overview.crab.quipCritical",
-                          defaultValue: "🚨 \(criticalCampaigns) critical campaign\(criticalCampaigns == 1 ? "" : "s")! CLAWS UP! 🦀")
+                          defaultValue: "🚨 \(criticalCampaigns) active critical campaign\(criticalCampaigns == 1 ? "" : "s")! CLAWS UP! 🦀")
         }
     }
 
@@ -105,9 +107,9 @@ struct V2CrabWidget: View {
                             let t = tl.date.timeIntervalSinceReferenceDate
                             let x = sin(t * speed) * amp
                             let facing: CGFloat = cos(t * speed) >= 0 ? 1 : -1   // face travel direction
-                            let bob = mood == .happy ? abs(sin(t * 5)) * 9 : 0
-                            let shake = mood == .critical ? sin(t * 34) * 3.5 : 0
-                            let tilt = sin(t * speed * 2) * (mood == .calm ? 4 : 9)
+                            let bob = mood == .happy ? abs(sin(t * 3)) * 7 : 0
+                            let shake = mood == .critical ? sin(t * 11) * 3 : 0
+                            let tilt = sin(t * speed * 2) * (mood == .calm ? 3 : 6)
                             crab
                                 .scaleEffect(x: facing, y: 1, anchor: .center)
                                 .rotationEffect(.degrees(tilt))

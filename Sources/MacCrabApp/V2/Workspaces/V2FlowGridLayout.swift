@@ -47,26 +47,35 @@ struct V2FlowGridLayout: Layout {
         var placements: [Placement] = []
         var y: CGFloat = 0
 
-        var rowStart = 0
-        while rowStart < subviews.count {
-            // Greedily fill one row.
-            var usedCols = 0
-            var rowEnd = rowStart
+        // Dense pack (like CSS grid-auto-flow: dense): fill each row left-to-
+        // right, pulling the EARLIEST remaining item that fits the leftover
+        // columns. This backfills the hole a wide item would otherwise leave
+        // when it wraps, so a resize/reorder/window-resize can't strand a ragged
+        // gap at any width. Order is preserved except where a later item is
+        // pulled up to fill a gap. (Span > columns is clamped, so an empty row
+        // always accepts the first remaining item — guaranteed progress.)
+        var remaining = Array(subviews.indices)
+        while !remaining.isEmpty {
+            var rowIdx: [Int] = []
             var rowSpans: [Int] = []
-            while rowEnd < subviews.count {
-                let span = min(max(1, subviews[rowEnd][WidgetSpanKey.self]), columns)
-                if usedCols > 0 && usedCols + span > columns { break }
-                rowSpans.append(span)
-                usedCols += span
-                rowEnd += 1
+            var usedCols = 0
+            var i = 0
+            while i < remaining.count && usedCols < columns {
+                let span = min(max(1, subviews[remaining[i]][WidgetSpanKey.self]), columns)
+                if usedCols + span <= columns {
+                    rowIdx.append(remaining[i])
+                    rowSpans.append(span)
+                    usedCols += span
+                    remaining.remove(at: i)   // pulled in; the next item shifts into i
+                } else {
+                    i += 1                    // doesn't fit here — try a later item
+                }
             }
 
-            // Natural per-item widths from their spans.
+            // If a row still ends short (no remaining item could fill it) AND it
+            // holds more than one item, justify it to the full width so there's
+            // no ragged edge. A lone tile is left natural (don't balloon it).
             var widths = rowSpans.map { width(forSpan: $0, colWidth: colWidth) }
-            // Justify a partially-filled MULTI-item row to the full width, so a
-            // resize/reorder can never leave a ragged horizontal GAP at the row's
-            // end. Items grow proportionally to their spans. A single-item row is
-            // left at its natural size — don't balloon a lone tile to full width.
             if rowSpans.count >= 2, usedCols < columns {
                 let gaps = CGFloat(rowSpans.count - 1) * spacing
                 let natural = widths.reduce(0, +)
@@ -79,22 +88,19 @@ struct V2FlowGridLayout: Layout {
 
             // Measure the row at the (possibly justified) widths; take max height.
             var heights: [CGFloat] = []
-            for (offset, w) in widths.enumerated() {
-                let h = subviews[rowStart + offset].sizeThatFits(.init(width: w, height: nil)).height
-                heights.append(h)
+            for (k, w) in widths.enumerated() {
+                heights.append(subviews[rowIdx[k]].sizeThatFits(.init(width: w, height: nil)).height)
             }
             let rowHeight = heights.max() ?? 0
 
             // Place the row.
             var x: CGFloat = 0
-            for (offset, w) in widths.enumerated() {
-                placements.append(Placement(index: rowStart + offset,
+            for (k, w) in widths.enumerated() {
+                placements.append(Placement(index: rowIdx[k],
                                             frame: CGRect(x: x, y: y, width: w, height: rowHeight)))
                 x += w + spacing
             }
-
             y += rowHeight + rowSpacing
-            rowStart = rowEnd
         }
 
         let totalHeight = max(0, y - rowSpacing)   // trailing rowSpacing not counted
