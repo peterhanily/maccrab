@@ -996,6 +996,12 @@ struct V2RaveCatalogBrowserView: View {
                 .scaledSystem(11)
         }
         HStack(spacing: 8) {
+            // Always offer a working action for an installed plugin: Update when
+            // the catalog has a newer version, otherwise Reinstall (a verified
+            // --force re-install of the current version). Both route through the
+            // same consent → `maccrabctl plugin install --force` path. (Split into
+            // two buttons rather than a ternary buttonStyle, which breaks the
+            // .bordered/.borderedProminent static-member lookup.)
             if canUpdate {
                 Button {
                     pendingIsUpdate = true
@@ -1005,8 +1011,17 @@ struct V2RaveCatalogBrowserView: View {
                     Label(String(localized: "rave.install.updateTo", defaultValue: "Update to v\(e.currentVersion)"),
                           systemImage: "arrow.up.circle")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.borderedProminent).controlSize(.small)
+            } else {
+                Button {
+                    pendingIsUpdate = true
+                    pendingInstalledVersion = installedVer
+                    installLink = RaveInstallLink(kind: .plugin, id: e.id)
+                } label: {
+                    Label(String(localized: "rave.install.reinstall", defaultValue: "Reinstall"),
+                          systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered).controlSize(.small)
             }
             Button(role: .destructive) {
                 removeTarget = e
