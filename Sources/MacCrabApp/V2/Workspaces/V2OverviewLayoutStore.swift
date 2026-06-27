@@ -20,6 +20,9 @@ enum V2OverviewWidget: String, CaseIterable {
     case recentActivity
     case quickActions
     case forensics
+    case protectionCoverage
+    case topRules
+    case crab
 
     /// User-facing name shown in the Customize controls.
     var displayName: String {
@@ -34,6 +37,9 @@ enum V2OverviewWidget: String, CaseIterable {
         case .recentActivity:     return String(localized: "overview.widget.recentActivity", defaultValue: "Recent Activity")
         case .quickActions:       return String(localized: "overview.widget.quickActions", defaultValue: "Quick Actions")
         case .forensics:          return String(localized: "overview.widget.forensics", defaultValue: "Forensics & Plugins")
+        case .protectionCoverage: return String(localized: "overview.widget.protectionCoverage", defaultValue: "Protection Coverage")
+        case .topRules:           return String(localized: "overview.widget.topRules", defaultValue: "Top Firing Rules")
+        case .crab:               return String(localized: "overview.widget.crab", defaultValue: "Crabby")
         }
     }
 
@@ -48,6 +54,8 @@ enum V2OverviewWidget: String, CaseIterable {
             return [2, 4]
         case .recentActivity, .quickActions:
             return [2, 4]
+        case .protectionCoverage, .topRules, .crab:
+            return [2, 4]
         }
     }
 
@@ -55,6 +63,7 @@ enum V2OverviewWidget: String, CaseIterable {
         switch self {
         case .alertHistogram, .forensics: return 4
         case .recentActivity, .quickActions: return 2
+        case .protectionCoverage, .topRules, .crab: return 2
         default: return 1
         }
     }

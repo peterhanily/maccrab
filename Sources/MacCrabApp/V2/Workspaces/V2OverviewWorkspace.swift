@@ -30,6 +30,7 @@ struct V2OverviewWorkspace: View {
     @State private var editing = false
     @State private var draggingID: String? = nil
     @State private var dropTargeted = false   // drag is over the dashboard area
+    @State private var confirmReset = false   // "Reset to default" layout confirm
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -272,10 +273,21 @@ struct V2OverviewWorkspace: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                 }
-                Button(String(localized: "overview.customize.reset", defaultValue: "Reset")) {
-                    withAnimation { layout.reset() }
+                Button(String(localized: "overview.customize.reset", defaultValue: "Reset to default"), role: .destructive) {
+                    confirmReset = true
                 }
                 .buttonStyle(.bordered).controlSize(.small)
+                .confirmationDialog(
+                    String(localized: "overview.customize.resetConfirmTitle", defaultValue: "Reset the Overview to its default layout?"),
+                    isPresented: $confirmReset, titleVisibility: .visible
+                ) {
+                    Button(String(localized: "overview.customize.reset", defaultValue: "Reset to default"), role: .destructive) {
+                        withAnimation { layout.reset() }
+                    }
+                    Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {}
+                } message: {
+                    Text(String(localized: "overview.customize.resetConfirmBody", defaultValue: "Restores every panel — shown, in default order and size. Your current arrangement is discarded."))
+                }
                 Button(String(localized: "overview.customize.done", defaultValue: "Done")) {
                     draggingID = nil
                     withAnimation { editing = false }
@@ -305,6 +317,9 @@ struct V2OverviewWorkspace: View {
         case .recentActivity:     recentActivityCard
         case .quickActions:       quickActionsCard
         case .forensics:          forensicsCard
+        case .protectionCoverage: protectionCoverageCard
+        case .topRules:           topRulesCard
+        case .crab:               crabCard
         }
     }
 
@@ -745,6 +760,120 @@ struct V2OverviewWorkspace: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Protection coverage (live sensor health)
+
+    private var protectionCoverageCard: some View {
+        let collectors = appState.heartbeat?.collectorHealth ?? []
+        let healthy = collectors.filter { $0.healthy }.count
+        let allHealthy = !collectors.isEmpty && healthy == collectors.count
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(String(localized: "overview.coverageTitle", defaultValue: "Protection coverage"))
+                    .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                Button { state.goto(V2NavigationDestination(workspace: .system, tab: nil)) } label: {
+                    Text(String(localized: "overview.viewAll", defaultValue: "View all →"))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                }.buttonStyle(.plain)
+            }
+            if collectors.isEmpty {
+                Text(String(localized: "overview.coverageUnavailable", defaultValue: "Sensor status unavailable — waiting for the engine heartbeat."))
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText).padding(.vertical, 16)
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: allHealthy ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                        .foregroundStyle(allHealthy ? Color.green : V2Theme.high)
+                    Text(String(localized: "overview.coverageSummary", defaultValue: "\(healthy) of \(collectors.count) sensors healthy"))
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                }
+                let sortedCollectors = collectors.sorted { ($0.healthy ? 1 : 0) < ($1.healthy ? 1 : 0) }
+                FlowLayout(spacing: 6) {
+                    ForEach(sortedCollectors, id: \.self) { c in
+                        HStack(spacing: 4) {
+                            Circle().fill(c.healthy ? Color.green : V2Theme.high).frame(width: 6, height: 6)
+                            Text(c.name).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                        }
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(V2Theme.panelBackground).clipShape(Capsule())
+                    }
+                }
+            }
+        }
+        .v2Panel()
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Top firing rules (rule telemetry)
+
+    private var topRulesCard: some View {
+        let top = Array(appState.ruleTelemetry.values
+            .filter { $0.fireCount > 0 }
+            .sorted { $0.fireCount > $1.fireCount }
+            .prefix(5))
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(String(localized: "overview.topRulesTitle", defaultValue: "Top firing rules"))
+                    .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                Button { state.goto(V2NavigationDestination(workspace: .detection, tab: nil)) } label: {
+                    Text(String(localized: "overview.viewAll", defaultValue: "View all →"))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                }.buttonStyle(.plain)
+            }
+            if top.isEmpty {
+                Text(String(localized: "overview.topRulesEmpty", defaultValue: "No rule activity yet."))
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText).padding(.vertical, 16)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(top, id: \.ruleId) { s in
+                        HStack(spacing: 10) {
+                            Text(ruleDisplayName(s.ruleId))
+                                .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText).lineLimit(1)
+                            Spacer()
+                            Text(verbatim: "\(s.fireCount)×")
+                                .font(V2Theme.meta()).fontWeight(.semibold).foregroundStyle(V2Theme.high)
+                            if let last = s.lastFiredAt {
+                                Text(V2TimeFormat.relative(last))
+                                    .font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(V2Theme.panelBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+                    }
+                }
+            }
+        }
+        .v2Panel()
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Humanize a rule id for display: drop the maccrab. prefix and underscores.
+    private func ruleDisplayName(_ id: String) -> String {
+        var s = id
+        if s.hasPrefix("maccrab.") { s = String(s.dropFirst("maccrab.".count)) }
+        s = s.replacingOccurrences(of: "_", with: " ")
+        return s
+    }
+
+    // MARK: - Crabby (the animated MacCrab mascot)
+
+    /// Derive Crabby's mood from live posture so he reacts to events.
+    private var crabMood: V2CrabWidget.Mood {
+        let score = appState.securityScore
+        if kpis.activeCampaignsCritical > 0 || (score > 0 && score < 50) { return .critical }
+        if kpis.openAlerts24h > 0 || kpis.activeCampaigns > 0 { return .alert }
+        if score >= 90 { return .happy }
+        return .calm
+    }
+
+    private var crabCard: some View {
+        V2CrabWidget(mood: crabMood,
+                     openAlerts: kpis.openAlerts24h,
+                     criticalCampaigns: kpis.activeCampaignsCritical)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var quickActionsCard: some View {
