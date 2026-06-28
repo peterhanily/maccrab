@@ -111,7 +111,8 @@ struct RaveInstallConsentSheet: View {
         guard let cli = Self.bundledMaccrabctlPath() else {
             return (false, "Bundled maccrabctl not found. Install from a terminal:\n  maccrabctl plugin install \(id)")
         }
-        let argv = Self.installArguments(id: id, isUpdate: isUpdate)
+        let argv = Self.installArguments(id: id, isUpdate: isUpdate,
+                                         catalogBase: Self.catalogBaseOverride())
         return await withCheckedContinuation { cont in
             DispatchQueue.global().async {
                 let p = Process()
@@ -141,8 +142,26 @@ struct RaveInstallConsentSheet: View {
     /// maccrabctl regardless of `--force` — the flag only permits overwriting an
     /// already-present destination, never bypasses trust. Pure + static so the
     /// arg construction is unit-testable without launching a Process.
-    static func installArguments(id: String, isUpdate: Bool) -> [String] {
-        ["plugin", "install", id] + (isUpdate ? ["--force"] : [])
+    static func installArguments(id: String, isUpdate: Bool, catalogBase: String? = nil) -> [String] {
+        var argv = ["plugin", "install", id]
+        if isUpdate { argv.append("--force") }
+        // Target the SAME catalog the consent facts were resolved from. Without
+        // this, installing while browsing a UserDefaults-overridden (non-official)
+        // catalog would run maccrabctl against the hard-coded official base —
+        // resolving a different (or absent) entry than the sheet just showed.
+        if let base = catalogBase, !base.isEmpty {
+            argv += ["--catalog-base", base]
+        }
+        return argv
+    }
+
+    /// The operator's non-default catalog base (UserDefaults), or nil when on the
+    /// official source (maccrabctl then defaults to official). Keeps the in-app
+    /// install consistent with the catalog the browser/sheet resolved against.
+    static func catalogBaseOverride() -> String? {
+        guard let v = UserDefaults.standard.string(forKey: RaveCatalogClient.userDefaultsBaseURLKey),
+              !v.isEmpty else { return nil }
+        return v
     }
 
     /// Confirm-button copy. "Update plugin" / "Updated" for an in-place update,
@@ -185,9 +204,9 @@ struct RaveInstallConsentSheet: View {
                           systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption.weight(.semibold))
                     HStack(spacing: 6) {
-                        Text("v\(old)").foregroundStyle(.secondary)
+                        Text(verbatim: "v\(old)").foregroundStyle(.secondary)
                         Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
-                        Text("v\(f.resolvedVersion)").fontWeight(.semibold)
+                        Text(verbatim: "v\(f.resolvedVersion)").fontWeight(.semibold)
                         if old == f.resolvedVersion {
                             Text(String(localized: "rave.consent.reinstall", defaultValue: "(re-install)"))
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -238,11 +257,11 @@ struct RaveInstallConsentSheet: View {
             // "reviewed & signed" for a pre-release/awaiting-binary entry).
             if f.isFirstParty {
                 if f.isInstallable {
-                    Label("Verified by MacCrab — reviewed & signed by the maintainer.",
+                    Label(String(localized: "rave.consent.firstParty.verified", defaultValue: "Verified by MacCrab — reviewed & signed by the maintainer."),
                           systemImage: "checkmark.seal.fill")
                         .font(.caption2).foregroundStyle(.green)
                 } else {
-                    Label("First-party plugin — not available for one-click install.",
+                    Label(String(localized: "rave.consent.firstParty.notInstallable", defaultValue: "First-party plugin — not available for one-click install."),
                           systemImage: "seal")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
@@ -254,7 +273,7 @@ struct RaveInstallConsentSheet: View {
             // first, then the "what this grants" caveat.
             if let pf = PluginFactsLookup.facts(forPluginID: f.id) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("What this scanner accesses", systemImage: "doc.text.magnifyingglass")
+                    Label(String(localized: "rave.consent.whatItAccesses", defaultValue: "What this scanner accesses"), systemImage: "doc.text.magnifyingglass")
                         .font(.caption.weight(.semibold))
                     consentChipRow("Reads", pf.reads)
                     if !pf.needs.isEmpty { consentChipRow("TCC", pf.needs) }

@@ -33,4 +33,14 @@ struct RaveInstallArgumentsTests {
         #expect(upd.last == "--force")
         #expect(upd.count == fresh.count + 1)              // exactly one extra arg
     }
+
+    @Test("catalogBase override appends --catalog-base; nil/empty omits it")
+    func catalogBaseArgv() {
+        #expect(RaveInstallConsentSheet.installArguments(id: "x", isUpdate: false, catalogBase: nil)
+                == ["plugin", "install", "x"])
+        #expect(RaveInstallConsentSheet.installArguments(id: "x", isUpdate: false, catalogBase: "")
+                == ["plugin", "install", "x"])   // empty = no override
+        #expect(RaveInstallConsentSheet.installArguments(id: "x", isUpdate: true, catalogBase: "https://mirror.example/")
+                == ["plugin", "install", "x", "--force", "--catalog-base", "https://mirror.example/"])
+    }
 }

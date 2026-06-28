@@ -13,15 +13,20 @@ import Foundation
 @Suite("Localization coverage (UX-2)")
 struct LocalizationCoverageTests {
 
+    /// Guarded surfaces, as paths relative to Sources/MacCrabApp. Trust/consent
+    /// surfaces live outside V2/Workspaces, so the set is keyed on relative path
+    /// rather than a bare filename joined to one directory.
     static let priorityFiles = [
-        "V2OverviewWorkspace.swift",
-        "V2ForensicsScansView.swift",
-        "V2ForensicsFindingsView.swift",
-        "V2ForensicsPastScansView.swift",
-        "V2ForensicsScanDetailView.swift",
-        "V2KitDetailSheet.swift",
-        "V2SystemWorkspace.swift",
-        "V2PreventionWorkspace.swift",
+        "V2/Workspaces/V2OverviewWorkspace.swift",
+        "V2/Workspaces/V2ForensicsScansView.swift",
+        "V2/Workspaces/V2ForensicsFindingsView.swift",
+        "V2/Workspaces/V2ForensicsPastScansView.swift",
+        "V2/Workspaces/V2ForensicsScanDetailView.swift",
+        "V2/Workspaces/V2KitDetailSheet.swift",
+        "V2/Workspaces/V2SystemWorkspace.swift",
+        "V2/Workspaces/V2PreventionWorkspace.swift",
+        // Trust / consent surface — the third-party plugin install gate.
+        "V2/Forensics/RaveInstallConsentSheet.swift",
     ]
 
     /// A bare user-facing literal: Text / Button / Label / .help /
@@ -40,7 +45,7 @@ struct LocalizationCoverageTests {
 
     @Test("no bare user-facing string literal in the priority V2 surfaces")
     func priorityFilesAreLocalized() throws {
-        let dir = Self.packageRoot().appendingPathComponent("Sources/MacCrabApp/V2/Workspaces")
+        let dir = Self.packageRoot().appendingPathComponent("Sources/MacCrabApp")
         for file in Self.priorityFiles {
             let url = dir.appendingPathComponent(file)
             let src = try String(contentsOf: url, encoding: .utf8)
