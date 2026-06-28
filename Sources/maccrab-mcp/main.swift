@@ -1244,6 +1244,12 @@ func handleForensicsInstallPlugin(_ args: [String: Any]) -> Any {
     guard let id = args["plugin_id"] as? String, !id.isEmpty else {
         return toolError("forensics_install_plugin requires 'plugin_id' (a catalog plugin id).")
     }
+    // A path-shaped id would route maccrabctl to the LOCAL SIDELOAD branch
+    // (unvetted code), defeating the documented "sideload is CLI-only" boundary.
+    // Reject it here, mirroring maccrabctl's isLikelyPluginID rule.
+    guard !id.contains("/"), !id.contains("\\"), !id.hasPrefix("."), !id.hasPrefix("~") else {
+        return toolError("plugin_id must be a catalog id (reverse-DNS, no path separators); local sideload is CLI-only.")
+    }
     guard (args["confirm"] as? Bool) == true else {
         return toolError("Pass confirm:true to install — it adds executable scanner code via the verified install path.")
     }

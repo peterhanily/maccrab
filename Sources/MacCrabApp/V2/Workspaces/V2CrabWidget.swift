@@ -33,6 +33,7 @@ struct V2CrabWidget: View {
     var onFeed: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var petting = false
     @State private var feeding = false
     @State private var snapAt: Date? = nil
@@ -182,7 +183,10 @@ struct V2CrabWidget: View {
 
     @ViewBuilder
     private var sceneView: some View {
-        if reduceMotion {
+        // Freeze the per-frame Canvas redraw when motion is off OR the window
+        // isn't the active scene (don't burn CPU/battery animating a pet the
+        // user can't see).
+        if reduceMotion || scenePhase != .active {
             sceneCanvas(t: 0)
         } else {
             TimelineView(.animation) { tl in
@@ -406,5 +410,6 @@ struct V2CrabWidget: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.45)
         .help(help)
+        .accessibilityLabel(Text(help))
     }
 }

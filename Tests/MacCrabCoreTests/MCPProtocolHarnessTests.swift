@@ -291,12 +291,19 @@ struct MCPProtocolHarnessTests {
             .compactMap { $0["name"] as? String })
         #expect(!names.isEmpty, "tools/list returned no tools")
 
-        // Engine mutators follow a verb-prefix convention. Dotted plugin tools
-        // (forensics.*) write app-side evidence, not engine detection state, and
-        // are intentionally outside the gate — excluded here.
+        // Engine mutators follow a verb-prefix convention. The forensics PLUGIN
+        // mutators (underscore-named since v1.19.1) carry no verb prefix but ARE
+        // gated (.response tier) — install/uninstall/pin replace executable
+        // scanner code / change pin state on disk — so pin them explicitly: a
+        // forgotten agentToolCapability entry (or a new forensics mutator) then
+        // fails the build instead of failing OPEN (the v1.18 bypass class).
         let mutatingPrefixes = ["create_", "delete_", "set_", "suppress_", "reload_", "refresh_"]
+        let forensicsMutators: Set<String> = [
+            "forensics_install_plugin", "forensics_uninstall_plugin",
+            "forensics_pin_plugin", "forensics_install_plugin_update",
+        ]
         let observed = names.filter { n in
-            !n.contains(".") && mutatingPrefixes.contains { n.hasPrefix($0) }
+            !n.contains(".") && (mutatingPrefixes.contains { n.hasPrefix($0) } || forensicsMutators.contains(n))
         }
 
         // The canonical gated engine-mutation surface (mirrors agentToolCapability
@@ -308,6 +315,8 @@ struct MCPProtocolHarnessTests {
             "reload_rules", "refresh_threat_intel",
             "suppress_alert", "suppress_campaign",
             "set_response_action",
+            "forensics_install_plugin", "forensics_uninstall_plugin",
+            "forensics_pin_plugin", "forensics_install_plugin_update",
         ]
         for n in observed {
             #expect(expectedGated.contains(n),
