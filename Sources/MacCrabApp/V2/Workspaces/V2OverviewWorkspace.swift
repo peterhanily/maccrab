@@ -26,6 +26,7 @@ struct V2OverviewWorkspace: View {
     // Store news on the forensics/plugins card.
     @State private var storeNews: [StoreNewsItem] = []
     @State private var ruleTitles: [String: String] = [:]   // ruleId → title (Top Firing Rules)
+    @State private var crabAckSeverity = 0   // highest crab alarm acknowledged this session
     // Customizable dashboard: which widgets show, in what order, at what size.
     @StateObject private var layout = V2OverviewLayoutStore()
     @State private var editing = false
@@ -153,6 +154,12 @@ struct V2OverviewWorkspace: View {
                     ruleTitles = Dictionary(rs.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
                 }
             }
+
+            // Re-arm Crabby's acknowledgement as threats subside: if the raw
+            // alarm level has dropped below what was acknowledged, lower the
+            // baseline so a future escalation alarms (and settles) again.
+            let sev = crabSeverity(rawCrabMood)
+            if sev < crabAckSeverity { crabAckSeverity = sev }
         }
     }
 
@@ -876,23 +883,44 @@ struct V2OverviewWorkspace: View {
 
     // MARK: - Crabby (the animated MacCrab mascot)
 
-    /// Derive Crabby's mood from ACTIVE CAMPAIGNS (correlated, current threats) —
+    /// Crabby's RAW mood from ACTIVE CAMPAIGNS (correlated, current threats) —
     /// deliberately NOT from raw open-alert counts or the posture score, so old
-    /// or benign rule firings (and a merely-imperfect security score) don't keep
-    /// him stuck in a panic. He only panics for a genuinely active critical
-    /// campaign; watches on an active high campaign; otherwise calm/happy.
-    private var crabMood: V2CrabWidget.Mood {
+    /// or benign rule firings don't keep him stuck in a panic.
+    private var rawCrabMood: V2CrabWidget.Mood {
         if kpis.activeCampaignsCritical > 0 { return .critical }
         if kpis.activeCampaignsHigh > 0 || kpis.activeCampaigns > 0 { return .alert }
         if appState.securityScore >= 90 && kpis.openAlerts24h == 0 { return .happy }
         return .calm
     }
 
+    private func crabSeverity(_ m: V2CrabWidget.Mood) -> Int {
+        switch m { case .critical: return 2; case .alert: return 1; default: return 0 }
+    }
+
+    /// Effective mood after acknowledgement: once you acknowledge an alarm Crabby
+    /// settles back to calm until a WORSE event occurs (re-armed as threats drop
+    /// in `loadCrabAckRearm`). happy/calm always show as-is.
+    private var effectiveCrabMood: V2CrabWidget.Mood {
+        let raw = rawCrabMood
+        let sev = crabSeverity(raw)
+        if sev == 0 { return raw }
+        return sev > crabAckSeverity ? raw : .calm
+    }
+
+    private var canAcknowledgeCrab: Bool {
+        let sev = crabSeverity(rawCrabMood)
+        return sev > 0 && sev > crabAckSeverity
+    }
+
     private var crabCard: some View {
-        V2CrabWidget(mood: crabMood,
-                     openAlerts: kpis.openAlerts24h,
-                     criticalCampaigns: kpis.activeCampaignsCritical)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        V2CrabWidget(
+            mood: effectiveCrabMood,
+            criticalCampaigns: kpis.activeCampaignsCritical,
+            canAcknowledge: canAcknowledgeCrab,
+            onAcknowledge: { crabAckSeverity = crabSeverity(rawCrabMood) },
+            onInvestigate: { state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns)) }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var quickActionsCard: some View {
