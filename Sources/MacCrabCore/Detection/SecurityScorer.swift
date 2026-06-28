@@ -257,9 +257,13 @@ public actor SecurityScorer {
     }
 
     private nonisolated func checkScreenLock() -> Bool {
-        // Check if screensaver password is required
-        runProbe("/usr/bin/defaults", ["read", "com.apple.screensaver", "askForPassword"])
-            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        // `askForPassword` is frequently ABSENT on modern macOS (the setting
+        // moved; `defaults read` then errors → empty output). Absent ≠ disabled,
+        // so don't false-warn: only a present "0" is a genuine fail.
+        let raw = runProbe("/usr/bin/defaults", ["read", "com.apple.screensaver", "askForPassword"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty { return true }   // key unreadable/absent → treat as unknown, don't penalize
+        return raw == "1"
     }
 
     private nonisolated func checkSSHEnabled() -> Bool {
@@ -267,18 +271,19 @@ public actor SecurityScorer {
     }
 
     private nonisolated func checkXProtectCurrent() -> Bool {
-        let xprotectPaths = [
-            "/Library/Apple/System/Library/CoreServices/XProtect.bundle",
-            "/Library/Apple/System/Library/CoreServices/XProtect.app",
-        ]
-        for path in xprotectPaths {
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-               let modDate = attrs[.modificationDate] as? Date {
-                // Consider current if updated in last 30 days
-                return Date().timeIntervalSince(modDate) < 30 * 86400
-            }
+        // XProtect is Apple-managed (silent background updates via XProtect
+        // Remediator / config-data), so a present bundle with a readable Version
+        // IS current. The old mtime + 30-day cliff false-warned on any Mac that
+        // simply hadn't received a (infrequent) update in a month.
+        let meta = "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.meta.plist"
+        if let dict = NSDictionary(contentsOfFile: meta),
+           let v = dict["Version"], !"\(v)".isEmpty {
+            return true
         }
-        return false
+        // Fallback: the bundle/app exists at all → managed by Apple.
+        let fm = FileManager.default
+        return fm.fileExists(atPath: "/Library/Apple/System/Library/CoreServices/XProtect.bundle")
+            || fm.fileExists(atPath: "/Library/Apple/System/Library/CoreServices/XProtect.app")
     }
 
     private nonisolated func checkSSHKeySecurity() -> Bool {
