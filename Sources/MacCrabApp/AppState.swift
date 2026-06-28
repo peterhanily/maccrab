@@ -1952,11 +1952,15 @@ final class AppState: ObservableObject {
         refreshTCCSnapshot()
         maybeKickWatchdog()
 
-        // Rules rarely change — only load once
+        // Rules rarely change — load once, BUT only latch on a SUCCESSFUL load.
+        // If the first poll reads the compiled_rules dir mid-install / mid-OTA
+        // (transiently empty), rulesLoaded would be 0; latching that for the
+        // session made isProtectionDegraded true forever (a permanent false
+        // "Protection degraded"). Retry each poll until rules actually load.
         if !rulesLoaded_cached {
             await loadRules()
             await loadTCCEvents()
-            rulesLoaded_cached = true
+            if rulesLoaded > 0 { rulesLoaded_cached = true }
         }
 
         // v1.6.8: keep the allowlist-count badge (Manage button on
@@ -2143,6 +2147,10 @@ final class AppState: ObservableObject {
                 in: .userDomainMask
             ).first.map { $0.appendingPathComponent("MacCrab/compiled_rules").path }
                 ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/compiled_rules",
+            // System dir the ROOT daemon enforces from — unconditional fallback so
+            // the app never reads 0 rules (→ false "degraded") when dataDir
+            // resolved to the user side but the engine runs system-side.
+            "/Library/Application Support/MacCrab/compiled_rules",
             // Development: next to the maccrabd binary
             URL(fileURLWithPath: CommandLine.arguments[0])
                 .deletingLastPathComponent()

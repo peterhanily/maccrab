@@ -275,20 +275,23 @@ struct WelcomeView: View {
             activeDataDir = systemDir
         }
 
+        // Count from the RESOLVED active dir only (mirrors AppState.loadRules'
+        // dataDir-first behaviour). The old MAX-across-candidates loop surfaced
+        // whichever dir had the most files — e.g. a stale, larger user-side
+        // corpus — instead of the rules the engine actually enforces, so the
+        // welcome screen could claim a rule count the daemon isn't running.
         let candidates = [
             activeDataDir + "/compiled_rules",
-            userDir + "/compiled_rules",
             systemDir + "/compiled_rules",
+            userDir + "/compiled_rules",
             fm.currentDirectoryPath + "/.build/debug/compiled_rules",
         ]
-
         var ruleCount = 0
         for dir in candidates {
-            if let files = try? fm.contentsOfDirectory(atPath: dir) {
-                let jsonCount = files.filter { $0.hasSuffix(".json") }.count
-                if jsonCount > ruleCount {
-                    ruleCount = jsonCount
-                }
+            if let files = try? fm.contentsOfDirectory(atPath: dir),
+               case let n = files.filter({ $0.hasSuffix(".json") }).count, n > 0 {
+                ruleCount = n
+                break   // first populated dir wins (active → system → user)
             }
         }
         compiledRuleCount = ruleCount

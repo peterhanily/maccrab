@@ -163,13 +163,15 @@ struct V2OverviewWorkspace: View {
         }
     }
 
-    /// Three-state banner driven by real signals: protection-active
-    /// (live data + heartbeat fresh + score ≥ 75), degraded (live but
-    /// score < 75 or stale heartbeat), or inactive (mock-mode = no
-    /// daemon writing data). v1.12.0 RC16: dropped the .starting state
-    /// (briefly introduced in RC15) — turbo-fast daemon boot makes the
-    /// transient "starting" window invisible to the user, so the extra
-    /// state was just noise.
+    /// Three-state banner driven by ENGINE-HEALTH signals only: active (live +
+    /// heartbeat fresh + engine not degraded), degraded (stale heartbeat / no
+    /// rules loaded / storage errors / rule tamper), or inactive (no daemon).
+    ///
+    /// The banner deliberately does NOT factor the security SCORE: a low posture
+    /// score (e.g. the macOS firewall is off) is an environmental finding, not an
+    /// engine impairment, and is already surfaced by the Security Grade tile +
+    /// its factors. Treating score<75 as "Protection degraded" cried wolf about
+    /// the engine when the engine was perfectly healthy.
     private enum ProtectionState { case active, degraded, inactive }
 
     private var protectionState: ProtectionState {
@@ -181,7 +183,6 @@ struct V2OverviewWorkspace: View {
         }()
         if !heartbeatFresh { return .degraded }
         if appState.isProtectionDegraded { return .degraded }
-        if appState.securityScore > 0 && appState.securityScore < 75 { return .degraded }
         return .active
     }
 
