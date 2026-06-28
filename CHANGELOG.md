@@ -3,6 +3,28 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] — 2026-06-28
+
+A features-and-correctness release: a richer, gap-free customizable Overview with
+new widgets (including the Crabby companion), forensic plugin management from both
+the CLI and the MCP server, and a deep-dive round of fixes.
+
+### Dashboard
+- The customizable Overview uses a masonry layout — mixed-height widgets pack together with no gaps at any window size.
+- New widgets: **Protection Coverage** (live sensor health), **Top Firing Rules**, and **Crabby** — a Tamagotchi-style companion using the rave pixel crab that reacts to your live security state (weather, mood, a coverage shield, an AI sidekick) and lets you Pet / Feed / Acknowledge / Investigate.
+- "Reset to default" now confirms first; installed catalog plugins show a working Update / Reinstall / Remove with an "up to date" status instead of an error.
+- Fixed a false "Protection degraded" banner that could latch after an update; the banner now reflects real engine health (a low posture score is shown by the Security Grade tile instead).
+
+### Detection & scoring
+- A broad allowlist can no longer silence an active command-and-control or credential-theft alert.
+- More honest security score: XProtect is no longer false-flagged as outdated, and the Screen Lock check no longer false-warns on modern macOS.
+
+### AI agent integration (MCP)
+- The forensic plugin platform now has CLI/MCP parity: list cases, search the signed catalog, run scanners, and (with the human-granted response capability) install / update / uninstall / pin plugins; plus a read-only `get_daemon_config`.
+
+### Reliability
+- Oversized event payloads are always stored as valid, readable records; hardened the SIGHUP rule reload; accessibility and localization polish across the new surfaces.
+
 ## [1.20.2] — 2026-06-26
 
 A stability and hardening release.
