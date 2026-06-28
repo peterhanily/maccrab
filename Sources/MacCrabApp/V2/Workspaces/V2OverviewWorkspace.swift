@@ -912,13 +912,26 @@ struct V2OverviewWorkspace: View {
         return sev > 0 && sev > crabAckSeverity
     }
 
+    /// All sensors reporting healthy (drives Crabby's coverage shield).
+    private var crabProtectionHealthy: Bool {
+        let cols = appState.heartbeat?.collectorHealth ?? []
+        return appState.isConnected && !cols.isEmpty && cols.allSatisfy { $0.healthy } && !appState.isProtectionDegraded
+    }
+
     private var crabCard: some View {
         V2CrabWidget(
             mood: effectiveCrabMood,
             criticalCampaigns: kpis.activeCampaignsCritical,
             canAcknowledge: canAcknowledgeCrab,
+            eventRate: kpis.eventsPerSecond,
+            eventBuckets: kpis.eventsLast8Buckets,
+            aiActive: !appState.aiSessions.isEmpty,
+            protectionHealthy: crabProtectionHealthy,
+            connected: appState.isConnected,
+            alertToken: alerts.first?.id ?? "",
             onAcknowledge: { crabAckSeverity = crabSeverity(rawCrabMood) },
-            onInvestigate: { state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns)) }
+            onInvestigate: { state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns)) },
+            onFeed: { Task { await appState.refreshThreatIntelNow() } }
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }
