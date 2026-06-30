@@ -149,6 +149,6 @@ struct RaveInstallURLTests {
     func stalenessWarningSurfacing() {
         #expect(Self.facts(freshness: .fresh(age: 10)).revocationStalenessWarning == nil)
         #expect(Self.facts(freshness: .never).revocationStalenessWarning != nil)
-        #expect(Self.facts(freshness: .stale(age: 8 * 86400)).revocationStalenessWarning != nil)
+        #expect(Self.facts(freshness: .stale(age: 8.0 * 86400)).revocationStalenessWarning != nil)
     }
 }

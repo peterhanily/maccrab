@@ -33,9 +33,9 @@ struct RevocationReverifyTests {
 
     @Test("stale data fails-closed by trust class: third-party quarantines, store warns, built-in unaffected")
     func staleByClass() {
-        let stale = RaveRevocationFreshness.stale(age: 8 * 24 * 3600)
-        #expect(RevocationReverify.staleAction(freshness: stale, provenance: .thirdParty) == .quarantine(age: 8 * 24 * 3600))
-        #expect(RevocationReverify.staleAction(freshness: stale, provenance: .store) == .warn(age: 8 * 24 * 3600))
+        let stale = RaveRevocationFreshness.stale(age: 8.0 * 24 * 3600)
+        #expect(RevocationReverify.staleAction(freshness: stale, provenance: .thirdParty) == .quarantine(age: 8.0 * 24 * 3600))
+        #expect(RevocationReverify.staleAction(freshness: stale, provenance: .store) == .warn(age: 8.0 * 24 * 3600))
         #expect(RevocationReverify.staleAction(freshness: stale, provenance: .builtIn) == .ok)
     }
 
@@ -75,7 +75,7 @@ struct RevocationReverifyTests {
         ]
         let recs = RevocationReverify.runtimeQuarantine(
             installed: installed, against: list,
-            freshness: .stale(age: 8 * 24 * 3600), now: Date(timeIntervalSince1970: 1_750_000_000))
+            freshness: .stale(age: 8.0 * 24 * 3600), now: Date(timeIntervalSince1970: 1_750_000_000))
         let byID = Dictionary(uniqueKeysWithValues: recs.map { ($0.pluginID, $0) })
         #expect(Set(byID.keys) == ["com.x.revoked", "com.x.sideload"])
         // explicit revocation keeps the list's reason/code, NOT the stale code
@@ -104,7 +104,7 @@ struct RevocationReverifyTests {
         // `.stale` (not `.never`) so the stale escalation genuinely fires and the
         // dedup against the explicit revocation is exercised.
         let recs = RevocationReverify.runtimeQuarantine(
-            installed: installed, against: list, freshness: .stale(age: 8 * 24 * 3600))
+            installed: installed, against: list, freshness: .stale(age: 8.0 * 24 * 3600))
         #expect(recs.count == 1)
         #expect(recs.first?.code == "MALWARE")
     }
