@@ -23,9 +23,7 @@
 
 MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
 
-**Positioning — and why not a commercial EDR.** MacCrab is a research, investigation, and power-user tool, **not** a drop-in replacement for a managed EDR. Commercial EDRs bring a decade of global adversary telemetry, vendor-curated detection content, 24/7 SOC response, and fleet orchestration — backed by a company and an SLA. MacCrab trades all of that for **transparency** (you read every rule), **auditability** (you can modify them), **local-only operation** (no console, no data egress), and **zero cost** — with real tradeoffs you should know up front: no global adversary corpus, no managed response, most of the rule corpus is still **experimental** (see [coverage](docs/COVERAGE.md)), and a **single-maintainer supply chain** (see [Supply-chain security](docs/SUPPLY_CHAIN_SECURITY.md)). Use MacCrab if you want to operate and understand your own detection logic; use a commercial EDR if you need managed threat hunting and fleet-scale coordination.
-
-**Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine **and is OK running alpha software.**
+It's a tool for reading and operating your own detection logic, not a managed EDR: there's no global adversary telemetry, no managed response, most of the rule corpus is still **experimental** (see [coverage](docs/COVERAGE.md)), and it ships from a **single-maintainer supply chain** (see [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md)).
 
 **Releases:** Signed, notarized, auto-updating builds ship via Sparkle through [maccrab.com/appcast.xml](https://maccrab.com/appcast.xml). See [CHANGELOG.md](CHANGELOG.md) for the release history.
 
@@ -89,29 +87,6 @@ Once running, MacCrab gives you:
 - **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
 - **Out-of-band rule updates** -- new detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`); pushed rules are detection-only and can never override a built-in rule
 - **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
-
----
-
-## How MacCrab Compares
-
-| Capability | MacCrab | Santa | osquery | Commercial EDR |
-|------------|:-------:|:-----:|:-------:|:--------------:|
-| Real-time kernel events (90+ ES types)[^es] | Yes | Exec only | Scheduled | Yes |
-| Sigma-compatible rules | **Yes** | No | No | Varies |
-| Temporal sequence detection | **Yes** | No | No | Some |
-| Behavioral scoring | **Yes** | No | No | Yes |
-| AI coding tool guardrails | **Yes** | No | No | No |
-| Threat intel feeds (abuse.ch) | **Yes** | No | No | Yes |
-| Baseline anomaly detection | **Yes** | No | No | Yes |
-| TCC permission monitoring | **Yes** | No | Partial | Some |
-| Process lineage DAG | **Yes** | No | Partial | Yes |
-| Native macOS dashboard | **Yes** | Yes | No | Agent only |
-| Self-defense (8 layers) | **Yes** | No | No | Yes |
-| Runs entirely local | **Yes** | **Yes** | **Yes** | No |
-| Open source | **Yes** | **Yes** | **Yes** | No |
-| Infrastructure required | **None** | Sync server | Fleet server | Cloud console |
-
-[^es]: **Coverage depends on the build.** Signed Homebrew/DMG **releases** run as a native Endpoint Security System Extension with the full 90+ event types. **Building from source** requires Apple's `com.apple.developer.endpoint-security.client` entitlement, which most developers don't have — so a source build falls back through `eslogger` (a subset of ES event types, root required) → `kdebug`/`fs_usage` (process-exec + file events only, root) → FSEvents (file changes only, non-root). The fallback chain works but the coverage delta is large; the comparison row reflects a release build. See [Signing and Distribution](#signing-and-distribution).
 
 ---
 
@@ -636,159 +611,23 @@ revocable, and sandboxed. See [docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.m
 and [docs/TRUST.md](docs/TRUST.md).
 
 ---
-
 ## What's New
 
-<details open>
-<summary><strong>v1.20 — customizable dashboard, signed out-of-band rule updates, live Rave plugin store (2026-06)</strong></summary>
+The current release is **v1.21.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
+dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
+Recent milestones:
 
-- **Customizable Overview dashboard** — show/hide, drag-reorder, and resize panels; the layout persists across app updates and is resilient to a corrupted preferences file.
-- **Signed out-of-band rule channel** — detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`). Pushed rules are Ed25519-verified, version-floored, additive-only (never shadow a built-in), and **detection-only** (never arm a response action).
-- **Forensics: simpler "Run a scan"** (built-in scanners + installed plugins as two collapsible lists) and at-a-glance plugin provenance (Built-in / Store / Sideloaded). The **[Rave plugin store](https://rave.maccrab.com)** is live.
-- **Privacy & hardening** — a strict no-leak mode for cloud LLM backends, a false-positive-rate benchmark harness, and a sandbox fd-broker hardening fix (v1.20.2).
-
-</details>
-
-<details>
-<summary><strong>v1.12 — supply-chain detection wave, intent posterior, TURBO daemon boot, in-dashboard Sigma editor (2026-05)</strong></summary>
-
-v1.12 ships detection coverage for the September 2025 Shai-Hulud worm class and the April–May 2026 follow-on incidents (Mini Shai-Hulud, Lightning PyPI, TanStack CVE-2026-45321), plus an intent-based detection layer that sits on top of the rule layer: a Bayesian belief network maintains a per-process-tree posterior over attacker goals, and an LLM-backed `IntentClassifier` produces a categorical verdict on `npm install` / `pip install` exec events. Both are detection-only; single-event Sigma rules still fire on the same events. Two pre-ship audit cycles (10 parallel domains across security, performance, detection FP, integration, release engineering, data safety, resiliency, stability, secrets, and UX) cleared a ~24-fix queue before tag.
-
-- **Wave 5 actors** — `IntentClassifier`, `PromptIntentBridge`, `CounterfactualReasoner`, `StylometricMaintainerDriftAnalyzer`, `HoneyPromptDeception`, `BayesianIntentPosterior`. Six new graph rules in `Rules/graph/` evaluate against materialized TraceGraph traces. Eight new MCP tools (`check_typosquat_score`, `scan_package_content`, `analyze_package_metadata`, `verify_package_attestation`, `classify_package_intent`, `predict_next_technique`, `score_text_style`, `get_intent_posterior`).
-- **Worm self-propagation detection** — the canonical Shai-Hulud signature (credential read + GitHub publish-endpoint egress, both from the same `node` lineage within a 60-s window) fires as both a sequence rule (`Rules/sequences/`) and a graph rule with O(1) tactic-indexed dispatch. Heuristic intent classifier catches it even without an LLM configured.
-- **Daemon cold-start: 114 s → 118 ms (~1000×).** Seven sources of synchronous main-thread work deferred behind `Task.detached` after the first heartbeat: `tracegraph.db` quick_check on a 7 GB store, `SelfDefense` self-SHA-256, `BaselineEngine.load`, `ThreatIntelFeed`, `BundledThreatIntel`, `ESClientMonitor`, polled monitors (USB / clipboard / browser-extension / rootkit / EDR / TEMPEST). `boot_phase` breadcrumbs stamped at 14 milestones so future regressions surface immediately.
-- **In-dashboard Sigma YAML editor.** The Detection workspace now ships a read-only viewer + a TextEditor save flow that pipes the edited YAML through the bundled `compile_rules.py` and writes the resulting JSON to `/Library/Application Support/MacCrab/user_rules/<uuid>.json`. Daemon picks up the change via a `.reload_tick` mtime watcher; no restart needed. Disable / re-enable actions write the same overlay with `enabled=false`. First write fires a single AppleScript admin prompt to create the override directory `root:admin 0775`; subsequent edits don't prompt.
-- **Privacy hardening.** Webhook + syslog default hostname is now `maccrab-host` instead of the machine hostname (overrideable via `MACCRAB_WEBHOOK_HOSTNAME` / `MACCRAB_SYSLOG_HOSTNAME`). MCP `get_alerts` / `get_alert_detail` / `scan_text` payloads route through `LLMSanitizer.sanitize()` before returning to the agent, matching the redaction guarantees of the cloud-LLM backends.
-- **LLM-backend allowlist tightening.** OpenAI host check replaced `hasSuffix("api.openai.com")` (which let `evilapi.openai.com` through) with a dot-anchored exact-host Set plus `.openai.azure.com` dot-suffix with a `count > suffix.count` guard. Gemini model-name allowlist is now a `[a-z0-9._-]+` regex capped at 64 chars. Ollama plaintext-remote detection now explicitly nil-checks the host.
-
-</details>
-
-<details>
-<summary><strong>v1.11 — 79-finding audit-fix wave + v1.10.x backlog clear + first-launch beachball hotfix (2026-05)</strong></summary>
-
-v1.11.0 was a feature release combined with a sustained audit-fix pass. A six-domain pre-release audit (security / stability / performance / functionality / scalability+UX-L10n / ship-readiness) on the v1.10.1 baseline surfaced 8 BLOCKERs + 24 HIGHs + 25 MEDIUMs + 22 LOWs (79 findings total). v1.11.0 closes every BLOCKER, the high-impact HIGHs, the wire-the-orphans HIGHs (alertNotifications + inbox poller reentrancy), the bulk of the MEDIUMs, AND ships the deferred v1.10.x backlog: M2 live data wiring across collectors / permissions / packages / integrations, AlertStore phantom-field schema migration, force-directed TraceGraph canvas, YAML compilation for graph rules, `maccrabctl trace replay --compare-rules`, and sidebar consolidation.
-
-- **v1.11.1** — First-launch beachball hotfix. Three things ran on the main thread before SwiftUI rendered the dashboard's first frame; all three are now deferred. `RuleBundleInstaller.syncIfNeeded()` moved off `MacCrabApp.init()`. `V2LiveDataProvider()` SQLite opens parallelized + detached. `AppState.loadSuppressPatterns()` + `loadSuppressedIDs()` deferred. Net result: dashboard window should paint in well under 200 ms on cold launch.
-
-</details>
-
-<details>
-<summary><strong>v1.10 — workspace dashboard, visual TraceGraph, Agent Traces, hardened mutation IPC (2026-05)</strong></summary>
-
-The v1.10 line replaces the v1 SwiftUI dashboard with a workspace-based V2 design (Overview / Alerts / Investigation / Intelligence / Protection / System), ships a real visual TraceGraph, and folds in 280+ pre-ship audit-fix findings across security, performance, scalability, localization, and daemon correctness.
-
-- **v1.10.1** — Hotfix for a regression that affected every notarized install since v1.3: dashboard suppress / unsuppress / delete actions and campaign suppress all silently failed because the sysext owns `alerts.db` as root while the dashboard runs as the user (`SQLITE_READONLY`). The error toast pointed at `maccrabctl alerts suppress <id>` (not a real subcommand) and `sudo open MacCrab.app` (LaunchServices ignores it). Fix routes mutations through the existing `/Library/Application Support/MacCrab/inbox/` file-IPC channel — sysext poller now drains `suppress-alert-*.json`, `unsuppress-alert-*.json`, `delete-alert-*.json`, and `suppress-campaign-*.json` request files. Poll interval drops 30 s → 5 s for interactive feel. Campaign-suppress fan-out moves server-side. README rule-count table now auto-generates from the YAML tree (`make readme-coverage`). New `RELEASE_PROCESS.md` documents the operator-side signing / notarization / Sparkle pipeline.
-- **v1.10.0** — V2 dashboard with six workspaces, multi-select alert triage, bulk-suppress, campaign suppress, suppressions viewer with lift-suppression, threat-intel feed refresh, custom feed + LLM key reveal-folder shortcuts. Visual TraceGraph view (hub-and-spoke layout with anchor at centre + members on concentric rings). New `tracegraph.db` (SQLite causal-graph store with the same column-level AES-GCM encryption as the other stores). Five new MCP trace tools (`get_traces`, `get_trace_detail`, `hunt_trace`, `verify_bundle`, `trace_from_event`). `.maccrabtrace` signed bundle export/verify via `maccrabctl trace`. CLIs (`maccrabctl`, `maccrab-mcp`) now bundle inside `MacCrab.app` so Sparkle in-place updates keep the terminal CLIs current.
-
-</details>
-
-<details>
-<summary><strong>v1.9 — Agent Traces (intent ↔ effect correlation), loopback OTLP receiver (2026-05)</strong></summary>
-
-v1.9 introduced Agent Traces — the AgentSight-inspired feature that correlates an AI coding agent's stated intent (LLM prompts, tool calls, OTel spans) against the kernel-level effects (ES exec / file / network events) its child processes actually produce on the host. AgentSight ([arXiv:2508.02736](https://arxiv.org/abs/2508.02736)) implements this on Linux via eBPF; MacCrab brings the idea to macOS via Endpoint Security plus a loopback OTLP receiver on `127.0.0.1:4318`. W3C `TRACEPARENT` propagation through the exec env block binds every descendant process to the originating LLM turn. The bundled 26-finding pre-ship audit-fix pass tightened the sysext's resource accounting and prune cadences.
-
-</details>
-
-<details>
-<summary><strong>v1.7 — operator self-service, observability, hot-fix discipline (2026-04)</strong></summary>
-
-The v1.7 line focused on closing the loop between "MacCrab thinks
-something is wrong" and "the operator can actually act on it",
-shipping multiple field-driven hot-fixes along the way.
-
-- **v1.7.6** — `SchemaMigrator` multi-store hot-fix. Co-resident
-  EventStore + AlertStore on shared `events.db` were silently
-  skipping each other's migrations after both hit schema v2,
-  causing AlertStore prepare to crash and the daemon to enter
-  a 10 s respawn loop. Fix re-applies a store's migrations
-  idempotently in version order; storage-init errors now log
-  with `.public` privacy (no more `<private>` redaction);
-  auto-recovery backs up corrupt sidecar files; new
-  `maccrabctl repair --fix-storage` operator escape hatch.
-  No data loss on existing installs.
-- **v1.7.5** — Heartbeat split into `heartbeat.json` (synchronous
-  liveness, can't deadlock) and `heartbeat_rich.json` (async rich
-  payload). Added `maccrabctl repair` self-diagnostic. Dashboard
-  shows zombie-sysext banner when prior versions queue uninstall.
-- **v1.7.4** — Hot-fix for a v1.7.3 silent-heartbeat regression
-  caused by an outer in-flight guard layered on top of per-writer
-  guards.
-- **v1.7.3** — Hot-fix for a memory regression (back to ~50 MB
-  steady from a transient 2.31 GB spike).
-- **v1.7.2** — 8-item deferred queue cleanup with pre-ship review.
-- **v1.7.1** — Dashboard panel-richness audit on 4 primary panels.
-- **v1.7.0** — MCP attribution: events tied back to the AI tool
-  session that triggered them via 3 new event columns
-  (`mcp_server_name`, `mcp_server_category`, `ai_tool_session_id`).
-
-The release pipeline now codifies its invariants in
-`scripts/pre-release-audit.sh` (8 architectural passes that gate
-every shipped DMG). Each shipped hot-fix added an audit pass for
-the bug class it fixed.
-
-</details>
-
-<details>
-<summary><strong>v1.4 – v1.6 — performance, prevention surface, fleet (2026-04)</strong></summary>
-
-- **v1.6.x** — Memory-cap regression fix (CampaignStore was
-  opening `events.db` instead of `campaigns.db` — caught by a new
-  events.db-handle-count audit pass). DaemonConfig decoder fix
-  for snake-case overrides silently being dropped to defaults.
-  Many feature additions: TEMPEST/SDR detection, EDR/RMM
-  discovery, Vitter Algorithm R reservoir sampling for snapshots.
-- **v1.5.x** — Prevention surface expansion (DNS sinkhole,
-  network blocker, persistence guard, kill/quarantine response
-  actions wired through the dashboard).
-- **v1.4.x** — Sparkle auto-update infrastructure, Homebrew cask
-  tap, fleet telemetry server (`fleet/server.py`), 14 dashboard
-  language localizations.
-
-</details>
-
-<details>
-<summary><strong>v1.3 — native Endpoint Security via SystemExtension (2026-04)</strong></summary>
-
-v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a native Endpoint Security **System Extension** activated from inside `MacCrab.app` -- matching the architecture every commercial macOS EDR uses (CrowdStrike, SentinelOne, Jamf Protect, Microsoft Defender). On macOS Catalina+, AMFI grants `com.apple.developer.endpoint-security.client` only to binaries loaded via `OSSystemExtensionRequest` from an approved `.systemextension` bundle -- LaunchDaemons are categorically rejected regardless of profile validity.
-
-- **SystemExtension activation** -- no more `sudo maccrabd`; open MacCrab.app and click Enable Protection. `sysextd` manages the lifecycle from there.
-- **Native ES client** -- `com.apple.developer.endpoint-security.client` approved under bundle ID `com.maccrab.agent`. The 3-level fallback chain (eslogger → kdebug → FSEvents) is still first-class for developer builds.
-- **Network-convergence hardening (1.3.4)** -- unresolved destination IPs no longer bucket benign HTTPS traffic under `:443`; new trusted-helper fan-out gate; 49-entry trusted-cloud suffix list.
-- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2642 tests in 477 suites**, FP regressions blocked at CI.
-- **Noise reduction arc (1.2.1 → 1.2.4)** -- reference workstation dropped from 2,856 alerts/24h to ~3/day (99.9% reduction) without degrading detection fidelity.
-- **Notarized Developer ID distribution** -- signed DMG, Homebrew cask tap (`peterhanily/maccrab`), reproducible release pipeline.
-- **Sparkle auto-update (1.3.5)** -- EdDSA-signed `appcast.xml` served from Cloudflare Pages at `maccrab.com`; "Check for Updates…" in the status-bar menu and Settings.
-- **Manual response actions in the dashboard (1.3.9)** -- Kill Process / Quarantine File / Block Destination buttons on `AlertDetailView` do real work: `kill(SIGTERM)` with `pkill -f` fallback; move-to-vault with `com.apple.quarantine` xattr + `chmod 000` + forensic sidecar; PF anchor write via `osascript` admin-privileges prompt. Typed errors distinguish "root-owned" from "already exited" from "not found".
-- **Hardened DB permissions (1.3.9)** -- SQLite WAL/SHM sidecars are 0o640 (group-readable for the dashboard) instead of world-readable. Closes a cross-user read of recent events.
-- **Self-allowlist (1.3.8)** -- MacCrab no longer alerts on its own activity (brew upgrades, xpcproxy, FDA grants).
-
-See [CHANGELOG.md](CHANGELOG.md) for the full version history.
-
-</details>
-
-<details>
-<summary><strong>v1.0.0 — initial release</strong></summary>
-
-- 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
-- LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
-- NL threat hunting, LLM investigation summaries, active defense recommendations
-- AI Guard monitoring 8 coding tools + MCP servers
-- Package freshness checking (npm, PyPI, Homebrew, Cargo)
-- Ultrasonic attack detection (DolphinAttack, NUIT, SurfingAttack)
-- Clipboard, browser extension, USB monitoring
-- TLS fingerprinting and C2 beacon detection
-- Auto rule generation from observed attacks (template + LLM-enhanced)
-- Encrypted database (AES-256)
-- HTML incident reports
-- Rootkit detection via cross-referenced process enumeration
-- Crash report mining for exploitation indicators
-- Power/thermal anomaly detection (crypto mining, C2 beacons)
-- CDHash extraction for process integrity verification
-- SDR-device + display-hotplug detection (17 known SDR USB devices; equipment/behavior flags only — no electromagnetic analysis)
-- EDR/RMM tool discovery (30+ tools across 5 categories)
-- 14 language localizations for the dashboard
-
-</details>
+- **v1.21.0** — customizable masonry Overview with new Protection Coverage, Top
+  Firing Rules, and companion-crab widgets; Forensics CLI ↔ MCP parity; honest
+  engine-health reporting on the dashboard.
+- **v1.20** — customizable Overview dashboard, a signed out-of-band rule channel
+  (`maccrabctl rules update`), and the live [Rave plugin store](https://rave.maccrab.com).
+- **v1.12** — supply-chain detection wave (Shai-Hulud worm class), a Bayesian
+  intent posterior, and a ~1000× faster daemon cold start.
+- **v1.10** — workspace dashboard, visual TraceGraph, Agent Traces (intent ↔
+  effect correlation), and hardened mutation IPC.
+- **v1.3** — native Endpoint Security via System Extension (the architecture every
+  commercial macOS EDR uses).
 
 ---
 
