@@ -63,7 +63,7 @@ struct AlertStorePruneOldestTests {
         // Oldest of the original 10 was at -9 minutes; after dropping 3
         // oldest, the remaining oldest should be at -6 minutes.
         let oldestRemaining = remaining.min { $0.timestamp < $1.timestamp }!
-        #expect(oldestRemaining.timestamp >= now.addingTimeInterval(-6 * 60 - 1))
+        #expect(oldestRemaining.timestamp >= now.addingTimeInterval(-6.0 * 60 - 1))
     }
 
     @Test("count == 0 is a no-op")
@@ -135,7 +135,7 @@ struct CampaignStorePruneOldestTests {
         let oldestRemaining = remaining.min { $0.detectedAt < $1.detectedAt }!
         // Original oldest was -9h; after dropping 4 oldest, remaining oldest
         // should be at -5h.
-        #expect(oldestRemaining.detectedAt >= now.addingTimeInterval(-5 * 3600 - 60))
+        #expect(oldestRemaining.detectedAt >= now.addingTimeInterval(-5.0 * 3600 - 60))
     }
 
     @Test("count == 0 is a no-op")
