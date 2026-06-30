@@ -31,7 +31,14 @@ func ensureRulesCompiled() {
     // Recompile when Rules/ changed OR the compiler itself changed — otherwise a
     // compiler fix (e.g. the De Morgan negation fix) would silently test against
     // stale compiled output and a regression could false-pass.
+    //
+    // The dir EXISTING is not enough: an interrupted compile (or a reaped /tmp)
+    // can leave it present-but-empty (e.g. only a `sequences/` subdir, zero
+    // top-level rule JSON). Its mtime still passes the freshness check, so the
+    // cache stays poisoned and every rule-driven test reads zero rules until the
+    // dir is manually deleted. Require it to actually hold compiled rules.
     if FileManager.default.fileExists(atPath: compiledDir),
+       compiledDirHasRules(compiledDir),
        !rulesDirNewerThan(compiledDir, rulesRoot: rulesDir),
        !fileNewerThanCompiled(compilerPath, compiledDir: compiledDir) {
         return
@@ -51,6 +58,17 @@ func ensureRulesCompiled() {
     proc.standardError = FileHandle.nullDevice
     try? proc.run()
     proc.waitUntilExit()
+}
+
+/// True when `compiledDir` actually holds at least one top-level compiled rule
+/// (`*.json`). A dir that exists but contains no rule JSON (interrupted compile,
+/// reaped /tmp output) must NOT be treated as a valid cache, or it poisons every
+/// rule-driven test.
+private func compiledDirHasRules(_ compiledDir: String) -> Bool {
+    guard let entries = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
+        return false
+    }
+    return entries.contains { $0.hasSuffix(".json") }
 }
 
 /// True if `source` (e.g. the compiler script) is newer than the compiled
