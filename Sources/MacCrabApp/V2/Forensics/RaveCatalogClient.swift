@@ -344,7 +344,12 @@ public actor RaveCatalogClient {
     }
 
     private func fetch(url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        // Trust data (catalog + revocations.json) must be fresh: a stale cached
+        // revocations.json could keep a just-revoked plugin shown as trusted.
+        // Bypass the URL cache so a revocation is never masked by a 304/cache hit.
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw RaveCatalogError.fetchFailed(url: url, status: -1)
         }

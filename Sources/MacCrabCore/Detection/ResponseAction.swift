@@ -221,10 +221,35 @@ public actor ResponseEngine {
             let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            // v1.21.1 (audit): response actions are privileged (kill / quarantine /
+            // blockNetwork), so only honor a user-home actions.json owned by an
+            // ADMIN user — the same bar the control-plane inbox enforces
+            // (DaemonTimers.isAuthorizedInboxRequest). Without it, any unprivileged
+            // local user could drop actions.json in their own home and steer the
+            // root engine's response actions on the next reload.
+            guard Self.isAdminUID(homeUID) else { continue }
             let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
             candidates.append(Candidate(path: path, mtime: mtime))
         }
         return candidates.max(by: { $0.mtime < $1.mtime })?.path
+    }
+
+    /// True if `uid` belongs to the macOS `admin` group (gid 80). Mirrors
+    /// DaemonTimers.isAdminUID; a user-home actions.json is only honored when
+    /// its owner is an admin (the bar the control-plane inbox enforces).
+    /// Replicated here because MacCrabCore cannot import MacCrabAgentKit.
+    nonisolated private static func isAdminUID(_ uid: UInt32) -> Bool {
+        guard let pw = getpwuid(uid) else { return false }
+        let name = String(cString: pw.pointee.pw_name)
+        let baseGID = Int32(bitPattern: pw.pointee.pw_gid)
+        var ngroups: Int32 = 64
+        var groups = [Int32](repeating: 0, count: Int(ngroups))
+        if getgrouplist(name, baseGID, &groups, &ngroups) == -1 {
+            // Buffer too small; ngroups now holds the needed size — retry once.
+            groups = [Int32](repeating: 0, count: Int(ngroups))
+            guard getgrouplist(name, baseGID, &groups, &ngroups) != -1 else { return false }
+        }
+        return groups.prefix(Int(ngroups)).contains(80)   // gid 80 == admin
     }
 
     // MARK: - Execution

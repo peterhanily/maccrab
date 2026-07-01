@@ -198,8 +198,7 @@ public actor DNSCollector {
 
         guard attached else {
             logger.error("DNS collector: failed to attach BPF to any interface")
-            close(bpfFd)
-            return
+            return   // bpfFd is closed by the `defer` above — no explicit (double) close
         }
 
         // Set BPF filter for UDP port 53
