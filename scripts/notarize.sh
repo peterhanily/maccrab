@@ -151,11 +151,12 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
 
         echo "$NOTARIZE_OUTPUT"
 
-        # Check for auth failure
-        if echo "$NOTARIZE_OUTPUT" | grep -qi "unable to authenticate\|401"; then
-            fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE (or APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD)"
-        fi
-
+        # A final "status: Accepted" wins over a transient auth blip. The
+        # `--wait` poll stream can carry a one-off "Unable to authenticate" /
+        # 401 that notarytool recovered from before reaching Accepted, so
+        # check acceptance FIRST and only treat auth failure as fatal when the
+        # submission did NOT get accepted — otherwise a successful notarization
+        # is aborted and the ticket is never stapled (offline installs break).
         if echo "$NOTARIZE_OUTPUT" | grep -q "status: Accepted"; then
             ok "Notarization accepted"
 
@@ -166,6 +167,8 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
             else
                 warn "Stapling failed — users can still download (ticket is in Apple's servers)"
             fi
+        elif echo "$NOTARIZE_OUTPUT" | grep -qi "unable to authenticate\|401"; then
+            fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE (or APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD)"
         elif echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
             # Extract the submission ID for log retrieval
             SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -o 'id: [a-f0-9-]*' | head -1 | awk '{print $2}')
