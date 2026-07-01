@@ -26,9 +26,11 @@ struct LLMSanitizerAuditTests {
     @Test("Redacts the live account name as a BARE standalone token")
     func redactsBareUsername() {
         let user = NSUserName()
-        // Skip on the (unlikely) CI edge where the account name is < 3 chars
-        // and therefore intentionally not in the redaction set.
-        guard user.count >= 3 else { return }
+        // Skip when the account name is < 3 chars, or is one of the reserved
+        // common-vocabulary names the sanitizer intentionally does NOT
+        // word-boundary redact (e.g. CI's "runner") — bare-name redaction is not
+        // the contract there. The /Users/<name>/ path form is covered separately.
+        guard user.count >= 3, !LLMSanitizer.reservedAccountNames.contains(user.lowercased()) else { return }
 
         // The exact shape LLMPrompts.baselineAnomalyUser emits.
         let out = LLMSanitizer.sanitize("User: \(user)")
@@ -73,7 +75,10 @@ struct LLMSanitizerAuditTests {
     @Test("A prompt with bare username + public IP + /Users path is fully scrubbed")
     func combinedAuditCase() {
         let user = NSUserName()
-        guard user.count >= 3 else { return }
+        // A reserved common-vocabulary account name (e.g. CI's "runner") is
+        // intentionally not bare-redacted, so "fully scrubbed" can't hold here;
+        // the public-IP scrubbing is covered by the dedicated IP tests.
+        guard user.count >= 3, !LLMSanitizer.reservedAccountNames.contains(user.lowercased()) else { return }
         let prompt = """
         Novel process lineage detected:
         User: \(user)

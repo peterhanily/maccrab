@@ -137,6 +137,20 @@ public enum LLMSanitizer {
         return names.filter { $0.count >= 4 }
     }()
 
+    /// Placeholder / shared dirs AND common security-vocabulary words that are
+    /// sometimes used as account names. Redacting every "admin" / "test" /
+    /// "runner" occurrence in a prompt to [USER] would gut the analysis text, so
+    /// a BARE account name matching one of these is intentionally NOT
+    /// word-boundary redacted — the `/Users/<name>/` path form still is.
+    /// (v1.19.1 audit P2.) Exposed so redaction-contract tests can skip a host
+    /// whose live account name is reserved (e.g. CI's "runner"), where bare-name
+    /// redaction is deliberately absent.
+    static let reservedAccountNames: Set<String> = [
+        "shared", "guest", "localized", ".localized",
+        "admin", "administrator", "root", "user", "test", "dev", "ops",
+        "app", "build", "ci", "runner", "service", "daemon", "system",
+    ]
+
     /// The machine's REAL local account names. The path regex above only
     /// strips a name when it appears inside `/Users/<name>/`; the audit
     /// found bare-username leaks too (e.g. `User: adrian` emitted by
@@ -156,16 +170,11 @@ public enum LLMSanitizer {
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Users") {
             for entry in entries { names.insert(entry) }
         }
-        // Skip placeholder dirs AND common security-vocabulary words that are
-        // sometimes used as account names — redacting every "admin"/"test"/"root"
-        // in a prompt to [USER] would gut the analysis text. (v1.19.1 audit P2.)
-        let skip: Set<String> = [
-            "shared", "guest", "localized", ".localized",
-            "admin", "administrator", "root", "user", "test", "dev", "ops",
-            "app", "build", "ci", "runner", "service", "daemon", "system",
-        ]
+        // Placeholder dirs + common security-vocabulary account names are
+        // preserved (see reservedAccountNames) so redacting every "admin" /
+        // "test" / "root" in a prompt to [USER] doesn't gut the analysis text.
         return names
-            .filter { $0.count >= 3 && !$0.hasPrefix(".") && !skip.contains($0.lowercased()) }
+            .filter { $0.count >= 3 && !$0.hasPrefix(".") && !reservedAccountNames.contains($0.lowercased()) }
             // Longest first so a username that is a prefix of another
             // ("dan" vs "danielle") redacts the longer match first.
             .sorted { $0.count > $1.count }
