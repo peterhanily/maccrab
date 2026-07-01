@@ -556,12 +556,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// many popular Mac apps (1Password, Discord, Notion) use colorful
     /// menu-bar icons for the same brand-recognition reason.
     ///
-    /// Degraded state prepends a warning triangle; healthy is just the
-    /// crab. Both variants carry an explicit accessibility description
-    /// via `setAccessibilityLabel` so VoiceOver users get a meaningful
-    /// announcement instead of "crab emoji."
+    /// The menu-bar glyph is always the single crab — prepending a second
+    /// emoji (a warning triangle for degraded state) rendered as a wider,
+    /// double-icon with an odd gap next to the crab. Degraded state is carried
+    /// by the accessibility description via `setAccessibilityLabel` (so
+    /// VoiceOver still announces it) and shown in full in the dashboard.
     @MainActor private static func applyStatusBarImage(to button: NSStatusBarButton, degraded: Bool) {
-        let title = degraded ? "⚠️🦀" : "🦀"
+        let title = "🦀"
         let label = degraded ? "MacCrab — protection degraded" : "MacCrab"
         if button.title != title {
             button.title = title
@@ -725,19 +726,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func flashCrab(for severity: Severity) {
         guard let button = statusItem?.button else { return }
-        let originalTitle = button.title
         let originalAccessibilityLabel = button.accessibilityLabel() ?? "MacCrab"
 
-        // Prepend a colored severity dot to the crab emoji so a live alert
-        // is visible at a glance in the menu bar without losing the brand.
-        // 🔴 for critical, 🟠 for high. Reset to the previous state after 10s.
-        let prefix = severity == .critical ? "🔴" : "🟠"
-        button.title = "\(prefix)🦀"
+        // A live alert updates the accessibility label (so VoiceOver announces
+        // it) but the menu-bar glyph stays the single, normally-spaced crab —
+        // prepending a colored severity dot made it a wider, double-icon with an
+        // odd gap. Alerts are also surfaced via notifications and the dashboard.
+        // Reset the label after 10s.
         button.setAccessibilityLabel("MacCrab — \(severity.rawValue) severity alert")
 
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
-            button.title = originalTitle
             button.setAccessibilityLabel(originalAccessibilityLabel)
         }
     }
