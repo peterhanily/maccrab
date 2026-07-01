@@ -3,6 +3,17 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.1] — 2026-07-02
+
+A small fixes release: menu-bar polish plus security and correctness hardening
+from a multi-domain audit.
+
+### Fixed
+- The menu bar always shows a single, normally-spaced crab; a live alert or a degraded-protection state no longer renders a wider, double-width icon with a gap.
+- Response-action configuration (kill / quarantine / block network) is now honored only from a file owned by an administrator account, matching the privilege bar already applied to the engine's control channel — a standard, non-administrator local account can no longer influence it.
+- DNS collector: fixed a file-descriptor double-close on a network-interface attach failure.
+- The plugin catalog and revocation list are always fetched fresh, so a newly revoked plugin can never appear trusted from a stale cache.
+
 ## [1.21.0] — 2026-06-28
 
 A features-and-correctness release: a richer, gap-free customizable Overview with
