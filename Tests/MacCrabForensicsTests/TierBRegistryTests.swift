@@ -160,14 +160,18 @@ struct TierBRegistryTests {
         registry.cleanupVerifiedBinary(v)
     }
 
-    @Test("first-party exec: unconfigured anchor (the ship default) → refuse")
+    @Test("first-party exec: anchor not configured → refuse (fail-closed) even for a MATCHING key")
     func firstPartyDenyUnconfigured() async throws {
-        let (registry, installer, _) = try await Self.installForExec(id: "com.test.fp.unconf")
+        let (registry, installer, fp) = try await Self.installForExec(id: "com.test.fp.unconf")
         defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
-        // Public API → pins to FirstPartyTrustRoot (unset sentinel → fail-closed).
+        // Registry-level "not configured → fail-closed" invariant. Uses the core
+        // overload with anchorConfigured:false + the fixture's OWN matching
+        // fingerprint, so the not-configured guard is proven to win over a byte
+        // match — independent of the ship anchor now being configured (Fix 1).
         await #expect(throws: TierBRegistry.RegistryError.self) {
             _ = try await registry.resolveForFirstPartyExecution(
-                pluginID: "com.test.fp.unconf", officialSource: true, catalogOverrideActive: false)
+                pluginID: "com.test.fp.unconf", officialSource: true, catalogOverrideActive: false,
+                expectedPublisherFingerprint: fp, anchorConfigured: false)
         }
     }
 

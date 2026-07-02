@@ -90,13 +90,13 @@ struct FirstPartyExecutionGateTests {
 
     // MARK: - FirstPartyTrustRoot
 
-    @Test("ships fail-closed: the compiled-in anchor is the unset sentinel until the operator configures it")
-    func shipsUnconfigured() {
-        // This documents the GA prerequisite: isConfigured must be made true (by
-        // baking in the real publisher fingerprint) before first-party execution
-        // can ever be authorized.
-        #expect(FirstPartyTrustRoot.publisherKeyFingerprint == FirstPartyTrustRoot.unsetSentinel)
-        #expect(FirstPartyTrustRoot.isConfigured == false)
+    @Test("ships configured: the compiled-in first-party publisher anchor is set")
+    func shipsConfigured() {
+        // Post-ceremony state (Fix 1): the real publisher fingerprint is baked
+        // in, so first-party execution can be authorized (still subject to the
+        // gate's other clauses — see the deny* tests).
+        #expect(FirstPartyTrustRoot.publisherKeyFingerprint != FirstPartyTrustRoot.unsetSentinel)
+        #expect(FirstPartyTrustRoot.isConfigured == true)
     }
 
     @Test("fingerprint(ofSigningKey:) is the lowercase-hex SHA-256 of the raw key bytes")

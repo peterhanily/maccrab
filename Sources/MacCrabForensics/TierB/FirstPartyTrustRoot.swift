@@ -35,7 +35,14 @@ public enum FirstPartyTrustRoot {
     /// SHA-256 (lowercase hex) of the first-party plugin-signing public key.
     /// OPERATOR: replace the sentinel with the real fingerprint at the GA signing
     /// ceremony (Runbook P / Q). Build-time constant ONLY.
-    public static let publisherKeyFingerprint: String = unsetSentinel
+    ///
+    /// KEYHOLDER: set to the SHA-256 of the first-party publisher's
+    /// signing.key.pub. This authorizes UNSANDBOXED, full-FDA first-party
+    /// execution — confirm this value equals the OFFLINE-held first-party
+    /// signing key's fingerprint before shipping (it must NOT be trusted purely
+    /// because an on-disk bundle happens to hash to it).
+    public static let publisherKeyFingerprint: String =
+        "07e39eb12c15b8052f5249134ea3337a0789ebc799d1c58d097aaa548a8aaae3"
 
     /// True iff a real (configured, well-formed, non-sentinel) fingerprint is
     /// baked in. When false, first-party execution is disabled (fail-closed).

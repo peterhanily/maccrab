@@ -37,6 +37,16 @@ public final class KitRunner: ObservableObject {
         public let reason: String
     }
 
+    /// Outcome of attempting an installed Tier-B plugin, so the caller can
+    /// surface WHY a plugin didn't contribute instead of collapsing every
+    /// refusal / errored run into a generic "not installed" skip.
+    enum TierBRunOutcome: Sendable {
+        case ran                    // committed artifacts (status ok / partial)
+        case ranWithError(String)   // spawned but errored / no terminal result — the real reason
+        case refused(String)        // typed refusal (first-party / sandboxed gate, quarantined, disabled)
+        case notInstalled           // genuinely not an installed Tier-B plugin
+    }
+
     @Published public internal(set) var state: State = .idle
 
     public init() {}
@@ -86,13 +96,17 @@ public final class KitRunner: ObservableObject {
                     // Not a Tier-A built-in — try an INSTALLED Tier-B plugin via
                     // the shared two-lane executor (first-party → sandboxed,
                     // fail-closed; untrusted code runs ONLY under the sandbox).
-                    let ranTierB = await Self.runInstalledTierB(
+                    let outcome = await Self.runInstalledTierB(
                         pluginID: pref.pluginID, store: handle.store, caseID: handle.caseID)
-                    if !ranTierB {
+                    switch outcome {
+                    case .ran:
+                        break   // contributed artifacts — no skip entry
+                    case .notInstalled:
                         skipped.append(SkippedPlugin(
                             pluginID: pref.pluginID,
-                            reason: "not a built-in and not an installed Tier-B plugin"
-                        ))
+                            reason: "not a built-in and not an installed Tier-B plugin"))
+                    case .ranWithError(let reason), .refused(let reason):
+                        skipped.append(SkippedPlugin(pluginID: pref.pluginID, reason: reason))
                     }
                     continue
                 }
@@ -146,7 +160,7 @@ public final class KitRunner: ObservableObject {
                 } catch {
                     skipped.append(SkippedPlugin(
                         pluginID: pref.pluginID,
-                        reason: shortReason(error)
+                        reason: Self.shortReason(error)
                     ))
                 }
                 pollTask.cancel()
@@ -169,7 +183,7 @@ public final class KitRunner: ObservableObject {
                           tally: tally,
                           skipped: skipped)
         } catch {
-            state = .failed(kitName: kit.name, error: shortReason(error))
+            state = .failed(kitName: kit.name, error: Self.shortReason(error))
         }
     }
 
@@ -182,7 +196,7 @@ public final class KitRunner: ObservableObject {
 
     /// Trim Swift's default error stringification — surface the
     /// useful sentence to the operator without the type path.
-    private func shortReason(_ error: Error) -> String {
+    private static func shortReason(_ error: Error) -> String {
         let s = "\(error)"
         // Most TCC-denied / sqlite-locked errors arrive as a
         // descriptive single sentence already.
@@ -196,7 +210,7 @@ public final class KitRunner: ObservableObject {
     /// (first-party → sandboxed, fail-closed) and commit its artifacts. Returns
     /// false (skip) if the plugin isn't installed or is refused — the kit run is
     /// best-effort per plugin. Untrusted code runs ONLY under the sandbox.
-    static func runInstalledTierB(pluginID: String, store: ArtifactStore, caseID: String) async -> Bool {
+    static func runInstalledTierB(pluginID: String, store: ArtifactStore, caseID: String) async -> TierBRunOutcome {
         let ctx = TierBCollectorExecutor.catalogContextFromEnv()
         let scratch = NSTemporaryDirectory() + "maccrab-tierb-scratch-\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
@@ -217,9 +231,21 @@ public final class KitRunner: ObservableObject {
                 artifactsRejected: Int64(result.artifactsRejected),
                 errorMessage: result.notes.isEmpty ? nil : result.notes.joined(separator: "; "),
                 snapshotHash: nil)
-            return true
+            // Spawned but errored (e.g. a first-party plugin that fell through to
+            // the sandboxed lane and "emitted no terminal result") — surface the
+            // real reason instead of a silent 0-row contribution.
+            if result.status != .ok && result.status != .partial {
+                let reason = result.notes.isEmpty
+                    ? "ran with status \(result.status.rawValue)"
+                    : result.notes.joined(separator: "; ")
+                return .ranWithError(reason)
+            }
+            return .ran
+        } catch let e as TierBRegistry.RegistryError {
+            if case .notInstalled = e { return .notInstalled }
+            return .refused(Self.shortReason(e))   // firstPartyExecutionRefused / sandboxedExecutionRefused / quarantined / …
         } catch {
-            return false
+            return .refused(Self.shortReason(error))
         }
     }
 }

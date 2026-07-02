@@ -103,11 +103,13 @@ struct FirstPartyExecutionGateInvariantTests {
         let d = decide(key: sentinel, anchor: sentinel, configured: false)
         #expect(d == .deny(reason: "first-party publisher key not configured (fail-closed)"))
         #expect(!d.isAllowed)
-        // And the SHIP state proves this is the live default: the compiled-in
-        // anchor is the sentinel and isConfigured is false, so production cannot
-        // be tricked into the allow path until the operator configures it.
-        #expect(FirstPartyTrustRoot.publisherKeyFingerprint == sentinel)
-        #expect(FirstPartyTrustRoot.isConfigured == false)
+        // The invariant is the pure-gate refusal above (not-configured wins,
+        // independent of the baked-in value). Post-ceremony (Fix 1) the
+        // compiled-in anchor is now configured; the sentinel short-circuit is
+        // proven by the injected-anchor `decide(...)` case above, not by the
+        // ship default.
+        #expect(FirstPartyTrustRoot.publisherKeyFingerprint != sentinel)
+        #expect(FirstPartyTrustRoot.isConfigured == true)
     }
 
     @Test("the unset-sentinel anchor never allows for ANY key (configured stays true to isolate the comparison)")
