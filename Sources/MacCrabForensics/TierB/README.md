@@ -44,10 +44,12 @@ all OS-denied (zero `leak.*` artifacts).
 
 ### Remaining gates (operator / keyholder / external — NOT code)
 
-The runnable third-party lane ships **fail-closed** until:
-- `FirstPartyTrustRoot.publisherKeyFingerprint` is set (offline keyholder
-  ceremony) — until then first-party execution is disabled and the catalog has no
-  live entries.
+**First-party lane:** `FirstPartyTrustRoot.publisherKeyFingerprint` is configured
+as of v1.21.2 (offline keyholder ceremony — the value must be confirmed against
+the offline-held first-party signing key), so signed first-party plugins now run
+on the unsandboxed first-party lane.
+
+The runnable **third-party** lane still ships **fail-closed** until:
 - `make test-corpus` passes against the EXACT signed release build.
 - an **independent external pentest** of the lane clears it.
 
