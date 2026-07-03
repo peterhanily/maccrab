@@ -532,15 +532,22 @@ struct V2ForensicsScansView: View {
     @MainActor
     private func consumePendingRun() async {
         guard let id = state.pendingForensicsRunPluginID else { return }
-        guard let reg = await PluginRegistry.shared.registration(forID: id) else {
-            state.pendingForensicsRunPluginID = nil
-            return
+        if let reg = await PluginRegistry.shared.registration(forID: id) {
+            // Built-in scanner.
+            runOrConfirm(Kit.adHoc(
+                pluginID: id,
+                name: ScannerDisplay.name(forPluginID: id),
+                encrypted: deriveEncrypted(reg)))
+        } else {
+            // Not a built-in — an INSTALLED store/third-party plugin. Run it via the
+            // Tier-B path instead of silently no-op'ing: the Catalog's "Run" button
+            // lands here, and the installed list may not be loaded yet, so resolve it.
+            var plugin = thirdPartyScanners.first(where: { $0.pluginID == id })
+            if plugin == nil {
+                plugin = (try? await PluginInstaller().list())?.first(where: { $0.pluginID == id })
+            }
+            if let p = plugin { runThirdPartyScanner(p) }
         }
-        runOrConfirm(Kit.adHoc(
-            pluginID: id,
-            name: ScannerDisplay.name(forPluginID: id),
-            encrypted: deriveEncrypted(reg)
-        ))
         state.pendingForensicsRunPluginID = nil
     }
 
