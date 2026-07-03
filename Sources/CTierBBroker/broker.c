@@ -120,3 +120,35 @@ int maccrab_tierb_recv_fd(int sock, int *out_fd) {
     if (out_fd) *out_fd = found;
     return (int)(unsigned char)payload;
 }
+
+int maccrab_tierb_broker_open(int sock, const char *path) {
+    if (sock < 0 || path == NULL) return -1;
+    size_t len = strlen(path);
+    if (len == 0 || len > 0xFFFF) return -1;   // 2-byte length frame
+
+    unsigned char hdr[2] = { (unsigned char)((len >> 8) & 0xFF),
+                             (unsigned char)(len & 0xFF) };
+    // Write the 2-byte length header then the path, tolerating partial writes.
+    size_t hoff = 0;
+    while (hoff < 2) {
+        ssize_t w = write(sock, hdr + hoff, 2 - hoff);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        if (w == 0) return -1;
+        hoff += (size_t)w;
+    }
+    size_t poff = 0;
+    while (poff < len) {
+        ssize_t w = write(sock, path + poff, len - poff);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        if (w == 0) return -1;
+        poff += (size_t)w;
+    }
+
+    int fd = -1;
+    int status = maccrab_tierb_recv_fd(sock, &fd);   // 0 == ok; else denial/error
+    if (status != 0 || fd < 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}

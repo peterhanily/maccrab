@@ -36,6 +36,22 @@ reap. TCC-protected sources are snapshotted into a plugin-unwritable dir
 (`BrokeredTCC.prepare`) and the broker re-checks TCC on the **served** path, so a
 broad ancestor read root can't reach a live store.
 
+### Plugin authoring: reading declared files
+
+Because the SBPL is deny-default, a sandboxed plugin **cannot `open()` its
+declared paths directly** — every read is served over the fd-3 broker. Use the
+**broker client** instead of `open()`/`FileManager`:
+
+- **Swift:** link `MacCrabPluginKit` and call `TierBBroker.readDeclared(path)`
+  (or `openHandle(path)`). It routes through the broker when sandboxed (the host
+  publishes `MACCRAB_TIERB_BROKER_FD`) and reads directly on the first-party
+  lane — one call works on both.
+- **C:** call `maccrab_tierb_broker_open(3, path)` from `CTierBBroker`.
+
+Every brokered request is still validated against the signature-bound manifest
+allowlist, the per-component `O_NOFOLLOW` safe-open, and the TCC guard — the
+client never reaches beyond the plugin's declared, consented read-set.
+
 **Containment is PROVEN on-device** by `ContainmentCorpusTests` (`make
 test-corpus`) against the EXACT shipped runner + broker + trampoline, for both a C
 fixture and a Swift fixture (Swift runtime + Foundation): a declared read is

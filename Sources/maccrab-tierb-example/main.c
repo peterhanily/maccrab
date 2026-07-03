@@ -7,9 +7,13 @@
 //   stdout : the plugin emits zero or more `artifact` JSON lines, then exactly
 //            one terminal `result` line (JSONL, one object per line).
 //   fd 3   : (sandboxed third-party lane only) the file broker — to READ a
-//            manifest-declared file, send a 2-byte-big-endian-length + path
-//            frame and receive the fd via SCM_RIGHTS. This example does no file
-//            reads, so it never touches fd 3 — the simplest possible collector.
+//            manifest-declared file, use the broker client rather than open():
+//              C     maccrab_tierb_broker_open(3, path)   (CTierBBroker)
+//              Swift TierBBroker.readDeclared(path)        (MacCrabPluginKit — it
+//                    auto-selects the broker when sandboxed, a direct read when
+//                    first-party, so one call works on both lanes).
+//            This example does no file reads, so it never touches fd 3 — the
+//            simplest possible collector.
 //
 // Under the deny-default sandbox this plugin needs nothing but stdout, so it is
 // also the corpus ALLOW fixture (F1: a benign plugin runs and emits its result).

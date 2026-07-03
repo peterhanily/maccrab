@@ -53,18 +53,24 @@ public struct TierBSubprocess {
         /// Called after the child is reaped (e.g. broker teardown: close the host
         /// socket → EOF the serve loop → bounded join).
         public var afterReap: (() -> Void)?
+        /// Extra environment entries for the child, added to the scrubbed PATH+HOME
+        /// base. The sandboxed lane publishes MACCRAB_TIERB_BROKER_FD here so a
+        /// plugin's broker client knows the socket fd; first-party adds nothing.
+        public var extraEnv: [String: String]
         public init(
             fileActions: ((UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> Void)? = nil,
             parentCloseAfterSpawn: [Int32] = [],
             parentCloseOnFailure: [Int32] = [],
             afterSpawn: ((pid_t) -> Void)? = nil,
-            afterReap: (() -> Void)? = nil
+            afterReap: (() -> Void)? = nil,
+            extraEnv: [String: String] = [:]
         ) {
             self.fileActions = fileActions
             self.parentCloseAfterSpawn = parentCloseAfterSpawn
             self.parentCloseOnFailure = parentCloseOnFailure
             self.afterSpawn = afterSpawn
             self.afterReap = afterReap
+            self.extraEnv = extraEnv
         }
     }
 
@@ -107,11 +113,13 @@ public struct TierBSubprocess {
         defer { posix_spawnattr_destroy(&attr) }
 
         let argv: [UnsafeMutablePointer<CChar>?] = argvStrings.map { strdup($0) } + [nil]
-        let envp: [UnsafeMutablePointer<CChar>?] = [
-            strdup("PATH=/usr/bin:/bin"),
-            strdup("HOME=\(NSHomeDirectory())"),
-            nil,
-        ]
+        // Scrubbed base (PATH+HOME only) plus any lane-specific extras (e.g. the
+        // sandboxed lane's MACCRAB_TIERB_BROKER_FD). Extras can't override PATH/HOME.
+        let envStrings = ["PATH=/usr/bin:/bin", "HOME=\(NSHomeDirectory())"]
+            + extras.extraEnv
+                .filter { $0.key != "PATH" && $0.key != "HOME" }
+                .map { "\($0.key)=\($0.value)" }
+        let envp: [UnsafeMutablePointer<CChar>?] = envStrings.map { strdup($0) } + [nil]
         defer {
             for p in argv where p != nil { free(p) }
             for p in envp where p != nil { free(p) }

@@ -16,6 +16,8 @@ let package = Package(
         // (legacy daemon) — the plugin runtime must not crash the
         // detection engine.
         .library(name: "MacCrabForensics", targets: ["MacCrabForensics"]),
+        // Plugin-author SDK — the broker read client for Tier-B forensic plugins.
+        .library(name: "MacCrabPluginKit", targets: ["MacCrabPluginKit"]),
         .executable(name: "maccrabd", targets: ["maccrabd"]),
         .executable(name: "maccrabctl", targets: ["maccrabctl"]),
         .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),
@@ -181,6 +183,15 @@ let package = Package(
             path: "Sources/CTierBBroker",
             publicHeadersPath: "include"
         ),
+        // Plugin-author SDK: the broker client a Tier-B forensic plugin links so
+        // its declared reads work on both lanes (direct when first-party, over the
+        // fd-3 broker when sandboxed) without ever gaining access beyond its
+        // declared, consented read-set.
+        .target(
+            name: "MacCrabPluginKit",
+            dependencies: ["CTierBBroker"],
+            path: "Sources/MacCrabPluginKit"
+        ),
         .target(
             name: "MacCrabForensics",
             dependencies: ["MacCrabCore", "CSQLCipher", "CTierBBroker"],
@@ -264,6 +275,7 @@ let package = Package(
             dependencies: [
                 "MacCrabForensics",
                 "CTierBBroker",   // the broker round-trip test uses the recv-fd side
+                "MacCrabPluginKit",   // the plugin-side broker client (SDK) tests
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),

@@ -394,7 +394,12 @@ public struct SandboxedTierBRunner: Sendable {
             afterReap: {
                 close(brokerHostFd)
                 _ = brokerDone.wait(timeout: .now() + 3.0)
-            })
+            },
+            // Tell the plugin (via MacCrabPluginKit) that it is on the sandboxed
+            // lane and where the broker socket is, so its declared reads go over
+            // the broker (fd 3) instead of a deny-default open(). The first-party
+            // lane sets nothing → the plugin reads directly.
+            extraEnv: ["MACCRAB_TIERB_BROKER_FD": "3"])
 
         do {
             return try TierBSubprocess.spawnAndStream(

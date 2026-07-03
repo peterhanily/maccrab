@@ -24,4 +24,15 @@ int maccrab_tierb_send_status(int sock, unsigned char status);
 // beyond the first (never sent by us) are closed to avoid a leak.
 int maccrab_tierb_recv_fd(int sock, int *out_fd);
 
+// ── Client side (plugin) ─────────────────────────────────────────────────────
+// Request a DECLARED read over broker socket `sock`: writes a 2-byte big-endian
+// length + UTF-8 `path` frame, then receives the resulting read-only descriptor
+// via recv_fd. Returns the fd (>= 0) on success — the plugin reads from it
+// without ever issuing an open() the deny-default sandbox would refuse — or -1
+// if the broker denied the path (undeclared / TCC-guarded / symlink) or on any
+// transport error. Client mirror of the send_fd/recv_fd host loop; a plugin uses
+// this INSTEAD of open()/fopen for its declared read paths on the sandboxed lane.
+// `sock` is the broker fd the host passes (fd 3 by convention).
+int maccrab_tierb_broker_open(int sock, const char *path);
+
 #endif
