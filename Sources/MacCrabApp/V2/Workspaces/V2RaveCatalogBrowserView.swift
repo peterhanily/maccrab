@@ -996,6 +996,16 @@ struct V2RaveCatalogBrowserView: View {
                 .scaledSystem(11)
         }
         HStack(spacing: 8) {
+            // Run the installed plugin now — hands the run to the Scans tab (which
+            // resolves the lane + consent), the same handoff the built-in Run uses.
+            // Lets the operator run a plugin immediately after installing it.
+            Button {
+                state.pendingForensicsRunPluginID = e.id
+                state.selectedTabs[.forensics] = .forensicsScans
+            } label: {
+                Label(String(localized: "raveStore.run", defaultValue: "Run"), systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent).controlSize(.small)
             // Always offer a working action for an installed plugin: Update when
             // the catalog has a newer version, otherwise Reinstall (a verified
             // --force re-install of the current version). Both route through the

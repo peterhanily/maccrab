@@ -322,9 +322,15 @@ public actor RaveCatalogClient {
     public func installedPlugins() async -> [String: String] {
         let installer = PluginInstaller()
         guard let installed = try? await installer.list() else { return [:] }
-        // Never badge dev/test residue as "installed" in the catalog.
+        // Never badge dev/test residue as "installed" in the catalog — but DO keep
+        // a legit trusted-key first-party-namespace store install (e.g. posture-pro,
+        // com.maccrab.forensics.* signed by a trusted publisher but not a built-in).
+        // Without the trusted keys the residue filter dropped it, so the catalog
+        // wrongly showed "Install" for an already-installed plugin.
         let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
-        let visible = PluginVisibility.filterInstalled(installed, builtinIDs: builtinIDs)
+        let trustedKeys = await installer.currentTrustedKeys()
+        let visible = PluginVisibility.filterInstalled(
+            installed, builtinIDs: builtinIDs, trustedKeyHexes: trustedKeys)
         var map: [String: String] = [:]
         map.reserveCapacity(visible.count)
         for p in visible {
