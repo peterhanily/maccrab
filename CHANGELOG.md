@@ -3,6 +3,20 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.3] — 2026-07-03
+
+Store-plugin capability plus Forensics and catalog polish.
+
+### Added
+- Sandboxed community plugins can now read the files they declare. A store plugin still runs fully contained (deny-default sandbox, no full-disk access), but its declared, consented read paths are served through a mediated file broker — so a community forensic collector actually works on the store lane. Plugin authors use the new `MacCrabPluginKit` read API, which routes through the broker when sandboxed and reads directly on the first-party lane (one call works on both); see the Tier-B README.
+- The catalog Run button runs an installed plugin on this Mac immediately after install.
+
+### Fixed
+- The catalog recognises already-installed plugins: an installed plugin shows "Installed · up to date" (or "· update available" with an Update button) instead of a fresh Install button.
+- Built-in forensic scanners appear immediately in the Forensics view instead of only after another scanner is run.
+- "Run on this Mac" no longer jars the window off-screen — the plugin inspector dismisses cleanly before the scan starts.
+- Skipped-plugin wording names the real reason instead of internal jargon.
+
 ## [1.21.2] — 2026-07-03
 
 Enables first-party forensic plugin execution.
