@@ -714,6 +714,11 @@ struct V2ForensicsScansView: View {
 
     private func reload() async {
         loading = true
+        // Register the built-in collectors/analyzers BEFORE listing the registry
+        // (idempotent, once per process). Without this the first open of the
+        // Forensics view read an empty registry, so the built-in scanners only
+        // appeared after a scan happened to register them.
+        await BuiltinBootstrapOnce.shared.ensure()
         // The full scanner inventory: built-in collectors/analyzers +
         // operator-visible third-party plugins (residue filtered via the shared
         // classifier) — the two individually-runnable scanner lists.

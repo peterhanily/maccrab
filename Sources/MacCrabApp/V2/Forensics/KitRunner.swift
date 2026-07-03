@@ -104,7 +104,7 @@ public final class KitRunner: ObservableObject {
                     case .notInstalled:
                         skipped.append(SkippedPlugin(
                             pluginID: pref.pluginID,
-                            reason: "not a built-in and not an installed Tier-B plugin"))
+                            reason: "not a built-in or installed forensic plugin"))
                     case .ranWithError(let reason), .refused(let reason):
                         skipped.append(SkippedPlugin(pluginID: pref.pluginID, reason: reason))
                     }

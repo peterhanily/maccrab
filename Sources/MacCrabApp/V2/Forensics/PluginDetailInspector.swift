@@ -180,7 +180,12 @@ struct PluginDetailInspector: View {
         HStack(spacing: 8) {
             if model.runnable, let onRun {
                 Button {
-                    onRun(); dismiss()
+                    // Dismiss THIS sheet first, then start the run on the next
+                    // runloop tick. Doing onRun() (which drives a state change /
+                    // presentation) and dismiss() in the same turn collided and
+                    // made the window jump off-screen.
+                    dismiss()
+                    DispatchQueue.main.async { onRun() }
                 } label: {
                     Label("Run on this Mac", systemImage: "play.fill")
                 }

@@ -9,7 +9,7 @@ Enables first-party forensic plugin execution.
 
 ### Fixed
 - First-party forensic plugins run again. A signed first-party plugin (e.g. Mac Security Posture Pro) ran but committed no results, because the first-party execution anchor was never configured — so it fell through to the sandboxed lane and produced nothing. The anchor is now configured, so first-party plugins run on their intended (unsandboxed, Full-Disk-Access) lane and collect their full artifact set. Third-party / sideloaded plugins are unaffected — they still run sandboxed, or are refused fail-closed.
-- Forensics scan skip reasons are now legible: a refused or errored Tier-B plugin shows the real reason in the scan's done banner instead of a generic "not a built-in and not an installed Tier-B plugin".
+- Forensics scan skip reasons are now legible: a refused or errored plugin shows the real reason in the scan's done banner instead of a generic "not a built-in or installed forensic plugin".
 
 ## [1.21.1] — 2026-07-02
 
