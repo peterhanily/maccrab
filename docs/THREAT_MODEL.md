@@ -168,11 +168,13 @@ events to suppress evidence post-compromise.
   events table, so size-cap pruning of one can't evict the other.
 
 **Residual risk (acknowledged):**
-- Encryption is currently AES-256-CBC + PKCS7 — confidentiality only,
-  not authenticity. A privileged attacker who can rewrite
-  `events.db` to a forged ciphertext gets undetected tampering.
-  Authenticated encryption (AES-GCM) is on the v1.9 roadmap; once
-  shipped, MAC verification on every page read will catch tamper.
+- `events.db` / `alerts.db` / `campaigns.db` (incl. `alert_evidence`)
+  are **not encrypted at rest today**. AES-GCM column encryption
+  currently covers only the trace / causal-graph stores (`traces.db` /
+  `tracegraph.db`); at-rest encryption for the primary stores is
+  scheduled, not shipped. Until then a reader with file access sees
+  plaintext, and a privileged writer can tamper undetected. (The
+  root-owned `0o640` perms above are the current at-rest control.)
 - The threat model treats local root as out-of-scope for tamper
   protection. With root, an attacker can do anything.
 

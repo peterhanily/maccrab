@@ -129,6 +129,18 @@ def main():
     print(f"| Tactic directories | {len([t for t in by_tactic if by_tactic[t]])} |")
     print()
 
+    print(f"## Default rule profile")
+    print()
+    print(f"Since **v1.21.4-alpha** the daemon defaults to the **stable** rule")
+    print(f"profile: only `status: stable` rules ship enabled. The")
+    print(f"`experimental` / `test` tiers still load — their ids/titles surface")
+    print(f"and an operator can enable them individually — but are disabled by")
+    print(f"default, keeping the daily false-positive budget honest. Set")
+    print(f'`"rule_profile": "all"` in `daemon_config.json` to enable every')
+    print(f"non-deprecated rule (the pre-1.21.4 behavior). Per-rule operator")
+    print(f"overlays (user_rules) are unaffected by this setting.")
+    print()
+
     print(f"## Caveat")
     print()
     print(f"This is **documented coverage** — what each rule's `tags:`")

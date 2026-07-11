@@ -880,9 +880,14 @@ enum DaemonSetup {
         let dbEncryptionEnabled = (encryptDbEnv != "0")
         let dbEncryption = DatabaseEncryption(enabled: dbEncryptionEnabled)
         if dbEncryption.isEnabled {
-            print("Database encryption: active (AES-GCM, key in Keychain)")
+            // v1.21.4 (audit A4-01): be precise about scope. This AES-GCM key
+            // (in Keychain) column-encrypts only the trace + causal-graph stores
+            // (TraceStore / SQLiteCausalGraphStore). The primary event / alert /
+            // campaign stores (incl. alert_evidence) are NOT yet encrypted at
+            // rest — that work is scheduled, not shipped.
+            print("Database encryption: trace + causal-graph stores column-encrypted (AES-GCM, key in Keychain); event/alert/campaign stores not yet encrypted at rest (scheduled)")
         } else {
-            print("Database encryption: disabled via MACCRAB_ENCRYPT_DB=0")
+            print("Database encryption: disabled via MACCRAB_ENCRYPT_DB=0 (trace + causal-graph stores plaintext; event/alert/campaign stores are not encrypted at rest either)")
         }
 
         // Report generator -- HTML incident reports
@@ -1466,9 +1471,14 @@ enum DaemonSetup {
         }
         let rulesURL = URL(fileURLWithPath: effectiveRulesDir)
         do {
-            let count = try await ruleEngine.loadRules(from: rulesURL)
-            logger.info("Loaded \(count) single-event detection rules")
-            print("Loaded \(count) single-event detection rules")
+            // F-04: the daemon defaults to the "stable" rule profile — only the
+            // curated stable tier ships enabled; "all" (daemon_config.json
+            // rule_profile) restores every non-deprecated rule. Operator per-rule
+            // overlays (user_rules, loaded below) are unaffected by the profile.
+            let ruleStatuses: Set<String>? = (config.ruleProfile.lowercased() == "all") ? nil : ["stable"]
+            let count = try await ruleEngine.loadRules(from: rulesURL, enabledStatuses: ruleStatuses)
+            logger.info("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")
+            print("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")
         } catch {
             logger.warning("No compiled rules found at \(compiledRulesDir). Run compile_rules.py first.")
             print("Warning: No compiled rules found. Run: python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir '\(compiledRulesDir)'")
@@ -2225,6 +2235,12 @@ private func _findUserHomeAlertNotificationConfigPath() -> String? {
         let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
         let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
         guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+        // v1.21.4 (audit A2-02): this file toggles the operator's OS alert
+        // notifications (enabled=false blinds them). Mirror the
+        // ResponseAction.findUserHomeActionsPath gate — only honor a user-home
+        // config owned by an ADMIN user, so a non-admin on a shared / managed
+        // Mac can't suppress alerting via a self-owned file.
+        guard DaemonTimers.isAdminUID(homeUID) else { continue }
         let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
         candidates.append(Candidate(path: path, mtime: mtime))
     }

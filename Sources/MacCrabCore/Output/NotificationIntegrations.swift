@@ -5,6 +5,7 @@
 // Supports Slack, Microsoft Teams, Discord, PagerDuty, and generic webhooks.
 
 import Foundation
+import Darwin
 import os.log
 
 /// Sends MacCrab alerts to external notification services via webhooks.
@@ -125,6 +126,14 @@ public actor NotificationIntegrations {
         case (let sc?, nil):          return sc
         case (nil, let uc?):          return uc
         case (let sc?, let uc?):
+            // v1.21.4 (audit A2-01): a root-owned system config is
+            // authoritative. Don't let a user-home notifications.json (webhook /
+            // Slack / SMTP exfil destinations) override the operator's config
+            // just by carrying a newer mtime. Only fall back to the mtime
+            // comparison when the system path is NOT root-owned (dev's
+            // ~/Library path), preserving the legacy single-user dev behavior.
+            let systemUID = (try? fm.attributesOfItem(atPath: systemPath))?[.ownerAccountID] as? NSNumber
+            if systemUID?.uint32Value == 0 { return sc }
             let sm = systemMtime ?? .distantPast
             let um = userMtime ?? .distantPast
             return um > sm ? uc : sc
@@ -148,10 +157,37 @@ public actor NotificationIntegrations {
             let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            // v1.21.4 (audit A2-01): notifications.json points at webhook / Slack
+            // / SMTP destinations that receive every alert payload. Mirror the
+            // ResponseAction.findUserHomeActionsPath gate — only honor a
+            // user-home config owned by an ADMIN user, so an unprivileged local
+            // user on a shared / managed Mac can't redirect alert exfil to an
+            // attacker endpoint (or override the operator's config).
+            guard Self.isAdminUID(homeUID) else { continue }
             let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
             candidates.append(Candidate(path: path, mtime: mtime))
         }
         return candidates.max(by: { $0.mtime < $1.mtime })?.path
+    }
+
+    /// True if `uid` belongs to the macOS `admin` group (gid 80). Mirrors
+    /// `ResponseAction.isAdminUID` (which is file-private and cannot be reached
+    /// cross-file) and `DaemonTimers.isAdminUID`; replicated here for the same
+    /// reason ResponseAction replicates it — the canonical helper isn't visible
+    /// from this type. A user-home notifications.json is only honored when its
+    /// owner is an admin.
+    private static func isAdminUID(_ uid: UInt32) -> Bool {
+        guard let pw = getpwuid(uid) else { return false }
+        let name = String(cString: pw.pointee.pw_name)
+        let baseGID = Int32(bitPattern: pw.pointee.pw_gid)
+        var ngroups: Int32 = 64
+        var groups = [Int32](repeating: 0, count: Int(ngroups))
+        if getgrouplist(name, baseGID, &groups, &ngroups) == -1 {
+            // Buffer too small; ngroups now holds the needed size — retry once.
+            groups = [Int32](repeating: 0, count: Int(ngroups))
+            guard getgrouplist(name, baseGID, &groups, &ngroups) != -1 else { return false }
+        }
+        return groups.prefix(Int(ngroups)).contains(80)   // gid 80 == admin
     }
 
     private static func loadConfigFromDisk(path: String) -> Config? {

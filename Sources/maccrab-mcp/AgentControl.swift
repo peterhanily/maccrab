@@ -104,6 +104,23 @@ let agentToolCapability: [String: AgentCapability] = [
     "forensics_install_plugin": .response,
     "forensics_uninstall_plugin": .response,
     "forensics_pin_plugin": .response,
+    // Running a forensic scan EXECUTES plugin scanner code and can sweep
+    // sensitive local data (messages, mail, browser history, TCC state) into a
+    // case. create_case opens the container; run_collector / run_analyzer /
+    // run_all execute the scanner/analyzer plugins. Previously ALL of these were
+    // absent here, so the fail-open default let an agent with ZERO granted tiers
+    // run arbitrary forensic collection. Gated at the top tier to match the other
+    // code-executing plugin tools above (this is a read/scan of local state, not
+    // a defense-config change, but .response is the tightest existing tier and
+    // the correct home for code execution + sensitive-data collection). NOTE:
+    // gating create_case only closes the fresh-case path — an agent can still
+    // target a case_id from forensics_list_cases — so run_collector /
+    // run_analyzer / run_all are gated DIRECTLY, and run_all (the "run all
+    // collectors" superset of run_collector) is included so it can't be a bypass.
+    "forensics_create_case": .response,
+    "forensics_run_collector": .response,
+    "forensics_run_analyzer": .response,
+    "forensics_run_all": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +

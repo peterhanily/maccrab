@@ -41,6 +41,16 @@ struct DaemonConfig: Codable {
     /// false` in daemon_config.json to disable the family independently.
     var subscribeIntrospectionEvents: Bool = true
 
+    // MARK: - Rule profile
+    /// Which Sigma `status` tiers ship ENABLED at load (F-04). `"stable"`
+    /// (default, since v1.21.4) enables only the curated stable corpus; the
+    /// experimental and test tiers still load (their ids/titles surface) but stay
+    /// disabled, keeping the daily false-positive budget honest. Set
+    /// `"rule_profile": "all"` in daemon_config.json to enable every non-deprecated
+    /// rule (the pre-1.21.4 behavior). Operator per-rule overlays / explicit
+    /// enables (user_rules) are unaffected by this setting.
+    var ruleProfile: String = "stable"
+
     /// v1.19 (S1-T6): suppress the self-inflicted honeyfile noise that
     /// `make test` / `make test-*` generate — the Swift test runner reading
     /// MacCrab's OWN deployed decoy files and tripping the credential/discovery
@@ -474,6 +484,12 @@ struct DaemonConfig: Codable {
             let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             let fileUID = (overrideAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            // v1.21.4 (audit A2-02): these overrides can shrink retention /
+            // storage caps (anti-forensics — evict evidence early). Mirror the
+            // ResponseAction.findUserHomeActionsPath gate — only honor a
+            // user-home overrides file owned by an ADMIN user, so a non-admin on
+            // a shared / managed Mac can't weaken the operator's config.
+            guard DaemonTimers.isAdminUID(homeUID) else { continue }
             let mtime = (overrideAttrs[.modificationDate] as? Date) ?? .distantPast
             candidates.append(Candidate(path: overridesPath, mtime: mtime))
         }

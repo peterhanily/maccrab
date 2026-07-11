@@ -107,13 +107,17 @@ struct RuleChannelFetcher {
     // MARK: - Fetch + verify
 
     private func fetch(url: URL) async throws -> Data {
-        // Always pull fresh: the manifest is re-published frequently and the
-        // anti-rollback serial only works if we actually SEE the newest one.
-        // URLSession.shared's default cache will otherwise serve a stale
-        // manifest for the same URL, silently masking a just-published update.
+        // Route through SecureURLSession.shared (TLS 1.2 floor, ephemeral no-disk
+        // cache, SSRF-redirect re-validation) — the hardened session every other
+        // outbound caller uses. This is the highest-trust channel (it delivers
+        // detection rules), so it must not fall back to raw URLSession.shared.
+        // We ALSO keep the explicit no-cache request policy: the manifest is
+        // re-published frequently and the anti-rollback serial only works if we
+        // actually SEE the newest one; a stale cached copy would silently mask a
+        // just-published update.
         var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
         req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await SecureURLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw RuleChannelError.httpFetchFailed(url: url, status: -1)
         }

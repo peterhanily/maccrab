@@ -517,13 +517,31 @@ public actor RuleEngine {
 
     // MARK: Rule loading
 
+    /// Active rule-status profile filter (F-04). When non-nil, only rules whose
+    /// Sigma `status` is in this set ship enabled from the BUNDLED base load
+    /// (operator overlays via `requireOwnerUID` are explicit intent and are never
+    /// gated). nil = no filter (every non-deprecated rule enabled) — the default
+    /// for direct callers and the test suite. The daemon sets `["stable"]` by
+    /// default (daemon_config.json `rule_profile`), so the experimental/test tiers
+    /// ship disabled unless the operator opts into `"all"`. Stored so a SIGHUP
+    /// `reloadRules` (which calls `loadRules` with no explicit profile) re-applies
+    /// the same filter instead of silently re-enabling the experimental corpus.
+    private var ruleProfileStatuses: Set<String>? = nil
+
     /// Load compiled rules from a directory of JSON files.
     ///
     /// Each `.json` file in `directory` must contain a single `CompiledRule`.
     /// Returns the number of rules successfully loaded. Rules that fail to
     /// parse are logged and skipped.
     @discardableResult
-    public func loadRules(from directory: URL, requireOwnerUID: uid_t? = nil) throws -> Int {
+    public func loadRules(from directory: URL, requireOwnerUID: uid_t? = nil, enabledStatuses: Set<String>? = nil) throws -> Int {
+        // F-04 rule-status profile: applies to the BUNDLED base load only. An
+        // operator overlay (requireOwnerUID != nil) is explicit intent and is
+        // never gated. Store the profile so a SIGHUP reloadRules re-applies it.
+        if requireOwnerUID == nil, let statuses = enabledStatuses {
+            ruleProfileStatuses = statuses
+        }
+        let activeStatuses: Set<String>? = (requireOwnerUID == nil) ? ruleProfileStatuses : nil
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
@@ -574,7 +592,14 @@ public actor RuleEngine {
             }
             do {
                 let data = try Data(contentsOf: file)
-                let rule = try decoder.decode(CompiledRule.self, from: data)
+                var rule = try decoder.decode(CompiledRule.self, from: data)
+                // F-04 stable-profile gate: a rule whose Sigma status falls outside
+                // the active profile ships disabled (deprecated is already
+                // enabled=false). nil profile = every non-deprecated rule enabled.
+                if let allowed = activeStatuses, rule.enabled,
+                   !allowed.contains((rule.status ?? "experimental").lowercased()) {
+                    rule.enabled = false
+                }
                 // Same-id overlay (a user_rules override of a bundled rule, loaded
                 // by a second loadRules call without a clear): replace in the
                 // dispatch index, don't duplicate. allRules dedups by id, but an

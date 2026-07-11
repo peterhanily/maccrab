@@ -1,11 +1,11 @@
 # MacCrab
 
-**Open, local-first macOS detection and investigation — for developers, researchers, and Mac security practitioners.**
+**Open, local-first macOS detection & investigation — with first-class visibility into what AI coding agents do on your Mac.** For developers, researchers, and Mac security practitioners.
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-2695%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-483%20(90%20stable%2C%20rest%20experimental)-blueviolet)](docs/COVERAGE.md)
+[![Tests](https://img.shields.io/badge/tests-2720%20passing-brightgreen)]()
+[![Rules](https://img.shields.io/badge/rules-483%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.21.3-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -15,15 +15,20 @@
 > [!WARNING]
 > **Alpha software under active development.** MacCrab ships in public
 > alpha and is iterating rapidly on detection quality, UX, and the
-> release pipeline. Expect false positives, occasional rule changes,
-> and frequent updates. Run it on a Mac you're comfortable debugging
+> release pipeline. Since v1.21.4-alpha the daemon defaults to the
+> curated **stable** rule tier (the broader experimental corpus is
+> opt-in via `rule_profile: all` in `daemon_config.json`), so expect
+> fewer false positives than earlier alphas — but still occasional rule
+> changes and frequent updates. Run it on a Mac you're comfortable debugging
 > on. Issue reports and field data are very welcome — they're driving
 > most of the current release cadence. See
 > [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
 
 MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
 
-It's a tool for reading and operating your own detection logic, not a managed EDR: there's no global adversary telemetry, no managed response, most of the rule corpus is still **experimental** (see [coverage](docs/COVERAGE.md)), and it ships from a **single-maintainer supply chain** (see [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md)).
+A distinguishing focus is **AI-coding-agent observability**: MacCrab's AI Guard and tamper-evident **Agent Traces** attribute file reads, config writes, MCP calls, and network egress to the specific agent session that caused them -- so when an AI coding tool (Claude Code, Codex, and the like), or a compromised one, touches something sensitive, you have a signed, replayable record. The Endpoint Security detection engine underneath gives that attribution teeth.
+
+It's a tool for reading and operating your own detection logic, not a managed EDR: there's no global adversary telemetry, no managed response, the experimental tier of the rule corpus is opt-in (the daemon defaults to the curated **stable** tier -- see [coverage](docs/COVERAGE.md)), and it ships from a **single-maintainer supply chain** (see [docs/SUPPLY_CHAIN_SECURITY.md](docs/SUPPLY_CHAIN_SECURITY.md)).
 
 **Releases:** Signed, notarized, auto-updating builds ship via Sparkle through [maccrab.com/appcast.xml](https://maccrab.com/appcast.xml). See [CHANGELOG.md](CHANGELOG.md) for the release history.
 

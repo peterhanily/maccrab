@@ -22,6 +22,17 @@ ATT&CK technique tags from each rule's `tags:` block.
 | Distinct MITRE ATT&CK techniques covered | 170 |
 | Tactic directories | 18 |
 
+## Default rule profile
+
+Since **v1.21.4-alpha** the daemon defaults to the **stable** rule
+profile: only `status: stable` rules ship enabled. The
+`experimental` / `test` tiers still load — their ids/titles surface
+and an operator can enable them individually — but are disabled by
+default, keeping the daily false-positive budget honest. Set
+`"rule_profile": "all"` in `daemon_config.json` to enable every
+non-deprecated rule (the pre-1.21.4 behavior). Per-rule operator
+overlays (user_rules) are unaffected by this setting.
+
 ## Caveat
 
 This is **documented coverage** — what each rule's `tags:`

@@ -37,12 +37,18 @@ private let logger = Logger(subsystem: "com.maccrab.mcp", category: "server")
 // share file-wide.
 let isoFormatter = ISO8601DateFormatter()
 
-// MARK: - Security: Parent Process Validation
+// MARK: - Observability: Parent Process Logging
 
-/// Verify the MCP server was launched by a trusted parent process.
-/// MCP stdio transport is inherently scoped to the launching process,
-/// but this check adds defense-in-depth against unexpected invocations.
-func validateParentProcess() {
+/// Record the invoking parent process at startup. This is OBSERVATIONAL ONLY —
+/// it logs `getppid()` + `proc_pidpath` and returns; it does NOT validate,
+/// gate, or reject anything, and its (void) result is not a control. MCP stdio
+/// transport is already scoped to the launching process; a parent-path
+/// allowlist would be fragile across the many legitimate agent launchers
+/// (Claude Code, Codex, node/python wrappers, …) and could break an authorized
+/// flow — matching the warn-not-refuse stance for euid 0 at startup. Enforcement
+/// of who may mutate lives in the root-owned capability gate (loadAgentCapabilities
+/// / agentCapabilityDenial), not here.
+func logInvokingParentProcess() {
     let ppid = getppid()
     var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
     let result = proc_pidpath(ppid, &buffer, UInt32(buffer.count))
@@ -3394,8 +3400,10 @@ private func jsonStringify(_ obj: Any) -> String {
 
 let decoder = JSONDecoder()
 
-// Security: validate parent process at startup
-validateParentProcess()
+// Observability: log the invoking parent process at startup. This is NOT a
+// security gate — it records who launched us but rejects nothing. Mutation
+// authorization is enforced by the root-owned capability gate, not by this.
+logInvokingParentProcess()
 
 // maccrab-mcp is meant to run as the logged-in user (launched by an AI
 // agent like Claude Code). It never needs root. Warn — not refuse — when
