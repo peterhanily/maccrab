@@ -103,6 +103,10 @@ scripts/build-pkg.sh
 .maccrab.env
 .maccrab-signing/
 maccrab-release-env*
+# Per-machine containment-corpus attestation marker: written by
+# `make test-corpus` on success, consumed by scripts/prerelease-check.sh.
+# It records a local, host-specific run result — never committed.
+.maccrab-corpus-attest
 
 # -----------------------------------------------------------------------------
 # Generic secret file patterns
@@ -185,6 +189,9 @@ coverage/
 # -----------------------------------------------------------------------------
 # Local planning docs (not part of public repo)
 plans/
+# Security / GA-readiness review artifacts — map exploitable paths at file:line;
+# MUST stay local-only, never published to this public repo.
+review/
 # Execution-companion / forward roadmap — relocated to the private wiki
 # (opsec review 2026-06-02); kept local-only like plans/.
 GOAL.md

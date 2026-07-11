@@ -187,11 +187,23 @@ SU_FEEDURL="$SU_FEEDURL"
 STAGE_ENV_EOF
 
     # ─── Compile for both architectures ──────────────────────────────
+    # Each arch MUST build. `| tail -1` collapses the log to its last line,
+    # so we TEST the pipeline (pipefail-adjusted) explicitly and ABORT loud
+    # if either arch fails — never silently fall back to a single-arch build.
+    # Pre-fix, a failed x86_64 compile left arm64-only binaries that the lipo
+    # loop below copied as "arm64 only" while stage_publish still labeled the
+    # DMG "universal" — handing Intel users an un-runnable app with no gate.
     echo "  Building arm64..."
-    swift build -c release --arch arm64 2>&1 | tail -1
+    if ! swift build -c release --arch arm64 2>&1 | tail -1; then
+        echo "  ✗ ABORT: arm64 release build failed — refusing to ship." >&2
+        exit 1
+    fi
 
     echo "  Building x86_64..."
-    swift build -c release --arch x86_64 2>&1 | tail -1
+    if ! swift build -c release --arch x86_64 2>&1 | tail -1; then
+        echo "  ✗ ABORT: x86_64 release build failed — refusing to ship a single-arch build mislabeled \"universal\"." >&2
+        exit 1
+    fi
 
     # Create universal binaries for every product. maccrabd still builds
     # (it's the legacy SPM target used during `swift run` development) but
@@ -949,6 +961,33 @@ stage_publish() {
         exit 1
     fi
     echo "    ✓ No build-path leakage in shipped binaries"
+
+    # ─── Universal-binary gate ───────────────────────────────────────
+    # Every Mach-O we ship MUST carry BOTH arm64 and x86_64. If an arch
+    # build silently produced a single-arch binary (or a stale arm64-only
+    # copy slipped through the unsigned-build lipo step), the DMG below is
+    # still labeled "universal (arm64 + x86_64)" and Intel users get an
+    # un-runnable app with no other gate to catch it. Assert each shipped
+    # binary is 2-arch via `lipo -archs`; abort on any single-arch. Scope:
+    # the app exe, the sysext exe, and the bundled CLIs / trampoline in
+    # Resources/bin (the same paths the sign stage handled above).
+    echo "  Verifying every shipped Mach-O is universal (arm64 + x86_64)..."
+    UNIVERSAL_TARGETS=(
+        "$APP/Contents/MacOS/MacCrab"
+        "$APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+    )
+    for _b in "$APP"/Contents/Resources/bin/*; do
+        if [ -f "$_b" ]; then UNIVERSAL_TARGETS+=("$_b"); fi
+    done
+    for _b in "${UNIVERSAL_TARGETS[@]}"; do
+        [ -f "$_b" ] || continue
+        _archs=$(lipo -archs "$_b" 2>/dev/null || true)
+        if ! echo "$_archs" | grep -qw arm64 || ! echo "$_archs" | grep -qw x86_64; then
+            echo "  ✗ ABORT: $_b is not 2-arch (lipo -archs: '${_archs:-none}') — refusing to ship a single-arch build labeled \"universal\"." >&2
+            exit 1
+        fi
+    done
+    echo "    ✓ All shipped Mach-O binaries are universal (arm64 + x86_64)"
 
     # ─── DMG ─────────────────────────────────────────────────────────
     echo "  Creating DMG..."

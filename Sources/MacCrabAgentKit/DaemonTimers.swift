@@ -1098,7 +1098,12 @@ enum DaemonTimers {
 
             // v1.7.2: collector liveness + drop counter.
             let collectorStatuses = await state.collectorRegistry.snapshot()
+            // Fold the merged-stream buffer drops (bufferingNewest cap →
+            // oldest evicted) into the registry total. recordDrop keeps its
+            // other callers; the merged-stream yield path is a separate drop
+            // source that must also show up in the heartbeat.
             let droppedTotal = await state.collectorRegistry.droppedEventsTotal()
+                &+ UInt64(state.mergedStreamDropCount)
             // Encode collectors as plain dicts for JSONSerialization
             // compatibility (it can't take a [Codable] directly).
             let collectorDicts: [[String: Any]] = collectorStatuses.map { s in

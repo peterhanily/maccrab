@@ -96,9 +96,21 @@ test-integration:
 # TierB or the trampoline/broker C targets — record the run in the release
 # checklist. (audit #2: the only containment proof must not run nowhere.)
 test-corpus:
-	swift build
+	@set -o pipefail; \
+	swift build && \
 	MACCRAB_CORPUS=1 MACCRAB_BIN_DIR="$$(swift build --show-bin-path)" \
-		swift test --filter ContainmentCorpus 2>&1 | grep -E "✔|✘|Test run"
+		swift test --filter ContainmentCorpus 2>&1 | grep -E "✔|✘|Test run"; \
+	rc=$$?; \
+	if [ "$$rc" -eq 0 ]; then \
+		ver="$${VERSION:-$$(grep -E '^[[:space:]]*public static let fallback:' Sources/MacCrabCore/MacCrabVersion.swift | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"; \
+		printf 'CORPUS_ATTESTED version=%s commit=%s date=%s\n' \
+			"$$ver" "$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+			"$$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .maccrab-corpus-attest; \
+		echo "✓ containment corpus attested for $$ver → .maccrab-corpus-attest"; \
+	else \
+		echo "✗ containment corpus failed (rc=$$rc) — .maccrab-corpus-attest NOT written"; \
+	fi; \
+	exit $$rc
 
 lint-rules:
 	./scripts/rule-lint.sh

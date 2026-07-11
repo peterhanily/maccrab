@@ -556,6 +556,36 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# Containment corpus attestation (E-01)
+# ---------------------------------------------------------------------
+# The Tier-B containment corpus (`make test-corpus`) is the only on-device
+# proof that the sandboxed third-party plugin lane actually CONTAINS
+# (undeclared read / network / fork / metadata-stat / undeclared
+# mach-lookup are OS-denied; a declared read is brokered over fd 3). It
+# can't run in hosted CI — it spawns the real sandbox_init under a physical
+# macOS host — so the operator must run it on the release machine. On
+# success `make test-corpus` writes a local `.maccrab-corpus-attest`
+# recording version + commit + UTC date. Require that marker here, and
+# require it to attest the exact version being cut, so a release can't ship
+# without that containment proof.
+
+section "Containment corpus attestation"
+
+ATTEST_FILE=".maccrab-corpus-attest"
+if [[ ! -f "$ATTEST_FILE" ]]; then
+    err "$ATTEST_FILE missing — run \`make test-corpus\` on this Mac (macOS 26) for the release build first"
+else
+    ATTEST_VER=$(grep -oE 'version=[^[:space:]]+' "$ATTEST_FILE" 2>/dev/null | head -1 | sed -E 's/^version=//')
+    if [[ -z "$ATTEST_VER" ]]; then
+        err "$ATTEST_FILE has no version= field — re-run \`make test-corpus\` on this Mac (macOS 26)"
+    elif [[ "$ATTEST_VER" != "$VERSION_SEMVER" ]]; then
+        err "$ATTEST_FILE attests \"$ATTEST_VER\" but this release is \"$VERSION_SEMVER\" — re-run \`make test-corpus\` on this Mac (macOS 26)"
+    else
+        ok "$ATTEST_FILE → containment corpus attested for $VERSION_SEMVER"
+    fi
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

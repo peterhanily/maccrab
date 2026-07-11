@@ -3076,6 +3076,74 @@ if [[ $pass_L_state_violations -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------
+# PASS M — universal-binary architecture (GA-blocker C-01)
+# ---------------------------------------------------------------------
+# build-release.sh compiles arm64 + x86_64 and lipo-merges every product
+# into a universal binary, then labels the DMG "universal (arm64 +
+# x86_64)". If an arch build silently produced a single-arch binary, the
+# DMG still shipped labeled universal and Intel users got an un-runnable
+# app — with no gate to catch it. build-release.sh now aborts at package
+# time; this pass is the INDEPENDENT audit-side assertion over whatever
+# MacCrab.app has been staged/built, so a single-arch binary fails here
+# too. Runs post-build: skips (info) when no built .app is present, the
+# same discipline as Pass B.
+#
+# Deliberately-broken fixture this catches:
+#   Break:  lipo-extract one shipped exe to a single slice, e.g.
+#           `lipo <app>/Contents/MacOS/MacCrab -thin arm64 -output <same>`.
+#   Expect: PASS M errs "<path> ... not universal (need arm64 + x86_64)".
+#   Restore: rebuild (lipo re-creates the fat binary).
+section "PASS M — universal-binary architecture (arm64 + x86_64)"
+
+passM_app=""
+shopt -s nullglob
+for app_root in \
+    .build/maccrab-stage/MacCrab.app \
+    .build/release/MacCrab.app \
+    .build/debug/MacCrab.app \
+    dist/MacCrab.app \
+    /Applications/MacCrab.app; do
+    if [[ -d "$app_root" ]]; then passM_app="$app_root"; break; fi
+done
+shopt -u nullglob
+
+if [[ -z "$passM_app" ]]; then
+    info "→ SKIPPED (no built MacCrab.app found — pass runs post-build)"
+else
+    # Shipped Mach-Os that MUST be 2-arch: the app exe, the sysext exe,
+    # and the bundled CLIs / trampoline in Resources/bin.
+    passM_targets=(
+        "$passM_app/Contents/MacOS/MacCrab"
+        "$passM_app/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+    )
+    for b in "$passM_app"/Contents/Resources/bin/*; do
+        if [[ -f "$b" ]]; then passM_targets+=("$b"); fi
+    done
+
+    passM_single=()
+    passM_checked=0
+    for b in "${passM_targets[@]}"; do
+        [[ -f "$b" ]] || continue
+        passM_checked=$((passM_checked + 1))
+        archs=$(lipo -archs "$b" 2>/dev/null || true)
+        if ! echo "$archs" | grep -qw arm64 || ! echo "$archs" | grep -qw x86_64; then
+            passM_single+=("$b (lipo -archs: ${archs:-none})")
+        fi
+    done
+
+    if [[ ${#passM_single[@]} -gt 0 ]]; then
+        err "Pass M: ${#passM_single[@]} shipped Mach-O(s) not universal (need arm64 + x86_64) — Intel users would get an un-runnable app in a DMG labeled \"universal\":"
+        for v in "${passM_single[@]}"; do
+            echo "    $v" >&2
+        done
+    elif [[ "$passM_checked" -eq 0 ]]; then
+        info "Pass M: MacCrab.app present but no expected Mach-O binaries found (staging incomplete?)"
+    else
+        ok "Pass M: all $passM_checked shipped Mach-O binaries in $passM_app are universal (arm64 + x86_64)"
+    fi
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

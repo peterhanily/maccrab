@@ -25,6 +25,11 @@
 # Job criticality:
 #   build-and-test  REQUIRED  — must pass to merge.
 #   rules           REQUIRED  — must pass to merge.
+#   broker-fuzz     REQUIRED  — ASan/UBSan fuzz of the SCM_RIGHTS fd broker
+#                               (Sources/CTierBBroker/broker.c), the sandbox-
+#                               escape primitive. A sanitizer fault or a stray-
+#                               closed descriptor means the containment boundary
+#                               re-opened — must block merge.
 #   audit           ADVISORY  — informational; does not block (it runs
 #                               the full architectural audit + PASS-L
 #                               Xcode-27 guards, some of which are
@@ -37,6 +42,13 @@
 #                               the REQUIRED containment gate is the operator's
 #                               on-device `make test-corpus` on macOS 26, recorded
 #                               in the release checklist.
+#   rule-channel    ADVISORY  — drives the signed OTA rule-update channel end-to-
+#                               end (maccrabctl rules …) against a local mock
+#                               endpoint + generated key, asserting every bad
+#                               manifest is refused fail-closed. Advisory because
+#                               it depends on host data-dir state a hosted runner
+#                               may not reproduce; the guarantees are re-proven on
+#                               device in the release checklist.
 name: CI
 
 on:
@@ -155,6 +167,33 @@ jobs:
       - name: Rule lint (filter coverage)
         run: ./scripts/rule-lint.sh
 
+  # ── REQUIRED ────────────────────────────────────────────────────────
+  broker-fuzz:
+    name: Broker fd fuzz — ASan/UBSan (required)
+    runs-on: macos-15
+    timeout-minutes: 20
+    # REQUIRED: the SCM_RIGHTS fd broker (Sources/CTierBBroker/broker.c) is the
+    # sandbox-escape primitive — a store plugin talks to it to receive its one
+    # brokered read fd. test-broker-fuzz.sh floods maccrab_tierb_recv_fd with
+    # thousands of malformed / multi-fd control messages under AddressSanitizer +
+    # UndefinedBehaviorSanitizer (the exact path of the v1.20.2 CWE-191 underflow
+    # fix). A sanitizer fault or a stray-closed descriptor = a re-opened boundary,
+    # so this blocks merge (no continue-on-error).
+    #
+    # Path relevance: this primarily guards PRs touching Sources/CTierBBroker/**,
+    # but it is wired to run on every push/PR (a regression can also arrive via
+    # the broker's callers or build flags) — the fuzz is cheap enough to always run.
+    #
+    # No swift build: the harness is a standalone clang compile of broker.c, so no
+    # Xcode-select pin is needed here — clang and the ASan/UBSan runtimes ship with
+    # the runner's Xcode/CLT toolchain.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Fuzz the SCM_RIGHTS fd broker (ASan + UBSan)
+        run: ./scripts/test-broker-fuzz.sh
+
   # ── ADVISORY ────────────────────────────────────────────────────────
   audit:
     name: Architectural audit (advisory)
@@ -244,3 +283,67 @@ jobs:
           swift build
           MACCRAB_CORPUS=1 MACCRAB_BIN_DIR="$(swift build --show-bin-path)" \
             swift test --filter ContainmentCorpus
+
+  # ── ADVISORY ────────────────────────────────────────────────────────
+  rule-channel:
+    name: Signed rule-update channel e2e (advisory)
+    runs-on: macos-15
+    timeout-minutes: 30
+    # Advisory (continue-on-error), same rationale shape as the corpus job: this
+    # drives the REAL RuleChannelFetcher end-to-end through the happy path and
+    # every dangerous failure mode (rollback, corrupt sig, wrong key, tampered
+    # body, malformed JSON, path-traversal rule id, version floor) against a LOCAL
+    # mock endpoint with a generated key, asserting each bad manifest is refused
+    # fail-closed with the prior corpus + anti-rollback serial intact. It isolates
+    # to the writable USER data dir by making its events.db the "newest"; a fresh
+    # hosted runner may not reproduce that host state, so a red check here is
+    # informational, not a merge blocker. The fail-closed guarantees are re-proven
+    # on device in the release checklist.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # A swift build is required (the harness needs a DEBUG maccrabctl and uses
+      # swiftc for the signer), so select Xcode 26.x here too — same logic as
+      # build-and-test — to keep CI on the release toolchain (PASS-K).
+      - name: Select Xcode ${{ env.PINNED_XCODE_MAJOR }}.x (PASS-K pin)
+        run: |
+          set -euo pipefail
+          want="${PINNED_XCODE_MAJOR}"
+          best=""
+          for app in /Applications/Xcode_${want}*.app /Applications/Xcode.app; do
+            [ -d "$app" ] || continue
+            ver=$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | sed -n 's/^Xcode \([0-9][0-9]*\).*/\1/p')
+            if [ "$ver" = "$want" ]; then best="$app"; break; fi
+          done
+          if [ -z "$best" ]; then
+            echo "::error::No Xcode ${want}.x found on this runner — CI is pinned to the release toolchain (PASS-K)." >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+
+      # The harness uses python3 for the mock http.server + manifest JSON (no
+      # PyYAML needed); setup-python guarantees a clean interpreter first on PATH.
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve dependencies (pinned)
+        run: swift package resolve
+
+      # The harness needs a DEBUG maccrabctl (DEBUG honours the test key path) —
+      # it aborts with exit 2 if .build/debug/maccrabctl is missing.
+      - name: Build maccrabctl (debug)
+        run: swift build --product maccrabctl
+
+      # The harness isolates to the writable USER data dir by making its events.db
+      # the "newest"; that dir must exist for the redirect check to pass on a fresh
+      # runner (no root /Library detector is installed here).
+      - name: Ensure user data dir exists
+        run: mkdir -p "$HOME/Library/Application Support/MacCrab"
+
+      - name: Rule-update channel adversarial e2e
+        run: ./scripts/test-rule-channel-e2e.sh

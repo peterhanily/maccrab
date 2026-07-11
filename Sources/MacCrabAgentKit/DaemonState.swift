@@ -579,6 +579,18 @@ final class DaemonState {
 
     private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")
 
+    /// Count of events the merged stream dropped because `mergedStreamCap`
+    /// was reached — i.e. `.bufferingNewest` evicted the *oldest* queued
+    /// event to make room (see `mergedStreamCap` doc below). This is a real
+    /// detection gap under a storm, so it must be visible in the heartbeat.
+    /// A synchronous `LockedCounter` (not an actor) so the hot yield path
+    /// never pays an actor hop or spawns a Task per drop.
+    private let mergedStreamDrops = LockedCounter()
+
+    /// Merged-stream drops since daemon start. Folded into the heartbeat's
+    /// `events_dropped` / `events_dropped_total` by `DaemonTimers`.
+    var mergedStreamDropCount: Int { mergedStreamDrops.get() }
+
     /// Upper bound on in-flight events queued to the detection pipeline.
     /// Past this depth, AsyncStream's `.bufferingNewest` policy drops the
     /// *oldest* event to make room. At 10k events/sec this cap represents
@@ -597,7 +609,17 @@ final class DaemonState {
     func mergedEventStream() -> AsyncStream<Event> {
         AsyncStream<Event>(bufferingPolicy: .bufferingNewest(Self.mergedStreamCap)) { continuation in
             let logger = mergedStreamLogger
-            let yield: @Sendable (Event) -> Void = { continuation.yield($0) }
+            // Capture the counter (not `self`) so the @Sendable closure stays
+            // isolation-free. On `.dropped` the `mergedStreamCap`
+            // `.bufferingNewest` buffer was full and evicted the oldest queued
+            // event — a real detection gap — so count it synchronously here.
+            // `.enqueued` / `.terminated` are normal and cost nothing.
+            let drops = mergedStreamDrops
+            let yield: @Sendable (Event) -> Void = { event in
+                if case .dropped = continuation.yield(event) {
+                    drops.increment()
+                }
+            }
             // v1.18: each source runs an independent backoff + escalation loop.
             // A source whose AsyncStream ends PERMANENTLY (ES client invalidated,
             // eslogger subprocess gone) no longer hot-spins at a fixed 2s logging
