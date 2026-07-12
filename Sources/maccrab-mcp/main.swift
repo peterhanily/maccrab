@@ -2217,8 +2217,8 @@ func handleGetStatus() async -> Any {
     } catch {}
 
     // Count compiled single-event rules (exclude manifest.json — it is
-    // build-time metadata, not a rule; counting it reported 437 vs the true
-    // 436 the engine loads).
+    // build-time metadata, not a rule; counting it reported 439 vs the true
+    // 438 the engine loads).
     let rulesDir = dataDir + "/compiled_rules"
     let ruleCount = (try? fm.contentsOfDirectory(atPath: rulesDir))?
         .filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.count ?? 0

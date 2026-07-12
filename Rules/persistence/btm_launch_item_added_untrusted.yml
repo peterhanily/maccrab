@@ -1,0 +1,45 @@
+title: BTM Launch Item Added by Untrusted Process
+id: 731b3c91-fb2e-42ef-8679-3d49412030f2
+status: stable
+description: >
+    Detects a login item, launch agent, or launch daemon being registered
+    with Background Task Management (BTM) by an instigator that is NOT
+    Apple-signed, App Store-signed, or MDM-managed. Modern
+    SMAppService.register() persistence leaves NO LaunchAgent plist and NO
+    write-time file event, so the write-time persistence rules stay silent;
+    this fires on the ES BTM add itself, attributed to the responsible
+    XPC caller (instigator), not the OS daemon that delivered the add.
+    A background launch item registered by a shell, an unsigned binary, or
+    a downloaded app running from a user-writable location is a persistence
+    signal (PamStealer / "Maccy" clipboard-manager class).
+author: MacCrab Community
+date: 2026/07/12
+references:
+    - https://attack.mitre.org/techniques/T1547/015/
+    - https://attack.mitre.org/techniques/T1543/001/
+tags:
+    - attack.persistence
+    - attack.t1547.015
+    - attack.t1543.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        BTMItemType:
+            - 'login_item'
+            - 'agent'
+            - 'daemon'
+    filter_apple:
+        SignerType: 'apple'
+    filter_appstore:
+        SignerType: 'appStore'
+    filter_managed:
+        BTMManaged: 'true'
+    condition: selection and not filter_apple and not filter_appstore and not filter_managed
+falsepositives:
+    - A user adding a legitimate but non-Apple-signed login item via System
+      Settings (the instigator is System Settings / Apple-signed and is filtered;
+      a third-party helper self-registering may still surface — verify the signer)
+    - Developer tools that self-register a login agent on first run
+level: medium

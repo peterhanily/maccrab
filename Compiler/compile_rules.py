@@ -123,6 +123,12 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     # RuleEngine's enrichment passthrough.
     "TargetImage", "TargetProcessName", "TargetSignerType", "TargetPid",
     "TargetIsSelf", "SameTeam",
+    # v1.21.4 BTM / SMAppService launch-item enrichment fields, set by
+    # ESCollector.btmEnrichments for NOTIFY_BTM_LAUNCH_ITEM_ADD events and
+    # resolved via RuleEngine's enrichment passthrough (the item + attributed-app
+    # metadata; the instigator's Image/SignerType/team are on event.process).
+    "BTMItemType", "BTMLegacy", "BTMManaged", "BTMExecutablePath",
+    "BTMItemURL", "BTMAppURL", "BTMAppSignerType", "BTMAppTeamId",
     # --- Phase 1 enrichment fields (hashes, session, signing) ---
     # Hash fingerprints populated by ProcessHasher/FileHasher enrichers.
     "ProcessSHA256", "ProcessCDHash", "ProcessMD5",

@@ -26,6 +26,9 @@ struct DaemonConfig: Codable {
     var rootkitPollInterval: TimeInterval = 120
     var eventTapPollInterval: TimeInterval = 30
     var systemPolicyPollInterval: TimeInterval = 300
+    /// v1.21.4: how often BTMSnapshotMonitor reconciles Background Task
+    /// Management state (read-only `sfltool dumpbtm`) for ghost login items.
+    var btmPollInterval: TimeInterval = 300
     /// v1.17.4: subscribe to ES NOTIFY_OPEN so credential/secret-file READ
     /// rules can fire (emission is bounded to a tight credential-dir
     /// allowlist in ESCollector). Kill-switch: set false (or
@@ -385,6 +388,7 @@ struct DaemonConfig: Codable {
             "rootkit_poll_interval": "rootkitPollInterval",
             "event_tap_poll_interval": "eventTapPollInterval",
             "system_policy_poll_interval": "systemPolicyPollInterval",
+            "btm_poll_interval": "btmPollInterval",
             // v1.19.1 opt-in network-enrichment flags
             "threat_intel_enabled": "threatIntelEnabled",
             "vuln_scan_enabled": "vulnScanEnabled",

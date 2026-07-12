@@ -119,6 +119,7 @@ final class DaemonState {
     let tccMonitor: TCCMonitor
     let edrMonitor: EDRMonitor
     let sdrDeviceMonitor: SDRDeviceMonitor
+    let btmSnapshotMonitor: BTMSnapshotMonitor
     let fsEventsCollector: FSEventsCollector
 
     // MARK: - Collectors
@@ -140,6 +141,14 @@ final class DaemonState {
     let libraryInventory: LibraryInventory
     let cdhashExtractor: CDHashExtractor
     let quarantineEnricher: QuarantineEnricher
+    /// Phase-5 delivery-provenance weld: attaches download-origin context to
+    /// firing cred/exfil alerts. Enrichment-only — emits no alerts of its own.
+    let deliveryProvenanceWeld: DeliveryProvenanceWeld
+    /// Phase-5 injection-evidence weld: on a firing agent-attributed cred-read /
+    /// read->egress trigger, retro-scans the session's prior agent-content reads
+    /// for injection markers and, on a hit, attaches the poisoned file + bumps
+    /// severity. Session-scoped, additive — emits no alerts of its own.
+    let injectionEvidenceWeld: InjectionEvidenceWeld
 
     // MARK: - Enrichment
     let yaraEnricher: YARAEnricher
@@ -406,6 +415,7 @@ final class DaemonState {
         tccMonitor: TCCMonitor,
         edrMonitor: EDRMonitor,
         sdrDeviceMonitor: SDRDeviceMonitor,
+        btmSnapshotMonitor: BTMSnapshotMonitor,
         fsEventsCollector: FSEventsCollector,
         collector: ESCollector?,
         esloggerCollector: EsloggerCollector?,
@@ -421,6 +431,8 @@ final class DaemonState {
         libraryInventory: LibraryInventory,
         cdhashExtractor: CDHashExtractor,
         quarantineEnricher: QuarantineEnricher,
+        deliveryProvenanceWeld: DeliveryProvenanceWeld,
+        injectionEvidenceWeld: InjectionEvidenceWeld,
         yaraEnricher: YARAEnricher,
         dbEncryption: DatabaseEncryption,
         preventionEnabled: Bool,
@@ -524,6 +536,7 @@ final class DaemonState {
         self.tccMonitor = tccMonitor
         self.edrMonitor = edrMonitor
         self.sdrDeviceMonitor = sdrDeviceMonitor
+        self.btmSnapshotMonitor = btmSnapshotMonitor
         self.fsEventsCollector = fsEventsCollector
         self.collector = collector
         self.esloggerCollector = esloggerCollector
@@ -539,6 +552,8 @@ final class DaemonState {
         self.libraryInventory = libraryInventory
         self.cdhashExtractor = cdhashExtractor
         self.quarantineEnricher = quarantineEnricher
+        self.deliveryProvenanceWeld = deliveryProvenanceWeld
+        self.injectionEvidenceWeld = injectionEvidenceWeld
         self.yaraEnricher = yaraEnricher
         self.dbEncryption = dbEncryption
         self.preventionEnabled = preventionEnabled

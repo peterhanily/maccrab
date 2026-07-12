@@ -1138,6 +1138,28 @@ public actor EventStore {
         return try queryEvents(sql: sql, bindings: bindings)
     }
 
+    /// Phase-5 injection-evidence weld: events for a session bounded to a tight
+    /// time window [since, until], chronological. Pushes the "prior N seconds"
+    /// retro-scan window into SQL (idx_events_ai_session covers
+    /// (ai_tool_session_id, timestamp)) so a busy session that has emitted more
+    /// than the plain `limit` of events can't push the recent window out of a
+    /// LIMIT-capped ASC scan. `since`/`until` are compared against the same
+    /// epoch-seconds `timestamp` column the index is keyed on.
+    public func eventsForAgentSession(_ sessionId: String, since: Date, until: Date, limit: Int = 2000) throws -> [Event] {
+        let sql = """
+            SELECT raw_json FROM events
+            WHERE ai_tool_session_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3
+            ORDER BY timestamp ASC LIMIT ?4
+            """
+        let bindings: [(Int32, BindingValue)] = [
+            (1, .text(sessionId)),
+            (2, .double(since.timeIntervalSince1970)),
+            (3, .double(until.timeIntervalSince1970)),
+            (4, .int(Int32(max(1, min(limit, 10000))))),
+        ]
+        return try queryEvents(sql: sql, bindings: bindings)
+    }
+
     /// Wave-3 P2b: the most-recent durable session id associated with a
     /// process pid. Used MCP-side to attribute a mutation (whose only
     /// correlation handle is the caller's ppid) back to an agent session —

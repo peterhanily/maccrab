@@ -10,13 +10,13 @@ ATT&CK technique tags from each rule's `tags:` block.
 
 | Metric | Count |
 |---|---|
-| Rules total | **477** |
-| Status: stable | 90 |
+| Rules total | **479** |
+| Status: stable | 92 |
 | Status: experimental | 374 |
 | Status: deprecated | 10 |
 | Severity: critical | 19 |
 | Severity: high | 111 |
-| Severity: medium | 226 |
+| Severity: medium | 228 |
 | Severity: low | 112 |
 | Severity: informational | 9 |
 | Distinct MITRE ATT&CK techniques covered | 170 |
@@ -412,7 +412,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `stolen_ssh_key_usage.yml`<br/>SSH Key Used from Non-Standard or Temporary Location | experimental | medium | T1021.004 T1552.004 |
 | `vnc_server_started.yml`<br/>VNC Server Started or Screen Sharing Activated | stable | medium | T1021.005 |
 
-### Persistence (TA0003) (39 rules)
+### Persistence (TA0003) (41 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
@@ -422,6 +422,8 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `at_job_creation.yml`<br/>At Job Scheduled (Legacy macOS Scheduler) | experimental | medium | T1053.002 |
 | `authorization_plugin_installed.yml`<br/>Authorization Plugin Installed | stable | high | T1547.002 |
 | `browser_extension_installed.yml`<br/>Browser Extension Installed by Non-Browser Process | experimental | medium | T1176 |
+| `btm_ghost_login_item_no_plist.yml`<br/>Ghost Login Item Registered via SMAppService (No Plist Written) | stable | medium | T1547.015 |
+| `btm_launch_item_added_untrusted.yml`<br/>BTM Launch Item Added by Untrusted Process | stable | medium | T1543.001 T1547.015 |
 | `cron_job_created.yml`<br/>Cron Job Created by Non-Crontab Process | experimental | medium | T1053.003 |
 | `directory_service_plugin.yml`<br/>Directory Service Plugin Installed | stable | high | T1556 |
 | `dock_persistence_entry_written.yml`<br/>Dock Persistence Entry Written via defaults | experimental | low | T1547 |

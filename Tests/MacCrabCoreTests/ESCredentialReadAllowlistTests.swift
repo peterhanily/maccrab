@@ -115,6 +115,71 @@ struct ESCredentialReadAllowlistTests {
         #expect(!ESCollector.isKeychainPath("/Users/x/.ssh/id_rsa"))
     }
 
+    // MARK: - Agent-content read allowlist (Phase-5 injection-evidence weld)
+
+    @Test("Agent-content reads (skills / hooks / config / workflows) are admitted for OPEN emission")
+    func agentContentAllowed() {
+        let yes = [
+            "/Users/x/.claude/skills/evil/SKILL.md",
+            "/Users/x/.codex/skills/foo/SKILL.md",
+            "/Users/x/.cursor/skills/bar/SKILL.md",
+            "/Users/x/.claude/hooks/pre.sh",
+            "/Users/x/.claude/agents/reviewer.md",
+            "/Users/x/.claude/scripts/run.sh",
+            "/Users/x/project/.github/workflows/ci.yml",
+            "/Users/x/.claude/settings.json",
+            "/Users/x/.claude/project.json",
+            "/Users/x/.claude/local.json",
+            "/Users/x/.claude.json",
+            "/Users/x/.cursor/mcp.json",
+            "/Users/x/.claude/claude_desktop_config.json",
+        ]
+        for p in yes { #expect(ESCollector.isAgentContentReadPath(p), "expected agent-content emit: \(p)") }
+    }
+
+    /// Drift guard: the agent-content read allowlist promises it mirrors
+    /// FileContentEnricher's agent roots/config-files (which the 14 FileContent
+    /// rules target). Every path FileContentEnricher.shouldScan admits for those
+    /// agent roots must also be admitted for OPEN emission — otherwise the read
+    /// half of the injection-evidence weld goes blind on a path the write rules
+    /// still cover. Both sides consulted for the same probe paths.
+    @Test("Agent-content read allowlist stays in sync with FileContentEnricher agent roots")
+    func agentContentAllowlistParity() {
+        let agentProbes = [
+            "/Users/x/.claude/skills/foo/SKILL.md",
+            "/Users/x/.codex/skills/foo/SKILL.md",
+            "/Users/x/.cursor/skills/foo/SKILL.md",
+            "/Users/x/.claude/scripts/x.sh",
+            "/Users/x/.claude/hooks/x.sh",
+            "/Users/x/.claude/agents/x.md",
+            "/Users/x/repo/.github/workflows/x.yml",
+            "/Users/x/.claude/claude_desktop_config.json",
+            "/Users/x/.claude.json",
+            "/Users/x/.cursor/mcp.json",
+            "/Users/x/.claude/settings.json",
+            "/Users/x/.claude/project.json",
+            "/Users/x/.claude/local.json",
+        ]
+        for p in agentProbes {
+            #expect(FileContentEnricher.shouldScan(targetPath: p),
+                    "FileContentEnricher lost coverage of agent path \(p)")
+            #expect(ESCollector.isAgentContentReadPath(p),
+                    "OPEN allowlist does not admit agent path \(p) (weld read-blind drift)")
+        }
+    }
+
+    @Test("Agent-content allowlist does NOT admit credential or ordinary paths (stays disjoint)")
+    func agentContentDisjointFromCredential() {
+        let no = [
+            "/Users/x/.ssh/id_rsa",                     // credential — the trigger fires on it; never re-read
+            "/Users/x/Library/Keychains/login.keychain-db",
+            "/Users/x/.aws/credentials",
+            "/Users/x/Documents/notes.txt",
+            "/Users/x/project/Sources/main.swift",
+        ]
+        for p in no { #expect(!ESCollector.isAgentContentReadPath(p), "expected NO agent-content emit: \(p)") }
+    }
+
     @Test("Ordinary paths are NOT emitted (the firehose is bounded)")
     func rejected() {
         let no = [

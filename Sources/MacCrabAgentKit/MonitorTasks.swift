@@ -445,6 +445,33 @@ enum MonitorTasks {
             }
         }
 
+        // BTM / SMAppService reconciliation task (read-only dumpbtm snapshot;
+        // ghost-login-item persistence the real-time ES BTM sensor missed).
+        await supervisor.start("btm_snapshot") {
+            for await btmEvent in state.btmSnapshotMonitor.events {
+                await state.collectorRegistry.recordTick(name: "BTMSnapshotMonitor")
+                let alert = Alert(
+                    ruleId: "maccrab.btm.reconcile",
+                    ruleTitle: btmEvent.title,
+                    severity: btmEvent.severity,
+                    eventId: UUID().uuidString,
+                    processPath: btmEvent.executablePath.isEmpty ? nil : btmEvent.executablePath,
+                    processName: btmEvent.identifier,
+                    description: "\(btmEvent.description)\n\n\(btmEvent.detail)",
+                    mitreTactics: "attack.persistence",
+                    mitreTechniques: "attack.t1547.015",
+                    suppressed: false
+                )
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                print("[BTM] reconcile: \(btmEvent.title)")
+                await Task.yield()
+            }
+        }
+
         // EDR/RMM tool monitoring task
         await supervisor.start("edr-rmm") {
             for await discovery in state.edrMonitor.events {

@@ -1878,7 +1878,7 @@ enum EventLoop {
                     let effectiveSeverity = await state.deduplicator.effectiveSeverity(
                         ruleId: match.ruleId, original: match.severity)
 
-                    let alert = Alert(
+                    var alert = Alert(
                         id: UUID().uuidString,
                         timestamp: Date(),
                         ruleId: match.ruleId,
@@ -1892,6 +1892,35 @@ enum EventLoop {
                         mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
                         suppressed: false
                     )
+
+                    // Phase-5 delivery-provenance weld: for the handful of
+                    // already-precise HIGH cred/exfil triggers, attach the
+                    // download-origin narrative (and a suspicious-delivery flag
+                    // when the FP conjunction holds) as ALERT CONTEXT. Pure
+                    // enrichment on `alert.description` — no new alert, no
+                    // severity change. Runs before the alert flows to responders
+                    // and outputs so the context travels with it everywhere.
+                    if state.deliveryProvenanceWeld.isTrigger(ruleId: alert.ruleId),
+                       let weld = await state.deliveryProvenanceWeld.weld(alert: alert, event: enrichedEvent) {
+                        alert.description = weld.appended(to: alert.description)
+                    }
+
+                    // Phase-5 injection-evidence weld: for the shipped agent-
+                    // attributed cred-read / read->egress triggers, retro-scan the
+                    // SAME agent session's prior agent-content reads (skills /
+                    // hooks / config) for the shipped injection-marker set. On a
+                    // hit, attach the poisoned file as context AND bump severity
+                    // one level. Session-scoped and additive — no new alert, no
+                    // auto-executed response. Awaited inline (like the delivery
+                    // weld) so the bumped severity + context travel with THIS
+                    // alert to responders, notifier, outputs, and the campaign
+                    // detector. Plaintext-marker matching only (see
+                    // InjectionEvidenceWeld header on obfuscation).
+                    if state.injectionEvidenceWeld.isTrigger(ruleId: alert.ruleId),
+                       let evidence = await state.injectionEvidenceWeld.evidence(alert: alert, event: enrichedEvent) {
+                        alert.description = evidence.appended(to: alert.description)
+                        alert.severity = evidence.bumpedSeverity(from: alert.severity)
+                    }
 
                     batchAlerts.append(alert)
                     // Only surface OS notifications for alerts that haven't

@@ -18,7 +18,7 @@ extension MacCrabCtl {
 
         // v1.19.0: exclude manifest.json (the rule-bundle manifest, not a rule —
         // it has no `level` key) so the count matches the engine's loaded total
-        // (436) instead of inflating to 437 / showing a phantom "unknown" level.
+        // (438) instead of inflating to 439 / showing a phantom "unknown" level.
         let jsonFiles = files.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.sorted()
 
         print("Detection Rules (\(jsonFiles.count) total)")

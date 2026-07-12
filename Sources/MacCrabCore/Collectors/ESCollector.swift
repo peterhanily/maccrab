@@ -153,6 +153,15 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_UNLINK,
         ES_EVENT_TYPE_NOTIFY_SIGNAL,
         ES_EVENT_TYPE_NOTIFY_KEXTLOAD,
+        // v1.21.4: BTM launch-item registration. A modern SMAppService.register()
+        // login item / launch agent / daemon leaves NO LaunchAgent plist and NO
+        // write-time file event, so the ~89 write-time persistence rules never
+        // fire (PamStealer / Jamf-Jul-2026 "ghost login item"). This is the only
+        // sensor that sees that add — WITH the responsible instigator. Low-volume
+        // (adds are rare, like KEXTLOAD), so subscribed UNCONDITIONALLY. Available
+        // at the macOS 13.0 deploy floor (ESTypes.h "available beginning in macOS
+        // 13.0" block), so no @available guard is needed.
+        ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD,
         ES_EVENT_TYPE_NOTIFY_MMAP,
         ES_EVENT_TYPE_NOTIFY_MPROTECT,
         ES_EVENT_TYPE_NOTIFY_SETOWNER,
@@ -266,6 +275,51 @@ public final class ESCollector: @unchecked Sendable {
         return false
     }
 
+    // MARK: - Agent-content read allowlist (Phase-5 injection-evidence weld)
+    //
+    // The credential allowlist above emits OPENs for SECRET reads. This second,
+    // equally-tight allowlist emits OPENs for reads of AGENT-CONTENT files —
+    // skills / hooks / MCP+project config / CI workflows — i.e. the files an AI
+    // coding agent *consumes as instructions*. Before this, a poisoned SKILL.md
+    // or `.claude/settings.json` that the agent READ produced ZERO events (the
+    // 14 FileContent rules fire on WRITES; a pure read never modifies, so
+    // NOTIFY_CLOSE was dropped and NOTIFY_OPEN was credential-only). That read is
+    // the load-bearing observation the injection-evidence retro-scan pivots on
+    // (InjectionEvidenceWeld): the emitted OPEN row records the PATH; the file's
+    // content is re-read on demand at trigger time (sidestepping storage
+    // truncation), so we only need the path here.
+    //
+    // These paths mirror FileContentEnricher's agentContentRoots/agentConfigFiles
+    // (kept in sync by ESCredentialReadAllowlistTests). They change rarely and
+    // are read roughly once per session — far below the credential firehose, so
+    // the ES queue bound is preserved. Substring roots + config-file suffixes,
+    // both cheap and applied in the NOTIFY_OPEN hot-path guard BEFORE the
+    // heap-allocating processFromESProcess build.
+    static let agentContentReadPathSubstrings: [String] = [
+        "/.claude/skills/", "/.codex/skills/", "/.cursor/skills/",
+        "/.claude/scripts/", "/.claude/hooks/", "/.claude/agents/",
+        "/.github/workflows/",
+    ]
+    /// Agent-content CONFIG files matched by suffix (a poisoned MCP / project /
+    /// settings config the agent reads). Mirrors FileContentEnricher.agentConfigFiles.
+    static let agentConfigReadFileSuffixes: [String] = [
+        "/.claude/claude_desktop_config.json", "/.claude.json", "/.cursor/mcp.json",
+        "/.claude/settings.json", "/.claude/project.json", "/.claude/local.json",
+    ]
+
+    /// True iff `path` is an agent-content file (skill / hook / config / workflow)
+    /// whose READ is worth emitting an OPEN event for. The second hot-path
+    /// early-out for NOTIFY_OPEN, alongside `isCredentialReadPath`.
+    static func isAgentContentReadPath(_ path: String) -> Bool {
+        for substring in agentContentReadPathSubstrings where path.contains(substring) {
+            return true
+        }
+        for suffix in agentConfigReadFileSuffixes where path.hasSuffix(suffix) {
+            return true
+        }
+        return false
+    }
+
     /// True iff `path` is an on-disk keychain database the keychain read-rules
     /// target (`/Keychains/…(.keychain-db|.keychain)`). Used to drop the
     /// high-frequency platform-binary (securityd / Security.framework) opens at
@@ -294,6 +348,49 @@ public final class ESCollector: @unchecked Sendable {
             "TargetIsSelf": actor.pid == target.pid ? "true" : "false",
             "SameTeam": sameTeam ? "true" : "false",
         ]
+    }
+
+    /// v1.21.4: enrichment keys describing a BTM (Background Task Management)
+    /// launch-item registration, emitted alongside NOTIFY_BTM_LAUNCH_ITEM_ADD.
+    /// Keys are the exact Sigma field names the persistence rules match, resolved
+    /// through RuleEngine's enrichment passthrough — no model or engine change.
+    /// The instigator's identity (Image / SignerType / team) is already carried
+    /// on `event.process`, so this describes only the ITEM and the app it is
+    /// attributed to. Pure and synthesizable (raw es_message_t can't be built in
+    /// a unit test), mirroring `introspectionEnrichments` as the testable seam.
+    static func btmEnrichments(
+        itemType: es_btm_item_type_t,
+        legacy: Bool,
+        managed: Bool,
+        executablePath: String,
+        itemURL: String,
+        appURL: String,
+        app: ProcessInfo?
+    ) -> [String: String] {
+        return [
+            "BTMItemType": btmItemTypeName(itemType),
+            "BTMLegacy": legacy ? "true" : "false",
+            "BTMManaged": managed ? "true" : "false",
+            "BTMExecutablePath": executablePath,
+            "BTMItemURL": itemURL,
+            "BTMAppURL": appURL,
+            "BTMAppSignerType": app?.codeSignature?.signerType.rawValue ?? "unknown",
+            "BTMAppTeamId": app?.codeSignature?.teamId ?? "",
+        ]
+    }
+
+    /// Stable lowercase token for the ES BTM item-type enum, used verbatim as the
+    /// `BTMItemType` rule value. C enums aren't exhaustive in Swift, so the
+    /// `default` covers any future ES item type.
+    static func btmItemTypeName(_ itemType: es_btm_item_type_t) -> String {
+        switch itemType {
+        case ES_BTM_ITEM_TYPE_USER_ITEM:  return "user_item"
+        case ES_BTM_ITEM_TYPE_APP:        return "app"
+        case ES_BTM_ITEM_TYPE_LOGIN_ITEM: return "login_item"
+        case ES_BTM_ITEM_TYPE_AGENT:      return "agent"
+        case ES_BTM_ITEM_TYPE_DAEMON:     return "daemon"
+        default:                          return "unknown"
+        }
     }
 
     // MARK: - Initialisation
@@ -576,7 +673,13 @@ public final class ESCollector: @unchecked Sendable {
         // kernel silently DROPS messages across ALL event types.
         if msg.event_type == ES_EVENT_TYPE_NOTIFY_OPEN {
             let openPath = esFileToPath(msg.event.open.file)
-            guard isCredentialReadPath(openPath) else { return nil }
+            // Emit for credential/secret reads OR agent-content reads (skills /
+            // hooks / config / workflows the agent consumes as instructions —
+            // the injection-evidence retro-scan pivots on the latter). Both
+            // checks are cheap substring scans; everything else is dropped here,
+            // before the heap-allocating processFromESProcess build, so the OPEN
+            // firehose stays bounded across ALL event types.
+            guard isCredentialReadPath(openPath) || isAgentContentReadPath(openPath) else { return nil }
             // ES-OPEN-5: keychain DBs are opened constantly by securityd /
             // the Security framework (platform binaries) for every keychain
             // query; the keychain read-rules only care about non-Apple
@@ -732,7 +835,12 @@ public final class ESCollector: @unchecked Sendable {
             // class, dead until now because no OPEN event was ever emitted.
             let openEvent = msg.event.open
             let openPath = esFileToPath(openEvent.file)
-            guard Self.isCredentialReadPath(openPath) else { return nil }
+            // Same widened admission as the hot-path guard: credential/secret
+            // reads (revives the "credential file read by untrusted process"
+            // rule class) OR agent-content reads (the read the injection-evidence
+            // weld retro-scans). Both emit an identical .file/.open Event — the
+            // path is all the retro-scan needs; content is re-read at trigger time.
+            guard Self.isCredentialReadPath(openPath) || Self.isAgentContentReadPath(openPath) else { return nil }
             return Event(
                 timestamp: timestamp,
                 eventCategory: .file,
@@ -905,6 +1013,55 @@ public final class ESCollector: @unchecked Sendable {
                 eventAction: "kextload",
                 process: processInfo,
                 file: FileInfo(path: kextId, action: .create),
+                severity: .medium
+            )
+
+        // -----------------------------------------------------------------
+        // MARK: BTM / Background Task Management (v1.21.4)
+        // -----------------------------------------------------------------
+        // A launch item (login item / launch agent / daemon) was made known to
+        // Background Task Management — including modern SMAppService.register()
+        // registrations that leave NO plist and NO write-time file event.
+        //
+        // ATTRIBUTION IS THE EXCEPTION HERE: `msg.process` is the OS daemon
+        // (backgroundtaskmanagementd), NOT the actor. The event carries a
+        // dedicated `instigator` es_process_t (the XPC caller that asked for the
+        // add), so that — not the delivering daemon — is the responsible process.
+        // Fall back instigator -> app -> msg.process. Both instigator and app are
+        // _Nullable, so guard with .map before processFromESProcess (its param is
+        // non-optional). `item` is _Nonnull. instigator_token/app_token are msg
+        // version >= 8 (macOS 14+) and are deliberately NOT read at the 13.0 floor.
+        //
+        // Modelled as .file/.creation -> logsource "file_event", gated by the
+        // BTM-only enrichment keys so it never cross-matches ordinary file rules.
+        case ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD:
+            let btm = msg.event.btm_launch_item_add.pointee
+            let item = btm.item.pointee
+            let actor: ProcessInfo = btm.instigator.map { processFromESProcess($0) }
+                ?? btm.app.map { processFromESProcess($0) }
+                ?? processInfo
+            let appInfo = btm.app.map { processFromESProcess($0) }
+            let exePath = esStringToSwift(btm.executable_path)
+            let itemURL = esStringToSwift(item.item_url)
+            // executable_path may be empty or relative to item->app_url for
+            // app-scoped records — fall back to the item URL so file.path is set.
+            let path = !exePath.isEmpty ? exePath : itemURL
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .file,
+                eventType: .creation,
+                eventAction: "btm_add",
+                process: actor,
+                file: FileInfo(path: path, action: .create),
+                enrichments: btmEnrichments(
+                    itemType: item.item_type,
+                    legacy: item.legacy,
+                    managed: item.managed,
+                    executablePath: exePath,
+                    itemURL: itemURL,
+                    appURL: esStringToSwift(item.app_url),
+                    app: appInfo
+                ),
                 severity: .medium
             )
 

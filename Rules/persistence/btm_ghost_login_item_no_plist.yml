@@ -1,0 +1,41 @@
+title: Ghost Login Item Registered via SMAppService (No Plist Written)
+id: 8795cb64-b6d3-464d-91b3-667fbda31be8
+status: stable
+description: >
+    Detects a modern (non-legacy) Background Task Management registration —
+    an SMAppService.register() login item, launch agent, or daemon — made by
+    an instigator that is not Apple-signed, App Store-signed, or MDM-managed.
+    Unlike a legacy launchd plist, a modern SMAppService item is written to
+    the app's own bundle Info property list and registered directly with BTM,
+    so NO LaunchAgent/LaunchDaemon plist is created on disk and NO write-time
+    file event is witnessed. This is the "ghost login item" persistence path
+    (BTMLegacy=false) that leaves the write-time persistence rules silent.
+author: MacCrab Community
+date: 2026/07/12
+references:
+    - https://attack.mitre.org/techniques/T1547/015/
+tags:
+    - attack.persistence
+    - attack.t1547.015
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        BTMLegacy: 'false'
+        BTMItemType:
+            - 'login_item'
+            - 'agent'
+            - 'daemon'
+    filter_apple:
+        SignerType: 'apple'
+    filter_appstore:
+        SignerType: 'appStore'
+    filter_managed:
+        BTMManaged: 'true'
+    condition: selection and not filter_apple and not filter_appstore and not filter_managed
+falsepositives:
+    - Legitimate third-party apps that adopt SMAppService for their own
+      "Open at Login" helper and are signed with a non-Apple Team ID —
+      confirm the app's Team Identifier and install location
+level: medium

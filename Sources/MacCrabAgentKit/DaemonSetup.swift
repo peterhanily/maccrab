@@ -850,7 +850,8 @@ enum DaemonSetup {
         await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "MCPMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "SDRDeviceMonitor", expectedIntervalSeconds: 60, eventDriven: true)
-        print("Collector registry initialized — 16 collectors tracked")
+        await collectorRegistry.register(name: "BTMSnapshotMonitor", expectedIntervalSeconds: 300, eventDriven: true)
+        print("Collector registry initialized — 17 collectors tracked")
 
         // Trust substrate -- ECDSA P-256 keypair for trace-bundle
         // signing. v1.10.0 audit fix: daemon was never instantiating
@@ -987,6 +988,16 @@ enum DaemonSetup {
         Task.detached(priority: .utility) {
             await sdrDeviceMonitor.start()
             print("SDR device monitor active (deferred — SDR device + display-hotplug detection)")
+        }
+
+        // BTM / SMAppService reconciliation monitor (read-only `sfltool dumpbtm`
+        // snapshot; flags newly-seen enabled launch items with weak attribution —
+        // the ghost-login-item persistence the real-time ES BTM sensor missed
+        // because it predates this session or was added while ES was offline).
+        let btmSnapshotMonitor = BTMSnapshotMonitor(pollInterval: config.btmPollInterval)
+        Task.detached(priority: .utility) {
+            await btmSnapshotMonitor.start()
+            print("BTM snapshot monitor active (deferred — SMAppService/BTM ghost-login-item reconcile)")
         }
 
         // Library inventory -- scans for injected dylibs
@@ -1342,6 +1353,21 @@ enum DaemonSetup {
 
         // Quarantine provenance enricher
         let quarantineEnricher = QuarantineEnricher()
+
+        // Phase-5 delivery-provenance weld — enrichment on firing cred/exfil
+        // alerts only (joins the quarantine GUID + Chromium referrer). Emits no
+        // alerts of its own.
+        let deliveryProvenanceWeld = DeliveryProvenanceWeld(
+            source: QuarantineProvenanceSource(quarantine: quarantineEnricher)
+        )
+
+        // Phase-5 injection-evidence weld — retro-scans a firing agent-attributed
+        // cred-read / read->egress trigger's session for a prior poisoned
+        // agent-content read. Reads the session index (eventStore) and re-reads
+        // file content on demand (fileContentEnricher). Enrichment-only.
+        let injectionEvidenceWeld = InjectionEvidenceWeld(
+            source: EventStoreInjectionSource(eventStore: eventStore, fileContent: fileContentEnricher)
+        )
 
         Self.logBootStep(label: "before_sequence_engine", startedAt: startedAt)
         // Initialize sequence engine (Phase 2: temporal-causal detection)
@@ -1752,6 +1778,7 @@ enum DaemonSetup {
             tccMonitor: tccMonitor,
             edrMonitor: edrMonitor,
             sdrDeviceMonitor: sdrDeviceMonitor,
+            btmSnapshotMonitor: btmSnapshotMonitor,
             fsEventsCollector: fsEventsCollector,
             collector: collector,
             esloggerCollector: esloggerCollector,
@@ -1767,6 +1794,8 @@ enum DaemonSetup {
             libraryInventory: libraryInventory,
             cdhashExtractor: cdhashExtractor,
             quarantineEnricher: quarantineEnricher,
+            deliveryProvenanceWeld: deliveryProvenanceWeld,
+            injectionEvidenceWeld: injectionEvidenceWeld,
             yaraEnricher: yaraEnricher,
             dbEncryption: dbEncryption,
             preventionEnabled: preventionEnabled,
