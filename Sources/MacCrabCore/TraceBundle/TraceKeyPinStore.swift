@@ -14,8 +14,26 @@
 //
 // The store is a small JSON map written atomically under the support dir.
 // It is bounded by the number of distinct (trace_id) values ever verified.
+//
+// A3-03 (root-own the pin store): the pinned trust anchors are what the
+// verifier hands `BundleVerifier.pinnedKeyFingerprint`, so the pin FILE is
+// itself security-relevant — a writer who can redirect or overwrite it can
+// poison the anchor. Writes therefore go through the codebase's O_NOFOLLOW
+// privileged-write pattern (temp file created O_EXCL|O_NOFOLLOW at 0o600, then
+// atomically rename()d over the target), and reads refuse to follow a symlink.
+// When the production store lives under root-owned `/Library/Application
+// Support/MacCrab/`, 0o600 + root ownership makes it non-user-writable and a
+// non-root process cannot poison it.
+//
+// Advisory limitation — SAME-HOST / SAME-UID TOFU: this hardening stops
+// cross-uid symlink redirection and non-root overwrite, but a process running
+// AS the owning uid can still rewrite an owned pin file, and first-ever verify
+// of an unseen trace_id is trusted by construction (classic TOFU). The strong
+// anchor for those cases is an out-of-band `--expect-key` fingerprint, whose
+// behavior is unchanged. Local root remains out of scope (docs/THREAT_MODEL.md).
 
 import Foundation
+import Darwin
 
 public struct TraceKeyPinStore {
 
@@ -51,19 +69,46 @@ public struct TraceKeyPinStore {
     // MARK: - Storage
 
     private func load() -> [String: String] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [:] }
+        // O_NOFOLLOW read (SecureFileIO): a symlink planted at the pin path is
+        // refused rather than silently followed to an attacker-chosen file.
+        // Any failure (missing file, symlink, unreadable) → empty map, so a
+        // poisoned/absent file fails safe to "no pins" (first-use TOFU) rather
+        // than loading an attacker's map. 1 MiB cap bounds a hostile file.
+        guard let data = try? SecureFileIO.readBytes(at: fileURL.path, maxBytes: 1 << 20) else {
+            return [:]
+        }
         return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
     }
 
     private func save(_ map: [String: String]) {
         guard let data = try? JSONEncoder().encode(map) else { return }
+        let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
-        // Atomic write; matches the simpler support-dir write style in this
-        // codebase. If this store is ever relocated into the privileged
-        // /Library path, switch to the O_NOFOLLOW symlink-safe pattern.
-        try? data.write(to: fileURL, options: .atomic)
+        // Symlink-safe atomic overwrite (mirrors the codebase's privileged-write
+        // pattern): create a fresh temp file with O_EXCL|O_NOFOLLOW at 0o600 via
+        // SecureFileIO, then rename() it over the target. rename replaces the
+        // destination NAME atomically without following a symlink there, and the
+        // 0o600 mode is applied to the temp before it becomes visible, so a
+        // reader never observes an over-permissive or partial pin file.
+        let tempPath = dir.appendingPathComponent(
+            ".tmp-\(UUID().uuidString)-\(fileURL.lastPathComponent)"
+        ).path
+        do {
+            try SecureFileIO.atomicCreate(at: tempPath, data: data, mode: 0o600)
+        } catch {
+            return
+        }
+        let renamed = tempPath.withCString { c1 in
+            fileURL.path.withCString { c2 in rename(c1, c2) }
+        }
+        if renamed != 0 {
+            // Rename failed (e.g. destination is a directory) — drop the temp
+            // rather than leaving it behind.
+            try? FileManager.default.removeItem(atPath: tempPath)
+        }
     }
 }

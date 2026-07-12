@@ -11,9 +11,13 @@
 //       (RaveTrustState.revocationFreshness), a maybe-revoked plugin may be running
 //       unknown to us. Fail-closed by trust class: a third-party SIDELOAD is
 //       quarantined (we cannot confirm it is still trusted); a curated STORE plugin
-//       warns (it carries the catalog vetting chain); a BUILT-IN is unaffected
-//       (first-party, no remote revocation). A NEVER-fetched feed — no revocation
-//       authority established yet, the reality until the rave server ships — does
+//       WARNS within a grace window (it carries the catalog vetting chain) but is
+//       QUARANTINED once staleness passes a hard ceiling (storeRevocationHardCeiling)
+//       — a network adversary who merely WITHHOLDS the signed revocations.json, or an
+//       offline host, must not buy a revoked store plugin unbounded runtime (A1-02);
+//       a BUILT-IN is unaffected (first-party, no remote revocation). A NEVER-fetched
+//       feed — no revocation authority established yet, the reality until the rave
+//       server ships — does
 //       NOT fail-close: an operator's explicit TOFU sideload must stay runnable
 //       offline, so `.never` warns rather than quarantines (audit #6). Explicit
 //       revocations (runtimeQuarantine part (a)) are enforced regardless of
@@ -46,6 +50,18 @@ public enum RaveRevocationStaleAction: Sendable, Equatable {
 
 public enum RevocationReverify {
 
+    /// Hard staleness ceiling for a curated STORE plugin. Within the freshness
+    /// grace window a stale store plugin only WARNS (it carries the catalog
+    /// vetting chain), but a client that has been unable to verify a fresh signed
+    /// revocations.json for this long can no longer vouch that the plugin has not
+    /// been revoked since — so past this ceiling a store plugin fail-closes to
+    /// QUARANTINE, the same terminal state a sideload reaches at the freshness
+    /// ceiling. Chosen well above the 7-day freshness window
+    /// (RaveTrustStateStore.defaultRevocationStalenessCeiling) so a brief outage
+    /// still only warns, while a month-long inability to refresh cannot let a
+    /// possibly-revoked store plugin run indefinitely (A1-02).
+    public static let storeRevocationHardCeiling: TimeInterval = 30 * 24 * 3600
+
     /// Staleness escalation keyed on trust class. Fresh data → `.ok` for all.
     ///
     /// `.never` (no signed revocation feed has EVER verified on this box) is
@@ -58,10 +74,13 @@ public enum RevocationReverify {
     /// loop on every box (audit #6). So `.never` does NOT fail-close: built-in is
     /// unaffected, store/sideload get at most a warning. Explicit revocations are
     /// still enforced regardless of freshness (runtimeQuarantine part (a)); only
-    /// genuine STALENESS escalates a sideload to quarantine.
+    /// genuine STALENESS escalates — a sideload at the freshness ceiling, and a
+    /// STORE plugin once staleness passes the hard ceiling (storeRevocationHardCeiling,
+    /// A1-02).
     public static func staleAction(
         freshness: RaveRevocationFreshness,
-        provenance: PluginProvenance
+        provenance: PluginProvenance,
+        storeHardCeiling: TimeInterval = storeRevocationHardCeiling
     ) -> RaveRevocationStaleAction {
         switch freshness {
         case .fresh:
@@ -71,7 +90,11 @@ public enum RevocationReverify {
         case .stale(let age):
             switch provenance {
             case .builtIn:    return .ok                   // first-party — no remote revocation
-            case .store:      return .warn(age: age)       // curated vetting chain — warn, keep running
+            case .store:
+                // Warn while the catalog vetting chain still vouches; past the
+                // HARD ceiling a store plugin we can no longer refresh fail-closes
+                // to quarantine (a withheld signed list ≠ unbounded runtime).
+                return age > storeHardCeiling ? .quarantine(age: age) : .warn(age: age)
             case .thirdParty: return .quarantine(age: age) // sideload + lost-freshness — fail-closed
             }
         }

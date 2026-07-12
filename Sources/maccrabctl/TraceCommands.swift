@@ -345,6 +345,20 @@ extension MacCrabCtl {
                 await store.close()
                 exit(1)
             }
+
+            // A3-04 verify-on-load: check the on-DB continuity chain before
+            // exporting. Advisory (non-fatal) — a break here means the local
+            // tracegraph.db ledger was mutated/truncated since materialization;
+            // we surface it so the operator knows, but still let the export
+            // proceed (the exported bundle carries its own signed Merkle root).
+            switch try await store.verifyHashChain().status {
+            case .ok:
+                break
+            case .brokenContent(let seq):
+                print("WARNING: trace continuity chain integrity check failed (content mismatch at sequence \(seq)); local ledger may have been modified.")
+            case .brokenLinkage(let seq):
+                print("WARNING: trace continuity chain integrity check failed (broken link at sequence \(seq)); a ledger entry may have been deleted or inserted.")
+            }
             // Collect entities + edges from memberships.
             var entityIds = Set<String>()
             var edgeIds = Set<String>()
@@ -385,9 +399,15 @@ extension MacCrabCtl {
             options.includeRawPaths = includeRawPaths
             options.includeHostname = includeHostname
 
+            // A3-01(a): wire a real unified-log anchor into every production
+            // export so the exporter's chain-head emit actually runs. Without
+            // this the subsystem was never written and `verify
+            // --check-unified-log` could never find a record. The emitted
+            // record is the external OS-managed witness of the signed head.
             let exporter = BundleExporter(
                 redactor: BundleRedactor.systemDefault(),
-                trustSubstrate: trustSubstrate
+                trustSubstrate: trustSubstrate,
+                unifiedLogAnchor: SystemUnifiedLogAnchor()
             )
             try await exporter.export(inputs: inputs, to: target, options: options)
             print("Bundle written: \(target.path)")

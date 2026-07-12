@@ -1088,6 +1088,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func appendHashChain(_ entry: TraceHashChainEntry) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try insertHashChainRow(entry, db: db)
+    }
+
+    /// Sync INSERT of one hash-chain row. Shared by `appendHashChain` and the
+    /// atomic `appendTraceContinuity` so the latter has no internal `await`
+    /// (see its comment for why that matters for continuity correctness).
+    private func insertHashChainRow(_ entry: TraceHashChainEntry, db: OpaquePointer) throws {
         let sql = """
         INSERT INTO trace_hash_chain (
             id, trace_id, sequence_number, previous_hash, current_hash,
@@ -1107,6 +1114,127 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             sqlite3_bind_int(stmt, 9, entry.chainHeadPublishedToUnifiedLog ? 1 : 0)
             sqlite3_bind_double(stmt, 10, entry.createdAt.timeIntervalSince1970)
         }
+    }
+
+    // MARK: - Continuity chain (A3-04)
+
+    /// Sync read of the current global chain head (highest sequence_number
+    /// across ALL traces). Used inside `appendTraceContinuity` without `await`.
+    private func globalChainHeadRow(db: OpaquePointer) throws -> TraceHashChainEntry? {
+        let sql = """
+        SELECT id, trace_id, sequence_number, previous_hash, current_hash,
+               event_id, edge_id, chain_head_signature,
+               chain_head_published_to_unified_log, created_at
+          FROM trace_hash_chain
+         ORDER BY sequence_number DESC
+         LIMIT 1
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        let rc = sqlite3_step(stmt)
+        if rc == SQLITE_DONE { return nil }
+        guard rc == SQLITE_ROW else {
+            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        return try decodeHashChainRow(stmt!)
+    }
+
+    public func globalChainHead() async throws -> TraceHashChainEntry? {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        return try globalChainHeadRow(db: db)
+    }
+
+    /// Append one continuity entry for a materialized trace, linked to the
+    /// current global head. The whole body is `await`-free: on an actor, an
+    /// async method with no internal suspension point runs to completion
+    /// without interleaving another call — so the head-read and the insert
+    /// are effectively atomic and two concurrent materializations cannot both
+    /// claim the same sequence number / fork the chain.
+    @discardableResult
+    public func appendTraceContinuity(
+        traceId: String,
+        eventId: String?,
+        edgeId: String?,
+        signature: String?,
+        publishedToUnifiedLog: Bool,
+        createdAt: Date = Date()
+    ) async throws -> TraceHashChainEntry {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let head = try globalChainHeadRow(db: db)
+        let nextSeq = (head?.sequenceNumber ?? 0) + 1
+        let id = UUID().uuidString
+        let currentHash = TraceHashChainEntry.computeCurrentHash(
+            id: id, traceId: traceId, sequenceNumber: nextSeq,
+            previousHash: head?.currentHash, eventId: eventId, edgeId: edgeId,
+            createdAt: createdAt
+        )
+        let entry = TraceHashChainEntry(
+            id: id, traceId: traceId, sequenceNumber: nextSeq,
+            previousHash: head?.currentHash, currentHash: currentHash,
+            eventId: eventId, edgeId: edgeId,
+            chainHeadSignature: signature,
+            chainHeadPublishedToUnifiedLog: publishedToUnifiedLog,
+            createdAt: createdAt
+        )
+        try insertHashChainRow(entry, db: db)
+        return entry
+    }
+
+    /// Walk the whole ledger (ordered by sequence_number) and verify:
+    ///   1. content — every row's current_hash recomputes from its stored
+    ///      fields (catches an in-place UPDATE or a sequence-number reorder);
+    ///   2. linkage — every row past the first retained one has
+    ///      previous_hash == the preceding retained row's current_hash
+    ///      (catches a deleted or inserted interior row).
+    /// The first retained row's inbound link is intentionally NOT enforced:
+    /// retention prunes the oldest entries (a prefix) and that shifted start
+    /// is authorized. See `HashChainVerification` for the full scope.
+    public func verifyHashChain() async throws -> HashChainVerification {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let sql = """
+        SELECT id, trace_id, sequence_number, previous_hash, current_hash,
+               event_id, edge_id, chain_head_signature,
+               chain_head_published_to_unified_log, created_at
+          FROM trace_hash_chain
+         ORDER BY sequence_number ASC
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var checked = 0
+        var previous: TraceHashChainEntry?
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else {
+                throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            let entry = try decodeHashChainRow(stmt!)
+
+            // 1. Content integrity — recompute from the row's own fields.
+            if entry.recomputedCurrentHash() != entry.currentHash {
+                return HashChainVerification(
+                    status: .brokenContent(atSequence: entry.sequenceNumber),
+                    entriesChecked: checked
+                )
+            }
+            // 2. Linkage — enforced for every row after the first retained one.
+            if let previous, entry.previousHash != previous.currentHash {
+                return HashChainVerification(
+                    status: .brokenLinkage(atSequence: entry.sequenceNumber),
+                    entriesChecked: checked
+                )
+            }
+            previous = entry
+            checked += 1
+        }
+        return HashChainVerification(status: .ok, entriesChecked: checked)
     }
 
     public func latestHashChainEntry(for traceId: String) async throws -> TraceHashChainEntry? {

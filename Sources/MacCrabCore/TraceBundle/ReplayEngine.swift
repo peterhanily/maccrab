@@ -56,6 +56,20 @@ public actor ReplayEngine {
         /// would advertise (must match the bundle's manifest field).
         public var expectedNormalizationVersion: String = "1"
 
+        /// A3-01: when true, run `BundleVerifier` (tamper-evidence: Merkle
+        /// root + daemon signature) in addition to the structural
+        /// `BundleValidator`, and fail-closed (`.schemaInvalid`) on any
+        /// verify failure before replaying. The UNSIGNED placeholder bundle
+        /// is exempted so unsigned dev bundles still replay for
+        /// detection-engineering. Default OFF to preserve the historical
+        /// replay contract (replay validates structure; verification is a
+        /// separate step) and existing exit-code semantics; production
+        /// callers that want fail-closed replay opt in explicitly.
+        public var verifyTamperEvidence: Bool = false
+        /// Trust anchor forwarded to `BundleVerifier` when
+        /// `verifyTamperEvidence` is on. nil → self-contained TOFU verify.
+        public var pinnedKeyFingerprint: String? = nil
+
         public init() {}
     }
 
@@ -132,6 +146,23 @@ public actor ReplayEngine {
                 deterministic: true,
                 additionalDifferences: []
             )
+        }
+
+        // Step 1b — tamper-evidence verification (A3-01, opt-in). A bundle
+        // that passes the structural validator can still have had its signed
+        // artifacts rewritten; when asked, refuse to replay a tampered bundle.
+        if options.verifyTamperEvidence, !isUnsignedBundle(directory: directory) {
+            var verifyOptions = BundleVerifier.Options()
+            verifyOptions.pinnedKeyFingerprint = options.pinnedKeyFingerprint
+            let verifyOutcome = await BundleVerifier.verify(at: directory, options: verifyOptions)
+            guard verifyOutcome.exitCode == 0 else {
+                return makeFailResult(
+                    directory: directory,
+                    outcome: .schemaInvalid,
+                    deterministic: true,
+                    additionalDifferences: []
+                )
+            }
         }
 
         // Step 2 — load manifest + replay manifest + matched_rules.
@@ -243,6 +274,19 @@ public actor ReplayEngine {
         }
         let data = try Data(contentsOf: url)
         return try canonicalJSONDecoder().decode(MatchedRulesArtifact.self, from: data)
+    }
+
+    /// True when the bundle carries the honest UNSIGNED placeholder signature
+    /// (exported without a TrustSubstrate). Such dev bundles are exempt from
+    /// the opt-in tamper-evidence gate so they still replay. A missing /
+    /// unreadable signature is treated as "not unsigned" so the verifier — not
+    /// this shortcut — decides.
+    private func isUnsignedBundle(directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("integrity/chain_head_signature.json")
+        guard let data = try? Data(contentsOf: url),
+              let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: data)
+        else { return false }
+        return sig.signatureBase64 == "UNSIGNED"
     }
 
     private func inputBundleSha(directory: URL) throws -> String {

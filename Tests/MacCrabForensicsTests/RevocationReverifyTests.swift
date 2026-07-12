@@ -39,6 +39,48 @@ struct RevocationReverifyTests {
         #expect(RevocationReverify.staleAction(freshness: stale, provenance: .builtIn) == .ok)
     }
 
+    @Test("A1-02: a STORE plugin stale past the HARD ceiling escalates warn → quarantine")
+    func storeHardCeiling() {
+        let ceiling = RevocationReverify.storeRevocationHardCeiling
+        // Within the grace window (just under the hard ceiling) a store plugin
+        // still only WARNS — the catalog vetting chain vouches for it.
+        #expect(RevocationReverify.staleAction(freshness: .stale(age: ceiling - 1), provenance: .store)
+                == .warn(age: ceiling - 1))
+        // Past the hard ceiling a withheld/blocked signed list must not buy the
+        // store plugin unbounded runtime: it fail-closes to quarantine.
+        #expect(RevocationReverify.staleAction(freshness: .stale(age: ceiling + 1), provenance: .store)
+                == .quarantine(age: ceiling + 1))
+        // Built-in remains unaffected regardless of how stale the feed is.
+        #expect(RevocationReverify.staleAction(freshness: .stale(age: ceiling + 1), provenance: .builtIn) == .ok)
+    }
+
+    @Test("A1-02 sweep: a store plugin stale past the hard ceiling is quarantined (REVOCATION_STALE)")
+    func sweepStoreHardCeiling() {
+        // No explicit revocation for this id — only the hard-ceiling staleness
+        // escalation should fire, and it must catch the STORE plugin now.
+        let installed: [(ref: RevocationEnforcer.InstalledRef, provenance: PluginProvenance)] = [
+            (Self.ref("com.x.store"), .store),
+        ]
+        let recs = RevocationReverify.runtimeQuarantine(
+            installed: installed, against: Self.listRevoking("com.unrelated"),
+            freshness: .stale(age: RevocationReverify.storeRevocationHardCeiling + 3600))
+        #expect(recs.map { $0.pluginID } == ["com.x.store"])
+        #expect(recs.first?.code == "REVOCATION_STALE")
+    }
+
+    @Test("A1-02: a store plugin stale WITHIN the hard-ceiling grace window is not quarantined by the sweep")
+    func sweepStoreWithinGrace() {
+        let installed: [(ref: RevocationEnforcer.InstalledRef, provenance: PluginProvenance)] = [
+            (Self.ref("com.x.store"), .store),
+        ]
+        // 8 days stale: past the 7-day freshness ceiling (so `.stale`) but well
+        // within the 30-day hard ceiling → warn only, not quarantined.
+        let recs = RevocationReverify.runtimeQuarantine(
+            installed: installed, against: Self.listRevoking("com.unrelated"),
+            freshness: .stale(age: 8.0 * 24 * 3600))
+        #expect(recs.isEmpty)
+    }
+
     @Test("never-fetched does NOT fail-close a sideload (no revocation authority yet — audit #6); it only warns")
     func neverFetched() {
         // `.never` = the signed revocation feed has never verified here (the

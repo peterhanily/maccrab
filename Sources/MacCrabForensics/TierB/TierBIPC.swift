@@ -28,8 +28,10 @@
 import Foundation
 
 public enum TierBIPC {
-    /// Bumped only on a breaking wire change. The plugin echoes the request's
-    /// protocolVersion; a mismatch is a host-side hard error.
+    /// Bumped only on a breaking wire change. The plugin echoes it back in its
+    /// terminal TierBCollectResult; the host's decode of that line HARD-FAILS on
+    /// a mismatch (TierBCollectResult.init(from:)), so a plugin speaking a
+    /// different wire version yields no terminal result and the collection errors.
     public static let protocolVersion = 1
 
     // Caps the host enforces while reading stdout (attack-pass: unbounded-stream
@@ -39,6 +41,19 @@ public enum TierBIPC {
     public static let maxArtifacts = 100_000               // per invocation
     public static let maxJSONDepth = 64                    // nesting guard
     public static let defaultTimeoutSeconds: TimeInterval = 120
+
+    /// Thrown by the host when it decodes a plugin's terminal result line whose
+    /// echoed protocolVersion is not the host's — the frozen wire contract's
+    /// version rail, enforced at the read boundary.
+    public enum ProtocolError: Error, Equatable, CustomStringConvertible {
+        case versionMismatch(host: Int, plugin: Int)
+        public var description: String {
+            switch self {
+            case .versionMismatch(let host, let plugin):
+                return "TierBIPC protocol version mismatch: host speaks v\(host), plugin sent v\(plugin) — refusing the result"
+            }
+        }
+    }
 }
 
 /// Host → plugin, written as one JSON line to stdin.
@@ -136,19 +151,36 @@ public struct TierBArtifactDTO: Codable, Sendable {
 
 /// The single terminal line a plugin emits to close the stream.
 public struct TierBCollectResult: Codable, Sendable {
+    /// The wire protocol version the plugin was built against — a plugin built
+    /// with this SDK echoes the request's protocolVersion here (the memberwise
+    /// init defaults it to the host's). ENFORCED: the host's decode of this line
+    /// HARD-FAILS when it is not TierBIPC.protocolVersion (see init(from:)), so a
+    /// plugin speaking a different wire version yields no terminal result and the
+    /// collection errors. Absent → assumed to match (back-compat with plugins
+    /// predating this field, e.g. the bundled example collector).
+    public let protocolVersion: Int
     /// "ok" | "partial" | "error" | "cancelled" — host maps to CollectionResult.ExitStatus.
     public let status: String
     public let notes: [String]
 
-    public init(status: String, notes: [String] = []) {
+    public init(status: String, notes: [String] = [], protocolVersion: Int = TierBIPC.protocolVersion) {
+        self.protocolVersion = protocolVersion
         self.status = status
         self.notes = notes
     }
 
     // Lenient decode: status required, notes defaults to [] when omitted.
-    private enum CodingKeys: String, CodingKey { case status, notes }
+    // protocolVersion is the ENFORCED safety rail — absent decodes to the host's
+    // version (back-compat), but an explicit mismatch throws, so the host never
+    // accepts a result line from a plugin speaking a different wire contract.
+    private enum CodingKeys: String, CodingKey { case status, notes, protocolVersion }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let pv = try c.decodeIfPresent(Int.self, forKey: .protocolVersion) ?? TierBIPC.protocolVersion
+        guard pv == TierBIPC.protocolVersion else {
+            throw TierBIPC.ProtocolError.versionMismatch(host: TierBIPC.protocolVersion, plugin: pv)
+        }
+        protocolVersion = pv
         status = try c.decode(String.self, forKey: .status)
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
     }

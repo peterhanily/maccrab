@@ -37,6 +37,17 @@ struct TierBConsentSummaryTests {
         #expect(s.derivedHighestPrivacy == "personalComms")  // UI shows the derived, not the claimed
     }
 
+    @Test("A1-06: a live-served ~/Library read (Preferences) is elevated above generic 'content'")
+    func liveHomeLibraryElevated() {
+        // ~/Library/Preferences is served LIVE with host FDA — more sensitive than
+        // generic file content, so the derived class is elevated (not "content").
+        let s = Self.manifest(reads: ["/Users/x/Library/Preferences/com.example.plist"]).consentSummary(home: "/Users/x")
+        #expect(s.derivedHighestPrivacy == "personalComms")
+        // A plain, non-Library file read still classifies as generic content.
+        let plain = Self.manifest(reads: ["/Users/x/Documents/notes.txt"]).consentSummary(home: "/Users/x")
+        #expect(plain.derivedHighestPrivacy == "content")
+    }
+
     @Test("personal-comms read + network = disclosed exfil surface (high friction)")
     func exfilSurface() {
         let s = Self.manifest(reads: ["/Users/x/Library/Messages/chat.db"], network: ["1.2.3.4:443"]).consentSummary(home: "/Users/x")

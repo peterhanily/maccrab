@@ -22,6 +22,7 @@
 // stable key plus a JSON attributes payload.
 
 import Foundation
+import CryptoKit
 
 // MARK: - TimeWindow
 
@@ -437,6 +438,110 @@ public struct TraceHashChainEntry: Sendable, Equatable, Codable {
         self.chainHeadPublishedToUnifiedLog = chainHeadPublishedToUnifiedLog
         self.createdAt = createdAt
     }
+
+    // MARK: - Continuity-chain digest (A3-04)
+
+    /// Deterministic SHA-256 (lowercase hex) over the entry's immutable
+    /// ledger fields. This is the value stored in `current_hash` when the
+    /// materializer appends a continuity entry, and the value
+    /// `verifyHashChain()` recomputes to detect an in-place mutation.
+    ///
+    /// Design notes (why these inputs / this encoding):
+    ///   - Every input is a column persisted on the row, so a verifier can
+    ///     recompute the digest from the stored row alone — no dependency on
+    ///     the `traces` table (which retention prunes independently).
+    ///   - `previousHash` binds each entry to its predecessor's `current_hash`,
+    ///     forming the append-only continuity chain.
+    ///   - `createdAt` is folded in at **millisecond** resolution. The raw
+    ///     `timeIntervalSince1970` double survives a SQLite REAL round-trip
+    ///     bit-exactly, but `Date(timeIntervalSince1970:)` re-derives through
+    ///     `timeIntervalSinceReferenceDate`, which can perturb the value by a
+    ///     ULP. Rounding to whole milliseconds absorbs that jitter so the
+    ///     digest recomputes identically on read-back.
+    ///   - Fields are hashed as a JSON array of strings (order-preserving,
+    ///     with library-level escaping) so a value containing the delimiter
+    ///     cannot forge a different field boundary.
+    ///
+    /// Scope: this digest certifies the *ledger* of materialized traces
+    /// (id, trace id, anchor event/edge, position, time). It does not bind
+    /// the full `traces` row content — mutating a trace's title/severity is
+    /// out of this chain's scope and is covered instead by the per-export
+    /// Merkle root + daemon signature. See docs/maccrabtrace.v1.spec.md §6.
+    public static func computeCurrentHash(
+        id: String,
+        traceId: String,
+        sequenceNumber: Int,
+        previousHash: String?,
+        eventId: String?,
+        edgeId: String?,
+        createdAt: Date
+    ) -> String {
+        let msEpoch = Int64((createdAt.timeIntervalSince1970 * 1000).rounded())
+        let fields: [String] = [
+            "maccrab.tracegraph.chain.v1",   // domain separation
+            id,
+            traceId,
+            String(sequenceNumber),
+            previousHash ?? "",
+            eventId ?? "",
+            edgeId ?? "",
+            String(msEpoch),
+        ]
+        // JSONEncoder over [String] is deterministic (fixed order + canonical
+        // escaping). The `\u{1F}` join is only a defensive fallback for the
+        // (unreachable) encode failure — plain String has no non-encodable form.
+        let payload = (try? JSONEncoder().encode(fields))
+            ?? Data(fields.joined(separator: "\u{1F}").utf8)
+        return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Recompute this entry's digest from its own stored fields.
+    public func recomputedCurrentHash() -> String {
+        Self.computeCurrentHash(
+            id: id, traceId: traceId, sequenceNumber: sequenceNumber,
+            previousHash: previousHash, eventId: eventId, edgeId: edgeId,
+            createdAt: createdAt
+        )
+    }
+}
+
+// MARK: - HashChainVerification (A3-04)
+
+/// Outcome of walking the on-DB continuity chain (`verifyHashChain()`).
+///
+/// The chain detects three tamper classes on the retained rows:
+///   - **content** — a row's `current_hash` no longer recomputes from its
+///     stored fields (an in-place UPDATE, or a sequence-number swap / reorder).
+///   - **linkage** — a row's `previous_hash` does not equal the immediately
+///     preceding retained row's `current_hash` (a deleted or inserted row).
+///   - clean otherwise (also for the empty chain).
+///
+/// Honest scope: the check tolerates a *shifted start* — the oldest retained
+/// row's back-link is not enforced, because retention prunes the oldest
+/// entries (a prefix) and that is authorized. Tail-truncation (deleting the
+/// newest rows) leaves the retained prefix internally consistent and is
+/// therefore NOT caught by the on-DB chain alone; it is bounded by the
+/// external unified-log witness and per-export daemon signature. Local root
+/// can rewrite the whole chain and is out of scope (see docs/THREAT_MODEL.md).
+public struct HashChainVerification: Sendable, Equatable {
+
+    public enum Status: Sendable, Equatable {
+        case ok
+        case brokenContent(atSequence: Int)
+        case brokenLinkage(atSequence: Int)
+    }
+
+    public let status: Status
+    /// Number of rows successfully verified before the first break (or the
+    /// full count when intact).
+    public let entriesChecked: Int
+
+    public init(status: Status, entriesChecked: Int) {
+        self.status = status
+        self.entriesChecked = entriesChecked
+    }
+
+    public var isIntact: Bool { status == .ok }
 }
 
 // MARK: - CausalGraphStore (protocol)
@@ -475,6 +580,70 @@ public protocol CausalGraphStore: Sendable {
     func appendHashChain(_ entry: TraceHashChainEntry) async throws
     func latestHashChainEntry(for traceId: String) async throws -> TraceHashChainEntry?
     func hashChainLength(for traceId: String) async throws -> Int
+
+    // Continuity chain (A3-04). Distinct from the per-trace helpers above:
+    // these treat `trace_hash_chain` as a single append-only ledger across
+    // all traces, where each materialized trace contributes one linked entry.
+    /// The current global chain head (highest `sequence_number`), or nil when
+    /// the ledger is empty.
+    func globalChainHead() async throws -> TraceHashChainEntry?
+    /// Append one continuity entry for a newly-materialized trace, linked to
+    /// the current global head. Atomic: reads the head and inserts in one hop.
+    @discardableResult
+    func appendTraceContinuity(
+        traceId: String,
+        eventId: String?,
+        edgeId: String?,
+        signature: String?,
+        publishedToUnifiedLog: Bool,
+        createdAt: Date
+    ) async throws -> TraceHashChainEntry
+    /// Walk the whole ledger and report whether it is intact. See
+    /// `HashChainVerification` for the tamper classes detected + scope.
+    func verifyHashChain() async throws -> HashChainVerification
+}
+
+public extension CausalGraphStore {
+
+    /// Backward-compat defaults so conformers predating A3-04 still build.
+    /// SQLiteCausalGraphStore overrides all three with real implementations.
+    func globalChainHead() async throws -> TraceHashChainEntry? { nil }
+    func verifyHashChain() async throws -> HashChainVerification {
+        HashChainVerification(status: .ok, entriesChecked: 0)
+    }
+
+    /// Generic continuity append for conformers that do not provide an atomic
+    /// override. Reads the head then appends — correct, but two hops, so a
+    /// SQLite-backed store overrides this with a single-hop implementation to
+    /// close the head-read/insert race under concurrent materialization.
+    @discardableResult
+    func appendTraceContinuity(
+        traceId: String,
+        eventId: String?,
+        edgeId: String?,
+        signature: String?,
+        publishedToUnifiedLog: Bool,
+        createdAt: Date = Date()
+    ) async throws -> TraceHashChainEntry {
+        let head = try await globalChainHead()
+        let nextSeq = (head?.sequenceNumber ?? 0) + 1
+        let id = UUID().uuidString
+        let currentHash = TraceHashChainEntry.computeCurrentHash(
+            id: id, traceId: traceId, sequenceNumber: nextSeq,
+            previousHash: head?.currentHash, eventId: eventId, edgeId: edgeId,
+            createdAt: createdAt
+        )
+        let entry = TraceHashChainEntry(
+            id: id, traceId: traceId, sequenceNumber: nextSeq,
+            previousHash: head?.currentHash, currentHash: currentHash,
+            eventId: eventId, edgeId: edgeId,
+            chainHeadSignature: signature,
+            chainHeadPublishedToUnifiedLog: publishedToUnifiedLog,
+            createdAt: createdAt
+        )
+        try await appendHashChain(entry)
+        return entry
+    }
 }
 
 public extension CausalGraphStore {

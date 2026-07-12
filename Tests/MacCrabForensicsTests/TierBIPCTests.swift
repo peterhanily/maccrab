@@ -58,4 +58,40 @@ struct TierBIPCTests {
         let data = try Self.enc(line)
         #expect(!data.contains(0x0A))
     }
+
+    // MARK: - protocolVersion enforcement (D-01)
+
+    @Test("result line echoes the host protocolVersion and round-trips")
+    func resultEchoesProtocolVersion() throws {
+        let back = try Self.dec(TierBCollectResult.self, Self.enc(TierBCollectResult(status: "ok")))
+        #expect(back.protocolVersion == TierBIPC.protocolVersion)
+        #expect(back.status == "ok")
+    }
+
+    @Test("a result line echoing a MISMATCHED protocolVersion is a host-side hard error at decode")
+    func mismatchedProtocolVersionRejected() {
+        let json = Data(#"{"status":"ok","protocolVersion":999}"#.utf8)
+        #expect(throws: TierBIPC.ProtocolError.versionMismatch(host: TierBIPC.protocolVersion, plugin: 999)) {
+            _ = try JSONDecoder().decode(TierBCollectResult.self, from: json)
+        }
+    }
+
+    @Test("an ABSENT protocolVersion is tolerated (back-compat with the bundled example collector)")
+    func absentProtocolVersionTolerated() throws {
+        let r = try JSONDecoder().decode(TierBCollectResult.self, from: Data(#"{"status":"ok"}"#.utf8))
+        #expect(r.protocolVersion == TierBIPC.protocolVersion)
+        #expect(r.status == "ok")
+    }
+
+    @Test("host read path drops a mismatched-version result line → no terminal result + a decode error")
+    func parseRejectsMismatchedResultLine() {
+        // The runner decodes each JSONL line as a TierBOutputLine; a result line
+        // echoing a different protocolVersion fails to decode, so parseOutputLines
+        // yields NO terminal result and counts a decode error — downstream the
+        // bridge maps a missing result to CollectionResult status .error.
+        let stdout = Data(#"{"kind":"result","result":{"status":"ok","protocolVersion":2}}"#.utf8) + Data([0x0A])
+        let parsed = FirstPartyTierBRunner.parseOutputLines(stdout)
+        #expect(parsed.result == nil)
+        #expect(parsed.decodeErrors == 1)
+    }
 }

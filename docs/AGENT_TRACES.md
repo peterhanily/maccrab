@@ -47,6 +47,34 @@ compromised agent lies in its spans — claims a `Read` while shelling out
 — the kernel events still expose the shell. The trace is for attribution
 and UX, never for trust.
 
+## Tamper-evidence (what "tamper-evident" means here)
+
+Two distinct records, two distinct guarantees — stated plainly so the
+word "tamper-evident" isn't doing unearned work:
+
+- **The OTel span store (`traces.db`).** Append-only, and AES-GCM
+  authenticated at rest (see **Privacy → Storage contract**): a modified
+  ciphertext fails the GCM tag check and surfaces a warning instead of
+  decrypting to garbage. That is at-rest integrity, not a portable proof.
+
+- **The exportable causal record (`.maccrabtrace` / `tracegraph.db`).**
+  This is the "signed, replayable record" a reviewer can verify offline.
+  Each materialized trace extends an **append-only continuity hash
+  chain** in `tracegraph.db` (a mutated / deleted / reordered / inserted
+  ledger row is detected by `verifyHashChain()`), and each exported
+  bundle carries a **daemon-signed Merkle root** over its contents. An
+  independent **unified-log witness** (subsystem
+  `com.maccrab.tracegraph.chain`) records each signed chain head.
+
+**Honest scope.** Tamper-**evident**, not tamper-proof:
+forgery-resistant against a *non-root* attacker and verifiable by a party
+holding an out-of-band pinned key (`--expect-key` / fleet pin / TOFU);
+**local root is out of scope** (root can rewrite and re-sign — see
+[`THREAT_MODEL.md`](THREAT_MODEL.md)); tail-truncation of the newest
+ledger entries is bounded by the log witness, not the chain alone; and
+the witness's cross-process/cross-run read-back is **pending on-device
+verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.spec.md).
+
 ## Privacy
 
 - **Env block: never persisted.** MacCrab scans the env block delivered

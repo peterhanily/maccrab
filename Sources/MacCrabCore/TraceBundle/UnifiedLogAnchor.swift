@@ -24,7 +24,8 @@
 //   and as a fallback when OSLogStore is unavailable.
 
 import Foundation
-import os.log
+import os.log   // Logger (emit path)
+import OSLog    // OSLogStore / OSLogEntryLog (read-back path)
 
 /// One emitted chain-head record.
 public struct UnifiedLogChainHeadRecord: Sendable, Codable, Equatable {
@@ -126,16 +127,59 @@ public actor SystemUnifiedLogAnchor: UnifiedLogAnchor {
 
     public func findChainHead(merkleRoot: String, within window: TimeWindow) async throws -> UnifiedLogChainHeadRecord? {
         // Try the in-memory mirror first — fast path for chains
-        // emitted during this daemon run.
+        // emitted during this daemon run (or this process, in tests).
         if let record = await inMemoryFallback.findChainHead(merkleRoot: merkleRoot, within: window) {
             return record
         }
-        // OSLogStore read-back happens here in a later v1.10.x increment
-        // — the API exists (OSLogStore.local() + getEntries(matching:))
-        // but requires careful entitlement handling and a non-trivial
-        // NSPredicate dance. For v1.10.0 we degrade to "not found" when
-        // the in-memory mirror misses, and the verifier reports an
-        // explicit warning per §19.4 rather than failing loudly.
+        // Cross-process / cross-run read-back from the macOS unified log.
+        return readChainHeadFromUnifiedLog(merkleRoot: merkleRoot, within: window)
+    }
+
+    /// Query `OSLogStore` for a previously-emitted chain-head record.
+    ///
+    /// UNVERIFIED RUNTIME PATH — NEEDS ON-DEVICE VERIFICATION.
+    /// The realistic production shape is: the **root System Extension** emits
+    /// the chain head (`emit`, logged under `\(Self.subsystem)`), and a
+    /// separate **uid-501 verifier process** (maccrabctl / the app) reads it
+    /// back here on a later invocation. That cross-uid, cross-run read cannot
+    /// be exercised by a unit test or reasoned to "proven" from source:
+    ///   - `OSLogStore.local()` reads the whole-system store, which is
+    ///     entitlement/privilege gated — a sandboxed or unentitled reader gets
+    ///     a throw, and we DEGRADE GRACEFULLY (return nil → the verifier emits
+    ///     the §19.4 "degraded, re-run without --check-unified-log" warning,
+    ///     never a crash and never a false "verified").
+    ///   - Log retention/rotation bounds how far back a head is visible.
+    ///   - The composed message must round-trip exactly through the log.
+    /// Everything here is best-effort and failure-tolerant on purpose; the
+    /// authoritative anchors remain the per-export daemon signature and the
+    /// in-memory fast path for same-run checks.
+    private func readChainHeadFromUnifiedLog(
+        merkleRoot: String,
+        within window: TimeWindow
+    ) -> UnifiedLogChainHeadRecord? {
+        // `OSLogStore.local()` is the whole-system store (needs privilege /
+        // the logging entitlement). Any failure — including the common
+        // unentitled case — degrades to nil rather than throwing.
+        guard let store = try? OSLogStore.local() else { return nil }
+        let position = store.position(date: window.start)
+        let predicate = NSPredicate(format: "subsystem == %@", Self.subsystem)
+        guard let entries = try? store.getEntries(at: position, matching: predicate) else {
+            return nil
+        }
+        let decoder = canonicalJSONDecoder()
+        for entry in entries {
+            guard let logEntry = entry as? OSLogEntryLog else { continue }
+            // We logged the record as compact JSON at .public privacy, so the
+            // composed message IS the JSON payload — parse it straight back.
+            guard let data = logEntry.composedMessage.data(using: .utf8),
+                  let record = try? decoder.decode(UnifiedLogChainHeadRecord.self, from: data)
+            else { continue }
+            if record.merkleRoot == merkleRoot,
+               record.emittedAt >= window.start,
+               record.emittedAt <= window.end {
+                return record
+            }
+        }
         return nil
     }
 }

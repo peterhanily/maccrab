@@ -11,7 +11,16 @@
 #       --version 1.3.5 \
 #       [--sparkle-bin <dir-with-sign_update>] \
 #       [--release-notes-md path/to/notes.md] \
+#       [--phased-rollout-interval <seconds>] \  # default 86400 (~7-day phased rollout)
+#       [--immediate] \                          # critical/security release: ship to 100% now
 #     > /tmp/item.xml
+#
+# Rollout (E-06): by default the emitted <item> carries a Sparkle
+# <sparkle:phasedRolloutInterval> so a non-critical release reaches users in
+# staggered groups (a bad build hits only a fraction before you can yank it —
+# see docs/ROLLBACK_RUNBOOK.md). For a critical/security release pass
+# --immediate (or MACCRAB_APPCAST_IMMEDIATE=1) to omit the field and update
+# every client at once.
 #
 # Prereqs:
 #   - DMG is already signed with Developer ID + notarized + stapled
@@ -36,14 +45,23 @@ RELEASE_NOTES_MD=""
 FEED_URL="https://maccrab.com/appcast.xml"
 DOWNLOAD_BASE="https://github.com/peterhanily/maccrab/releases/download"
 
+# Phased rollout (E-06). Sparkle staggers a non-critical update across 7 groups,
+# adding PHASED_INTERVAL seconds of delay per group (default 86400 → ~7-day full
+# rollout). A critical/security release must reach 100% at once, so --immediate
+# (or MACCRAB_APPCAST_IMMEDIATE=1) omits the field entirely.
+IMMEDIATE="${MACCRAB_APPCAST_IMMEDIATE:-0}"
+PHASED_INTERVAL="${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dmg) DMG="$2"; shift 2 ;;
         --version) VERSION="$2"; shift 2 ;;
         --sparkle-bin) SPARKLE_BIN="$2"; shift 2 ;;
         --release-notes-md) RELEASE_NOTES_MD="$2"; shift 2 ;;
+        --phased-rollout-interval) PHASED_INTERVAL="$2"; shift 2 ;;
+        --immediate|--critical) IMMEDIATE=1; shift ;;
         -h|--help)
-            sed -n '2,26p' "$0"; exit 0 ;;
+            sed -n '2,36p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -181,8 +199,25 @@ if [[ -z "$NOTES_HTML" ]]; then
     NOTES_HTML="$NOTES"
 fi
 
+# Phased-rollout element (E-06). Omitted for a critical/security release so
+# every client updates at once; otherwise emitted so Sparkle staggers the
+# rollout and a bad build reaches only a fraction of users before you can yank
+# it (see docs/ROLLBACK_RUNBOOK.md).
+if [[ "$IMMEDIATE" == "1" ]]; then
+    PHASED_ROLLOUT_XML=""
+    echo "  Appcast rollout: IMMEDIATE (100% now) — no phasedRolloutInterval (critical/security release)." >&2
+else
+    if ! [[ "$PHASED_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$PHASED_INTERVAL" -le 0 ]]; then
+        echo "ERROR: --phased-rollout-interval must be a positive integer of seconds; got '$PHASED_INTERVAL'" >&2
+        exit 2
+    fi
+    PHASED_ROLLOUT_XML="  <sparkle:phasedRolloutInterval>${PHASED_INTERVAL}</sparkle:phasedRolloutInterval>"
+    echo "  Appcast rollout: PHASED — phasedRolloutInterval=${PHASED_INTERVAL}s (Sparkle staggers across 7 groups → ~$(( PHASED_INTERVAL * 7 ))s to reach 100%). Use --immediate for a critical/security release." >&2
+fi
+
 # Emit a single Sparkle <item>. HTML notes are embedded as CDATA so
-# tags pass through unescaped.
+# tags pass through unescaped. A non-critical release carries
+# <sparkle:phasedRolloutInterval>; --immediate drops that line.
 cat <<XML
 <item>
   <title>MacCrab ${VERSION}</title>
@@ -191,6 +226,7 @@ cat <<XML
   <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
   <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
   <pubDate>${PUB_DATE}</pubDate>
+${PHASED_ROLLOUT_XML}
   <description><![CDATA[
 ${NOTES_HTML}
 ]]></description>

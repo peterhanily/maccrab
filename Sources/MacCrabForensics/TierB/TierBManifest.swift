@@ -105,10 +105,24 @@ public struct TierBManifest: Codable, Sendable {
         self.tccRequirements = tccRequirements
     }
 
+    /// Errors decode can produce. Mirrors PluginManifest.ValidationError's
+    /// schemaVersion guard so both manifest formats reject the same shape at load.
+    public enum ValidationError: Error, Equatable, CustomStringConvertible {
+        case schemaVersionMustBePositive(Int)
+        public var description: String {
+            switch self {
+            case .schemaVersionMustBePositive(let n):
+                return "TierBManifest.schemaVersion must be >= 1; got \(n)"
+            }
+        }
+    }
+
     // Lenient decode: only id/displayName/version/schemaVersion/description are
     // required. kind + the three capability arrays are optional (arrays absent →
     // [], kind absent → nil) so a minimal plugin manifest isn't brittle. Encode
     // stays synthesized. An unknown `kind` value is rejected (fail-closed).
+    // schemaVersion is guarded >= 1 (parity with PluginManifest) — a missing key
+    // throws keyNotFound and a zero/negative value throws schemaVersionMustBePositive.
     private enum CodingKeys: String, CodingKey {
         case id, displayName, version, schemaVersion, description, kind
         case fileReadSubpaths, fileWriteSubpaths, networkConnectAllowlist
@@ -120,7 +134,9 @@ public struct TierBManifest: Codable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         displayName = try c.decode(String.self, forKey: .displayName)
         version = try c.decode(String.self, forKey: .version)
-        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        let sv = try c.decode(Int.self, forKey: .schemaVersion)
+        guard sv >= 1 else { throw ValidationError.schemaVersionMustBePositive(sv) }
+        schemaVersion = sv
         description = try c.decode(String.self, forKey: .description)
         kind = try c.decodeIfPresent(TierBPluginKind.self, forKey: .kind)
         fileReadSubpaths = try c.decodeIfPresent([String].self, forKey: .fileReadSubpaths) ?? []
@@ -185,13 +201,17 @@ public struct TierBManifest: Codable, Sendable {
     public func consentSummary(home: String = NSHomeDirectory()) -> TierBConsentSummary {
         // Uses the SAME classifier as the broker's served-path TCC guard
         // (TierBFileBroker.guardTCC), so disclosure can't drift from enforcement:
-        // a declared path AT/UNDER a TCC store (e.g. the exact chat.db) is a
-        // brokered personal-comms read (snapshotted) and shows here; a broad
-        // ANCESTOR root (e.g. ~/Library) is NOT a TCC read because the broker
-        // fail-closes its TCC subtrees, so it honestly classifies as "content".
+        // a declared path AT/UNDER a TCC store (e.g. the exact chat.db), OR any
+        // ~/Library path the deny-by-default subtree policy protects (e.g. a broad
+        // ANCESTOR root like ~/Library, or Calendars/Reminders), is a brokered
+        // personal-comms read (snapshotted or denied) and shows in `tccReads`.
         let tcc = fileReadSubpaths.filter { TCCProtectedPaths.isProtected($0, home: home) }
+        // Reads the broker still serves LIVE with host FDA under ~/Library (the
+        // known-safe allowlist, e.g. Preferences) are more sensitive than generic
+        // file "content" — elevate them so consent never under-states FDA exposure.
+        let liveLibrary = fileReadSubpaths.filter { TCCProtectedPaths.isLiveServedHomeLibrary($0, home: home) }
         let derived: String
-        if !tcc.isEmpty { derived = "personalComms" }            // conservative: TCC read → high friction
+        if !tcc.isEmpty || !liveLibrary.isEmpty { derived = "personalComms" } // TCC / live-FDA ~/Library → high friction
         else if !fileReadSubpaths.isEmpty { derived = "content" }
         else { derived = "metadata" }
         let underdeclared = TierBConsentSummary.privacyRank(privacyClass) < TierBConsentSummary.privacyRank(derived)

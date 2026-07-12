@@ -426,8 +426,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         //   (the marketplace stays opt-in; nothing leaves the machine by default).
         @Sendable func reconcileRevocations() async {
             let client = RaveCatalogClient()
-            if !(await client.installedPlugins()).isEmpty {
-                _ = try? await client.refreshRevocationsIfStale()
+            let installedCount = (await client.installedPlugins()).count
+            if installedCount > 0 {
+                do {
+                    _ = try await client.refreshRevocationsIfStale()
+                } catch {
+                    // A1-02: an installed store/sideload plugin whose signed
+                    // revocation endpoint we cannot reach (offline / withheld /
+                    // bad-signature) is a LOUD condition, not a silent skip — a
+                    // network adversary must not be able to quietly withhold the
+                    // signed revocations.json and keep a revoked plugin running.
+                    // The staleness sweep below still fail-closes past the ceiling
+                    // (store: hard ceiling; sideload: freshness ceiling); this
+                    // surfaces the unreachable-with-installed-plugins state.
+                    NSLog("[MacCrab] Tier-B revocation refresh FAILED with \(installedCount) plugin(s) installed — revocation data may be stale; plugins will fail-closed past the staleness ceiling. Error: \(error)")
+                }
             }
             if let recs = try? await RevocationReverifyService.reconcileDefaults(), !recs.isEmpty {
                 NSLog("[MacCrab] Tier-B revocation reconcile: quarantined \(recs.count) plugin(s)")

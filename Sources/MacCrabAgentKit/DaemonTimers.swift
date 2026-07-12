@@ -2281,10 +2281,43 @@ enum DaemonTimers {
         return scrubbed
     }
 
+    /// v1.21.4 (G-04): size-based rotation for `dashboard_audit.log`. The log
+    /// is plain-appended one line per privileged mutation and previously had no
+    /// cap, so it grew without bound. When the live file passes `maxBytes`,
+    /// shift `.N → .(N+1)` (oldest falls off the end) and move the live file to
+    /// `.1`, mirroring the FileOutput rotation idiom. `maxArchives` rotated
+    /// generations are kept.
+    ///
+    /// Best-effort and intentionally NON-tamper-evident: this is a forensic
+    /// breadcrumb (a single tail target for "who changed alert state"), not a
+    /// hash-chained ledger — rotation discards the oldest generation. Operators
+    /// needing durable retention should export via the daemon's syslog/SIEM
+    /// sinks.
+    static func rotateAuditLogIfNeeded(
+        path: String, maxBytes: UInt64 = 5 * 1024 * 1024, maxArchives: Int = 3
+    ) {
+        let fm = FileManager.default
+        guard maxArchives >= 1,
+              let attrs = try? fm.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64, size > maxBytes else { return }
+        // Shift .N → .(N+1) from the oldest so nothing is overwritten.
+        for i in stride(from: maxArchives, to: 0, by: -1) {
+            let src = "\(path).\(i)"
+            guard fm.fileExists(atPath: src) else { continue }
+            if i == maxArchives {
+                try? fm.removeItem(atPath: src)          // oldest falls off the end
+            } else {
+                try? fm.moveItem(atPath: src, toPath: "\(path).\(i + 1)")
+            }
+        }
+        try? fm.moveItem(atPath: path, toPath: "\(path).1")
+    }
+
     private static func auditLogInbox(
         state: DaemonState, prefix: String, id: String, uid: Int, result: String
     ) {
         let logPath = state.supportDir + "/dashboard_audit.log"
+        rotateAuditLogIfNeeded(path: logPath)
         // Sanitize all attacker-controlled fields so log-injection
         // attempts (newlines, ANSI escapes, control chars in the id
         // / result string) can't forge subsequent log lines.

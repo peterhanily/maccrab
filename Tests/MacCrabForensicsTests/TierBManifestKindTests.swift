@@ -38,4 +38,33 @@ struct TierBManifestKindTests {
         let back = try JSONDecoder().decode(TierBManifest.self, from: JSONEncoder().encode(m))
         #expect(back.kind == .collector)
     }
+
+    // MARK: - schemaVersion guard (D-02) — parity with PluginManifest
+
+    @Test("schemaVersion 0 is rejected at decode")
+    func schemaVersionZeroRejected() {
+        #expect(throws: TierBManifest.ValidationError.schemaVersionMustBePositive(0)) {
+            _ = try Self.decode(#"{"id":"com.x.p","displayName":"P","version":"1.0","schemaVersion":0,"description":"d"}"#)
+        }
+    }
+
+    @Test("negative schemaVersion is rejected at decode")
+    func schemaVersionNegativeRejected() {
+        #expect(throws: TierBManifest.ValidationError.schemaVersionMustBePositive(-3)) {
+            _ = try Self.decode(#"{"id":"com.x.p","displayName":"P","version":"1.0","schemaVersion":-3,"description":"d"}"#)
+        }
+    }
+
+    @Test("absent schemaVersion is rejected at decode")
+    func schemaVersionAbsentRejected() {
+        #expect(throws: (any Error).self) {
+            _ = try Self.decode(#"{"id":"com.x.p","displayName":"P","version":"1.0","description":"d"}"#)
+        }
+    }
+
+    @Test("a valid schemaVersion loads")
+    func schemaVersionValidLoads() throws {
+        let m = try Self.decode(#"{"id":"com.x.p","displayName":"P","version":"1.0","schemaVersion":2,"description":"d"}"#)
+        #expect(m.schemaVersion == 2)
+    }
 }

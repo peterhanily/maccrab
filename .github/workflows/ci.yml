@@ -30,10 +30,21 @@
 #                               escape primitive. A sanitizer fault or a stray-
 #                               closed descriptor means the containment boundary
 #                               re-opened — must block merge.
-#   audit           ADVISORY  — informational; does not block (it runs
-#                               the full architectural audit + PASS-L
-#                               Xcode-27 guards, some of which are
-#                               release-time gates, not per-PR gates).
+#   audit-deterministic REQUIRED — the cheap, hermetic, source-only subset of
+#                               the architectural audit (MACCRAB_AUDIT_SCOPE=
+#                               deterministic): the wire-the-orphans / single-
+#                               sink / bounded-state invariants + the PASS 13
+#                               env-block secret-leak scan. Pure grep over
+#                               committed source, so it's deterministic on a
+#                               fresh runner and gates every PR. The release-
+#                               time passes (K/L/M) are skipped here.
+#   audit           ADVISORY  — informational; does not block. Runs the FULL
+#                               architectural audit incl. the release-time
+#                               gates a hosted PR runner can't satisfy (PASS-K
+#                               toolchain pin, PASS-L Xcode-27 guards, PASS-M
+#                               universal-binary arch). The deterministic subset
+#                               is promoted to the REQUIRED audit-deterministic
+#                               job above; this job keeps surfacing the rest.
 #   corpus          ADVISORY  — runs the Tier-B containment corpus so a
 #                               regression in the broker/SBPL/trampoline that
 #                               re-opens the boundary turns a check red instead
@@ -193,6 +204,33 @@ jobs:
 
       - name: Fuzz the SCM_RIGHTS fd broker (ASan + UBSan)
         run: ./scripts/test-broker-fuzz.sh
+
+  # ── REQUIRED ────────────────────────────────────────────────────────
+  audit-deterministic:
+    name: Architectural audit — deterministic passes (required)
+    runs-on: macos-15
+    timeout-minutes: 15
+    # REQUIRED: the cheap, hermetic, source-only subset of the architectural
+    # audit — the wire-the-orphans / single-sink / bounded-actor-state
+    # invariants plus PASS 13 (env-block secret-leak scan). These are pure
+    # grep/awk/sed over committed source, so they're fully deterministic on a
+    # fresh runner and MUST gate every PR. MACCRAB_AUDIT_SCOPE=deterministic
+    # skips the release-time passes K/L/M (toolchain pin, Xcode-27 source-compat
+    # guards, universal-binary arch) that a hosted PR runner can't satisfy — the
+    # full `audit` job below keeps running those, advisory. No Xcode select and
+    # no build step: the deterministic passes never touch the toolchain or build
+    # products, so this job stays fast and can't false-fail on the runner's
+    # default Xcode.
+    #
+    # No continue-on-error: an error-level finding (a new unclassified Settings
+    # @AppStorage orphan, an unauthorised alertStore.insert, an env-block secret
+    # leak) blocks merge.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Deterministic architectural audit (source invariants + secret-leak scan)
+        run: MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
 
   # ── ADVISORY ────────────────────────────────────────────────────────
   audit:

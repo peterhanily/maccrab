@@ -1226,6 +1226,10 @@ func handleForensicsRunAll(_ args: [String: Any]) -> Any {
     guard let id = args["case_id"] as? String, !id.isEmpty else {
         return toolError("forensics_run_all requires 'case_id'.")
     }
+    // G-05: a gated (.response) mutation — runs every applicable collector +
+    // analyzer (code execution + artifact commits). Audit it like every other
+    // gated tool.
+    auditLog("forensics_run_all", details: "case_id=\(id) ppid=\(getppid())")
     var argv = ["scan", "run-all", id]
     if (args["scheduled"] as? Bool) == true { argv.append("--scheduled") }
     guard let r = runMaccrabctl(argv) else {
@@ -2874,6 +2878,11 @@ func handleForensicsCreateCase(_ args: [String: Any]) async -> Any {
           !name.isEmpty, name.count <= 200 else {
         return toolError("'name' is required (a short case label, ≤200 chars)")
     }
+    // G-05: a gated (.response) mutation — creating a case is a persistent
+    // write and the entry point for code-executing / sensitive-data collection.
+    // Audit it like every other gated tool. Log only the label length (the raw
+    // name is operator free-text) + ppid; the case_id is minted below.
+    auditLog("forensics_create_case", details: "name_len=\(name.count) ppid=\(getppid())")
     // Plaintext by default: an encrypted case wraps its DEK to the app's
     // keychain, whose retrieval needs an interactive Touch ID/passcode
     // prompt the headless MCP process can't satisfy — the agent could
@@ -3011,6 +3020,10 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
           let caseID = args["case_id"] as? String else {
         return toolError("missing required arguments: plugin_id, case_id")
     }
+    // G-05: a gated (.response) mutation — executes collector plugin code and
+    // commits artifacts (potentially sensitive local data) into the case. Audit
+    // it like every other gated tool.
+    auditLog("forensics_run_collector", details: "plugin_id=\(pluginID) case_id=\(caseID) ppid=\(getppid())")
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
@@ -3077,6 +3090,9 @@ func handleForensicsRunAnalyzer(_ args: [String: Any]) async -> Any {
           let caseID = args["case_id"] as? String else {
         return toolError("missing required arguments: plugin_id, case_id")
     }
+    // G-05: a gated (.response) mutation — executes analyzer plugin code and
+    // commits posture findings into the case. Audit it like every other gated tool.
+    auditLog("forensics_run_analyzer", details: "plugin_id=\(pluginID) case_id=\(caseID) ppid=\(getppid())")
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         guard let reg = await PluginRegistry.shared.registration(forID: pluginID) else {

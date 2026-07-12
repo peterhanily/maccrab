@@ -43,7 +43,14 @@ struct TierBBrokeredTCCTests {
         #expect(TCCProtectedPaths.isProtected("/Users/x/Library/Safari/History.db", home: home))
         #expect(TCCProtectedPaths.isProtected("/Library/Application Support/com.apple.TCC/TCC.db", home: home))
         #expect(!TCCProtectedPaths.isProtected("/Users/x/Documents/notes.txt", home: home))
-        #expect(!TCCProtectedPaths.isProtected("/Users/x/Library/MessagesOther/x", home: home)) // not a component prefix
+        // A1-06 deny-by-default: any ~/Library path not on the known-safe allowlist
+        // is protected (even one no explicit prefix names) — the FDA broker must not
+        // serve it live. Known-safe ~/Library/Preferences stays live.
+        #expect(TCCProtectedPaths.isProtected("/Users/x/Library/MessagesOther/x", home: home))  // deny-by-default
+        #expect(!TCCProtectedPaths.isProtected("/Users/x/Library/Preferences/com.example.plist", home: home))
+        #expect(TCCProtectedPaths.isProtected("/Users/x/Library/PreferencesEvil/x", home: home)) // component boundary — NOT the safe prefix
+        // System /Library and non-Library paths are unaffected by deny-by-default.
+        #expect(!TCCProtectedPaths.isProtected("/Library/LaunchDaemons/foo.plist", home: home))
         // trailing slash on home is tolerated
         #expect(TCCProtectedPaths.isProtected("/Users/x/Library/Mail/foo", home: "/Users/x/"))
     }
@@ -120,6 +127,46 @@ struct TierBBrokeredTCCTests {
         #expect(Set(plan.denied) == Set([home + "/Library/Mail", home + "/Library/Messages/nope.db"]))
     }
 
+    @Test("A1-06: a ~/Library/Calendars source is snapshotted (never a live direct root)")
+    func calendarsSnapshottedNotLive() throws {
+        let snapDir = URL(fileURLWithPath: NSTemporaryDirectory() + "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapDir) }
+        let home = NSTemporaryDirectory() + "tcc-home-\(UUID().uuidString)"
+        let cal = home + "/Library/Calendars/Calendar.sqlitedb"
+        try FileManager.default.createDirectory(atPath: (cal as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try Self.makeSourceDB(at: cal)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+
+        let plan = BrokeredTCC.prepare(manifestReadPaths: [cal], snapshotDir: snapDir, home: home)
+        #expect(plan.directReadRoots.isEmpty)      // NOT served live with the host's FDA
+        #expect(plan.denied.isEmpty)
+        #expect(plan.redirects.count == 1)         // snapshot + redirect instead
+        #expect(plan.redirects.first?.prefix == cal)
+        // The classifier and the served-path guard both treat it as protected.
+        #expect(TCCProtectedPaths.isProtected(cal, home: home))
+        let guarded = TierBFileBroker.Policy(allowedReadRoots: [home + "/Library"], tccGuardHome: home)
+        #expect(TierBFileBroker.resolve(cal, policy: guarded) == nil)   // guard denies a live serve
+    }
+
+    @Test("A1-06 deny-by-default: an unenumerated ~/Library store dir is denied, not served live")
+    func denyByDefaultUnenumeratedStore() throws {
+        let snapDir = URL(fileURLWithPath: NSTemporaryDirectory() + "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapDir) }
+        let home = NSTemporaryDirectory() + "tcc-home-\(UUID().uuidString)"
+        // A store NO explicit prefix names (a directory) — deny-by-default must
+        // still protect it: a directory can't be snapshotted → denied (not live).
+        let reminders = home + "/Library/Reminders"
+        let future = home + "/Library/SomeFutureTCCStore"
+        try FileManager.default.createDirectory(atPath: reminders, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: future, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+
+        let plan = BrokeredTCC.prepare(manifestReadPaths: [reminders, future], snapshotDir: snapDir, home: home)
+        #expect(plan.directReadRoots.isEmpty)      // neither served live
+        #expect(plan.redirects.isEmpty)
+        #expect(Set(plan.denied) == Set([reminders, future]))
+    }
+
     // MARK: - Exact-file redirect resolution
 
     @Test("broker resolve: an exact-file redirect serves the snapshot rooted at its parent")
@@ -176,12 +223,16 @@ struct TierBBrokeredTCCTests {
         let scratch = NSTemporaryDirectory() + "scratch-\(UUID().uuidString)"
 
         // The plugin declares the broad ANCESTOR root, not the exact chat.db.
+        // A1-06 deny-by-default: ~/Library is a protected directory (can't be
+        // snapshotted) → prepare DENIES it outright rather than serving it live.
         let plan = BrokeredTCC.prepare(manifestReadPaths: [home + "/Library"], snapshotDir: snapDir, home: home)
-        #expect(plan.directReadRoots == [home + "/Library"])   // ancestor → direct root (not snapshotted)
+        #expect(plan.directReadRoots.isEmpty)                  // ancestor root is NOT served live
         #expect(plan.redirects.isEmpty)
+        #expect(plan.denied == [home + "/Library"])            // deny-by-default (directory under protected subtree)
         let policy = plan.brokerPolicy(scratchDir: scratch)
         #expect(policy.tccGuardHome == home)
-        // The guard fail-closes the live store reached via the ancestor root.
+        // Defense in depth: even were the ancestor root a direct grant, the guard
+        // still fail-closes the live store reached beneath it.
         #expect(TierBFileBroker.resolve(chat, policy: policy) == nil)
     }
 

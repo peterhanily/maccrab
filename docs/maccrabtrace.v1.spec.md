@@ -215,6 +215,58 @@ Plain hex of the outer `.tar.gz` SHA-256, included for convenience
 only. **Not** part of the signed Merkle root. Recompressing the bundle
 changes this value but does not invalidate the signature.
 
+### 6.4 Tamper-evidence: what is guaranteed (and what is not)
+
+A `.maccrabtrace` bundle is **tamper-EVIDENT, not tamper-PROOF.** Two
+independent integrity layers back it, and one on-device witness:
+
+1. **Per-export signature (bundle).** `§6.1` + `§6.2` above: a canonical
+   Merkle root over the bundle's artifacts, signed by the daemon's key.
+   A verifier that holds the trusted public key **out of band** — an
+   operator `--expect-key` fingerprint, a fleet/install pin, or the
+   trust-on-first-use `TraceKeyPinStore` — can confirm the bundle was
+   signed by that key and that no artifact changed since signing. Without
+   an out-of-band key it is self-contained/TOFU only (an attacker who
+   rewrites the artifacts can re-sign with their own key; the pin closes
+   this).
+
+2. **On-DB continuity chain (`tracegraph.db`).** Each materialized trace
+   appends one linked entry to an append-only ledger (`trace_hash_chain`)
+   whose `previous_hash` chains to the prior head. `verifyHashChain()`
+   walks the ledger and flags an in-place field mutation, a reorder
+   (both caught by recomputing each row's digest), and an interior
+   deletion or insertion (caught by the `previous_hash` linkage).
+   Retention prunes the **oldest** entries (a prefix); verify tolerates
+   that shifted start and does not treat it as tampering. `trace export`
+   runs this check before writing a bundle and warns on a break.
+
+3. **Unified-log external witness.** On export the daemon emits the
+   signed chain head to the `com.maccrab.tracegraph.chain` subsystem of
+   the macOS unified log — an OS-managed, append-oriented record that
+   raises the cost of silent retroactive tampering. `verify
+   --check-unified-log` reads it back (`OSLogStore`), degrading to a
+   §-`10`/`19.4` warning (never a hard failure) where log access is
+   entitlement-restricted.
+
+**Guarantee scope (honest):**
+
+- **Forgery-resistant against a NON-root attacker.** A process that edits
+  `tracegraph.db` or a bundle without the daemon's signing key breaks the
+  hash chain or fails the signature; a party holding the out-of-band key
+  detects it.
+- **Local ROOT is out of scope.** Root can rewrite the whole ledger and
+  re-sign, so the on-DB chain cannot bind root. See
+  [`docs/THREAT_MODEL.md`](THREAT_MODEL.md) — local root is out of scope
+  for tamper protection by design. The bundle signature still constrains
+  root to a key an out-of-band verifier trusts.
+- **Tail-truncation** (deleting the newest ledger entries) leaves the
+  retained prefix internally consistent and is *not* caught by the on-DB
+  chain alone; the unified-log witness bounds it.
+- **Read-back caveat.** The cross-process / cross-run unified-log
+  read-back (root sysext emits, uid-501 verifier reads on a later run) is
+  wired but **pending on-device verification** — treat the log witness as
+  a hardening layer, not a proven control, until validated on a real host.
+
 ---
 
 ## 7. Standards-aligned artifacts

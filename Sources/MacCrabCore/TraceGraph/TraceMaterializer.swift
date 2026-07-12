@@ -240,6 +240,25 @@ public actor TraceMaterializer {
             throw MaterializeError.storeError(error.localizedDescription)
         }
 
+        // A3-04: extend the on-DB append-only continuity chain with one linked
+        // entry certifying that this trace was materialized, in this position,
+        // at this time. Best-effort: a ledger-append failure must never fail
+        // the detection path (materialize is on the hot ingest path), but it
+        // is logged so a persistent failure is visible. The signed per-export
+        // bundle + unified-log witness anchor the head independently.
+        do {
+            _ = try await store.appendTraceContinuity(
+                traceId: trace.id,
+                eventId: trace.anchorEventId,
+                edgeId: nil,
+                signature: nil,
+                publishedToUnifiedLog: false,
+                createdAt: now
+            )
+        } catch {
+            logger.error("continuity-chain append failed for trace \(trace.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+
         return trace
     }
 

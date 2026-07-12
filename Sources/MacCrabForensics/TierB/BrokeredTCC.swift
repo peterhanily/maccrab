@@ -34,6 +34,8 @@ public enum TCCProtectedPaths {
         "Library/Application Support/AddressBook",
         "Library/Application Support/CallHistoryDB",
         "Library/Application Support/CallHistoryTransactions",
+        "Library/Calendars",                             // Calendar.app store — Calendars TCC
+        "Library/Reminders",                             // Reminders store — Reminders TCC
         "Library/Application Support/Knowledge",          // knowledgeC.db — usage graph
         "Library/Application Support/com.apple.sharedfilelist",
         "Library/Accounts",                              // Accounts4.sqlite — identities
@@ -62,7 +64,28 @@ public enum TCCProtectedPaths {
         "/Library/Application Support/com.apple.TCC",
     ]
 
-    /// True iff `path` is at or under a known TCC-protected location for `home`.
+    /// The ONLY ~/Library subtrees the FDA broker may serve LIVE (deny-by-default,
+    /// below). Kept deliberately small: adding a prefix here means the broker opens
+    /// the real file with the host's Full Disk Access, so it must be a location
+    /// Apple does NOT gate behind TCC/FDA-sensitive consent. `Library/Preferences`
+    /// is not TCC-gated and is routinely read; everything else under ~/Library
+    /// (Calendars, Reminders, and any store Apple adds later) is snapshotted or
+    /// denied rather than served live.
+    static let homeLibrarySafePrefixes: [String] = [
+        "Library/Preferences",
+    ]
+
+    /// True iff `path` must be BROKERED (snapshotted, or denied) rather than opened
+    /// LIVE by the FDA-holding broker for `home`.
+    ///
+    /// Two rules, both fail-safe:
+    ///   1. an explicit TCC-protected location (the prefix lists above), and
+    ///   2. DENY-BY-DEFAULT across the whole ~/Library subtree: anything under
+    ///      ~/Library that is not on `homeLibrarySafePrefixes` is protected. A new
+    ///      or unenumerated TCC store (Calendars, Reminders, a future one) is thus
+    ///      never leaked live merely because it wasn't named — the broker holds
+    ///      host FDA, so an ~/Library read it isn't sure is safe is snapshotted or
+    ///      denied. (System `/Library` and non-Library paths are unaffected.)
     ///
     /// Matching is CASE-FOLDED: the default macOS boot volume is APFS
     /// case-insensitive, so `/Users/x/library/Messages` resolves to the real
@@ -80,7 +103,34 @@ public enum TCCProtectedPaths {
             let a = abs.lowercased()
             if p == a || p.hasPrefix(a + "/") { return true }
         }
+        // Deny-by-default under ~/Library: protected unless on a known-safe prefix.
+        let lib = h + "/library"
+        if p == lib || p.hasPrefix(lib + "/") {
+            return !isHomeLibrarySafe(p, foldedHome: h)
+        }
         return false
+    }
+
+    /// True iff a case-folded `p` (home already folded to `foldedHome`) is at or
+    /// under a known-safe ~/Library prefix — the broker may serve it LIVE.
+    private static func isHomeLibrarySafe(_ p: String, foldedHome h: String) -> Bool {
+        for safe in homeLibrarySafePrefixes {
+            let s = (h + "/" + safe).lowercased()
+            if p == s || p.hasPrefix(s + "/") { return true }
+        }
+        return false
+    }
+
+    /// True iff `path` is a LIVE-served ~/Library read (under ~/Library and on the
+    /// known-safe allowlist). Such a read is more sensitive than generic file
+    /// "content" — the broker opens it with the host's Full Disk Access — so the
+    /// consent summary elevates it above plain content.
+    public static func isLiveServedHomeLibrary(_ path: String, home: String) -> Bool {
+        let p = path.lowercased()
+        let h = (home.hasSuffix("/") ? String(home.dropLast()) : home).lowercased()
+        let lib = h + "/library"
+        guard p == lib || p.hasPrefix(lib + "/") else { return false }
+        return isHomeLibrarySafe(p, foldedHome: h)
     }
 }
 

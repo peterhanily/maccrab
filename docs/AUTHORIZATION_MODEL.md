@@ -219,3 +219,34 @@ prevention**: every action is audit-logged, and detection-weakening actions
 raise a high-severity, noise-filter-bypassing self-protection alert. Operators
 and SOC teams should monitor `dashboard_audit.log` and the
 `maccrab.self-defense.*` alert class.
+
+---
+
+## Scope: single-host by design; no RBAC (out of scope this release)
+
+MacCrab is a **single-host** endpoint tool. Its authorization model is
+deliberately binary — **root, or the live admin console user** — and it has, by
+design, **no role-based access control (RBAC), no multi-user role separation,
+and no notion of "operator A may suppress but not author rules."** Every
+authorized principal has the full control-plane surface documented above.
+
+This is an intentional non-goal for this release, not an oversight:
+
+- The product's unit of protection and administration is **one Mac**. There is
+  no central console, no fleet server, and no shared operator directory that an
+  RBAC policy could be scoped against — so a role model would be structure with
+  nothing to enforce it over.
+- The gate that *does* exist (root / admin-console-user) already matches the
+  macOS trust boundary for a device its user administers. On a single-admin Mac
+  — the overwhelmingly common case — RBAC would add no separation the OS doesn't
+  already draw.
+- Accountability, not role separation, is how this release bounds an authorized
+  principal: **every** mutation is audit-logged (`dashboard_audit.log`) and
+  detection-weakening changes raise a self-protection alert (see above).
+
+**RBAC / role separation would only be required if a fleet console ships** — a
+multi-operator, multi-host management plane where distinct humans need distinct,
+enforceable authority (e.g. "the SOC tier may triage alerts fleet-wide but may
+not disable detections"). That console does not exist in this release; if and
+when it does, RBAC becomes an explicit requirement for it, enforced at that
+plane. It is out of scope here.
