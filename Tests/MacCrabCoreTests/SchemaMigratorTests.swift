@@ -158,6 +158,40 @@ struct SchemaMigratorTests {
         #expect(try SchemaMigrator.readVersion(db: db.handle) == 99)
     }
 
+    /// C-05: schema-DOWNGRADE policy is DELIBERATE additive-and-warn, NOT
+    /// fail-closed. An older binary opened against a DB a newer build wrote
+    /// (Sparkle/MDM rollback, mixed-version fleet) must NOT throw — throwing
+    /// would trip DaemonSetup.recoverEventStore into quarantining a good DB and
+    /// losing the operator's history. Instead: proceed additively (re-apply this
+    /// store's own migrations idempotently), preserve the newer counter, and warn.
+    @Test("C-05: newer-than-binary DB is opened additively (not refused) and warns")
+    func downgradeAdditiveAndWarn() throws {
+        let db = openTempDB()
+        defer { db.close() }
+
+        // Simulate a DB a NEWER binary wrote: table present, counter well past
+        // this binary's latest known migration.
+        sqlite3_exec(db.handle, "CREATE TABLE events (id TEXT PRIMARY KEY)", nil, nil, nil)
+        sqlite3_exec(db.handle, "PRAGMA user_version = 999", nil, nil, nil)
+
+        // This (older) binary knows migrations only up to v2.
+        let known = [
+            Migration(version: 1, name: "baseline", sql: []),
+            Migration(version: 2, name: "add_note", sql: ["ALTER TABLE events ADD COLUMN note TEXT"]),
+        ]
+
+        // Must NOT throw (fail-closed would destroy the DB via recovery).
+        var messages: [String] = []
+        try SchemaMigrator.run(on: db.handle, migrations: known) { messages.append($0) }
+
+        // This binary's own additive migration still applied...
+        #expect(hasColumn(db.handle, table: "events", column: "note"))
+        // ...and the newer counter was preserved (never lowered).
+        #expect(try SchemaMigrator.readVersion(db: db.handle) == 999)
+        // ...and the skew was surfaced loudly.
+        #expect(messages.contains { $0.uppercased().contains("WARNING") && $0.contains("999") })
+    }
+
     @Test("Reports migration progress via logger callback")
     func loggerCalled() throws {
         let db = openTempDB()

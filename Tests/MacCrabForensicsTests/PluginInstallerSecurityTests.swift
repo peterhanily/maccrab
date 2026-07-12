@@ -184,6 +184,62 @@ struct PluginInstallerSecurityTests {
         let mode = attrs[.posixPermissions] as? Int ?? 0
         #expect(mode == 0o700)
     }
+
+    // MARK: - A1-03: trusted-keys list is signed + fails closed on tamper
+
+    @Test("A1-03: trusted-keys round-trips through the signed form")
+    func trustedKeysSignedRoundTrip() async throws {
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let hex = String(repeating: "a", count: 64)
+        try await installer.addTrustedKey(hex)
+        #expect(await installer.currentTrustedKeys().contains(hex))
+        // A fresh installer at the same root re-reads the signed list (shared key).
+        let reopened = PluginInstaller(pluginsRoot: URL(fileURLWithPath: installer.pluginsRootPath))
+        #expect(await reopened.currentTrustedKeys().contains(hex))
+    }
+
+    @Test("A1-03: a same-uid edit that injects a publisher key is rejected fail-closed")
+    func injectedTrustedKeyRejected() async throws {
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let legit = String(repeating: "a", count: 64)
+        try await installer.addTrustedKey(legit)   // seals the list
+
+        // Attacker overwrites trusted-keys.json with an unsigned flat list adding
+        // their own key — the vector A1-03 closes.
+        let attacker = String(repeating: "e", count: 64)
+        let trustedPath = installer.pluginsRootPath + "/trusted-keys.json"
+        try Data("{\"keys\":[\"\(legit)\",\"\(attacker)\"]}".utf8)
+            .write(to: URL(fileURLWithPath: trustedPath))
+
+        // Unsigned/forged list grants NO trust (fail-closed), so neither the
+        // injected key NOR the legit one is honored — an install would then refuse.
+        let trusted = await installer.currentTrustedKeys()
+        #expect(!trusted.contains(attacker))
+        #expect(trusted.isEmpty)
+    }
+
+    @Test("A1-03: mutating the sealed trusted-keys body is detected")
+    func mutatedTrustedKeysBodyRejected() async throws {
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let legit = String(repeating: "a", count: 64)
+        try await installer.addTrustedKey(legit)
+
+        // Flip the sealed body's key list to an attacker key, keeping the old
+        // signature — the signature no longer matches the mutated body.
+        let trustedPath = installer.pluginsRootPath + "/trusted-keys.json"
+        var obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: trustedPath))) as! [String: Any]
+        var body = obj["body"] as! [String: Any]
+        body["keys"] = [String(repeating: "e", count: 64)]
+        obj["body"] = body
+        try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted])
+            .write(to: URL(fileURLWithPath: trustedPath))
+
+        #expect(await installer.currentTrustedKeys().isEmpty)   // fail-closed
+    }
 }
 
 @Suite("TierBRegistry security — audit-4: TOCTOU verify-to-spawn")

@@ -189,6 +189,13 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
     }
 
     public func saveFilesystemPrivateKey(_ data: Data) throws {
+        // A3-02 (degraded fallback): unlike the SE mode — where the key is
+        // non-exportable and pinned with a usage ACL (see TrustSubstrate.
+        // makeSigningKeyAccessControl) — this on-disk DER has NO keychain
+        // ACL. Its only at-rest protection is 0o600 under the 0o700 keys
+        // dir, so any process that can read the file (root, or a directory
+        // misconfiguration) can sign. This mode is selected only when SE is
+        // unavailable and is explicitly NOT root-resistant.
         try ensureBaseDirectory()
         let url = baseDirectory.appendingPathComponent(Self.privateKeyFile)
         try writeAtomically(data, to: url, mode: 0o600)

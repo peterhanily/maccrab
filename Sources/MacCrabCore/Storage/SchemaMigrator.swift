@@ -78,12 +78,37 @@ public enum SchemaMigrator {
 
     /// Apply any pending migrations to the given SQLite handle.
     ///
+    /// ## Schema-downgrade policy (C-05) — DELIBERATE, PERMANENT: additive + warn
+    ///
+    /// When the on-disk `user_version` is NEWER than this binary's latest known
+    /// migration (an older MacCrab opened against a DB a newer build wrote — a
+    /// Sparkle/MDM rollback or a mixed-version fleet), we do NOT fail-closed. We
+    /// proceed additively and log the skew LOUDLY. This is a considered policy,
+    /// not an oversight:
+    ///
+    ///   1. Every migration in this codebase is strictly additive — `ADD COLUMN`
+    ///      and `CREATE … IF NOT EXISTS`. An older binary only ever reads/writes
+    ///      the columns it knows; columns a newer build added sit unused. There
+    ///      is no read-wrong-data or corruption risk from a newer additive schema.
+    ///   2. Hard-refusing would be *actively dangerous* here. A throw from `run()`
+    ///      propagates out of `EventStore.init`, which `DaemonSetup.recoverEventStore`
+    ///      treats as corruption — it would quarantine the (perfectly good) DB and
+    ///      start a fresh empty one, DESTROYING the operator's event/evidence
+    ///      history on a benign version rollback. Staying open + warning preserves
+    ///      the data and keeps the security daemon detecting.
+    ///
+    /// `SchemaMigrationError.unknownVersion` exists for a caller that explicitly
+    /// wants fail-closed semantics; the primary stores intentionally do NOT use
+    /// it. If a future migration ever becomes non-additive (a `DROP`/rewrite),
+    /// this policy must be revisited — that's the one case additive-safety breaks.
+    ///
     /// - Parameters:
     ///   - db: Open SQLite handle (must be writable).
     ///   - migrations: All known migrations. Order-independent; sorted internally.
     ///   - logger: Optional callback for human-readable progress messages.
     /// - Throws: `SchemaMigrationError` on failure. State is left at the last
-    ///   successfully committed version.
+    ///   successfully committed version. Note: a newer-than-binary `user_version`
+    ///   is NOT a failure (see the downgrade policy above).
     public static func run(
         on db: OpaquePointer,
         migrations: [Migration],
@@ -125,9 +150,14 @@ public enum SchemaMigrator {
             // CREATE … IF NOT EXISTS), so re-applying them is safe and the old
             // binary's column-explicit reads/writes still work; but this build may
             // not understand columns/semantics a newer one added, so surface the
-            // version skew LOUDLY rather than treating it as routine. (A caller
-            // that wants to hard-refuse can check for current > latest and throw
-            // SchemaMigrationError.unknownVersion.)
+            // version skew LOUDLY rather than treating it as routine.
+            //
+            // C-05: proceeding additively (not throwing) is the DELIBERATE,
+            // PERMANENT policy — see the "Schema-downgrade policy" block on
+            // run(). Throwing here would trip DaemonSetup.recoverEventStore into
+            // quarantining a good DB and losing the operator's history on a
+            // benign downgrade. A caller that truly wants fail-closed can check
+            // `current > latest` and throw SchemaMigrationError.unknownVersion.
             let msg = "DB user_version=\(current) EXCEEDS this binary's latest known v\(latest) — running an OLDER MacCrab against a newer-schema database (downgrade/rollback / mixed-version fleet?). Proceeding additively; upgrade to the build that wrote this DB if you see schema errors."
             // Log via BOTH the optional callback AND os.Logger.warning — the
             // primary stores pass no callback, so the os.Logger is what actually

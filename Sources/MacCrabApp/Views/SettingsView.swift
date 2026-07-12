@@ -1094,7 +1094,10 @@ struct SettingsView: View {
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
-                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames) is automatically redacted before sending."))
+                                // A4-06: be honest that cloud redaction is
+                                // best-effort heuristics, not a guarantee, and
+                                // point operators at the fully-private option.
+                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames, API-key-shaped tokens) is redacted before sending. This is best-effort heuristic scrubbing, not a guarantee — novel data shapes can still slip through. For fully private analysis, use a local Ollama backend, where no data leaves this Mac."))
                                     .font(.caption)
                                     .foregroundColor(.orange)
                             }

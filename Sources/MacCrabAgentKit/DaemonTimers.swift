@@ -2545,7 +2545,9 @@ func runAdaptiveRollupSweep(
         let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
         if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
             do {
-                try await eventStore.vacuum()
+                // B-03: dedicated connection, off the actor — see the phase-2b
+                // caller. Keeps the multi-minute rewrite off the ingestion path.
+                try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
             } catch {
                 logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -2750,7 +2752,9 @@ private func enforceDatabaseSizeCap(
     // consolidated in the main file.
     let checkpointBefore = await eventStore.walCheckpoint()
     do {
-        try await eventStore.vacuum()
+        // B-03: run the full VACUUM on a dedicated connection off the actor so
+        // it can't head-of-line-block event ingestion for the rewrite's duration.
+        try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
     } catch {
         logger.error("Size-cap phase 2b: VACUUM failed (\(error.localizedDescription)). Phase 2a reclaimed \(preReclaimed) pages; will retry next tick.")
         let endMB = currentSizeMB()

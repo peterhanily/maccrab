@@ -6,6 +6,13 @@
 // the Shape-2 attack pass:
 //   - hard-requires VerifiedPlugin.isFirstParty (only the Phase-1 gate sets it);
 //     a non-first-party plugin can never reach this runner.
+//   - exec-guarded before spawn (TierBFirstPartyExecGuard, findings A1-01/A1-05):
+//     the verified bytes are staged into a fresh host-only 0o700 dir, re-opened
+//     O_NOFOLLOW (single-link/owner/regular/not-writable) and re-hashed to the
+//     verified digest immediately before spawn (closes the verify→exec TOCTOU on
+//     this UNSANDBOXED lane), AND required to carry a Developer-ID + host-team
+//     code signature (the same bar the sandbox lane applies to its trampoline) —
+//     so an Ed25519 publisher-key compromise alone cannot run full-FDA code.
 //   - spawned in its OWN PROCESS GROUP (posix_spawn + POSIX_SPAWN_SETPGROUP) so
 //     the entire subtree is reachable via kill(-pgid) — a forked descendant is
 //     REAPED, not orphaned (Foundation.Process cannot set the group).
@@ -36,6 +43,10 @@ public struct TierBRunOutcome: Sendable {
 public enum FirstPartyTierBRunnerError: Error, CustomStringConvertible {
     case notFirstParty(pluginID: String)
     case spawnFailed(pluginID: String, message: String)
+    /// The exec-time guard refused BEFORE any spawn: a symlink/inode/owner/re-hash
+    /// mismatch on the staged binary (A1-01) or the payload is not Developer-ID-
+    /// signed under the host team (A1-05). Fail-closed — no unsandboxed code ran.
+    case execGuardRefused(pluginID: String, message: String)
 
     public var description: String {
         switch self {
@@ -43,13 +54,24 @@ public enum FirstPartyTierBRunnerError: Error, CustomStringConvertible {
             return "FirstPartyTierBRunner: refusing to spawn \(id) — not first-party-verified (only resolveForFirstPartyExecution may produce a runnable first-party plugin)"
         case .spawnFailed(let id, let m):
             return "FirstPartyTierBRunner: failed to spawn \(id): \(m)"
+        case .execGuardRefused(let id, let m):
+            return "FirstPartyTierBRunner: refusing to spawn \(id): \(m)"
         }
     }
 }
 
 public struct FirstPartyTierBRunner: Sendable {
 
-    public init() {}
+    /// DEBUG-only override permitting an unsigned / non-Developer-ID payload on the
+    /// UNSANDBOXED first-party lane — the in-process channel for dev/test (unit
+    /// fixtures, `plugin test` on a `swift build` binary). Threaded as a VALUE, not
+    /// an env var, and IGNORED in RELEASE (the A1-05 signature gate is always
+    /// enforced there). Mirrors `SandboxedTierBRunner.allowUnsignedTrampoline`.
+    public let allowUnsignedPayload: Bool
+
+    public init(allowUnsignedPayload: Bool = false) {
+        self.allowUnsignedPayload = allowUnsignedPayload
+    }
 
     /// Spawn the verified first-party plugin, deliver the request on stdin, and
     /// stream + parse its TierBIPC stdout. SYNCHRONOUS (blocks until the child
@@ -66,13 +88,46 @@ public struct FirstPartyTierBRunner: Sendable {
             throw FirstPartyTierBRunnerError.notFirstParty(pluginID: verified.pluginID)
         }
 
-        // First-party: spawn the verified binary directly (no sandbox, no broker).
-        // The hardened spawn/drain/reap/timeout machinery is the shared
-        // TierBSubprocess (audit #9: one source of truth across both lanes).
+        // The payload runs UNSANDBOXED with the host's full FDA, so harden the
+        // verify→exec window BEFORE spawning (findings A1-01 + A1-05, fail-closed):
+        //   (a) stage the verified bytes into a FRESH host-only 0o700 dir (not the
+        //       shared NSTemporaryDirectory the registry temp lives in),
+        //   (b)+(c) O_NOFOLLOW / single-link / owner / not-writable re-open + re-hash
+        //       to the verified digest immediately before spawn, and
+        //   (A1-05) a Developer-ID + host-team code-signature check on the exact
+        //       bytes we exec (the same bar the sandbox lane applies to its
+        //       trampoline). See TierBFirstPartyExecGuard for the fexecve caveat.
+        let stagingDir = NSTemporaryDirectory() + "maccrab-tier-b-fp-exec-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: stagingDir) }
+        let execPath: String
+        do {
+            try FileManager.default.createDirectory(
+                atPath: stagingDir, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            execPath = try TierBFirstPartyExecGuard.stage(
+                verifiedPath: verified.binaryPath,
+                expectedSHA256: verified.binarySHA256,
+                into: stagingDir)
+            guard TierBFirstPartyExecGuard.developerIDTrusted(
+                path: execPath,
+                allowUnsigned: TierBFirstPartyExecGuard.devOverrideAllowed(explicit: allowUnsignedPayload)) else {
+                throw TierBFirstPartyExecGuard.GuardError.payloadNotDeveloperIDTrusted
+            }
+            try TierBFirstPartyExecGuard.revalidateBeforeSpawn(
+                execPath: execPath, expectedSHA256: verified.binarySHA256)
+        } catch let e as TierBFirstPartyExecGuard.GuardError {
+            throw FirstPartyTierBRunnerError.execGuardRefused(pluginID: verified.pluginID, message: e.description)
+        } catch {
+            throw FirstPartyTierBRunnerError.execGuardRefused(pluginID: verified.pluginID, message: "\(error)")
+        }
+
+        // Spawn the STAGED + guarded bytes (no sandbox, no broker). The hardened
+        // spawn/drain/reap/timeout machinery is the shared TierBSubprocess (audit
+        // #9: one source of truth across both lanes).
         do {
             return try TierBSubprocess.spawnAndStream(
-                executable: verified.binaryPath,
-                argv: [verified.binaryPath],
+                executable: execPath,
+                argv: [execPath],
                 request: TierBCollectRequest(
                     pluginID: verified.pluginID,
                     pluginVersion: verified.manifest.version,

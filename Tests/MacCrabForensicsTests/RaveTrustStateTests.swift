@@ -7,7 +7,8 @@
 //   - record() never lowers the mark (idempotent / monotonic)
 //   - persistence round-trips through the on-disk JSON
 //   - revocations high-water mark is independent of the catalog one
-//   - missing/garbage file degrades to empty (first-seen)
+//   - missing file degrades to empty (first-seen)
+//   - A1-03: present-but-unsigned/tampered/forged file fails CLOSED (not first-seen)
 
 import Testing
 import Foundation
@@ -116,14 +117,93 @@ struct RaveTrustStateTests {
         #expect(store.evaluateCatalog(incoming: 999) == .firstSeen)
     }
 
-    @Test("garbage file degrades to empty (no wedge)")
-    func garbageFileEmpty() throws {
-        let path = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("garbage-\(UUID().uuidString).json")
+    // MARK: - A1-03: present-but-untrusted state fails CLOSED (not first-seen)
+
+    static func tmpPath() -> String {
+        (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("rave-ts-a103-\(UUID().uuidString).json")
+    }
+
+    /// Any present file that isn't a valid host-signed envelope must NOT read as
+    /// first-seen — that would re-open the anti-rollback window a reset targets.
+    /// It fails closed to a maximal mark so `decide()` rejects any real serial.
+    private func expectFailClosed(_ store: RaveTrustStateStore, _ what: String) {
+        let d = store.evaluateCatalog(incoming: 1)
+        #expect(d != .firstSeen, "\(what): must not be first-seen")
+        #expect(d != .accepted, "\(what): must not be accepted")
+        if case .rollback = d {} else { Issue.record("\(what): expected fail-closed rollback, got \(d)") }
+        #expect(store.load() != RaveTrustState(), "\(what): must not degrade to empty")
+    }
+
+    @Test("A1-03: garbage present file fails closed (was: degraded to first-seen)")
+    func garbageFileFailsClosed() throws {
+        let path = Self.tmpPath()
         try Data("not json {{{".utf8).write(to: URL(fileURLWithPath: path))
+        expectFailClosed(RaveTrustStateStore(path: path), "garbage")
+    }
+
+    @Test("A1-03: legacy/forged unsigned flat file fails closed")
+    func unsignedFlatFileFailsClosed() throws {
+        let path = Self.tmpPath()
+        // The pre-A1-03 shape — a same-uid attacker could write this to reset the
+        // mark. It must be rejected, not honored as first-seen.
+        try Data(#"{"schema_version":1,"catalog_serial":0}"#.utf8)
+            .write(to: URL(fileURLWithPath: path))
+        expectFailClosed(RaveTrustStateStore(path: path), "unsigned flat")
+    }
+
+    @Test("A1-03: a body mutated after signing is detected and rejected")
+    func mutatedBodyRejected() throws {
+        let path = Self.tmpPath()
         let store = RaveTrustStateStore(path: path)
-        #expect(store.load() == RaveTrustState())
-        #expect(store.evaluateCatalog(incoming: 1) == .firstSeen)
+        try store.recordCatalog(serial: 5)
+        #expect(store.evaluateCatalog(incoming: 4) == .rollback(stored: 5, incoming: 4)) // verifies clean
+        // Flip the sealed body's catalog_serial to 999 without re-signing.
+        var obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: path))) as! [String: Any]
+        var body = obj["body"] as! [String: Any]
+        body["catalog_serial"] = 999
+        obj["body"] = body
+        try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted])
+            .write(to: URL(fileURLWithPath: path))
+        #expect(store.currentCatalogSerial() != 999)   // forged mark not honored
+        expectFailClosed(store, "mutated body")
+    }
+
+    @Test("A1-03: an envelope signed by a foreign key is rejected (pin)")
+    func foreignKeyRejected() throws {
+        let path = Self.tmpPath()
+        // Seal with an unrelated key, drop it at the store path. The store's own
+        // signkey differs, so the embedded pubkey fails the pin.
+        let foreign = LocalTrustSigner(keyPath: URL(fileURLWithPath: Self.tmpPath() + ".signkey"))
+        let envelope = try foreign.seal(body: ["catalog_serial": 1])
+        try JSONSerialization.data(withJSONObject: envelope, options: [.prettyPrinted])
+            .write(to: URL(fileURLWithPath: path))
+        expectFailClosed(RaveTrustStateStore(path: path), "foreign key")
+    }
+
+    @Test("A1-03: record refuses to launder a tampered file (no-op, not overwrite)")
+    func recordRefusesTampered() throws {
+        let path = Self.tmpPath()
+        let store = RaveTrustStateStore(path: path)
+        try store.recordCatalog(serial: 5)
+        try Data("garbage".utf8).write(to: URL(fileURLWithPath: path))
+        // record* must THROW rather than re-sign a fresh attacker-chosen baseline.
+        #expect(throws: RaveTrustStateError.self) { try store.recordCatalog(serial: 6) }
+        #expect(throws: RaveTrustStateError.self) { try store.recordRevocations(serial: 6) }
+        #expect(throws: RaveTrustStateError.self) { try store.recordRulesManifest(serial: 6) }
+    }
+
+    @Test("A1-03: signed state round-trips + verifies across instances")
+    func signedRoundTrip() throws {
+        let path = Self.tmpPath()
+        let a = RaveTrustStateStore(path: path)
+        try a.recordCatalog(serial: 7)
+        try a.recordRevocations(serial: 3, verifiedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let b = RaveTrustStateStore(path: path)   // same path → same signkey → verifies
+        #expect(b.load().catalogSerial == 7)
+        #expect(b.currentRevocationsSerial() == 3)
+        #expect(b.evaluateCatalog(incoming: 6) == .rollback(stored: 7, incoming: 6))
     }
 
     // MARK: - C-E revocation freshness / staleness ceiling

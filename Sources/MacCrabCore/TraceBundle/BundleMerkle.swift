@@ -7,16 +7,29 @@
 // signature commits to a canonical Merkle root over the bundle's
 // internal artifacts, NOT the outer .tar.gz bytes.
 //
-// Canonical reduction:
+// Canonical reduction (v2 — A3-06(a) hardening):
 //   1. List every regular file under the bundle root, EXCLUDING the
 //      `integrity/` subdirectory (those are the integrity artifacts
 //      themselves — they're computed FROM this list).
 //   2. Compute SHA-256 over each file.
 //   3. Sort by canonical relative path.
-//   4. Reduce pairwise via SHA-256 pairwise concatenation. On odd
-//      levels the last hash is duplicated (Bitcoin-style merkle).
-//   5. Single-leaf trees return the leaf itself; the empty tree
-//      returns SHA-256("").
+//   4. Domain-separate each leaf: leaf node = SHA-256(0x00 || leafHash).
+//      Reduce pairwise with an internal-node tag: parent =
+//      SHA-256(0x01 || left || right). On odd levels the last node is
+//      still duplicated as its own right sibling.
+//   5. Bind the exact leaf COUNT into the final root:
+//      root = SHA-256(DOMAIN || uint64_be(leafCount) || treeRoot),
+//      where treeRoot is the reduced tree (or SHA-256("") when empty).
+//
+// Steps 4–5 close the CVE-2012-2459 duplicate-last-leaf malleability:
+// duplicating the tail changes the leaf count, so two distinct artifact
+// lists (e.g. [A,B,C] vs [A,B,C,C]) can no longer collapse to the same
+// root. The 0x00/0x01 tags also remove the leaf/internal-node ambiguity
+// (an internal digest can't be re-presented as a leaf). This is a
+// deliberate format change from the v1 Bitcoin-style reduction; both the
+// exporter and the verifier recompute through THIS function, so bundles
+// stay internally consistent — a third-party verifier must mirror the
+// v2 reduction below.
 //
 // This lives outside BundleExporter so BundleVerifier can recompute
 // the same root deterministically on a bundle written by any
@@ -42,7 +55,7 @@ public enum BundleMerkle {
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) else {
-            return Computation(merkleRoot: emptyMerkle(), artifacts: [])
+            return Computation(merkleRoot: reduce([]), artifacts: [])
         }
 
         for case let url as URL in enumerator {
@@ -64,31 +77,62 @@ public enum BundleMerkle {
         return Computation(merkleRoot: root, artifacts: artifacts)
     }
 
-    /// Pairwise SHA-256 reduction. Public so tests can exercise the
-    /// reduction in isolation from disk IO.
+    /// Domain-separated, leaf-count-bound SHA-256 reduction (v2). Public
+    /// so tests can exercise the reduction in isolation from disk IO.
+    ///
+    /// See the file header for the canonical definition. The count bound
+    /// + node tags close the CVE-2012-2459 duplicate-last-leaf
+    /// malleability: the root commits to the exact leaf set, not just its
+    /// tree shape.
     public static func reduce(_ leaves: [String]) -> String {
-        if leaves.isEmpty { return emptyMerkle() }
-        var current = leaves.compactMap { hex -> Data? in
-            return Data(merkleHex: hex)
+        // Leaf nodes: SHA-256(0x00 || leafHash). Leaves that aren't valid
+        // hex are dropped from the tree (same as v1) but still counted in
+        // the leaf-count bind so the root commits to the requested set.
+        var current: [Data] = leaves.compactMap { hex -> Data? in
+            guard let raw = Data(merkleHex: hex) else { return nil }
+            return Data(SHA256.hash(data: leafPrefixed(raw)))
         }
-        if current.isEmpty { return emptyMerkle() }
-        while current.count > 1 {
-            var next: [Data] = []
-            var i = 0
-            while i < current.count {
-                let left = current[i]
-                let right = (i + 1 < current.count) ? current[i + 1] : current[i]
-                let combined = SHA256.hash(data: left + right)
-                next.append(Data(combined))
-                i += 2
+        let treeRoot: Data
+        if current.isEmpty {
+            treeRoot = Data(SHA256.hash(data: Data()))
+        } else {
+            while current.count > 1 {
+                var next: [Data] = []
+                var i = 0
+                while i < current.count {
+                    let left = current[i]
+                    let right = (i + 1 < current.count) ? current[i + 1] : current[i]
+                    // Internal node: SHA-256(0x01 || left || right).
+                    var combined = Data([nodeTag])
+                    combined.append(left)
+                    combined.append(right)
+                    next.append(Data(SHA256.hash(data: combined)))
+                    i += 2
+                }
+                current = next
             }
-            current = next
+            treeRoot = current[0]
         }
-        return current[0].map { String(format: "%02x", $0) }.joined()
+        // Final root binds the domain tag + the exact leaf count.
+        var rootInput = Data(rootDomain.utf8)
+        var countBE = UInt64(leaves.count).bigEndian
+        withUnsafeBytes(of: &countBE) { rootInput.append(contentsOf: $0) }
+        rootInput.append(treeRoot)
+        return SHA256.hash(data: rootInput).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func emptyMerkle() -> String {
-        SHA256.hash(data: Data()).map { String(format: "%02x", $0) }.joined()
+    // MARK: - v2 domain-separation constants
+
+    private static let leafTag: UInt8 = 0x00
+    private static let nodeTag: UInt8 = 0x01
+    /// Domain-separation prefix for the final root. Any change to the
+    /// reduction MUST bump this so roots from different formats never alias.
+    private static let rootDomain = "maccrab.bundle.merkle.v2\u{0}"
+
+    private static func leafPrefixed(_ raw: Data) -> Data {
+        var d = Data([leafTag])
+        d.append(raw)
+        return d
     }
 
     private static func relativePath(of url: URL, under root: URL) -> String {

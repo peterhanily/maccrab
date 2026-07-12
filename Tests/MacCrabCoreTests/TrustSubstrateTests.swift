@@ -6,6 +6,7 @@
 import Testing
 import Foundation
 import CryptoKit
+import Security
 @testable import MacCrabCore
 
 @Suite("TraceGraph: TrustSubstrate (filesystem mode)")
@@ -193,10 +194,32 @@ struct FilesystemTrustSubstrateStorageTests {
 @Suite("TraceGraph: TrustSubstrate (Secure Enclave)")
 struct TrustSubstrateSecureEnclaveTests {
 
+    /// A3-02: the SE key must be created WITH a usage ACL. The ACL policy
+    /// object is built in software (SecAccessControlCreateWithFlags does
+    /// not touch SE hardware), so this runs on any host — including CI
+    /// runners without a Secure Enclave — and asserts the ACL is
+    /// constructed/requested at key-creation time.
+    ///
+    /// NOTE: this proves the ACL is REQUESTED, not that the Secure Enclave
+    /// ENFORCES it. ACL enforcement (only the daemon's signed code can
+    /// invoke the key) can only be validated on real SE hardware with the
+    /// daemon's signed code identity — NEEDS ON-DEVICE VERIFICATION.
+    @Test("A3-02: SE signing-key access control is constructed (.privateKeyUsage)")
+    func signingKeyAccessControlIsRequested() throws {
+        let access = try TrustSubstrate.makeSigningKeyAccessControl()
+        // A non-nil SecAccessControl means the usage ACL was pinned; it is
+        // passed into kSecAttrAccessControl at SE key creation.
+        #expect(CFGetTypeID(access) == SecAccessControlGetTypeID())
+    }
+
     /// SE tests are best-effort: they only exercise the SE code path
     /// when the host hardware actually supports SE-bound EC keys. CI
     /// runners on virtualised hosts and Apple-silicon-without-SE
     /// configurations will skip silently rather than fail.
+    ///
+    /// When SE IS present this now also exercises the ACL'd creation path
+    /// (kSecAttrAccessControl set) end-to-end: sign + verify must still
+    /// round-trip with the usage ACL applied.
     @Test("SE roundtrip when SE is available")
     func seRoundtripWhenAvailable() async throws {
         let storage = InMemoryTrustSubstrateStorage()

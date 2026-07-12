@@ -54,62 +54,29 @@ enum DaemonSetup {
 
     /// Backup events.db / .wal / .shm to .corrupt-<timestamp> sibling files.
     /// Allows a fresh init to succeed; preserves the corrupted DB for forensics.
+    ///
+    /// v1.21.4 (C-04): the move-aside + bounded-prune logic now lives in the
+    /// shared `MacCrabCore.CorruptDBBackup` so the EventStore mid-run self-heal
+    /// reuses the identical naming scheme + retention budget. This is a thin
+    /// forwarder preserving the init-time call sites (and the C-03 test symbols).
     private static func backupCorruptDatabase(directory: String, base: String) {
-        let ts = Int(Date().timeIntervalSince1970)
-        let suffixes = ["", "-wal", "-shm", "-journal"]
-        for suffix in suffixes {
-            let src = "\(directory)/\(base)\(suffix)"
-            let dst = "\(directory)/\(base)\(suffix).corrupt-\(ts)"
-            if FileManager.default.fileExists(atPath: src) {
-                try? FileManager.default.moveItem(atPath: src, toPath: dst)
-            }
-        }
-        pruneCorruptBackups(directory: directory, base: base)
+        CorruptDBBackup.backup(directory: directory, base: base, keep: corruptBackupRetention)
     }
 
     /// How many distinct corruption events to retain per database. Each event
     /// drops up to four sibling files (db + -wal / -shm / -journal), all sharing
     /// one `corrupt-<unix-ts>` stamp; we keep the newest `N` stamps' worth.
-    static let corruptBackupRetention = 3
+    static let corruptBackupRetention = CorruptDBBackup.defaultRetention
 
     /// v1.21.4 (C-03): bound the `*.corrupt-<ts>` quarantine backups that
     /// `backupCorruptDatabase` and the tracegraph-quarantine path leave behind.
     /// Nothing pruned them, so a machine that repeatedly boots against a corrupt
-    /// DB accumulated them without bound. Keep the `keep` most-recent corruption
-    /// events (grouped by timestamp) for `base`; delete every older file. Mirrors
-    /// the count-based prune idiom the stores use (`pruneOldest(count:)`).
-    ///
-    /// Safe for the privileged system dir: it only ever `removeItem`s an entry
-    /// whose name matches a stamp we generated, and `removeItem` unlinks the
-    /// entry itself (it never follows a symlinked final component). We also skip
-    /// any matched entry that is itself a symlink, matching the quarantine
-    /// path's refuse-on-symlink stance.
+    /// DB accumulated them without bound. Thin forwarder to the shared
+    /// `CorruptDBBackup.prune` (see C-04); kept so the tracegraph-quarantine
+    /// call site and the existing tests keep the `DaemonSetup.pruneCorruptBackups`
+    /// entry point.
     static func pruneCorruptBackups(directory: String, base: String, keep: Int = corruptBackupRetention) {
-        let fm = FileManager.default
-        guard keep >= 0,
-              let entries = try? fm.contentsOfDirectory(atPath: directory) else { return }
-        // Names come in two shapes, both starting with `base`:
-        //   events.db-wal.corrupt-<ts>          (backupCorruptDatabase)
-        //   tracegraph.db.corrupt-<ts>-wal      (openCausalStore quarantine)
-        // so parse the leading run of digits after `.corrupt-` to recover <ts>.
-        var stamped: [(name: String, ts: Int)] = []
-        for name in entries {
-            guard name.hasPrefix(base), let r = name.range(of: ".corrupt-") else { continue }
-            let digits = String(name[r.upperBound...].prefix { $0.isNumber })
-            guard let ts = Int(digits) else { continue }
-            stamped.append((name, ts))
-        }
-        // Dedupe to distinct corruption events BEFORE taking the newest `keep`,
-        // so a stamp's sidecars don't each count against the retention budget.
-        let distinctStamps = Set(stamped.map { $0.ts }).sorted(by: >)
-        let keepStamps = Set(distinctStamps.prefix(keep))
-        for entry in stamped where !keepStamps.contains(entry.ts) {
-            let path = "\(directory)/\(entry.name)"
-            let isSymlink = (try? URL(fileURLWithPath: path)
-                .resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-            if isSymlink { continue }
-            try? fm.removeItem(atPath: path)
-        }
+        CorruptDBBackup.prune(directory: directory, base: base, keep: keep)
     }
 
     /// Recover from EventStore init failure. Captures the original error,

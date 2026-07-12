@@ -57,6 +57,14 @@ public actor TierBRegistry {
         /// the first-party execution gate compares against the FirstPartyTrustRoot
         /// publisher anchor. (Shape 2.)
         public let publicKeySHA256: String
+        /// SHA-256 (lowercase hex) of the signature-verified BINARY bytes. The
+        /// first-party lane re-hashes the staged exec target against this
+        /// immediately before spawn, closing the verify→exec TOCTOU on the
+        /// UNSANDBOXED lane (A1-01). Stamped by resolve() from the same bytes the
+        /// signature covered; default "" only for disjoint-lane fixtures that never
+        /// reach FirstPartyTierBRunner (which fail-closes on a "" digest mismatch).
+        /// internal(set): only this module stamps it.
+        public internal(set) var binarySHA256: String = ""
         /// True ONLY when resolved via resolveForFirstPartyExecution AND the
         /// FirstPartyExecutionGate allowed (publisher-key match + defense-in-depth
         /// checks). Base resolve() never evaluates first-party authority → false.
@@ -209,7 +217,12 @@ public actor TierBRegistry {
             bundleRoot: entry.installRoot,
             binaryPath: tempBinaryPath,
             publicKeyHex: entry.publicKeyHex,
-            publicKeySHA256: resolvedPublisherFingerprint
+            publicKeySHA256: resolvedPublisherFingerprint,
+            // Digest of the SAME signature-verified bytes we just wrote to the temp
+            // — the value the first-party lane re-hashes the exec target against
+            // immediately before spawn (A1-01). Computed once here so both sides
+            // hash identically.
+            binarySHA256: TierBFirstPartyExecGuard.sha256Hex(verifiedBinaryBytes)
         )
     }
 

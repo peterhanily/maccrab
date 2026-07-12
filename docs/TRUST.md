@@ -127,6 +127,31 @@ detection collapses to the fallback collectors (Unified Log, FSEvents,
 network tap, BPF DNS). The entitlement is real Apple-issued — if a
 fork strips it, the fork won't have ES coverage.
 
+## Plugin trust tiers & catalog governance
+
+The verification above covers the **app** (the signed, notarized MacCrab
+build). Forensic **plugins** are a separate trust chain with three tiers. In
+all three the plugin runs the same way at the OS level — trust gates *whether
+a plugin runs*, not *what it can reach*; the sandbox + fd-broker gate what it
+can reach (see [`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md)).
+
+| Tier | Who vouches | How it runs | Provenance shown |
+|---|---|---|---|
+| **First-party** | The app publisher key. The `com.maccrab.*` id namespace is **reserved** and impersonation is refused. | Unsandboxed, with Full Disk Access. | first-party |
+| **Curated store (rave catalog)** | The rave catalog vets the plugin and signs its entry (Ed25519); the client verifies the signature, the artifact SHA-256, and the signed anti-rollback revocation list before install. | **Sandboxed, deny-default** (reads brokered over fd 3). | third-party · store |
+| **Sideload (operator TOFU)** | You, the operator: `maccrabctl plugin trust <hex>` or `install --trust-on-install` / `install --local`. | **Sandboxed, deny-default.** | third-party · sideloaded · unverified |
+
+**Where third-party catalog moderation/governance lives:** the curated-store
+tier — which plugins are accepted, how submissions are vetted, and how a key
+is revoked — is governed in the **separate `maccrab-rave` repository**, not in
+this repo. This repo carries only the **client** side: signature/SHA/revocation
+verification, the reserved-namespace guard, and quarantine-on-revoke (see
+[`SUPPLY_CHAIN_SECURITY.md`](SUPPLY_CHAIN_SECURITY.md) for the release/update
+supply chain, and [`INCIDENT_RESPONSE.md`](INCIDENT_RESPONSE.md) §3 for
+handling a revoked plugin). The catalog key that signs store entries is
+distinct from the app-signing key and the rule-channel key, so a compromise of
+one does not extend to the others.
+
 ## Reporting trust issues
 
 If you see a downloaded artifact whose checksum, signature, notarization,

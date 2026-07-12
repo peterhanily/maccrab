@@ -36,6 +36,8 @@ public struct FleetAlertSummary: Codable, Sendable {
         // Privacy: redact the username (and any other PII) out of the path
         // before it can leave the host. FleetTelemetry's own header promises
         // "no user names", but processPath shipped raw (/Users/<name>/...).
+        // A4-06: LLMSanitizer is best-effort heuristics (see its header), not a
+        // contractual no-leak boundary — Fleet egress inherits that limitation.
         self.processPath = LLMSanitizer.sanitize(processPath)
         self.mitreTechniques = mitreTechniques; self.timestamp = timestamp
     }

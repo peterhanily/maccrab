@@ -104,7 +104,10 @@ struct TierBArtifactBridgeTests {
         try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-        let outcome = try FirstPartyTierBRunner().run(verified: verified, scratchDir: scratch, timeout: 20)
+        // allowUnsignedPayload: the DEBUG-only dev override so this unsigned shell
+        // fixture clears the A1-05 Developer-ID gate (RELEASE always enforces it).
+        let outcome = try FirstPartyTierBRunner(allowUnsignedPayload: true)
+            .run(verified: verified, scratchDir: scratch, timeout: 20)
         let result = await TierBArtifactBridge.commit(
             outcome: outcome, caseID: handle.caseID, manifest: verified.manifest,
             caseAllowsSensitive: true, output: StoreCollectorOutput(store: handle.store))

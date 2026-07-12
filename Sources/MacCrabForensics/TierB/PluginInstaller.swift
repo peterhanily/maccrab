@@ -441,8 +441,60 @@ public actor PluginInstaller {
 
     // MARK: - Trust + revocation lists
 
+    /// A1-03: the trusted-keys list gates SANDBOXED plugin execution, so it is
+    /// SIGNED with a per-host P256 key (dedicated `.trusted-keys.signkey`, 0o600,
+    /// under the 0o700 plugins root). A same-uid edit that adds a publisher key
+    /// without this host's signature fails verification and is rejected — the
+    /// list reads as empty (trust nothing) rather than honoring the injected key.
+    /// (The operator revoked-keys list keeps its flat form: dropping a revocation
+    /// on tamper would fail OPEN — un-revoking — so it is not converted here.)
+    private var trustedKeysPath: String {
+        pluginsRoot.appendingPathComponent("trusted-keys.json").path
+    }
+
+    private var trustedKeysSigner: LocalTrustSigner {
+        LocalTrustSigner(keyPath: pluginsRoot.appendingPathComponent(".trusted-keys.signkey"))
+    }
+
+    /// Read the SIGNED trusted-keys list. Missing → empty (bootstrap: nothing
+    /// trusted yet). A present file that is unsigned (legacy/forged) or fails
+    /// verification fails CLOSED to the empty set: an unverifiable trust list
+    /// grants no trust, so an install then refuses rather than honoring a key an
+    /// attacker slipped in. (Legacy unsigned lists from a pre-A1-03 install read
+    /// as empty once — the operator re-trusts via `plugin install --trust`, which
+    /// re-seals the list.)
+    private func readTrustedKeys() -> Set<String> {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: trustedKeysPath)) else {
+            return []
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              LocalTrustSigner.isEnvelope(obj),
+              let body = trustedKeysSigner.open(obj),
+              let arr = body["keys"] as? [String] else {
+            FileHandle.standardError.write(Data(
+                "MacCrab: trusted-keys.json integrity check FAILED (unsigned/tampered) at \(trustedKeysPath) — trusting no publisher key (A1-03)\n".utf8
+            ))
+            return []
+        }
+        return Set(arr)
+    }
+
+    /// Rewrite trusted-keys.json as a host-signed envelope (0o600).
+    private func writeTrustedKeys(_ keys: Set<String>) throws {
+        let body: [String: Any] = ["keys": keys.sorted()]
+        let envelope = try trustedKeysSigner.seal(body: body)
+        let data = try JSONSerialization.data(
+            withJSONObject: envelope,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: URL(fileURLWithPath: trustedKeysPath), options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: trustedKeysPath
+        )
+    }
+
     public func currentTrustedKeys() async -> Set<String> {
-        Self.readKeySet(path: pluginsRoot.appendingPathComponent("trusted-keys.json").path)
+        readTrustedKeys()
     }
 
     public func currentRevokedKeys() async -> Set<String> {
@@ -451,17 +503,17 @@ public actor PluginInstaller {
 
     public func addTrustedKey(_ keyHex: String) async throws {
         try ensureRoot()
-        try await Self.mutateKeySet(
-            path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
-        ) { $0.insert(keyHex) }
+        var keys = readTrustedKeys()
+        keys.insert(keyHex)
+        try writeTrustedKeys(keys)
         appendTrustAudit(action: "trust", keyHex: keyHex)
     }
 
     public func removeTrustedKey(_ keyHex: String) async throws {
         try ensureRoot()
-        try await Self.mutateKeySet(
-            path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
-        ) { $0.remove(keyHex) }
+        var keys = readTrustedKeys()
+        keys.remove(keyHex)
+        try writeTrustedKeys(keys)
         appendTrustAudit(action: "untrust", keyHex: keyHex)
     }
 

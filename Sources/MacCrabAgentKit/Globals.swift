@@ -266,7 +266,11 @@ actor StorageErrorTracker {
         if lower.contains("out of memory") || lower.contains("nomem") {
             return "out_of_memory"
         }
-        if lower.contains("corrupt") || lower.contains("not a database") {
+        // "database disk image is malformed" is SQLITE_CORRUPT's canonical
+        // message (contains neither "corrupt" nor "not a database"), so match
+        // "malformed" too — otherwise a mid-run corruption (C-04) would be
+        // misfiled as `step_other` in the heartbeat.
+        if lower.contains("corrupt") || lower.contains("not a database") || lower.contains("malformed") {
             return "corrupt"
         }
         if lower.contains("encoding failed") {

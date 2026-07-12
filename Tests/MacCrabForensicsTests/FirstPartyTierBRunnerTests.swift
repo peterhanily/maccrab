@@ -71,7 +71,12 @@ struct FirstPartyTierBRunnerTests {
 
     /// Install a script as a first-party bundle binary, gate it for execution with
     /// an injected matching fingerprint, and run it through FirstPartyTierBRunner.
-    static func runScript(id: String, script: String, timeout: TimeInterval) async throws -> TierBRunOutcome {
+    ///
+    /// `allowUnsignedPayload` defaults TRUE so the unsigned shell-script fixtures
+    /// clear the A1-05 Developer-ID gate (the DEBUG-only dev override); the A1-05
+    /// negative test passes `false` to prove the gate refuses an unsigned payload.
+    static func runScript(id: String, script: String, timeout: TimeInterval,
+                          allowUnsignedPayload: Bool = true) async throws -> TierBRunOutcome {
         let scriptPath = NSTemporaryDirectory() + "tierb-script-\(UUID().uuidString).sh"
         try script.write(toFile: scriptPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
@@ -97,7 +102,8 @@ struct FirstPartyTierBRunnerTests {
         try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-        return try FirstPartyTierBRunner().run(verified: verified, scratchDir: scratch, timeout: timeout)
+        return try FirstPartyTierBRunner(allowUnsignedPayload: allowUnsignedPayload)
+            .run(verified: verified, scratchDir: scratch, timeout: timeout)
     }
 
     @Test("happy path: a verified first-party plugin emits artifacts + result over stdin/stdout")
@@ -200,5 +206,139 @@ struct FirstPartyTierBRunnerTests {
             usleep(100_000)
         }
         #expect(!alive, "forked descendant pid \(descPid) should be reaped by the process-group kill")
+    }
+
+    // MARK: - A1-01 exec-guard: TOCTOU hardening on the unsandboxed exec target
+    //
+    // The first-party lane runs UNSANDBOXED with the host's full FDA, so the bytes
+    // it spawns must be provably the verified bytes. These pin the guard that
+    // closes the write→spawn TOCTOU the runner previously had no defense against.
+
+    /// Write `bytes` to a fresh temp path as an owner-r-x (0o500) regular file.
+    static func writePayload(_ bytes: Data) throws -> String {
+        let path = NSTemporaryDirectory() + "fp-guard-\(UUID().uuidString)"
+        try bytes.write(to: URL(fileURLWithPath: path))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: path)
+        return path
+    }
+
+    @Test("A1-01: revalidateBeforeSpawn refuses a symlink at the exec-target path (O_NOFOLLOW — no swap runs)")
+    func guardRefusesSymlinkExecTarget() throws {
+        let payload = Data("#!/bin/sh\necho verified\n".utf8)
+        let real = try Self.writePayload(payload)
+        defer { try? FileManager.default.removeItem(atPath: real) }
+        let digest = TierBFirstPartyExecGuard.sha256Hex(payload)
+        // Sanity: the real regular file re-validates cleanly.
+        try TierBFirstPartyExecGuard.revalidateBeforeSpawn(execPath: real, expectedSHA256: digest)
+
+        // A same-uid attacker swaps the exec target for a symlink to the real bytes
+        // (a symlink swap is the minimal TOCTOU; posix_spawn would follow it).
+        let link = NSTemporaryDirectory() + "fp-guard-link-\(UUID().uuidString)"
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: real)
+        defer { try? FileManager.default.removeItem(atPath: link) }
+        #expect(throws: TierBFirstPartyExecGuard.GuardError.self) {
+            try TierBFirstPartyExecGuard.revalidateBeforeSpawn(execPath: link, expectedSHA256: digest)
+        }
+    }
+
+    @Test("A1-01: revalidateBeforeSpawn refuses a re-hash mismatch (substituted bytes)")
+    func guardRefusesHashMismatch() throws {
+        let payload = Data("#!/bin/sh\necho verified\n".utf8)
+        let path = try Self.writePayload(payload)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        // Correct digest passes; a wrong digest (as if the inode was swapped) is refused.
+        try TierBFirstPartyExecGuard.revalidateBeforeSpawn(
+            execPath: path, expectedSHA256: TierBFirstPartyExecGuard.sha256Hex(payload))
+        #expect(throws: TierBFirstPartyExecGuard.GuardError.self) {
+            try TierBFirstPartyExecGuard.revalidateBeforeSpawn(
+                execPath: path, expectedSHA256: String(repeating: "a", count: 64))
+        }
+    }
+
+    @Test("A1-01: stage refuses a symlinked verified source (O_NOFOLLOW read of the source)")
+    func guardStageRefusesSymlinkedSource() throws {
+        let payload = Data("#!/bin/sh\necho verified\n".utf8)
+        let real = try Self.writePayload(payload)
+        defer { try? FileManager.default.removeItem(atPath: real) }
+        let digest = TierBFirstPartyExecGuard.sha256Hex(payload)
+
+        let link = NSTemporaryDirectory() + "fp-guard-srclink-\(UUID().uuidString)"
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: real)
+        defer { try? FileManager.default.removeItem(atPath: link) }
+
+        let dir = NSTemporaryDirectory() + "fp-guard-dir-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        #expect(throws: TierBFirstPartyExecGuard.GuardError.self) {
+            _ = try TierBFirstPartyExecGuard.stage(verifiedPath: link, expectedSHA256: digest, into: dir)
+        }
+    }
+
+    @Test("A1-01: stage copies the verified bytes into a fresh 0o700 dir as a 0o500 target that re-validates")
+    func guardStageHappy() throws {
+        let payload = Data("#!/bin/sh\necho verified\n".utf8)
+        let real = try Self.writePayload(payload)
+        defer { try? FileManager.default.removeItem(atPath: real) }
+        let digest = TierBFirstPartyExecGuard.sha256Hex(payload)
+
+        let dir = NSTemporaryDirectory() + "fp-guard-dir-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let execPath = try TierBFirstPartyExecGuard.stage(verifiedPath: real, expectedSHA256: digest, into: dir)
+        // The staged copy re-validates against the same digest…
+        try TierBFirstPartyExecGuard.revalidateBeforeSpawn(execPath: execPath, expectedSHA256: digest)
+        // …is 0o500 (owner r-x, not group/other-writable)…
+        let fileMode = (try FileManager.default.attributesOfItem(atPath: execPath)[.posixPermissions] as? NSNumber)?.intValue
+        #expect(fileMode == 0o500)
+        // …and lives in the fresh 0o700 dir.
+        let dirMode = (try FileManager.default.attributesOfItem(atPath: dir)[.posixPermissions] as? NSNumber)?.intValue
+        #expect(dirMode == 0o700)
+    }
+
+    @Test("A1-01: stage refuses a source whose bytes do not match the verified digest")
+    func guardStageRefusesDigestMismatch() throws {
+        let real = try Self.writePayload(Data("#!/bin/sh\necho tampered\n".utf8))
+        defer { try? FileManager.default.removeItem(atPath: real) }
+        let dir = NSTemporaryDirectory() + "fp-guard-dir-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        #expect(throws: TierBFirstPartyExecGuard.GuardError.self) {
+            _ = try TierBFirstPartyExecGuard.stage(
+                verifiedPath: real, expectedSHA256: String(repeating: "b", count: 64), into: dir)
+        }
+    }
+
+    // MARK: - A1-05 exec-guard: Developer-ID gate on the unsandboxed payload
+
+    @Test("A1-05: an unsigned / non-Developer-ID payload is refused (allowUnsigned=false); the dev override lets it through")
+    func guardRefusesUnsignedPayload() throws {
+        // A bare unsigned file carries no Developer-ID signature, so the gate must
+        // refuse it. (Deterministic regardless of host team: even the DEBUG
+        // anchor-apple-generic fallback fails on a non-Apple-anchored file.)
+        let path = try Self.writePayload(Data("#!/bin/sh\necho hi\n".utf8))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        #expect(TierBFirstPartyExecGuard.developerIDTrusted(path: path, allowUnsigned: false) == false)
+        // The DEBUG-only dev/test override is the ONLY bypass.
+        #expect(TierBFirstPartyExecGuard.developerIDTrusted(path: path, allowUnsigned: true) == true)
+    }
+
+    @Test("A1-05 end-to-end: the first-party runner with NO dev override refuses an unsigned payload before spawning")
+    func runnerRefusesUnsignedPayloadEndToEnd() async throws {
+        // Skip if a corpus/dev env override is ambiently active (it would legitimately
+        // bypass the gate); the guard-level test above covers the enforcement.
+        guard !TierBFirstPartyExecGuard.devOverrideAllowed(explicit: false) else { return }
+        let script = """
+        #!/bin/sh
+        cat >/dev/null
+        printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
+        """
+        await #expect(throws: FirstPartyTierBRunnerError.self) {
+            _ = try await Self.runScript(id: "com.test.run.unsigned", script: script,
+                                         timeout: 20, allowUnsignedPayload: false)
+        }
     }
 }

@@ -865,6 +865,15 @@ public actor EventStore {
             if rc == SQLITE_FULL || (rc & 0xFF) == SQLITE_FULL || rc == 0x0D0A {
                 throw EventStoreError.diskFull(msg)
             }
+            // C-04: a mid-run corruption code triggers a bounded, rate-limited
+            // close→quarantine→reopen so ingestion recovers instead of failing
+            // forever. We still throw this event's failure (the row is lost);
+            // the *next* insert lands in the freshly-reopened DB. (When reached
+            // from the batch `insert(events:)`, the enclosing transaction's
+            // ROLLBACK runs on the reopened handle as a harmless no-op.)
+            if Self.isCorruptionResultCode(rc) {
+                attemptCorruptionSelfHeal(reason: msg)
+            }
             throw EventStoreError.stepFailed(msg)
         }
     }
@@ -2058,6 +2067,81 @@ public actor EventStore {
         return rcRestart == SQLITE_OK && restartLog == restartCkpt
     }
 
+    // MARK: - Off-actor full VACUUM (B-03)
+
+    /// Run a full `VACUUM` on a DEDICATED short-lived connection instead of the
+    /// actor's long-lived ingestion connection (`self.db`).
+    ///
+    /// A full VACUUM rewrites the whole file and can take minutes on a large
+    /// events.db. Routing it through the actor `vacuum()` holds the actor for
+    /// the entire rewrite, so every `insert(event:)` is head-of-line-blocked
+    /// behind maintenance. This variant:
+    ///   1. is `nonisolated` + `static` — it touches no actor state, so callers
+    ///      never hop onto (and park) the EventStore actor; ingestion keeps
+    ///      flowing on the actor's own connection, and
+    ///   2. runs the blocking sqlite work on a detached thread (via a
+    ///      continuation) so it doesn't park a Swift-concurrency cooperative
+    ///      thread either.
+    ///
+    /// Two connections to one WAL database in the same process is safe: SQLite
+    /// serializes them at the file-lock level (both use `FULLMUTEX`), so under
+    /// concurrent inserts the VACUUM simply contends for the write lock and
+    /// retries within `busy_timeout` rather than corrupting or deadlocking.
+    /// VACUUM bumps the schema cookie; the ingestion connection's `prepare_v2`
+    /// insert statement auto-reprepares on the resulting `SQLITE_SCHEMA`.
+    ///
+    /// Re-checks the symlink guard on the privileged path before opening.
+    public static func vacuumOnDedicatedConnection(at path: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            // Detached thread: a multi-minute blocking VACUUM must not sit on a
+            // cooperative-pool thread (there are only ~core-count of them).
+            Thread.detachNewThread {
+                do {
+                    try Self.performDedicatedVacuum(at: path)
+                    cont.resume()
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Synchronous body of `vacuumOnDedicatedConnection`. Opens its own RW
+    /// connection, checkpoints + VACUUMs + checkpoints, and closes. Blocking —
+    /// only ever called from the detached thread above.
+    private static func performDedicatedVacuum(at path: String) throws {
+        try rejectIfSymlink(path)
+        try rejectIfSymlink(path + "-wal")
+        try rejectIfSymlink(path + "-shm")
+        try rejectIfSymlink(path + "-journal")
+
+        var conn: OpaquePointer?
+        // READWRITE (no CREATE): the file must already exist to be vacuumed.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(path, &conn, flags, nil) == SQLITE_OK, let db = conn else {
+            let msg = conn.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            if let conn { sqlite3_close(conn) }
+            throw EventStoreError.databaseOpenFailed("dedicated VACUUM connection: \(msg)")
+        }
+        defer { sqlite3_close(db) }
+
+        // Retry (rather than fail instantly) when the ingestion connection is
+        // mid-write and VACUUM wants the exclusive lock. 15 s tolerates a busy
+        // host without wedging the maintenance task indefinitely.
+        sqlite3_exec(db, "PRAGMA busy_timeout = 15000", nil, nil, nil)
+
+        // Same WAL discipline as the actor `vacuum()`, on this connection:
+        // pre-checkpoint so VACUUM rebuilds a drained main DB; post-checkpoint
+        // (best-effort TRUNCATE) so the on-disk footprint reflects the rebuild.
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
+        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
+        }
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+    }
+
     // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
     //
     // Reclaim freelist pages from the end of the file in place — no
@@ -2119,6 +2203,95 @@ public actor EventStore {
     /// a `defer` block so it runs even on throws.
     public func endSizeCapPrune() {
         _isPruningForSizeCap = false
+    }
+
+    // MARK: - Mid-run corruption self-heal (C-04)
+    //
+    // Init-time recovery (DaemonSetup.recoverEventStore) handles a store that
+    // is already corrupt at open. This path handles a store that corrupts
+    // *while the daemon is live* — a `SQLITE_CORRUPT` / `SQLITE_NOTADB` on an
+    // insert step. Without it, every subsequent insert throws forever and
+    // ingestion is silently dead until the next daemon restart.
+    //
+    // The self-heal is: close → quarantine the corrupt files aside → reopen a
+    // fresh DB. It is *bounded* (at most `selfHealMaxAttempts` for the process
+    // lifetime) and *rate-limited* (`selfHealMinInterval` between attempts) so
+    // a persistently-failing device can't thrash open/close/backup in a hot
+    // loop. Backups reuse the shared `CorruptDBBackup` naming + retention, so
+    // they stay bounded exactly like the init-time quarantine.
+
+    /// Attempts so far this process. Bounded so a device that keeps corrupting
+    /// (failing hardware) doesn't churn forever — after the cap we stop trying
+    /// and inserts simply keep failing (surfaced via StorageErrorTracker).
+    private var selfHealCount = 0
+    private var lastSelfHealAt = Date.distantPast
+    private static let selfHealMaxAttempts = 3
+    private static let selfHealMinInterval: TimeInterval = 300  // 5 minutes
+
+    /// SQLite primary result code for a step failure that indicates on-disk
+    /// corruption (as opposed to a transient lock / disk-full). Extended codes
+    /// (e.g. `SQLITE_CORRUPT_VTAB`) share the low byte with their primary code.
+    static func isCorruptionResultCode(_ rc: Int32) -> Bool {
+        let primary = rc & 0xFF
+        return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
+    }
+
+    /// Close the current connection, quarantine the corrupt DB (+ sidecars)
+    /// aside, and reopen a fresh one. Returns `true` if the store is usable
+    /// again afterwards. Bounded + rate-limited (see above). No-op (returns
+    /// `false`) on a read-only store — the dashboard has no business rewriting
+    /// the owner's DB.
+    ///
+    /// `now:` is injectable for tests; production callers use the default.
+    @discardableResult
+    func attemptCorruptionSelfHeal(reason: String, now: Date = Date()) -> Bool {
+        let log = Logger(subsystem: "com.maccrab.storage", category: "event-store")
+        guard !isReadOnly else { return false }
+        guard selfHealCount < Self.selfHealMaxAttempts else {
+            log.error("EventStore: corruption self-heal cap (\(Self.selfHealMaxAttempts, privacy: .public)) reached — not reopening. reason=\(reason, privacy: .public)")
+            return false
+        }
+        guard now.timeIntervalSince(lastSelfHealAt) >= Self.selfHealMinInterval else {
+            // Rate-limited: a burst of corrupt steps must not thrash the file.
+            return false
+        }
+        lastSelfHealAt = now
+        selfHealCount += 1
+        log.error("EventStore: mid-run corruption detected (reason=\(reason, privacy: .public)); quarantining DB and reopening (attempt \(self.selfHealCount, privacy: .public)/\(Self.selfHealMaxAttempts, privacy: .public)).")
+
+        // Close: finalize the cached insert statement, then close the handle.
+        // insertStmt is the only long-lived statement on this connection
+        // (queries prepare + finalize locally), so a v1 close succeeds cleanly.
+        if let insertStmt { sqlite3_finalize(insertStmt) }
+        insertStmt = nil
+        if let db { sqlite3_close(db) }
+        db = nil
+
+        // Quarantine the corrupt files aside (bounded retention). This *moves*
+        // events.db* out of the way, so the reopen below starts from a clean
+        // slate. `moveItem`/`removeItem` act on the final path component and
+        // never follow a symlinked leaf; `openDatabase` re-checks the symlink
+        // guard on the privileged path before it recreates the file.
+        let dir = (databasePath as NSString).deletingLastPathComponent
+        let base = (databasePath as NSString).lastPathComponent
+        CorruptDBBackup.backup(directory: dir, base: base)
+
+        // Reopen from the (now-empty) path. openDatabase re-applies pragmas +
+        // schema + re-prepares the insert statement.
+        do {
+            let oldUmask = umask(0o007)
+            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
+            umask(oldUmask)
+            db = handle
+            isReadOnly = ro
+            insertStmt = stmt
+            chmod(databasePath, 0o660)
+            log.notice("EventStore: reopened fresh DB after corruption self-heal.")
+            return true
+        } catch {
+            log.error("EventStore: reopen after corruption self-heal FAILED: \(error.localizedDescription, privacy: .public). Inserts will keep failing until restart.")
+            return false
+        }
     }
 
     // MARK: - Private Helpers

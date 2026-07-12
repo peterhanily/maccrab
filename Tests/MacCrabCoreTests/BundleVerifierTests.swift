@@ -349,20 +349,28 @@ private extension BundleValidator.Outcome {
 @Suite("TraceGraph: BundleMerkle reduction")
 struct BundleMerkleReductionTests {
 
-    @Test("Empty input → SHA-256 of empty data")
+    // v2 reduction (A3-06(a)): domain-separated + leaf-count-bound.
+    // Golden vectors are pinned so a third-party verifier can mirror the
+    // canonical reduction; they were computed independently (see the
+    // reduction spec in BundleMerkle.swift's header).
+
+    @Test("Empty input → domain-tagged, count-bound root (v2 golden)")
     func emptyReduction() {
         let root = BundleMerkle.reduce([])
-        #expect(root == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        #expect(root == "e66367da073bd5b0047d9868f7e90312f0c5ae30a898d09e24ac86c72557496c")
     }
 
-    @Test("Single leaf returns the leaf itself")
+    @Test("Single leaf is hashed + count-bound, NOT returned bare (v2 golden)")
     func singleLeaf() {
         let leaf = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         let root = BundleMerkle.reduce([leaf])
-        #expect(root == leaf)
+        // v2 no longer returns the leaf itself — it binds the leaf tag +
+        // count so a lone internal digest can't be re-presented as a leaf.
+        #expect(root != leaf)
+        #expect(root == "1f013f11c33db531cec35a0a09c1d857f4c2940bbef181c2b9c358bcac56f212")
     }
 
-    @Test("Two leaves → SHA-256 of concatenation")
+    @Test("Two leaves reduce deterministically (v2 golden)")
     func twoLeaves() {
         let leaf = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         let root1 = BundleMerkle.reduce([leaf, leaf])
@@ -370,17 +378,35 @@ struct BundleMerkleReductionTests {
         #expect(root1 == root2)
         #expect(root1.count == 64)
         #expect(root1 != leaf)  // reduction actually happened
+        #expect(root1 == "2f8cd4592e1e139629438fdcb27c82286f99a77816d4bbb4d6f6ac76818212c0")
     }
 
-    @Test("Odd-count reduction duplicates the last leaf")
-    func oddCount() {
+    /// A3-06(a): CVE-2012-2459 duplicate-last-leaf malleability. Under the
+    /// old Bitcoin-style reduction, [l1,l2,l3] and [l1,l2,l3,l3] collapsed
+    /// to the SAME root (the odd level duplicated the tail). v2 binds the
+    /// exact leaf count, so these two DISTINCT lists now produce DIFFERENT
+    /// roots — the root commits to the leaf set, not just the tree shape.
+    @Test("A3-06(a): odd-duplication no longer collides two distinct leaf lists")
+    func duplicateLastLeafMalleabilityClosed() {
         let l1 = String(repeating: "1", count: 64)
         let l2 = String(repeating: "2", count: 64)
         let l3 = String(repeating: "3", count: 64)
-        let oddRoot = BundleMerkle.reduce([l1, l2, l3])
-        // Equivalent: [l1, l2, l3, l3] (Bitcoin-style duplicate)
-        let evenRoot = BundleMerkle.reduce([l1, l2, l3, l3])
-        #expect(oddRoot == evenRoot)
+        let three = BundleMerkle.reduce([l1, l2, l3])
+        let fourWithDuplicatedTail = BundleMerkle.reduce([l1, l2, l3, l3])
+        #expect(three != fourWithDuplicatedTail,
+                "duplicate-last-leaf lists must NOT alias to the same root (CVE-2012-2459)")
+    }
+
+    /// A normal list still reduces deterministically and round-trips: an
+    /// independent recomputation over the same leaves yields the same root.
+    @Test("A3-06(a): a normal list still verifies round-trip (recompute matches)")
+    func normalListRoundTrips() {
+        let leaves = (0 ..< 5).map { String(repeating: String($0), count: 64) }
+        let first = BundleMerkle.reduce(leaves)
+        let recomputed = BundleMerkle.reduce(leaves)
+        #expect(first == recomputed)
+        #expect(first.count == 64)
+        #expect(first.allSatisfy { Set("0123456789abcdef").contains($0) })
     }
 
     @Test("Different leaves produce different roots")

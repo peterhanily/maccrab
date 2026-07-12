@@ -17,9 +17,11 @@
 // Production: hardcoded. Local-dev override: MACCRAB_RAVE_CATALOG_PUB_PATH.
 //
 // URL rewriting for local testing: MACCRAB_RAVE_URL_REWRITE_FROM +
-// MACCRAB_RAVE_URL_REWRITE_TO replace a prefix in release URLs. This lets the
-// production catalog's GitHub-Releases URLs be redirected to a localhost
-// http.server for the launch-rehearsal flow.
+// MACCRAB_RAVE_URL_REWRITE_TO replace a prefix in the resolved artifact URL. This
+// lets the production catalog's GitHub-Releases URLs be redirected to a localhost
+// http.server for the launch-rehearsal flow. DEBUG-ONLY (A4-04): the seam is
+// compiled out of release builds, so a release install resolves the artifact URL
+// only from the signed catalog and an inherited env var cannot redirect it.
 
 import Foundation
 import CryptoKit
@@ -384,14 +386,25 @@ struct PluginCatalogFetcher {
         // convention "<id>.maccrabplugin.zip" — NOT the legacy "<id>.zip", which
         // 404'd against the published artifact.
         let zipFile = versionEntry.filename ?? "\(pluginID).maccrabplugin.zip"
-        var rendered = parsed.releaseURLTemplate
+        let renderedFromCatalog = parsed.releaseURLTemplate
             .replacingOccurrences(of: "{tag}", with: versionEntry.tag)
             .replacingOccurrences(of: "{file}", with: zipFile)
+        #if DEBUG
+        // A4-04: artifact-URL redirect seam for local/staging dry-runs. DEBUG-ONLY
+        // (matches the catalog-pub override above and RaveStagingPubOverride): a
+        // RELEASE build must resolve the artifact URL only from the signed catalog,
+        // so an inherited env var can't redirect the download host. (Signature +
+        // artifact-SHA pin already gate code injection; this removes an unnecessary
+        // release-reachable redirect.)
+        var rendered = renderedFromCatalog
         if let from = ProcessInfo.processInfo.environment["MACCRAB_RAVE_URL_REWRITE_FROM"],
            let to = ProcessInfo.processInfo.environment["MACCRAB_RAVE_URL_REWRITE_TO"],
            rendered.hasPrefix(from) {
             rendered = to + rendered.dropFirst(from.count)
         }
+        #else
+        let rendered = renderedFromCatalog
+        #endif
         guard let binaryURL = URL(string: rendered) else {
             throw PluginCatalogFetchError.catalogParseFailed(reason: "bad rendered URL: \(rendered)")
         }

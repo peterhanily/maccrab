@@ -3,6 +3,58 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-alpha.1] — 2026-07-12
+
+A hardening and honesty release: safer detection defaults, real tamper-evidence for
+Agent Traces, stronger plugin-trust and release gates, and documentation that states
+exactly what is and isn't protected.
+
+### Added
+- **Stable rule profile.** The engine now defaults to the curated **stable** rule tier;
+  the broader experimental corpus still loads but ships disabled unless you set
+  `"rule_profile": "all"` in `daemon_config.json`. This reduces false positives out of
+  the box; per-rule operator overrides are unaffected.
+- **Tamper-evident Agent Traces, wired end-to-end.** The per-trace continuity hash chain
+  is now populated and verified on export — detecting row mutation, deletion, and
+  reordering while tolerating retention pruning — the daemon-signed unified-log chain-head
+  record is emitted on every export, and `trace verify --check-unified-log` works. The
+  delivered guarantee (append-only continuity + a signed Merkle root, forgery-resistant
+  against a non-root attacker) is now documented precisely; local root remains out of scope.
+- Sparkle **phased rollout** for updates (staggered by default; `--immediate` for security
+  hotfixes) plus a rollback runbook. New operator docs: rule-update channel, rollback,
+  stability/SLOs, incident response. A version marker for the plugin SDK.
+
+### Changed
+- Startup banner and docs now state exactly what is encrypted at rest: trace and
+  causal-graph stores are column-encrypted; the primary event/alert/campaign stores are
+  not yet (scheduled).
+- The rule-update and plugin-catalog channels now use the hardened networking path
+  (TLS 1.2 floor, redirect re-validation, no disk cache).
+
+### Fixed / Hardened
+- **Release safety:** a universal build aborts instead of silently shipping an
+  Intel-incompatible arm64-only app, and asserts every shipped binary is 2-architecture
+  before packaging.
+- **Plugin trust:** first-party (unsandboxed) plugin execution now stages the verified
+  binary into a private directory and re-checks it (symlink-safe, digest-verified,
+  Developer-ID required) immediately before launch; the file broker denies unknown
+  `~/Library` locations by default (adds Calendars/Reminders); a store plugin found revoked
+  is quarantined even when the signed revocation list can't be refreshed; local trust state
+  and key lists are now signed and fail closed if tampered; the Tier-B protocol and manifest
+  schema versions are enforced.
+- **Reliability:** the merged event stream now counts events dropped under load (previously
+  always zero); database maintenance no longer blocks event ingestion; a database that
+  corrupts at runtime self-heals within bounds; corrupt-DB backups are pruned; the dashboard
+  audit log rotates.
+- **Integrity:** the trace Merkle construction is malleability-resistant; synthesized
+  OpenTelemetry ids use a collision-resistant hash; every mutating agent (MCP) tool is
+  capability-gated and audit-logged.
+- Admin-owner gating on privileged config files (notification/webhook destinations, alert
+  and override configs) so a non-admin local account can't influence them.
+
+> **Alpha.** Run it on a Mac you're comfortable debugging on. A few of the protections
+> above carry on-device verification steps noted in the docs.
+
 ## [1.21.3] — 2026-07-03
 
 Store-plugin capability plus Forensics and catalog polish.

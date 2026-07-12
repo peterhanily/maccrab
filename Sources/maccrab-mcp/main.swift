@@ -1142,18 +1142,16 @@ func handleTierBVerify() async -> Any {
 /// Resolve a binary that ships alongside this maccrab-mcp executable
 /// (Contents/Resources/bin/<name> in a release, .build/<config>/<name> in dev).
 func resolveSiblingBinary(_ name: String) -> String? {
-    let fm = FileManager.default
-    if let exe = Bundle.main.executablePath {
-        let sib = URL(fileURLWithPath: exe).deletingLastPathComponent().appendingPathComponent(name)
-        if fm.isExecutableFile(atPath: sib.path) { return sib.path }
-    }
-    let arg0 = CommandLine.arguments.first ?? ""
-    if arg0.contains("/") {
-        let sib = URL(fileURLWithPath: arg0).resolvingSymlinksInPath()
-            .deletingLastPathComponent().appendingPathComponent(name)
-        if fm.isExecutableFile(atPath: sib.path) { return sib.path }
-    }
-    return nil
+    // A1-04: resolve ONLY from Bundle.main (the real executable image), never
+    // argv[0]. A launching parent controls argv[0] and could steer the sibling
+    // candidate into an attacker-writable dir — and this path shells `maccrabctl
+    // plugin install/update`, which trusts publisher keys. If Bundle.main can't
+    // resolve, fail closed (nil) rather than trusting parent-supplied input.
+    // Mirrors SandboxedTierBRunner.defaultTrampolinePath, which refuses argv[0]
+    // for the same reason.
+    guard let exe = Bundle.main.executablePath else { return nil }
+    let sib = URL(fileURLWithPath: exe).deletingLastPathComponent().appendingPathComponent(name)
+    return FileManager.default.isExecutableFile(atPath: sib.path) ? sib.path : nil
 }
 
 /// Run maccrabctl with `args`, capturing stdout/stderr. Returns nil if the

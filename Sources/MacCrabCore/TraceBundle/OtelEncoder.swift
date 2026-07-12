@@ -17,6 +17,7 @@
 // namespace per §22.2.
 
 import Foundation
+import CryptoKit
 
 public enum OtelEncoder {
 
@@ -151,21 +152,21 @@ public enum OtelEncoder {
     /// Build a deterministic hex string of the requested length from
     /// a source string. Used when no real OTel trace_id / span_id is
     /// available — the OTLP shape requires hex ids of fixed length.
-    private static func deterministicHexId(from source: String, length: Int) -> String {
-        // Simple: hash the source (FNV-1a over UTF-8) and format as hex.
-        var h: UInt64 = 0xcbf29ce484222325
-        for byte in source.utf8 {
-            h ^= UInt64(byte)
-            h &*= 0x100000001b3
-        }
-        var out = String(format: "%016x", h)
-        while out.count < length {
-            // Mix in a perturbed copy for length 32.
-            var h2: UInt64 = h
-            h2 ^= 0xdeadbeefcafebabe
-            out += String(format: "%016x", h2)
-        }
-        return String(out.prefix(length))
+    ///
+    /// A3-06(b): derive from a truncated SHA-256 rather than a 64-bit
+    /// FNV-1a. The old FNV path only had ~64 bits of entropy (the
+    /// 32-hex trace_id was two halves both derived from the same 64-bit
+    /// hash), so two distinct entities could be steered onto a shared
+    /// span_id / trace_id. SHA-256 is a cryptographic hash: an attacker
+    /// can't cheaply drive two sources onto the same id, and the 32-hex
+    /// trace_id now carries a full 128 bits of independent output.
+    /// `internal` (not `private`) so the tests can exercise it directly.
+    static func deterministicHexId(from source: String, length: Int) -> String {
+        let hex = SHA256.hash(data: Data(source.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        // SHA-256 yields 64 hex chars; span_id (16) and trace_id (32) both fit.
+        return String(hex.prefix(length))
     }
 
     private static func decode<T: Decodable>(_ type: T.Type, from entity: TraceEntity) -> T? {

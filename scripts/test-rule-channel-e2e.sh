@@ -35,6 +35,10 @@ bad(){ red "  ✗ $*"; FAIL=$((FAIL+1)); }
 # ---- snapshot for restore ------------------------------------------------
 ORIG_EVENTS_MTIME="$(stat -f %Sm -t %Y%m%d%H%M.%S "$EVENTS" 2>/dev/null || echo "")"
 TRUST_EXISTED=0; [ -f "$TRUST" ] && { TRUST_EXISTED=1; cp -p "$TRUST" "$WORK/trust.orig"; }
+# A1-03: the trust-state is now a host-signed envelope; start each run from a
+# clean first-seen state so a stale/old-format file can't fail the CLI closed.
+# (Restored from trust.orig on exit; the sibling .signkey is left in place.)
+rm -f "$TRUST"
 PUSHED_EXISTED=0; [ -d "$PUSHED" ] && { PUSHED_EXISTED=1; mv "$PUSHED" "$WORK/pushed.orig"; }
 
 cleanup() {
@@ -122,9 +126,17 @@ serve() {  # serve a freshly-built+signed manifest (valid sig with key A)
   "$WORK/signer" sign "$WORK/priv_a" "$WORK/web/rules-manifest.json" "$WORK/web/rules-manifest.json.sig"
 }
 
-serial_now() { python3 -c "import json,sys;
-try: print(json.load(open('$TRUST')).get('rules_manifest_serial','none'))
-except Exception: print('none')"; }
+# A1-03: rave_trust_state.json is now a host-signed envelope — the marks live
+# under "body" (older builds wrote them at the top level). Read either shape.
+serial_now() { python3 -c "
+import json
+try:
+    d = json.load(open('$TRUST'))
+    b = d['body'] if isinstance(d.get('body'), dict) else d
+    print(b.get('rules_manifest_serial', 'none'))
+except Exception:
+    print('none')
+"; }
 pushed_count() { ls -1 "$PUSHED"/*.json 2>/dev/null | wc -l | tr -d ' '; }
 
 run_update(){ "$BIN" rules update --rules-base "$BASE" 2>&1; }

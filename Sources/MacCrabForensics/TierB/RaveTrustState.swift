@@ -10,13 +10,26 @@
 // counters is part of the trust boundary (a downgraded counter re-opens the
 // rollback window the signed serials are meant to close).
 //
+// A1-03: the file is now a HOST-SIGNED envelope (LocalTrustSigner) rather than
+// a bare flat object. A same-uid attacker who deletes/corrupts/forges it can no
+// longer silently reset the marks to "first-seen" — a present-but-unverifiable
+// file fails CLOSED (the marks read as maximal, so any real serial is rejected
+// as a rollback) instead of re-opening the rollback window. A *missing* file is
+// still a legitimate first-run bootstrap.
+//
 //   <supportDir>/rave_trust_state.json
 //     {
-//       "schema_version": 1,
-//       "catalog_serial": <int>,        // highest accepted catalog_serial
-//       "revocations_serial": <int>,    // highest accepted revocations serial
-//       "updated_at": "<ISO8601>"
+//       "schema_version": 2,
+//       "body": {
+//         "catalog_serial": <int>,        // highest accepted catalog_serial
+//         "revocations_serial": <int>,    // highest accepted revocations serial
+//         "rules_manifest_serial": <int>, // highest accepted rules manifest serial
+//         "updated_at": "<ISO8601>"
+//       },
+//       "signature": "<base64 DER ECDSA-P256-SHA256 over canonical(body)>",
+//       "public_key_der": "<base64 SPKI DER of this host's signing key>"
 //     }
+//   <supportDir>/rave_trust_state.json.signkey   // the 0o600 host signing key
 //
 // Semantics: a missing counter is "never seen" (any serial is accepted and
 // becomes the new high-water mark). Once a counter is set, a strictly lower
@@ -89,13 +102,28 @@ public enum RaveSerialDecision: Sendable, Equatable {
     case rollback(stored: Int, incoming: Int)
 }
 
+/// Raised by the `record*` paths when the on-disk state is present but fails its
+/// integrity check (A1-03). Recording is refused so a tampered file is never
+/// "laundered" into a freshly-signed one; callers use `try?`, so this degrades to
+/// a no-op rather than advancing/overwriting a compromised mark.
+public enum RaveTrustStateError: Error, Equatable {
+    case tampered
+}
+
 public struct RaveTrustStateStore: Sendable {
     private let path: String
+    /// Signs/verifies the on-disk state so a same-uid reset (delete/corrupt/forge)
+    /// is detectable and rejected rather than silently read as first-seen (A1-03).
+    private let signer: LocalTrustSigner
 
     /// `path` is the full path to the state JSON file. Callers that want the
-    /// default location should use `default(supportDir:)`.
-    public init(path: String) {
+    /// default location should use `default(supportDir:)`. `signer` defaults to a
+    /// per-host key sitting next to the state file (`<path>.signkey`, 0o600) — so
+    /// every distinct state file gets an independent key, and the CLI + app that
+    /// share one state path also share its key.
+    public init(path: String, signer: LocalTrustSigner? = nil) {
         self.path = path
+        self.signer = signer ?? LocalTrustSigner(keyPath: URL(fileURLWithPath: path + ".signkey"))
     }
 
     /// Default store at `<supportDir>/rave_trust_state.json`.
@@ -106,41 +134,94 @@ public struct RaveTrustStateStore: Sendable {
 
     public var filePath: String { path }
 
-    /// Load the persisted state. A missing or unreadable/garbage file is
-    /// treated as empty (first-seen) — fail-open is correct here because an
-    /// absent file legitimately means "fresh install, nothing accepted yet".
-    /// A *present* file that fails to parse also degrades to empty: we'd
-    /// rather re-accept the current signed catalog than wedge the client.
-    public func load() -> RaveTrustState {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return RaveTrustState()
-        }
-        // JSONSerialization decodes integers as NSNumber; pull as Int.
-        let cat = (obj["catalog_serial"] as? NSNumber)?.intValue
-        let rev = (obj["revocations_serial"] as? NSNumber)?.intValue
-        // C-E: round-trip the revocations freshness clock (a malformed/absent
-        // timestamp degrades to "never verified" → the staleness ceiling warns).
-        let verifiedAt = (obj["revocations_verified_at"] as? String)
-            .flatMap { ISO8601DateFormatter().date(from: $0) }
-        let rulesSerial = (obj["rules_manifest_serial"] as? NSNumber)?.intValue
-        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt, rulesManifestSerial: rulesSerial)
+    /// Outcome of reading the state file with its integrity check.
+    private enum LoadOutcome {
+        /// No file — a legitimate fresh install (bootstrap → first-seen).
+        case missing
+        /// A present file that verified against this host's signing key.
+        case verified(RaveTrustState)
+        /// A present file that is unsigned, corrupt, or forged with another key.
+        case tampered
     }
 
-    /// Atomically persist the state, locking the file to 0o600.
+    /// Read + integrity-check the state file. A *missing* file is bootstrap
+    /// (first-seen). A *present* file must be a host-signed envelope that
+    /// verifies; anything else (legacy-unsigned flat file, garbage, mutated body,
+    /// or a signature from a foreign key) is `.tampered`.
+    private func loadOutcome() -> LoadOutcome {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return .missing
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              LocalTrustSigner.isEnvelope(obj),
+              let body = signer.open(obj) else {
+            // Present but not a valid host-signed envelope → reset attempt.
+            FileHandle.standardError.write(Data(
+                "MacCrab: rave trust-state integrity check FAILED (unsigned/tampered) at \(path) — refusing to trust it (A1-03)\n".utf8
+            ))
+            return .tampered
+        }
+        // JSONSerialization decodes integers as NSNumber; pull as Int.
+        let cat = (body["catalog_serial"] as? NSNumber)?.intValue
+        let rev = (body["revocations_serial"] as? NSNumber)?.intValue
+        // C-E: round-trip the revocations freshness clock (a malformed/absent
+        // timestamp degrades to "never verified" → the staleness ceiling warns).
+        let verifiedAt = (body["revocations_verified_at"] as? String)
+            .flatMap { ISO8601DateFormatter().date(from: $0) }
+        let rulesSerial = (body["rules_manifest_serial"] as? NSNumber)?.intValue
+        return .verified(RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt, rulesManifestSerial: rulesSerial))
+    }
+
+    /// Load the persisted state. A missing file is empty (first-seen) — a fresh
+    /// install legitimately has nothing accepted yet. A *present* file that fails
+    /// its integrity check (A1-03) does NOT silently degrade to first-seen (which
+    /// would re-open the anti-rollback window a reset attack is aiming at);
+    /// instead it fails CLOSED to a MAXIMAL high-water mark, so every real
+    /// (finite) incoming serial reads as a rollback and the caller refuses.
+    /// Recovery from a genuine corruption is to delete the file (→ clean
+    /// first-seen bootstrap) — a deliberate operator action, not a silent reset.
+    public func load() -> RaveTrustState {
+        switch loadOutcome() {
+        case .missing: return RaveTrustState()
+        case .verified(let s): return s
+        case .tampered: return Self.tamperedSentinel
+        }
+    }
+
+    /// Fail-closed baseline for a present-but-untrusted state: treat the marks as
+    /// maxed so `decide()` rejects any real serial as a rollback. `nil`
+    /// verifiedAt → freshness reads `.never` (stale → the UI warns).
+    private static let tamperedSentinel = RaveTrustState(
+        catalogSerial: Int.max, revocationsSerial: Int.max, revocationsVerifiedAt: nil, rulesManifestSerial: Int.max
+    )
+
+    /// State to advance from on a `record*` write. Missing → empty base; verified
+    /// → that state; tampered → THROW so a compromised file is never laundered
+    /// into a freshly-signed one (callers use `try?`, so this is a safe no-op).
+    private func loadForRecord() throws -> RaveTrustState {
+        switch loadOutcome() {
+        case .missing: return RaveTrustState()
+        case .verified(let s): return s
+        case .tampered: throw RaveTrustStateError.tampered
+        }
+    }
+
+    /// Atomically persist the state as a host-signed envelope, locking the file
+    /// to 0o600 (A1-03). The signature covers the canonical body, so a later
+    /// same-uid edit that isn't re-signed by this host is rejected on load.
     public func save(_ state: RaveTrustState) throws {
-        var payload: [String: Any] = [
-            "schema_version": 1,
+        var body: [String: Any] = [
             "updated_at": ISO8601DateFormatter().string(from: Date()),
         ]
-        if let c = state.catalogSerial { payload["catalog_serial"] = c }
-        if let r = state.revocationsSerial { payload["revocations_serial"] = r }
+        if let c = state.catalogSerial { body["catalog_serial"] = c }
+        if let r = state.revocationsSerial { body["revocations_serial"] = r }
         if let v = state.revocationsVerifiedAt {
-            payload["revocations_verified_at"] = ISO8601DateFormatter().string(from: v)
+            body["revocations_verified_at"] = ISO8601DateFormatter().string(from: v)
         }
-        if let rm = state.rulesManifestSerial { payload["rules_manifest_serial"] = rm }
+        if let rm = state.rulesManifestSerial { body["rules_manifest_serial"] = rm }
+        let envelope = try signer.seal(body: body)
         let data = try JSONSerialization.data(
-            withJSONObject: payload,
+            withJSONObject: envelope,
             options: [.prettyPrinted, .sortedKeys]
         )
         // Ensure the parent dir exists.
@@ -176,7 +257,7 @@ public struct RaveTrustStateStore: Sendable {
     /// Advance the persisted rules-manifest high-water mark (idempotent; never
     /// lowers). Call only after the manifest has been fully verified + accepted.
     public func recordRulesManifest(serial: Int) throws {
-        var state = load()
+        var state = try loadForRecord()
         if let stored = state.rulesManifestSerial, stored >= serial { return }
         state.rulesManifestSerial = serial
         try save(state)
@@ -185,7 +266,7 @@ public struct RaveTrustStateStore: Sendable {
     /// Advance the persisted catalog high-water mark to `serial` if it is
     /// greater than the stored value (idempotent; never lowers the mark).
     public func recordCatalog(serial: Int) throws {
-        var state = load()
+        var state = try loadForRecord()
         if let stored = state.catalogSerial, stored >= serial { return }
         state.catalogSerial = serial
         try save(state)
@@ -199,7 +280,7 @@ public struct RaveTrustStateStore: Sendable {
     /// caller has already accepted the document (via `evaluateRevocations`)
     /// before calling this, so a rollback serial never reaches here. (Stage 2.)
     public func recordRevocations(serial: Int, verifiedAt: Date = Date()) throws {
-        var state = load()
+        var state = try loadForRecord()
         if state.revocationsSerial == nil || serial > state.revocationsSerial! {
             state.revocationsSerial = serial
         }

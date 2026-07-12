@@ -34,11 +34,27 @@
 // since the dashboard, CLI, and external validators verify by
 // reading it from disk rather than calling back into the daemon.
 //
-// The keychain ACL pinned to the daemon's code-signing identity
-// described in §19.1 is a follow-up in a later v1.10 increment; v1.10.0
-// ships with the SE key in the daemon's default keychain (root-owned
-// when the daemon runs as root via the sysext) which is sufficient for
-// the v1.10.0 acceptance criterion 21.
+// A3-02: the SE private key is now created with a usage ACL
+// (SecAccessControl, `.privateKeyUsage`) pinned at key CREATION so the
+// key material can only be exercised for signing. Combined with the
+// keychain's default ACL — a keychain item is, by default, reachable
+// only by the code identity that created it — this ties invocation of
+// the signing key to the daemon's own signed code rather than leaving it
+// open to any process. This RAISES THE BAR against a *non-daemon* root
+// process trying to forge trace signatures with our key.
+//
+// It is explicitly NOT a defense against local ROOT / a kernel-level
+// attacker: per docs/THREAT_MODEL.md, local root is out of scope for
+// tamper protection — with root (or SIP disabled) an attacker can rewrite
+// the daemon binary, dump keychain items, or drive the Secure Enclave
+// directly. The ACL is defense-in-depth, not a root boundary.
+//
+// The filesystemDegraded fallback keeps its weaker guarantee: the private
+// key is an on-disk DER blob at 0o600 under a 0o700 dir (see
+// TrustSubstrateStorage). There is no SE/keychain ACL in that mode — any
+// process able to read the file (root, or a misconfiguration) can sign.
+// That mode is chosen only when SE is unavailable (CI, VMs, older HW) and
+// is documented above as NOT root-resistant.
 
 import Foundation
 import CryptoKit
@@ -284,6 +300,40 @@ public actor TrustSubstrate {
 
     // MARK: - Secure Enclave mode
 
+    /// A3-02: build the usage ACL pinned to the SE signing key at creation.
+    ///
+    /// `.privateKeyUsage` marks the key usable only for signing operations
+    /// (no export, no decrypt). We deliberately do NOT add `.userPresence`
+    /// or biometry flags — the daemon signs headless, so an interactive
+    /// prompt is neither possible nor wanted. The protection class is
+    /// `…AfterFirstUnlockThisDeviceOnly`: device-bound (never syncs, never
+    /// leaves this Mac) and available to the background daemon after the
+    /// first unlock following boot.
+    ///
+    /// The code-identity binding ("only the daemon's signed code may
+    /// invoke it") comes from the keychain ACL, not from a flag here: a
+    /// keychain item is by default reachable only by the identity that
+    /// created it. This helper is `internal` so tests can assert the ACL
+    /// is constructed even on hosts without a Secure Enclave (the policy
+    /// object is built in software and does not touch SE hardware).
+    static func makeSigningKeyAccessControl() throws -> SecAccessControl {
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            [.privateKeyUsage],
+            &error
+        ) else {
+            let cfError = error?.takeRetainedValue()
+            let message = cfError.map { CFErrorCopyDescription($0) as String } ?? "<unknown>"
+            throw SubstrateError.keyGenerationFailed(
+                status: errSecParam,
+                message: "SecAccessControl creation failed: \(message)"
+            )
+        }
+        return access
+    }
+
     private func loadOrGenerateSecureEnclaveKey() async throws -> SecKey {
         if let cachedSEKey { return cachedSEKey }
         // Try to load by tag.
@@ -300,6 +350,10 @@ public actor TrustSubstrate {
         let tag = (Self.defaultKeyTagPrefix + UUID().uuidString)
             .data(using: .utf8)!
 
+        // A3-02: pin a usage ACL to the private key at CREATION so it can
+        // only be used for signing operations. See makeSigningKeyAccessControl.
+        let access = try Self.makeSigningKeyAccessControl()
+
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
@@ -308,6 +362,7 @@ public actor TrustSubstrate {
                 kSecAttrIsPermanent as String: true,
                 kSecAttrApplicationTag as String: tag,
                 kSecAttrLabel as String: "MacCrab TraceGraph Signing Key",
+                kSecAttrAccessControl as String: access,
             ],
         ]
 
