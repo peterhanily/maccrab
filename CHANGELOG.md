@@ -40,6 +40,15 @@ exactly what is and isn't protected.
   from the kernel exec event — no SDK or callback in the agent — and raises a single **critical**
   verdict when credential access, untrusted content, and external egress converge in one such
   session. Off by default; requires the agent to propagate trace context.
+- **Sensor-integrity telemetry.** MacCrab now measures kernel-level Endpoint Security message
+  drops (a file-write flood could previously starve the process/exec channel while the daemon
+  reported zero dropped events) and raises a "protection degraded / possible evasion" alert +
+  menu-bar indicator when it detects it's losing coverage. A periodic self-test canary verifies
+  its own event pipeline end-to-end, process/exec events are protected from being evicted by a
+  file storm, and — when a gap does drop attribution — activity is honestly marked "telemetry
+  gap" instead of silently unattributed. The two deeper Endpoint Security changes (an async
+  message handler and a split file/exec client) are staged and unit-tested but marked for
+  on-device validation before release.
 
 ### Changed
 - Startup banner and docs now state exactly what is encrypted at rest: trace and
