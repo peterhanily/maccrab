@@ -1,28 +1,28 @@
 // OTLPReceiver.swift
 // MacCrabCore
 //
-// v1.9 PR-3a — stub OTLP/HTTP receiver.
+// v1.9 — OTLP/HTTP receiver (wired; config-gated).
 //
 // Listens on 127.0.0.1:<port> (default 4318 — the OTel ecosystem's
-// canonical OTLP/HTTP port). Accepts POST /v1/traces with a protobuf body.
-// PR-3a decodes the body via `OTLPMinimalDecoder` (verifies the message is
-// well-formed protobuf and counts top-level ResourceSpans) and DROPS the
-// result; no persistence yet. PR-3b will swap in SwiftProtobuf-generated
-// types and write into TraceStore.
+// canonical OTLP/HTTP port). Accepts POST /v1/traces with a protobuf body,
+// decodes it, and writes ingested spans into traces.db (attributes are
+// sanitized + AES-GCM-encrypted at rest with the shared DB key).
+//
+// Started from DaemonSetup.buildState (boot) and DaemonSetup
+// .applyAgentTracesConfig (SIGHUP reload) when the agent-traces config
+// asks for it. Not a stub — the class is live on any daemon whose config
+// has enabled + receiverEnabled set.
 //
 // Hard invariants from Plan v3:
 //   * Loopback only. NWListener bound to 127.0.0.1 explicitly. Connection
 //     handlers refuse any peer endpoint that is not loopback.
 //   * Bind failure surfaces loudly — we do NOT silently fall back to a
 //     different port (that would make the user-facing setup snippet lie).
-//   * Default-off: the daemon must explicitly start the receiver. The
-//     ESCollector trace-binding feature flag (MACCRAB_AGENT_TRACES) does
-//     NOT auto-start the receiver; the dashboard's "Receive agent traces"
-//     toggle does. PR-4 wires that toggle.
-//
-// This file ships the receiver class. It is intentionally not started from
-// any boot path in PR-3a — that wiring lands in PR-3b alongside the
-// TraceStore writes and the sanitizer.
+//   * Default-off: the daemon starts the receiver only when the master
+//     (env MACCRAB_AGENT_TRACES=1 OR agent_traces_config.json
+//     `agent_traces_enabled`) AND `receiverEnabled` are both on. The
+//     dashboard's "Receive agent traces" toggle writes both; a dev run
+//     can use env vars instead.
 
 import Foundation
 import Network

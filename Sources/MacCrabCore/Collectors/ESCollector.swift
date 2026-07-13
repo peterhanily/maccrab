@@ -113,12 +113,20 @@ public final class ESCollector: @unchecked Sendable {
     /// it independently of the OPEN family.
     private let subscribeIntrospection: Bool
 
-    /// v1.9 Agent Traces feature flag, read once at type-load. Set
-    /// `MACCRAB_AGENT_TRACES=1` in the daemon's environment to enable
-    /// TRACEPARENT extraction on NOTIFY_EXEC. Default-off so a v1.9
-    /// daemon binary running on an older host stays bit-identical to
-    /// the v1.8.1 wire path until the operator opts in.
-    private static let agentTracesEnabled: Bool =
+    /// v1.9 Agent Traces master gate. Seeded from `MACCRAB_AGENT_TRACES=1`
+    /// at type-load (the dev / standalone-daemon path) to enable
+    /// TRACEPARENT extraction on NOTIFY_EXEC. Default-off so a daemon
+    /// binary running on an older host stays bit-identical to the
+    /// v1.8.1 wire path until the operator opts in.
+    ///
+    /// v1.21.4 Phase-6 6A: no longer immutable. DaemonSetup OR's in the
+    /// operator's `agent_traces_config.json` master (`agent_traces_enabled`)
+    /// via `applyConfigMaster(_:)` at boot — the shipped System Extension
+    /// can't be handed an env var, so config is the only reachable switch
+    /// there. Written exactly once during boot, BEFORE the ES handler
+    /// block starts reading it per-event (createClient runs after the
+    /// setter); read-only afterward — hence `nonisolated(unsafe)`.
+    nonisolated(unsafe) private static var agentTracesEnabled: Bool =
         Foundation.ProcessInfo.processInfo.environment["MACCRAB_AGENT_TRACES"] == "1"
 
     /// v1.9 audit Phase-1.8: shared AIToolRegistry instance reused
@@ -127,9 +135,28 @@ public final class ESCollector: @unchecked Sendable {
     /// adds avoidable allocation pressure on the ES callback queue.
     fileprivate static let sharedAIRegistry = AIToolRegistry()
 
-    /// Public accessor for the feature flag. Tests and the dashboard
-    /// status panel can read this without touching ProcessInfo themselves.
+    /// Public accessor for the master gate (env seed OR'd with the
+    /// config master applied at boot). Tests and the dashboard status
+    /// panel can read this without touching ProcessInfo themselves.
     public static var isAgentTracesEnabled: Bool { agentTracesEnabled }
+
+    /// v1.21.4 Phase-6 6A: pure `env OR config` combine for the master
+    /// gate. Used by `applyConfigMaster` and unit-tested directly so the
+    /// truth table is deterministic without mutating global state.
+    public static func agentTracesMasterEnabled(env: Bool, config: Bool) -> Bool {
+        env || config
+    }
+
+    /// v1.21.4 Phase-6 6A: fold the config-file master into the env
+    /// seed. Called once by DaemonSetup at boot, BEFORE the ESCollector
+    /// is constructed, so the ES handler block and every DaemonSetup
+    /// boot-time gate (`isAgentTracesEnabled`) observe the OR'd value.
+    /// Monotonic — only ever turns the gate ON (an env-enabled dev run
+    /// stays on regardless of config); never OFF. Safe as a one-time
+    /// boot write (see the `nonisolated(unsafe)` note on the flag).
+    public static func applyConfigMaster(_ configEnabled: Bool) {
+        agentTracesEnabled = agentTracesMasterEnabled(env: agentTracesEnabled, config: configEnabled)
+    }
 
     /// The asynchronous stream of normalised events.
     public let events: AsyncStream<Event>

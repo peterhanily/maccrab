@@ -1,0 +1,23 @@
+{
+  "id": "maccrab_ai_agent_lethal_trifecta",
+  "title": "Lethal trifecta in one agent session: sensitive-data read + untrusted content + external egress",
+  "severity": "critical",
+  "status": "stable",
+  "type": "graph",
+  "nodes": {
+    "agent": { "type": "ai_agent" },
+    "proc":  { "type": "process" },
+    "cred":      { "type": "file",    "where": { "file_kind":        { "equals": "credential_file" } } },
+    "untrusted": { "type": "file",    "where": { "untrusted_content": { "equals_bool": true } } },
+    "net":       { "type": "network", "where": { "reputation":       { "not_in": ["known_good", "private_range"] } } }
+  },
+  "edges": [
+    { "from": "agent", "to": "proc",      "relation": "associated_with_agent", "min_tier": "direct" },
+    { "from": "proc",  "to": "cred",      "relation": "read",                  "min_tier": "weak_inferred" },
+    { "from": "proc",  "to": "untrusted", "relation": "read",                  "min_tier": "weak_inferred" },
+    { "from": "proc",  "to": "net",       "relation": "connected_to",          "min_tier": "weak_inferred" }
+  ],
+  "scope": { "common_ancestor": "proc", "max_depth": 3 },
+  "constraints": { "within_seconds": 600, "min_confidence": 0.75 },
+  "attack": ["T1059", "T1555", "T1041"]
+}

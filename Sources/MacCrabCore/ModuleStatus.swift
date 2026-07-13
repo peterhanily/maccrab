@@ -52,7 +52,7 @@ public struct ModuleStatus: Sendable {
         // ─── Core detection (stable) ─────────────────────────────────
         .init(id: "rule-engine", name: "Rule engine",
               category: "detection", maturity: .stable,
-              summary: "Sigma-compatible YAML → JSON predicates. 485 rules (438 single-event + 41 sequence + 6 graph) indexed by category."),
+              summary: "Sigma-compatible YAML → JSON predicates. 486 rules (438 single-event + 41 sequence + 7 graph) indexed by category."),
         .init(id: "es-collector", name: "Endpoint Security collector",
               category: "collector", maturity: .stable,
               summary: "Native ES client for exec/fork/exit/file/network/signal events."),

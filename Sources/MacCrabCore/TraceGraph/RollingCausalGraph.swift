@@ -130,11 +130,17 @@ public actor RollingCausalGraph {
         public let path: String
         public let pathHash: String
         public let sha256: String?
+        /// v1.21.4 (Phase-6 6B, leg 2): set by the bridge from
+        /// `enrichments["untrusted_content"]` — carried through to the
+        /// `FileNode` so the causal substrate records that this file (read
+        /// by an agent-attributed process) held prompt-injection markers.
+        public let untrustedContent: Bool
 
-        public init(path: String, pathHash: String, sha256: String? = nil) {
+        public init(path: String, pathHash: String, sha256: String? = nil, untrustedContent: Bool = false) {
             self.path = path
             self.pathHash = pathHash
             self.sha256 = sha256
+            self.untrustedContent = untrustedContent
         }
     }
 
@@ -281,6 +287,7 @@ public actor RollingCausalGraph {
                 pathHash: fileObs.pathHash,
                 fileKind: inferredKind,
                 sha256: fileObs.sha256,
+                untrustedContent: fileObs.untrustedContent,
                 firstSeen: event.timestamp,
                 lastSeen: event.timestamp
             )

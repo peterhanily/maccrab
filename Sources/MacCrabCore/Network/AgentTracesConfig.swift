@@ -18,15 +18,42 @@ import os.log
 
 /// One config record. The dashboard writes; the daemon reads.
 public struct AgentTracesConfig: Sendable, Codable, Equatable {
-    /// Whether the OTLP receiver should be running. Default false:
-    /// agent traces are an opt-in feature.
+    /// v1.21.4 Phase-6 6A: master enable for the whole agent-traces
+    /// stack — the producer env-scan (TRACEPARENT lift on NOTIFY_EXEC),
+    /// the TraceRegistry, and the event correlation that stamps
+    /// `agent_trace_id`. Default false (opt-in). The shipped System
+    /// Extension can't be handed an env var, so this file field is the
+    /// only way to reach the master gate on a release build; on a dev
+    /// build `MACCRAB_AGENT_TRACES=1` still works and is OR'd with this.
+    /// JSON key: `agent_traces_enabled`.
+    public var enabled: Bool
+    /// Whether the OTLP receiver should be running. Default false. Only
+    /// takes effect when the master `enabled` is also on.
     public var receiverEnabled: Bool
     /// TCP port for the receiver. Default OTel canonical 4318.
     public var port: UInt16
 
-    public init(receiverEnabled: Bool = false, port: UInt16 = 4318) {
+    public init(enabled: Bool = false, receiverEnabled: Bool = false, port: UInt16 = 4318) {
+        self.enabled = enabled
         self.receiverEnabled = receiverEnabled
         self.port = port
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled = "agent_traces_enabled"
+        case receiverEnabled
+        case port
+    }
+
+    /// Tolerant decode: any missing key falls back to its default so a
+    /// partial config — or an older file written before the `enabled`
+    /// master existed — keeps decoding instead of reverting the whole
+    /// record to defaults (the DaemonConfig snake-case decoder hazard).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        self.receiverEnabled = try c.decodeIfPresent(Bool.self, forKey: .receiverEnabled) ?? false
+        self.port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? 4318
     }
 
     public static let defaultConfig = AgentTracesConfig()

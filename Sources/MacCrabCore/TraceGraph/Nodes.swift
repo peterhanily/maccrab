@@ -157,6 +157,13 @@ public struct FileNode: TraceGraphNode, Equatable {
     public let fileKind: FileKind
     public let sha256: String?
     public let quarantineInfo: String?
+    /// v1.21.4 (Phase-6 6B, leg 2): true when this file, read by an
+    /// AI-agent-attributed process, carried the shipped plaintext
+    /// prompt-injection markers (see `InjectionMarkerScanner`). Encoded
+    /// into `attributes_json` so a graph rule can match it with a
+    /// `where: { untrusted_content: { equals_bool: true } }` clause — the
+    /// load-bearing "untrusted content" leg of the lethal-trifecta rule.
+    public let untrustedContent: Bool
     public let firstSeen: Date
     public let lastSeen: Date
 
@@ -169,6 +176,7 @@ public struct FileNode: TraceGraphNode, Equatable {
         fileKind: FileKind,
         sha256: String? = nil,
         quarantineInfo: String? = nil,
+        untrustedContent: Bool = false,
         firstSeen: Date,
         lastSeen: Date
     ) {
@@ -177,8 +185,31 @@ public struct FileNode: TraceGraphNode, Equatable {
         self.fileKind = fileKind
         self.sha256 = sha256
         self.quarantineInfo = quarantineInfo
+        self.untrustedContent = untrustedContent
         self.firstSeen = firstSeen
         self.lastSeen = lastSeen
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, pathHash, fileKind, sha256, quarantineInfo, untrustedContent, firstSeen, lastSeen
+    }
+
+    // Custom decode so `untrustedContent` (new in v1.21.4 Phase-6 6B) is
+    // tolerant: pre-upgrade `file` entities persisted without the key decode
+    // cleanly (default false) instead of failing — otherwise a ProvO export of
+    // a pre-1.21.4 tracegraph would drop those entities. encode(to:) stays
+    // synthesized. (The detection path decodes via tolerant JSONSerialization
+    // and was never affected.)
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        pathHash = try c.decode(String.self, forKey: .pathHash)
+        fileKind = try c.decode(FileKind.self, forKey: .fileKind)
+        sha256 = try c.decodeIfPresent(String.self, forKey: .sha256)
+        quarantineInfo = try c.decodeIfPresent(String.self, forKey: .quarantineInfo)
+        untrustedContent = try c.decodeIfPresent(Bool.self, forKey: .untrustedContent) ?? false
+        firstSeen = try c.decode(Date.self, forKey: .firstSeen)
+        lastSeen = try c.decode(Date.self, forKey: .lastSeen)
     }
 }
 

@@ -102,7 +102,11 @@ public actor EventToRollingCausalGraphBridge {
             return RollingCausalGraph.FileObservation(
                 path: file.path,
                 pathHash: pathHash(file.path),
-                sha256: nil
+                sha256: nil,
+                // v1.21.4 (Phase-6 6B, leg 2): EventLoop stamps this enrichment
+                // when the Phase-5 InjectionMarkerScanner flagged plaintext
+                // prompt-injection markers on this agent-attributed read.
+                untrustedContent: event.enrichments["untrusted_content"] == "true"
             )
         }()
 

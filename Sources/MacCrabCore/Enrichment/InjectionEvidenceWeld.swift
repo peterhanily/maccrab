@@ -222,6 +222,24 @@ public struct InjectionEvidenceWeld: Sendable {
         Self.triggerRuleIds.contains(ruleId)
     }
 
+    /// Phase-6 6B (leg 2): per-event companion to `evidence(...)`. Returns true
+    /// when `path` is an AGENT-CONTENT read (skills / hooks / config / workflows —
+    /// the same `ESCollector.isAgentContentReadPath` allowlist the weld's own
+    /// source uses, disjoint from credential paths) whose CURRENT content carries
+    /// the shipped plaintext injection markers. Reuses the SAME
+    /// `InjectionEvidenceSource.readContent` (FileContentEnricher: O_NOFOLLOW,
+    /// 64 KB / 8 MB caps) and `InjectionMarkerScanner` as `evidence()` — no second
+    /// scanner and no new marker set. The caller (EventLoop) stamps
+    /// `enrichments["untrusted_content"]="true"` on a hit so the causal
+    /// substrate's `FileNode` records the load-bearing leg-2 signal for the
+    /// lethal-trifecta graph rule. Plaintext-marker fidelity only (see the file
+    /// header on obfuscation); it never emits an alert of its own.
+    public func readsInjectedContent(path: String) async -> Bool {
+        guard ESCollector.isAgentContentReadPath(path) else { return false }
+        guard let content = await source.readContent(path: path) else { return false }
+        return !InjectionMarkerScanner.scan(content).isEmpty
+    }
+
     /// Retro-scan the session's agent-content reads for injection markers.
     /// Returns nil (no change) when: the rule isn't a trigger, the event carries
     /// no `ai_tool_session_id`, the session read no marker-bearing agent-content

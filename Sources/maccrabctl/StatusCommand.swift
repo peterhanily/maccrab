@@ -162,7 +162,7 @@ extension MacCrabCtl {
         }
         if !anyTraceLine {
             if isDaemonRunning() {
-                print("Agent Traces:    Disabled (set MACCRAB_AGENT_TRACES=1 + MACCRAB_OTLP_RECEIVER=1 to enable)")
+                print("Agent Traces:    Disabled (enable via the dashboard toggle / agent_traces_config.json, or MACCRAB_AGENT_TRACES=1 for dev)")
             }
         }
 

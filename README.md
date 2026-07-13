@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-2720%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-485%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
+[![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
 [![Version](https://img.shields.io/badge/version-1.21.3-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -530,7 +530,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **485 rules** (438 single-event + 41 sequence + 6 graph)
+release ships **486 rules** (438 single-event + 41 sequence + 7 graph)
 covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 

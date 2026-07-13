@@ -40,6 +40,46 @@ enum EventLoop {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+
+    /// v1.21.4 Phase-6 6A: direct agent-trace correlation for an event's
+    /// OWN process identity, decoupled from the isAIChild lineage pass.
+    ///
+    /// A process launched with an inherited TRACEPARENT — the agent's own
+    /// root process, or a helper the agent spawned that AIToolRegistry
+    /// doesn't recognise — may never be tagged as an "AI child" by
+    /// lineage, yet the ESCollector env-scan already bound its TRACEPARENT
+    /// into the registry. This helper looks that binding up by exact
+    /// `ProcessIdentity` so the event still gets `agent_trace_id`.
+    ///
+    /// It runs the TraceRegistry lookup only — NO AIToolRegistry lineage
+    /// fallback (`aiToolForPath` returns nil). Pass `ancestors: []` for a
+    /// direct-only lookup (the common call); a non-empty `ancestors` still
+    /// only walks *bound* ancestors in the registry, never the shape-based
+    /// lineage Pass-2, which stays in the isAIChild branch.
+    static func correlateAgentTrace(
+        identity: ProcessIdentity,
+        ancestors: [ProcessAncestor],
+        registry: TraceRegistry
+    ) async -> TraceCorrelation? {
+        await TraceCorrelator.correlate(
+            identity: identity,
+            ancestors: ancestors,
+            registry: registry,
+            ancestorIdentityResolver: { ancestor in
+                ProcessIdentity(
+                    auditIdentity: AuditIdentity(
+                        auid: 0, euid: 0, egid: 0, ruid: 0, rgid: 0,
+                        pid: ancestor.pid, pidversion: 0, asid: 0
+                    ),
+                    pathHash: ProcessIdentity.fnv1a64(ancestor.executable),
+                    pid: ancestor.pid,
+                    startTime: 0
+                )
+            },
+            aiToolForPath: { _ in nil }
+        )
+    }
+
     static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter, alertCount: LockedCounter) async {
         for await event in eventStream {
             eventCount.increment()
@@ -516,6 +556,38 @@ enum EventLoop {
                             }
                         }
                     }
+                }
+            }
+
+            // v1.21.4 Phase-6 6A: agent-trace correlation for the event's
+            // OWN identity, decoupled from the isAIChild branch above.
+            // That branch only runs for processes lineage recognises as
+            // agent children — but a TRACEPARENT-bound process (the
+            // agent's own root, or a helper AIToolRegistry doesn't know)
+            // may never take it. If nothing above already stamped an
+            // agent-trace attribution and the registry is live, try a
+            // direct lookup on this pid's exact identity. No-op (registry
+            // nil) when the feature master is off. Direct-only: the
+            // ancestor walk / lineage Pass-2 stays in the isAIChild branch.
+            if let traceRegistry = state.traceRegistry,
+               enrichedEvent.enrichments[TraceCorrelator.EnrichmentKey.confidence] == nil {
+                let p = enrichedEvent.process
+                let ownIdentity = ProcessIdentity(
+                    auditIdentity: AuditIdentity(
+                        auid: 0, euid: p.userId, egid: 0,
+                        ruid: p.userId, rgid: 0,
+                        pid: p.pid, pidversion: 0, asid: 0
+                    ),
+                    pathHash: ProcessIdentity.fnv1a64(p.executable),
+                    pid: p.pid,
+                    startTime: UInt64(p.startTime.timeIntervalSince1970)
+                )
+                if let correlation = await correlateAgentTrace(
+                    identity: ownIdentity,
+                    ancestors: [],
+                    registry: traceRegistry
+                ) {
+                    TraceCorrelator.apply(correlation, to: &enrichedEvent)
                 }
             }
 
@@ -1212,6 +1284,24 @@ enum EventLoop {
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
+            }
+
+            // === Phase-6 6B (leg 2): untrusted-content taint for the causal graph ===
+            // Stamp `untrusted_content` on an AGENT-attributed read of an
+            // agent-content file (skill / hook / config / workflow) that carries
+            // the shipped PLAINTEXT prompt-injection markers, so the bridge below
+            // records `FileNode.untrustedContent=true` — the load-bearing leg-2
+            // signal the lethal-trifecta graph rule keys on. Reuses the Phase-5
+            // InjectionEvidenceWeld path (same FileContentEnricher source +
+            // InjectionMarkerScanner) — no second scanner. Read events only
+            // (`open`), agent-content allowlist only; plaintext-marker fidelity
+            // (obfuscation-resistant taint needs forensicate — see the weld header).
+            if enrichedEvent.eventCategory == .file,
+               enrichedEvent.eventAction == "open",
+               enrichedEvent.enrichments["ai_tool"] != nil || enrichedEvent.enrichments["ai_tool_child"] != nil,
+               let injPath = enrichedEvent.file?.path,
+               await state.injectionEvidenceWeld.readsInjectedContent(path: injPath) {
+                enrichedEvent.enrichments["untrusted_content"] = "true"
             }
 
             // === Behavioral scoring: process-level indicators ===

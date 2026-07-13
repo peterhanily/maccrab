@@ -1656,7 +1656,14 @@ final class AppState: ObservableObject {
     func syncAgentTracesConfig() {
         let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
         let path = configDir + "/" + AgentTracesConfigStore.filename
+        // v1.21.4 Phase-6 6A: the single "Receive agent traces" toggle
+        // drives the whole stack — set the master (agent_traces_enabled)
+        // and receiverEnabled together. The master is what the shipped
+        // sysext gates the producer + receiver on; without it the toggle
+        // would write receiverEnabled=true but the daemon's master stays
+        // off and nothing starts.
         let cfg = AgentTracesConfig(
+            enabled: agentTracesReceiverEnabled,
             receiverEnabled: agentTracesReceiverEnabled,
             port: 4318
         )

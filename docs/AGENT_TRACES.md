@@ -47,6 +47,44 @@ compromised agent lies in its spans — claims a `Read` while shelling out
 — the kernel events still expose the shell. The trace is for attribution
 and UX, never for trust.
 
+## AI-agent session attribution and the lethal trifecta
+
+The "lethal trifecta" — an agent that combines access to **private
+data**, exposure to **untrusted content**, and the ability to
+**communicate externally** — is a framing coined by Simon Willison. When
+those three capabilities converge in one agent session, a
+prompt-injection in the untrusted content can exfiltrate the private
+data. That is the risk this attribution machinery is meant to help you
+reason about.
+
+**What's defensible here.** MacCrab's contribution is the *attribution
+mechanism*, not the trifecta concept and not a general trifecta detector.
+As far as we know, it is the first macOS Endpoint-Security detector to
+attribute agent-session activity by **out-of-band W3C `traceparent`
+readback from the kernel exec-event environment**: the ES collector lifts
+the trace context an agent already injected into a child process's env at
+`execve` time, with no agent SDK, callback, wrapper, or reasoning-chain
+instrumentation on the agent side. The agent runs unmodified — attribution
+is kernel-grounded and needs no MacCrab-specific integration.
+
+**What this is not.** This is *not* an unqualified "first lethal-trifecta
+detector." App-layer / instrumented products already market trifecta
+detection on the endpoint (e.g. Certiv, Mar 2026), and eBPF +
+TLS-interception approaches exist on Linux. The narrow, honest claim is
+about *how* the session is attributed on macOS-ES — kernel exec-event
+`traceparent` readback — not about being first to name or catch the
+trifecta itself.
+
+**On-device dependency (stated plainly).** The high-confidence
+`traceparent` binding — and any "convergence" verdict that all three
+trifecta legs touched one attributed session — depends on the real agent
+harness actually propagating a W3C `traceparent` into its child
+processes' environment. That is an on-device runtime property of each
+agent, not something MacCrab can force. When no `traceparent` is present,
+attribution degrades to process-lineage tagging
+(`machine_agent_confidence: lineage`) — a less specific signal that does
+not drive high-severity rules on its own (see **Limitations**).
+
 ## Tamper-evidence (what "tamper-evident" means here)
 
 Two distinct records, two distinct guarantees — stated plainly so the

@@ -1656,6 +1656,17 @@ enum DaemonSetup {
             print("Warning: Unified Log collector unavailable")
         }
 
+        // v1.21.4 Phase-6 6A: fold the operator's agent_traces_config.json
+        // master (agent_traces_enabled) into ESCollector's env-seeded gate
+        // BEFORE the collector is constructed, so its ES handler block and
+        // the registry / receiver gates below all observe the
+        // config-reachable value. The shipped System Extension can't be
+        // handed MACCRAB_AGENT_TRACES, so this file field is the only way
+        // to reach the master on a release build. Loaded once here and
+        // reused for the receiver gate below.
+        let agentTracesCfg = AgentTracesConfigStore.loadEffective()
+        ESCollector.applyConfigMaster(agentTracesCfg.enabled)
+
         // Start ES collector (optional -- requires root + ES entitlement)
         // Falls back to eslogger proxy if entitlement is missing.
         var esloggerCollector: EsloggerCollector? = nil
@@ -1881,11 +1892,14 @@ enum DaemonSetup {
         // one — every install would see an empty snapshot.
         state.agentLineageService = agentLineageService
 
-        // v1.9 Agent Traces (PR-2): if the operator opted in via
-        // MACCRAB_AGENT_TRACES=1, allocate a TraceRegistry and spawn
-        // the consumer Task that drains ESCollector.traceBindings into
-        // it. The collector emits bind/evict signals only when the
-        // same env var is set, so an unconfigured daemon pays nothing.
+        // v1.9 Agent Traces (PR-2): if the operator opted in (via
+        // MACCRAB_AGENT_TRACES=1 on dev, OR agent_traces_enabled in
+        // agent_traces_config.json on a release sysext — folded into the
+        // gate by ESCollector.applyConfigMaster above), allocate a
+        // TraceRegistry and spawn the consumer Task that drains
+        // ESCollector.traceBindings into it. The collector emits
+        // bind/evict signals only when the same master is on, so an
+        // unconfigured daemon pays nothing.
         if ESCollector.isAgentTracesEnabled {
             let registry = TraceRegistry()
             state.traceRegistry = registry
@@ -1923,7 +1937,10 @@ enum DaemonSetup {
         // SIGHUP triggers a reload via SignalHandlers.
         let otlpEnvFlag = Foundation.ProcessInfo.processInfo
             .environment["MACCRAB_OTLP_RECEIVER"] == "1"
-        let cfg = AgentTracesConfigStore.loadEffective()
+        // v1.21.4 Phase-6 6A: reuse the config loaded above (its
+        // `enabled` master was already folded into
+        // ESCollector.isAgentTracesEnabled).
+        let cfg = agentTracesCfg
         let otlpEnabled = otlpEnvFlag || cfg.receiverEnabled
 
         if ESCollector.isAgentTracesEnabled, otlpEnabled {
@@ -1964,20 +1981,14 @@ enum DaemonSetup {
                 )
                 state.traceStore = nil
             }
-        } else if cfg.receiverEnabled || otlpEnvFlag {
-            // Operator wanted it on but agent-traces master flag is off.
-            // Surface the disagreement.
-            AgentTracesStatusStore.write(
-                AgentTracesStatus(
-                    running: false,
-                    port: cfg.port,
-                    lastError: "Receiver enabled but MACCRAB_AGENT_TRACES is not set",
-                    lastErrorAt: Date()
-                ),
-                to: supportDir
-            )
         } else {
-            // Neither config nor env asks for it — record stopped.
+            // v1.21.4 Phase-6 6A: the master is now config-reachable
+            // (agent_traces_enabled), and the dashboard toggle writes the
+            // master and receiverEnabled together — so the old
+            // "receiver enabled but MACCRAB_AGENT_TRACES not set" mismatch
+            // branch is no longer reachable from any supported path. Any
+            // remaining off-state (master off, or receiver not requested)
+            // simply records stopped.
             AgentTracesStatusStore.write(
                 AgentTracesStatus(running: false, port: cfg.port),
                 to: supportDir
@@ -2008,7 +2019,19 @@ enum DaemonSetup {
         let cfg = AgentTracesConfigStore.loadEffective()
         let envFlag = Foundation.ProcessInfo.processInfo
             .environment["MACCRAB_OTLP_RECEIVER"] == "1"
-        let shouldRun = ESCollector.isAgentTracesEnabled && (cfg.receiverEnabled || envFlag)
+        // v1.21.4 Phase-6 6A: compute the master from the CURRENT config
+        // (env seed OR agent_traces_enabled) rather than the boot-frozen
+        // `ESCollector.isAgentTracesEnabled` static, so the dashboard can
+        // start/stop the OTLP receiver live via SIGHUP. NOTE: this only
+        // gates the *receiver* — the *producer* (TraceRegistry + the ES
+        // emit gate) is allocated once at boot and can't be hot-toggled,
+        // so enabling the master on a running daemon needs a restart to
+        // start the producer. The receiver is independent (it ingests
+        // external OTLP) so it can come up here regardless.
+        let envMaster = Foundation.ProcessInfo.processInfo
+            .environment["MACCRAB_AGENT_TRACES"] == "1"
+        let master = ESCollector.agentTracesMasterEnabled(env: envMaster, config: cfg.enabled)
+        let shouldRun = master && (cfg.receiverEnabled || envFlag)
         let logger = Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
 
         // Already running — stop and restart only if port changed.

@@ -92,10 +92,10 @@ struct BuiltinCatalogCoverageTests {
 
     // MARK: - v1.19.0 (S7-8): rule-count consistency, Option A
 
-    /// Pin the built-in detection count. The public 485 figure (Sigma rules)
+    /// Pin the built-in detection count. The public 486 figure (Sigma rules)
     /// is a SEPARATE class; the app's Detection card and About string label
-    /// the built-ins explicitly ("485 rules + 46 built-in detections") so a
-    /// user never sees a bare Sigma+built-in sum (~531) contradicting 485.
+    /// the built-ins explicitly ("486 rules + 46 built-in detections") so a
+    /// user never sees a bare Sigma+built-in sum (~532) contradicting 486.
     /// If a built-in is added/removed, update release.json `builtins`, the
     /// app card label, and bump this expectation — prerelease-check asserts
     /// the release.json side agrees with this catalog.
@@ -104,16 +104,16 @@ struct BuiltinCatalogCoverageTests {
         #expect(BuiltinRuleCatalog.all.count == 46)
     }
 
-    /// The public Sigma total (438 single + 41 sequence + 6 graph = 485) is
+    /// The public Sigma total (438 single + 41 sequence + 7 graph = 486) is
     /// the composition surfaced on the website, README badge, and About
     /// string. Cross-check the pinned constants against the actual Rules/
     /// tree so a rule added without updating the published figure fails here.
-    @Test("Detection-card composition math: 438 + 41 + 6 = 485 Sigma, +46 built-in")
+    @Test("Detection-card composition math: 438 + 41 + 7 = 486 Sigma, +46 built-in")
     func sigmaCompositionMath() {
-        let single = 438, sequence = 41, graph = 6
+        let single = 438, sequence = 41, graph = 7
         let sigmaTotal = single + sequence + graph
-        #expect(sigmaTotal == 485)
-        #expect(sigmaTotal + BuiltinRuleCatalog.all.count == 531,
+        #expect(sigmaTotal == 486)
+        #expect(sigmaTotal + BuiltinRuleCatalog.all.count == 532,
                 "Sigma + built-in sum — the figure the app card must NOT show bare")
 
         // Cross-check the pinned constants against the on-disk Rules/ tree
