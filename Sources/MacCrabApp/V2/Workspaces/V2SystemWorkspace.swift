@@ -75,12 +75,55 @@ public struct V2SystemWorkspace: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 dataSourceCard
+                if heartbeat?.esSensorDegraded == true {
+                    sensorDegradedBanner
+                }
                 healthSummaryRow
                 collectorsTable
                 trustSubstrateCard
             }
             .padding(16)
         }
+    }
+
+    /// v1.21.4 Phase-1 D2: prominent advisory banner when the ES sensor is
+    /// dropping telemetry under a file-event flood (possible evasion). Shown
+    /// only while the heartbeat reports the degraded state; advisory only —
+    /// MacCrab never auto-throttles or auto-mutes in response.
+    private var sensorDegradedBanner: some View {
+        let isBenign = (heartbeat?.esSensorDegradedSeverity == "low")
+        let accent = isBenign ? V2Theme.warning : V2Theme.high
+        let title = isBenign
+            ? String(localized: "system.sensorDegradedBenignTitle", defaultValue: "Protection degraded (benign attribution)")
+            : String(localized: "system.sensorDegradedTitle", defaultValue: "Protection degraded — possible telemetry-drop evasion")
+        let detail = heartbeat?.esSensorDegradedDetail
+            ?? String(localized: "system.sensorDegradedDefaultDetail", defaultValue: "A file-event flood is spiking above baseline while the kernel is dropping ES messages, starving process/exec coverage.")
+        return HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(accent.opacity(0.18))
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(accent)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .scaledSystem(13, weight: .semibold)
+                        .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(isBenign
+                        ? String(localized: "system.sensorDegradedChipLow", defaultValue: "Advisory")
+                        : String(localized: "system.sensorDegradedChipHigh", defaultValue: "Degraded"),
+                        kind: isBenign ? .warning : .degraded)
+                }
+                Text(detail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
     }
 
     private var dataSourceCard: some View {

@@ -19,6 +19,193 @@ import SystemConfiguration
 // instead of queueing on the actor. The heartbeat write itself
 // stays on the critical fast path.
 
+// MARK: - v1.21.4 Phase-1 D2 — sensor-degraded / possible-evasion evaluator
+//
+// A file-write flood that spikes above baseline WHILE the kernel is dropping
+// ES messages (or the process/exec channel collapses) is the "cross-channel
+// blind-spot" signature: a benign-looking storm starving MacCrab's exec
+// attribution. This evaluator is PURE + deterministic (baseline in → decision
+// + baseline out) so it can be unit-tested with synthetic heartbeat inputs
+// without a live daemon. The rolling EWMA baseline is held LOCALLY by the
+// heartbeat closure in `DaemonTimers.start` (a locked box), NOT on DaemonState.
+//
+// Evasion advisory ONLY — nothing here auto-throttles or auto-mutes in
+// response (owner decision). It emits a HIGH meta-alert (LOW when the dominant
+// high-I/O writer is a known-benign signer, so coverage loss is never fully
+// silent).
+enum SensorDegradationEvaluator {
+
+    // Tunables — NEEDS-ON-DEVICE calibration against real host baselines.
+    /// EWMA smoothing factor over 30 s ticks (~3-4 tick memory).
+    static let ewmaAlpha = 0.3
+    /// A tick's file-event rate must exceed baseline × this to count as a spike.
+    static let fileSpikeMultiplier = 3.0
+    /// Absolute floor: below this many file events in a tick, no spike (guards
+    /// the divide-by-tiny-baseline FP on an idle box / at daemon start).
+    static let minFileEventsForSpike = 2000.0
+    /// Process/exec events collapse when they fall below baseline × this.
+    static let processCollapseRatio = 0.5
+    /// The process/exec baseline must have been at least this busy for a
+    /// "collapse" to mean anything — stops a near-idle box (trivial exec rate)
+    /// from tripping the collapse branch on ordinary noise. The kernel-drop
+    /// branch is unaffected.
+    static let minProcessBaselineForCollapse = 50.0
+
+    /// Rolling baseline carried tick-to-tick. `degradedActive` is the latch
+    /// that makes a sustained flood fire exactly once (rising-edge only).
+    struct Baseline: Equatable {
+        var fileEventEwma: Double = 0
+        var processEventEwma: Double = 0
+        var seeded: Bool = false
+        var degradedActive: Bool = false
+    }
+
+    /// Per-tick inputs, all derived from the D1/D4 monotonic counters' deltas.
+    struct Input {
+        /// File write-family events processed this tick (CREATE/WRITE/CLOSE/
+        /// RENAME/UNLINK delta).
+        var fileEventsThisTick: Double
+        /// Process/exec events reached-at-callback this tick (EXEC/FORK/EXIT
+        /// delta). Collapses precisely when the kernel drops exec messages.
+        var processEventsThisTick: Double
+        /// `es_kernel_dropped_total` delta over this tick.
+        var kernelDropDelta: UInt64
+        /// The dominant high-I/O writer this window is a known-benign signer.
+        var benignHighIOSigner: Bool
+    }
+
+    enum Outcome: Equatable {
+        case noAlert
+        /// Fire. `severity` is HIGH normally, LOW when attributed to a
+        /// benign signer; `benignAttribution` echoes the input for the
+        /// "(benign attribution)" wording.
+        case degraded(severity: Severity, benignAttribution: Bool)
+    }
+
+    struct Result: Equatable {
+        var outcome: Outcome
+        var newBaseline: Baseline
+        // Diagnostics for the alert description.
+        var fileRate: Double
+        var fileBaseline: Double
+        var processRate: Double
+        var processBaseline: Double
+        var kernelDropDelta: UInt64
+    }
+
+    /// Pure evaluation: given this tick's inputs and the prior baseline,
+    /// decide whether the sensor is degraded and return the advanced baseline.
+    static func evaluate(input: Input, baseline: Baseline) -> Result {
+        var b = baseline
+
+        // First observation: seed the baseline; a spike needs history.
+        guard b.seeded else {
+            b.fileEventEwma = input.fileEventsThisTick
+            b.processEventEwma = input.processEventsThisTick
+            b.seeded = true
+            return Result(
+                outcome: .noAlert, newBaseline: b,
+                fileRate: input.fileEventsThisTick, fileBaseline: input.fileEventsThisTick,
+                processRate: input.processEventsThisTick, processBaseline: input.processEventsThisTick,
+                kernelDropDelta: input.kernelDropDelta
+            )
+        }
+
+        let spike = input.fileEventsThisTick >= minFileEventsForSpike
+            && input.fileEventsThisTick > b.fileEventEwma * fileSpikeMultiplier
+        let processCollapse = b.processEventEwma >= minProcessBaselineForCollapse
+            && input.processEventsThisTick < b.processEventEwma * processCollapseRatio
+        let conjunction = spike && (input.kernelDropDelta > 0 || processCollapse)
+
+        var outcome: Outcome = .noAlert
+        if conjunction && !b.degradedActive {
+            // Rising edge — fire once. Benign signer downgrades HIGH → LOW.
+            let severity: Severity = input.benignHighIOSigner ? .low : .high
+            outcome = .degraded(severity: severity, benignAttribution: input.benignHighIOSigner)
+            b.degradedActive = true
+        }
+        // Re-arm only when the file-rate spike subsides (not merely when drops
+        // pause), so a sustained flood stays latched at exactly one fire.
+        if !spike { b.degradedActive = false }
+
+        // Don't learn from anomalies: freeze the baseline while spiking so a
+        // flood can't poison it (which would blind the next episode).
+        if !spike {
+            b.fileEventEwma = ewmaAlpha * input.fileEventsThisTick + (1 - ewmaAlpha) * b.fileEventEwma
+            b.processEventEwma = ewmaAlpha * input.processEventsThisTick + (1 - ewmaAlpha) * b.processEventEwma
+        }
+
+        return Result(
+            outcome: outcome, newBaseline: b,
+            fileRate: input.fileEventsThisTick, fileBaseline: baseline.fileEventEwma,
+            processRate: input.processEventsThisTick, processBaseline: baseline.processEventEwma,
+            kernelDropDelta: input.kernelDropDelta
+        )
+    }
+}
+
+/// Thread-safe holder for the D2 EWMA baseline + the previous cumulative
+/// counters (for the per-tick delta) — LOCAL to `DaemonTimers.start` (captured
+/// by the heartbeat closure), so overlapping heartbeat ticks (the design
+/// permits parallel ticks when one runs > 30 s) can't race the
+/// read-modify-write. NOT a DaemonState field.
+final class SensorDegradationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var baseline = SensorDegradationEvaluator.Baseline()
+    private var lastFileCumulative: UInt64 = 0
+    private var lastProcessCumulative: UInt64 = 0
+    private var lastKernelDropCumulative: UInt64 = 0
+    private var haveLastCumulative = false
+
+    /// Fold this tick's CUMULATIVE counters (monotonic since the last ES
+    /// client (re)create) into per-tick deltas, then evaluate. A client
+    /// reconnect resets the kernel counters to a lower value; a negative delta
+    /// is clamped to 0 so a restart isn't miscounted as a giant burst.
+    func step(
+        fileCumulative: UInt64,
+        processCumulative: UInt64,
+        kernelDropCumulative: UInt64,
+        benignHighIOSigner: Bool
+    ) -> SensorDegradationEvaluator.Result {
+        lock.lock(); defer { lock.unlock() }
+
+        // First call: no prior cumulative, so no real delta exists yet. Record
+        // and skip the evaluator so its baseline is seeded from the first REAL
+        // delta (next tick) rather than a fake zero — which would otherwise let
+        // any first delta ≥ minFileEventsForSpike spike against a zero baseline.
+        guard haveLastCumulative else {
+            lastFileCumulative = fileCumulative
+            lastProcessCumulative = processCumulative
+            lastKernelDropCumulative = kernelDropCumulative
+            haveLastCumulative = true
+            return SensorDegradationEvaluator.Result(
+                outcome: .noAlert, newBaseline: baseline,
+                fileRate: 0, fileBaseline: 0, processRate: 0, processBaseline: 0,
+                kernelDropDelta: 0
+            )
+        }
+
+        func delta(_ cur: UInt64, _ last: UInt64) -> UInt64 { cur >= last ? cur &- last : 0 }
+        let fileDelta = delta(fileCumulative, lastFileCumulative)
+        let processDelta = delta(processCumulative, lastProcessCumulative)
+        let dropDelta = delta(kernelDropCumulative, lastKernelDropCumulative)
+
+        lastFileCumulative = fileCumulative
+        lastProcessCumulative = processCumulative
+        lastKernelDropCumulative = kernelDropCumulative
+
+        let input = SensorDegradationEvaluator.Input(
+            fileEventsThisTick: Double(fileDelta),
+            processEventsThisTick: Double(processDelta),
+            kernelDropDelta: dropDelta,
+            benignHighIOSigner: benignHighIOSigner
+        )
+        let result = SensorDegradationEvaluator.evaluate(input: input, baseline: baseline)
+        baseline = result.newBaseline
+        return result
+    }
+}
+
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
@@ -1059,6 +1246,11 @@ enum DaemonTimers {
         // longer than 30 s the next tick simply runs in parallel, and
         // since each writeSnapshot guards itself, no actor backlog
         // forms.
+        // v1.21.4 Phase-1 D2: rolling baseline for the sensor-degraded
+        // meta-alert. Captured by the heartbeat closure below; lives here (not
+        // on DaemonState) and is lock-guarded so overlapping ticks are safe.
+        let sensorDegradation = SensorDegradationState()
+
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
         heartbeatTimer.setEventHandler {
@@ -1162,6 +1354,55 @@ enum DaemonTimers {
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
 
+            // v1.21.4 Phase-1 D2: sensor-degraded / possible-evasion meta-alert.
+            // Fold the D1/D4 cumulative counters into per-tick deltas and gate on
+            // the conjunction (file-event spike above rolling baseline AND
+            // (kernel drops > 0 OR process/exec channel collapse)). Advisory
+            // ONLY — never auto-throttles/auto-mutes (owner decision).
+            let fileEventsCumulative = Self.esFileEventTypeNames
+                .reduce(UInt64(0)) { $0 &+ (esProcessedByType[$1] ?? 0) }
+            let processEventsCumulative = Self.esProcessEventTypeNames
+                .reduce(UInt64(0)) { $0 &+ (esProcessedByType[$1] ?? 0) }
+            // Best-effort FP control: is the dominant recent file writer a
+            // known-benign high-I/O signer (Time Machine / Spotlight / Xcode /
+            // MacCrab)? Bounded query (off the hot path, 30 s cadence). Only
+            // downgrades severity — never silences the alert.
+            let benignHighIOSigner = await Self.dominantFileWriterIsBenign(state: state)
+            let sensorResult = sensorDegradation.step(
+                fileCumulative: fileEventsCumulative,
+                processCumulative: processEventsCumulative,
+                kernelDropCumulative: esGlobalDropped,
+                benignHighIOSigner: benignHighIOSigner
+            )
+            var esSensorDegraded = false
+            var esSensorDegradedSeverity = ""
+            var esSensorDegradedDetail = ""
+            if case let .degraded(severity, benignAttribution) = sensorResult.outcome {
+                esSensorDegraded = true
+                esSensorDegradedSeverity = severity.rawValue
+                let attribution = benignAttribution ? " (benign attribution)" : ""
+                // Plain interpolation (no String(format:) — avoids the CVarArg
+                // %@/%llu pitfalls this codebase has been bitten by).
+                esSensorDegradedDetail =
+                    "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(sensorResult.kernelDropDelta) ES messages were kernel-dropped and process/exec throughput fell to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
+                let alert = Alert(
+                    ruleId: "maccrab.self-defense.\(ESClientMonitor.ESHealthEvent.EventType.sensorDegraded.rawValue)",
+                    ruleTitle: "Sensor Degraded: possible telemetry-drop evasion",
+                    severity: severity,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "maccrabd",
+                    description: esSensorDegradedDetail,
+                    mitreTactics: "attack.defense_evasion",
+                    mitreTechniques: "attack.t1562.001",
+                    suppressed: false
+                )
+                // Route through AlertSink (not the raw alertStore.insert) so the
+                // meta-alert inherits dedup/suppression — the sink dedups on the
+                // shared ruleId, backstopping the evaluator's rising-edge latch.
+                _ = try? await state.alertSink.submit(alert: alert)
+            }
+
             // v1.18: engine LLM health — surfaces "enabled but unreachable /
             // misconfigured model" instead of failing silently. nil service
             // → not configured for the engine.
@@ -1213,6 +1454,11 @@ enum DaemonTimers {
                 "es_handler_p99_us": esHandlerP99Micros,
                 "es_processed_by_type": esProcessedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
+                // v1.21.4 Phase-1 D2: sensor-degraded advisory state for the
+                // ES Health surface + the menu-bar "protection degraded" flag.
+                "es_sensor_degraded": esSensorDegraded,
+                "es_sensor_degraded_severity": esSensorDegradedSeverity,
+                "es_sensor_degraded_detail": esSensorDegradedDetail,
                 // Wave 9D additions. `last_event_insert_error_kind` is
                 // an empty string when no event-insert error has been
                 // recorded since boot — JSONSerialization can't carry
@@ -1452,6 +1698,56 @@ enum DaemonTimers {
             artifactsPruneTimer: artifactsPruneTimer,
             inboxPoller: inboxPoller
         )
+    }
+
+    // MARK: - v1.21.4 Phase-1 D2 helpers
+
+    /// ES event-type names (as re-keyed in the heartbeat's `esProcessedByType`)
+    /// that make up the file write-family — the D2 flood numerator.
+    static let esFileEventTypeNames: [String] = [
+        "NOTIFY_CREATE", "NOTIFY_WRITE", "NOTIFY_CLOSE", "NOTIFY_RENAME", "NOTIFY_UNLINK",
+    ]
+
+    /// Process/exec event-type names — the channel a file flood can starve.
+    static let esProcessEventTypeNames: [String] = [
+        "NOTIFY_EXEC", "NOTIFY_FORK", "NOTIFY_EXIT",
+    ]
+
+    /// Known-benign high-I/O signing identifiers. When the dominant recent
+    /// file writer matches one of these, a sensor-degraded episode is
+    /// downgraded HIGH → LOW (still emitted). Matched as a substring of the
+    /// process's `signingId` so bundle-id variants (e.g. `com.apple.mdworker`,
+    /// `com.apple.mdworker_shared`) are covered.
+    static let benignHighIOSignerIDs: [String] = [
+        "com.apple.backupd",        // Time Machine
+        "com.apple.mdworker",       // Spotlight indexing
+        "com.apple.mds",            // Spotlight metadata server
+        "com.apple.Spotlight",
+        "com.apple.dt.Xcode",       // Xcode builds
+        "com.apple.CloudDocs",      // iCloud Drive sync
+        "com.apple.bird",           // CloudKit / iCloud daemon
+        "com.maccrab",              // MacCrab's own copies (belt-and-braces vs Mitigation A)
+    ]
+
+    /// Best-effort: is the dominant writer across the most recent file events a
+    /// known-benign high-I/O signer? Bounded (≤200 rows), off the hot path.
+    /// Returns false on any query error or when no signer dominates — the
+    /// safe default is "not benign" (keeps the alert at HIGH).
+    static func dominantFileWriterIsBenign(state: DaemonState) async -> Bool {
+        let recent = try? await state.eventStore.events(
+            before: nil, category: .file, pageSize: 200
+        )
+        guard let items = recent?.items, !items.isEmpty else { return false }
+        var counts: [String: Int] = [:]
+        for event in items {
+            let signer = event.process.codeSignature?.signingId ?? "(unsigned)"
+            counts[signer, default: 0] += 1
+        }
+        guard let (topSigner, topCount) = counts.max(by: { $0.value < $1.value }) else { return false }
+        // Require a clear majority so a benign signer that merely appears
+        // alongside the real flood-writer doesn't downgrade the alert.
+        guard Double(topCount) >= Double(items.count) * 0.5 else { return false }
+        return benignHighIOSignerIDs.contains { topSigner.contains($0) }
     }
 
     // MARK: - Inbox request handlers (v1.10.1)

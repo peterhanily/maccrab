@@ -483,7 +483,8 @@ enum DaemonSetup {
             honeyfileManager: honeyfileManager,
             honeyPromptManager: honeyPromptManager,
             fileContentEnricher: fileContentEnricher,
-            captureEnv: captureEnv
+            captureEnv: captureEnv,
+            telemetryGapSignal: TelemetryGapProbe(read: { collector?.esGlobalDropped() ?? 0 }).signal
         )
         ruleEngine = RuleEngine()
         Self.logBootStep(label: "after_enricher_engine", startedAt: startedAt)

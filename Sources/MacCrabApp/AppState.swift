@@ -74,6 +74,16 @@ final class AppState: ObservableObject {
         /// Nil for v1–v3 heartbeats.
         var eventsDropped: UInt64?
 
+        /// v1.21.4 Phase-1 D2: the ES sensor is in a degraded state — a
+        /// file-event flood is spiking above baseline while the kernel is
+        /// dropping messages (possible telemetry-drop evasion). Nil for
+        /// pre-v1.21.4 heartbeats. Advisory only. Drives the menu-bar
+        /// "protection degraded" flag + the ES Health banner.
+        var esSensorDegraded: Bool?
+        /// Human-readable D2 detail (drop counts + rates) for the ES Health
+        /// banner. Empty/nil when not degraded.
+        var esSensorDegradedDetail: String?
+
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
         /// is ~4× the 30s write cadence: tolerates one missed tick and
@@ -150,6 +160,9 @@ final class AppState: ObservableObject {
         if let snap = storageErrors, hasConcerningStorageError(snap) { return true }
         if let hb = heartbeat, hb.isStale { return true }
         if ruleTamper != nil { return true }
+        // v1.21.4 Phase-1 D2: the ES sensor is losing telemetry to a
+        // possible-evasion file-flood — surface it as degraded protection.
+        if let hb = heartbeat, hb.esSensorDegraded == true { return true }
         return false
     }
 
@@ -323,6 +336,9 @@ final class AppState: ObservableObject {
         var richCollectorHealth: [CollectorHealthEntry]? = collectorHealth
         var richDropped: UInt64? = (json["events_dropped"] as? UInt64)
             ?? UInt64(json["events_dropped"] as? Int ?? 0)
+        // v1.21.4 Phase-1 D2: sensor-degraded advisory (rich-file only).
+        var richSensorDegraded: Bool? = json["es_sensor_degraded"] as? Bool
+        var richSensorDegradedDetail: String? = json["es_sensor_degraded_detail"] as? String
         let richPath = "/Library/Application Support/MacCrab/heartbeat_rich.json"
         if let richData = try? Data(contentsOf: URL(fileURLWithPath: richPath)),
            let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any] {
@@ -355,6 +371,12 @@ final class AppState: ObservableObject {
             } else if let dropped = richJSON["events_dropped"] as? Int {
                 richDropped = UInt64(dropped)
             }
+            if let degraded = richJSON["es_sensor_degraded"] as? Bool {
+                richSensorDegraded = degraded
+            }
+            if let detail = richJSON["es_sensor_degraded_detail"] as? String, !detail.isEmpty {
+                richSensorDegradedDetail = detail
+            }
         }
 
         var snapshot = HeartbeatSnapshot(
@@ -369,6 +391,8 @@ final class AppState: ObservableObject {
             collectorHealth: richCollectorHealth,
             eventsDropped: richDropped
         )
+        snapshot.esSensorDegraded = richSensorDegraded
+        snapshot.esSensorDegradedDetail = richSensorDegradedDetail
         // v1.12.0 RC15: pull the boot-phase tracker out of the payload
         // when it's there. Older daemons (v1.11.x and earlier) won't
         // write this field; snapshot.isReady falls back to liveness for

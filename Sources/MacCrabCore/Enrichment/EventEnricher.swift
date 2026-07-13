@@ -60,6 +60,13 @@ public actor EventEnricher {
     /// daemon startup by `MACCRAB_CAPTURE_ENV=1`.
     private let captureEnv: Bool
 
+    /// Telemetry-gap gate. Returns `true` when a kernel drop (ES per-client
+    /// queue backpressure) is active for the current window. Nil = no gap
+    /// signal wired (tests + non-daemon callers), so the honest-degradation
+    /// path never fires and unresolved orphans stay `.unknown`. Wired in
+    /// `DaemonSetup` to a `TelemetryGapProbe` over `ESCollector.esGlobalDropped()`.
+    private let telemetryGapSignal: (@Sendable () -> Bool)?
+
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
         subsystem: "com.maccrab.core",
@@ -92,7 +99,8 @@ public actor EventEnricher {
         honeyPromptManager: HoneyPromptManager? = nil,
         fileContentEnricher: FileContentEnricher? = nil,
         captureEnv: Bool = false,
-        pruneInterval: UInt64 = 5000
+        pruneInterval: UInt64 = 5000,
+        telemetryGapSignal: (@Sendable () -> Bool)? = nil
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
@@ -102,6 +110,7 @@ public actor EventEnricher {
         self.fileContentEnricher = fileContentEnricher
         self.captureEnv = captureEnv
         self.pruneInterval = pruneInterval
+        self.telemetryGapSignal = telemetryGapSignal
     }
 
     // MARK: Enrichment
@@ -179,6 +188,7 @@ public actor EventEnricher {
         // anything the collector already set.
         let session = proc.session
             ?? SessionEnricher.enrich(pid: proc.pid, ancestors: ancestors.isEmpty ? proc.ancestors : ancestors)
+            ?? telemetryGapSession(ancestors: ancestors.isEmpty ? proc.ancestors : ancestors)
 
         // --- 4. Build enriched ProcessInfo ---
         // v1.12.6 Wave 9I: resolve uid → user_name when the collector
@@ -313,6 +323,23 @@ public actor EventEnricher {
         }
 
         return enrichedEvent
+    }
+
+    // MARK: Graceful attribution (telemetry gap)
+
+    /// Honest-degradation fallback for the session/launch-source resolution.
+    ///
+    /// Reached ONLY when `SessionEnricher` could not classify the process
+    /// (nil result ⇒ empty ancestry). Returns a `.telemetryGap` session IFF a
+    /// kernel telemetry gap is active for the current window; otherwise nil so
+    /// the event stays a silent NULL / `.unknown`. Both gates are required —
+    /// empty ancestry AND an active drop — so a benign orphan (double-fork /
+    /// setsid) during a no-drop window is NOT mislabelled. Mirrors
+    /// `DeliveryProvenanceWeld.Decision.degradedMissingInput`
+    /// (DeliveryProvenanceWeld.swift:156-160): degrade honestly rather than guess.
+    private func telemetryGapSession(ancestors: [ProcessAncestor]) -> SessionInfo? {
+        guard ancestors.isEmpty, telemetryGapSignal?() == true else { return nil }
+        return SessionInfo(launchSource: .telemetryGap)
     }
 
     // MARK: Hashing
@@ -452,5 +479,46 @@ private final class UserNameCache: @unchecked Sendable {
         entries[uid] = resolved
         lock.unlock()
         return resolved
+    }
+}
+
+// MARK: - TelemetryGapProbe
+
+/// Rolling kernel-drop probe backing `EventEnricher`'s telemetry-gap gate.
+///
+/// Holds the last-observed cumulative kernel-drop count and reports `true`
+/// when it has advanced since the previous poll — i.e. the ES per-client queue
+/// is actively shedding messages for the current window. `read` pulls the live
+/// count (`ESCollector.esGlobalDropped()`) and is nil-safe at the call site, so
+/// a non-root / no-collector build simply reports no gap. One `NSLock` guards
+/// the rolling baseline (the enrichment actor polls it). `@unchecked Sendable`
+/// so `.signal` can be handed to the actor as a plain `@Sendable () -> Bool`
+/// even though `read` captures the daemon's collector handle.
+public final class TelemetryGapProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastDropCount: UInt64 = 0
+    private let read: () -> UInt64
+
+    /// - Parameter read: pulls the current cumulative kernel-drop count.
+    ///   Called once per poll; must be cheap and non-blocking.
+    public init(read: @escaping () -> UInt64) {
+        self.read = read
+    }
+
+    /// `true` when the drop count has advanced since the previous poll.
+    /// Advances the rolling baseline as a side effect so each increase is
+    /// reported exactly once.
+    public func gapActive() -> Bool {
+        let current = read()
+        lock.lock()
+        defer { lock.unlock() }
+        let increased = current > lastDropCount
+        lastDropCount = current
+        return increased
+    }
+
+    /// A `@Sendable` gap signal suitable for `EventEnricher(telemetryGapSignal:)`.
+    public var signal: @Sendable () -> Bool {
+        { [self] in self.gapActive() }
     }
 }

@@ -245,6 +245,73 @@ public final class ESCollector: @unchecked Sendable {
         "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer",
     ]
 
+    // MARK: - Observer-effect mute (v1.21.4 Phase-1 Mitigation A)
+    //
+    // MacCrab's OWN forensic DB copies (LiveDBSnapshot's sqlite-backup copy,
+    // the broker's host-owned snapshot dir) and its stores/config writes
+    // generate a file-event storm INTO MacCrab-owned directories. `muteSelf`
+    // only silences the daemon-as-INITIATOR; the copies are performed by
+    // SIBLING processes (MacCrabApp uid 501, maccrabctl, the broker host), so
+    // an initiator-path mute (`es_mute_path_literal`/`_prefix`) can't reach
+    // them. We mute by TARGET path instead: any write-family event whose
+    // destination is under a MacCrab-owned dir is suppressed regardless of who
+    // initiates it. Applied via `es_mute_path_events` restricted to the
+    // write-family types ONLY (below) — crucially NOT NOTIFY_OPEN, so decoy /
+    // honey-prompt reads under `.../MacCrab/decoys/` still emit (the
+    // credential-read allowlist above depends on that OPEN emission).
+    //
+    // ES_MUTE_PATH_TYPE_TARGET_PREFIX is API_AVAILABLE(macos(13.0)) — exactly
+    // the deploy floor — and es_mute_path_events is macOS 12.0+, so no
+    // @available guard is needed. NEEDS-ON-DEVICE: confirm (a) the enum value
+    // is honored at the 13.0 floor and (b) target muting does not perturb the
+    // D1 seq_num accounting (mutes should suppress BEFORE sequencing — see the
+    // D1 zero-FP caveat).
+
+    /// TARGET-path prefixes whose write-family file events are muted: the
+    /// root support dir (root daemon's DB + broker host-owned snapshot dirs +
+    /// root-side Cases). Per-user home Cases roots (where the dashboard writes
+    /// forensic snapshots) are added dynamically in `muteNoisyPaths()` by
+    /// walking `/Users/*`, mirroring `AgentTracesConfig.findUserHomeConfigPath`.
+    private static let mutedTargetPrefixes: [String] = [
+        "/Library/Application Support/MacCrab/",
+    ]
+
+    /// Write-family ES event types muted on the target prefixes above.
+    /// Deliberately excludes NOTIFY_OPEN (decoy reads must still emit). All
+    /// five are in ESClient.h's target-muting supported-event list.
+    static let forensicCopyMutedEventTypes: [es_event_type_t] = [
+        ES_EVENT_TYPE_NOTIFY_CREATE,
+        ES_EVENT_TYPE_NOTIFY_WRITE,
+        ES_EVENT_TYPE_NOTIFY_CLOSE,
+        ES_EVENT_TYPE_NOTIFY_RENAME,
+        ES_EVENT_TYPE_NOTIFY_UNLINK,
+    ]
+
+    /// Pure builder for the observer-effect TARGET-mute prefixes: the fixed
+    /// root support dir plus each supplied user home's MacCrab dir (the
+    /// dashboard writes forensic Cases into the console user's home, which the
+    /// root sysext doesn't know at compile time). Split out so the path logic
+    /// is unit-testable without a live ES client.
+    static func forensicCopyMuteTargetPrefixes(userHomes: [String]) -> [String] {
+        var prefixes = mutedTargetPrefixes
+        for home in userHomes {
+            let trimmed = home.hasSuffix("/") ? String(home.dropLast()) : home
+            prefixes.append(trimmed + "/Library/Application Support/MacCrab/")
+        }
+        return prefixes
+    }
+
+    /// Real user home dirs under `/Users` (skips `Shared` + dotdirs), used to
+    /// reach the per-user forensic Cases snapshot roots from the root sysext.
+    private static func realUserHomes() -> [String] {
+        let fm = FileManager.default
+        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return [] }
+        return users
+            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
+            .map { "/Users/\($0)" }
+            .filter { var isDir: ObjCBool = false; return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue }
+    }
+
     // MARK: - Credential-read allowlist (v1.17.4)
     //
     // The ONLY paths for which a NOTIFY_OPEN emits an Event. The OPEN stream
@@ -619,6 +686,38 @@ public final class ESCollector: @unchecked Sendable {
                 let rc = es_mute_path_literal(client, path)
                 if rc != ES_RETURN_SUCCESS {
                     logger.warning("Failed to mute path literal: \(path)")
+                }
+            }
+        }
+
+        // v1.21.4 Phase-1 Mitigation A: mute MacCrab's own forensic-copy
+        // destinations by TARGET prefix, write-family events only. See the
+        // "Observer-effect mute" section above for the design + the two
+        // needs-on-device caveats.
+        muteForensicCopyTargets(client: client)
+    }
+
+    /// Suppress the write-family file-event storm generated when ANY process
+    /// copies data INTO a MacCrab-owned directory (forensic DB snapshots,
+    /// store/config writes) — the observer-effect fix. Uses target-path
+    /// muting so it catches sibling-process copies that `muteSelf` (initiator
+    /// muting) cannot. NOTIFY_OPEN is intentionally NOT muted so decoy reads
+    /// still surface.
+    private func muteForensicCopyTargets(client: OpaquePointer) {
+        let prefixes = Self.forensicCopyMuteTargetPrefixes(userHomes: Self.realUserHomes())
+        Self.forensicCopyMutedEventTypes.withUnsafeBufferPointer { eventsBuf in
+            for prefix in prefixes {
+                let rc = es_mute_path_events(
+                    client,
+                    prefix,
+                    ES_MUTE_PATH_TYPE_TARGET_PREFIX,
+                    eventsBuf.baseAddress!,
+                    eventsBuf.count
+                )
+                if rc != ES_RETURN_SUCCESS {
+                    logger.warning("Failed to target-mute forensic-copy prefix: \(prefix) (rc=\(rc.rawValue))")
+                } else {
+                    logger.info("ESCollector target-muted write-family events under \(prefix)")
                 }
             }
         }

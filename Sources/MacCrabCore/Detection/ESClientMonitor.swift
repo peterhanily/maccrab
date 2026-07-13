@@ -38,6 +38,16 @@ public actor ESClientMonitor {
             case slotExhaustion = "es_slot_exhaustion"
             case securityDaemonRestarted = "security_daemon_restarted"
             case healthy = "es_healthy"
+            // v1.21.4 Phase-1 D2: the ES sensor is losing telemetry — a
+            // file-event flood is spiking above baseline WHILE the kernel is
+            // dropping messages (or the process/exec channel is collapsing),
+            // i.e. a possible telemetry-drop evasion. Unlike the daemon-liveness
+            // cases above, this is NOT emitted through `events` (the D2 meta-alert
+            // is routed via AlertSink from the heartbeat tick so it inherits
+            // dedup/suppression); the case exists so the alert's synthetic
+            // `maccrab.self-defense.sensor_degraded` ruleId and the ES Health
+            // surface share one canonical type string.
+            case sensorDegraded = "sensor_degraded"
         }
     }
 

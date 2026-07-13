@@ -135,6 +135,9 @@ struct V2HeartbeatSnapshotTests {
             collectors: [],
             payloadTruncatedTotal: 0,
             esloggerDroppedTotal: 0,
+            esSensorDegraded: false,
+            esSensorDegradedDetail: nil,
+            esSensorDegradedSeverity: nil,
             llm: nil,
             prevention: nil
         )

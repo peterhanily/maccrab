@@ -65,6 +65,10 @@ public enum TraceCorrelator {
     ///   - aiToolForPath: closure mapping an executable path to an
     ///     AIToolType — typically `AIToolRegistry.isAITool`. Used only by
     ///     the lineage fallback.
+    ///   - telemetryGapActive: true when a kernel telemetry gap (ES per-client
+    ///     queue backpressure) is active for this event's window. Default false
+    ///     so existing callers are unchanged. Only consulted after both
+    ///     attribution passes miss — see the honest-degradation branch below.
     /// - Returns: a `TraceCorrelation` on a hit, or nil. Nil is the common
     ///   case (most processes are not under an AI agent).
     public static func correlate(
@@ -72,7 +76,8 @@ public enum TraceCorrelator {
         ancestors: [ProcessAncestor],
         registry: TraceRegistry,
         ancestorIdentityResolver: (ProcessAncestor) -> ProcessIdentity?,
-        aiToolForPath: (String) -> AIToolType?
+        aiToolForPath: (String) -> AIToolType?,
+        telemetryGapActive: Bool = false
     ) async -> TraceCorrelation? {
         // Pass 1: direct + lineage walk against TraceRegistry.
         if let lookup = await registry.lookup(
@@ -115,6 +120,31 @@ public enum TraceCorrelator {
                 matchedPid: identity.pid,
                 matchedAncestorPid: ancestor.pid,
                 hopCount: hopIndex + 1
+            )
+            return TraceCorrelation(
+                evidence: evidence,
+                enrichments: flatten(evidence)
+            )
+        }
+
+        // Honest degradation: neither pass resolved an attribution AND the
+        // ancestor chain is empty AND a kernel telemetry gap is active for this
+        // window — emit a telemetry-gap evidence rather than a silent nil so a
+        // drop-induced attribution loss is distinguishable from a benign
+        // orphan. Gated on BOTH empty ancestry and the active-drop signal
+        // (mirrors the EventEnricher session gate). This evidence asserts no
+        // agent — confidence `.telemetryGap` must never drive a rule. Default-
+        // off (`telemetryGapActive` defaults false), so existing callers are
+        // unchanged and this only fires once the daemon wires the gap signal.
+        if telemetryGapActive, ancestors.isEmpty {
+            let evidence = AttributionEvidence(
+                source: .telemetryGap,
+                confidence: .telemetryGap,
+                agentTool: nil,
+                traceId: nil,
+                spanId: nil,
+                parentSpanId: nil,
+                matchedPid: identity.pid
             )
             return TraceCorrelation(
                 evidence: evidence,

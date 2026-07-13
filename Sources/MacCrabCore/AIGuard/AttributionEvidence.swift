@@ -39,6 +39,10 @@ public struct AttributionEvidence: Codable, Sendable, Hashable {
         case traceparentEnv = "traceparent_env"
         /// Lineage walk found an ancestor pid bound to a known agent.
         case lineageRegistry = "lineage_registry"
+        /// Attribution was UNRESOLVED because a kernel telemetry gap was active
+        /// for the event's window and the ancestor chain was empty — an honest
+        /// "we lost the lineage to a drop" marker, not a real attribution.
+        case telemetryGap = "telemetry_gap"
         /// Decoder fallback for any unknown future Source value.
         case unknown = "unknown"
     }
@@ -55,6 +59,11 @@ public struct AttributionEvidence: Codable, Sendable, Hashable {
         /// Backed by ancestor lineage match against AIToolRegistry. Eligible
         /// to drive medium-severity rules.
         case lineage
+        /// Not attribution at all: lineage/session was unresolved and a kernel
+        /// telemetry gap was active for the window. Emitted so a drop-induced
+        /// attribution loss is honest rather than a silent nil. Must NOT drive
+        /// any rule (it asserts nothing about the actor).
+        case telemetryGap = "telemetry_gap"
         /// Decoder fallback for any unknown future Confidence value.
         case unknown
     }

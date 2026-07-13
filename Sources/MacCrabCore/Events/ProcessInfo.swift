@@ -211,6 +211,14 @@ public enum LaunchSource: String, Codable, Sendable, Hashable, CaseIterable {
     case cron
     case xpc
     case applescript
+    /// Attribution was UNRESOLVED and this is because a kernel telemetry gap
+    /// (ES per-client-queue backpressure) was active for the event's window
+    /// while the ancestor chain came back empty. Distinguishes an honest
+    /// "the lineage was lost to a drop" from a benign orphan (`.unknown`).
+    /// The raw value is the sentinel written to `events.session_launch_source`
+    /// (see EventStore column 44). Every reader in-tree consumes LaunchSource
+    /// via `.rawValue` (no exhaustive switch), so this case is additive.
+    case telemetryGap = "telemetry_gap"
     case unknown
 }
 

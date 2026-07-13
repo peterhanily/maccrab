@@ -22,6 +22,14 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     // payload-cap-firing rate and ES-collector drop rate.
     public let payloadTruncatedTotal: Int
     public let esloggerDroppedTotal: Int
+    /// v1.21.4 Phase-1 D2: ES sensor-degraded advisory. True when a file-event
+    /// flood is spiking above baseline while the kernel is dropping messages
+    /// (possible telemetry-drop evasion). `esSensorDegradedDetail` carries the
+    /// drop counts + rates; `esSensorDegradedSeverity` is "high" or "low"
+    /// (low = attributed to a known-benign high-I/O signer). Advisory only.
+    public let esSensorDegraded: Bool
+    public let esSensorDegradedDetail: String?
+    public let esSensorDegradedSeverity: String?
     /// v1.18: engine-side LLM health (from the `llm` block). nil when the
     /// heartbeat predates this field. `configured == false` means the engine
     /// has no LLM backend wired; configured-but-not-healthy means enabled
@@ -163,6 +171,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             // rather than crash.
             payloadTruncatedTotal: raw["payload_truncated_total"] as? Int ?? 0,
             esloggerDroppedTotal: raw["eslogger_dropped_total"] as? Int ?? 0,
+            // Phase-1 D2 — defaults to "not degraded" on legacy heartbeats.
+            esSensorDegraded: raw["es_sensor_degraded"] as? Bool ?? false,
+            esSensorDegradedDetail: (raw["es_sensor_degraded_detail"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            esSensorDegradedSeverity: (raw["es_sensor_degraded_severity"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             llm: llm,
             prevention: prevention
         )

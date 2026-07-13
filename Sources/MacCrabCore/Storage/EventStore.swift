@@ -842,7 +842,11 @@ public actor EventStore {
         }
         // 44: session_launch_source -- LaunchSource raw value ("ssh",
         // "terminal", "launchd", ...) from SessionEnricher; nil when
-        // the enricher hasn't classified the parent chain yet.
+        // the enricher hasn't classified the parent chain yet. The
+        // "telemetry_gap" sentinel (LaunchSource.telemetryGap) is the
+        // honest-degradation value written when attribution was UNRESOLVED
+        // because a kernel telemetry gap was active for the event's window
+        // (EventEnricher.telemetryGapSession) — distinct from a silent NULL.
         bindTextOrNull(stmt, index: 44, value: event.process.session?.launchSource?.rawValue)
         // 45: tcc_decision -- "granted" / "denied". TCCInfo.allowed
         // (Bool) flattened to a string so the Sigma rule can compare
