@@ -206,6 +206,45 @@ final class SensorDegradationState: @unchecked Sendable {
     }
 }
 
+// MARK: - v1.21.4 Phase-2 D3 — coverage-canary two-point verdict
+//
+// The watchdog spawns `/usr/bin/true` with a per-run nonce, then checks two
+// independent points: (1) did the ES callback SEE the exec, and (2) did it
+// land in `events.db`. This PURE evaluator turns those two booleans into a
+// verdict that NAMES the failing stage — so a coverage gap is attributed to
+// the kernel/ingest path vs the store/eviction path, not reported as an
+// undifferentiated "we lost it". Deterministic → unit-tested without a spawn.
+enum CoverageCanaryEvaluator {
+    enum Verdict: Equatable {
+        /// Seen at the callback AND present in the DB — full coverage.
+        case healthy
+        /// Missing at the ES callback ⇒ the kernel/ingest stage dropped it
+        /// (per-client-queue backpressure — the D1 blind-spot made visible).
+        case kernelGap
+        /// Seen at the callback but absent from the DB ⇒ the store/eviction
+        /// stage lost it (retention sweep evicted the row, or an insert gap).
+        case evictionGap
+
+        /// Human-readable stage name for the alert (nil when healthy).
+        var stageLabel: String? {
+            switch self {
+            case .healthy:     return nil
+            case .kernelGap:   return "kernel/ingest"
+            case .evictionGap: return "store/eviction"
+            }
+        }
+    }
+
+    /// Two-point verdict. A miss at the callback dominates: if the exec never
+    /// reached us, the DB result is moot (and a lone DB hit without a callback
+    /// sighting would be a timing artifact of the recognizer window, not real
+    /// coverage), so `seenAtCallback == false` is always a kernel gap.
+    static func verdict(seenAtCallback: Bool, foundInDB: Bool) -> Verdict {
+        guard seenAtCallback else { return .kernelGap }
+        return foundInDB ? .healthy : .evictionGap
+    }
+}
+
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
@@ -252,6 +291,11 @@ enum DaemonTimers {
         /// Handles: flush-request-*, suppress-alert-*, unsuppress-alert-*,
         /// delete-alert-*, suppress-campaign-* (v1.10.1).
         let inboxPoller: DispatchSourceTimer
+        /// v1.21.4 Phase-2 (D3): jittered coverage-canary watchdog. Self-
+        /// reschedules ~5-15 min out on each fire (see start()). Retained here
+        /// so the DispatchSourceTimer isn't ARC-deallocated on return from
+        /// start() (same reason as the prune timers above).
+        let coverageCanaryTimer: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -928,7 +972,8 @@ enum DaemonTimers {
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
                     alertsRetentionDays: alertsRetention,
-                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB)
+                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB),
+                    processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
                 )
             }
         }
@@ -981,7 +1026,8 @@ enum DaemonTimers {
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
                     alertsRetentionDays: alertsRetention,
-                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB)
+                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB),
+                    processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
                 )
             }
         }
@@ -1679,6 +1725,24 @@ enum DaemonTimers {
         }
         inboxPoller.resume()
 
+        // v1.21.4 Phase-2 (D3): coverage-canary watchdog. On a jittered ~5-15 min
+        // interval, spawn a benign probe exec and verify it reaches both the ES
+        // callback and events.db (see runCoverageCanary). Jitter (a fresh random
+        // deadline re-armed on each fire, one-shot repeating: .never) so the
+        // probe cadence isn't predictable and doesn't phase-lock with other
+        // sweeps. First fire is already 5-15 min out, clear of the 60 s warm-up.
+        let coverageCanaryTimer = DispatchSource.makeTimerSource(queue: .global())
+        // One-shot (repeating: .never), re-armed to a fresh random deadline on
+        // each fire — this is the jitter. `canaryJitterSeconds()` returns 5-15 min.
+        coverageCanaryTimer.schedule(deadline: .now() + canaryJitterSeconds(), repeating: .never)
+        coverageCanaryTimer.setEventHandler {
+            // Re-arm for the next jittered fire immediately; the probe itself
+            // runs off-timer in a Task (spawn NEVER happens in the ES callback).
+            coverageCanaryTimer.schedule(deadline: .now() + canaryJitterSeconds(), repeating: .never)
+            Task { await runCoverageCanary(state: state) }
+        }
+        coverageCanaryTimer.resume()
+
         return Handles(
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
@@ -1696,7 +1760,8 @@ enum DaemonTimers {
             tracegraphPruneTimer: tracegraphPruneTimer,
             tracesPruneTimer: tracesPruneTimer,
             artifactsPruneTimer: artifactsPruneTimer,
-            inboxPoller: inboxPoller
+            inboxPoller: inboxPoller,
+            coverageCanaryTimer: coverageCanaryTimer
         )
     }
 
@@ -1748,6 +1813,142 @@ enum DaemonTimers {
         // alongside the real flood-writer doesn't downgrade the alert.
         guard Double(topCount) >= Double(items.count) * 0.5 else { return false }
         return benignHighIOSignerIDs.contains { topSigner.contains($0) }
+    }
+
+    // MARK: - v1.21.4 Phase-2 (D3) coverage-canary watchdog
+
+    /// Jittered probe interval bounds (seconds): 5-15 min, like the sweep timers.
+    static let canaryMinIntervalSeconds: Double = 300
+    static let canaryMaxIntervalSeconds: Double = 900
+
+    /// A fresh random interval in [min, max]. The unpredictable cadence keeps the
+    /// probe from phase-locking with other sweeps and from being trivially timed
+    /// around by an adversary. First fire is already ≥5 min out, clear of warm-up.
+    static func canaryJitterSeconds() -> Double {
+        Double.random(in: canaryMinIntervalSeconds...canaryMaxIntervalSeconds)
+    }
+
+    /// Seconds to wait after the probe spawn before checking coverage — long
+    /// enough for the ES callback to latch and the async DB insert to flush.
+    static let canarySettleSeconds: UInt64 = 20
+    /// Extra DB re-checks (spaced by canaryDBRecheckSeconds) before concluding a
+    /// store/eviction gap — tolerates insert-batch latency without crying wolf.
+    static let canaryDBRecheckAttempts = 3
+    static let canaryDBRecheckSeconds: UInt64 = 5
+
+    /// One coverage-canary cycle: spawn a benign probe exec, then verify it
+    /// reached BOTH the ES callback and events.db, and on a gap emit a
+    /// stage-naming health alert via AlertSink (advisory — nothing auto-acts).
+    ///
+    /// Safety invariants (see CoverageCanary): the probe is `/usr/bin/true` +
+    /// a neutral marker, so it trips no rule and no self-defense check; the
+    /// exec is suppressed in NoiseFilter as belt-and-braces; and the spawn
+    /// happens HERE (the timer task), never in the ES callback.
+    static func runCoverageCanary(state: DaemonState) async {
+        // No ES client (dev non-root fallback) ⇒ nothing to probe.
+        guard let collector = state.collector else { return }
+
+        let nonce = CoverageCanary.makeNonce()
+        collector.armCanaryNonce(nonce)
+        defer { collector.disarmCanaryNonce(nonce) }
+
+        let spawnedAt = Date()
+        guard spawnCanaryProbe(nonce: nonce) else {
+            // A failed spawn is a local error, not a coverage gap — don't alert.
+            print("[D3] coverage-canary spawn failed")
+            return
+        }
+
+        // Point 1: settle, then read the callback sighting.
+        try? await Task.sleep(nanoseconds: canarySettleSeconds * 1_000_000_000)
+        let seenAtCallback = collector.canarySeenAtCallback(nonce)
+
+        // Point 2: look for the exec in events.db (command line carries the
+        // nonce). Re-check a few times so a slow insert batch isn't misread as
+        // an eviction gap. Window starts slightly before the spawn.
+        let since = spawnedAt.addingTimeInterval(-30)
+        var foundInDB = await canaryPresentInDB(state: state, nonce: nonce, since: since)
+        var attempt = 0
+        while !foundInDB && attempt < canaryDBRecheckAttempts {
+            try? await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
+            foundInDB = await canaryPresentInDB(state: state, nonce: nonce, since: since)
+            attempt += 1
+        }
+
+        let verdict = CoverageCanaryEvaluator.verdict(
+            seenAtCallback: seenAtCallback, foundInDB: foundInDB
+        )
+        guard verdict != .healthy, let stage = verdict.stageLabel else { return }
+
+        // A kernel/ingest gap is active telemetry loss (possible evasion); an
+        // eviction gap is retention pressure — surface both, weighted accordingly.
+        let severity: Severity = (verdict == .kernelGap) ? .high : .medium
+        let description =
+            "Coverage canary lost at the \(stage) stage: a self-generated probe exec "
+            + (verdict == .kernelGap
+               ? "never reached the ES callback — the kernel/ingest path dropped it (per-client-queue backpressure; the same blind-spot a file-write flood exploits). "
+               : "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). ")
+            + "MacCrab's own telemetry coverage is degraded; verify what is generating load or storage pressure."
+
+        let alert = Alert(
+            // Synthetic self-defense ruleId (same convention as the D2
+            // sensor-degraded meta-alert). NOT a Rules/ entry.
+            ruleId: "maccrab.self-defense.coverage_gap",
+            ruleTitle: "Coverage Gap: telemetry canary lost at \(stage)",
+            severity: severity,
+            eventId: UUID().uuidString,
+            processPath: CoverageCanary.spawnBinaryPath,
+            processName: "maccrabd",
+            description: description,
+            mitreTactics: "attack.defense_evasion",
+            mitreTechniques: "attack.t1562.001",
+            suppressed: false
+        )
+        // Route via AlertSink so it inherits dedup/suppression (backstops the
+        // per-cycle cadence if a gap persists across several probes).
+        _ = try? await state.alertSink.submit(alert: alert)
+    }
+
+    /// Store-side half of the two-point check: is an event carrying `nonce`
+    /// present in events.db? Uses the FTS/command-line search the hunt tool
+    /// uses. Any query error ⇒ treated as "not found" (the recheck loop covers
+    /// transient errors; a persistent one degrades to an eviction-gap report).
+    static func canaryPresentInDB(state: DaemonState, nonce: String, since: Date) async -> Bool {
+        let hits = try? await state.eventStore.search(text: nonce, since: since, limit: 1)
+        return (hits?.isEmpty == false)
+    }
+
+    /// posix_spawn the benign probe as `/usr/bin/env /usr/bin/true <nonce>`,
+    /// detached, with a minimal environment. The `env` layer is the muteSelf
+    /// work-around (see CoverageCanary): it makes the OBSERVED `/usr/bin/true`
+    /// exec be initiated by `env` (unmuted) rather than the daemon (muted).
+    /// Reaps the child so it can't linger as a zombie. Returns whether the
+    /// spawn itself succeeded.
+    static func spawnCanaryProbe(nonce: String) -> Bool {
+        let spawnPath = CoverageCanary.intermediaryBinaryPath   // /usr/bin/env
+        guard let cEnv = strdup(spawnPath),
+              let cTrue = strdup(CoverageCanary.spawnBinaryPath),   // /usr/bin/true
+              let cNonce = strdup(nonce) else { return false }
+        defer { free(cEnv); free(cTrue); free(cNonce) }
+        var pid: pid_t = 0
+        // env <true> <nonce> → env execs /usr/bin/true with argv[1] = nonce.
+        let argv: [UnsafeMutablePointer<CChar>?] = [cEnv, cTrue, cNonce, nil]
+        // Empty environment — the probe needs nothing and this avoids leaking
+        // the daemon's env (API keys etc.) into a child exec.
+        let envp: [UnsafeMutablePointer<CChar>?] = [nil]
+        let rc = argv.withUnsafeBufferPointer { aBuf in
+            envp.withUnsafeBufferPointer { eBuf in
+                posix_spawn(&pid, spawnPath, nil, nil,
+                            UnsafeMutablePointer(mutating: aBuf.baseAddress!),
+                            UnsafeMutablePointer(mutating: eBuf.baseAddress!))
+            }
+        }
+        guard rc == 0 else { return false }
+        // Best-effort reap — the probe exits immediately. ECHILD (SIGCHLD
+        // auto-reaped elsewhere) is fine; we only need to avoid a zombie.
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, 0)
+        return true
     }
 
     // MARK: - Inbox request handlers (v1.10.1)
@@ -2716,8 +2917,19 @@ func runAdaptiveRollupSweep(
     aggregateDays: Int = 90,
     alertsRetentionDays: Int = 365,
     evidencePerAlertCap: Int = 50,
-    evidenceMaxSizeMB: Int = 100
+    evidenceMaxSizeMB: Int = 100,
+    processFloorMinutes: Int = 0
 ) async {
+    // v1.21.4 per-category retention floor. When > 0, spare process/exec rows
+    // newer than this cutoff from BOTH the time-based rollup (Layer 2) and the
+    // oldest-first row-count fallback (Layer 3) so a cheap file-write flood
+    // can't collapse the low-volume process channel as collateral. Layer 3's
+    // pruneOldest carries a soft-floor valve, so the cap still converges even
+    // when the protected rows alone exceed it. 0 = category-blind (unchanged).
+    let processFloorCategory: EventCategory? = processFloorMinutes > 0 ? .process : nil
+    let processFloorCutoff: Date? = processFloorMinutes > 0
+        ? Date().addingTimeInterval(-Double(processFloorMinutes) * 60)
+        : nil
     // v1.8.0-rc6: Prune oversized alert_evidence FIRST. On the field test
     // host, a single sweep found 802K evidence rows / 2.4 GB — the storage
     // split decoupled evidence (in events.db) from its parent alerts (now
@@ -2785,7 +2997,9 @@ func runAdaptiveRollupSweep(
             let cutoff = Date().addingTimeInterval(-minutes * 60)
             let pruned = try await eventStore.rollUpAndPrune(
                 olderThan: cutoff,
-                aggregateRetentionDays: aggregateDays
+                aggregateRetentionDays: aggregateDays,
+                protecting: processFloorCategory,
+                newerThan: processFloorCutoff
             )
             totalPruned += pruned
             if pruned > 0 {
@@ -2816,7 +3030,11 @@ func runAdaptiveRollupSweep(
             let total = (try? await eventStore.count()) ?? 0
             let overFraction = Double(sizeAfterAdaptiveMB - capSizeMB) / Double(sizeAfterAdaptiveMB)
             let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
-            let dropped = (try? await eventStore.pruneOldest(count: dropTarget)) ?? 0
+            let dropped = (try? await eventStore.pruneOldest(
+                count: dropTarget,
+                protecting: processFloorCategory,
+                newerThan: processFloorCutoff
+            )) ?? 0
             logger.notice("Layer 3 cap: pruned \(dropped) oldest events (target \(dropTarget))")
             // v1.10.0 audit fix: feed Layer 3's drop count into the
             // shared totalPruned counter so the VACUUM gate below
@@ -2929,7 +3147,8 @@ func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
         dbPath: dbFilePath,
         maxSizeMB: maxSizeMB,
         targetSizeMB: targetSizeMB,
-        eventStore: state.eventStore
+        eventStore: state.eventStore,
+        processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
     )
 }
 
@@ -2963,7 +3182,8 @@ private func enforceDatabaseSizeCap(
     dbPath: String,
     maxSizeMB: Int,
     targetSizeMB: Int,
-    eventStore: EventStore
+    eventStore: EventStore,
+    processFloorMinutes: Int = 0
 ) async -> Bool {
     // Reentrancy: if another sweep is already running (hourly timer
     // + on-demand invocation can race), exit cleanly. v1.9.0
@@ -3018,7 +3238,17 @@ private func enforceDatabaseSizeCap(
     let estimatedPrune = max(10_000, Int(Double(totalEventsBefore) * min(0.6, overageFraction + 0.1)))
     let pruneCount = min(estimatedPrune, maxPerSweep)
 
-    let pruned = (try? await eventStore.pruneOldest(count: pruneCount)) ?? 0
+    // v1.21.4 per-category floor: spare recent process/exec rows, spilling
+    // into them only when the eligible (file) rows can't satisfy the drop
+    // count (pruneOldest's soft-floor valve — keeps the cap converging).
+    let processFloorCutoff: Date? = processFloorMinutes > 0
+        ? Date().addingTimeInterval(-Double(processFloorMinutes) * 60)
+        : nil
+    let pruned = (try? await eventStore.pruneOldest(
+        count: pruneCount,
+        protecting: processFloorMinutes > 0 ? .process : nil,
+        newerThan: processFloorCutoff
+    )) ?? 0
     let sizeAfterPruneMB = currentSizeMB()
     logger.notice("Size-cap phase 1: pruned \(pruned) rows (estimated \(estimatedPrune), cap \(maxPerSweep)); logical size now \(sizeAfterPruneMB) MB")
 

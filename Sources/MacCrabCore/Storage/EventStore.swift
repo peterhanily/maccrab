@@ -1422,12 +1422,32 @@ public actor EventStore {
     /// Also removes corresponding FTS entries to keep the search index consistent.
     ///
     /// - Parameter date: Events with timestamps before this date will be deleted.
+    /// - Parameters:
+    ///   - protectedCategory: If supplied with `floorCutoff`, rows in this
+    ///     category that are newer than `floorCutoff` are SPARED even though
+    ///     they are older than `date` — the per-category retention floor. Lets
+    ///     a tightened size-cap cutoff roll up the file firehose without
+    ///     evicting the low-volume process/exec channel out from under its
+    ///     floor. Nil (default) = category-blind, unchanged behavior.
+    ///   - floorCutoff: The floor boundary for `protectedCategory` (see above).
     /// - Returns: The total number of events deleted across all batches.
     @discardableResult
-    public func prune(olderThan date: Date) async throws -> Int {
+    public func prune(
+        olderThan date: Date,
+        protecting protectedCategory: EventCategory? = nil,
+        newerThan floorCutoff: Date? = nil
+    ) async throws -> Int {
         let batchSize: Int32 = 100_000
         let timestamp = date.timeIntervalSince1970
         var totalDeleted = 0
+
+        // Base predicate: older than the retention cutoff. When a protected
+        // category + floor are supplied, spare protected-category rows still
+        // newer than the floor (bound to ?3/?4).
+        let hasFloor = protectedCategory != nil && floorCutoff != nil
+        let selector = hasFloor
+            ? "timestamp < ?1 AND (event_category <> ?3 OR timestamp < ?4)"
+            : "timestamp < ?1"
 
         // Batch: delete FTS entries for the next batch of stale events, then delete
         // the events themselves. Repeat until no rows remain older than `date`.
@@ -1437,22 +1457,30 @@ public actor EventStore {
         // be set in the system SQLite.
         let deleteFTS = """
             DELETE FROM events_fts WHERE rowid IN (
-                SELECT rowid FROM events WHERE timestamp < ?1
+                SELECT rowid FROM events WHERE \(selector)
                 ORDER BY rowid LIMIT ?2
             )
             """
         let deleteEvents = """
             DELETE FROM events WHERE rowid IN (
-                SELECT rowid FROM events WHERE timestamp < ?1
+                SELECT rowid FROM events WHERE \(selector)
                 ORDER BY rowid LIMIT ?2
             )
             """
 
+        func bindSelector(_ stmt: OpaquePointer) {
+            sqlite3_bind_double(stmt, 1, timestamp)
+            sqlite3_bind_int(stmt, 2, batchSize)
+            if let protectedCategory, let floorCutoff {
+                bindText(stmt, index: 3, value: protectedCategory.rawValue)
+                sqlite3_bind_double(stmt, 4, floorCutoff.timeIntervalSince1970)
+            }
+        }
+
         while true {
             // FTS batch
             let ftsStmt = try prepare(deleteFTS)
-            sqlite3_bind_double(ftsStmt, 1, timestamp)
-            sqlite3_bind_int(ftsStmt, 2, batchSize)
+            bindSelector(ftsStmt)
             let rc1 = sqlite3_step(ftsStmt)
             sqlite3_finalize(ftsStmt)
             guard rc1 == SQLITE_DONE else {
@@ -1462,8 +1490,7 @@ public actor EventStore {
 
             // Events batch
             let evtStmt = try prepare(deleteEvents)
-            sqlite3_bind_double(evtStmt, 1, timestamp)
-            sqlite3_bind_int(evtStmt, 2, batchSize)
+            bindSelector(evtStmt)
             let rc2 = sqlite3_step(evtStmt)
             sqlite3_finalize(evtStmt)
             guard rc2 == SQLITE_DONE else {
@@ -1504,15 +1531,95 @@ public actor EventStore {
     ///
     /// Batching matches `prune(olderThan:)` so a single 1M-event
     /// prune doesn't hold the write lock too long.
+    ///
+    /// ## Per-category floor (v1.21.4)
+    ///
+    /// When `protectedCategory` + `floorCutoff` are supplied the eviction
+    /// becomes **category-aware**: rows that are NOT the protected category
+    /// (plus protected-category rows already older than `floorCutoff`) are
+    /// evicted first, oldest-first. This spares the low-volume — but
+    /// high-value — process/exec channel from a cheap file-write flood that
+    /// would otherwise collapse the whole window and take exec rows with it.
+    ///
+    /// **Soft-floor safety valve.** If the eligible (non-protected/aged) rows
+    /// are exhausted before `count` is met — i.e. the protected process rows
+    /// within the floor ALONE are keeping the DB over cap — the loop falls
+    /// back to unconditional oldest-first (even on protected rows) for the
+    /// remaining count. This guarantees `pruneOldest` always removes `count`
+    /// rows (or the whole table), so events.db can never grow unbounded no
+    /// matter how large the protected channel gets.
     @discardableResult
-    public func pruneOldest(count: Int) async throws -> Int {
+    public func pruneOldest(
+        count: Int,
+        protecting protectedCategory: EventCategory? = nil,
+        newerThan floorCutoff: Date? = nil
+    ) async throws -> Int {
         guard count > 0 else { return 0 }
         let batchSize: Int32 = min(100_000, Int32(count))
         var remaining = count
         var totalDeleted = 0
 
-        // Same pattern as prune(olderThan:) — delete FTS first so the
-        // rowid subquery sees a stable event set, then the events.
+        // Phase 1 — category-aware eviction. "Eligible" = any row NOT in the
+        // protected category, OR a protected-category row already older than
+        // the floor. Oldest-first within that eligible set. Protected rows
+        // newer than the floor are spared here. Delete FTS first so the rowid
+        // subquery sees a stable event set, then the events (same pattern as
+        // prune(olderThan:)).
+        if let protectedCategory, let floorCutoff {
+            let floorTs = floorCutoff.timeIntervalSince1970
+            let deleteEligibleFTS = """
+                DELETE FROM events_fts WHERE rowid IN (
+                    SELECT rowid FROM events
+                    WHERE event_category <> ?1 OR timestamp < ?2
+                    ORDER BY timestamp ASC LIMIT ?3
+                )
+                """
+            let deleteEligibleEvents = """
+                DELETE FROM events WHERE rowid IN (
+                    SELECT rowid FROM events
+                    WHERE event_category <> ?1 OR timestamp < ?2
+                    ORDER BY timestamp ASC LIMIT ?3
+                )
+                """
+            while remaining > 0 {
+                let thisBatch = min(batchSize, Int32(remaining))
+
+                let ftsStmt = try prepare(deleteEligibleFTS)
+                bindText(ftsStmt, index: 1, value: protectedCategory.rawValue)
+                sqlite3_bind_double(ftsStmt, 2, floorTs)
+                sqlite3_bind_int(ftsStmt, 3, thisBatch)
+                let rc1 = sqlite3_step(ftsStmt)
+                sqlite3_finalize(ftsStmt)
+                guard rc1 == SQLITE_DONE else {
+                    let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                    throw EventStoreError.stepFailed("FTS category-prune failed: \(msg)")
+                }
+
+                let evtStmt = try prepare(deleteEligibleEvents)
+                bindText(evtStmt, index: 1, value: protectedCategory.rawValue)
+                sqlite3_bind_double(evtStmt, 2, floorTs)
+                sqlite3_bind_int(evtStmt, 3, thisBatch)
+                let rc2 = sqlite3_step(evtStmt)
+                sqlite3_finalize(evtStmt)
+                guard rc2 == SQLITE_DONE else {
+                    let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                    throw EventStoreError.stepFailed("Event category-prune failed: \(msg)")
+                }
+
+                let deleted = Int(sqlite3_changes(db))
+                if deleted == 0 { break }  // no more eligible rows — engage valve below
+                totalDeleted += deleted
+                remaining -= deleted
+                await Task.yield()
+            }
+            // Soft-floor valve: fall through to the plain oldest-first loop
+            // below with the (possibly reduced) `remaining`, which can now
+            // touch protected rows. When the floor was fully honored above,
+            // `remaining == 0` and the loop is a no-op.
+        }
+
+        // Phase 2 — plain oldest-first. The whole job when no floor is
+        // configured; the safety-valve tail otherwise.
         let deleteFTS = """
             DELETE FROM events_fts WHERE rowid IN (
                 SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
@@ -1926,10 +2033,20 @@ public actor EventStore {
     /// `event_aggregates` table (Step 3 below). v1.8.0 made this
     /// configurable from `StorageConfig.aggregateDays` — pre-v1.8 it was
     /// hardcoded at 30 days.
+    ///
+    /// v1.21.4: `protectedCategory` + `floorCutoff` extend the per-category
+    /// retention floor to the time-based rollup. When supplied, protected-
+    /// category rows newer than `floorCutoff` are excluded from BOTH the
+    /// aggregation and the delete (the same predicate), so they stay as raw
+    /// rows and are NOT double-counted — a later sweep whose cutoff has aged
+    /// past the floor rolls them up normally. Keeps aggregate/delete
+    /// symmetric under the floor.
     @discardableResult
     public func rollUpAndPrune(
         olderThan cutoff: Date,
-        aggregateRetentionDays: Int = 30
+        aggregateRetentionDays: Int = 30,
+        protecting protectedCategory: EventCategory? = nil,
+        newerThan floorCutoff: Date? = nil
     ) async throws -> Int {
         guard let db = db else { return 0 }
 
@@ -1955,6 +2072,14 @@ public actor EventStore {
             }
         }
 
+        // Per-category floor: the aggregate SELECT and the delete below MUST
+        // use the identical predicate so protected rows spared from deletion
+        // are also spared from aggregation (no double-count on a later sweep).
+        let hasFloor = protectedCategory != nil && floorCutoff != nil
+        let aggFloorPredicate = hasFloor
+            ? " AND (event_category <> ?2 OR timestamp < ?3)"
+            : ""
+
         // Step 1: roll up older events into daily aggregates.
         // strftime('%Y-%m-%d', timestamp, 'unixepoch') turns the REAL epoch
         // into a sortable ISO date string. UTC; localized display happens
@@ -1968,13 +2093,17 @@ public actor EventStore {
                 COALESCE(process_path, ''),
                 COUNT(*) AS c
             FROM events
-            WHERE timestamp < ?1
+            WHERE timestamp < ?1\(aggFloorPredicate)
             GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
             ON CONFLICT(day, event_category, process_signer, process_path)
             DO UPDATE SET count = count + excluded.count
             """
         let aggStmt = try prepare(aggregateSQL)
         sqlite3_bind_double(aggStmt, 1, cutoff.timeIntervalSince1970)
+        if let protectedCategory, let floorCutoff {
+            bindText(aggStmt, index: 2, value: protectedCategory.rawValue)
+            sqlite3_bind_double(aggStmt, 3, floorCutoff.timeIntervalSince1970)
+        }
         guard sqlite3_step(aggStmt) == SQLITE_DONE else {
             let msg = String(cString: sqlite3_errmsg(db))
             sqlite3_finalize(aggStmt)
@@ -1986,8 +2115,14 @@ public actor EventStore {
         // FTS+events delete loop — keeps the write lock from being held too
         // long on machines with 100K+ aged events to migrate on first run.
         // Inside the same transaction so a crash before COMMIT rolls back
-        // both aggregates AND deletes atomically.
-        let deleted = try await prune(olderThan: cutoff)
+        // both aggregates AND deletes atomically. Same floor predicate as the
+        // aggregate SELECT above, so spared rows stay both un-aggregated and
+        // un-deleted.
+        let deleted = try await prune(
+            olderThan: cutoff,
+            protecting: protectedCategory,
+            newerThan: floorCutoff
+        )
 
         try execute("COMMIT")
         transactionCommitted = true

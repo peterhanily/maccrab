@@ -141,6 +141,31 @@ struct DaemonConfig: Codable {
         /// folded onto this field by `migrateLegacyStorageKeys` (× 60).
         var eventsHotTierMinutes: Int = 30
 
+        /// Per-category retention FLOOR for the low-volume process/exec
+        /// channel, in MINUTES. Process-category rows newer than this cutoff
+        /// are spared by the size-cap eviction paths (adaptive rollup + the
+        /// oldest-first row-count fallback) even when a cheap file-write flood
+        /// has collapsed the general retention window.
+        ///
+        /// Rationale: file + exec share one events.db, and a benign file storm
+        /// can balloon the file ~30× and evict the low-volume — but high-value
+        /// — process/exec rows (and their attribution) as collateral. This
+        /// floor inverts that: non-process rows are evicted first, and recent
+        /// process rows survive up to `processEventsFloorMinutes`. Because the
+        /// default (60) exceeds `eventsHotTierMinutes` (30), process rows also
+        /// get a longer guaranteed hot-tier window than the general firehose.
+        ///
+        /// SOFT floor: if the protected process rows within this window ALONE
+        /// exceed `eventsMaxSizeMB`, the size-cap sweep falls back to
+        /// oldest-first even on process rows (the pruneOldest safety valve), so
+        /// events.db can never grow unbounded. Set 0 to disable the floor
+        /// entirely (fully category-blind, pre-v1.21.4 behavior).
+        ///
+        /// JSON key mapping: both `process_events_floor_minutes` (snake_case)
+        /// and `processEventsFloorMinutes` (camelCase) decode to this field via
+        /// the storage block's snake-rewrite. See `migrateLegacyStorageKeys`.
+        var processEventsFloorMinutes: Int = 60
+
         /// Hard cap on the events.db file size, in MB. The adaptive rollup
         /// tightens the cutoff (1h → 30m → 15m) if needed to stay under
         /// this. Last-resort row-count prune kicks in if even the tightest
@@ -517,6 +542,7 @@ struct DaemonConfig: Codable {
             if let v = storage["eventsHotTierHours"] as? Int, storage["eventsHotTierMinutes"] == nil {
                 config.storage.eventsHotTierMinutes = v * 60
             }
+            if let v = storage["processEventsFloorMinutes"] as? Int { config.storage.processEventsFloorMinutes = v }
             if let v = storage["eventsMaxSizeMB"]    as? Int { config.storage.eventsMaxSizeMB = v }
             // v1.12.6 per-host tunable sweep cadence
             if let v = storage["eventsSizeCapIntervalMinutes"] as? Int { config.storage.eventsSizeCapIntervalMinutes = v }
@@ -577,6 +603,7 @@ struct DaemonConfig: Codable {
         let storageSnakeToCamel: [String: String] = [
             "events_hot_tier_hours":            "eventsHotTierHours",   // legacy alias (handled below)
             "events_hot_tier_minutes":          "eventsHotTierMinutes",
+            "process_events_floor_minutes":     "processEventsFloorMinutes",
             "events_max_size_mb":               "eventsMaxSizeMB",
             // v1.12.6: per-host tunable sweep cadence. `*Minutes` is
             // safe under JSONDecoder's `.convertFromSnakeCase` (no

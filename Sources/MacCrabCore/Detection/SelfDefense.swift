@@ -691,6 +691,22 @@ public actor SelfDefense {
 
     /// Check if another process is running with our name (possible replacement attack).
     /// Only alerts once per daemon lifetime to avoid spam during upgrades/restarts.
+    /// `pgrep -f` regex used by `checkForImpersonation` to spot OTHER live
+    /// MacCrab instances (covers dev `maccrabd` + the release sysext
+    /// `com.maccrab.agent`). Exposed so the D3 coverage-canary marker can be
+    /// pinned disjoint from it: the canary spawns `/usr/bin/true` with a neutral
+    /// "MCB-…" marker that must NEVER contain these tokens, or the health probe
+    /// would self-report as an impersonator. See `CoverageCanary` + its safety
+    /// test (`matchesImpersonationPattern`).
+    nonisolated static let impersonationProcessPattern = "maccrabd|com\\.maccrab\\.agent"
+
+    /// Pure mirror of the `pgrep -f` match `checkForImpersonation` performs:
+    /// true when `commandLine` would be flagged as another MacCrab instance.
+    /// Used by the canary self-trip safety test.
+    nonisolated static func matchesImpersonationPattern(_ commandLine: String) -> Bool {
+        commandLine.range(of: impersonationProcessPattern, options: .regularExpression) != nil
+    }
+
     private func checkForImpersonation() async {
         guard !duplicateAlerted else { return }
 
@@ -702,7 +718,7 @@ public actor SelfDefense {
         // release (sysextd-activated) flavors.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-f", "maccrabd|com\\.maccrab\\.agent"]
+        process.arguments = ["-f", Self.impersonationProcessPattern]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice

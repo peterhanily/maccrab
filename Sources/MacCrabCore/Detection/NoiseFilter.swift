@@ -71,6 +71,17 @@ public enum NoiseFilter {
         return event.enrichments["IsHoneyfile"] == "true"
     }
 
+    /// True when `event` is the D3 coverage-canary probe exec — `/usr/bin/true`
+    /// carrying MacCrab's neutral health-probe marker in its command line. Scoped
+    /// tightly (exact `/usr/bin/true` executable AND the marker) so the marker
+    /// cannot be used to suppress alerts on an unrelated binary: only the inert
+    /// canary exec is silenced. Not flag-gated — the probe runs in prod.
+    static func isCoverageCanaryProbe(event: Event) -> Bool {
+        guard event.eventCategory == .process else { return false }
+        guard event.process.executable == CoverageCanary.spawnBinaryPath else { return false }
+        return event.process.commandLine.contains(CoverageCanary.argvMarker)
+    }
+
     /// Apply all three gates to a batch of rule matches. Mutates in place.
     /// Each gate drops non-`.critical` matches; critical rules (ransomware,
     /// SIP disabled, known-malicious-hash) always fire regardless of gate.
@@ -91,6 +102,19 @@ public enum NoiseFilter {
         // every event whose rule engine produced zero matches — which
         // is the overwhelming majority of events on a healthy system.
         guard !matches.isEmpty else { return }
+
+        // Gate 0 — v1.21.4 Phase-2 (D3) coverage-canary probe. The daemon-health
+        // watchdog spawns `/usr/bin/true` carrying a neutral marker in argv; it
+        // must NEVER raise a detection alert (that would create a feedback loop
+        // every probe interval). Defence-in-depth: `/usr/bin/true` + the neutral
+        // marker already matches no rule, but drop ALL matches here — AHEAD of
+        // the must-fire short-circuit below — so even a hypothetical must-fire
+        // match on the probe cannot fire. Tightly scoped (exact `/usr/bin/true`
+        // executable + marker), so it can't be abused to launder a real binary.
+        if isCoverageCanaryProbe(event: event) {
+            matches.removeAll()
+            return
+        }
 
         // v1.19: trust-aware must-fire. The subject is "trusted" when it is an
         // Apple platform binary OR a notarized-DevID / first-party signer. A

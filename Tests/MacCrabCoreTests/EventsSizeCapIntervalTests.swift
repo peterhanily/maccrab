@@ -70,6 +70,27 @@ struct EventsSizeCapIntervalTests {
         }
     }
 
+    /// Insert one event of a given category at a given timestamp. Used by the
+    /// per-category-floor integration tests (v1.21.4) that mix a file flood
+    /// with a small fixed set of exec rows.
+    private func insertCat(
+        _ store: EventStore, category: EventCategory, at ts: Date, tag: String
+    ) async throws {
+        let proc = ProcessInfo(
+            pid: 1, ppid: 1, rpid: 1,
+            name: tag, executable: "/bin/\(tag)",
+            commandLine: "/bin/\(tag)", args: [],
+            workingDirectory: "/",
+            userId: 501, userName: "t", groupId: 20,
+            startTime: ts, ancestors: [], isPlatformBinary: false
+        )
+        let type: EventType = category == .process ? .start : .creation
+        try await store.insert(event: Event(
+            timestamp: ts, eventCategory: category, eventType: type,
+            eventAction: "x", process: proc
+        ))
+    }
+
     // MARK: - 1. DaemonConfig round-trip for the new field
 
     @Test("eventsSizeCapIntervalMinutes has a sensible default")
@@ -153,6 +174,32 @@ struct EventsSizeCapIntervalTests {
         let encoded = try JSONEncoder().encode(cfg)
         let decoded = try #require(DaemonConfig.decode(encoded))
         #expect(decoded.storage.eventsSizeCapIntervalMinutes == 42)
+    }
+
+    // MARK: - 1b. processEventsFloorMinutes (v1.21.4) config plumbing
+
+    @Test("processEventsFloorMinutes has a sensible default (60)")
+    func floorDefault() {
+        #expect(DaemonConfig().storage.processEventsFloorMinutes == 60)
+    }
+
+    @Test("processEventsFloorMinutes round-trips through camelCase + snake_case daemon_config.json")
+    func floorRoundTrips() throws {
+        for (key, value) in [("processEventsFloorMinutes", 90), ("process_events_floor_minutes", 120)] {
+            let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
+            try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+            let json = "{ \"storage\": { \"\(key)\": \(value) } }"
+            try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
+
+            let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+            #expect(cfg.storage.processEventsFloorMinutes == value,
+                    "\(key) should decode to \(value)")
+            // Sibling storage fields untouched by the partial decode.
+            #expect(cfg.storage.eventsMaxSizeMB == 350)
+            #expect(cfg.storage.eventsHotTierMinutes == 30)
+        }
     }
 
     // MARK: - 2. Adaptive ladder no-collapse contract
@@ -309,5 +356,91 @@ struct EventsSizeCapIntervalTests {
         // rows", not an exact count.
         #expect(after < before,
                 "At hotTierMinutes=15, Layer 3 should still engage and prune (was \(before), now \(after))")
+    }
+
+    // MARK: - 4. Per-category retention floor (v1.21.4)
+
+    /// The money test: a cheap file-write flood must NOT evict the low-volume
+    /// process/exec channel when a floor is configured — while the size cap
+    /// still converges (the DB shrinks). All rows are recent (within the
+    /// floor + inside the tightest Layer-2 rung) so Layer 2 leaves them and
+    /// Layer 3's category-aware `pruneOldest` does the eviction.
+    @Test("processFloorMinutes: file flood cannot evict exec rows within the floor, cap still converges")
+    func floorProtectsExecUnderFileFlood() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let now = Date()
+        for i in 0..<12_000 {
+            try await insertCat(store, category: .file, at: now.addingTimeInterval(-Double(i % 240)), tag: "flood\(i)")
+        }
+        for i in 0..<500 {
+            try await insertCat(store, category: .process, at: now.addingTimeInterval(-Double(i % 240)), tag: "exec\(i)")
+        }
+        try await store.vacuum()
+        let dbPath = tmp.appendingPathComponent("events.db").path
+
+        let before = try await store.count()
+        #expect(before == 12_500)
+
+        // Cap just below the current footprint so the overage is small. A
+        // small over-fraction floors Layer 3's dropTarget at 10_000 —
+        // comfortably below the 12_000 eligible file rows — so the valve is
+        // NOT reached and the 500 exec rows are spared deterministically.
+        let measured = measureDatabaseFootprintMB(dbPath: dbPath)
+        #expect(measured >= 2, "12.5k events should occupy >= 2 MB on disk (was \(measured))")
+        let capMB = max(1, measured - 1)
+
+        await runAdaptiveRollupSweep(
+            eventStore: store,
+            dbPath: dbPath,
+            targetSizeMB: capMB,
+            capSizeMB: capMB,
+            hotTierMinutes: 15,
+            aggregateDays: 90,
+            alertsRetentionDays: 365,
+            processFloorMinutes: 60
+        )
+
+        let byCat = try await store.eventCountsByCategory(since: .distantPast)
+        #expect(byCat["process"] == 500, "all exec rows within the floor survive the file-storm sweep")
+        #expect((byCat["file"] ?? 0) < 12_000, "file rows were evicted")
+        let after = try await store.count()
+        #expect(after < before, "the size cap still converges — DB shrank (was \(before), now \(after))")
+    }
+
+    /// Soft-floor safety valve at the sweep level: when EVERY row is a
+    /// protected process row within the floor (so nothing is eligible for
+    /// category-aware eviction), the sweep must still fall back to
+    /// oldest-first and shrink the DB. Guarantees events.db can never grow
+    /// unbounded even if the process channel alone breaches the cap.
+    @Test("processFloorMinutes: soft-floor valve still shrinks the DB when all rows are protected")
+    func floorValveConvergesWhenAllProcess() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let now = Date()
+        for i in 0..<12_000 {
+            try await insertCat(store, category: .process, at: now.addingTimeInterval(-Double(i % 240)), tag: "exec\(i)")
+        }
+        try await store.vacuum()
+        let dbPath = tmp.appendingPathComponent("events.db").path
+        let before = try await store.count()
+        #expect(before == 12_000)
+
+        await runAdaptiveRollupSweep(
+            eventStore: store,
+            dbPath: dbPath,
+            targetSizeMB: 1,
+            capSizeMB: 1,
+            hotTierMinutes: 15,
+            aggregateDays: 90,
+            alertsRetentionDays: 365,
+            processFloorMinutes: 60   // every recent process row is "protected"
+        )
+
+        let after = try await store.count()
+        #expect(after < before,
+                "soft-floor valve: with every row protected the sweep must still fall back to oldest-first and shrink (was \(before), now \(after))")
     }
 }

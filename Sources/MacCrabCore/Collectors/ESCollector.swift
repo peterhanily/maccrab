@@ -111,6 +111,15 @@ public final class ESCollector: @unchecked Sendable {
     /// sequences at 0. See `ESSeqTracker`.
     private let seqTracker = ESSeqTracker()
 
+    /// v1.21.4 Phase-2 (D3): coverage-canary recognizer. The daemon-health
+    /// watchdog (`DaemonTimers`) periodically `posix_spawn`s `/usr/bin/true`
+    /// carrying a per-run nonce in argv; this registry lets the callback record
+    /// "the probe was seen at the ES callback boundary" for a live nonce. Armed
+    /// only for the ~seconds a probe is in flight, so the hot path is a single
+    /// locked `isEmpty` check the rest of the time. The spawn NEVER happens from
+    /// the callback — only the cheap recognizer note does. See `CoverageCanary`.
+    private let canaryRegistry = ESCanaryRegistry()
+
     /// v1.17.4: subscribe to ES NOTIFY_OPEN (credential-read detection).
     /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
     private let subscribeFileOpen: Bool
@@ -567,6 +576,7 @@ public final class ESCollector: @unchecked Sendable {
         let traceContinuation = self.traceBindingContinuation!
         let logger = self.logger
         let tracker = self.seqTracker
+        let canary = self.canaryRegistry
 
         var newClient: OpaquePointer?   // es_client_t*
 
@@ -616,6 +626,14 @@ public final class ESCollector: @unchecked Sendable {
                 if let event = event {
                     yielded = true
                     if case .dropped = continuation.yield(event) { yieldDropped = true }
+                    // v1.21.4 Phase-2 (D3): coverage-canary recognizer. On an
+                    // EXEC whose argv (already parsed by normalise) carries a
+                    // live probe nonce, latch "seen at callback" for that nonce.
+                    // Cheap no-op when no probe is in flight (registry armed-gate);
+                    // NEVER spawns — spawning is the timer task's job.
+                    if evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
+                        canary.noteExecIfCanary(commandLine: event.process.commandLine)
+                    }
                 } else {
                     logger.debug("Dropped unhandled ES event type: \(evType)")
                 }
@@ -793,6 +811,21 @@ public final class ESCollector: @unchecked Sendable {
     /// Count of downstream AsyncStream `yield`s that came back `.dropped` (D4) —
     /// the userspace-backlog proxy.
     public func esStreamYieldDropped() -> UInt64 { seqTracker.yieldDroppedTotal() }
+
+    // MARK: - v1.21.4 Phase-2 (D3) coverage-canary probe
+
+    /// Arm the recognizer for a live probe `nonce` — the timer task calls this
+    /// immediately BEFORE `posix_spawn`ing `/usr/bin/true <nonce>`, so the
+    /// callback is watching by the time the exec is delivered.
+    public func armCanaryNonce(_ nonce: String) { canaryRegistry.arm(nonce) }
+
+    /// Whether a probe `nonce` was observed at the ES callback boundary. `false`
+    /// after the settle delay ⇒ the kernel/ingest stage dropped the probe.
+    public func canarySeenAtCallback(_ nonce: String) -> Bool { canaryRegistry.seenAtCallback(nonce) }
+
+    /// Retire a probe `nonce` (found or not). Called from the timer's `defer` so
+    /// the registry never accumulates stale nonces.
+    public func disarmCanaryNonce(_ nonce: String) { canaryRegistry.disarm(nonce) }
 
     /// Human-readable name for an `es_event_type_t.rawValue`, used to key the
     /// heartbeat drop/processed maps (`NOTIFY_EXEC`, …) instead of a bare
@@ -1370,5 +1403,103 @@ public final class ESCollector: @unchecked Sendable {
         default:
             return nil
         }
+    }
+}
+
+// MARK: - v1.21.4 Phase-2 (D3) coverage canary
+
+/// Shared constants + nonce scheme for the daemon-health coverage canary (D3).
+///
+/// The watchdog (`DaemonTimers`) periodically spawns a benign, known-signed
+/// Apple platform binary carrying a per-run nonce in argv, then verifies the
+/// exec reached both the ES callback and `events.db`. Everything the recognizer
+/// (`ESCollector`), the spawner (`DaemonTimers`), and the suppression allowlist
+/// (`NoiseFilter`) need to agree on lives here so there is exactly one source
+/// of truth.
+///
+/// ## Why an `/usr/bin/env` intermediary (muteSelf interaction)
+/// `muteSelf()` mutes the daemon's OWN executable path via `es_mute_path_literal`.
+/// A process `posix_spawn`ed directly by the daemon is still running the daemon
+/// image at the moment it execs, so its `NOTIFY_EXEC` would be muted and never
+/// reach the callback — the canary would falsely report a kernel gap every run.
+/// So the watchdog spawns `/usr/bin/env /usr/bin/true <nonce>`: the `env` exec
+/// (daemon-initiated) is muted, but the `/usr/bin/true` exec it in turn performs
+/// is initiated by `env` (path `/usr/bin/env`, NOT muted), so the OBSERVED probe
+/// exec is delivered to the callback with `/usr/bin/true` as its image.
+///
+/// ## Self-trip safety (why these exact values)
+/// - `spawnBinaryPath` (the OBSERVED image) is `/usr/bin/true`: an Apple platform
+///   binary that does nothing, matches no `Image|endswith` EDR/RMM rule, and is
+///   trust-gated in NoiseFilter's Gate 7 anyway.
+/// - `intermediaryBinaryPath` is `/usr/bin/env`: an unmuted Apple platform
+///   binary; its own exec is muted (daemon-initiated) so it raises nothing.
+/// - `argvMarker` is deliberately **"MCB-…", not "maccrab…"**: `SelfDefense`'s
+///   impersonation probe is `pgrep -f "maccrabd|com\.maccrab\.agent"`, so a
+///   marker free of those tokens can never be mistaken for a rogue MacCrab
+///   instance. It also contains none of the tokens any `CommandLine|contains`
+///   rule keys on. `NoiseFilter.isCoverageCanaryProbe` additionally requires
+///   the executable to be exactly `/usr/bin/true`, so the marker cannot be used
+///   to launder an attacker's own binary through the suppression gate.
+public enum CoverageCanary {
+    /// The benign, known-signed binary whose exec the probe OBSERVES. Present on
+    /// every macOS. Recognizer + suppression key on this image path.
+    public static let spawnBinaryPath = "/usr/bin/true"
+
+    /// Unmuted intermediary that performs the observed exec (see muteSelf note).
+    public static let intermediaryBinaryPath = "/usr/bin/env"
+
+    /// Fixed, neutral argv marker prefix. The suppression allowlist matches on
+    /// this (nonce-agnostic); the recognizer matches on the full nonce below.
+    public static let argvMarker = "MCB-COVERAGE-PROBE"
+
+    /// Build a per-run nonce: the fixed marker + a random component. The random
+    /// tail makes each probe unforgeable within its short in-flight window, so a
+    /// stale or guessed marker can't falsely satisfy the seen-at-callback check.
+    public static func makeNonce() -> String {
+        "\(argvMarker)-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+    }
+}
+
+/// Thread-safe recognizer state for in-flight coverage-canary probes (D3).
+///
+/// Mirrors `ESSeqTracker`'s locked-primitive style (one `NSLock`, `@unchecked
+/// Sendable`) because it is touched from the same synchronous ES callback. The
+/// hot path (`noteExecIfCanary`) short-circuits on an empty live set, so in
+/// steady state — no probe in flight — it costs one lock + `isEmpty`.
+public final class ESCanaryRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    /// Nonces the watchdog has spawned and is waiting on.
+    private var live: Set<String> = []
+    /// Nonces observed at the ES callback boundary this cycle.
+    private var seen: Set<String> = []
+
+    public init() {}
+
+    /// Arm a nonce before its exec is spawned.
+    public func arm(_ nonce: String) {
+        lock.lock(); defer { lock.unlock() }
+        live.insert(nonce)
+        seen.remove(nonce)
+    }
+
+    /// Retire a nonce (clears both live + seen state for it).
+    public func disarm(_ nonce: String) {
+        lock.lock(); defer { lock.unlock() }
+        live.remove(nonce)
+        seen.remove(nonce)
+    }
+
+    /// Whether `nonce` was seen at the callback boundary.
+    public func seenAtCallback(_ nonce: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return seen.contains(nonce)
+    }
+
+    /// Hot path: called for every EXEC. Latches any LIVE nonce present in the
+    /// exec's command line. Near-free when no probe is armed.
+    public func noteExecIfCanary(commandLine: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard !live.isEmpty else { return }
+        for nonce in live where commandLine.contains(nonce) { seen.insert(nonce) }
     }
 }
