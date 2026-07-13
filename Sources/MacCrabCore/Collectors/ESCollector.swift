@@ -103,6 +103,14 @@ public final class ESCollector: @unchecked Sendable {
     private var continuation: AsyncStream<Event>.Continuation?
     private var traceBindingContinuation: AsyncStream<TraceBindingSignal>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "ESCollector")
+
+    /// v1.21.4 Phase-0 (D1 + D4): kernel-drop `seq_num`/`global_seq_num` gap
+    /// accountant plus the hot-path processed/latency/backlog gauges. Captured
+    /// by value into the ES callback closure (like `continuation`/`logger`) and
+    /// `reset()` on client (re)create — a new `es_client_t` restarts the kernel
+    /// sequences at 0. See `ESSeqTracker`.
+    private let seqTracker = ESSeqTracker()
+
     /// v1.17.4: subscribe to ES NOTIFY_OPEN (credential-read detection).
     /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
     private let subscribeFileOpen: Bool
@@ -481,11 +489,17 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Create the `es_client_t`, mapping result codes to typed errors.
     private func createClient() throws {
+        // A new es_client_t restarts kernel seq_num/global_seq_num at 0, so
+        // clear the accountant before its first message or a (re)create would
+        // be miscounted as a giant backward gap (D1).
+        seqTracker.reset()
+
         // We need a local to pass into the closure so that `self` is not
         // captured before initialisation completes.
         let continuation = self.continuation!
         let traceContinuation = self.traceBindingContinuation!
         let logger = self.logger
+        let tracker = self.seqTracker
 
         var newClient: OpaquePointer?   // es_client_t*
 
@@ -502,6 +516,20 @@ public final class ESCollector: @unchecked Sendable {
             // and any future enrichment that touches Foundation APIs would
             // accumulate. Wrap defensively so the discipline holds.
             autoreleasepool {
+                // v1.21.4 Phase-0 D1: kernel-drop accounting. Read seq_num
+                // (per-type) + global_seq_num (whole-client) BEFORE normalise
+                // and feed the accountant; a hole in either sequence is a
+                // message the kernel dropped before delivery. Both fields are
+                // always present at the 13.0 deploy floor (seq_num v≥2,
+                // global_seq_num v≥4 — same version-agnostic reasoning as the
+                // introspection block below), so no @available guard.
+                let evType = message.pointee.event_type.rawValue
+                tracker.record(
+                    eventType: evType,
+                    seqNum: message.pointee.seq_num,
+                    globalSeq: message.pointee.global_seq_num
+                )
+
                 // v1.9 Agent Traces side-channel. Computed BEFORE normalise so
                 // the env-scan can lift TRACEPARENT off the live es_message_t
                 // before normalise drops the env reference. Cheap no-op when
@@ -510,12 +538,27 @@ public final class ESCollector: @unchecked Sendable {
                     Self.emitTraceSignals(message: message, into: traceContinuation)
                 }
 
+                // v1.21.4 Phase-0 D4: monotonic wall-time around normalise +
+                // yield (leading indicator that precedes kernel drops) plus the
+                // yield-outcome backlog gauge. Allocation-free — one DispatchTime
+                // delta and the shared ESSeqTracker lock.
+                let startNanos = DispatchTime.now().uptimeNanoseconds
                 let event = Self.normalise(message: message)
+                var yielded = false
+                var yieldDropped = false
                 if let event = event {
-                    continuation.yield(event)
+                    yielded = true
+                    if case .dropped = continuation.yield(event) { yieldDropped = true }
                 } else {
-                    logger.debug("Dropped unhandled ES event type: \(message.pointee.event_type.rawValue)")
+                    logger.debug("Dropped unhandled ES event type: \(evType)")
                 }
+                let elapsedNanos = DispatchTime.now().uptimeNanoseconds &- startNanos
+                tracker.recordProcessed(
+                    eventType: evType,
+                    elapsedNanos: elapsedNanos,
+                    yielded: yielded,
+                    yieldDropped: yieldDropped
+                )
             }
         }
 
@@ -626,6 +669,59 @@ public final class ESCollector: @unchecked Sendable {
         // stream above.
         traceBindingContinuation?.finish()
         traceBindingContinuation = nil
+    }
+
+    // MARK: - v1.21.4 Phase-0 (D1 + D4) — telemetry-drop instrumentation
+
+    /// Per-event-type kernel-drop tally since the last client (re)create — the
+    /// number of messages the kernel dropped for each type, measured as
+    /// per-type `seq_num` gaps at the callback boundary (D1). Keyed by
+    /// `es_event_type_t.rawValue`; render with `eventTypeName(_:)`.
+    public func esKernelDroppedByType() -> [UInt32: UInt64] { seqTracker.droppedByType() }
+
+    /// Whole-client kernel-drop total since the last client (re)create,
+    /// measured as `global_seq_num` gaps (D1).
+    public func esGlobalDropped() -> UInt64 { seqTracker.globalDropped() }
+
+    /// Per-event-type processed (seen-at-callback) counts (D4) — the denominator
+    /// the flood test measures marker execs against.
+    public func esProcessedByType() -> [UInt32: UInt64] { seqTracker.processedByType() }
+
+    /// p99-estimate of the ES callback handler wall-time in microseconds (D4) —
+    /// the leading indicator that rises before kernel drops appear.
+    public func esHandlerP99Micros() -> UInt64 { seqTracker.handlerP99Micros() }
+
+    /// Count of downstream AsyncStream `yield`s that came back `.dropped` (D4) —
+    /// the userspace-backlog proxy.
+    public func esStreamYieldDropped() -> UInt64 { seqTracker.yieldDroppedTotal() }
+
+    /// Human-readable name for an `es_event_type_t.rawValue`, used to key the
+    /// heartbeat drop/processed maps (`NOTIFY_EXEC`, …) instead of a bare
+    /// integer. Falls back to `TYPE_<raw>` for any type we don't subscribe to.
+    public static func eventTypeName(_ raw: UInt32) -> String {
+        switch raw {
+        case ES_EVENT_TYPE_NOTIFY_EXEC.rawValue: return "NOTIFY_EXEC"
+        case ES_EVENT_TYPE_NOTIFY_FORK.rawValue: return "NOTIFY_FORK"
+        case ES_EVENT_TYPE_NOTIFY_EXIT.rawValue: return "NOTIFY_EXIT"
+        case ES_EVENT_TYPE_NOTIFY_CREATE.rawValue: return "NOTIFY_CREATE"
+        case ES_EVENT_TYPE_NOTIFY_WRITE.rawValue: return "NOTIFY_WRITE"
+        case ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue: return "NOTIFY_CLOSE"
+        case ES_EVENT_TYPE_NOTIFY_RENAME.rawValue: return "NOTIFY_RENAME"
+        case ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue: return "NOTIFY_UNLINK"
+        case ES_EVENT_TYPE_NOTIFY_SIGNAL.rawValue: return "NOTIFY_SIGNAL"
+        case ES_EVENT_TYPE_NOTIFY_KEXTLOAD.rawValue: return "NOTIFY_KEXTLOAD"
+        case ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD.rawValue: return "NOTIFY_BTM_LAUNCH_ITEM_ADD"
+        case ES_EVENT_TYPE_NOTIFY_MMAP.rawValue: return "NOTIFY_MMAP"
+        case ES_EVENT_TYPE_NOTIFY_MPROTECT.rawValue: return "NOTIFY_MPROTECT"
+        case ES_EVENT_TYPE_NOTIFY_SETOWNER.rawValue: return "NOTIFY_SETOWNER"
+        case ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue: return "NOTIFY_SETMODE"
+        case ES_EVENT_TYPE_NOTIFY_OPEN.rawValue: return "NOTIFY_OPEN"
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ.rawValue: return "NOTIFY_GET_TASK_READ"
+        case ES_EVENT_TYPE_NOTIFY_TRACE.rawValue: return "NOTIFY_TRACE"
+        case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE.rawValue: return "NOTIFY_REMOTE_THREAD_CREATE"
+        case ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED.rawValue: return "NOTIFY_CS_INVALIDATED"
+        default: return "TYPE_\(raw)"
+        }
     }
 
     // MARK: - v1.9 Agent Traces — side-channel emission

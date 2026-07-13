@@ -1134,12 +1134,33 @@ enum DaemonTimers {
             //    the counter incremented on every truncation but was
             //    never surfaced — Wave 1's cap could fire 10⁴× per
             //    minute without operator visibility.
-            //  - `eslogger_dropped_total`: ES-collector sequence-gap
-            //    drops. Pre-9K only logged as a warning every 30 s;
-            //    now exposed as a counter so the dashboard can plot
-            //    ES buffer pressure.
+            //  - `eslogger_dropped_total`: `global_seq_num` gaps observed by
+            //    the dev-fallback `EsloggerCollector` subprocess (nil in the
+            //    release sysext, so 0 there). This is the *eslogger fallback's*
+            //    own drop counter — NOT the native ES client's kernel drops,
+            //    which are surfaced separately below as `es_kernel_dropped_total`
+            //    / `es_kernel_dropped_by_type` (v1.21.4 Phase-0 D1). Pre-9K it
+            //    was only logged as a warning every 30 s.
             let payloadTruncatedTotal = await state.eventStore.payloadTruncatedTotal()
             let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
+
+            // v1.21.4 Phase-0 (D1 + D4): native ES kernel-drop accounting +
+            // hot-path gauges, read straight off the ESCollector (synchronous,
+            // lock-guarded — no actor hop). nil collector (dev eslogger/kdebug
+            // fallback path, no ES entitlement) → zeros, so the keys are always
+            // present. `events_dropped` is deliberately NOT folded with these —
+            // the kernel ingest-drop vs userspace-eviction distinction is the
+            // whole point of the D1 methodology correction. By-type maps are
+            // re-keyed to readable event-type names for the heartbeat surface.
+            let esGlobalDropped = state.collector?.esGlobalDropped() ?? 0
+            let esKernelDroppedByType: [String: UInt64] =
+                (state.collector?.esKernelDroppedByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            let esProcessedByType: [String: UInt64] =
+                (state.collector?.esProcessedByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
+            let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
 
             // v1.18: engine LLM health — surfaces "enabled but unreachable /
             // misconfigured model" instead of failing silently. nil service
@@ -1183,6 +1204,15 @@ enum DaemonTimers {
                 "event_type_counts_1h": eventTypeCounts,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,
+                // v1.21.4 Phase-0 D1: honest kernel-drop counters (per-client
+                // global + per-event-type), separate from `events_dropped`
+                // (userspace AsyncStream eviction). Names via ESCollector.eventTypeName.
+                "es_kernel_dropped_total": esGlobalDropped,
+                "es_kernel_dropped_by_type": esKernelDroppedByType,
+                // v1.21.4 Phase-0 D4: leading-indicator gauges.
+                "es_handler_p99_us": esHandlerP99Micros,
+                "es_processed_by_type": esProcessedByType,
+                "es_stream_yield_dropped_total": esStreamYieldDropped,
                 // Wave 9D additions. `last_event_insert_error_kind` is
                 // an empty string when no event-insert error has been
                 // recorded since boot — JSONSerialization can't carry
@@ -1226,6 +1256,11 @@ enum DaemonTimers {
                 "events_total": events,
                 "alerts_total": alerts,
                 "events_dropped_total": droppedTotal,
+                // v1.21.4 Phase-0 D1/D4 scalar counters (Prometheus-style; the
+                // per-type maps live in heartbeat_rich.json only).
+                "es_kernel_dropped_total": esGlobalDropped,
+                "es_handler_p99_us": esHandlerP99Micros,
+                "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "events_per_sec_lifetime": uptime > 0 ? Double(events) / Double(uptime) : 0,
                 "resident_memory_mb": residentMB,
                 "sysext_has_fda": sysextHasFDA,
