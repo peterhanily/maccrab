@@ -99,17 +99,31 @@ public final class ESCollector: @unchecked Sendable {
 
     // MARK: Properties
 
-    private var client: OpaquePointer?          // es_client_t*
     private var continuation: AsyncStream<Event>.Continuation?
     private var traceBindingContinuation: AsyncStream<TraceBindingSignal>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "ESCollector")
 
-    /// v1.21.4 Phase-0 (D1 + D4): kernel-drop `seq_num`/`global_seq_num` gap
-    /// accountant plus the hot-path processed/latency/backlog gauges. Captured
-    /// by value into the ES callback closure (like `continuation`/`logger`) and
-    /// `reset()` on client (re)create — a new `es_client_t` restarts the kernel
-    /// sequences at 0. See `ESSeqTracker`.
-    private let seqTracker = ESSeqTracker()
+    /// v1.21.4 Phase-4 (Mitigation C): the split ES clients. Normally TWO
+    /// `ESClientContext`s — a FILE client (write-family + OPEN) and an
+    /// EXEC/PROCESS client (everything else) — each on its OWN `es_client_t` /
+    /// kernel queue, so a file-write flood can no longer starve exec from a
+    /// shared queue (Apple's top-line mitigation). Each context owns its client,
+    /// its own `ESSeqTracker` (so `es_kernel_dropped_by_type` is measured
+    /// per-queue — the money test needs the EXEC queue's NOTIFY_EXEC drop counter
+    /// independent of the FILE queue's), its own `ESMessageWorker`, and the exact
+    /// type list it subscribes; the read-path accessors MERGE across contexts. In
+    /// the graceful single-client fallback (`splitDegraded == true`) this holds
+    /// ONE context subscribing all types. Assigned once in `createClients()`
+    /// during `init` and only ever DRAINED (never re-shaped) afterward, so the
+    /// heartbeat's concurrent reads are race-free — the same guarantee the old
+    /// `let` trackers gave.
+    private var contexts: [ESClientContext] = []
+
+    /// v1.21.4 Phase-4 (Mitigation C): true iff the file/exec split could NOT be
+    /// established (the second `es_new_client` failed) and the collector fell back
+    /// to a single client subscribing ALL types. Surfaced as the heartbeat health
+    /// flag `es_client_split_degraded`. Write-once during `init`; read-only after.
+    private var splitDegraded = false
 
     /// v1.21.4 Phase-2 (D3): coverage-canary recognizer. The daemon-health
     /// watchdog (`DaemonTimers`) periodically `posix_spawn`s `/usr/bin/true`
@@ -120,18 +134,15 @@ public final class ESCollector: @unchecked Sendable {
     /// the callback — only the cheap recognizer note does. See `CoverageCanary`.
     private let canaryRegistry = ESCanaryRegistry()
 
-    /// v1.21.4 Phase-3 (Mitigation B): bounded off-thread worker that owns each
-    /// retained ES message between the callback boundary and `normalise`+`yield`.
-    /// The callback now does the MINIMUM (D1 seq accounting + retain + hand-off)
-    /// and returns immediately, so the per-client kernel queue drains at the
-    /// retain+enqueue rate instead of the parse rate — shrinking the window in
-    /// which the kernel back-pressures and silently drops messages. Constructed
-    /// once in `init` (before `createClient`, so the ES handler can capture it)
-    /// and drained in `stop()` before `es_delete_client`. See `ESMessageWorker`
-    /// for the free-exactly-once + bounded-in-flight guarantees.
-    private let messageWorker: ESMessageWorker
+    // v1.21.4 Phase-4 (Mitigation C): the Phase-3 bounded off-thread worker is
+    // now PER-CONTEXT (one per split client), not a single shared worker — a
+    // shared worker would re-couple the file and exec channels at the parse
+    // stage, defeating the split. Each `ESClientContext` owns its `ESMessageWorker`
+    // (built in `makeClientContext`, drained in `teardownContext`). The
+    // free-exactly-once + bounded-in-flight guarantees are unchanged per worker.
 
-    /// v1.21.4 Phase-3 (Mitigation B): in-flight cap for `messageWorker`. Under a
+    /// v1.21.4 Phase-3 (Mitigation B): in-flight cap for each per-client
+    /// `ESMessageWorker`. Under a
     /// flood the parse worker can fall behind; rather than let retained messages
     /// pile up without bound (kernel memory held per retained message), the
     /// worker drops the newest arrival past this cap, frees it immediately, and
@@ -161,7 +172,7 @@ public final class ESCollector: @unchecked Sendable {
     /// via `applyConfigMaster(_:)` at boot — the shipped System Extension
     /// can't be handed an env var, so config is the only reachable switch
     /// there. Written exactly once during boot, BEFORE the ES handler
-    /// block starts reading it per-event (createClient runs after the
+    /// block starts reading it per-event (createClients runs after the
     /// setter); read-only afterward — hence `nonisolated(unsafe)`.
     nonisolated(unsafe) private static var agentTracesEnabled: Bool =
         Foundation.ProcessInfo.processInfo.environment["MACCRAB_AGENT_TRACES"] == "1"
@@ -569,50 +580,18 @@ public final class ESCollector: @unchecked Sendable {
         }
         self.traceBindingContinuation = capturedTraceContinuation
 
-        // v1.21.4 Phase-3 (Mitigation B): build the bounded off-thread worker
-        // BEFORE createClient() so the ES handler closure can capture it. Its
-        // `process` closure runs the full parse/yield/D4/canary pipeline on the
-        // worker's serial queue; its `free` closure balances the per-message
-        // `Unmanaged.passRetained` box and calls `es_release_message` exactly
-        // once. Both closures capture locals (not `self`) so we don't reference
-        // `self` before initialisation completes. Serial (not concurrent) so
-        // events yield in the same kernel-delivery order as before — only ONE
-        // event is normalised at a time, but the callback no longer blocks on it.
-        let workerContinuation = capturedContinuation!
-        let workerTraceContinuation = capturedTraceContinuation!
-        let workerTracker = self.seqTracker
-        let workerCanary = self.canaryRegistry
-        let workerLogger = self.logger
-        self.messageWorker = ESMessageWorker(
-            maxInFlight: Self.maxInFlightMessages,
-            process: { handle in
-                // Peek at the boxed context WITHOUT consuming the retain (the
-                // `free` closure consumes it exactly once). Never frees here.
-                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeUnretainedValue()
-                ESCollector.processRetained(
-                    box,
-                    continuation: workerContinuation,
-                    traceContinuation: workerTraceContinuation,
-                    tracker: workerTracker,
-                    canary: workerCanary,
-                    logger: workerLogger
-                )
-            },
-            free: { handle in
-                // Consume the box's retain (deallocs ESPendingMessage) and
-                // release the kernel message. Called EXACTLY ONCE per handle on
-                // every worker path (processed, over-bound drop, shutdown drain).
-                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeRetainedValue()
-                es_release_message(box.message)
-            }
-        )
-
-        try createClient()
+        // v1.21.4 Phase-4 (Mitigation C): build the split ES clients. Each
+        // `ESClientContext` constructs its OWN bounded off-thread worker
+        // (capturing locals, not `self`) inside `makeClientContext`, so the
+        // workers exist before their client's callback captures them.
+        // `createClients()` also owns the graceful single-client fallback if the
+        // second `es_new_client` fails.
+        try createClients()
         muteNoisyPaths()
         muteSelf()
         try subscribe()
 
-        logger.info("ESCollector initialised — subscribed to \(Self.subscribedEvents.count) event types.")
+        logger.info("ESCollector initialised — \(self.contexts.count) ES client(s), split_degraded=\(self.splitDegraded).")
     }
 
     deinit {
@@ -621,137 +600,318 @@ public final class ESCollector: @unchecked Sendable {
 
     // MARK: - Client Lifecycle
 
-    /// Create the `es_client_t`, mapping result codes to typed errors.
-    private func createClient() throws {
-        // A new es_client_t restarts kernel seq_num/global_seq_num at 0, so
-        // clear the accountant before its first message or a (re)create would
-        // be miscounted as a giant backward gap (D1).
-        seqTracker.reset()
+    // MARK: - v1.21.4 Phase-4 (Mitigation C) — the file/exec client split
 
-        // Locals captured into the closure so `self` is not captured before
-        // initialisation completes. Post Phase-3 (Mitigation B) only the D1
-        // accountant and the bounded worker are needed on the callback boundary;
-        // the parse/yield/D4/canary pipeline moved off-thread into the worker.
-        let tracker = self.seqTracker
-        let worker = self.messageWorker
+    /// The flood-prone FILE family — the write family (CREATE/WRITE/CLOSE/RENAME/
+    /// UNLINK) plus the OPEN firehose. This set is the SINGLE source of truth for
+    /// the client split: `fileClientTypes`/`execClientTypes` partition the full
+    /// subscription list on membership here (predicate P vs !P), so every
+    /// subscribed type lands on exactly one client — union == full, intersection
+    /// == ∅ — with no drift if a new type is added to `subscribedEvents` (it
+    /// defaults to the exec client unless it is also added here). Keyed by
+    /// `rawValue` for cheap Set membership.
+    static let fileFamilyRawValues: Set<UInt32> = [
+        ES_EVENT_TYPE_NOTIFY_CREATE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_WRITE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue,
+        ES_EVENT_TYPE_NOTIFY_RENAME.rawValue,
+        ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue,
+        ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+    ]
+
+    /// The full pre-split subscription list — `subscribedEvents` plus the
+    /// optional OPEN and introspection families. Used verbatim for the degraded
+    /// single client AND as the domain that `fileClientTypes`/`execClientTypes`
+    /// partition. Kept identical to the old `subscribe()` set so the fallback is
+    /// byte-for-byte the pre-split behavior.
+    static func fullSubscription(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
+        var types = subscribedEvents
+        if subscribeFileOpen { types.append(ES_EVENT_TYPE_NOTIFY_OPEN) }
+        if subscribeIntrospection { types.append(contentsOf: introspectionEvents) }
+        return types
+    }
+
+    /// FILE client subscription: the members of the full list that are in the
+    /// file family. Disjoint from `execClientTypes`; their union is the full set.
+    static func fileClientTypes(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
+        fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+            .filter { fileFamilyRawValues.contains($0.rawValue) }
+    }
+
+    /// EXEC/PROCESS client subscription: everything in the full list NOT in the
+    /// file family — process lineage (EXEC/FORK/EXIT), the introspection family,
+    /// and the low-volume SIGNAL/KEXTLOAD/BTM/MMAP/MPROTECT/SETOWNER/SETMODE set.
+    static func execClientTypes(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
+        fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+            .filter { !fileFamilyRawValues.contains($0.rawValue) }
+    }
+
+    /// Graceful-degradation decision (pure, so it is unit-testable without a live
+    /// `es_client_t`): given the result of creating the SECOND (exec) client, do
+    /// we fall back to a single all-types client? Any non-success ⇒ degrade —
+    /// we never run with half the events.
+    static func shouldDegradeToSingleClient(secondClientResult: es_new_client_result_t) -> Bool {
+        secondClientResult != ES_NEW_CLIENT_RESULT_SUCCESS
+    }
+
+    /// Merge per-type count maps from every context's tracker into one. The split
+    /// clients cover DISJOINT type sets, so this is a union; a shared key (the
+    /// degraded single client, or defensively) sums. Pure so the read-path merge
+    /// is unit-testable without a live `es_client_t`.
+    static func mergeCountMaps(_ maps: [[UInt32: UInt64]]) -> [UInt32: UInt64] {
+        var merged: [UInt32: UInt64] = [:]
+        for m in maps { for (k, v) in m { merged[k, default: 0] &+= v } }
+        return merged
+    }
+
+    /// Map an `es_new_client` failure code to a typed error (extracted so both
+    /// the first-client and degraded-fallback paths report identically).
+    private static func mapClientError(_ result: es_new_client_result_t) -> ESCollectorError {
+        switch result {
+        case ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED:    return .notRunningAsRoot
+        case ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED:     return .missingEntitlement
+        case ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS: return .tooManyClients
+        default:                                        return .clientCreationFailed(result)
+        }
+    }
+
+    /// Build an `ESClientContext` (fresh tracker + its OWN bounded off-thread
+    /// worker) for `types`. The worker closures capture LOCALS (the shared
+    /// continuations + this context's own tracker + the canary), never `self`, so
+    /// this is safe to call before `init` completes — mirroring the old inline
+    /// worker build. `canary` is non-nil only for the context that carries EXEC
+    /// (the D3 recognizer runs on exec events).
+    private static func makeClientContext(
+        label: String,
+        types: [es_event_type_t],
+        canary: ESCanaryRegistry?,
+        continuation: AsyncStream<Event>.Continuation,
+        traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
+        logger: Logger,
+        maxInFlight: Int
+    ) -> ESClientContext {
+        let tracker = ESSeqTracker()
+        let worker = ESMessageWorker(
+            maxInFlight: maxInFlight,
+            label: "com.maccrab.es.message-worker.\(label)",
+            process: { handle in
+                // Peek at the boxed context WITHOUT consuming the retain (the
+                // `free` closure consumes it exactly once). Never frees here.
+                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeUnretainedValue()
+                ESCollector.processRetained(
+                    box,
+                    continuation: continuation,
+                    traceContinuation: traceContinuation,
+                    tracker: tracker,
+                    canary: canary,
+                    logger: logger
+                )
+            },
+            free: { handle in
+                // Consume the box's retain (deallocs ESPendingMessage) and release
+                // the kernel message. Called EXACTLY ONCE per handle on every
+                // worker path (processed / over-bound drop / shutdown drain).
+                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeRetainedValue()
+                es_release_message(box.message)
+            }
+        )
+        return ESClientContext(label: label, subscribedTypes: types, tracker: tracker, worker: worker)
+    }
+
+    /// Wrap `makeClientContext` with this collector's captured continuations.
+    private func makeContext(label: String, types: [es_event_type_t], canary: ESCanaryRegistry?) -> ESClientContext {
+        Self.makeClientContext(
+            label: label,
+            types: types,
+            canary: canary,
+            continuation: continuation!,
+            traceContinuation: traceBindingContinuation!,
+            logger: logger,
+            maxInFlight: Self.maxInFlightMessages
+        )
+    }
+
+    /// Create an `es_client_t` for `context`, installing a callback that does the
+    /// MINIMUM on the callback boundary (D1 seq accounting + retain + hand-off to
+    /// this context's OWN worker) and returns immediately. On success stores the
+    /// handle on the context. Returns the raw `es_new_client` result so the
+    /// caller can decide split-vs-degrade.
+    private func openClient(for context: ESClientContext) -> es_new_client_result_t {
+        // A fresh es_client_t restarts kernel seq_num/global_seq_num at 0, so
+        // clear this context's accountant before its first message or a (re)create
+        // would be miscounted as a giant backward gap (D1).
+        context.tracker.reset()
+        let tracker = context.tracker
+        let worker = context.worker
 
         var newClient: OpaquePointer?   // es_client_t*
-
         let result = es_new_client(&newClient) { _, message in
-            // SAFETY / LIFETIME (v1.21.4 Phase-3 Mitigation B — async handler):
+            // SAFETY / LIFETIME: both split clients are NOTIFY-ONLY — every
+            // subscribed type is ES_EVENT_TYPE_NOTIFY_* (the file family, the
+            // process/exec family, OPEN, and the introspection family). There is
+            // NO AUTH subscription and NO `es_respond` anywhere in this file, so
+            // returning from the callback BEFORE the message is processed is safe
+            // — there is no AUTH deadline to satisfy. The kernel owns `message`
+            // and it is valid only for THIS callback unless retained;
+            // `es_retain_message` extends its lifetime across the hand-off and the
+            // worker's `free` closure calls `es_release_message` EXACTLY ONCE.
             //
-            // This is a NOTIFY-ONLY client — every subscribed type is
-            // ES_EVENT_TYPE_NOTIFY_* (`subscribedEvents` + `introspectionEvents`
-            // + NOTIFY_OPEN); there is NO AUTH subscription and NO `es_respond`
-            // anywhere in this file. So returning from the callback BEFORE the
-            // message is processed is safe — there is no AUTH deadline to satisfy.
-            // We do the minimum synchronously and hand the message to a bounded
-            // worker so the per-client kernel queue drains at the retain+enqueue
-            // rate, not the parse rate — shrinking the kernel-drop window.
-            //
-            // The kernel owns `message`; it is valid only for THIS callback unless
-            // retained. `es_retain_message` extends its lifetime across the
-            // hand-off, and the worker's `free` closure calls `es_release_message`
-            // EXACTLY ONCE per retain on every path (processed / over-bound drop /
-            // shutdown drain) — see ESMessageWorker's free-exactly-once proof.
-
-            // === STAYS ON THE CALLBACK BOUNDARY (must run here, in order) ===
-            // D1 kernel-drop accounting. seq_num (per-type) and global_seq_num
-            // (whole-client) are kernel-assigned BEFORE delivery, so the gap
-            // accounting must happen here — once per delivered message, in
-            // delivery order — and cannot move off-thread. Both fields are
-            // present at the 13.0 deploy floor (seq_num v≥2, global_seq_num v≥4),
-            // so no @available guard.
+            // D1 kernel-drop accounting stays on the boundary: seq_num (per-type)
+            // and global_seq_num (per-CLIENT — now per split queue) are
+            // kernel-assigned BEFORE delivery, so the gap accounting must happen
+            // here, once per delivered message, in delivery order. Both fields are
+            // present at the 13.0 deploy floor (seq_num v≥2, global_seq_num v≥4).
             let evType = message.pointee.event_type.rawValue
             tracker.record(
                 eventType: evType,
                 seqNum: message.pointee.seq_num,
                 globalSeq: message.pointee.global_seq_num
             )
-            // D4 handler-entry timestamp — captured here so the worker measures
-            // end-to-end latency (arrival → normalise-done, INCLUDING queue wait),
-            // which is the backlog leading-indicator that precedes kernel drops.
+            // D4 handler-entry timestamp — the worker measures end-to-end latency
+            // (arrival → normalise-done, including queue wait) against it.
             let startNanos = DispatchTime.now().uptimeNanoseconds
-
-            // === RETAIN + HAND OFF + RETURN IMMEDIATELY ===
-            // No autoreleasepool here: the callback now allocates no autoreleased
-            // objects (esStringToSwift/normalise moved into the worker, which
-            // wraps itself in an autoreleasepool). This is two pointer reads, a
-            // retain, one Swift class alloc, and a non-blocking enqueue.
             es_retain_message(message)
             let box = ESPendingMessage(message: message, startNanos: startNanos, eventType: evType)
-            // `submit` takes ownership of the boxed handle and guarantees the
-            // matching release runs exactly once — including when the in-flight
-            // bound is hit (drop + count) or the worker is draining at shutdown.
             worker.submit(UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()))
         }
+        if result == ES_NEW_CLIENT_RESULT_SUCCESS {
+            context.client = newClient
+        }
+        return result
+    }
 
-        switch result {
-        case ES_NEW_CLIENT_RESULT_SUCCESS:
-            self.client = newClient
-        case ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED:
-            throw ESCollectorError.notRunningAsRoot
-        case ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED:
-            throw ESCollectorError.missingEntitlement
-        case ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS:
-            throw ESCollectorError.tooManyClients
-        default:
-            throw ESCollectorError.clientCreationFailed(result)
+    /// Drain a context's worker (frees every retained ES message via
+    /// `es_release_message`) THEN delete its client — the strict
+    /// release-before-delete ordering. Safe on a context whose client was never
+    /// created (drains the empty worker only). Used both by graceful degradation
+    /// and by `stop()`. Idempotent (drain is idempotent; delete is guarded).
+    private func teardownContext(_ context: ESClientContext) {
+        context.worker.shutdownAndDrain()
+        if let client = context.client {
+            es_delete_client(client)
+            context.client = nil
+            logger.info("ESCollector: \(context.label) ES client deleted.")
         }
     }
 
-    /// Subscribe to the configured NOTIFY event types.
+    /// Create the SPLIT ES clients — a FILE client (write-family + OPEN) and an
+    /// EXEC/PROCESS client (everything else), each on its OWN `es_client_t` /
+    /// kernel queue, so a file-write flood can no longer starve exec from a shared
+    /// queue. If the SECOND (exec) client cannot be created (e.g.
+    /// `ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS`), GRACEFULLY DEGRADE to a
+    /// single client subscribing ALL types (the pre-split topology) with a loud
+    /// warning + `splitDegraded = true`, rather than aborting or running with half
+    /// the events. Failure of the FIRST client is fatal (same as the pre-split
+    /// single-client failure — there is nothing to fall back to).
+    private func createClients() throws {
+        let fileTypes = Self.fileClientTypes(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+        let execTypes = Self.execClientTypes(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+
+        // The exec/process context carries the D3 canary — its EXEC events feed
+        // the recognizer. The file context never sees EXEC, so it gets no canary.
+        let fileCtx = makeContext(label: "file", types: fileTypes, canary: nil)
+        let execCtx = makeContext(label: "exec", types: execTypes, canary: canaryRegistry)
+
+        // FIRST client (file).
+        let firstResult = openClient(for: fileCtx)
+        guard firstResult == ES_NEW_CLIENT_RESULT_SUCCESS else {
+            teardownContext(fileCtx)   // drains the (empty) worker; no client to delete
+            teardownContext(execCtx)
+            throw Self.mapClientError(firstResult)
+        }
+
+        // SECOND client (exec/process).
+        let secondResult = openClient(for: execCtx)
+        if !Self.shouldDegradeToSingleClient(secondClientResult: secondResult) {
+            contexts = [fileCtx, execCtx]
+            splitDegraded = false
+            logger.info("ESCollector: split ES clients active — file(\(fileTypes.count) types) + exec(\(execTypes.count) types), separate kernel queues.")
+            return
+        }
+
+        // GRACEFUL DEGRADATION: the second client failed. Tear down the partial
+        // split (release the file client + drain both workers) so nothing leaks,
+        // then run ONE client subscribing every type. A single kernel queue means
+        // a file-write flood can again starve exec — hence the loud warning and
+        // the heartbeat flag so the loss of the mitigation is never silent.
+        logger.error("ESCollector: SECOND (exec) ES client creation FAILED (rc=\(secondResult.rawValue)) — DEGRADING to a single client subscribing ALL event types. File and exec now share one kernel queue; a file-write flood can starve exec. Heartbeat es_client_split_degraded=true.")
+        teardownContext(fileCtx)
+        teardownContext(execCtx)
+
+        let allTypes = Self.fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+        let unifiedCtx = makeContext(label: "unified", types: allTypes, canary: canaryRegistry)
+        let unifiedResult = openClient(for: unifiedCtx)
+        guard unifiedResult == ES_NEW_CLIENT_RESULT_SUCCESS else {
+            teardownContext(unifiedCtx)
+            throw Self.mapClientError(unifiedResult)
+        }
+        contexts = [unifiedCtx]
+        splitDegraded = true
+    }
+
+    /// Subscribe each context's client to its OWN type list. In split mode the
+    /// file client subscribes the file family and the exec client the rest; in
+    /// degraded mode the single unified client subscribes all types.
     private func subscribe() throws {
-        guard let client = self.client else {
-            throw ESCollectorError.notRunning
-        }
-        var events = Self.subscribedEvents
-        // v1.17.4: NOTIFY_OPEN is enormous system-wide, so emission is bounded
-        // to a tight credential-dir allowlist in the handler (isCredentialReadPath).
-        // Gated so an operator can disable it if the firehose ever degrades a host.
-        if subscribeFileOpen { events.append(ES_EVENT_TYPE_NOTIFY_OPEN) }
-        if subscribeIntrospection { events.append(contentsOf: Self.introspectionEvents) }
-        let result = events.withUnsafeBufferPointer { buffer -> es_return_t in
-            es_subscribe(client, buffer.baseAddress!, UInt32(buffer.count))
-        }
-        if result != ES_RETURN_SUCCESS {
-            logger.error("es_subscribe failed with code \(result.rawValue)")
-            throw ESCollectorError.subscriptionFailed
-        }
-    }
-
-    /// Mute noisy paths to reduce kernel-to-userspace traffic.
-    private func muteNoisyPaths() {
-        guard let client = self.client else { return }
-
-        for path in Self.mutedPathLiterals {
-            let rc = es_mute_path_literal(client, path)
-            if rc != ES_RETURN_SUCCESS {
-                logger.warning("Failed to mute path: \(path)")
+        for context in contexts {
+            guard let client = context.client else {
+                throw ESCollectorError.notRunning
+            }
+            let result = context.subscribedTypes.withUnsafeBufferPointer { buffer -> es_return_t in
+                es_subscribe(client, buffer.baseAddress!, UInt32(buffer.count))
+            }
+            if result != ES_RETURN_SUCCESS {
+                logger.error("es_subscribe failed for \(context.label) client with code \(result.rawValue)")
+                throw ESCollectorError.subscriptionFailed
             }
         }
+    }
 
-        // For prefix-based paths we use es_mute_path_prefix when available.
-        // The function was introduced alongside es_mute_path_literal.
-        for path in Self.mutedPaths {
-            if path.hasSuffix("/") {
-                let rc = es_mute_path_prefix(client, path)
-                if rc != ES_RETURN_SUCCESS {
-                    logger.warning("Failed to mute path prefix: \(path)")
-                }
-            } else {
+    /// Mute noisy paths to reduce kernel-to-userspace traffic. v1.21.4 Phase-4:
+    /// with the split, mutes are PER-CLIENT (each kernel queue mutes
+    /// independently), so the initiator-path mutes (noisy system binaries emit on
+    /// BOTH channels) are applied to EVERY context to preserve the pre-split
+    /// noise reduction. The forensic TARGET-mute is write-family only, so it is
+    /// applied ONLY to the context that carries the file family (the file client
+    /// in split mode, or the unified client in degraded mode).
+    private func muteNoisyPaths() {
+        for context in contexts {
+            guard let client = context.client else { continue }
+
+            for path in Self.mutedPathLiterals {
                 let rc = es_mute_path_literal(client, path)
                 if rc != ES_RETURN_SUCCESS {
-                    logger.warning("Failed to mute path literal: \(path)")
+                    logger.warning("Failed to mute path: \(path) on \(context.label)")
                 }
             }
-        }
 
-        // v1.21.4 Phase-1 Mitigation A: mute MacCrab's own forensic-copy
-        // destinations by TARGET prefix, write-family events only. See the
-        // "Observer-effect mute" section above for the design + the two
-        // needs-on-device caveats.
-        muteForensicCopyTargets(client: client)
+            // For prefix-based paths we use es_mute_path_prefix when available.
+            // The function was introduced alongside es_mute_path_literal.
+            for path in Self.mutedPaths {
+                if path.hasSuffix("/") {
+                    let rc = es_mute_path_prefix(client, path)
+                    if rc != ES_RETURN_SUCCESS {
+                        logger.warning("Failed to mute path prefix: \(path) on \(context.label)")
+                    }
+                } else {
+                    let rc = es_mute_path_literal(client, path)
+                    if rc != ES_RETURN_SUCCESS {
+                        logger.warning("Failed to mute path literal: \(path) on \(context.label)")
+                    }
+                }
+            }
+
+            // v1.21.4 Phase-1 Mitigation A: mute MacCrab's own forensic-copy
+            // destinations by TARGET prefix, write-family events only — so only on
+            // the context that actually carries the file family. See the
+            // "Observer-effect mute" section above for the design + caveats.
+            let carriesFileFamily = context.subscribedTypes.contains {
+                Self.fileFamilyRawValues.contains($0.rawValue)
+            }
+            if carriesFileFamily {
+                muteForensicCopyTargets(client: client)
+            }
+        }
     }
 
     /// Suppress the write-family file-event storm generated when ANY process
@@ -787,8 +947,6 @@ public final class ESCollector: @unchecked Sendable {
     /// Use `proc_pidpath` so muteSelf works under the sysext, the dev
     /// daemon, and any future Sparkle-relaunched binary path.
     private func muteSelf() {
-        guard let client = self.client else { return }
-
         var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         let len = proc_pidpath(getpid(), &pathBuf, UInt32(pathBuf.count))
         guard len > 0 else {
@@ -801,29 +959,36 @@ public final class ESCollector: @unchecked Sendable {
             return
         }
 
-        let rc = es_mute_path_literal(client, selfPath)
-        if rc != ES_RETURN_SUCCESS {
-            logger.warning("Failed to self-mute at path \(selfPath) (rc=\(rc.rawValue))")
-        } else {
-            logger.info("ESCollector self-muted at \(selfPath)")
+        // v1.21.4 Phase-4: self-mute on EVERY context. The daemon initiates both
+        // file events (store/config writes) and process events (its own
+        // exec/fork), and the D3 canary's `env` intermediary relies on the EXEC
+        // client's muteSelf, so both split clients need the initiator mute.
+        for context in contexts {
+            guard let client = context.client else { continue }
+            let rc = es_mute_path_literal(client, selfPath)
+            if rc != ES_RETURN_SUCCESS {
+                logger.warning("Failed to self-mute \(context.label) at path \(selfPath) (rc=\(rc.rawValue))")
+            } else {
+                logger.info("ESCollector self-muted \(context.label) at \(selfPath)")
+            }
         }
     }
 
-    /// Tear down the ES client and finish the event stream.
+    /// Tear down BOTH ES clients (or the single unified client in degraded mode)
+    /// and finish the event stream.
     public func stop() {
-        // v1.21.4 Phase-3 (Mitigation B): drain the off-thread worker FIRST, so
-        // every retained ES message is released (via `es_release_message`) BEFORE
-        // the client goes away. This keeps every release strictly ordered before
-        // `es_delete_client`, which is unambiguously safe. `shutdownAndDrain` is
-        // idempotent and blocks until all in-flight messages have been processed
-        // and freed. Any callback still firing during teardown sees the
-        // shutting-down worker and frees its retained message inline (no leak),
-        // and `es_delete_client` below then blocks until no callback is executing.
-        messageWorker.shutdownAndDrain()
-        if let client = self.client {
-            es_delete_client(client)
-            self.client = nil
-            logger.info("ESCollector stopped — client deleted.")
+        // v1.21.4 Phase-4 (Mitigation C): symmetric teardown across every
+        // context. `teardownContext` drains that context's off-thread worker
+        // FIRST — so every retained ES message is released (via
+        // `es_release_message`) BEFORE its client goes away, keeping every
+        // release strictly ordered before `es_delete_client` — then deletes the
+        // client. Each context's worker only ever holds its own client's
+        // messages, so per-context teardown is correct regardless of order.
+        // `shutdownAndDrain` and the nil-guarded delete make this idempotent; the
+        // `contexts` array itself is NOT mutated, so concurrent heartbeat reads of
+        // the (now-drained) trackers stay race-free.
+        for context in contexts {
+            teardownContext(context)
         }
         continuation?.finish()
         continuation = nil
@@ -838,35 +1003,69 @@ public final class ESCollector: @unchecked Sendable {
 
     // MARK: - v1.21.4 Phase-0 (D1 + D4) — telemetry-drop instrumentation
 
+    // v1.21.4 Phase-4 (Mitigation C): every read-path accessor now MERGES across
+    // the split contexts. The two clients cover DISJOINT type sets, so the
+    // per-type map merges are unions; the scalar totals sum across queues.
+
     /// Per-event-type kernel-drop tally since the last client (re)create — the
     /// number of messages the kernel dropped for each type, measured as
     /// per-type `seq_num` gaps at the callback boundary (D1). Keyed by
-    /// `es_event_type_t.rawValue`; render with `eventTypeName(_:)`.
-    public func esKernelDroppedByType() -> [UInt32: UInt64] { seqTracker.droppedByType() }
+    /// `es_event_type_t.rawValue`; render with `eventTypeName(_:)`. Merged across
+    /// the split queues (disjoint type sets ⇒ a union): the FILE queue owns the
+    /// write-family/OPEN drop counters, the EXEC queue owns NOTIFY_EXEC et al.
+    public func esKernelDroppedByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.tracker.droppedByType() })
+    }
 
-    /// Whole-client kernel-drop total since the last client (re)create,
-    /// measured as `global_seq_num` gaps (D1).
-    public func esGlobalDropped() -> UInt64 { seqTracker.globalDropped() }
+    /// Total kernel-drop count since the last client (re)create, measured as
+    /// `global_seq_num` gaps (D1). NOTE: `global_seq_num` is PER-CLIENT, so with
+    /// the file/exec split there is no single client-global number — this SUMS the
+    /// per-queue global-drop tallies (the honest "total messages the kernel
+    /// dropped across BOTH queues"). Pre-split (or degraded single-client) this is
+    /// one client, so the sum degenerates to that single value.
+    public func esGlobalDropped() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.globalDropped() }
+    }
 
     /// Per-event-type processed (seen-at-callback) counts (D4) — the denominator
-    /// the flood test measures marker execs against.
-    public func esProcessedByType() -> [UInt32: UInt64] { seqTracker.processedByType() }
+    /// the flood test measures marker execs against. Merged (union) across queues.
+    public func esProcessedByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.tracker.processedByType() })
+    }
 
     /// p99-estimate of the ES callback handler wall-time in microseconds (D4) —
-    /// the leading indicator that rises before kernel drops appear.
-    public func esHandlerP99Micros() -> UInt64 { seqTracker.handlerP99Micros() }
+    /// the leading indicator that rises before kernel drops appear. Two
+    /// independent per-queue histograms can't be merged into one true p99, so
+    /// this reports the WORST (max) per-queue p99 — the honest "worst handler
+    /// latency across both queues," which is what the leading-indicator gate wants.
+    public func esHandlerP99Micros() -> UInt64 {
+        contexts.map { $0.tracker.handlerP99Micros() }.max() ?? 0
+    }
 
     /// Count of downstream AsyncStream `yield`s that came back `.dropped` (D4) —
-    /// the userspace-backlog proxy.
-    public func esStreamYieldDropped() -> UInt64 { seqTracker.yieldDroppedTotal() }
+    /// the userspace-backlog proxy. Summed across queues.
+    public func esStreamYieldDropped() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.yieldDroppedTotal() }
+    }
 
     /// v1.21.4 Phase-3 (Mitigation B): count of retained ES messages dropped at
-    /// the copy/hand-off stage because the bounded off-thread worker was already
-    /// at its in-flight cap (`maxInFlightMessages`). Surfaced as the heartbeat
-    /// key `es_copy_backpressure_dropped_total` (wiring lives in `DaemonTimers`,
-    /// alongside the D1/D4 keys). This is honest userspace backpressure — a
-    /// dropped-here message is COUNTED here, unlike a silent kernel drop.
-    public func esCopyBackpressureDropped() -> UInt64 { messageWorker.backpressureDropped() }
+    /// the copy/hand-off stage because a bounded off-thread worker was already at
+    /// its in-flight cap (`maxInFlightMessages`). Surfaced as the heartbeat key
+    /// `es_copy_backpressure_dropped_total` (wiring lives in `DaemonTimers`,
+    /// alongside the D1/D4 keys). Summed across both per-client workers. This is
+    /// honest userspace backpressure — a dropped-here message is COUNTED here,
+    /// unlike a silent kernel drop.
+    public func esCopyBackpressureDropped() -> UInt64 {
+        contexts.reduce(UInt64(0)) { $0 &+ $1.worker.backpressureDropped() }
+    }
+
+    /// v1.21.4 Phase-4 (Mitigation C): true iff the file/exec client split could
+    /// NOT be established (the second `es_new_client` failed) and the collector
+    /// fell back to a single client subscribing ALL types (the pre-split
+    /// topology). Surfaced as the heartbeat health flag `es_client_split_degraded`
+    /// so the loss of the cross-channel mitigation is never silent. `false` on the
+    /// normal two-client path.
+    public func esClientSplitDegraded() -> Bool { splitDegraded }
 
     // MARK: - v1.21.4 Phase-2 (D3) coverage-canary probe
 
@@ -915,7 +1114,7 @@ public final class ESCollector: @unchecked Sendable {
     // MARK: - v1.21.4 Phase-3 (Mitigation B) — off-thread message processing
 
     /// The full parse/yield/D4/canary pipeline that used to run inline on the ES
-    /// callback boundary. Now runs on the `messageWorker`'s serial queue against
+    /// callback boundary. Now runs on the per-client worker's serial queue against
     /// the RETAINED message (`box.message`), which stays valid until the worker's
     /// `free` closure calls `es_release_message`. Byte-for-byte the same work as
     /// the old inline handler (same single `yield`, same content, same downstream
@@ -932,7 +1131,7 @@ public final class ESCollector: @unchecked Sendable {
         continuation: AsyncStream<Event>.Continuation,
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
         tracker: ESSeqTracker,
-        canary: ESCanaryRegistry,
+        canary: ESCanaryRegistry?,
         logger: Logger
     ) {
         autoreleasepool {
@@ -955,9 +1154,11 @@ public final class ESCollector: @unchecked Sendable {
                 // v1.21.4 Phase-2 (D3): coverage-canary recognizer. On an EXEC
                 // whose argv (already parsed by normalise) carries a live probe
                 // nonce, latch "seen at callback" for that nonce. Cheap no-op when
-                // no probe is in flight (registry armed-gate).
+                // no probe is in flight (registry armed-gate). `canary` is non-nil
+                // only on the EXEC/PROCESS client (Phase-4 split), which is the
+                // only client that delivers NOTIFY_EXEC.
                 if evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
-                    canary.noteExecIfCanary(commandLine: event.process.commandLine)
+                    canary?.noteExecIfCanary(commandLine: event.process.commandLine)
                 }
             } else {
                 logger.debug("Dropped unhandled ES event type: \(evType)")
@@ -1621,6 +1822,36 @@ public final class ESCanaryRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard !live.isEmpty else { return }
         for nonce in live where commandLine.contains(nonce) { seen.insert(nonce) }
+    }
+}
+
+// MARK: - ESClientContext (v1.21.4 Phase-4 Mitigation C)
+
+/// Everything one of the split ES clients owns: its kernel handle, its OWN seq
+/// accountant (so `es_kernel_dropped_by_type` is measured per-queue), its OWN
+/// off-thread worker (a SHARED worker would re-couple the channels at the parse
+/// stage, defeating the split), the exact type list it subscribes, and a label
+/// for logging. The two contexts feed the ONE downstream continuation, so the
+/// split is invisible past this boundary.
+///
+/// A reference type: `openClient(for:)` mutates `client` after creation and the
+/// `contexts` array must observe that mutation. Not `Sendable` on its own — it is
+/// only ever set up on the init thread and then read (its thread-safe `tracker` /
+/// `worker` are read from the heartbeat) without further re-shaping the array.
+private final class ESClientContext {
+    let label: String
+    let subscribedTypes: [es_event_type_t]
+    let tracker: ESSeqTracker
+    let worker: ESMessageWorker
+    /// es_client_t*, set on a successful `es_new_client`; nil'd on teardown.
+    var client: OpaquePointer?
+
+    init(label: String, subscribedTypes: [es_event_type_t], tracker: ESSeqTracker, worker: ESMessageWorker) {
+        self.label = label
+        self.subscribedTypes = subscribedTypes
+        self.tracker = tracker
+        self.worker = worker
+        self.client = nil
     }
 }
 
