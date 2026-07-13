@@ -23,6 +23,23 @@ exactly what is and isn't protected.
 - Sparkle **phased rollout** for updates (staggered by default; `--immediate` for security
   hotfixes) plus a rollback runbook. New operator docs: rule-update channel, rollback,
   stability/SLOs, incident response. A version marker for the plugin SDK.
+- **Download provenance.** A new read-only `chrome_downloads_recent` tool reads Chrome/Brave/
+  Edge/Arc download history (referrer + redirect chain). When a high-severity credential or
+  exfiltration alert fires, MacCrab now welds in *where the file came from* — the delivering
+  app and origin, resolved from the quarantine record — as alert context, without raising new
+  alerts, and only flags a foreign origin under a strict conjunction so ordinary apps don't trip it.
+- **Ghost login-item coverage.** Modern `SMAppService` login items leave no LaunchAgent plist
+  and no write-time event; MacCrab now watches Background Task Management (BTM) directly and
+  flags a newly-enabled login item with an unknown signing team.
+- **Injection evidence on agent alerts.** When an AI-coding-tool alert fires, MacCrab retro-scans
+  what that agent session recently read for prompt-injection markers and, on a hit, attaches the
+  poisoned file and raises severity (plaintext-marker matching).
+- **AI-agent session attribution + lethal-trifecta detection.** Agent Traces can now be enabled
+  from the dashboard (previously only via an env var, so it never turned on in installed builds).
+  When on, MacCrab attributes activity to an AI-agent session by reading the W3C `traceparent`
+  from the kernel exec event — no SDK or callback in the agent — and raises a single **critical**
+  verdict when credential access, untrusted content, and external egress converge in one such
+  session. Off by default; requires the agent to propagate trace context.
 
 ### Changed
 - Startup banner and docs now state exactly what is encrypted at rest: trace and
