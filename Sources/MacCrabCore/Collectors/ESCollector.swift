@@ -120,6 +120,26 @@ public final class ESCollector: @unchecked Sendable {
     /// the callback — only the cheap recognizer note does. See `CoverageCanary`.
     private let canaryRegistry = ESCanaryRegistry()
 
+    /// v1.21.4 Phase-3 (Mitigation B): bounded off-thread worker that owns each
+    /// retained ES message between the callback boundary and `normalise`+`yield`.
+    /// The callback now does the MINIMUM (D1 seq accounting + retain + hand-off)
+    /// and returns immediately, so the per-client kernel queue drains at the
+    /// retain+enqueue rate instead of the parse rate — shrinking the window in
+    /// which the kernel back-pressures and silently drops messages. Constructed
+    /// once in `init` (before `createClient`, so the ES handler can capture it)
+    /// and drained in `stop()` before `es_delete_client`. See `ESMessageWorker`
+    /// for the free-exactly-once + bounded-in-flight guarantees.
+    private let messageWorker: ESMessageWorker
+
+    /// v1.21.4 Phase-3 (Mitigation B): in-flight cap for `messageWorker`. Under a
+    /// flood the parse worker can fall behind; rather than let retained messages
+    /// pile up without bound (kernel memory held per retained message), the
+    /// worker drops the newest arrival past this cap, frees it immediately, and
+    /// counts it (`es_copy_backpressure_dropped_total`). 4096 retained messages
+    /// is a burst absorber bounded to tens of MB worst-case — large enough that
+    /// steady state never hits it, small enough to never explode RSS.
+    private static let maxInFlightMessages = 4096
+
     /// v1.17.4: subscribe to ES NOTIFY_OPEN (credential-read detection).
     /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
     private let subscribeFileOpen: Bool
@@ -549,6 +569,44 @@ public final class ESCollector: @unchecked Sendable {
         }
         self.traceBindingContinuation = capturedTraceContinuation
 
+        // v1.21.4 Phase-3 (Mitigation B): build the bounded off-thread worker
+        // BEFORE createClient() so the ES handler closure can capture it. Its
+        // `process` closure runs the full parse/yield/D4/canary pipeline on the
+        // worker's serial queue; its `free` closure balances the per-message
+        // `Unmanaged.passRetained` box and calls `es_release_message` exactly
+        // once. Both closures capture locals (not `self`) so we don't reference
+        // `self` before initialisation completes. Serial (not concurrent) so
+        // events yield in the same kernel-delivery order as before — only ONE
+        // event is normalised at a time, but the callback no longer blocks on it.
+        let workerContinuation = capturedContinuation!
+        let workerTraceContinuation = capturedTraceContinuation!
+        let workerTracker = self.seqTracker
+        let workerCanary = self.canaryRegistry
+        let workerLogger = self.logger
+        self.messageWorker = ESMessageWorker(
+            maxInFlight: Self.maxInFlightMessages,
+            process: { handle in
+                // Peek at the boxed context WITHOUT consuming the retain (the
+                // `free` closure consumes it exactly once). Never frees here.
+                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeUnretainedValue()
+                ESCollector.processRetained(
+                    box,
+                    continuation: workerContinuation,
+                    traceContinuation: workerTraceContinuation,
+                    tracker: workerTracker,
+                    canary: workerCanary,
+                    logger: workerLogger
+                )
+            },
+            free: { handle in
+                // Consume the box's retain (deallocs ESPendingMessage) and
+                // release the kernel message. Called EXACTLY ONCE per handle on
+                // every worker path (processed, over-bound drop, shutdown drain).
+                let box = Unmanaged<ESPendingMessage>.fromOpaque(handle).takeRetainedValue()
+                es_release_message(box.message)
+            }
+        )
+
         try createClient()
         muteNoisyPaths()
         muteSelf()
@@ -570,81 +628,62 @@ public final class ESCollector: @unchecked Sendable {
         // be miscounted as a giant backward gap (D1).
         seqTracker.reset()
 
-        // We need a local to pass into the closure so that `self` is not
-        // captured before initialisation completes.
-        let continuation = self.continuation!
-        let traceContinuation = self.traceBindingContinuation!
-        let logger = self.logger
+        // Locals captured into the closure so `self` is not captured before
+        // initialisation completes. Post Phase-3 (Mitigation B) only the D1
+        // accountant and the bounded worker are needed on the callback boundary;
+        // the parse/yield/D4/canary pipeline moved off-thread into the worker.
         let tracker = self.seqTracker
-        let canary = self.canaryRegistry
+        let worker = self.messageWorker
 
         var newClient: OpaquePointer?   // es_client_t*
 
         let result = es_new_client(&newClient) { _, message in
-            // SAFETY: message memory is owned by the kernel and valid only during
-            // this callback. normalise() is synchronous and copies all needed data
-            // (via esStringToSwift) before the callback returns.
+            // SAFETY / LIFETIME (v1.21.4 Phase-3 Mitigation B — async handler):
             //
-            // v1.7.9 defensive autoreleasepool: this callback fires per ES event
-            // on a kernel-managed dispatch queue. Pass 9 doesn't flag it (no
-            // `while let`/`for await` shape) but the same Foundation autorelease
-            // accumulation that bit Eslogger/UnifiedLog could happen here too —
-            // esStringToSwift creates Strings (CFString-backed under the hood)
-            // and any future enrichment that touches Foundation APIs would
-            // accumulate. Wrap defensively so the discipline holds.
-            autoreleasepool {
-                // v1.21.4 Phase-0 D1: kernel-drop accounting. Read seq_num
-                // (per-type) + global_seq_num (whole-client) BEFORE normalise
-                // and feed the accountant; a hole in either sequence is a
-                // message the kernel dropped before delivery. Both fields are
-                // always present at the 13.0 deploy floor (seq_num v≥2,
-                // global_seq_num v≥4 — same version-agnostic reasoning as the
-                // introspection block below), so no @available guard.
-                let evType = message.pointee.event_type.rawValue
-                tracker.record(
-                    eventType: evType,
-                    seqNum: message.pointee.seq_num,
-                    globalSeq: message.pointee.global_seq_num
-                )
+            // This is a NOTIFY-ONLY client — every subscribed type is
+            // ES_EVENT_TYPE_NOTIFY_* (`subscribedEvents` + `introspectionEvents`
+            // + NOTIFY_OPEN); there is NO AUTH subscription and NO `es_respond`
+            // anywhere in this file. So returning from the callback BEFORE the
+            // message is processed is safe — there is no AUTH deadline to satisfy.
+            // We do the minimum synchronously and hand the message to a bounded
+            // worker so the per-client kernel queue drains at the retain+enqueue
+            // rate, not the parse rate — shrinking the kernel-drop window.
+            //
+            // The kernel owns `message`; it is valid only for THIS callback unless
+            // retained. `es_retain_message` extends its lifetime across the
+            // hand-off, and the worker's `free` closure calls `es_release_message`
+            // EXACTLY ONCE per retain on every path (processed / over-bound drop /
+            // shutdown drain) — see ESMessageWorker's free-exactly-once proof.
 
-                // v1.9 Agent Traces side-channel. Computed BEFORE normalise so
-                // the env-scan can lift TRACEPARENT off the live es_message_t
-                // before normalise drops the env reference. Cheap no-op when
-                // the feature flag is off.
-                if Self.agentTracesEnabled {
-                    Self.emitTraceSignals(message: message, into: traceContinuation)
-                }
+            // === STAYS ON THE CALLBACK BOUNDARY (must run here, in order) ===
+            // D1 kernel-drop accounting. seq_num (per-type) and global_seq_num
+            // (whole-client) are kernel-assigned BEFORE delivery, so the gap
+            // accounting must happen here — once per delivered message, in
+            // delivery order — and cannot move off-thread. Both fields are
+            // present at the 13.0 deploy floor (seq_num v≥2, global_seq_num v≥4),
+            // so no @available guard.
+            let evType = message.pointee.event_type.rawValue
+            tracker.record(
+                eventType: evType,
+                seqNum: message.pointee.seq_num,
+                globalSeq: message.pointee.global_seq_num
+            )
+            // D4 handler-entry timestamp — captured here so the worker measures
+            // end-to-end latency (arrival → normalise-done, INCLUDING queue wait),
+            // which is the backlog leading-indicator that precedes kernel drops.
+            let startNanos = DispatchTime.now().uptimeNanoseconds
 
-                // v1.21.4 Phase-0 D4: monotonic wall-time around normalise +
-                // yield (leading indicator that precedes kernel drops) plus the
-                // yield-outcome backlog gauge. Allocation-free — one DispatchTime
-                // delta and the shared ESSeqTracker lock.
-                let startNanos = DispatchTime.now().uptimeNanoseconds
-                let event = Self.normalise(message: message)
-                var yielded = false
-                var yieldDropped = false
-                if let event = event {
-                    yielded = true
-                    if case .dropped = continuation.yield(event) { yieldDropped = true }
-                    // v1.21.4 Phase-2 (D3): coverage-canary recognizer. On an
-                    // EXEC whose argv (already parsed by normalise) carries a
-                    // live probe nonce, latch "seen at callback" for that nonce.
-                    // Cheap no-op when no probe is in flight (registry armed-gate);
-                    // NEVER spawns — spawning is the timer task's job.
-                    if evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
-                        canary.noteExecIfCanary(commandLine: event.process.commandLine)
-                    }
-                } else {
-                    logger.debug("Dropped unhandled ES event type: \(evType)")
-                }
-                let elapsedNanos = DispatchTime.now().uptimeNanoseconds &- startNanos
-                tracker.recordProcessed(
-                    eventType: evType,
-                    elapsedNanos: elapsedNanos,
-                    yielded: yielded,
-                    yieldDropped: yieldDropped
-                )
-            }
+            // === RETAIN + HAND OFF + RETURN IMMEDIATELY ===
+            // No autoreleasepool here: the callback now allocates no autoreleased
+            // objects (esStringToSwift/normalise moved into the worker, which
+            // wraps itself in an autoreleasepool). This is two pointer reads, a
+            // retain, one Swift class alloc, and a non-blocking enqueue.
+            es_retain_message(message)
+            let box = ESPendingMessage(message: message, startNanos: startNanos, eventType: evType)
+            // `submit` takes ownership of the boxed handle and guarantees the
+            // matching release runs exactly once — including when the in-flight
+            // bound is hit (drop + count) or the worker is draining at shutdown.
+            worker.submit(UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()))
         }
 
         switch result {
@@ -772,6 +811,15 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Tear down the ES client and finish the event stream.
     public func stop() {
+        // v1.21.4 Phase-3 (Mitigation B): drain the off-thread worker FIRST, so
+        // every retained ES message is released (via `es_release_message`) BEFORE
+        // the client goes away. This keeps every release strictly ordered before
+        // `es_delete_client`, which is unambiguously safe. `shutdownAndDrain` is
+        // idempotent and blocks until all in-flight messages have been processed
+        // and freed. Any callback still firing during teardown sees the
+        // shutting-down worker and frees its retained message inline (no leak),
+        // and `es_delete_client` below then blocks until no callback is executing.
+        messageWorker.shutdownAndDrain()
         if let client = self.client {
             es_delete_client(client)
             self.client = nil
@@ -811,6 +859,14 @@ public final class ESCollector: @unchecked Sendable {
     /// Count of downstream AsyncStream `yield`s that came back `.dropped` (D4) —
     /// the userspace-backlog proxy.
     public func esStreamYieldDropped() -> UInt64 { seqTracker.yieldDroppedTotal() }
+
+    /// v1.21.4 Phase-3 (Mitigation B): count of retained ES messages dropped at
+    /// the copy/hand-off stage because the bounded off-thread worker was already
+    /// at its in-flight cap (`maxInFlightMessages`). Surfaced as the heartbeat
+    /// key `es_copy_backpressure_dropped_total` (wiring lives in `DaemonTimers`,
+    /// alongside the D1/D4 keys). This is honest userspace backpressure — a
+    /// dropped-here message is COUNTED here, unlike a silent kernel drop.
+    public func esCopyBackpressureDropped() -> UInt64 { messageWorker.backpressureDropped() }
 
     // MARK: - v1.21.4 Phase-2 (D3) coverage-canary probe
 
@@ -853,6 +909,70 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE.rawValue: return "NOTIFY_REMOTE_THREAD_CREATE"
         case ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED.rawValue: return "NOTIFY_CS_INVALIDATED"
         default: return "TYPE_\(raw)"
+        }
+    }
+
+    // MARK: - v1.21.4 Phase-3 (Mitigation B) — off-thread message processing
+
+    /// The full parse/yield/D4/canary pipeline that used to run inline on the ES
+    /// callback boundary. Now runs on the `messageWorker`'s serial queue against
+    /// the RETAINED message (`box.message`), which stays valid until the worker's
+    /// `free` closure calls `es_release_message`. Byte-for-byte the same work as
+    /// the old inline handler (same single `yield`, same content, same downstream
+    /// order), minus the D1 seq accounting which must stay on the callback
+    /// boundary. Never frees the message — that is the worker's `free` closure's
+    /// sole responsibility, called exactly once after this returns.
+    ///
+    /// Wrapped in an `autoreleasepool` so the CFString-backed `String`s that
+    /// `esStringToSwift`/`normalise` create are reclaimed per message instead of
+    /// accumulating on the worker thread — the same defensive discipline the old
+    /// inline callback used, moved to where the allocation now happens.
+    private static func processRetained(
+        _ box: ESPendingMessage,
+        continuation: AsyncStream<Event>.Continuation,
+        traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
+        tracker: ESSeqTracker,
+        canary: ESCanaryRegistry,
+        logger: Logger
+    ) {
+        autoreleasepool {
+            let message = box.message
+            let evType = box.eventType
+
+            // v1.9 Agent Traces side-channel. Computed BEFORE normalise so the
+            // env-scan can lift TRACEPARENT off the retained es_message_t before
+            // normalise drops the env reference. Cheap no-op when the flag is off.
+            if agentTracesEnabled {
+                emitTraceSignals(message: message, into: traceContinuation)
+            }
+
+            let event = normalise(message: message)
+            var yielded = false
+            var yieldDropped = false
+            if let event = event {
+                yielded = true
+                if case .dropped = continuation.yield(event) { yieldDropped = true }
+                // v1.21.4 Phase-2 (D3): coverage-canary recognizer. On an EXEC
+                // whose argv (already parsed by normalise) carries a live probe
+                // nonce, latch "seen at callback" for that nonce. Cheap no-op when
+                // no probe is in flight (registry armed-gate).
+                if evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
+                    canary.noteExecIfCanary(commandLine: event.process.commandLine)
+                }
+            } else {
+                logger.debug("Dropped unhandled ES event type: \(evType)")
+            }
+            // v1.21.4 Phase-0 D4: end-to-end handler latency (arrival → done,
+            // including the queue-wait now that processing is off-thread) plus
+            // the yield-outcome backlog gauge. `box.startNanos` was captured at
+            // the callback boundary; `&-` is the monotonic DispatchTime delta.
+            let elapsedNanos = DispatchTime.now().uptimeNanoseconds &- box.startNanos
+            tracker.recordProcessed(
+                eventType: evType,
+                elapsedNanos: elapsedNanos,
+                yielded: yielded,
+                yieldDropped: yieldDropped
+            )
         }
     }
 
@@ -1501,5 +1621,176 @@ public final class ESCanaryRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard !live.isEmpty else { return }
         for nonce in live where commandLine.contains(nonce) { seen.insert(nonce) }
+    }
+}
+
+// MARK: - ESPendingMessage (v1.21.4 Phase-3 Mitigation B)
+
+/// Per-message context carried across the callback → worker hand-off. Holds the
+/// RETAINED `es_message_t` pointer (valid until `es_release_message`), the
+/// handler-entry timestamp (D4 end-to-end latency), and the event type (D4
+/// processed-count + D3 canary gating). Boxed with `Unmanaged.passRetained` at
+/// the callback boundary and released by the worker's `free` closure exactly
+/// once. Not `Sendable`: it only ever crosses the boundary as an opaque pointer.
+private final class ESPendingMessage {
+    let message: UnsafePointer<es_message_t>
+    let startNanos: UInt64
+    let eventType: UInt32
+
+    init(message: UnsafePointer<es_message_t>, startNanos: UInt64, eventType: UInt32) {
+        self.message = message
+        self.startNanos = startNanos
+        self.eventType = eventType
+    }
+}
+
+// MARK: - ESMessageWorker (v1.21.4 Phase-3 Mitigation B)
+
+/// Bounded off-thread worker that owns retained Endpoint Security messages
+/// between the callback boundary and the parse/yield pipeline. The ES callback
+/// does the minimum (D1 seq accounting + `es_retain_message`) and hands the
+/// retained message here, returning immediately so the per-client kernel queue
+/// drains at the retain+enqueue rate, not the parse rate — shrinking the window
+/// in which the kernel back-pressures and silently drops messages.
+///
+/// # Free-exactly-once (the whole risk of this change)
+///
+/// The worker takes OWNERSHIP of every handle passed to `submit` and guarantees
+/// its injected `free` closure runs EXACTLY ONCE per handle, on every path:
+///
+///   • **accepted** → the serial worker runs `process(handle)` then
+///     `free(handle)` inside one dispatched block, and GCD runs each async block
+///     exactly once;
+///   • **over-bound** → `submit` frees inline (and counts the drop) and never
+///     enqueues, so the accepted branch cannot also run for that handle;
+///   • **shutting down** → `submit` frees inline and never enqueues.
+///
+/// The three `submit` branches are mutually exclusive (each returns), and a
+/// handle reaches `submit` exactly once (the caller boxes a fresh
+/// `Unmanaged.passRetained` per message). Therefore `free` runs on every handle
+/// exactly once — no leak (a missed free leaks kernel message memory) and no
+/// double-free / use-after-free (either would crash the ES client). `process`
+/// never frees (that is `free`'s sole job) and always runs strictly before
+/// `free` within the same block, so nothing touches the handle after it is
+/// freed.
+///
+/// # Bounded / backpressure
+///
+/// `inFlight` (submitted-but-not-yet-completed handles) is capped at
+/// `maxInFlight`. Past the cap the NEWEST arrival is dropped (freed + counted in
+/// `backpressureDroppedCount`) rather than blocking the callback — blocking the
+/// ES callback thread would itself starve the kernel queue, the exact failure
+/// this change fixes — or growing memory without bound. Bounding by an in-flight
+/// COUNT on a dedicated serial queue is the first mechanism the plan names; it
+/// drops-newest because you cannot evict an already-enqueued item from a GCD
+/// queue. Drop-newest and drop-oldest bound memory identically, and the drop is
+/// COUNTED either way, which is the point (an honest userspace gauge instead of
+/// a silent kernel drop).
+///
+/// # Ordering
+///
+/// The queue is SERIAL, so messages are normalised and yielded in the same
+/// kernel-delivery order as the old inline handler — one at a time, but the
+/// callback no longer waits for it. `submit` increments `inFlight` and enqueues
+/// under one lock, giving `shutdownAndDrain` a consistent view: every enqueued
+/// block is enqueued before a concurrent shutdown observes the flag, or the
+/// submit sees the flag and frees inline.
+///
+/// # Concurrency
+///
+/// One `NSLock` guards `inFlight`, `shuttingDown`, and `backpressureDroppedCount`
+/// — mirroring the sibling `ESSeqTracker` / `ESCanaryRegistry` locked primitives.
+public final class ESMessageWorker: @unchecked Sendable {
+
+    /// Opaque per-message handle. In production this is
+    /// `Unmanaged.passRetained(ESPendingMessage).toOpaque()`; in tests it is any
+    /// distinct non-null pointer. The worker treats it purely as a token whose
+    /// only contract is "pass me to `process` then `free`, exactly once each."
+    public typealias Handle = UnsafeRawPointer
+
+    private let queue: DispatchQueue
+    private let maxInFlight: Int
+    private let process: (Handle) -> Void
+    private let free: (Handle) -> Void
+
+    private let lock = NSLock()
+    private var inFlight = 0
+    private var shuttingDown = false
+    private var backpressureDroppedCount: UInt64 = 0
+
+    /// - Parameters:
+    ///   - maxInFlight: in-flight cap (clamped to ≥1).
+    ///   - label: dispatch-queue label.
+    ///   - process: run the message pipeline; MUST NOT free the handle.
+    ///   - free: release the handle; the worker calls it exactly once per handle.
+    public init(maxInFlight: Int,
+                label: String = "com.maccrab.es.message-worker",
+                process: @escaping (Handle) -> Void,
+                free: @escaping (Handle) -> Void) {
+        self.maxInFlight = Swift.max(1, maxInFlight)
+        self.queue = DispatchQueue(label: label, qos: .userInitiated)
+        self.process = process
+        self.free = free
+    }
+
+    /// Take ownership of `handle` and either dispatch it for processing or, if
+    /// the worker is at capacity or shutting down, free it inline. On EVERY
+    /// return path the handle is freed exactly once (see the type doc). Never
+    /// blocks the caller (the ES callback thread).
+    public func submit(_ handle: Handle) {
+        lock.lock()
+        if shuttingDown {
+            lock.unlock()
+            free(handle)                       // drain path — free once
+            return
+        }
+        if inFlight >= maxInFlight {
+            backpressureDroppedCount &+= 1
+            lock.unlock()
+            free(handle)                       // over-bound drop — free once + counted
+            return
+        }
+        inFlight += 1
+        // Enqueue UNDER the lock so (inFlight += 1, enqueue) is atomic w.r.t.
+        // shutdownAndDrain: any block we enqueue is enqueued before a concurrent
+        // shutdown can observe `shuttingDown` and run its drain barrier.
+        // `async` never blocks, so holding the lock across it cannot deadlock.
+        queue.async {
+            self.process(handle)               // pipeline — must not free
+            self.free(handle)                  // accepted path — free once
+            self.lock.lock()
+            self.inFlight -= 1
+            self.lock.unlock()
+        }
+        lock.unlock()
+    }
+
+    /// Stop accepting new work and block until every in-flight handle has been
+    /// processed and freed. Idempotent. Called from `ESCollector.stop()` BEFORE
+    /// `es_delete_client`, so every `es_release_message` happens strictly before
+    /// the client is torn down.
+    public func shutdownAndDrain() {
+        lock.lock()
+        shuttingDown = true
+        lock.unlock()
+        // Serial queue: this empty sync block runs only after every block
+        // enqueued before it (all currently in-flight work) has completed, and
+        // each of those frees its handle. Submits after the flag is set free
+        // inline and never enqueue, so nothing new can appear behind this barrier.
+        queue.sync { }
+    }
+
+    /// Count of handles dropped at the copy/hand-off stage because the in-flight
+    /// cap was hit — surfaced as `es_copy_backpressure_dropped_total`.
+    public func backpressureDropped() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return backpressureDroppedCount
+    }
+
+    /// Current in-flight count (submitted-but-not-yet-completed). Observability
+    /// and test aid; not on any hot path.
+    public func inFlightCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return inFlight
     }
 }

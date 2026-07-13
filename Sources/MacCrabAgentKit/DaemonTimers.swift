@@ -1399,6 +1399,7 @@ enum DaemonTimers {
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
+            let esCopyBackpressureDropped = state.collector?.esCopyBackpressureDropped() ?? 0
 
             // v1.21.4 Phase-1 D2: sensor-degraded / possible-evasion meta-alert.
             // Fold the D1/D4 cumulative counters into per-tick deltas and gate on
@@ -1500,6 +1501,7 @@ enum DaemonTimers {
                 "es_handler_p99_us": esHandlerP99Micros,
                 "es_processed_by_type": esProcessedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
+                "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 // v1.21.4 Phase-1 D2: sensor-degraded advisory state for the
                 // ES Health surface + the menu-bar "protection degraded" flag.
                 "es_sensor_degraded": esSensorDegraded,
@@ -1553,6 +1555,7 @@ enum DaemonTimers {
                 "es_kernel_dropped_total": esGlobalDropped,
                 "es_handler_p99_us": esHandlerP99Micros,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
+                "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 "events_per_sec_lifetime": uptime > 0 ? Double(events) / Double(uptime) : 0,
                 "resident_memory_mb": residentMB,
                 "sysext_has_fda": sysextHasFDA,
