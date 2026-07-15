@@ -16,6 +16,11 @@ final class DaemonState {
 
     // MARK: - Storage
     let eventStore: EventStore
+    /// v1.21.4 (F2/A1): async batched writer sitting in FRONT of `eventStore`
+    /// for the hot detection path. The event loop hands events here (O(1))
+    /// instead of blocking on a per-event SQLite transaction; the writer flushes
+    /// them in batches off the consumer's critical path. See BatchedEventWriter.
+    let eventWriter: BatchedEventWriter
     let alertStore: AlertStore
     /// Single chokepoint for all alert insertion. Routes everything through
     /// AlertDeduplicator before reaching AlertStore, closing the v1.6.9
@@ -478,6 +483,7 @@ final class DaemonState {
         self.sequenceRulesDir = sequenceRulesDir
         self.effectiveRulesDir = effectiveRulesDir
         self.eventStore = eventStore
+        self.eventWriter = BatchedEventWriter(store: eventStore)
         self.alertStore = alertStore
         // Build AlertSink from the already-stored alertStore + deduplicator so
         // we don't need a new initializer parameter. Construction is cheap
@@ -602,9 +608,19 @@ final class DaemonState {
     /// never pays an actor hop or spawns a Task per drop.
     private let mergedStreamDrops = LockedCounter()
 
-    /// Merged-stream drops since daemon start. Folded into the heartbeat's
-    /// `events_dropped` / `events_dropped_total` by `DaemonTimers`.
+    /// PRIORITY-stream drops since daemon start (v1.21.4 A2 split the merged
+    /// stream in two; `mergedStreamDrops` now counts the priority/non-file
+    /// stream). Folded into the heartbeat's `events_dropped` by `DaemonTimers`.
     var mergedStreamDropCount: Int { mergedStreamDrops.get() }
+
+    /// v1.21.4 (F2/A2): file-category events ride a SEPARATE bounded stream so a
+    /// file-write flood can't evict high-value exec/network/tcc events from the
+    /// priority stream. This is its own drop counter — folded into the
+    /// heartbeat's detection-input `events_dropped` alongside the priority drops,
+    /// but reported distinctly so operators can see that shed volume was
+    /// low-value file noise, not a missed exec.
+    private let fileStreamDrops = LockedCounter()
+    var fileStreamDropCount: Int { fileStreamDrops.get() }
 
     /// Upper bound on in-flight events queued to the detection pipeline.
     /// Past this depth, AsyncStream's `.bufferingNewest` policy drops the
@@ -615,26 +631,56 @@ final class DaemonState {
     /// than growing the resident set unboundedly — an explicit choice because
     /// an OOM'd daemon detects nothing. Sequence rules tolerate a sparse
     /// drop via the partial-match timeout; a memory blow-up wouldn't.
-    private static let mergedStreamCap = 100_000
+    /// v1.21.4 (F2/A2): the merged stream is split in two so a file-write flood
+    /// can't evict high-value events. Each has its own bounded buffer. Defaults
+    /// preserve the prior 100k depth per stream; tunable via DaemonConfig (A3).
+    static var priorityStreamCap = 100_000
+    static var fileStreamCap = 100_000
 
-    /// Merges all event sources into a single async stream.
+    /// v1.21.4 (F2/A2): which split stream an event rides. The file-write family
+    /// is the flood source, so it goes to the dedicated `file` stream where a
+    /// storm can only evict OTHER file events; everything else (exec/network/
+    /// tcc/auth/registry) rides the `priority` stream and is protected from that
+    /// eviction. Explicit + testable so a future high-volume category isn't
+    /// silently routed onto the priority stream (which would reopen the gap).
+    static func ridesFileStream(_ category: EventCategory) -> Bool {
+        category == .file
+    }
+
+    /// Merges all event sources into TWO async streams, split by category so a
+    /// file-write flood is contained to the `file` stream and cannot evict
+    /// high-value exec/network/tcc/auth events from the `priority` stream.
     /// Each source runs in a restart loop — if the underlying AsyncStream ends
     /// (subprocess exit, actor error, buffer overflow), the Task re-attaches
-    /// after a 2-second back-off so the source recovers without a daemon restart.
-    func mergedEventStream() -> AsyncStream<Event> {
-        AsyncStream<Event>(bufferingPolicy: .bufferingNewest(Self.mergedStreamCap)) { continuation in
-            let logger = mergedStreamLogger
-            // Capture the counter (not `self`) so the @Sendable closure stays
-            // isolation-free. On `.dropped` the `mergedStreamCap`
-            // `.bufferingNewest` buffer was full and evicted the oldest queued
-            // event — a real detection gap — so count it synchronously here.
-            // `.enqueued` / `.terminated` are normal and cost nothing.
-            let drops = mergedStreamDrops
-            let yield: @Sendable (Event) -> Void = { event in
-                if case .dropped = continuation.yield(event) {
-                    drops.increment()
-                }
+    /// after a back-off so the source recovers without a daemon restart. A
+    /// single source (e.g. ESCollector) emits BOTH families; the yield closure
+    /// routes each event by `eventCategory` into the correct stream.
+    func mergedEventStreams() -> (priority: AsyncStream<Event>, file: AsyncStream<Event>) {
+        var priorityCont: AsyncStream<Event>.Continuation!
+        var fileCont: AsyncStream<Event>.Continuation!
+        let priorityStream = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.priorityStreamCap)) { priorityCont = $0 }
+        let fileStream = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.fileStreamCap)) { fileCont = $0 }
+
+        // Capture the continuations as `let` (Sendable) + the counters, so the
+        // @Sendable yield closure stays isolation-free. On `.dropped` the
+        // per-stream `.bufferingNewest` buffer was full and evicted the oldest
+        // queued event of THAT category — a real detection gap — so count it
+        // synchronously against the right counter.
+        let pCont = priorityCont!
+        let fCont = fileCont!
+        let pDrops = mergedStreamDrops
+        let fDrops = fileStreamDrops
+        let yield: @Sendable (Event) -> Void = { event in
+            if DaemonState.ridesFileStream(event.eventCategory) {
+                if case .dropped = fCont.yield(event) { fDrops.increment() }
+            } else {
+                if case .dropped = pCont.yield(event) { pDrops.increment() }
             }
+        }
+        let continuationPair = (priorityStream, fileStream)
+        let logger = mergedStreamLogger
             // v1.18: each source runs an independent backoff + escalation loop.
             // A source whose AsyncStream ends PERMANENTLY (ES client invalidated,
             // eslogger subprocess gone) no longer hot-spins at a fixed 2s logging
@@ -668,7 +714,7 @@ final class DaemonState {
             Task { await driveSource("TCCMonitor", logger: logger, events: { tcc.events }, yield: yield) }
             let net = networkCollector
             Task { await driveSource("NetworkCollector", logger: logger, events: { net.events }, yield: yield) }
-        }
+        return continuationPair
     }
 }
 

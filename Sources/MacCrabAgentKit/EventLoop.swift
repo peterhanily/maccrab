@@ -1352,8 +1352,13 @@ enum EventLoop {
                 }
             }
 
-            // Store event
-            do { try await state.eventStore.insert(event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordEventError(error) }
+            // Store event. v1.21.4 (F2/A1): hand off to the async batched writer
+            // (O(1)) instead of blocking this consumer on a per-event SQLite
+            // transaction — the write happens off the critical path in batches.
+            // Nothing below reads the event back from events.db (detection uses
+            // the in-memory enrichedEvent; alert evidence is snapshotted in
+            // memory), so deferring the write is detection-safe.
+            await state.eventWriter.enqueue(enrichedEvent)
 
             // v1.10.0 TraceGraph ingestion. Bridge handles category/action
             // mapping internally and returns nil-equivalent for events

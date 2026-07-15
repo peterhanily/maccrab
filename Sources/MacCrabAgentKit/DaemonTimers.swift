@@ -1367,9 +1367,16 @@ enum DaemonTimers {
             // Fold the merged-stream buffer drops (bufferingNewest cap →
             // oldest evicted) into the registry total. recordDrop keeps its
             // other callers; the merged-stream yield path is a separate drop
-            // source that must also show up in the heartbeat.
+            // source that must also show up in the heartbeat. v1.21.4 (A2): the
+            // merged stream is split priority/file, so BOTH detection-input drop
+            // counters are folded here. The batched writer's storage-write drops
+            // are NOT folded — they are a storage-layer loss, not a detection
+            // gap (the event was fully processed), surfaced under their own key.
+            let priorityDropped = UInt64(state.mergedStreamDropCount)
+            let fileDropped = UInt64(state.fileStreamDropCount)
+            let eventWriterDropped = UInt64(state.eventWriter.droppedCount)
             let droppedTotal = await state.collectorRegistry.droppedEventsTotal()
-                &+ UInt64(state.mergedStreamDropCount)
+                &+ priorityDropped &+ fileDropped
             // Encode collectors as plain dicts for JSONSerialization
             // compatibility (it can't take a [Codable] directly).
             let collectorDicts: [[String: Any]] = collectorStatuses.map { s in
@@ -1567,6 +1574,14 @@ enum DaemonTimers {
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
                 "rules_active": rulesActive,
+                // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
+                // detection-input drops folded into `events_dropped`; surfaced
+                // distinctly so a file-noise flood (file) is not read as a lost
+                // exec (priority). `events_storage_write_dropped_total` is the
+                // batched writer's storage-layer drop — NOT a detection gap.
+                "merged_priority_dropped_total": priorityDropped,
+                "merged_file_dropped_total": fileDropped,
+                "events_storage_write_dropped_total": eventWriterDropped,
                 "schema_version": 5,
             ]
 

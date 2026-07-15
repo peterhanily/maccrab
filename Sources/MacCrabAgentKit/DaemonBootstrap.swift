@@ -82,13 +82,34 @@ public enum DaemonBootstrap {
     /// count globals below are read by the periodic timers to report
     /// throughput without requiring a tighter coupling.
     public static func runEventLoop(handles: DaemonHandles) async {
-        let stream = handles.state.mergedEventStream()
-        await EventLoop.run(
+        // v1.21.4 (F2/A1): start the batched events.db writer's partial-flush
+        // timer so below-threshold batches still reach disk on a bounded cadence.
+        await handles.state.eventWriter.startFlushLoop()
+        // v1.21.4 (F2/A2): two consumers, one per split stream. The file
+        // consumer drains the high-volume file-write family; the priority
+        // consumer drains everything else (exec/network/tcc/auth) from its OWN
+        // bounded buffer, so a file flood can't evict high-value events. Both
+        // feed the same actor engines + the same batched writer — safe because
+        // EventLoop.run holds no loop-local mutable state (all state is in
+        // DaemonState's actors + Sendable counters); cross-collector reordering
+        // into the engines already existed before the split.
+        let streams = handles.state.mergedEventStreams()
+        async let priorityConsumer: Void = EventLoop.run(
             state: handles.state,
-            eventStream: stream,
+            eventStream: streams.priority,
             eventCount: _sharedEventCount,
             alertCount: _sharedAlertCount
         )
+        async let fileConsumer: Void = EventLoop.run(
+            state: handles.state,
+            eventStream: streams.file,
+            eventCount: _sharedEventCount,
+            alertCount: _sharedAlertCount
+        )
+        _ = await (priorityConsumer, fileConsumer)
+        // Both streams ended (SIGTERM / sysextd teardown) — flush anything still
+        // buffered so a graceful shutdown doesn't lose the last partial batch.
+        await handles.state.eventWriter.shutdown()
     }
 
     /// The full bootstrap + run. Most callers want this; the split

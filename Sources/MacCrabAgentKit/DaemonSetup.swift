@@ -336,6 +336,12 @@ enum DaemonSetup {
         NoiseFilter.selfTestNoiseSuppressionEnabled = config.suppressSelftestNoise
             || ProcessInfo.processInfo.environment["MACCRAB_SUPPRESS_SELFTEST_NOISE"] == "1"
 
+        // v1.21.4 (F2/A3): apply the split merged-stream buffer depths from
+        // config before the streams are built in runEventLoop. Floored at 1000
+        // so a fat-fingered tiny value can't make the pipeline drop everything.
+        DaemonState.priorityStreamCap = max(1000, config.storage.mergedPriorityStreamCap)
+        DaemonState.fileStreamCap = max(1000, config.storage.mergedFileStreamCap)
+
         // Create support directories with restrictive permissions
         try? fm.createDirectory(
             atPath: supportDir,
