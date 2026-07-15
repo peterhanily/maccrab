@@ -70,6 +70,18 @@ enum SensorDegradationEvaluator {
         var processEventsThisTick: Double
         /// `es_kernel_dropped_total` delta over this tick.
         var kernelDropDelta: UInt64
+        /// ES-collector-stage userspace drops over this tick:
+        /// `es_copy_backpressure_dropped_total` + `es_stream_yield_dropped_total`.
+        /// After Phase-3 (async retain-worker) and Phase-4 (file/exec client
+        /// split), a flood no longer produces KERNEL drops — the message is
+        /// retained off the kernel queue and then lost when the bounded worker
+        /// queue or the collector's AsyncStream buffer overflows. Those are the
+        /// dominant coverage-loss signal now, so D2 must gate on them too, not
+        /// just `kernelDropDelta` (else a real flood degrades the sensor
+        /// silently). NOT the merged-stream `events_dropped` — that is a
+        /// downstream consumer stage, deliberately kept out of the ES-sensor
+        /// verdict.
+        var collectorDropDelta: UInt64
         /// The dominant high-I/O writer this window is a known-benign signer.
         var benignHighIOSigner: Bool
     }
@@ -91,6 +103,7 @@ enum SensorDegradationEvaluator {
         var processRate: Double
         var processBaseline: Double
         var kernelDropDelta: UInt64
+        var collectorDropDelta: UInt64
     }
 
     /// Pure evaluation: given this tick's inputs and the prior baseline,
@@ -107,7 +120,8 @@ enum SensorDegradationEvaluator {
                 outcome: .noAlert, newBaseline: b,
                 fileRate: input.fileEventsThisTick, fileBaseline: input.fileEventsThisTick,
                 processRate: input.processEventsThisTick, processBaseline: input.processEventsThisTick,
-                kernelDropDelta: input.kernelDropDelta
+                kernelDropDelta: input.kernelDropDelta,
+                collectorDropDelta: input.collectorDropDelta
             )
         }
 
@@ -115,7 +129,14 @@ enum SensorDegradationEvaluator {
             && input.fileEventsThisTick > b.fileEventEwma * fileSpikeMultiplier
         let processCollapse = b.processEventEwma >= minProcessBaselineForCollapse
             && input.processEventsThisTick < b.processEventEwma * processCollapseRatio
-        let conjunction = spike && (input.kernelDropDelta > 0 || processCollapse)
+        // Any coverage-loss signal — kernel drops OR the ES-collector-stage
+        // userspace drops (backpressure / stream-yield) OR an exec-channel
+        // collapse — while the file rate is spiking is a degraded sensor.
+        // collectorDropDelta is the signal that survives Phase-3/4 (which drove
+        // kernelDropDelta to ~0); without it the meta-alert never fires on a
+        // real flood.
+        let conjunction = spike
+            && (input.kernelDropDelta > 0 || input.collectorDropDelta > 0 || processCollapse)
 
         var outcome: Outcome = .noAlert
         if conjunction && !b.degradedActive {
@@ -139,7 +160,8 @@ enum SensorDegradationEvaluator {
             outcome: outcome, newBaseline: b,
             fileRate: input.fileEventsThisTick, fileBaseline: baseline.fileEventEwma,
             processRate: input.processEventsThisTick, processBaseline: baseline.processEventEwma,
-            kernelDropDelta: input.kernelDropDelta
+            kernelDropDelta: input.kernelDropDelta,
+            collectorDropDelta: input.collectorDropDelta
         )
     }
 }
@@ -155,6 +177,7 @@ final class SensorDegradationState: @unchecked Sendable {
     private var lastFileCumulative: UInt64 = 0
     private var lastProcessCumulative: UInt64 = 0
     private var lastKernelDropCumulative: UInt64 = 0
+    private var lastCollectorDropCumulative: UInt64 = 0
     private var haveLastCumulative = false
 
     /// Fold this tick's CUMULATIVE counters (monotonic since the last ES
@@ -165,6 +188,7 @@ final class SensorDegradationState: @unchecked Sendable {
         fileCumulative: UInt64,
         processCumulative: UInt64,
         kernelDropCumulative: UInt64,
+        collectorDropCumulative: UInt64,
         benignHighIOSigner: Bool
     ) -> SensorDegradationEvaluator.Result {
         lock.lock(); defer { lock.unlock() }
@@ -177,11 +201,12 @@ final class SensorDegradationState: @unchecked Sendable {
             lastFileCumulative = fileCumulative
             lastProcessCumulative = processCumulative
             lastKernelDropCumulative = kernelDropCumulative
+            lastCollectorDropCumulative = collectorDropCumulative
             haveLastCumulative = true
             return SensorDegradationEvaluator.Result(
                 outcome: .noAlert, newBaseline: baseline,
                 fileRate: 0, fileBaseline: 0, processRate: 0, processBaseline: 0,
-                kernelDropDelta: 0
+                kernelDropDelta: 0, collectorDropDelta: 0
             )
         }
 
@@ -189,15 +214,18 @@ final class SensorDegradationState: @unchecked Sendable {
         let fileDelta = delta(fileCumulative, lastFileCumulative)
         let processDelta = delta(processCumulative, lastProcessCumulative)
         let dropDelta = delta(kernelDropCumulative, lastKernelDropCumulative)
+        let collectorDropDelta = delta(collectorDropCumulative, lastCollectorDropCumulative)
 
         lastFileCumulative = fileCumulative
         lastProcessCumulative = processCumulative
         lastKernelDropCumulative = kernelDropCumulative
+        lastCollectorDropCumulative = collectorDropCumulative
 
         let input = SensorDegradationEvaluator.Input(
             fileEventsThisTick: Double(fileDelta),
             processEventsThisTick: Double(processDelta),
             kernelDropDelta: dropDelta,
+            collectorDropDelta: collectorDropDelta,
             benignHighIOSigner: benignHighIOSigner
         )
         let result = SensorDegradationEvaluator.evaluate(input: input, baseline: baseline)
@@ -1420,6 +1448,11 @@ enum DaemonTimers {
                 fileCumulative: fileEventsCumulative,
                 processCumulative: processEventsCumulative,
                 kernelDropCumulative: esGlobalDropped,
+                // ES-collector-stage userspace drops (Phase-3 worker queue +
+                // Phase-4/collector AsyncStream). These, not kernel drops, are
+                // what a real flood produces after the retain-worker + client
+                // split — so D2 gates on them too (see Input.collectorDropDelta).
+                collectorDropCumulative: esCopyBackpressureDropped &+ esStreamYieldDropped,
                 benignHighIOSigner: benignHighIOSigner
             )
             var esSensorDegraded = false
@@ -1432,7 +1465,7 @@ enum DaemonTimers {
                 // Plain interpolation (no String(format:) — avoids the CVarArg
                 // %@/%llu pitfalls this codebase has been bitten by).
                 esSensorDegradedDetail =
-                    "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(sensorResult.kernelDropDelta) ES messages were kernel-dropped and process/exec throughput fell to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
+                    "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(sensorResult.kernelDropDelta) ES messages were kernel-dropped, \(sensorResult.collectorDropDelta) were dropped at the collector stage (backpressure/stream-yield), and process/exec throughput fell to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
                 let alert = Alert(
                     ruleId: "maccrab.self-defense.\(ESClientMonitor.ESHealthEvent.EventType.sensorDegraded.rawValue)",
                     ruleTitle: "Sensor Degraded: possible telemetry-drop evasion",
