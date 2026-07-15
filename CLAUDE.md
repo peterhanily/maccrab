@@ -276,6 +276,8 @@ Optional `daemon_config.json` in the support directory overrides defaults:
     "tracegraph_max_size_mb": 250,
     "traces_retention_days": 90,
     "traces_max_size_mb": 100,
+    "merged_priority_stream_cap": 100000,
+    "merged_file_stream_cap": 100000,
     "reports_retention_days": 90,
     "auto_generated_rules_max": 200
   }

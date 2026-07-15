@@ -3,6 +3,31 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.2] — 2026-07-15
+
+Follow-up to rc.1 from on-device testing: no more duplicate notifications, higher
+event-ingest throughput under load, and honest reporting of active detection coverage.
+
+### Fixed
+- **No more double notifications.** A single alert could raise both a macOS banner and an
+  in-app popup. Notifications now have one owner — the macOS banner — with the in-app popup
+  used only as a fallback when notification permission is denied. Alert surfacing is governed
+  uniformly by your notification severity floor (`min_severity`); to surface high-severity
+  alerts, set `min_severity` to `high`.
+- **Sensor-degraded advisory under sustained floods.** The "sensor degraded" advisory now
+  also fires when events are shed at the collector stage — not only when the kernel drops
+  them — so a heavy file-write storm can no longer reduce coverage without surfacing it.
+
+### Changed
+- **Higher event throughput under load.** Events are now written to the database in batches
+  off the detection path instead of one transaction each, and the event pipeline is split so
+  a file-write flood can no longer evict high-value process/network events. Together these
+  sharply reduce dropped events under stress. New `merged_priority_stream_cap` /
+  `merged_file_stream_cap` knobs in `daemon_config.json` size the two pipeline buffers.
+- **Honest rule coverage in status.** `maccrabctl status` now reports active vs loaded rule
+  counts (e.g. "87 active / 438 loaded") so the stable-profile default is transparent about
+  how many rules are actually evaluating.
+
 ## [1.21.4-rc.1] — 2026-07-15
 
 A hardening and honesty release: safer detection defaults, real tamper-evidence for
