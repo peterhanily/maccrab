@@ -89,7 +89,23 @@ extension MacCrabCtl {
             let seqDir = compiledDir + "/sequences"
             let seqFiles = try? FileManager.default.contentsOfDirectory(atPath: seqDir)
             let seqCount = seqFiles?.filter { $0.hasSuffix(".json") }.count ?? 0
-            print("Rules:           \(ruleCount) standard, \(seqCount) sequence rule(s) loaded")
+            // v1.21.4 (F3): prefer the daemon's live active/loaded counts from
+            // the heartbeat so we report EFFECTIVE coverage. The on-disk file
+            // count counts every rule PRESENT; under the F-04 stable rule
+            // profile many ship disabled, so the file count overstates how many
+            // rules actually evaluate. Fall back to the file count when the
+            // daemon isn't running (no fresh heartbeat) or on an older daemon
+            // build that doesn't publish the keys.
+            if daemonRunning, let hb = ruleCoverageFromHeartbeat(supportDir: supportDir), hb.loaded > 0 {
+                if hb.active < hb.loaded {
+                    print("Rules:           \(hb.active) active / \(hb.loaded) loaded standard, \(seqCount) sequence rule(s)")
+                    print("                 \(hb.loaded - hb.active) disabled by rule profile — set rule_profile: all to enable")
+                } else {
+                    print("Rules:           \(hb.active) standard, \(seqCount) sequence rule(s) loaded")
+                }
+            } else {
+                print("Rules:           \(ruleCount) standard, \(seqCount) sequence rule(s) loaded")
+            }
         } else {
             print("Rules:           No compiled rules found")
             print("                 Run: make compile-rules")
@@ -212,5 +228,21 @@ extension MacCrabCtl {
             if process.terminationStatus == 0 { return true }
         }
         return false
+    }
+
+    /// v1.21.4 (F3): read the daemon's live single-event rule coverage from the
+    /// rich heartbeat — `rules_active` (rules that will actually evaluate) vs
+    /// `rules_loaded` (rules present on disk). Returns nil when the heartbeat is
+    /// missing or predates these keys (older daemon), in which case the caller
+    /// falls back to counting compiled rule files.
+    static func ruleCoverageFromHeartbeat(supportDir: String) -> (active: Int, loaded: Int)? {
+        let path = supportDir + "/heartbeat_rich.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let active = json["rules_active"] as? Int,
+              let loaded = json["rules_loaded"] as? Int else {
+            return nil
+        }
+        return (active, loaded)
     }
 }

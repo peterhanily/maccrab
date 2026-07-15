@@ -894,6 +894,17 @@ public actor RuleEngine {
         allRules.count
     }
 
+    /// v1.21.4 (F3): count of rules that will actually EVALUATE — i.e. those
+    /// with `enabled == true`. Under the F-04 stable rule profile the bundled
+    /// base load disables every rule whose Sigma `status` falls outside the
+    /// active-profile set, so this is materially smaller than `ruleCount`
+    /// (loaded). Surfaced in the heartbeat + `maccrabctl status` so the
+    /// operator sees EFFECTIVE detection coverage, not just how many rule
+    /// files are present on disk.
+    public var enabledRuleCount: Int {
+        allRules.values.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
+    }
+
     // MARK: - Private Evaluation Logic
 
     /// Evaluate a single compiled rule against an event.

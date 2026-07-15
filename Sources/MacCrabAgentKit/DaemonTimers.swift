@@ -1514,6 +1514,16 @@ enum DaemonTimers {
                 "persistence_guard": ["enabled": guardStats.enabled, "count": guardStats.protectedCount],
             ]
 
+            // v1.21.4 (F3): honest single-event rule coverage. `rules_loaded` =
+            // every rule the engine loaded from disk; `rules_active` = the subset
+            // that will actually EVALUATE (enabled). Under the F-04 stable rule
+            // profile these diverge sharply (e.g. ~438 loaded / ~87 active), so
+            // the dashboard + `maccrabctl status` can report effective coverage
+            // rather than the on-disk file count that overstates protection.
+            // Cheap actor reads, off the hot path (30 s cadence).
+            let rulesLoaded = await state.ruleEngine.ruleCount
+            let rulesActive = await state.ruleEngine.enabledRuleCount
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "llm": llmHealthDict,
@@ -1554,6 +1564,9 @@ enum DaemonTimers {
                 // Wave 9K additions.
                 "payload_truncated_total": payloadTruncatedTotal,
                 "eslogger_dropped_total": esloggerDroppedTotal,
+                // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
+                "rules_loaded": rulesLoaded,
+                "rules_active": rulesActive,
                 "schema_version": 5,
             ]
 

@@ -100,6 +100,30 @@ struct RuleProfileTests {
         #expect(experimental?.enabled == true, "with no profile, an experimental rule must load enabled (unchanged legacy default)")
     }
 
+    // F3: the heartbeat + `maccrabctl status` report `enabledRuleCount` (active)
+    // vs `ruleCount` (loaded) so the operator sees effective coverage, not the
+    // on-disk file count. Under [stable] the two must diverge: both rules load
+    // (ruleCount == 2) but only the stable one evaluates (enabledRuleCount == 1).
+    @Test("enabledRuleCount reflects the active subset; ruleCount reflects loaded (F3)")
+    func enabledRuleCountReflectsProfile() async throws {
+        let (dir, _, _) = try makeProfileDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: dir, enabledStatuses: ["stable"])
+        let loaded = await engine.ruleCount
+        let active = await engine.enabledRuleCount
+        #expect(loaded == 2, "both rules are loaded (present), regardless of profile")
+        #expect(active == 1, "only the status:stable rule evaluates under the [stable] profile")
+        #expect(active < loaded, "the whole point of F3: active < loaded when a profile disables rules")
+
+        // Default (nil) profile: nothing disabled → active == loaded.
+        let engineDefault = RuleEngine()
+        _ = try await engineDefault.loadRules(from: dir)
+        #expect(await engineDefault.ruleCount == 2)
+        #expect(await engineDefault.enabledRuleCount == 2, "with no profile every rule is active")
+    }
+
     @Test("reloadRules re-applies the stored profile — experimental stays disabled")
     func profilePersistsAcrossReload() async throws {
         let (dir, stableID, experimentalID) = try makeProfileDir()
