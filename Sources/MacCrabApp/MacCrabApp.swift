@@ -489,10 +489,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {
         self.appState = appState
         if let updater { self.updater = updater }
-        // Register callback for critical alert popups
-        appState.onCriticalAlert = { [weak self] alert in
-            self?.showAlertPopover(alert: alert)
-        }
+        // v1.21.4: `AlertNotifier` is the SOLE per-alert surface owner. It posts
+        // the OS banner when it can and falls back to the in-app popover (below)
+        // only when it can't (auth denied/undetermined). AppState no longer
+        // fires the popover independently — that second, uncoordinated trigger
+        // was the double-notification bug (banner AND bubble for the same
+        // critical). Surfacing is now uniformly governed by the notification
+        // severity floor (min_severity), not a hardcoded critical/high popover.
         // v1.17 (issue #2): OS banners are now posted by the app via
         // UNUserNotificationCenter (attributed to MacCrab, controllable
         // in System Settings, and gone on uninstall) rather than the

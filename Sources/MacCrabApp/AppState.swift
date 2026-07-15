@@ -945,9 +945,6 @@ final class AppState: ObservableObject {
 
     // MARK: Private
 
-    /// Callback for showing critical alert popovers in the menu bar
-    var onCriticalAlert: ((AlertViewModel) -> Void)?
-
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
     private var lastStatsUpdate: Date = Date()
@@ -2605,12 +2602,11 @@ final class AppState: ObservableObject {
                 refreshAlertBadges()
                 lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
 
-                // Trigger crab speech bubble for critical/high alerts
-                if let newest = newViewModels.first,
-                   (newest.severity == .critical || newest.severity == .high),
-                   !newest.suppressed, !isPatternSuppressed(newest) {
-                    onCriticalAlert?(newest)
-                }
+                // v1.21.4: the in-app alert popover is NO LONGER triggered here.
+                // It is owned solely by AlertNotifier (OS banner, with the
+                // popover as its auth-denied fallback). This independent
+                // per-poll trigger fired the popover in ADDITION to the banner
+                // for the same critical alert — the double-notification bug.
 
                 // Extract AI analysis alerts
                 aiAnalysisAlerts = dashboardAlerts.filter {
