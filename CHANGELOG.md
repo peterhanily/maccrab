@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.21.4-alpha.1] — 2026-07-12
+## [1.21.4-rc.1] — 2026-07-15
 
 A hardening and honesty release: safer detection defaults, real tamper-evidence for
 Agent Traces, stronger plugin-trust and release gates, and documentation that states
