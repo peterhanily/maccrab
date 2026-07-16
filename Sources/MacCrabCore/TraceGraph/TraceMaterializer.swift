@@ -197,10 +197,21 @@ public actor TraceMaterializer {
             criticalPathEdgeIds: scoredPath.map { $0.id },
             attackTechniques: attackTechniques
         )
+        // §11.3 honesty gate. The deterministic explainer asserts AI-agent
+        // involvement — and, when an agent is the root cause, NAMES the vendor
+        // ("AI-agent activity from Claude Desktop preceded…") — as fact. When a
+        // participating agent's attribution confidence is below the active
+        // policy threshold, re-render that prose as inferred, not asserted, via
+        // AIAttributionRenderer (the single source of truth for the decision).
+        let gatedExplanation = applyAIAttributionGate(
+            explanation,
+            entities: allEntities,
+            rootCauseEntityId: rootCause.rootEntityId
+        )
         let summaryJson: String? = {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            guard let data = try? encoder.encode(explanation) else { return nil }
+            guard let data = try? encoder.encode(gatedExplanation) else { return nil }
             return String(data: data, encoding: .utf8)
         }()
         let trace = Trace(
@@ -369,6 +380,81 @@ public actor TraceMaterializer {
         }
 
         return out
+    }
+
+    // MARK: - §11.3 AI-attribution honesty gate
+
+    /// Re-render the explanation's AI-agent prose as inferred rather than
+    /// asserted when a participating agent's attribution confidence is below
+    /// the active policy threshold. `AIAttributionRenderer` owns the
+    /// asserted/inferred decision + phrasing so this stays the single source of
+    /// truth; the materializer just applies it at the point the trace summary
+    /// becomes user-facing text.
+    ///
+    /// No-op when no AIAgentNode participates, or when the (lowest) participating
+    /// agent confidence clears the threshold. The lowest confidence is used so a
+    /// single weakly-attributed agent softens the prose even if a better-attributed
+    /// one is also present — honesty errs conservative.
+    private func applyAIAttributionGate(
+        _ explanation: StructuredExplanation,
+        entities: [TraceEntity],
+        rootCauseEntityId: String
+    ) -> StructuredExplanation {
+        let agents = entities.compactMap { decodeAgent($0) }
+        guard let minConfidence = agents.map({ $0.confidence }).min() else {
+            return explanation  // no AI-agent participates — nothing to gate
+        }
+        let rendering = AIAttributionRenderer.render(
+            confidence: minConfidence,
+            assertionThreshold: policy.aiAttributionAssertionThreshold
+        )
+        guard !rendering.assertedAsFact else {
+            return explanation  // confidence clears the bar — assert as-is
+        }
+
+        // Below threshold. (1) Soften the vendor-named root display when the
+        // root cause is itself an agent — that is the only site the explainer
+        // NAMES a vendor, and so the highest reputational-risk assertion.
+        var display = explanation.rootCause.display
+        if let rootEntity = entities.first(where: { $0.id == rootCauseEntityId }),
+           rootEntity.entityType == AIAgentNode.entityType,
+           let rootAgent = decodeAgent(rootEntity) {
+            display = AIAttributionRenderer.explainerSentence(
+                agentName: rootAgent.agentName,
+                confidence: rootAgent.confidence,
+                assertionThreshold: policy.aiAttributionAssertionThreshold
+            )
+        }
+        // (2) Soften every asserted AI-agent severity reason.
+        let gatedReasons = explanation.severityReasons.map {
+            AIAttributionRenderer.gatedSeverityReason(
+                $0,
+                confidence: minConfidence,
+                assertionThreshold: policy.aiAttributionAssertionThreshold
+            )
+        }
+        let gatedRoot = StructuredExplanation.RootCause(
+            entityId: explanation.rootCause.entityId,
+            display: display,
+            trustTransition: explanation.rootCause.trustTransition
+        )
+        return StructuredExplanation(
+            rootCause: gatedRoot,
+            criticalPath: explanation.criticalPath,
+            severityReasons: gatedReasons,
+            confidenceReasons: explanation.confidenceReasons,
+            attackMapping: explanation.attackMapping
+        )
+    }
+
+    /// Decode an `AIAgentNode` from a trace entity's attributes JSON. Mirrors
+    /// `DeterministicExplainer.decodeAgent` (millisecond date strategy).
+    private func decodeAgent(_ entity: TraceEntity) -> AIAgentNode? {
+        guard entity.entityType == AIAgentNode.entityType,
+              let data = entity.attributesJson.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return try? decoder.decode(AIAgentNode.self, from: data)
     }
 
     // MARK: - Helpers

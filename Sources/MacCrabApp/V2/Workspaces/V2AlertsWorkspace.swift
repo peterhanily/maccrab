@@ -21,6 +21,10 @@ struct V2AlertsWorkspace: View {
     @State private var campaigns: [V2MockCampaign] = []
     @State private var suppressedCampaigns: [V2MockCampaign] = []
     @State private var selectedCampaignIds: Set<String> = []
+    // v1.21.4: multi-select set for the Open table's checkbox column. When
+    // non-empty, Bulk suppress targets the checked subset instead of every
+    // visible row.
+    @State private var selectedAlertIds: Set<String> = []
     @State private var loaded = false
     // v1.12.7 Wave 9R: pending-mutation reconciliation. After Wave 9Q
     // flipped @State optimistically on click, the auto-refresh-tick
@@ -577,15 +581,23 @@ struct V2AlertsWorkspace: View {
             for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
                 self.alerts[idx].suppressed = true
             }
+            // The batch is consumed — clear its checkboxes.
+            selectedAlertIds.subtract(idSet)
         }
 
         let count = await state.provider.suppressAlerts(ids: ids)
         await MainActor.run {
             if count > 0 && count == ids.count {
+                // Offer an Undo that reverses the whole batch via the existing
+                // unsuppress path. Longer display so it's actually clickable.
                 state.showToast(V2Toast(
                     kind: .success,
                     title: "Bulk suppress",
-                    detail: "\(count) alert\(count == 1 ? "" : "s") suppressed"
+                    detail: "\(count) alert\(count == 1 ? "" : "s") suppressed",
+                    displayFor: 6,
+                    action: V2ToastAction(title: "Undo") {
+                        Task { await undoBulkSuppress(ids: ids) }
+                    }
                 ))
             } else if count > 0 {
                 state.showToast(V2Toast(
@@ -621,6 +633,51 @@ struct V2AlertsWorkspace: View {
                     title: isReadOnly ? "Cannot mutate from dashboard"
                                       : "Bulk suppress failed",
                     detail: detail,
+                    displayFor: 6
+                ))
+            }
+        }
+    }
+
+    /// Reverse a bulk suppress (the "Undo" toast action). There is no
+    /// bulk-unsuppress provider method, so this loops the existing single-alert
+    /// `unsuppressAlert(id:)` path — mirroring `unsuppressAlert(_:)`'s optimistic
+    /// flip + pending-registration bookkeeping across the whole batch.
+    private func undoBulkSuppress(ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        let idSet = Set(ids)
+        await MainActor.run {
+            pendingUnsuppressedAlertIds.formUnion(idSet)
+            pendingSuppressedAlertIds.subtract(idSet)
+            for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
+                self.alerts[idx].suppressed = false
+            }
+        }
+
+        var restored = 0
+        for id in ids {
+            if await state.provider.unsuppressAlert(id: id) { restored += 1 }
+        }
+
+        await MainActor.run {
+            if restored == ids.count {
+                state.showToast(V2Toast(
+                    kind: .success,
+                    title: "Suppression undone",
+                    detail: "\(restored) alert\(restored == 1 ? "" : "s") restored"
+                ))
+            } else {
+                // Partial/total failure — we don't know which ids failed, so
+                // drop the optimistic un-suppress for the whole batch and let
+                // the next reload reconcile to DB truth (restored ids come back
+                // un-suppressed; failed ones stay suppressed).
+                pendingUnsuppressedAlertIds.subtract(idSet)
+                let detail = state.provider.lastErrorDescription ?? "unknown error"
+                let isReadOnly = detail.lowercased().contains("read-only")
+                state.showToast(V2Toast(
+                    kind: isReadOnly ? .warning : .error,
+                    title: isReadOnly ? "Cannot mutate from dashboard" : "Undo failed",
+                    detail: restored > 0 ? "Restored \(restored) of \(ids.count); \(detail)" : detail,
                     displayFor: 6
                 ))
             }
@@ -991,16 +1048,19 @@ struct V2AlertsWorkspace: View {
                 }
             }
             Spacer()
-            V2ActionButton("Bulk suppress (\(visible.count))",
+            let bulkTargets = bulkSuppressTargets(visible: visible)
+            V2ActionButton("Bulk suppress (\(bulkTargets.count))",
                            icon: "bell.slash", style: .secondary,
-                           disabled: visible.isEmpty,
-                           tooltip: "Suppress all \(visible.count) alerts currently visible in the table") {
+                           disabled: bulkTargets.isEmpty,
+                           tooltip: selectedAlertIds.isEmpty
+                                ? "Suppress all \(visible.count) alerts currently visible in the table"
+                                : "Suppress the \(bulkTargets.count) checked alert\(bulkTargets.count == 1 ? "" : "s")") {
                 // Confirm before silencing a large batch; small batches run
                 // straight through.
-                if visible.count > bulkSuppressConfirmThreshold {
-                    pendingBulkSuppress = visible
+                if bulkTargets.count > bulkSuppressConfirmThreshold {
+                    pendingBulkSuppress = bulkTargets
                 } else {
-                    Task { await bulkSuppress(visible) }
+                    Task { await bulkSuppress(bulkTargets) }
                 }
             }
             V2ActionButton("Export (\(visible.count))",
@@ -1016,11 +1076,23 @@ struct V2AlertsWorkspace: View {
     /// rows so they aren't recomputed for the table on top of what
     /// `searchBarMemoized` already computed for its bulk-suppress badge.
     private func alertsTableMemoized(items: [V2MockAlert]) -> some View {
+        // Multi-select: the checkbox column drives `selectedAlertIds` for
+        // selective bulk-suppress; a row-body click still sets `selected` so
+        // the inspector keeps opening as before.
         V2DataTable(
             columns: alertsTableColumns,
             items: items,
-            selection: $selected
+            selection: $selected,
+            multiSelection: $selectedAlertIds
         )
+    }
+
+    /// Bulk-suppress target set: the checked subset when the operator has
+    /// ticked specific rows, otherwise the full visible list (preserving the
+    /// pre-multi-select "suppress everything visible" behaviour).
+    private func bulkSuppressTargets(visible: [V2MockAlert]) -> [V2MockAlert] {
+        guard !selectedAlertIds.isEmpty else { return visible }
+        return visible.filter { selectedAlertIds.contains($0.id) }
     }
 
     /// Shared column definitions used by `alertsTableMemoized(items:)`.

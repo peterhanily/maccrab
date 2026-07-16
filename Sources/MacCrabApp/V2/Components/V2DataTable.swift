@@ -5,8 +5,16 @@
 // Phase 2 scope: column-driven rendering, single-row selection,
 // hover background. Column resize / sort / virtualized rows land
 // in phase 3 if needed.
+//
+// v1.21.4: opt-in multi-select mode (a second init taking a
+// `Binding<Set<Item.ID>>`). It adds a leading checkbox column for
+// bulk selection while the row body still drives the single
+// `selection` binding for a detail/inspector pane. The original
+// single-select init is unchanged, so every existing caller keeps
+// compiling and rendering identically.
 
 import SwiftUI
+import AppKit
 
 /// A type-correct sort key for a `V2DataColumn`. Strings compare
 /// case-insensitively, numbers/dates compare naturally (so "10" sorts after
@@ -73,6 +81,12 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     public let columns: [V2DataColumn<Item>]
     public let items: [Item]
     @Binding public var selection: Item?
+    /// Non-nil only when built via the multi-select init. When present a
+    /// leading checkbox column drives this id set; the single `selection`
+    /// binding still tracks the row-body click for a detail pane.
+    private let multiSelection: Binding<Set<Item.ID>>?
+    /// Range-select (shift-click) anchor for multi-select mode.
+    @State private var selectionAnchor: Item.ID?
     /// When set, a filter field appears above the table that narrows rows by any
     /// sortable column's value. Leave nil for views that already have their own
     /// search box (Alerts, Rules) so there is no duplicate filter.
@@ -100,12 +114,35 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         self.columns = columns
         self.items = items
         self._selection = selection
+        self.multiSelection = nil
         self.searchPrompt = searchPrompt
         // v1.19: seed displayCache synchronously so the FIRST body eval renders
         // rows. Previously it started [] and filled in .onAppear, so the first
         // frame painted an empty table before onAppear ran — a one-frame empty
         // flash on every mount. At init the filter is "" and no sort column is
         // set, so the initial display is just `items` (no filter/sort applied).
+        self._displayCache = State(initialValue: Self.computeDisplay(
+            items: items, columns: columns,
+            filterQuery: "", sortColumnId: nil, sortAscending: true))
+    }
+
+    /// Opt-in multi-select variant. A leading checkbox column toggles
+    /// membership in `multiSelection` (with shift-click range extension) for
+    /// bulk actions, while a row-body click still sets `selection` so a
+    /// detail/inspector pane keeps working. The single-select init above is
+    /// untouched, so existing callers are unaffected.
+    public init(
+        columns: [V2DataColumn<Item>],
+        items: [Item],
+        selection: Binding<Item?>,
+        multiSelection: Binding<Set<Item.ID>>,
+        searchPrompt: String? = nil
+    ) {
+        self.columns = columns
+        self.items = items
+        self._selection = selection
+        self.multiSelection = multiSelection
+        self.searchPrompt = searchPrompt
         self._displayCache = State(initialValue: Self.computeDisplay(
             items: items, columns: columns,
             filterQuery: "", sortColumnId: nil, sortAscending: true))
@@ -144,6 +181,75 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             filterQuery: filterQuery, sortColumnId: sortColumnId, sortAscending: sortAscending)
     }
 
+    // MARK: - Multi-select (pure selection algebra)
+
+    /// Pure selection-set update for multi-select mode. A plain click toggles
+    /// the tapped id and moves the range anchor to it; a range (shift) click
+    /// selects the contiguous span between the current anchor and the tapped
+    /// id (union with the current set, anchor unchanged). Extracted so the
+    /// selection algebra is unit-testable without a SwiftUI view.
+    static func updatedMultiSelection(
+        current: Set<Item.ID>,
+        tapped: Item.ID,
+        orderedIDs: [Item.ID],
+        anchor: Item.ID?,
+        rangeSelect: Bool
+    ) -> (selection: Set<Item.ID>, anchor: Item.ID?) {
+        if rangeSelect,
+           let anchor,
+           let a = orderedIDs.firstIndex(of: anchor),
+           let b = orderedIDs.firstIndex(of: tapped) {
+            let span = orderedIDs[min(a, b)...max(a, b)]
+            return (current.union(span), anchor)
+        }
+        var next = current
+        if next.contains(tapped) { next.remove(tapped) } else { next.insert(tapped) }
+        return (next, tapped)
+    }
+
+    /// Pure "select all displayed" toggle: if every displayed id is already
+    /// selected, remove them all; otherwise add them all. Selections for rows
+    /// not currently displayed (filtered out) are left untouched.
+    static func toggledSelectAll(
+        current: Set<Item.ID>,
+        displayedIDs: [Item.ID]
+    ) -> Set<Item.ID> {
+        let displayed = Set(displayedIDs)
+        guard !displayed.isEmpty else { return current }
+        return displayed.isSubset(of: current)
+            ? current.subtracting(displayed)
+            : current.union(displayed)
+    }
+
+    private var isMulti: Bool { multiSelection != nil }
+
+    private func isChecked(_ item: Item) -> Bool {
+        multiSelection?.wrappedValue.contains(item.id) ?? false
+    }
+
+    private var allDisplayedChecked: Bool {
+        guard let m = multiSelection, !displayCache.isEmpty else { return false }
+        return Set(displayCache.map(\.id)).isSubset(of: m.wrappedValue)
+    }
+
+    private func toggleCheck(_ item: Item) {
+        guard let m = multiSelection else { return }
+        let result = Self.updatedMultiSelection(
+            current: m.wrappedValue,
+            tapped: item.id,
+            orderedIDs: displayCache.map(\.id),
+            anchor: selectionAnchor,
+            rangeSelect: NSEvent.modifierFlags.contains(.shift))
+        m.wrappedValue = result.selection
+        selectionAnchor = result.anchor
+    }
+
+    private func toggleSelectAllDisplayed() {
+        guard let m = multiSelection else { return }
+        m.wrappedValue = Self.toggledSelectAll(
+            current: m.wrappedValue, displayedIDs: displayCache.map(\.id))
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             if let prompt = searchPrompt {
@@ -159,7 +265,10 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                             columns: columns,
                             item: item,
                             isSelected: selection?.id == item.id,
-                            select: { selection = $0 }
+                            isChecked: isChecked(item),
+                            showsCheckbox: isMulti,
+                            onSelectRow: { selection = $0 },
+                            onToggleCheck: { toggleCheck($0) }
                         )
                     }
                 }
@@ -199,6 +308,18 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
 
     private var headerRow: some View {
         HStack(spacing: 0) {
+            if isMulti {
+                Button { toggleSelectAllDisplayed() } label: {
+                    Image(systemName: allDisplayedChecked ? "checkmark.square.fill" : "square")
+                        .foregroundStyle(allDisplayedChecked ? V2Theme.brand : V2Theme.mutedText)
+                        .scaledSystem(14)
+                        .frame(width: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(allDisplayedChecked ? "Deselect all rows" : "Select all rows")
+                .accessibilityLabel(allDisplayedChecked ? "Deselect all rows" : "Select all rows")
+            }
             ForEach(columns.indices, id: \.self) { idx in
                 let col = columns[idx]
                 Self.cell(width: col.width, alignment: col.alignment) {
@@ -241,31 +362,35 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         let columns: [V2DataColumn<Item>]
         let item: Item
         let isSelected: Bool
-        let select: (Item) -> Void
+        /// Multi-select membership. Always false in single-select mode, so the
+        /// single path renders identically to phase 2.
+        let isChecked: Bool
+        /// Whether to render the leading multi-select checkbox.
+        let showsCheckbox: Bool
+        let onSelectRow: (Item) -> Void
+        let onToggleCheck: (Item) -> Void
         @State private var isHovered = false
 
         var body: some View {
+            if showsCheckbox {
+                multiRow
+            } else {
+                singleRow
+            }
+        }
+
+        /// Single-select row — the whole row is one button that selects the
+        /// item. Unchanged from phase 2.
+        private var singleRow: some View {
             Button {
-                select(item)
+                onSelectRow(item)
             } label: {
-                HStack(spacing: 0) {
-                    ForEach(columns.indices, id: \.self) { idx in
-                        let col = columns[idx]
-                        V2DataTable.cell(width: col.width, alignment: col.alignment) {
-                            col.cell(item)
-                        }
-                    }
-                }
-                .padding(.vertical, 10)
-                .padding(.horizontal, 12)
-                .background(background)
-                .overlay(
-                    Rectangle()
-                        .fill(isSelected ? V2Theme.brand : .clear)
-                        .frame(width: 2),
-                    alignment: .leading
-                )
-                .contentShape(Rectangle())
+                cells
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(background)
+                    .overlay(selectionBar, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { isHovered = $0 }
@@ -282,7 +407,58 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             )
         }
 
+        /// Multi-select row — a leading checkbox toggles set membership
+        /// (with shift-range at the table level), while the row body still
+        /// selects the item for a detail/inspector pane.
+        private var multiRow: some View {
+            HStack(spacing: 0) {
+                Button { onToggleCheck(item) } label: {
+                    Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                        .foregroundStyle(isChecked ? V2Theme.brand : V2Theme.mutedText)
+                        .scaledSystem(14)
+                        .frame(width: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isChecked ? "Deselect row" : "Select row")
+                Button { onSelectRow(item) } label: {
+                    cells.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+                .accessibilityHint("Activate to open this row")
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .background(background)
+            .overlay(selectionBar, alignment: .leading)
+            .onHover { isHovered = $0 }
+            .overlay(
+                Rectangle().fill(V2Theme.panelBorder).frame(height: 1),
+                alignment: .bottom
+            )
+        }
+
+        private var cells: some View {
+            HStack(spacing: 0) {
+                ForEach(columns.indices, id: \.self) { idx in
+                    let col = columns[idx]
+                    V2DataTable.cell(width: col.width, alignment: col.alignment) {
+                        col.cell(item)
+                    }
+                }
+            }
+        }
+
+        private var selectionBar: some View {
+            Rectangle()
+                .fill((isSelected || isChecked) ? V2Theme.brand : .clear)
+                .frame(width: 2)
+        }
+
         private var background: Color {
+            if isChecked  { return V2Theme.brand.opacity(0.14) }
             if isSelected { return V2Theme.brand.opacity(0.10) }
             if isHovered  { return V2Theme.hoverBackground }
             return Color.clear

@@ -14,6 +14,11 @@ struct V2InvestigationWorkspace: View {
     // synchronously in the view body on every re-evaluation.
     @State private var engineHeartbeat: V2HeartbeatSnapshot?
     @State private var traceMembersCache: [String: [V2TraceMember]] = [:]
+    /// Real causal edges per trace id, loaded alongside members. When a
+    /// trace has edges the graph draws source→target relations; when empty
+    /// (mock mode, or a trace materialised without edge rows) EdgeOverlay
+    /// falls back to anchor→member hub-spokes.
+    @State private var traceEdgesCache: [String: [V2TraceEdge]] = [:]
     @State private var hoveredMemberId: String? = nil
     @State private var selectedMemberId: String? = nil
     @State private var graphAsList: Bool = false
@@ -620,7 +625,7 @@ struct V2InvestigationWorkspace: View {
                 if graphAsList {
                     memberListView(members)
                 } else {
-                    memberGraphView(members)
+                    memberGraphView(members, edges: traceEdgesCache[trace.id] ?? [])
                 }
             }
         }
@@ -720,14 +725,16 @@ struct V2InvestigationWorkspace: View {
     }
 
     /// Interactive graph view of the trace. Anchor renders centred /
-    /// pinned per layout, non-anchor members radiate around it, edges
-    /// drawn anchor→non-anchor (the only relation we can infer
-    /// without `traceMembers` returning real edges). Per-node drag,
+    /// pinned per layout, non-anchor members radiate around it. When the
+    /// causal graph store returns real edges for this trace they are drawn
+    /// source→target with relation-specific styling; when it returns none
+    /// (mock mode, or a trace materialised without edge rows) EdgeOverlay
+    /// falls back to anchor→non-anchor hub-spokes. Per-node drag,
     /// pinch-zoom, and a 5-way layout switcher all live here. Drag a
     /// node and the layout flips to `.manual` so subsequent layout
     /// switches don't fight the user's positioning.
     @ViewBuilder
-    private func memberGraphView(_ members: [V2TraceMember]) -> some View {
+    private func memberGraphView(_ members: [V2TraceMember], edges: [V2TraceEdge]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             graphToolbar(members)
             GeometryReader { geo in
@@ -788,17 +795,16 @@ struct V2InvestigationWorkspace: View {
                         // dragModel; lines visibly snapped to the new
                         // node position only after onEnded committed
                         // to customPositions.
-                        if let anchor {
-                            EdgeOverlay(
-                                members: members,
-                                positions: positions,
-                                anchorId: anchor.id,
-                                hoveredMemberId: hoveredMemberId,
-                                zoom: graphZoom,
-                                dragModel: dragModel
-                            )
-                            .allowsHitTesting(false)
-                        }
+                        EdgeOverlay(
+                            members: members,
+                            edges: edges,
+                            positions: positions,
+                            anchorId: anchor?.id ?? "",
+                            hoveredMemberId: hoveredMemberId,
+                            zoom: graphZoom,
+                            dragModel: dragModel
+                        )
+                        .allowsHitTesting(false)
                         // Nodes — each one is its own DraggableMemberNode
                         // child view that owns its in-flight drag offset
                         // as local @State. Pre-fix the parent owned a
@@ -1839,9 +1845,15 @@ struct V2InvestigationWorkspace: View {
                 // when lastUpdated advances (or the trace switches) keeps
                 // the graph live without polling every tick.
                 .task(id: "\(trace.id)@\(trace.lastUpdated.timeIntervalSince1970)") {
+                    // Load members + real causal edges; both feed the graph so it
+                    // can draw a real source→target skeleton instead of fabricated
+                    // anchor spokes. (Both queries hit the same causal-graph actor,
+                    // which serializes them, so this stays sequential.)
                     let members = await state.provider.traceMembers(traceId: trace.id)
+                    let edges = await state.provider.traceEdges(traceId: trace.id)
                     await MainActor.run {
                         traceMembersCache[trace.id] = members
+                        traceEdgesCache[trace.id] = edges
                     }
                 }
         } else {
@@ -2454,6 +2466,9 @@ final class DragPositionsModel: ObservableObject {
 /// `customPositions` finally committed).
 private struct EdgeOverlay: View {
     let members: [V2TraceMember]
+    /// Real causal edges (source→target + relation). When non-empty they are
+    /// drawn instead of the anchor hub-spoke fallback below.
+    let edges: [V2TraceEdge]
     let positions: [String: CGPoint]
     let anchorId: String
     let hoveredMemberId: String?
@@ -2462,24 +2477,80 @@ private struct EdgeOverlay: View {
 
     var body: some View {
         Canvas { ctx, _ in
-            guard let from = livePos(for: anchorId) else { return }
-            for m in members where !m.isAnchor {
-                guard let to = livePos(for: m.id) else { continue }
-                var path = Path()
-                path.move(to: from)
-                path.addLine(to: to)
-                let dim = (hoveredMemberId != nil && hoveredMemberId != m.id)
-                ctx.stroke(
-                    path,
-                    with: .color(dim
-                        ? V2Theme.panelBorder.opacity(0.4)
-                        : V2Theme.dataAccent.opacity(0.55)),
-                    style: StrokeStyle(
-                        lineWidth: (dim ? 1 : 1.5) / max(zoom, 0.5),
+            if edges.isEmpty {
+                // Fallback: no real edges known for this trace — draw the
+                // anchor→every-node hub-spoke so the graph still reads as a
+                // connected lineage (mock mode, or a trace materialised
+                // without edge rows).
+                guard let from = livePos(for: anchorId) else { return }
+                for m in members where !m.isAnchor {
+                    guard let to = livePos(for: m.id) else { continue }
+                    var path = Path()
+                    path.move(to: from)
+                    path.addLine(to: to)
+                    let dim = (hoveredMemberId != nil && hoveredMemberId != m.id)
+                    ctx.stroke(
+                        path,
+                        with: .color(dim
+                            ? V2Theme.panelBorder.opacity(0.4)
+                            : V2Theme.dataAccent.opacity(0.55)),
+                        style: StrokeStyle(
+                            lineWidth: (dim ? 1 : 1.5) / max(zoom, 0.5),
+                            lineCap: .round
+                        )
+                    )
+                }
+            } else {
+                // Real edges: draw each source→target with relation styling.
+                for edge in edges {
+                    guard let from = livePos(for: edge.source),
+                          let to = livePos(for: edge.target) else { continue }
+                    var path = Path()
+                    path.move(to: from)
+                    path.addLine(to: to)
+                    // Dim unless a hovered node is one of this edge's endpoints
+                    // (or nothing is hovered).
+                    let touchesHover = hoveredMemberId == nil
+                        || hoveredMemberId == edge.source
+                        || hoveredMemberId == edge.target
+                    let style = Self.relationStyle(edge.relation)
+                    var stroke = StrokeStyle(
+                        lineWidth: (touchesHover ? 1.5 : 1) / max(zoom, 0.5),
                         lineCap: .round
                     )
-                )
+                    if style.dashed {
+                        stroke.dash = [4 / max(zoom, 0.5), 3 / max(zoom, 0.5)]
+                    }
+                    ctx.stroke(
+                        path,
+                        with: .color(style.color.opacity(touchesHover ? 0.8 : 0.3)),
+                        style: stroke
+                    )
+                }
             }
+        }
+    }
+
+    /// Relation → (line color, dashed) from the §9 causal-graph vocabulary.
+    /// Solid, saturated lines for direct observed relations (spawn / file I/O
+    /// / network); dashed muted lines for inferred or meta relations. Kept
+    /// static + pure so it's trivially reasoned about (and testable).
+    static func relationStyle(_ relation: String) -> (color: Color, dashed: Bool) {
+        switch relation {
+        case "spawned":
+            return (V2Theme.dataAccent, false)
+        case "wrote", "read", "renamed", "deleted":
+            return (V2Theme.medium, false)
+        case "connected_to":
+            return (V2Theme.high, false)
+        case "created_persistence", "loaded_code":
+            return (V2Theme.critical, false)
+        case "associated_with_agent":
+            return (V2Theme.aiAccent, false)
+        case "signed_by", "triggered_rule", "matched_sequence", "caused":
+            return (V2Theme.mutedText, true)
+        default:
+            return (V2Theme.dataAccent.opacity(0.8), false)
         }
     }
 

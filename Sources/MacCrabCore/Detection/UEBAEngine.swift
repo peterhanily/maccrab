@@ -140,6 +140,49 @@ public struct UEBAAnomaly: Sendable, Hashable {
     }
 }
 
+// MARK: - Alert mapping
+
+/// Deterministic mapping from a `UEBAAnomaly` onto the fields the daemon's
+/// alert sink needs. Kept here (rather than at the EventLoop callsite) so the
+/// engine owns its own alert framing and the mapping is unit-testable without
+/// standing up the daemon.
+public extension UEBAAnomaly {
+
+    /// Stable rule id — mirrors the `maccrab.<engine>.<kind>` convention the
+    /// other engine-emitted alerts use (e.g. `maccrab.clickfix.paste-and-run`).
+    var alertRuleId: String { "maccrab.ueba.\(kind.rawValue)" }
+
+    /// Human-readable alert title.
+    var alertTitle: String {
+        switch kind {
+        case .unusualLoginHour: return "UEBA: activity at an unusual hour for this user"
+        case .newSSHSource:     return "UEBA: SSH login from a never-before-seen source"
+        case .novelTool:        return "UEBA: first-ever execution of this tool by user"
+        case .coldStart:        return "UEBA: baseline still warming (cold start)"
+        }
+    }
+
+    /// MITRE ATT&CK tactic tags (comma-joined) or nil when none map cleanly.
+    var mitreTactics: String? {
+        switch kind {
+        case .newSSHSource:          return "attack.initial_access,attack.lateral_movement"
+        case .unusualLoginHour:      return "attack.initial_access"
+        case .novelTool, .coldStart: return nil
+        }
+    }
+
+    /// MITRE ATT&CK technique tags (comma-joined) or nil. Both credential-abuse
+    /// signals map to T1078 (Valid Accounts) — UEBA's remit is malware-free
+    /// account/credential misuse, not tool-specific techniques.
+    var mitreTechniques: String? {
+        switch kind {
+        case .newSSHSource:          return "attack.t1078"
+        case .unusualLoginHour:      return "attack.t1078"
+        case .novelTool, .coldStart: return nil
+        }
+    }
+}
+
 // MARK: - UEBAEngine
 
 public actor UEBAEngine {

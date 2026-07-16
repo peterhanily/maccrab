@@ -565,6 +565,12 @@ public protocol CausalGraphStore: Sendable {
     /// conformer by looping the single-row upserts (entities first for FK).
     func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws
     func entity(id: String) async throws -> TraceEntity?
+    /// Batch variant of `entity(id:)` — resolves many ids in a single hop
+    /// (`WHERE id IN (…)`) instead of N separate round trips. Order is not
+    /// guaranteed and unknown ids are simply absent from the result (never
+    /// nil placeholders), so callers treat it as a set lookup. The default
+    /// below loops `entity(id:)`; SQLite-backed stores override it.
+    func entities(ids: [String]) async throws -> [TraceEntity]
     func edge(id: String) async throws -> TraceEdge?
 
     // Graph traversal
@@ -648,6 +654,20 @@ public extension CausalGraphStore {
         )
         try await appendHashChain(entry)
         return entry
+    }
+}
+
+public extension CausalGraphStore {
+    /// Default batch entity lookup: loop the single-row `entity(id:)`. Correct
+    /// for any conformer; SQLiteCausalGraphStore overrides it with one
+    /// `WHERE id IN (…)` query so the dashboard's trace-member resolution stops
+    /// issuing N separate reads. Result is order-independent (unknown ids drop).
+    func entities(ids: [String]) async throws -> [TraceEntity] {
+        var out: [TraceEntity] = []
+        for id in ids {
+            if let e = try await entity(id: id) { out.append(e) }
+        }
+        return out
     }
 }
 

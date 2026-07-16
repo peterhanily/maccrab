@@ -156,6 +156,10 @@ struct EventViewModel: Identifiable {
     // field defaults to "" so the 12+ existing mock-construction
     // sites in this file stay valid without an audit pass.
     var executablePath: String = ""
+    // v1.21.4: process command line for the Events drill-in. Was populated
+    // in events.db but never carried into the view model, so the detail
+    // pane couldn't show it. Defaults "" like the fields above.
+    var commandLine: String = ""
     var userName: String = ""
     var workingDirectory: String = ""
     var architecture: String = ""

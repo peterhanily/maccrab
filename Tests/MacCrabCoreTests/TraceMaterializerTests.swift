@@ -67,6 +67,23 @@ struct TraceMaterializerTests {
         return edge
     }
 
+    private func upsertAgent(
+        _ store: SQLiteCausalGraphStore,
+        name: String,
+        confidence: Double,
+        method: AttributionMethod = .temporalProximity
+    ) async throws -> TraceEntity {
+        let node = AIAgentNode(
+            agentId: "\(name.lowercased()):trace-x",
+            agentName: name, traceId: "trace-x",
+            confidence: confidence, attributionMethod: method,
+            firstSeen: now
+        )
+        let entity = try node.toEntity(source: "test", confidence: confidence)
+        try await store.upsertEntity(entity)
+        return entity
+    }
+
     // MARK: - Tests
 
     @Test("Materializes a single-process trace with no ancestors")
@@ -294,6 +311,58 @@ struct TraceMaterializerTests {
         let loaded = try await store.loadTrace(id: trace.id)
         let criticalPathMembers = loaded?.members.filter { $0.role == "critical_path" } ?? []
         #expect(criticalPathMembers.contains { $0.edgeId != nil })
+        await store.close()
+    }
+
+    // MARK: - §11.3 AI-attribution honesty gate (v1.21.4)
+
+    @Test("§11.3 gate: below-threshold AI-agent attribution renders as inferred in the summary")
+    func aiAttributionGateSoftensBelowThreshold() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        // Weakly-attributed agent (0.7 < 0.85) spawns the anchor shell. The
+        // spawned edge makes the agent the (untrusted) root cause AND trips the
+        // explainer's "AI-agent associated shell execution" severity reason.
+        let agent = try await upsertAgent(store, name: "Claude Desktop", confidence: 0.7)
+        let shell = try await upsertProcess(store, makeProcessNode(
+            key: "zsh", path: "/bin/zsh", isAppleSigned: true))
+        _ = try await upsertSpawn(store, from: agent, to: shell, confidence: 0.9)
+
+        let materializer = TraceMaterializer(store: store)
+        let trace = try await materializer.materialize(
+            anchorEntityId: shell.id, anchorEventId: "ev-1",
+            title: "Agent shell", severity: "high", confidence: 0.9,
+            now: now.addingTimeInterval(1)
+        )
+        let summary = try #require(trace.summaryJson)
+        // Attribution must be hedged, never asserted, when below threshold.
+        #expect(summary.contains("attribution inferred, not asserted"))
+        #expect(!summary.contains("AI-agent associated"))
+        // The vendor-named root display is hedged too.
+        #expect(summary.contains("appears to involve"))
+        await store.close()
+    }
+
+    @Test("§11.3 gate: at/above-threshold AI-agent attribution stays asserted")
+    func aiAttributionGateAssertsAboveThreshold() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let agent = try await upsertAgent(store, name: "Claude Desktop", confidence: 0.95)
+        let shell = try await upsertProcess(store, makeProcessNode(
+            key: "zsh", path: "/bin/zsh", isAppleSigned: true))
+        _ = try await upsertSpawn(store, from: agent, to: shell, confidence: 0.9)
+
+        let materializer = TraceMaterializer(store: store)
+        let trace = try await materializer.materialize(
+            anchorEntityId: shell.id, anchorEventId: "ev-1",
+            title: "Agent shell", severity: "high", confidence: 0.9,
+            now: now.addingTimeInterval(1)
+        )
+        let summary = try #require(trace.summaryJson)
+        #expect(summary.contains("AI-agent associated shell execution"))
+        #expect(!summary.contains("attribution inferred"))
         await store.close()
     }
 }

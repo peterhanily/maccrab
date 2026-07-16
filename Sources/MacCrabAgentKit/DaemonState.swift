@@ -115,6 +115,12 @@ final class DaemonState {
     /// exec against them — the ClickFix paste-and-run detection. Optional: nil
     /// disables the correlation (e.g. in tests / non-clipboard daemons).
     let clickFix: ClickFixDetector?
+    /// Per-user entity behaviour analytics (v1.21.4). Optional: nil disables
+    /// UEBA (the default — see `DaemonConfig.uebaEnabled`). When set, the event
+    /// loop feeds process-exec events in and routes any returned `UEBAAnomaly`
+    /// to `alertSink`. In-memory only: profiles rebuild from the cold-start
+    /// window on each daemon start (no persistence timer is wired).
+    let uebaEngine: UEBAEngine?
     let clipboardInjectionDetector: ClipboardInjectionDetector
     let browserExtMonitor: BrowserExtensionMonitor
     let ultrasonicMonitor: UltrasonicMonitor
@@ -473,7 +479,8 @@ final class DaemonState {
         toolIntegrations: SecurityToolIntegrations,
         fleetClient: FleetClient?,
         llmService: LLMService?,
-        clickFix: ClickFixDetector? = nil
+        clickFix: ClickFixDetector? = nil,
+        uebaEngine: UEBAEngine? = nil
     ) {
         self.isRoot = isRoot
         self.supportDir = supportDir
@@ -607,6 +614,7 @@ final class DaemonState {
         self.fleetClient = fleetClient
         self.llmService = llmService
         self.clickFix = clickFix
+        self.uebaEngine = uebaEngine
     }
 
     private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")

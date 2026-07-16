@@ -1373,11 +1373,10 @@ public struct V2DetectionWorkspace: View {
     }
 
     /// Inspector for a selected extension. Surfaces the full
-    /// permissions list, manifest version, dev-mode flag, and a
-    /// dangerous-permissions-weighted risk-score breakdown.
-    /// (The on-disk manifest path isn't carried on V2MockExtension yet —
-    /// surfacing it needs a `path` field on the model + provider; see the
-    /// deep-audit residual note.)
+    /// permissions list, manifest version, dev-mode flag, a
+    /// dangerous-permissions-weighted risk-score breakdown, and — when the live
+    /// provider resolved it from the BrowserExtensionMonitor snapshot — the
+    /// on-disk extension directory with a Reveal-in-Finder action.
     @ViewBuilder
     private func extensionInspector(_ ext: V2MockExtension) -> some View {
         V2Inspector(
@@ -1427,6 +1426,29 @@ public struct V2DetectionWorkspace: View {
             V2InspectorSection(String(localized: "inspector.identity", defaultValue: "Identity")) {
                 V2InspectorKeyValue("ID", String(ext.id.split(separator: ":").last ?? ""), mono: true)
                 V2InspectorKeyValue("Version", ext.version, mono: true)
+            }
+            if !ext.path.isEmpty {
+                V2InspectorSection(String(localized: "inspector.location", defaultValue: "Location")) {
+                    Text(ext.path)
+                        .font(V2Theme.mono())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        V2ActionButton("Reveal in Finder", icon: "folder", style: .secondary, size: .compact) {
+                            let manifest = ext.path + "/manifest.json"
+                            let target = FileManager.default.fileExists(atPath: manifest) ? manifest : ext.path
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: target)])
+                        }
+                        V2ActionButton("Copy path", icon: "doc.on.doc", style: .ghost, size: .compact) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(ext.path, forType: .string)
+                            state.showToast(V2Toast(kind: .success, title: "Path copied", detail: nil))
+                        }
+                    }
+                }
             }
         }
     }
@@ -1497,7 +1519,13 @@ public struct V2DetectionWorkspace: View {
                                          sortKey: { .text($0.host) }) { m in
                                 V2TableCellText(m.host, mono: true)
                             },
-                            V2DataColumn(id: "tools", title: "Tools", width: .fixed(80),
+                            // "Tools (approx)" not "Tools": toolCount is a proxy
+                            // (args.count + 1) — the real tool set can only be known
+                            // by launching the server and enumerating its manifest,
+                            // which the config scan doesn't do. Label it honestly so
+                            // the number doesn't read as an authoritative count. The
+                            // inspector's Details row already says "Tools (approx)".
+                            V2DataColumn(id: "tools", title: "Tools (approx)", width: .fixed(120),
                                          sortKey: { .number(Double($0.toolCount)) }) { m in
                                 V2TableCellText("\(m.toolCount)", mono: true)
                             },

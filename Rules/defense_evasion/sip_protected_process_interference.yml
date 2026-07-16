@@ -22,18 +22,43 @@ detection:
             - '/kill'
             - '/pkill'
             - '/killall'
-    selection_target:
+    # Long, distinctive daemon names + the MRT bundle/label forms are safe as
+    # substrings. The bare 3-char 'MRT' substring was dropped from here — it
+    # matched any kill command line merely CONTAINING those letters (a path or
+    # a larger word like 'FormatMRT'), which fired HIGH on benign admin kills.
+    selection_target_named:
         CommandLine|contains:
             - 'xprotectd'
             - 'syspolicyd'
             - 'endpointsecurityd'
-            - 'MRT'
             - 'XProtect'
+            - 'MRT.app'
+            - 'com.apple.MRT'
+    # Word-bounded process-name kill of MRT: `killall MRT`, `pkill MRT`,
+    # `pkill -9 MRT`, `killall -SIGTERM MRT` all END with " MRT". Requiring the
+    # space + tail anchor keeps the real attack form while excluding incidental
+    # substrings (e.g. `pkill MRTPlayer`, a `/opt/MRTools/…` path).
+    selection_target_mrt_name:
+        CommandLine|endswith: ' MRT'
     filter_system:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection_kill and selection_target and not filter_system
+    # v1.21.4: exclude non-terminating control signals. -HUP/-USR1/-USR2 (and
+    # their SIG* spellings) reload/poke a process, they don't kill it, so an
+    # admin sending one is not a disable-security attempt. The default (no
+    # signal = SIGTERM) and explicit fatal signals still match, so the core
+    # attack — `pkill xprotectd`, `killall MRT` — is unaffected. Mirrors the
+    # filter_nonfatal_signal gate in security_tool_killed.yml.
+    filter_nonfatal_signal:
+        CommandLine|contains:
+            - '-HUP'
+            - '-USR1'
+            - '-USR2'
+            - 'SIGHUP'
+            - 'SIGUSR1'
+            - 'SIGUSR2'
+    condition: selection_kill and (selection_target_named or selection_target_mrt_name) and not (filter_system or filter_nonfatal_signal)
 falsepositives:
     - System administrators investigating stuck security processes
 suppressible: false

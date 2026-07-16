@@ -6,6 +6,19 @@
 import SwiftUI
 import AppKit
 
+/// An optional labelled button carried by a toast (e.g. "Undo"). The handler
+/// is `@Sendable` so `V2Toast` can stay `Sendable`; it runs on the main actor
+/// from the toast view's button (mirrors the app's `Task { … }` call sites).
+public struct V2ToastAction: Sendable {
+    public let title: String
+    public let handler: @Sendable () -> Void
+
+    public init(title: String, handler: @escaping @Sendable () -> Void) {
+        self.title = title
+        self.handler = handler
+    }
+}
+
 public struct V2Toast: Identifiable, Equatable, Sendable {
     public enum Kind: Sendable { case success, info, warning, error }
     public let id = UUID()
@@ -13,12 +26,23 @@ public struct V2Toast: Identifiable, Equatable, Sendable {
     public let title: String
     public let detail: String?
     public let displayFor: TimeInterval
+    /// Optional inline action (e.g. "Undo") rendered next to Dismiss. nil for
+    /// the common informational toast.
+    public let action: V2ToastAction?
 
-    public init(kind: Kind, title: String, detail: String? = nil, displayFor: TimeInterval = 3.0) {
+    public init(kind: Kind, title: String, detail: String? = nil, displayFor: TimeInterval = 3.0, action: V2ToastAction? = nil) {
         self.kind = kind
         self.title = title
         self.detail = detail
         self.displayFor = displayFor
+        self.action = action
+    }
+
+    // Custom Equatable: the `action` closure isn't Equatable, and `id` is a
+    // fresh UUID per toast — so identity by `id` is behaviourally equivalent
+    // to the (previously synthesized) all-field comparison.
+    public static func == (lhs: V2Toast, rhs: V2Toast) -> Bool {
+        lhs.id == rhs.id
     }
 
     public var icon: String {
@@ -65,6 +89,27 @@ public struct V2ToastView: View {
                 }
             }
             Spacer(minLength: 12)
+            if let action = toast.action {
+                Button {
+                    // Run the action, then dismiss so the toast (and its now-
+                    // spent Undo) clears; the handler typically shows its own
+                    // follow-up toast.
+                    action.handler()
+                    onDismiss()
+                } label: {
+                    Text(action.title)
+                        .scaledSystem(12, weight: .semibold)
+                        .foregroundStyle(toast.color)
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(toast.color.opacity(0.5), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(action.title)
+            }
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .scaledSystem(10, weight: .semibold)

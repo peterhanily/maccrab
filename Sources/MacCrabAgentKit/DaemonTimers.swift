@@ -1560,6 +1560,28 @@ enum DaemonTimers {
                 "persistence_guard": ["enabled": guardStats.enabled, "count": guardStats.protectedCount],
             ]
 
+            // v1.21.4 (#260): TraceRegistry telemetry — surfaced only when the
+            // agent-trace binding is active (MACCRAB_AGENT_TRACES; the registry
+            // is nil otherwise). `ttlEvictions` (bindings aged out) and
+            // `pidRecycleRejected` (a stale pid→binding hit refused because the
+            // pid was recycled to a different process) were counted on the hot
+            // path but never surfaced; now visible so a Pass-11 audit can verify
+            // the recycle-rejection + TTL-eviction accounting from the heartbeat.
+            let traceRegistryDict: [String: Any]
+            if let reg = state.traceRegistry {
+                let m = await reg.metricsSnapshot()
+                traceRegistryDict = [
+                    "enabled": true,
+                    "live_bindings": m.liveBindings,
+                    "cap": m.cap,
+                    "pid_recycle_rejected": m.pidRecycleRejected,
+                    "cap_evictions": m.capEvictions,
+                    "ttl_evictions": m.ttlEvictions,
+                ]
+            } else {
+                traceRegistryDict = ["enabled": false]
+            }
+
             // v1.21.4 (F3): honest single-event rule coverage. `rules_loaded` =
             // every rule the engine loaded from disk; `rules_active` = the subset
             // that will actually EVALUATE (enabled). Under the F-04 stable rule
@@ -1649,7 +1671,15 @@ enum DaemonTimers {
                 // batched writer's storage-layer drop — NOT a detection gap.
                 "merged_priority_dropped_total": priorityDropped,
                 "merged_file_dropped_total": fileDropped,
+                // v1.21.4 (#260): single aggregate of the two merged-stream
+                // detection-input drop counters (priority + file). Previously only
+                // surfaced split; this is the total detection-input loss — a
+                // SUBSET of `events_dropped`, which additionally folds in the
+                // collector-registry drops. Surfaced so a consumer can read
+                // "did the engine lose detection input" without summing two keys.
+                "detection_input_dropped_total": priorityDropped &+ fileDropped,
                 "events_storage_write_dropped_total": eventWriterDropped,
+                "trace_registry": traceRegistryDict,
                 "schema_version": 5,
             ]
 
@@ -1847,6 +1877,11 @@ enum DaemonTimers {
                 // routes through the same authorized inbox IPC as delete-alert.
                 let pruneAlertsReqs = files.filter { $0.hasPrefix("prune-alerts-") && $0.hasSuffix(".json") }
                 let agentTracesReqs = files.filter { $0.hasPrefix("apply-agent-traces-") && $0.hasSuffix(".json") }
+                // v1.21.4: the Prevention tab's per-module enable/disable toggle.
+                // The app (uid-501) can't mutate the root-owned prevention state
+                // nor SIGHUP the sysext, so it routes through this same
+                // authorized inbox IPC.
+                let preventionConfigReqs = files.filter { $0.hasPrefix("prevention-config-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1864,6 +1899,7 @@ enum DaemonTimers {
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
                 await handlePruneAlertsRequests(pruneAlertsReqs, inboxDir: inboxDir, state: state)
                 await handleApplyAgentTracesRequests(agentTracesReqs, inboxDir: inboxDir, state: state)
+                await handlePreventionConfigRequests(preventionConfigReqs, inboxDir: inboxDir, state: state)
             }
         }
         inboxPoller.resume()
@@ -2716,6 +2752,83 @@ enum DaemonTimers {
         )
         print("[inbox] apply-agent-traces receiver=\(receiverEnabled) port=\(port) uid=\(chosen.uid) applied")
         auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: chosen.uid, result: "receiver=\(receiverEnabled) port=\(port)")
+    }
+
+    /// v1.21.4: apply the Prevention tab's per-module enable/disable toggle.
+    /// The app (uid-501) can't mutate the root-owned prevention state nor SIGHUP
+    /// the sysext (EPERM), so each toggle drops a `prevention-config-*.json`
+    /// request; the daemon applies it LIVE to the sinkhole / network-blocker /
+    /// persistence-guard actors it already owns. Same uid/symlink auth + admin
+    /// gate + audit as every verb. Coalesces to the newest authorized request.
+    ///
+    /// Only the module keys present in the payload are touched (a missing key
+    /// leaves that module untouched). Enabling the sinkhole/blocker repopulates
+    /// them from the CURRENT threat-intel set (empty when feeds are off — a
+    /// harmless empty enforcement section); persistence-guard takes no seed.
+    ///
+    /// SCOPING RESIDUALS (honest): this applies LIVE only — it is not persisted
+    /// across a daemon restart (startup is governed by the boot-time
+    /// `MACCRAB_PREVENTION` gate, see DaemonSetup), and when prevention booted
+    /// ACTIVE the `threatIntel.onUpdate` callback (DaemonSetup) re-enables the
+    /// sinkhole/blocker on the next feed refresh, so a live "disable" of those
+    /// two is transient until that callback becomes toggle-aware.
+    private static func handlePreventionConfigRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        // Coalesce: apply only the newest authorized request.
+        var newest: (mtime: Date, payload: [String: Any], uid: Int)?
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "malformed")
+                continue
+            }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                ?? Date(timeIntervalSince1970: 0)
+            if newest == nil || mtime > newest!.mtime { newest = (mtime, json, uid) }
+        }
+        guard let chosen = newest else { return }
+
+        var applied: [String] = []
+        if let on = chosen.payload["sinkhole"] as? Bool {
+            if on {
+                let domains = await state.threatIntel.maliciousDomainSet()
+                await state.dnsSinkhole.enable(domains: domains)
+            } else {
+                await state.dnsSinkhole.disable()
+            }
+            applied.append("sinkhole=\(on)")
+        }
+        if let on = chosen.payload["network_blocker"] as? Bool {
+            if on {
+                let ips = await state.threatIntel.maliciousIPSet()
+                await state.networkBlocker.enable(ips: ips)
+            } else {
+                await state.networkBlocker.disable()
+            }
+            applied.append("network_blocker=\(on)")
+        }
+        if let on = chosen.payload["persistence_guard"] as? Bool {
+            if on { await state.persistenceGuard.enable() }
+            else { await state.persistenceGuard.disable() }
+            applied.append("persistence_guard=\(on)")
+        }
+        guard !applied.isEmpty else {
+            auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: chosen.uid, result: "no_recognized_keys")
+            return
+        }
+        let summary = applied.joined(separator: " ")
+        print("[inbox] prevention-config uid=\(chosen.uid) applied \(summary)")
+        auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: chosen.uid, result: summary)
     }
 
     /// v1.17: threat-intel refresh over the inbox channel. The

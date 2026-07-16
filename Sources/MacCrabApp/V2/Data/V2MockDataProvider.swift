@@ -47,6 +47,7 @@ public final class V2MockDataProvider: V2DataProvider {
     public func suppressions() async -> [V2SuppressionEntry] { [] }
     public func liftSuppression(ruleId: String, scope: String) async -> Bool { true }
     public func traceMembers(traceId: String) async -> [V2TraceMember] { [] }
+    public func traceEdges(traceId: String) async -> [V2TraceEdge] { [] }
 
     public func heartbeat() async -> V2HeartbeatSnapshot? { nil }
 

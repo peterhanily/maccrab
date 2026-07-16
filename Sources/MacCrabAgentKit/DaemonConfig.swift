@@ -44,6 +44,18 @@ struct DaemonConfig: Codable {
     /// false` in daemon_config.json to disable the family independently.
     var subscribeIntrospectionEvents: Bool = true
 
+    // MARK: - UEBA (User Entity Behaviour Analytics) — v1.21.4
+    /// OFF by default. When enabled, the daemon feeds process-exec events
+    /// (carrying SSH-session + executable context) into `UEBAEngine`, which
+    /// baselines each user SILENTLY for the first 100 observations and then
+    /// flags off-hours activity, first-seen SSH source IPs, and novel tool
+    /// executions as alerts. Opt-in because per-user baselining is a
+    /// behavioural signal that can be noisy on shared / multi-user hosts, and
+    /// `novelTool` in particular is chatty on a developer box until the
+    /// baseline warms. Local rule / sequence / campaign detection is
+    /// unaffected either way. JSON key: `ueba_enabled`.
+    var uebaEnabled: Bool = false
+
     // MARK: - Rule profile
     /// Which Sigma `status` tiers ship ENABLED at load (F-04). `"stable"`
     /// (default, since v1.21.4) enables only the curated stable corpus; the
@@ -432,6 +444,7 @@ struct DaemonConfig: Codable {
             "rule_profile": "ruleProfile",
             "subscribe_file_open_events": "subscribeFileOpenEvents",
             "subscribe_introspection_events": "subscribeIntrospectionEvents",
+            "ueba_enabled": "uebaEnabled",
             "suppress_selftest_noise": "suppressSelftestNoise",
             // v1.19.1 opt-in network-enrichment flags
             "threat_intel_enabled": "threatIntelEnabled",

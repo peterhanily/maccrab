@@ -717,6 +717,37 @@ enum EventLoop {
                 }
             }
 
+            // v1.21.4: UEBA (per-user entity behaviour analytics). Feeds
+            // process events into the per-user baseline; once a user is past
+            // the cold-start window (100 obs), off-hours activity, first-seen
+            // SSH source IPs, and novel tool executions surface as anomalies
+            // routed to the standard alert sink. nil (the default — see
+            // DaemonConfig.uebaEnabled) short-circuits before any actor hop.
+            // observe() itself self-filters to exec/fork process events; the
+            // category guard here just avoids the hop on the file firehose.
+            if let ueba = state.uebaEngine,
+               enrichedEvent.eventCategory == .process {
+                let anomalies = await ueba.observe(event: enrichedEvent)
+                for anomaly in anomalies {
+                    let alert = Alert(
+                        ruleId: anomaly.alertRuleId,
+                        ruleTitle: anomaly.alertTitle,
+                        severity: anomaly.severity,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: anomaly.detail,
+                        mitreTactics: anomaly.mitreTactics,
+                        mitreTechniques: anomaly.mitreTechniques
+                    )
+                    do {
+                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                }
+            }
+
             // === Notarization check for executed binaries ===
             //
             // PERF (v1.17): spctl --assess is expensive (forks a process). It must
@@ -1476,6 +1507,46 @@ enum EventLoop {
                                 } catch {
                                     await StorageErrorTracker.shared.recordAlertError(error)
                                 }
+
+                                // v1.21.4: record the graph-rule → trace hit in
+                                // trace_rule_hits. Two payoffs: (1) durable
+                                // provenance — which graph rule fired against which
+                                // trace, with the full node bindings; (2) it gives
+                                // `recordRuleHit` its first production caller, so the
+                                // retention sweep's orphan-guard forward-proofing
+                                // (SQLiteCausalGraphStore.{edge,entity}OrphanGuardSQL,
+                                // STG-1/F5) — which already excludes rows referenced
+                                // by matched_entity_id / matched_edge_id — now
+                                // actually pins the primary entity/edge a surviving
+                                // hit points at. Best-effort: a store-write failure
+                                // must never disturb the detection path.
+                                let ruleHitExplanation: String = {
+                                    let obj: [String: Any] = [
+                                        "bindings": match.bindings,
+                                        "matched_edge_ids": match.matchedEdgeIds,
+                                        "attack": match.attack,
+                                    ]
+                                    if let data = try? JSONSerialization.data(
+                                        withJSONObject: obj, options: [.sortedKeys]
+                                    ), let s = String(data: data, encoding: .utf8) {
+                                        return s
+                                    }
+                                    return "{}"
+                                }()
+                                let ruleHit = TraceRuleHit(
+                                    id: UUID().uuidString,
+                                    traceId: trace.id,
+                                    ruleId: match.ruleId,
+                                    ruleTitle: match.ruleTitle,
+                                    ruleVersion: trace.rulesetVersion,
+                                    severity: match.severity,
+                                    matchedEventId: anchorEventId,
+                                    matchedEntityId: match.bindings.values.sorted().first,
+                                    matchedEdgeId: match.matchedEdgeIds.sorted().first,
+                                    matchedAt: trace.createdAt,
+                                    explanationJson: ruleHitExplanation
+                                )
+                                try? await store.recordRuleHit(ruleHit)
                             }
                         }
                     }

@@ -155,6 +155,96 @@ struct SQLiteCausalGraphStoreTests {
         await store.close()
     }
 
+    // MARK: - Batch entity lookup (entities(ids:))
+
+    @Test("entities(ids:) returns the same rows as N single entity(id:) lookups")
+    func entitiesBatchMatchesSingles() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let ids = ["e1", "e2", "e3", "e4"]
+        for id in ids {
+            try await store.upsertEntity(makeEntity(id: id))
+        }
+        // N single lookups — the pre-batch path traceMembers() used.
+        var singles: [TraceEntity] = []
+        for id in ids {
+            if let e = try await store.entity(id: id) { singles.append(e) }
+        }
+        // One batch lookup.
+        let batch = try await store.entities(ids: ids)
+        #expect(batch.count == singles.count)
+        #expect(Set(batch.map { $0.id }) == Set(singles.map { $0.id }))
+        // Field-level equivalence, order-independent (batch has no ORDER BY).
+        let batchById = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
+        for s in singles {
+            #expect(batchById[s.id] == s)
+        }
+        await store.close()
+    }
+
+    @Test("entities(ids:) drops unknown ids and returns [] for empty input")
+    func entitiesBatchIgnoresUnknownAndEmpty() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        try await store.upsertEntity(makeEntity(id: "known"))
+        let mixed = try await store.entities(ids: ["known", "missing"])
+        #expect(mixed.map { $0.id } == ["known"])
+        let empty = try await store.entities(ids: [])
+        #expect(empty.isEmpty)
+        await store.close()
+    }
+
+    // MARK: - Edges among trace members (edgesAmongTraceMembers)
+
+    @Test("edgesAmongTraceMembers returns only edges whose BOTH endpoints are members")
+    func edgesAmongMembers() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        // Members: a, b, c. Non-member: outsider.
+        for id in ["a", "b", "c", "outsider"] {
+            try await store.upsertEntity(makeEntity(id: id))
+        }
+        // Two edges wholly among members, carrying distinct relations.
+        try await store.upsertEdge(makeEdge(id: "e_ab", from: "a", to: "b", relation: "spawned"))
+        try await store.upsertEdge(makeEdge(id: "e_bc", from: "b", to: "c", relation: "wrote"))
+        // One edge dangling to a NON-member — must be excluded.
+        try await store.upsertEdge(makeEdge(id: "e_co", from: "c", to: "outsider", relation: "connected_to"))
+
+        // Trace whose members are a, b, c (NOT outsider).
+        let members = [
+            TraceMembership(traceId: "t1", entityId: "a", role: "anchor"),
+            TraceMembership(traceId: "t1", entityId: "b", role: "context"),
+            TraceMembership(traceId: "t1", entityId: "c", role: "context"),
+        ]
+        try await store.saveTrace(makeTrace(id: "t1"), members: members)
+
+        let edges = try await store.edgesAmongTraceMembers(traceId: "t1")
+        let ids = Set(edges.map { $0.id })
+        #expect(ids == ["e_ab", "e_bc"])
+        #expect(!ids.contains("e_co"))
+        // The relation type is carried through verbatim (not fabricated).
+        let byId = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
+        #expect(byId["e_ab"]?.relation == "spawned")
+        #expect(byId["e_bc"]?.relation == "wrote")
+        // Every returned edge has both endpoints in the member set.
+        let memberSet: Set<String> = ["a", "b", "c"]
+        for e in edges {
+            #expect(memberSet.contains(e.sourceEntityId))
+            #expect(memberSet.contains(e.targetEntityId))
+        }
+        await store.close()
+    }
+
+    @Test("edgesAmongTraceMembers is empty for a member-less or unknown trace")
+    func edgesAmongMembersEmptyTrace() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        try await store.saveTrace(makeTrace(id: "empty"), members: [])
+        #expect(try await store.edgesAmongTraceMembers(traceId: "empty").isEmpty)
+        #expect(try await store.edgesAmongTraceMembers(traceId: "does-not-exist").isEmpty)
+        await store.close()
+    }
+
     // MARK: - Ancestors / descendants
 
     @Test("ancestors walks the parent chain")

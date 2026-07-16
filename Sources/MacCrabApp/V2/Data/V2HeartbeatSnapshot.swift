@@ -75,6 +75,15 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public struct Module: Sendable, Equatable {
             public let enabled: Bool
             public let count: Int
+            /// v1.21.4 (view/manage scaffold): the actual blocked / sinkholed /
+            /// guarded entries, when the daemon reports them. The current daemon
+            /// heartbeat emits COUNTS only — the DNSSinkhole / NetworkBlocker /
+            /// PersistenceGuard actors keep their entry sets private and expose
+            /// no list accessor, so the writer can't include them without a
+            /// daemon-side (MacCrabCore) change. Defaults to `[]` and stays empty
+            /// until the daemon adds an `entries: [String]` array per module —
+            /// at which point the Prevention tab list renders automatically.
+            public let entries: [String]
         }
         public let sinkhole: Module
         public let networkBlocker: Module
@@ -85,7 +94,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             func module(_ key: String) -> Module {
                 let m = raw[key] as? [String: Any]
                 return Module(enabled: m?["enabled"] as? Bool ?? false,
-                              count: m?["count"] as? Int ?? 0)
+                              count: m?["count"] as? Int ?? 0,
+                              entries: (m?["entries"] as? [String]) ?? [])
             }
             sinkhole = module("sinkhole")
             networkBlocker = module("network_blocker")

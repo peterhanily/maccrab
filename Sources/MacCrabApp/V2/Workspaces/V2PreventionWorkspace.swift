@@ -14,6 +14,12 @@ struct V2PreventionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @State private var preventionAlerts: [V2MockAlert] = []
     @State private var heartbeat: V2HeartbeatSnapshot?
+    /// Optimistic per-module toggle overlay, keyed by the heartbeat/payload
+    /// module key ("sinkhole" / "network_blocker" / "persistence_guard"). A
+    /// pending value wins over the heartbeat-reported state until a later
+    /// heartbeat confirms the engine reached it (reconciled in `.task`), so the
+    /// switch doesn't visibly snap back during the ~30s apply window.
+    @State private var pendingToggles: [String: Bool] = [:]
 
     init(state: V2DashboardState) { self.state = state }
 
@@ -21,6 +27,7 @@ struct V2PreventionWorkspace: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 preventionStatusStrip
+                preventionModulesCard
                 summaryRow
                 configureCard
                 recentActionsCard
@@ -41,7 +48,63 @@ struct V2PreventionWorkspace: View {
             await MainActor.run {
                 self.preventionAlerts = recent.filter { !$0.actionsTaken.isEmpty }
                 self.heartbeat = h
+                // Drop any optimistic pending toggle the engine has now caught
+                // up to (only trust a FRESH heartbeat as ground truth).
+                if let p = h?.prevention, !(h?.isStale ?? true) {
+                    if pendingToggles["sinkhole"] == p.sinkhole.enabled { pendingToggles["sinkhole"] = nil }
+                    if pendingToggles["network_blocker"] == p.networkBlocker.enabled { pendingToggles["network_blocker"] = nil }
+                    if pendingToggles["persistence_guard"] == p.persistenceGuard.enabled { pendingToggles["persistence_guard"] = nil }
+                }
             }
+        }
+    }
+
+    /// True only when a FRESH heartbeat reports the prevention block — i.e. we
+    /// know each module's real current state. Toggling without a confirmed
+    /// current state could enable/disable the wrong thing, so the controls are
+    /// disabled otherwise (an honest "we don't know" rather than a live switch
+    /// over a stale reading).
+    private var canToggle: Bool {
+        guard let h = heartbeat, !h.isStale, h.prevention != nil else { return false }
+        return true
+    }
+
+    /// Binding for one module's toggle. `get` prefers the optimistic pending
+    /// value, falling back to the heartbeat-reported `enabled`. `set` fires only
+    /// on user interaction (never on a programmatic heartbeat refresh), records
+    /// the optimistic value, and drops the inbox request.
+    private func toggleBinding(module key: String, enabled: Bool) -> Binding<Bool> {
+        Binding(
+            get: { pendingToggles[key] ?? enabled },
+            set: { newValue in
+                pendingToggles[key] = newValue
+                pushPrevention(module: key, enabled: newValue)
+            }
+        )
+    }
+
+    private func pushPrevention(module key: String, enabled: Bool) {
+        let requested: Bool
+        switch key {
+        case "sinkhole":          requested = V2DaemonControl.sendPreventionConfig(sinkhole: enabled)
+        case "network_blocker":   requested = V2DaemonControl.sendPreventionConfig(networkBlocker: enabled)
+        case "persistence_guard": requested = V2DaemonControl.sendPreventionConfig(persistenceGuard: enabled)
+        default:                  requested = false
+        }
+        if requested {
+            state.showToast(V2Toast(
+                kind: .info,
+                title: enabled ? String(localized: "prevention.toastEnabling", defaultValue: "Enabling…")
+                               : String(localized: "prevention.toastDisabling", defaultValue: "Disabling…"),
+                detail: String(localized: "prevention.toastApplyWindow", defaultValue: "Requested — the enforcing engine applies this within ~30s (requires an administrator).")))
+        } else {
+            // Honest failure: no inbox dir means no daemon is installed. Roll the
+            // optimistic value back so the switch reflects reality.
+            pendingToggles[key] = nil
+            state.showToast(V2Toast(
+                kind: .error,
+                title: String(localized: "prevention.toastNoDaemonTitle", defaultValue: "No daemon"),
+                detail: String(localized: "prevention.toastNoDaemonBody", defaultValue: "No running MacCrab engine to apply this change.")))
         }
     }
 
@@ -91,6 +154,84 @@ struct V2PreventionWorkspace: View {
         } else {
             V2StatusChip(off, kind: .neutral, icon: "shield.slash")
         }
+    }
+
+    /// Per-module enable/disable controls. Each toggle drops an authorized
+    /// `prevention-config-*.json` inbox request the root engine applies live to
+    /// the DNS-sinkhole / network-blocker / persistence-guard actors (the app
+    /// runs as uid-501 and can't mutate root-owned prevention state directly).
+    /// Disabled unless a fresh heartbeat confirms the modules' current state.
+    private var preventionModulesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: "prevention.modulesTitle", defaultValue: "Prevention modules"))
+                .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            if let p = heartbeat?.prevention, canToggle {
+                moduleRow(title: String(localized: "prevention.module.sinkhole", defaultValue: "DNS Sinkhole"),
+                          key: "sinkhole", module: p.sinkhole,
+                          detail: String(localized: "prevention.module.sinkhole.detail", defaultValue: "Redirects known-malicious domains to 127.0.0.1 via /etc/hosts. Protected domains (Apple, OCSP, resolvers) are never sinkholed."))
+                Divider()
+                moduleRow(title: String(localized: "prevention.module.networkBlocker", defaultValue: "Network Blocker"),
+                          key: "network_blocker", module: p.networkBlocker,
+                          detail: String(localized: "prevention.module.networkBlocker.detail", defaultValue: "PF-blocks known-malicious IPs. Loopback / RFC1918 / the default gateway are never blocked."))
+                Divider()
+                moduleRow(title: String(localized: "prevention.module.persistenceGuard", defaultValue: "Persistence Guard"),
+                          key: "persistence_guard", module: p.persistenceGuard,
+                          detail: String(localized: "prevention.module.persistenceGuard.detail", defaultValue: "Locks LaunchAgent / LaunchDaemon directories with the system-immutable flag."))
+                Text(String(localized: "prevention.modulesFootnote", defaultValue: "Toggles apply to the running engine within ~30s and require an administrator. They apply live only — startup state is set at daemon launch, and while threat-intel feeds are enabled the sinkhole/blocker repopulate on the next feed refresh."))
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                    .padding(.top, 2)
+            } else {
+                Text(String(localized: "prevention.modulesUnavailable", defaultValue: "Live module state is unavailable (no recent daemon heartbeat), so these controls are disabled — toggling without a confirmed current state could enable or disable the wrong module."))
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                    .padding(.vertical, 8)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .v2Panel()
+    }
+
+    @ViewBuilder
+    private func moduleRow(title: String, key: String,
+                           module: V2HeartbeatSnapshot.Prevention.Module, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.primaryText)
+                    Text(detail).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                }
+                Spacer()
+                Toggle("", isOn: toggleBinding(module: key, enabled: module.enabled))
+                    .labelsHidden()
+                    .disabled(!canToggle)
+                    .accessibilityLabel(title)
+            }
+            // Entry detail (view/manage). The daemon heartbeat currently reports
+            // COUNTS only — the prevention actors expose no entry-list accessor —
+            // so `entries` is empty and we say so honestly. If a future daemon
+            // build emits `entries`, the real list renders here automatically.
+            if module.enabled {
+                if module.entries.isEmpty {
+                    Text(module.count == 0
+                         ? String(localized: "prevention.module.activeEmpty", defaultValue: "Active — no entries currently enforced.")
+                         : String(localized: "prevention.module.countOnly", defaultValue: "\(module.count) enforced — entry list not reported by this daemon build."))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                        .padding(.top, 1)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(module.entries.prefix(20), id: \.self) { entry in
+                            Text(entry).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText).lineLimit(1)
+                        }
+                        if module.entries.count > 20 {
+                            Text(String(localized: "prevention.module.moreEntries", defaultValue: "+ \(module.entries.count - 20) more"))
+                                .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     /// B1: the live provider's `toV2Alert` hardcodes `actionsTaken: []` (the

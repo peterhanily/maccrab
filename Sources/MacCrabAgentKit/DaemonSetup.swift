@@ -921,6 +921,18 @@ enum DaemonSetup {
         // The monitor records delivery-shaped clipboard payloads (curl|bash, etc.);
         // the exec path correlates a subsequent shell/Terminal exec against them.
         let clickFixDetector = ClickFixDetector()
+
+        // v1.21.4: per-user entity behaviour analytics. OFF unless the operator
+        // opts in via `ueba_enabled` — see DaemonConfig.uebaEnabled. In-memory
+        // only (no persistencePath): profiles rebuild from the cold-start window
+        // on each start, so there is no save-timer dependency. When enabled the
+        // event loop feeds process-exec events in (EventLoop) and routes any
+        // UEBAAnomaly to the alert sink.
+        let uebaEngine: UEBAEngine? = config.uebaEnabled ? UEBAEngine() : nil
+        if config.uebaEnabled {
+            print("UEBA enabled — per-user behavioural baselining active (silent for first 100 obs/user)")
+        }
+
         let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval, clickFix: clickFixDetector)
         Task.detached(priority: .utility) {
             await clipboardMonitor.start()
@@ -1901,7 +1913,8 @@ enum DaemonSetup {
             toolIntegrations: toolIntegrations,
             fleetClient: fleetClient,
             llmService: llmService,
-            clickFix: clickFixDetector
+            clickFix: clickFixDetector,
+            uebaEngine: uebaEngine
         )
 
         // v1.6.21: wire AlertSink into ResponseEngine so the

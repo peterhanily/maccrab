@@ -75,6 +75,59 @@ public enum V2DaemonControl {
         return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
     }
 
+    // MARK: - Prevention module toggles (v1.21.4)
+
+    /// Push the Prevention tab's per-module enable/disable toggle to the ROOT
+    /// engine via the privileged inbox. The app runs as the console user, so it
+    /// can neither mutate the root-owned prevention state nor `pkill` the sysext
+    /// cross-uid (EPERM). Each toggle drops a `prevention-config-<token>.json`
+    /// request the sysext validates (uid/symlink auth + admin gate) and applies
+    /// LIVE by calling enable/disable on the DNS-sinkhole / network-blocker /
+    /// persistence-guard actors — the same cross-uid-safe channel used by
+    /// suppress / llm-config / apply-agent-traces.
+    ///
+    /// A `nil` argument means "leave that module unchanged"; only the modules
+    /// the caller specifies are carried in the request. Returns true if the
+    /// request was queued (a `false` means no inbox dir was resolvable, i.e. no
+    /// daemon is installed — NOT that the toggle was rejected; rejection happens
+    /// daemon-side and is audit-logged).
+    ///
+    /// SCOPING / RESIDUALS (honest): the toggle applies live to the running
+    /// engine, but it is NOT persisted across a daemon restart (startup state is
+    /// governed by the boot-time `MACCRAB_PREVENTION` gate), and when prevention
+    /// booted ACTIVE the `threatIntel.onUpdate` callback re-enables the
+    /// sinkhole/blocker on the next feed refresh — so a live "disable" of those
+    /// two is transient until that callback path is toggle-aware.
+    @discardableResult
+    public static func sendPreventionConfig(sinkhole: Bool? = nil,
+                                            networkBlocker: Bool? = nil,
+                                            persistenceGuard: Bool? = nil) -> Bool {
+        guard let inboxDir = resolveInboxDir() else { return false }
+        var payload: [String: Any] = [:]
+        if let sinkhole { payload["sinkhole"] = sinkhole }
+        if let networkBlocker { payload["network_blocker"] = networkBlocker }
+        if let persistenceGuard { payload["persistence_guard"] = persistenceGuard }
+        guard !payload.isEmpty else { return false }
+        return writePreventionConfigRequest(inboxDir: inboxDir, payload: payload)
+    }
+
+    /// Write one `prevention-config-*.json` into `inboxDir`. Internal + static so
+    /// it's unit-testable against a temp dir (mirrors AppState.writeAgentTracesRequest).
+    /// Key contract with the daemon partition in DaemonTimers.swift:
+    /// `hasPrefix("prevention-config-") && hasSuffix(".json")`.
+    static func writePreventionConfigRequest(inboxDir: String, payload: [String: Any]) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        let path = inboxDir + "/prevention-config-\(UUID().uuidString).json"
+        var obj = payload
+        obj["queuedAt"] = ISO8601DateFormatter().string(from: Date())
+        obj["source"] = "MacCrabApp"
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
+    }
+
     /// Resolve the data directory the daemon actually writes to, matching
     /// V2LiveDataProvider.pickDataDirectory: prefer the root sysext's
     /// /Library path, else the dev daemon's ~/Library path.

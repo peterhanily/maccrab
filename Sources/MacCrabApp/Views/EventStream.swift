@@ -145,6 +145,25 @@ struct EventStream: View {
         "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")"
     }
 
+    /// `filterCategory` bridged to the Core enum so `loadEvents` can push
+    /// the category predicate DB-side. nil ("All Categories") = no
+    /// predicate. Raw values are 1:1 with the app mirror, so the failable
+    /// init never returns nil for a real case (same pattern the aggregate /
+    /// histogram tasks already use).
+    private var coreCategory: MacCrabCore.EventCategory? {
+        filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
+    }
+
+    /// Reload key for the hot-tier (non-search) event query. Range OR
+    /// category changing must re-hit the DB: category is now a DB-side
+    /// predicate (loadEvents forwards it), so a category change has to
+    /// re-query rather than only paring down the loaded ~500-row window
+    /// in memory (which undercounts on busy hosts). Same value shape as
+    /// aggregateInputsKey but drives the per-event table task.
+    private var eventQueryKey: String {
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")"
+    }
+
     /// ISO date string for `daysAgo` days before now. Matches the
     /// `strftime('%Y-%m-%d', timestamp, 'unixepoch')` format the daemon's
     /// roll-up uses, so day strings sort + compare as text.
@@ -517,12 +536,13 @@ struct EventStream: View {
                     Task {
                         let bounds = computeEventsTimeBounds()
                         if filterText.isEmpty {
-                            await appState.loadEvents(since: bounds.since, until: bounds.until)
+                            await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
                         } else {
                             await appState.loadEvents(
                                 filter: filterText,
                                 since: bounds.since,
-                                until: bounds.until
+                                until: bounds.until,
+                                category: coreCategory
                             )
                         }
                     }
@@ -758,7 +778,7 @@ struct EventStream: View {
                     Spacer()
                     Button {
                         Task {
-                            await appState.loadOlderEvents()
+                            await appState.loadOlderEvents(category: coreCategory)
                             // #13: an explicit user fetch — reflect it even
                             // while Paused (Pause freezes the live firehose,
                             // not on-demand paging, so the onReceive recompute
@@ -843,7 +863,8 @@ struct EventStream: View {
                     await appState.loadEvents(
                         filter: filterText,
                         since: bounds.since,
-                        until: bounds.until
+                        until: bounds.until,
+                        category: coreCategory
                     )
                 }
             }
@@ -871,26 +892,31 @@ struct EventStream: View {
             // selected); otherwise the chip's window is used.
             let bounds = computeEventsTimeBounds()
             if filterText.isEmpty {
-                await appState.loadEvents(since: bounds.since, until: bounds.until)
+                await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
             } else {
-                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
+                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until, category: coreCategory)
             }
         }
-        // #12: re-query the DB when the range changes — in BOTH the search
-        // and non-search paths. Pre-fix the non-search path only re-filtered
-        // the already-loaded ~500-row window (via onChange→recomputeFilter),
-        // so widening the range surfaced no additional DB rows and
-        // under-represented the window.
-        .task(id: timeRange) {
+        // #12: re-query the DB when the range OR category changes — in BOTH
+        // the search and non-search paths. Pre-fix the non-search path only
+        // re-filtered the already-loaded ~500-row window (via
+        // onChange→recomputeFilter), so widening the range — or picking a
+        // category — surfaced no additional DB rows and under-represented the
+        // window. `eventQueryKey` folds filterCategory into the id so a
+        // category change re-queries category-side in the DB, not just
+        // in-memory.
+        .task(id: eventQueryKey) {
             // When centred (Investigate in Events) the window is fixed to the
             // centre ± half-window regardless of the chip, so a chip change
             // need not re-query (onAppear + the filterText task already load).
+            // The in-memory recomputeFilter still applies the category to the
+            // small fully-loaded centred window, so no undercount there.
             guard initialCenterTime == nil else { return }
             let bounds = computeEventsTimeBounds()
             if filterText.isEmpty {
-                await appState.loadEvents(since: bounds.since, until: bounds.until)
+                await appState.loadEvents(since: bounds.since, until: bounds.until, category: coreCategory)
             } else {
-                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
+                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until, category: coreCategory)
             }
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
@@ -1046,6 +1072,9 @@ private struct EventDetailPanel: View {
                         // in events.db but never rendered.
                         if !event.executablePath.isEmpty {
                             EventDetailRow(label: "Path", value: event.executablePath)
+                        }
+                        if !event.commandLine.isEmpty {
+                            EventDetailRow(label: "Command", value: event.commandLine)
                         }
                         if !event.signerType.isEmpty {
                             EventDetailRow(label: "Signer", value: event.signerType)

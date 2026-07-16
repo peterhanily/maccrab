@@ -602,6 +602,37 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return try decodeEntityRow(stmt!)
     }
 
+    /// Batch entity lookup via `WHERE id IN (…)` — one round trip in place of
+    /// N `entity(id:)` calls (the dashboard's trace-member resolution path).
+    /// Returns one row per DISTINCT matching id; unknown ids are simply absent
+    /// (never nil placeholders), matching the protocol contract. Callers pass
+    /// bounded id sets (a trace's members are ≤ the §14.3 context budget, well
+    /// under SQLite's 999 host-parameter ceiling), so a single statement suffices.
+    public func entities(ids: [String]) async throws -> [TraceEntity] {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+        SELECT id, entity_type, stable_key, display_name,
+               first_seen, last_seen, attributes_json, source,
+               confidence, observation_count
+          FROM trace_entities WHERE id IN (\(placeholders))
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for (idx, id) in ids.enumerated() {
+            sqlite3_bind_text(stmt, Int32(1 + idx), id, -1, SQLITE_TRANSIENT)
+        }
+        var out: [TraceEntity] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(try decodeEntityRow(stmt!))
+        }
+        return out
+    }
+
     public func edge(id: String) async throws -> TraceEdge? {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         let sql = """
@@ -914,6 +945,65 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         guard let trace = try fetchTraceRow(id: id, db: db) else { return nil }
         let members = try fetchTraceMembership(traceId: id, db: db)
         return (trace, members)
+    }
+
+    /// Return every relation-typed edge whose BOTH endpoints are member
+    /// entities of the given trace — the real causal skeleton the dashboard's
+    /// Investigation graph draws (source→target) instead of the fabricated
+    /// anchor→every-node hub-spokes it falls back to when no edges are known.
+    ///
+    /// Member entity ids come from `trace_membership` (entity rows only). An
+    /// edge is kept only when its source AND target are both in that set, so a
+    /// context edge that dangles to an entity outside the trace is excluded.
+    /// Returns [] when the trace has no member entities. Member sets are bounded
+    /// (≤ the §14.3 context budget), so 2×|members| bind params stays under
+    /// SQLite's 999-parameter ceiling.
+    public func edgesAmongTraceMembers(traceId: String) async throws -> [TraceEdge] {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        // 1. Resolve the trace's member entity ids.
+        let memberSql = """
+        SELECT entity_id FROM trace_membership
+         WHERE trace_id = ? AND entity_id IS NOT NULL
+        """
+        var memberStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, memberSql, -1, &memberStmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        sqlite3_bind_text(memberStmt, 1, traceId, -1, SQLITE_TRANSIENT)
+        var memberIds: [String] = []
+        while sqlite3_step(memberStmt) == SQLITE_ROW {
+            if let idc = sqlite3_column_text(memberStmt, 0) {
+                memberIds.append(String(cString: idc))
+            }
+        }
+        sqlite3_finalize(memberStmt)
+        guard !memberIds.isEmpty else { return [] }
+
+        // 2. Fetch edges whose source AND target are both member entities.
+        let placeholders = memberIds.map { _ in "?" }.joined(separator: ", ")
+        let edgeSql = """
+        SELECT id, source_entity_id, target_entity_id, relation,
+               first_seen, last_seen, confidence, confidence_tier,
+               evidence_json, event_ids_json
+          FROM trace_edges
+         WHERE source_entity_id IN (\(placeholders))
+           AND target_entity_id IN (\(placeholders))
+        """
+        var edgeStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, edgeSql, -1, &edgeStmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(edgeStmt) }
+        // Same id list bound twice: once for the source IN-list, once for target.
+        for (idx, id) in memberIds.enumerated() {
+            sqlite3_bind_text(edgeStmt, Int32(1 + idx), id, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(edgeStmt, Int32(1 + memberIds.count + idx), id, -1, SQLITE_TRANSIENT)
+        }
+        var out: [TraceEdge] = []
+        while sqlite3_step(edgeStmt) == SQLITE_ROW {
+            out.append(try decodeEdgeRow(edgeStmt!))
+        }
+        return out
     }
 
     public func updateTraceStatus(id: String, status: String, updatedAt: Date) async throws {

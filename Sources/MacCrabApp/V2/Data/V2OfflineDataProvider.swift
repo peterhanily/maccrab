@@ -44,6 +44,7 @@ public final class V2OfflineDataProvider: V2DataProvider {
     public func suppressions() async -> [V2SuppressionEntry] { [] }
     public func liftSuppression(ruleId: String, scope: String) async -> Bool { false }
     public func traceMembers(traceId: String) async -> [V2TraceMember] { [] }
+    public func traceEdges(traceId: String) async -> [V2TraceEdge] { [] }
 
     public func heartbeat() async -> V2HeartbeatSnapshot? { nil }
     public func alertHistogram(rangeKey: String) async -> [V2OverviewBucket] { [] }

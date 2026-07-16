@@ -1159,7 +1159,8 @@ public final class V2LiveDataProvider: V2DataProvider {
                     permissions: allPerms,
                     signed: !snap.isDevMode,
                     riskScore: snap.riskScore,
-                    installedAt: installedAt
+                    installedAt: installedAt,
+                    path: snap.extensionPath
                 )
             }
         }.value
@@ -1540,18 +1541,24 @@ public final class V2LiveDataProvider: V2DataProvider {
         guard let unwrapped = outer, let result = unwrapped else {
             return []
         }
+        // Batch-resolve the member entities in ONE query instead of N+1
+        // (pre-fix this issued one `entity(id:)` per membership). Keep the
+        // membership rows so we retain each entity's role (anchor vs. member).
+        let entityMemberships = result.members.filter { $0.entityId != nil }
+        let entityIds = entityMemberships.compactMap { $0.entityId }
+        let resolved = (try? await causalStore.entities(ids: entityIds)) ?? []
+        let entityById = Dictionary(resolved.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var members: [V2TraceMember] = []
-        for membership in result.members {
-            guard let entityId = membership.entityId else { continue }
-            if let entity = try? await causalStore.entity(id: entityId) {
-                members.append(V2TraceMember(
-                    id: entity.id,
-                    entityType: entity.entityType,
-                    displayName: entity.displayName,
-                    firstSeen: entity.firstSeen,
-                    isAnchor: membership.role == "anchor"
-                ))
-            }
+        for membership in entityMemberships {
+            guard let entityId = membership.entityId,
+                  let entity = entityById[entityId] else { continue }
+            members.append(V2TraceMember(
+                id: entity.id,
+                entityType: entity.entityType,
+                displayName: entity.displayName,
+                firstSeen: entity.firstSeen,
+                isAnchor: membership.role == "anchor"
+            ))
         }
         // Anchor first, then by first-seen ascending — matches the
         // chronological-then-importance ordering operators expect.
@@ -1559,6 +1566,28 @@ public final class V2LiveDataProvider: V2DataProvider {
             if lhs.isAnchor && !rhs.isAnchor { return true }
             if !lhs.isAnchor && rhs.isAnchor { return false }
             return lhs.firstSeen < rhs.firstSeen
+        }
+    }
+
+    /// Resolve the real causal edges among a trace's member entities so the
+    /// graph view can draw source→target relations. Empty when the trace has
+    /// no materialized edges or the causal graph store isn't reachable, and the
+    /// graph then falls back to anchor→member hub-spokes.
+    public func traceEdges(traceId: String) async -> [V2TraceEdge] {
+        guard let causalStore else { return [] }
+        do {
+            let edges = try await causalStore.edgesAmongTraceMembers(traceId: traceId)
+            return edges.map { e in
+                V2TraceEdge(
+                    id: e.id,
+                    source: e.sourceEntityId,
+                    target: e.targetEntityId,
+                    relation: e.relation
+                )
+            }
+        } catch {
+            lastErrorDescription = "trace edges read: \(error)"
+            return []
         }
     }
 

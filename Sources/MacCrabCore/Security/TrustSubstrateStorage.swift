@@ -172,8 +172,8 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
         let url = baseDirectory.appendingPathComponent(Self.privateKeyFile)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         // v1.11.0 (audit security MEDIUM): refuse to load if the path
-        // is a symlink. The 0o700 parent dir mostly prevents this, but
-        // a one-time directory misconfiguration could let an attacker
+        // is a symlink. The non-writable (0o711) parent dir mostly prevents
+        // this, but a one-time directory misconfiguration could let an attacker
         // substitute keys via a symlink in the keys dir. Open with
         // O_NOFOLLOW; lstat first to catch symlinks deterministically
         // (Foundation's Data(contentsOf:) doesn't expose O_NOFOLLOW).
@@ -192,8 +192,9 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
         // A3-02 (degraded fallback): unlike the SE mode — where the key is
         // non-exportable and pinned with a usage ACL (see TrustSubstrate.
         // makeSigningKeyAccessControl) — this on-disk DER has NO keychain
-        // ACL. Its only at-rest protection is 0o600 under the 0o700 keys
-        // dir, so any process that can read the file (root, or a directory
+        // ACL. Its only at-rest protection is 0o600 under the 0o711 keys
+        // dir (traversable but non-listable, non-writable), so any process
+        // that can read the file (root, or a directory
         // misconfiguration) can sign. This mode is selected only when SE is
         // unavailable and is explicitly NOT root-resistant.
         try ensureBaseDirectory()
@@ -221,7 +222,24 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
         try FileManager.default.createDirectory(
             at: baseDirectory,
             withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
+            attributes: [.posixPermissions: 0o711]
+        )
+        // createDirectory only applies `attributes` on CREATION. A keys/ dir
+        // created by an earlier version at 0o700 keeps that mode — which blocks
+        // the non-root (uid-501) dashboard from traversing IN to read the
+        // world-readable public key (trace-signing.pub is 0o644). chmod
+        // explicitly (idempotent) so existing installs get the traversable mode.
+        //
+        // 0o711 = owner rwx, group/other execute-only: the dir is TRAVERSABLE
+        // (a uid-501 reader can open a known child path like trace-signing.pub)
+        // but NOT listable (no `r` — can't enumerate the filenames) and NOT
+        // writable (no `w` — a non-owner still can't plant a substitute-key
+        // symlink). The private key stays 0o600, so directory traversal alone
+        // never exposes it — reading it still requires file-level `r` the
+        // daemon user alone has.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o711],
+            ofItemAtPath: baseDirectory.path
         )
     }
 

@@ -56,6 +56,7 @@ struct V2OfflineDataProviderCompletenessTests {
         #expect(await p.extensions().isEmpty)
         #expect(await p.suppressions().isEmpty)
         #expect(await p.traceMembers(traceId: "anything").isEmpty)
+        #expect(await p.traceEdges(traceId: "anything").isEmpty)
         #expect(await p.alertHistogram(rangeKey: "24h").isEmpty)
 
         // Read surfaces backed by PROTOCOL DEFAULTS (the offline type inherits
@@ -136,7 +137,8 @@ struct V2OfflineDataProviderCompletenessTests {
             "traces(limit:)", "agentSessions(limit:)", "rules()",
             "compositeRuleLabels()", "feeds()", "mcpServers()", "collectors()",
             "permissions()", "packages()", "extensions()", "integrations()",
-            "suppressions()", "traceMembers(traceId:)", "suppressedCampaigns(limit:)",
+            "suppressions()", "traceMembers(traceId:)", "traceEdges(traceId:)",
+            "suppressedCampaigns(limit:)",
             // scalar reads
             "heartbeat()", "kpis()", "alertHistogram(rangeKey:)",
             // mutations
@@ -146,10 +148,11 @@ struct V2OfflineDataProviderCompletenessTests {
         ]
         // The count is pinned: any drift (add/remove) is a visible diff that
         // forces the maintainer back to this file. As of the V2DataProvider
-        // protocol at the time of writing, there are 31 covered members
-        // (3 properties + 17 read accessors + 11 mutations — counting
-        // alertHistogram/kpis/heartbeat among the reads).
-        #expect(coveredRequirements.count == 31,
+        // protocol at the time of writing, there are 32 covered members
+        // (3 properties + 18 read accessors + 11 mutations — counting
+        // alertHistogram/kpis/heartbeat among the reads). traceEdges(traceId:)
+        // was added in v1.21.4 for the Investigation graph's real causal edges.
+        #expect(coveredRequirements.count == 32,
                 "V2DataProvider requirement count changed — re-audit the offline empty surface")
     }
 }

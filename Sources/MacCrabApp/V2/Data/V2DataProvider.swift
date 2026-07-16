@@ -138,6 +138,13 @@ public protocol V2DataProvider: AnyObject {
     /// view. Empty when the trace has no members or the causal graph
     /// store isn't reachable.
     func traceMembers(traceId: String) async -> [V2TraceMember]
+
+    /// Resolve the REAL causal edges among a trace's member entities, so the
+    /// graph view draws source→target relations instead of fabricated
+    /// anchor→every-node spokes. Empty when the trace has no materialized
+    /// edges or the causal graph store isn't reachable — in which case the
+    /// graph falls back to the anchor hub-spoke shape.
+    func traceEdges(traceId: String) async -> [V2TraceEdge]
 }
 
 /// One node in a trace — minimum viable graph representation. The
@@ -157,6 +164,25 @@ public struct V2TraceMember: Identifiable, Sendable, Hashable {
         self.displayName = displayName
         self.firstSeen = firstSeen
         self.isAnchor = isAnchor
+    }
+}
+
+/// One real causal edge between two trace members — source→target carrying a
+/// relation from the §9 causal-graph vocabulary (`spawned`, `wrote`, `read`,
+/// `connected_to`, `created_persistence`, `loaded_code`, `associated_with_agent`,
+/// …). The Investigation graph renders these with relation-specific styling
+/// rather than the anchor→every-node hub-spokes it draws when no edges exist.
+/// `source` / `target` are entity ids that match `V2TraceMember.id`.
+public struct V2TraceEdge: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let source: String
+    public let target: String
+    public let relation: String
+    public init(id: String, source: String, target: String, relation: String) {
+        self.id = id
+        self.source = source
+        self.target = target
+        self.relation = relation
     }
 }
 

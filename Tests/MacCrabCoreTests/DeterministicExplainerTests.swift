@@ -185,6 +185,29 @@ struct DeterministicExplainerTests {
         #expect(exp.criticalPath.first?.edgeId == edge.id)
     }
 
+    @Test("Drift guard: AI-agent severity reason still carries the §11.3 gate marker")
+    func agentReasonCarriesGateMarker() throws {
+        // The TraceMaterializer §11.3 honesty gate locates the AI-agent severity
+        // reason via AIAttributionRenderer.assertedAgentReasonMarker (a substring
+        // match) before softening it. If this prose drifts, fail LOUDLY here
+        // rather than silently un-gating below-threshold attribution downstream.
+        let agent = try agentEntity(name: "Claude Desktop")
+        let shell = try processEntity(key: "p", path: "/bin/zsh")
+        let spawn = EdgeBuilder.build(
+            sourceEntityId: agent.id, targetEntityId: shell.id,
+            relation: .spawned, confidence: 0.9, observedAt: now
+        )
+        let exp = DeterministicExplainer.explain(
+            trace: makeTrace(),
+            entities: [agent, shell], edges: [spawn],
+            rootCauseEntityId: shell.id, rootCauseTrustTransition: "x",
+            criticalPathEdgeIds: [spawn.id]
+        )
+        #expect(exp.severityReasons.contains {
+            $0.contains(AIAttributionRenderer.assertedAgentReasonMarker)
+        })
+    }
+
     @Test("Empty critical path produces empty array (not crash)")
     func emptyCriticalPath() throws {
         let proc = try processEntity(key: "p", path: "/bin/zsh")

@@ -82,6 +82,37 @@ public enum AIAttributionRenderer {
         )
     }
 
+    /// The lexical marker `DeterministicExplainer` opens an AI-agent SEVERITY
+    /// reason with ("AI-agent associated activity" / "AI-agent associated shell
+    /// execution"). Centralized here so the §11.3 gate that softens those
+    /// reasons has ONE authority for the asserted phrasing. `DeterministicExplainer`
+    /// lives in a file the gate does not (and should not) import prose from at
+    /// runtime; `AIAttributionRendererTests` asserts the explainer still emits a
+    /// reason carrying this marker, so prose drift there fails a test loudly
+    /// instead of silently un-gating attribution here.
+    public static let assertedAgentReasonMarker = "AI-agent associated"
+
+    /// §11.3 gate for a single deterministic severity reason. When the reason
+    /// asserts AI-agent involvement (carries `assertedAgentReasonMarker`) AND
+    /// `confidence` is below `assertionThreshold`, soften
+    /// "AI-agent associated X" → "possible AI-agent X (attribution inferred,
+    /// not asserted)". Any other reason — or an at/above-threshold confidence —
+    /// is returned unchanged.
+    public static func gatedSeverityReason(
+        _ reason: String,
+        confidence: Double,
+        assertionThreshold: Double = AIAttributionRenderer.defaultAssertionThreshold
+    ) -> String {
+        guard reason.contains(assertedAgentReasonMarker),
+              !render(confidence: confidence, assertionThreshold: assertionThreshold).assertedAsFact
+        else { return reason }
+        let subject = reason
+            .replacingOccurrences(of: assertedAgentReasonMarker, with: "")
+            .trimmingCharacters(in: .whitespaces)
+        let phrase = subject.isEmpty ? "activity" : subject
+        return "possible AI-agent \(phrase) (attribution inferred, not asserted)"
+    }
+
     /// Generate the natural-language explainer sentence for an
     /// AI-attribution edge. Uses `agentName` for the subject and
     /// the confidence-driven template above.

@@ -2068,7 +2068,8 @@ final class AppState: ObservableObject {
         limit: Int = 500,
         filter: String? = nil,
         since: Date = .distantPast,
-        until: Date = .distantFuture
+        until: Date = .distantFuture,
+        category: MacCrabCore.EventCategory? = nil
     ) async {
         do {
             let store = try eventStore()
@@ -2082,13 +2083,22 @@ final class AppState: ObservableObject {
                 // from an alert 30 days ago still surfaced today's
                 // events that matched the same process — which
                 // wasn't what the user clicked Investigate to see.
+                //
+                // EventStore.search has no category predicate, so a
+                // search + category combo is narrowed by the caller's
+                // in-memory pass (EventStream.recomputeFilter) rather
+                // than DB-side. That path is limit-capped, so on a busy
+                // host it undercounts the same way the non-search path
+                // used to — the hot-tier fix below is the primary one.
                 raw = try await store.search(text: query, since: since, until: until, limit: limit)
             } else {
                 // EventStore.events doesn't yet take an upper bound;
                 // narrow client-side after the fetch. The result set
                 // for non-search queries is already small (`limit`
-                // capped) so this is fine.
-                let all = try await store.events(since: since, limit: limit)
+                // capped) so this is fine. `category` IS pushed DB-side
+                // so the picker filters the whole hot tier, not just the
+                // ~500-row loaded window (which undercounts on busy hosts).
+                let all = try await store.events(since: since, category: category, limit: limit)
                 raw = all.filter { $0.timestamp <= until }
             }
             events = raw.map { eventToViewModel($0) }
@@ -2149,14 +2159,14 @@ final class AppState: ObservableObject {
     }
 
     /// Mirror of `loadOlderAlerts` for the Events tab.
-    func loadOlderEvents(pageSize: Int = 200) async {
+    func loadOlderEvents(pageSize: Int = 200, category: MacCrabCore.EventCategory? = nil) async {
         guard hasMoreEvents, let cursor = eventCursor else { return }
         if isLoadingOlderEvents { return }
         isLoadingOlderEvents = true
         defer { isLoadingOlderEvents = false }
         do {
             let store = try eventStore()
-            let page = try await store.events(before: cursor, pageSize: pageSize)
+            let page = try await store.events(before: cursor, category: category, pageSize: pageSize)
             let existing = Set(events.map { $0.id })
             let appended = page.items
                 .filter { !existing.contains($0.id) }
@@ -2777,6 +2787,7 @@ final class AppState: ObservableObject {
             detail: detail,
             signerType: e.process.codeSignature?.signerType.rawValue ?? "",
             executablePath: e.process.executable,
+            commandLine: e.process.commandLine,
             userName: e.process.userName,
             workingDirectory: e.process.workingDirectory,
             architecture: e.process.architecture ?? "",

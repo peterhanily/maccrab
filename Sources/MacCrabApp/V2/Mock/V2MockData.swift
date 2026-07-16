@@ -331,6 +331,11 @@ public struct V2MockExtension: Identifiable, Sendable, Hashable {
     public let signed: Bool
     public let riskScore: Int
     public let installedAt: Date
+    /// On-disk extension directory (the folder containing manifest.json).
+    /// Empty for mock fixtures and for browsers where the path isn't known
+    /// (e.g. a Firefox .xpi). Populated by the live provider from the
+    /// BrowserExtensionMonitor snapshot so the inspector can Reveal in Finder.
+    public var path: String = ""
 }
 
 // MARK: - MCP server

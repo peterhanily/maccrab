@@ -300,4 +300,40 @@ struct UEBAEngineTests {
         #expect(p.weekdayObservations == 0)
         #expect(p.weekendObservations == 0)
     }
+
+    // MARK: - Anomaly → alert mapping (v1.21.4 EventLoop wiring)
+
+    @Test("Anomaly maps to a stable rule id, title, and MITRE tags per kind")
+    func anomalyAlertMapping() {
+        let ssh = UEBAAnomaly(kind: .newSSHSource, userName: "alice", detail: "d", severity: .high)
+        #expect(ssh.alertRuleId == "maccrab.ueba.newSSHSource")
+        #expect(ssh.alertTitle.contains("SSH"))
+        #expect(ssh.mitreTactics == "attack.initial_access,attack.lateral_movement")
+        #expect(ssh.mitreTechniques == "attack.t1078")
+
+        let hour = UEBAAnomaly(kind: .unusualLoginHour, userName: "alice", detail: "d", severity: .medium)
+        #expect(hour.alertRuleId == "maccrab.ueba.unusualLoginHour")
+        #expect(hour.mitreTactics == "attack.initial_access")
+        #expect(hour.mitreTechniques == "attack.t1078")
+
+        // novelTool is low-signal on its own — no MITRE over-claim.
+        let novel = UEBAAnomaly(kind: .novelTool, userName: "alice", detail: "d", severity: .low)
+        #expect(novel.alertRuleId == "maccrab.ueba.novelTool")
+        #expect(novel.mitreTactics == nil)
+        #expect(novel.mitreTechniques == nil)
+    }
+
+    @Test("A real observed novel-tool anomaly carries non-empty alert fields")
+    func observedAnomalyMapsToAlert() async {
+        let engine = UEBAEngine(minObservationsForScoring: 5)
+        for _ in 0..<5 { _ = await engine.observe(event: procEvent(path: "/usr/bin/ls")) }
+        let anomalies = await engine.observe(event: procEvent(path: "/tmp/never_seen_before"))
+        let novel = anomalies.first { $0.kind == .novelTool }
+        // These are exactly the fields EventLoop threads into Alert(...).
+        #expect(novel != nil)
+        #expect(novel?.alertRuleId == "maccrab.ueba.novelTool")
+        #expect(novel?.alertTitle.isEmpty == false)
+        #expect(novel?.detail.isEmpty == false)
+        #expect(novel?.severity == .low)
+    }
 }
