@@ -3,6 +3,35 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.3] — 2026-07-16
+
+Reliability release: fixes several dashboard crashes, makes the UI honest when the
+detection engine isn't running, corrects the alert-triage flow, and completes
+agent-trace attribution.
+
+### Fixed
+- **Agent-trace attribution now works.** Kernel events are correctly linked to the
+  AI-agent session that caused them (via the W3C traceparent the agent's process
+  carries) — previously the correlation silently never matched, so `agent_trace_id`
+  stayed empty end-to-end.
+- **Dashboard crashes.** Fixed several app-killing traps — duplicate trace/rule ids,
+  deeply-nested forensic artifact payloads, and a keyboard-shortcut edge case.
+- **Honest status when the engine is down.** The dashboard no longer shows a
+  reassuring "Running / Live / all healthy / 0 actions taken" on the System, Events,
+  Prevention, Alerts, and Investigation screens when the engine hasn't reported a
+  recent heartbeat — those now show a clear "not reporting" state.
+- **Alert triage.** Bulk-suppress no longer permanently hides an alert whose
+  suppression failed; "Investigate in Events" works for alerts older than the default
+  time range; "Trigger SIGHUP" actually reloads rules; the Events Pause/Auto-scroll
+  controls and the Detection rule inspector now behave correctly.
+- **Forensics & Intelligence.** Read errors surface (with a Retry) instead of an
+  empty list; one bad scan no longer blanks the whole Findings tab; package staleness
+  and vulnerability counts are corrected.
+
+### Added
+- Foundations for automated UI testing — a fixture-database launch mode and
+  accessibility identifiers.
+
 ## [1.21.4-rc.2] — 2026-07-15
 
 Follow-up to rc.1 from on-device testing: no more duplicate notifications, higher
