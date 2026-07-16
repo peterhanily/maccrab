@@ -14,6 +14,22 @@ public struct V2DocsWorkspace: View {
             docNav
             docArticle
         }
+        // Deep-link support: a `maccrab://docs?entity=<slug>` link or the
+        // command palette's Docs rows navigate here with the article slug in
+        // selectedEntities["docs"]. Preselect that article. Pre-fix the passed
+        // navigation state was ignored, so there was no way to link to a
+        // specific article.
+        .onAppear { applyDeepLinkSelection() }
+        .onChange(of: state.selectedEntities["docs"]) { _ in applyDeepLinkSelection() }
+    }
+
+    /// Resolve a pending docs deep-link (entity slug → article) and consume it
+    /// so re-navigating to the same article later still fires the change.
+    private func applyDeepLinkSelection() {
+        guard let slug = state.selectedEntities["docs"],
+              let entry = V2DocEntry(rawValue: slug) else { return }
+        selectedDoc = entry
+        state.selectedEntities["docs"] = nil
     }
 
     private var docNav: some View {
@@ -121,7 +137,10 @@ public struct V2DocsWorkspace: View {
 
 // MARK: - Doc entries
 
-private enum V2DocEntry: CaseIterable, Hashable {
+// `String`-backed so the rawValue (case name) is a stable deep-link slug the
+// command palette and `maccrab://docs?entity=<slug>` links can target. Internal
+// (not private) so V2CommandPalette can enumerate the articles for search.
+enum V2DocEntry: String, CaseIterable, Hashable {
     case gettingStarted, traceGraph, traceBundle, aiGuard, mcp, rules, intel, settings, troubleshooting
 
     var title: String {
@@ -171,7 +190,7 @@ private enum V2DocEntry: CaseIterable, Hashable {
         case .troubleshooting:   return "wrench.and.screwdriver.fill"
         }
     }
-    var sections: [DocSection] {
+    fileprivate var sections: [DocSection] {
         switch self {
         case .gettingStarted:
             return [
@@ -215,7 +234,7 @@ private enum V2DocEntry: CaseIterable, Hashable {
         case .mcp:
             return [
                 DocSection(title: "MacCrab as an MCP server",
-                           body: "The bundled maccrab-mcp binary exposes 17 tools so AI agents can query MacCrab data with structured tool calls. Triage tools: get_alerts, get_alert_detail, cluster_alerts, get_events, get_campaigns, suppress_alert, suppress_campaign, get_ai_alerts. Investigation tools: hunt, get_traces, get_trace_detail, hunt_trace, trace_from_event, verify_bundle. Status: get_status, get_security_score, scan_text. All MCP responses are sanitized before reaching the agent.",
+                           body: "The bundled maccrab-mcp binary exposes ~80 tools so AI agents can query MacCrab data with structured tool calls (the exact count varies with installed store plugins). They fall into groups: triage (get_alerts, get_alert_detail, cluster_alerts, get_events, get_campaigns, suppress_alert, suppress_campaign, get_ai_alerts); investigation / traces (hunt, get_traces, get_trace_detail, hunt_trace, trace_from_event, verify_bundle); status (get_status, get_security_score, scan_text); forensics plugins (forensics_run_collector / forensics_run_analyzer / forensics_enrich / forensics_search_artifacts / forensics_timeline …); response actions (list_response_actions / set_response_action); and supply-chain / intent (analyze_package_metadata, classify_package_intent, get_intent_posterior …). Tools are underscore-named for strict-MCP-client compatibility; the legacy forensics.* dotted names still work as aliases. All MCP responses are sanitized before reaching the agent, and defense-affecting tools are gated behind the human-enabled capability tiers.",
                            codeBlock: "{\n  \"mcpServers\": {\n    \"maccrab\": {\n      \"command\": \"/usr/local/bin/maccrab-mcp\"\n    }\n  }\n}"),
             ]
         case .rules:
@@ -233,8 +252,8 @@ private enum V2DocEntry: CaseIterable, Hashable {
         case .settings:
             return [
                 DocSection(title: "daemon_config.json",
-                           body: "All keys are optional. Missing keys use defaults from DaemonConfig.swift. Common keys:",
-                           codeBlock: "{\n  \"behavior_alert_threshold\": 10.0,\n  \"behavior_critical_threshold\": 20.0,\n  \"statistical_z_threshold\": 3.0,\n  \"max_database_size_mb\": 500,\n  \"retention_days\": 30\n}"),
+                           body: "All keys are optional. Missing keys use defaults from DaemonConfig.swift. Since v1.8 the per-tier retention / size caps live under a nested storage{} block (the legacy top-level retention_days / max_database_size_mb keys still decode but are deprecated). Common keys:",
+                           codeBlock: "{\n  \"behavior_alert_threshold\": 10.0,\n  \"behavior_critical_threshold\": 20.0,\n  \"statistical_z_threshold\": 3.0,\n  \"storage\": {\n    \"events_hot_tier_minutes\": 30,\n    \"events_max_size_mb\": 350,\n    \"alerts_retention_days\": 365,\n    \"campaigns_retention_days\": 365,\n    \"tracegraph_retention_days\": 90\n  }\n}"),
             ]
         case .troubleshooting:
             return [

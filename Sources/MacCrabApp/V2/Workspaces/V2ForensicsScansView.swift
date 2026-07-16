@@ -297,6 +297,33 @@ struct V2ForensicsScansView: View {
 
     // MARK: - Run a new scan
 
+    /// Shown when both the built-in and installed scanner lists come back empty
+    /// after a completed load — the inventory failed to populate (registry
+    /// bootstrap issue), so give a reason and a way to retry.
+    private var noScannersCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(String(localized: "scans.noScannersTitle", defaultValue: "No scanners available")).font(.headline)
+            }
+            Text(String(localized: "scans.noScannersBody", defaultValue: "The built-in scanner registry didn't load, and no plugins are installed. This is unusual — try again, or reopen the app if it persists."))
+                .scaledSystem(12)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(String(localized: "scans.retry", defaultValue: "Retry")) {
+                Task { await reload() }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
     private var runNewScanSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             // Built-in scanners — the curated forensic collectors/analyzers that
@@ -365,6 +392,12 @@ struct V2ForensicsScansView: View {
                     }
                 }
             }
+            // Both inventories empty after a completed load = something went
+            // wrong (the built-in registry always ships scanners), so surface a
+            // reason + Retry instead of a silent blank section.
+            if !loading && builtinScanners.isEmpty && thirdPartyScanners.isEmpty {
+                noScannersCard
+            }
         }
         .sheet(item: $detailModel) { m in
             // Unified Run + manage surface: built-ins run only; installed plugins
@@ -372,7 +405,10 @@ struct V2ForensicsScansView: View {
             PluginDetailInspector(
                 model: m,
                 onRun: m.runnable ? { runScanner(id: m.id) } : nil,
-                onVerify: m.provenance != .builtIn ? { Task { await reverifyAll() } } : nil,
+                // Verify has no in-sheet feedback and would leave stale data on
+                // screen, so dismiss the inspector first; the outcome then shows
+                // via the list's "Re-verifying…" state + reload.
+                onVerify: m.provenance != .builtIn ? { detailModel = nil; Task { await reverifyAll() } } : nil,
                 onUpdate: (m.provenance != .builtIn && updateAvailable(for: m.id)) ? { updateAction(m.id) } : nil,
                 onUninstall: m.provenance != .builtIn ? { pendingUninstall = m.id } : nil)
         }

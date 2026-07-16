@@ -53,4 +53,19 @@ public enum V2SettingsBridge {
             }
         }
     }
+
+    /// Open the Settings window on a specific tab.
+    ///
+    /// SwiftUI's `Settings { }` scene owns the only preferences UI and its
+    /// `TabView` binds its selection to the shared `SettingsTab.storageKey`
+    /// UserDefaults key. Writing that key *before* opening the window makes a
+    /// freshly-created scene initialise on the requested tab, and a scene
+    /// that's already alive reacts (@AppStorage) and switches — so callers
+    /// like Prevention → "Open Response Actions" land on the right tab
+    /// instead of whatever was last shown.
+    @MainActor
+    public static func openSettings(selectingTab tab: SettingsTab) {
+        UserDefaults.standard.set(tab.rawValue, forKey: SettingsTab.storageKey)
+        openSettings()
+    }
 }

@@ -57,7 +57,17 @@ struct V2Sidebar: View {
                 // grouping. Same surface, less visual noise.
                 VStack(spacing: 2) {
                     ForEach(V2SidebarGroup.allCases) { group in
-                        let visible = group.workspaces.filter { $0.isVisible(in: currentUIMode) }
+                        // Always surface the ACTIVE workspace even when the
+                        // current density mode would hide it. ⌘N / the command
+                        // palette / deep links can navigate to a workspace below
+                        // the current density (visibility gates the sidebar, not
+                        // navigation) — without this the workspace would render
+                        // with no matching sidebar row, leaving the nav with no
+                        // active selection. Surfacing it (highlighted, since it's
+                        // active) keeps the sidebar and the content in agreement.
+                        let visible = group.workspaces.filter {
+                            $0.isVisible(in: currentUIMode) || $0 == state.currentWorkspace
+                        }
                         // Header only when the group has at least one visible
                         // workspace in this density mode (no empty section labels).
                         if !collapsed, !visible.isEmpty, let label = group.headerLabel {

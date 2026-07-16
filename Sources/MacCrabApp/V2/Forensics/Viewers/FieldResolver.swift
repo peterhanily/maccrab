@@ -150,11 +150,11 @@ public enum FieldResolver {
     }
 
     /// Find the field name associated with a role, or nil.
+    /// When multiple fields share a role, the lowest field name (sorted)
+    /// wins so selection is stable across launches — `fieldRoles` is a
+    /// Dictionary whose iteration order is otherwise non-deterministic.
     public static func field(forRole role: FieldRole, in hint: ViewerHint?) -> String? {
         guard let hint else { return nil }
-        for (field, mappedRole) in hint.fieldRoles where mappedRole == role {
-            return field
-        }
-        return nil
+        return hint.fieldRoles.filter { $0.value == role }.keys.sorted().first
     }
 }

@@ -2,6 +2,7 @@
 // Spec §7.6 — health, permissions, settings.
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct V2SystemWorkspace: View {
     @ObservedObject var state: V2DashboardState
@@ -16,6 +17,10 @@ public struct V2SystemWorkspace: View {
     /// beachballs. Now: load once per refresh tick off-main, render
     /// from this @State.
     @State private var trustInfo: V2TrustSubstrateInfo?
+    /// Owned so its delegate survives the async OS activation callback while
+    /// this workspace is on screen (the "Reactivate System Extension" repair
+    /// action). Independent of the app's primary manager — sysextd dedups.
+    @StateObject private var sysextManager = SystemExtensionManager()
 
     public init(state: V2DashboardState) { self.state = state }
 
@@ -78,11 +83,131 @@ public struct V2SystemWorkspace: View {
                 if heartbeat?.esSensorDegraded == true {
                     sensorDegradedBanner
                 }
+                healthActionsCard
                 healthSummaryRow
                 collectorsTable
                 trustSubstrateCard
             }
             .padding(16)
+        }
+    }
+
+    /// Engine repair / diagnostics actions — surfaced on Health precisely
+    /// because the sensor-degraded and offline states above call for a
+    /// recovery affordance. Reactivate re-submits the System Extension
+    /// activation (macOS may prompt); Reload rules uses the privileged inbox
+    /// (the only cross-uid-safe channel to the root sysext); Export writes a
+    /// diagnostics bundle (heartbeat + collector health + permissions + last
+    /// error) for issue reports.
+    private var healthActionsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: "system.actionsSection", defaultValue: "Engine controls"))
+                .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "system.actionsDesc", defaultValue: "Repair or refresh the detection engine, or export a diagnostics bundle to attach when reporting an issue."))
+                .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                V2ActionButton(String(localized: "system.reactivateSysext", defaultValue: "Reactivate System Extension"), icon: "arrow.triangle.2.circlepath", style: .secondary) {
+                    sysextManager.activate()
+                    state.showToast(V2Toast(
+                        kind: .info,
+                        title: String(localized: "system.reactivateToastTitle", defaultValue: "Reactivating System Extension"),
+                        detail: String(localized: "system.reactivateToastDetail", defaultValue: "macOS may prompt you to approve it in System Settings.")))
+                }
+                V2ActionButton(String(localized: "system.reloadRules", defaultValue: "Reload rules"), icon: "arrow.clockwise", style: .secondary) {
+                    let ok = V2DaemonControl.reloadDetectionRules()
+                    state.showToast(ok
+                        ? V2Toast(kind: .success,
+                                  title: String(localized: "system.reloadRulesOkTitle", defaultValue: "Rule reload requested"),
+                                  detail: String(localized: "system.reloadRulesOkDetail", defaultValue: "The engine will reload its rules shortly."))
+                        : V2Toast(kind: .error,
+                                  title: String(localized: "system.reloadRulesFailTitle", defaultValue: "Couldn't request reload"),
+                                  detail: String(localized: "system.reloadRulesFailDetail", defaultValue: "No running engine inbox was found.")))
+                }
+                V2ActionButton(String(localized: "system.exportDiagnostics", defaultValue: "Export diagnostics"), icon: "square.and.arrow.up", style: .secondary) {
+                    exportDiagnostics()
+                }
+                Spacer()
+            }
+        }
+        .v2Panel()
+    }
+
+    /// Write a JSON diagnostics bundle from the currently-loaded health state.
+    private func exportDiagnostics() {
+        let hb = heartbeat
+        let perms = permissions
+        let ti = trustInfo
+        let providerMode = state.provider.mode.label
+        let dataDirPath = state.provider.dataDir ?? "—"
+        let lastError = state.provider.lastErrorDescription
+        let iso = ISO8601DateFormatter()
+
+        var diag: [String: Any] = [
+            "generated_at": iso.string(from: Date()),
+            "app_version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unknown",
+            "provider_mode": providerMode,
+            "data_dir": dataDirPath,
+        ]
+        if let lastError { diag["last_error"] = lastError }
+        if let hb {
+            // Omit optional keys when absent rather than encoding nil — a nil
+            // boxed as Any is not a valid JSON value and would make
+            // JSONSerialization throw for the whole bundle.
+            var hbDict: [String: Any] = [
+                "written_at": iso.string(from: hb.writtenAt),
+                "age_seconds": hb.ageSeconds,
+                "is_stale": hb.isStale,
+                "uptime_seconds": hb.uptimeSeconds,
+                "events_processed": hb.eventsProcessed,
+                "alerts_emitted": hb.alertsEmitted,
+                "sysext_has_fda": hb.sysextHasFDA,
+                "events_per_second_1h": hb.eventsPerSecond1h,
+                "payload_truncated_total": hb.payloadTruncatedTotal,
+                "eslogger_dropped_total": hb.esloggerDroppedTotal,
+                "es_sensor_degraded": hb.esSensorDegraded,
+            ]
+            if let mem = hb.residentMemoryMB { hbDict["resident_memory_mb"] = mem }
+            if let sev = hb.esSensorDegradedSeverity { hbDict["es_sensor_degraded_severity"] = sev }
+            diag["heartbeat"] = hbDict
+            diag["collectors"] = hb.collectors.map { c -> [String: Any] in
+                var m: [String: Any] = ["name": c.name, "event_count": c.eventCount, "healthy": c.healthy]
+                if let lt = c.lastTick { m["last_tick"] = iso.string(from: lt) }
+                return m
+            }
+        }
+        diag["permissions"] = perms.map { p -> [String: Any] in
+            ["service": p.service, "granted": p.granted, "required": p.required, "detail": p.description]
+        }
+        if let ti {
+            diag["trust_substrate"] = ["mode": ti.modeLabel, "fingerprint": ti.fingerprintFull]
+        }
+
+        let panel = NSSavePanel()
+        panel.title = String(localized: "system.exportDiagnosticsPanelTitle", defaultValue: "Export diagnostics")
+        panel.allowedContentTypes = [.json]
+        panel.allowsOtherFileTypes = true
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd-HHmm"
+        fmt.timeZone = .current
+        panel.nameFieldStringValue = "maccrab-diagnostics-\(fmt.string(from: Date())).json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var ok = false
+                if let data = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
+                    ok = (try? data.write(to: url, options: .atomic)) != nil
+                }
+                DispatchQueue.main.async {
+                    state.showToast(ok
+                        ? V2Toast(kind: .success,
+                                  title: String(localized: "system.exportDiagnosticsOkTitle", defaultValue: "Diagnostics exported"),
+                                  detail: url.lastPathComponent)
+                        : V2Toast(kind: .error,
+                                  title: String(localized: "system.exportDiagnosticsFailTitle", defaultValue: "Export failed"),
+                                  detail: url.path))
+                }
+            }
         }
     }
 
@@ -215,7 +340,11 @@ public struct V2SystemWorkspace: View {
         // below is a frozen snapshot — flag it rather than present it as live.
         let staleSuffix = stale ? " · " + String(localized: "system.metricStale", defaultValue: "stale") : ""
         func liveKind(_ base: V2ChipKind) -> V2ChipKind { stale ? .warning : base }
-        return HStack(spacing: 12) {
+        // Up to 8 metric cards. A plain HStack crushed them all into one
+        // non-wrapping row on a narrow window; the flow grid wraps to a 4-column
+        // masonry (as the Overview dashboard does) so each card keeps a readable
+        // width and the row reflows instead of truncating.
+        return V2FlowGridLayout(columns: 4, spacing: 12, rowSpacing: 12) {
             metricCard(
                 title: String(localized: "system.metricDaemon", defaultValue: "Daemon"),
                 value: h == nil
@@ -321,7 +450,7 @@ public struct V2SystemWorkspace: View {
                 V2CollectorRow(
                     id: c.name, name: c.name,
                     healthy: c.healthy, eventCount: c.eventCount,
-                    lastTick: c.lastTick, isLive: true
+                    lastTick: c.lastTick
                 )
             }
             if rows.isEmpty {
@@ -369,18 +498,6 @@ public struct V2SystemWorkspace: View {
         let eventCount: Int
         /// nil when the collector has never ticked. Renders as "—".
         let lastTick: Date?
-        let isLive: Bool
-    }
-
-    private func formatRate(_ rate: Double) -> String {
-        if rate >= 1000 { return String(format: "%.1fK", rate / 1000) }
-        if rate >= 1    { return String(format: "%.0f", rate) }
-        return String(format: "%.2f", rate)
-    }
-    private func formatLag(_ lag: TimeInterval) -> String {
-        if lag < 1     { return String(format: "%.0fms", lag * 1000) }
-        if lag < 60    { return String(format: "%.1fs", lag) }
-        return String(format: "%.0fm", lag / 60)
     }
 
     private var trustSubstrateCard: some View {
@@ -460,11 +577,37 @@ public struct V2SystemWorkspace: View {
         let required = permissions.filter { $0.required }.count
         let blockingMissing = permissions.filter { $0.required && !$0.granted }.count
         let optionalMissing = permissions.filter { !$0.required && !$0.granted }.count
+        // Engine (System Extension) Full Disk Access — the authoritative signal
+        // is the heartbeat boolean the sysext writes after probing itself, NOT
+        // the app-side TCC dump above (which is the menubar app's own grants).
+        let hb = heartbeat
+        let engineFDAValue: String
+        let engineFDAKind: V2ChipKind
+        let engineFDATrend: String
+        if hb == nil {
+            engineFDAValue = "—"; engineFDAKind = .neutral
+            engineFDATrend = String(localized: "system.engineFDANoData", defaultValue: "no heartbeat")
+        } else if hb?.isStale == true {
+            engineFDAValue = String(localized: "system.engineFDAUnknown", defaultValue: "Unknown")
+            engineFDAKind = .warning
+            engineFDATrend = String(localized: "system.engineFDAStale", defaultValue: "last known")
+        } else if hb?.sysextHasFDA == true {
+            engineFDAValue = String(localized: "system.engineFDAGranted", defaultValue: "Granted")
+            engineFDAKind = .healthy
+            engineFDATrend = String(localized: "system.engineFDASysext", defaultValue: "system extension")
+        } else {
+            engineFDAValue = String(localized: "system.engineFDAMissing", defaultValue: "Missing")
+            engineFDAKind = .high
+            engineFDATrend = String(localized: "system.engineFDANoEvents", defaultValue: "engine can't read events")
+        }
         return HStack(spacing: 12) {
             metricCard(title: String(localized: "system.permGranted", defaultValue: "Granted"), value: "\(granted) / \(permissions.count)",
                        trend: permissions.isEmpty ? String(localized: "system.permNoData", defaultValue: "no data") : String(localized: "system.permRequiredCount", defaultValue: "required: \(required)"),
                        trendKind: permissions.isEmpty ? .neutral : .healthy,
                        icon: "checkmark.shield.fill", iconColor: V2Theme.healthy)
+            metricCard(title: String(localized: "system.engineFDA", defaultValue: "Engine FDA"), value: engineFDAValue,
+                       trend: engineFDATrend, trendKind: engineFDAKind,
+                       icon: "externaldrive.fill", iconColor: engineFDAKind.color)
             metricCard(title: String(localized: "system.permBlockingMissing", defaultValue: "Blocking missing"), value: "\(blockingMissing)",
                        trend: blockingMissing == 0 ? String(localized: "system.permBlockingNone", defaultValue: "none") : String(localized: "system.permBlockingInvestigate", defaultValue: "investigate"),
                        trendKind: blockingMissing == 0 ? .healthy : .high,
@@ -492,6 +635,14 @@ public struct V2SystemWorkspace: View {
                         V2StatusChip(p.granted ? String(localized: "system.grantedYes", defaultValue: "Yes") : String(localized: "system.grantedNo", defaultValue: "No"),
                                      kind: p.granted ? .healthy : .high)
                     },
+                    V2DataColumn(id: "fix", title: String(localized: "system.colFix", defaultValue: ""), width: .fixed(90)) { p in
+                        if p.required && !p.granted {
+                            V2ActionButton(String(localized: "system.fixPermission", defaultValue: "Fix"),
+                                           icon: "arrow.up.forward.app", style: .secondary, size: .compact) {
+                                openPermissionSettings(for: p.service)
+                            }
+                        }
+                    },
                     V2DataColumn(id: "desc", title: String(localized: "system.colReason", defaultValue: "Reason"), width: .flexible(min: 280)) { p in
                         V2TableCellText(p.description, primary: false, lineLimit: 2)
                     },
@@ -507,10 +658,37 @@ public struct V2SystemWorkspace: View {
                 }
             }
             V2ActionButton(String(localized: "system.openPrivacySecurity", defaultValue: "Open Privacy & Security"), icon: "arrow.up.right.square", style: .secondary) {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                    NSWorkspace.shared.open(url)
-                }
+                openPermissionSettings(for: nil)
             }
+        }
+    }
+
+    /// Deep-link to the specific System Settings › Privacy pane for a TCC
+    /// service (or the Privacy root when unmapped / nil). `service` is the
+    /// pretty label produced by V2LiveDataProvider.prettyTCCService.
+    private func openPermissionSettings(for service: String?) {
+        let base = "x-apple.systempreferences:com.apple.preference.security?"
+        let anchor = service.flatMap(permissionAnchor(for:)) ?? "Privacy"
+        if let url = URL(string: base + anchor) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func permissionAnchor(for service: String) -> String? {
+        switch service {
+        case "Full Disk Access":  return "Privacy_AllFiles"
+        case "Accessibility":     return "Privacy_Accessibility"
+        case "Input Monitoring":  return "Privacy_ListenEvent"
+        case "Screen Recording":  return "Privacy_ScreenCapture"
+        case "Camera":            return "Privacy_Camera"
+        case "Microphone":        return "Privacy_Microphone"
+        case "Contacts":          return "Privacy_Contacts"
+        case "Calendar":          return "Privacy_Calendars"
+        case "Photos":            return "Privacy_Photos"
+        case "Location Services": return "Privacy_LocationServices"
+        // Endpoint Security Client has no dedicated Privacy pane (it's granted
+        // via System Extension approval, not a TCC toggle) → Privacy root.
+        default:                  return nil
         }
     }
 

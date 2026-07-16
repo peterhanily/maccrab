@@ -36,14 +36,18 @@ struct ArtifactTranscriptView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                ForEach(sortedArtifacts.prefix(300), id: \.id) { a in
-                    messageBubble(a)
-                }
+                // The older end is truncated, so the note belongs at the top.
                 if artifacts.count > 300 {
-                    Text("Showing first 300 of \(artifacts.count). Newest at the bottom.")
+                    Text("Showing the most recent 300 of \(artifacts.count). Older messages above are truncated. Newest at the bottom.")
                         .scaledSystem(10)
                         .foregroundStyle(.tertiary)
-                        .padding(.top, 4)
+                        .padding(.bottom, 4)
+                }
+                // Keep the NEWEST 300 (suffix of the ascending sort) since recency
+                // dominates in forensics; they still render oldest→newest so the
+                // most-recent message sits at the bottom, matching the note.
+                ForEach(sortedArtifacts.suffix(300), id: \.id) { a in
+                    messageBubble(a)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

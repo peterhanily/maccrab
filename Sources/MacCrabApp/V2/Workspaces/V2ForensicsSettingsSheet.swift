@@ -79,16 +79,16 @@ struct V2ForensicsSettingsSheet: View {
 
     // MARK: - Sections
 
-    /// Installed-scanner management moved to the dedicated "My Plugins" tab
-    /// (richer: provenance, live re-verify, quarantine, uninstall). This keeps
-    /// Settings focused on trust keys + maintenance and avoids two divergent
-    /// inventory views. (Modal sheet → informational pointer, not a navigation.)
+    /// Installed-scanner management moved to the "Run a scan" tab (richer:
+    /// provenance, live re-verify, quarantine, uninstall). This keeps Settings
+    /// focused on trust keys + maintenance and avoids two divergent inventory
+    /// views. (Modal sheet → informational pointer, not a navigation.)
     private var installedPointerSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             sectionHeader(String(localized: "forensicsSettings.installedScanners", defaultValue: "Installed scanners"), "")
             HStack(spacing: 6) {
                 Image(systemName: "puzzlepiece.extension").foregroundStyle(.secondary).scaledSystem(12)
-                Text("Manage installed scanners — provenance, live re-verify, and uninstall — in the My Plugins tab.")
+                Text("Manage installed scanners — provenance, live re-verify, and uninstall — in the Run a scan tab.")
                     .scaledSystem(11).foregroundStyle(.secondary)
             }
         }

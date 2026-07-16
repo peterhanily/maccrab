@@ -35,6 +35,15 @@ struct V2AlertsWorkspace: View {
     @State private var pendingDeletedAlertIds: Set<String> = []
     @State private var pendingSuppressedCampaignIds: Set<String> = []
     @State private var pendingLiftedSuppressionKeys: Set<String> = []
+    // Destructive/large-batch confirmations. A permanent delete and a bulk
+    // suppress that can hit the full visible set (fetch cap 1000) both warrant
+    // a confirm step — matching the Forensics bulk-delete precedent.
+    @State private var pendingDeleteAlert: V2MockAlert?
+    @State private var pendingBulkSuppress: [V2MockAlert]?
+
+    /// Bulk suppress runs immediately at or below this count; above it, a
+    /// confirmation dialog gates the action.
+    private let bulkSuppressConfirmThreshold = 5
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -71,6 +80,51 @@ struct V2AlertsWorkspace: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick):\(state.alertTimeRange):\(windowTaskKey)") { await reload() }
+        // Permanent-delete confirmation (History tab). The delete is a hard
+        // DELETE FROM alerts with no undo — including the snapshotted
+        // triggering-event evidence — so it must not fire on a single mis-click.
+        .confirmationDialog(
+            String(localized: "alerts.confirmDeleteTitle", defaultValue: "Delete this alert permanently?"),
+            isPresented: Binding(get: { pendingDeleteAlert != nil },
+                                 set: { if !$0 { pendingDeleteAlert = nil } }),
+            presenting: pendingDeleteAlert
+        ) { alert in
+            Button(role: .destructive) {
+                let target = alert
+                pendingDeleteAlert = nil
+                Task { await deleteAlert(target) }
+            } label: { Text(String(localized: "alerts.confirmDeleteButton", defaultValue: "Delete")) }
+            Button(role: .cancel) { pendingDeleteAlert = nil } label: {
+                Text(String(localized: "common.cancel", defaultValue: "Cancel"))
+            }
+        } message: { alert in
+            Text(String(localized: "alerts.confirmDeleteMessage",
+                        defaultValue: "“\(alert.title)” and its snapshotted evidence will be permanently removed from alerts.db. This cannot be undone."))
+        }
+        // Large bulk-suppress confirmation. Bulk suppress can target the full
+        // visible set (fetch cap 1000); a confirm step above a small threshold
+        // guards against silencing far more than intended.
+        .confirmationDialog(
+            String(localized: "alerts.confirmBulkSuppressTitle", defaultValue: "Suppress these alerts?"),
+            isPresented: Binding(get: { pendingBulkSuppress != nil },
+                                 set: { if !$0 { pendingBulkSuppress = nil } }),
+            presenting: pendingBulkSuppress
+        ) { targets in
+            Button {
+                let batch = targets
+                pendingBulkSuppress = nil
+                Task { await bulkSuppress(batch) }
+            } label: {
+                Text(String(localized: "alerts.confirmBulkSuppressButton",
+                            defaultValue: "Suppress \(targets.count)"))
+            }
+            Button(role: .cancel) { pendingBulkSuppress = nil } label: {
+                Text(String(localized: "common.cancel", defaultValue: "Cancel"))
+            }
+        } message: { targets in
+            Text(String(localized: "alerts.confirmBulkSuppressMessage",
+                        defaultValue: "\(targets.count) alerts currently visible will be suppressed. You can lift suppressions from the History and Suppressions tabs."))
+        }
     }
 
     private func reload() async {
@@ -370,18 +424,20 @@ struct V2AlertsWorkspace: View {
     /// chip is a click target — tap fires the callback.
     @ViewBuilder
     private func FlowingChips(items: [String], kind: V2ChipKind, onTap: @escaping (String) -> Void) -> some View {
-        // SwiftUI's HStack doesn't wrap; use a ViewThatFits-fallback
-        // FlowLayout once we adopt iOS 16+. For now a simple HStack
-        // with .lineLimit(2) handles 4–6 chips fine.
-        HStack(spacing: 6) {
-            ForEach(items, id: \.self) { tech in
-                Button { onTap(tech) } label: {
-                    V2StatusChip(tech, kind: kind, icon: "arrow.up.forward")
+        // The inspector pane is a fixed ~340 pt and a plain HStack doesn't
+        // wrap — extra chips clipped off the right edge and became
+        // unreachable. A horizontal ScrollView keeps every chip on one
+        // scannable, scrollable line (the same pattern `campaignChipRow` uses).
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(items, id: \.self) { tech in
+                    Button { onTap(tech) } label: {
+                        V2StatusChip(tech, kind: kind, icon: "arrow.up.forward")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open MITRE D3FEND reference for \(tech)")
                 }
-                .buttonStyle(.plain)
-                .help("Open MITRE D3FEND reference for \(tech)")
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -395,6 +451,49 @@ struct V2AlertsWorkspace: View {
         case "uncertain":      return .info
         default:               return .neutral
         }
+    }
+
+    /// Deterministic, LLM-free triage guidance shown in "What to do" when the
+    /// alert has no persisted remediation hint.
+    private func defaultRemediation(for alert: V2MockAlert) -> String {
+        var lines: [String] = []
+        if alert.severity == .critical || alert.severity == .high {
+            lines.append("Treat this as high priority. Review the process, path, and parent above to decide whether this activity is expected on this Mac.")
+        } else {
+            lines.append("Review the process, path, and parent above to decide whether this activity is expected on this Mac.")
+        }
+        lines.append("Use “Investigate in Events” to see what happened around the time it fired, and open the full causal trace with the CLI command in Trace context below.")
+        lines.append("If it’s expected, suppress the alert so it stops recurring. If it isn’t, isolate the process and preserve evidence before acting.")
+        return lines.joined(separator: "\n\n")
+    }
+
+    /// True when the alert carries any analyst-workflow metadata worth showing.
+    private func hasAnalystMetadata(_ a: V2MockAlert) -> Bool {
+        (a.analystStatus?.isEmpty == false)
+            || (a.analystOwner?.isEmpty == false)
+            || (a.analystTicketRef?.isEmpty == false)
+            || (a.analystNote?.isEmpty == false)
+    }
+
+    /// Map a raw analyst status ("new"/"investigating"/"resolved"/…) to a
+    /// display label + chip color.
+    private func analystStatusChip(_ status: String) -> (String, V2ChipKind) {
+        switch status {
+        case "resolved":       return ("Resolved", .healthy)
+        case "false_positive": return ("False positive", .neutral)
+        case "dismissed":      return ("Dismissed", .neutral)
+        case "investigating":  return ("Investigating", .warning)
+        case "new":            return ("New", .info)
+        default:               return (status.capitalized, .info)
+        }
+    }
+
+    /// History "Status" column: reflect the real analyst disposition rather
+    /// than mislabeling every still-open alert as green "Resolved".
+    private func historyStatusChip(_ a: V2MockAlert) -> (String, V2ChipKind) {
+        if a.suppressed { return ("Suppressed", .neutral) }
+        if let s = a.analystStatus, !s.isEmpty { return analystStatusChip(s) }
+        return ("Open", .info)
     }
 
     /// Shell out to `maccrabctl unsuppress` and refresh the list.
@@ -641,9 +740,9 @@ struct V2AlertsWorkspace: View {
 
     private var openTab: some View {
         // Compute `visible` (filtered + sorted) ONCE here and pass to
-        // searchBar + alertsTable. Pre-fix searchBar called
-        // filteredAlerts(...) for the bulk-suppress count and
-        // alertsTable called it again for the table items — twice the
+        // searchBarMemoized + alertsTableMemoized. Pre-memoization the
+        // search bar called filteredAlerts(...) for the bulk-suppress count
+        // and the table called it again for the rows — twice the
         // O(N log N) work per body re-eval, which fires on every
         // keystroke in the search field. severityCards previously
         // also called it 5× more (once per severity case); that's
@@ -797,7 +896,7 @@ struct V2AlertsWorkspace: View {
         // 5× per body re-eval (once per severity case via ForEach), and
         // `filteredAlerts` re-runs `filter + filter? + filter? + sorted`
         // over `self.alerts` (up to 200 rows) each call. Since the
-        // searchBar's Bulk-suppress count adds a 6th call, every
+        // search bar's Bulk-suppress count adds a 6th call, every
         // keystroke in the search field cost 1200-1600 row passes plus
         // 6 sorts. Now: one pass to bucket alerts (excluding the
         // search filter so the cards reflect the un-searched
@@ -884,7 +983,13 @@ struct V2AlertsWorkspace: View {
                            icon: "bell.slash", style: .secondary,
                            disabled: visible.isEmpty,
                            tooltip: "Suppress all \(visible.count) alerts currently visible in the table") {
-                Task { await bulkSuppress(visible) }
+                // Confirm before silencing a large batch; small batches run
+                // straight through.
+                if visible.count > bulkSuppressConfirmThreshold {
+                    pendingBulkSuppress = visible
+                } else {
+                    Task { await bulkSuppress(visible) }
+                }
             }
             V2ActionButton("Export (\(visible.count))",
                            icon: "square.and.arrow.up", style: .secondary,
@@ -895,10 +1000,9 @@ struct V2AlertsWorkspace: View {
         }
     }
 
-    /// Memoized variant of alertsTable. Same column wiring as the
-    /// public `alertsTable`; only differs in that the rows come from
-    /// the caller (so they aren't recomputed for the table what
-    /// searchBar already computed for its bulk-suppress badge).
+    /// Alerts table for the Open tab. Takes the already-computed `visible`
+    /// rows so they aren't recomputed for the table on top of what
+    /// `searchBarMemoized` already computed for its bulk-suppress badge.
     private func alertsTableMemoized(items: [V2MockAlert]) -> some View {
         V2DataTable(
             columns: alertsTableColumns,
@@ -907,72 +1011,9 @@ struct V2AlertsWorkspace: View {
         )
     }
 
-    /// Original entry — left in place because `searchBar` is also
-    /// used by the History tab, which doesn't want the memoization
-    /// hand-off pattern.
-    private var searchBar: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(V2Theme.mutedText)
-                    .scaledSystem(12)
-                TextField("Search alerts (rule, process, MITRE…)", text: query)
-                    .textFieldStyle(.plain)
-                    .font(V2Theme.body())
-                    .foregroundStyle(V2Theme.primaryText)
-                if !query.wrappedValue.isEmpty {
-                    Button { query.wrappedValue = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(V2Theme.tertiaryText)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(V2Theme.panelBackground)
-            .overlay(
-                RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
-                    .stroke(V2Theme.panelBorder, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
-
-            if severityFilter.wrappedValue != nil {
-                V2ActionButton("Clear filter", icon: "xmark", style: .ghost) {
-                    severityFilter.wrappedValue = nil
-                }
-            }
-            Spacer()
-            let visible = filteredAlerts(severity: severityFilter.wrappedValue, applyExternalFilter: true)
-            V2ActionButton("Bulk suppress (\(visible.count))",
-                           icon: "bell.slash", style: .secondary,
-                           disabled: visible.isEmpty,
-                           tooltip: "Suppress all \(visible.count) alerts currently visible in the table") {
-                Task { await bulkSuppress(visible) }
-            }
-            V2ActionButton("Export (\(visible.count))",
-                           icon: "square.and.arrow.up", style: .secondary,
-                           disabled: visible.isEmpty,
-                           tooltip: "Export visible alerts as JSON Lines") {
-                exportAlerts(visible)
-            }
-        }
-    }
-
-    private var alertsTable: some View {
-        let items = filteredAlerts(severity: severityFilter.wrappedValue, applyExternalFilter: true)
-        return V2DataTable(
-            columns: alertsTableColumns,
-            items: items,
-            selection: $selected
-        )
-        .frame(maxHeight: .infinity)
-    }
-
-    /// Shared column definitions used by both `alertsTable` and the
-    /// memoized `alertsTableMemoized(items:)`. Building these inline
-    /// per body re-eval allocated 6 V2DataColumn structs + their
-    /// label closures on every keystroke.
+    /// Shared column definitions used by `alertsTableMemoized(items:)`.
+    /// Building these inline per body re-eval allocated 6 V2DataColumn
+    /// structs + their label closures on every keystroke.
     private var alertsTableColumns: [V2DataColumn<V2MockAlert>] {
         [
             V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
@@ -1043,19 +1084,23 @@ struct V2AlertsWorkspace: View {
             subtitle: alert.ruleId,
             onClose: { selected = nil }
         ) {
-            HStack(spacing: 8) {
-                V2StatusChip(alert.severity.label, kind: alert.severity.chipKind)
-                ForEach(alert.mitre, id: \.self) { code in
-                    // FIQ-7: humanize + link the bare ATT&CK code. Chip shows
-                    // the normalized code, the full technique name is the
-                    // tooltip, and clicking opens the canonical ATT&CK page.
-                    if let urlString = ATTACKRef.url(forCode: code), let url = URL(string: urlString) {
-                        Link(destination: url) {
-                            V2StatusChip(ATTACKRef.normalize(code) ?? code, kind: .neutral, icon: "doc.plaintext")
+            // Horizontal scroll so the severity chip + a long ATT&CK code list
+            // stay reachable in the fixed-width inspector instead of clipping.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    V2StatusChip(alert.severity.label, kind: alert.severity.chipKind)
+                    ForEach(alert.mitre, id: \.self) { code in
+                        // FIQ-7: humanize + link the bare ATT&CK code. Chip shows
+                        // the normalized code, the full technique name is the
+                        // tooltip, and clicking opens the canonical ATT&CK page.
+                        if let urlString = ATTACKRef.url(forCode: code), let url = URL(string: urlString) {
+                            Link(destination: url) {
+                                V2StatusChip(ATTACKRef.normalize(code) ?? code, kind: .neutral, icon: "doc.plaintext")
+                            }
+                            .help(ATTACKRef.display(forCode: code))
+                        } else {
+                            V2StatusChip(code, kind: .neutral, icon: "doc.plaintext")
                         }
-                        .help(ATTACKRef.display(forCode: code))
-                    } else {
-                        V2StatusChip(code, kind: .neutral, icon: "doc.plaintext")
                     }
                 }
             }
@@ -1137,6 +1182,19 @@ struct V2AlertsWorkspace: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
+            } else {
+                // Legacy alerts (and rules with no ATT&CK/D3FEND mapping) carry
+                // no persisted remediation_hint, so the section was simply
+                // absent — the operator got zero guidance. Fall back to a
+                // deterministic, LLM-free triage checklist so "What to do" is
+                // never empty.
+                V2InspectorSection(String(localized: "inspector.whatToDo", defaultValue: "What to do")) {
+                    Text(defaultRemediation(for: alert))
+                        .font(V2Theme.body())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
             }
             if !alert.d3fendTechniques.isEmpty {
                 V2InspectorSection(String(localized: "inspector.d3fend", defaultValue: "D3FEND defenses")) {
@@ -1199,11 +1257,36 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             }
-            // Analyst workflow section (status / owner / ticket /
-            // notes) removed before v1.10.0 GA — same reason as the
-            // Remediation / D3FEND sections above. Returns in v1.11
-            // alongside the metadata_json schema column and the
-            // inline mutation UI to populate it.
+            // Analyst workflow metadata (status / owner / ticket / notes) is
+            // plumbed all the way DB → provider → model but was never rendered.
+            // Show it read-only when present. (Inline mutation to SET status /
+            // owner would need a provider write method — tracked separately.)
+            if hasAnalystMetadata(alert) {
+                V2InspectorSection(String(localized: "inspector.analyst", defaultValue: "Analyst")) {
+                    if let status = alert.analystStatus, !status.isEmpty {
+                        HStack(spacing: 6) {
+                            Text(String(localized: "inspector.analystStatus", defaultValue: "Status"))
+                                .font(V2Theme.meta())
+                                .foregroundStyle(V2Theme.mutedText)
+                            let chip = analystStatusChip(status)
+                            V2StatusChip(chip.0, kind: chip.1)
+                        }
+                    }
+                    if let owner = alert.analystOwner, !owner.isEmpty {
+                        V2InspectorKeyValue("Owner", owner)
+                    }
+                    if let ticket = alert.analystTicketRef, !ticket.isEmpty {
+                        V2InspectorKeyValue("Ticket", ticket, mono: true)
+                    }
+                    if let note = alert.analystNote, !note.isEmpty {
+                        Text(note)
+                            .font(V2Theme.body())
+                            .foregroundStyle(V2Theme.primaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
             // v1.17.2 / v1.18: the EXACT triggering event(s), snapshotted onto
             // the alert at creation (AlertStore schema v6) and rendered as
             // structured fields. Unlike "Surrounding events", this survives
@@ -1499,11 +1582,21 @@ struct V2AlertsWorkspace: View {
     private var campaignsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // B6: without this an empty campaigns list on a dead/stale daemon
+                // rendered a reassuring "No active campaigns" all-clear — the
+                // same "daemon-down looks safe" trap the Open/History tabs guard
+                // against. Show the stale banner and only show the all-clear
+                // empty state when the engine is actually reporting.
+                daemonStaleBanner
                 timeRangeChips
                 if !campaigns.isEmpty {
                     campaignsToolbar
                 }
-                if campaigns.isEmpty && loaded {
+                if !campaigns.isEmpty {
+                    ForEach(campaigns) { campaign in
+                        campaignCard(campaign)
+                    }
+                } else if daemonReporting && loaded {
                     V2EmptyState(
                         title: "No active campaigns",
                         body: "MacCrab has not detected any multi-step attack campaigns in the selected time range.",
@@ -1511,10 +1604,6 @@ struct V2AlertsWorkspace: View {
                     )
                     .frame(minHeight: 280)
                     .v2Panel()
-                } else {
-                    ForEach(campaigns) { campaign in
-                        campaignCard(campaign)
-                    }
                 }
                 if !suppressedCampaigns.isEmpty {
                     suppressedCampaignsSection
@@ -1751,6 +1840,14 @@ struct V2AlertsWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
                 timeRangeChips
+                // An Overview histogram bar tap narrows `self.alerts` to a
+                // single [start, end] window in reload(); that same window
+                // applies to the History tab. Surface the same banner + clear
+                // affordance the Open tab shows, so a silently-narrowed History
+                // list is explained and dismissable.
+                if let window = state.pendingAlertsWindow {
+                    histogramWindowBanner(window)
+                }
                 Text("Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons.")
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
@@ -1771,21 +1868,30 @@ struct V2AlertsWorkspace: View {
                 let history = suppressed + resolved
                 V2DataTable(
                     columns: [
-                        V2DataColumn(id: "sev", title: "Severity", width: .fixed(96)) { a in
+                        V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
+                                     sortKey: { .number(Double($0.severity.sortOrder)) }) { a in
                             V2StatusChip(a.severity.label, kind: a.severity.chipKind)
                         },
-                        V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 240)) { a in
+                        V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 240),
+                                     sortKey: { .text($0.title) }) { a in
                             V2TableCellText(a.title)
                         },
-                        V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 160)) { a in
+                        V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 160),
+                                     sortKey: { .text($0.ruleId) }) { a in
                             V2TableCellText(a.ruleId, primary: false, mono: true)
                         },
-                        V2DataColumn(id: "when", title: "When", width: .fixed(110)) { a in
+                        V2DataColumn(id: "when", title: "When", width: .fixed(110),
+                                     sortKey: { .date($0.timestamp) }) { a in
                             V2TableCellText(V2TimeFormat.relative(a.timestamp), primary: false)
                         },
-                        V2DataColumn(id: "status", title: "Status", width: .fixed(110)) { a in
-                            V2StatusChip(a.suppressed ? "Suppressed" : "Resolved",
-                                         kind: a.suppressed ? .neutral : .healthy)
+                        // Drive the chip off the real disposition — a still-open
+                        // alert is no longer mislabeled green "Resolved", and a
+                        // set analystStatus (false_positive / dismissed / …) is
+                        // honored instead of being flattened to "Resolved".
+                        V2DataColumn(id: "status", title: "Status", width: .fixed(120),
+                                     sortKey: { .text(historyStatusChip($0).0) }) { a in
+                            let chip = historyStatusChip(a)
+                            V2StatusChip(chip.0, kind: chip.1)
                         },
                         // History row actions: Unsuppress + Delete.
                         // Pre-fix the History tab was read-only — once
@@ -1808,7 +1914,10 @@ struct V2AlertsWorkspace: View {
                                 V2ActionButton("Delete", icon: "trash",
                                                style: .tinted(V2Theme.critical), size: .compact,
                                                tooltip: "Permanently delete this alert from alerts.db") {
-                                    Task { await deleteAlert(a) }
+                                    // Route through a confirmation — the delete is
+                                    // irreversible (hard DELETE incl. snapshotted
+                                    // evidence) and sits next to Unsuppress.
+                                    pendingDeleteAlert = a
                                 }
                             }
                         },
@@ -1893,6 +2002,7 @@ struct V2AlertsWorkspace: View {
     private var suppressionsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                daemonStaleBanner
                 Text("Active suppressions silence specific (rule, scope) pairs until expiry. Lift a suppression with the per-row button — the daemon's SuppressionManager re-evaluates immediately.")
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
@@ -1906,19 +2016,25 @@ struct V2AlertsWorkspace: View {
                 } else {
                     V2DataTable(
                         columns: [
-                            V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 200)) { e in
+                            V2DataColumn(id: "rule", title: "Rule", width: .flexible(min: 200),
+                                         sortKey: { .text($0.ruleId) }) { e in
                                 V2TableCellText(e.ruleId, mono: true)
                             },
-                            V2DataColumn(id: "scope", title: "Scope", width: .flexible(min: 140)) { e in
+                            V2DataColumn(id: "scope", title: "Scope", width: .flexible(min: 140),
+                                         sortKey: { .text($0.scope) }) { e in
                                 V2TableCellText(e.scope, primary: false)
                             },
-                            V2DataColumn(id: "by", title: "Added by", width: .fixed(110)) { e in
+                            V2DataColumn(id: "by", title: "Added by", width: .fixed(110),
+                                         sortKey: { .text($0.addedBy) }) { e in
                                 V2TableCellText(e.addedBy, primary: false)
                             },
-                            V2DataColumn(id: "added", title: "Added", width: .fixed(100)) { e in
+                            V2DataColumn(id: "added", title: "Added", width: .fixed(100),
+                                         sortKey: { .date($0.createdAt) }) { e in
                                 V2TableCellText(V2TimeFormat.relative(e.createdAt), primary: false)
                             },
-                            V2DataColumn(id: "exp", title: "Expires", width: .fixed(100)) { e in
+                            V2DataColumn(id: "exp", title: "Expires", width: .fixed(100),
+                                         // Indefinite (no expiry) sorts last.
+                                         sortKey: { .date($0.expiresAt ?? .distantFuture) }) { e in
                                 if let exp = e.expiresAt {
                                     V2StatusChip(V2TimeFormat.relative(exp), kind: .neutral)
                                 } else {

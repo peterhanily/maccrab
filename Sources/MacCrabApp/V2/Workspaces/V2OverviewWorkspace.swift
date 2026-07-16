@@ -14,7 +14,13 @@ struct V2OverviewWorkspace: View {
     @State private var campaigns: [V2MockCampaign] = []
     @State private var kpis: V2OverviewKPIs = .zero
     @State private var histogramBuckets: [V2OverviewBucket] = []
-    @State private var rangeKey: String = "6h"
+    /// Persisted so the operator's chosen window survives navigating away and
+    /// back — a workspace switch destroys @State, so a plain @State reset the
+    /// range to 6h every time. Pure view preference; safe to persist.
+    @AppStorage("v2.overview.rangeKey") private var rangeKey: String = "6h"
+    /// nil-vs-empty sentinel for the alert histogram: distinguishes "not fetched
+    /// yet" (show a loading placeholder) from "fetched, genuinely zero alerts".
+    @State private var histogramLoaded = false
     @State private var showingSecurityFactors: Bool = false
     // Issue #2: surface forensics/plugins on Overview.
     @State private var forensicsBuiltinCount = 0
@@ -26,7 +32,9 @@ struct V2OverviewWorkspace: View {
     // Store news on the forensics/plugins card.
     @State private var storeNews: [StoreNewsItem] = []
     @State private var ruleTitles: [String: String] = [:]   // ruleId → title (Top Firing Rules)
+    @State private var ruleTitlesLoaded = false   // attempted (vs empty) — see .task
     @State private var crabAckSeverity = 0   // highest crab alarm acknowledged this session
+    @State private var feedInFlight = false   // debounce Crabby's "Feed" intel refresh
     // Customizable dashboard: which widgets show, in what order, at what size.
     @StateObject private var layout = V2OverviewLayoutStore()
     @State private var editing = false
@@ -97,15 +105,16 @@ struct V2OverviewWorkspace: View {
                 layout.commit()
                 return true
             }
-            // When the drag leaves the dashboard (e.g. released outside the
-            // window) clear the dragging state, otherwise a card could stay
-            // stuck faded. Persist wherever the reorder ended up.
-            .onChange(of: dropTargeted) { targeted in
-                if !targeted && draggingID != nil {
-                    draggingID = nil
-                    layout.commit()
-                }
-            }
+            // Deliberately NO clear-on-`dropTargeted == false` here: SwiftUI
+            // toggles THIS (parent) drop target off the instant the pointer
+            // crosses onto a child card's own drop target, which is
+            // indistinguishable from "released outside the window" — so the
+            // former clear aborted a live reorder mid-drag (it nil'd draggingID
+            // before the child's dropEntered could move the card). draggingID is
+            // cleared by the real drag-end paths instead: the per-tile
+            // performDrop, the open-area onDrop above, and the Customize "Done"
+            // button. A drag abandoned entirely outside the window self-heals on
+            // the next drag.
         }
         .sheet(isPresented: $showingSecurityFactors) {
             securityFactorsSheet
@@ -135,7 +144,7 @@ struct V2OverviewWorkspace: View {
             await MainActor.run { self.kpis = k }
 
             let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
-            await MainActor.run { self.histogramBuckets = buckets }
+            await MainActor.run { self.histogramBuckets = buckets; self.histogramLoaded = true }
 
             // Populate the AI Guard + Threat Intel tiles (both @Published on
             // appState; mtime-gated so a tight refresh tick is cheap).
@@ -147,11 +156,14 @@ struct V2OverviewWorkspace: View {
             // only ids (built-in maccrab.* + compiled-rule UUIDs), so without a
             // title join the card shows raw UUIDs. Load once, and only when the
             // widget is actually visible (the live rules() read touches disk).
-            if ruleTitles.isEmpty,
+            if !ruleTitlesLoaded,
                layout.visibleOrdered.contains(where: { $0.widget == .topRules }) {
                 let rs = await state.provider.rules()
                 await MainActor.run {
                     ruleTitles = Dictionary(rs.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+                    // Track "attempted", not "empty" — an empty rules() result
+                    // must NOT re-hit disk every 5s tick while the widget is up.
+                    ruleTitlesLoaded = true
                 }
             }
 
@@ -378,10 +390,11 @@ struct V2OverviewWorkspace: View {
             iconColor: V2Theme.high,
             action: V2KpiAction(String(localized: "overview.kpiViewAlerts", defaultValue: "View Alerts")) {
                 state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
-            },
-            visual: kpis.eventsLast8Buckets.isEmpty
-                ? nil
-                : .sparkline(values: kpis.eventsLast8Buckets, color: V2Theme.high)
+            }
+            // No sparkline: the Open-Alerts number is an alert count, but the only
+            // available series (eventsLast8Buckets) is EVENT volume — an unrelated
+            // mini-visual under an alerts number. Dropped rather than mislead;
+            // V2OverviewKPIs has no per-bucket alert series to feed instead.
         ))
     }
 
@@ -522,20 +535,34 @@ struct V2OverviewWorkspace: View {
                     }
                 }
             }
-            V2AlertHistogram(
-                rangeKey: rangeKey,
-                buckets: buckets,
-                onBucketTap: { bucket in
-                    state.goto(V2NavigationDestination(
-                        workspace: .alerts, tab: .alertsOpen,
-                        filters: [
-                            "from": "\(Int(bucket.start.timeIntervalSince1970))",
-                            "to":   "\(Int(bucket.end.timeIntervalSince1970))"
-                        ]
-                    ))
+            if !histogramLoaded && buckets.isEmpty {
+                // Not fetched yet — a loading placeholder so empty axes aren't
+                // mistaken for a genuinely quiet window before the first fetch.
+                ZStack {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(String(localized: "overview.alertVolumeLoading", defaultValue: "Loading alert volume…"))
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
+                        .padding(.top, 26)
                 }
-            )
-            .frame(height: 180)
+                .frame(maxWidth: .infinity)
+                .frame(height: 180)
+            } else {
+                V2AlertHistogram(
+                    rangeKey: rangeKey,
+                    buckets: buckets,
+                    onBucketTap: { bucket in
+                        state.goto(V2NavigationDestination(
+                            workspace: .alerts, tab: .alertsOpen,
+                            filters: [
+                                "from": "\(Int(bucket.start.timeIntervalSince1970))",
+                                "to":   "\(Int(bucket.end.timeIntervalSince1970))"
+                            ]
+                        ))
+                    }
+                )
+                .frame(height: 180)
+            }
             histogramLegend
         }
         .v2Panel()
@@ -741,10 +768,28 @@ struct V2OverviewWorkspace: View {
                     activityRow(alert: alert)
                 }
                 if alerts.isEmpty {
-                    Text(String(localized: "overview.noRecentAlerts", defaultValue: "No recent alerts."))
-                        .font(V2Theme.body())
-                        .foregroundStyle(V2Theme.mutedText)
+                    // Distinguish "genuinely nothing recent" from "couldn't read"
+                    // / "engine stopped reporting" — an empty list on a dead
+                    // daemon otherwise reads as a false all-clear.
+                    let readError = state.provider.lastErrorDescription != nil
+                    let stale = appState.heartbeat?.isStale == true
+                    if readError || stale {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(V2Theme.warning)
+                            Text(readError
+                                 ? String(localized: "overview.recentActivityError", defaultValue: "Couldn't load recent alerts.")
+                                 : String(localized: "overview.recentActivityStale", defaultValue: "Engine not reporting — recent activity may be out of date."))
+                                .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
                         .padding(20)
+                    } else {
+                        Text(String(localized: "overview.noRecentAlerts", defaultValue: "No recent alerts."))
+                            .font(V2Theme.body())
+                            .foregroundStyle(V2Theme.mutedText)
+                            .padding(20)
+                    }
                 }
             }
         }
@@ -938,7 +983,17 @@ struct V2OverviewWorkspace: View {
             alertToken: alerts.first?.id ?? "",
             onAcknowledge: { crabAckSeverity = crabSeverity(rawCrabMood) },
             onInvestigate: { state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsCampaigns)) },
-            onFeed: { Task { await appState.refreshThreatIntelNow() } }
+            onFeed: {
+                // The Feed tap fires a real ~6s threat-intel refresh that writes
+                // the daemon inbox. Ignore it while one is already in flight, and
+                // when the engine isn't connected (there is nothing to refresh).
+                guard appState.isConnected, !feedInFlight else { return }
+                feedInFlight = true
+                Task {
+                    await appState.refreshThreatIntelNow()
+                    await MainActor.run { feedInFlight = false }
+                }
+            }
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }

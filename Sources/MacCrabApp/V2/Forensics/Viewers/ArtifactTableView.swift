@@ -22,6 +22,11 @@ struct ArtifactTableView: View {
     @State private var sortField: String
     @State private var sortAscending: Bool
 
+    /// Minimum per-column width. Columns expand to fill when there is room and
+    /// the table scrolls horizontally when the total exceeds the viewport, so
+    /// wide artifacts are no longer crushed to truncated slivers.
+    private let minColumnWidth: CGFloat = 150
+
     init(artifacts: [CommittedArtifact], hint: ViewerHint) {
         self.artifacts = artifacts
         self.hint = hint
@@ -70,23 +75,41 @@ struct ArtifactTableView: View {
         VStack(spacing: 0) {
             searchBar
             Divider()
-            headerRow
-            Divider()
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(filtered.prefix(500), id: \.id) { a in
-                        rowView(a)
-                        Divider()
+            GeometryReader { geo in
+                let count = max(columns.count, 1)
+                // Row chrome = horizontal padding (10+10) + inter-column spacing
+                // (8 per gap). Subtract it so "fits" means fits, and no spurious
+                // few-pixel horizontal scrollbar appears when it does.
+                let chrome: CGFloat = 20 + 8 * CGFloat(count - 1)
+                // Fill the viewport when there is room; hold min width and scroll
+                // horizontally when the columns don't fit.
+                let colWidth = max(minColumnWidth, (geo.size.width - chrome) / CGFloat(count))
+                let contentWidth = colWidth * CGFloat(count) + chrome
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        Section {
+                            ForEach(filtered.prefix(500), id: \.id) { a in
+                                rowView(a, colWidth: colWidth)
+                                Divider()
+                            }
+                            if filtered.count > 500 {
+                                Text("Showing first 500 of \(filtered.count). Use search to narrow.")
+                                    .scaledSystem(11)
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.vertical, 8)
+                                    .frame(width: contentWidth, alignment: .leading)
+                            }
+                        } header: {
+                            VStack(spacing: 0) {
+                                headerRow(colWidth: colWidth)
+                                Divider()
+                            }
+                            .background(Color(NSColor.controlBackgroundColor))
+                        }
                     }
-                    if filtered.count > 500 {
-                        Text("Showing first 500 of \(filtered.count). Use search to narrow.")
-                            .scaledSystem(11)
-                            .foregroundStyle(.tertiary)
-                            .padding(.vertical, 8)
-                    }
+                    .frame(width: contentWidth, alignment: .leading)
                 }
             }
-            .frame(maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.controlBackgroundColor))
@@ -108,7 +131,7 @@ struct ArtifactTableView: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
     }
 
-    private var headerRow: some View {
+    private func headerRow(colWidth: CGFloat) -> some View {
         HStack(spacing: 8) {
             ForEach(columns, id: \.self) { col in
                 Button {
@@ -131,17 +154,17 @@ struct ArtifactTableView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: colWidth, alignment: .leading)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
     }
 
-    private func rowView(_ a: CommittedArtifact) -> some View {
+    private func rowView(_ a: CommittedArtifact, colWidth: CGFloat) -> some View {
         HStack(spacing: 8) {
             ForEach(columns, id: \.self) { col in
                 cellView(a, field: col)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(width: colWidth, alignment: .leading)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -188,13 +211,16 @@ struct ArtifactTableView: View {
             .timestamp, .severity, .status, .title, .subtitle, .sender,
             .path, .link, .count, .identifier, .body,
         ]
+        // Sort the fields sharing each role (and the trailing remainder) by
+        // name so column order is deterministic across launches — fieldRoles is
+        // a Dictionary whose iteration order is otherwise unstable.
         for role in priority {
-            for (field, mapped) in hint.fieldRoles where mapped == role {
+            for field in hint.fieldRoles.filter({ $0.value == role }).keys.sorted() {
                 if !ordered.contains(field) { ordered.append(field) }
             }
         }
         // Any remaining declared field-roles not in the priority list.
-        for (field, _) in hint.fieldRoles {
+        for field in hint.fieldRoles.keys.sorted() {
             if !ordered.contains(field) { ordered.append(field) }
         }
         if ordered.isEmpty {

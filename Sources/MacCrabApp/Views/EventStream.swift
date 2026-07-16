@@ -79,6 +79,10 @@ struct EventStream: View {
 
     @State private var isPaused: Bool = false
     @State private var selectedEventID: EventViewModel.ID? = nil
+    /// Aggregate-table selection so warm-tier summary rows get a right-click
+    /// drill-in (they were previously inert despite the banner telling the
+    /// user to "narrow the range for per-event detail"). (#5)
+    @State private var selectedAggregateID: EventStream.IdentifiedAggregate.ID? = nil
     // v1.8.0: default to Last 24h so the user lands in the hot tier on
     // open — `.all` immediately put them in aggregate mode against an
     // empty rollup table on a fresh DB, which read as broken.
@@ -117,6 +121,11 @@ struct EventStream: View {
     /// previous filteredCache-derived path was broken on high-volume
     /// hosts because the 500-row in-memory window covered ~2 seconds.
     @State private var histogramRows: [(Date, Int)] = []
+    /// #16: bumped on every live prepend so the histogram task re-queries in
+    /// step with the table. The chart previously refreshed only on time-range
+    /// / category changes, so it drifted stale relative to the live stream —
+    /// the "refresh tick" the histogramRows doc-comment named was never wired.
+    @State private var histogramRefreshTick: Int = 0
     /// True when the current `timeRange` selection looks past the 24h hot
     /// tier. Drives the "summarized — drill in for detail" banner + table swap.
     private var isAggregateMode: Bool {
@@ -192,7 +201,7 @@ struct EventStream: View {
             }
             .frame(maxWidth: .infinity)
         } else {
-            Table(identifiedAggregates) {
+            Table(identifiedAggregates, selection: $selectedAggregateID) {
                 TableColumn(String(localized: "events.day", defaultValue: "Day")) { agg in
                     Text(agg.row.day)
                         .font(.system(.caption, design: .monospaced))
@@ -232,6 +241,27 @@ struct EventStream: View {
                 }
                 .width(min: 60, ideal: 70, max: 90)
             }
+            // #5: warm-tier summary rows can now drill into the hot-tier
+            // per-event table (banner previously told users to "narrow the
+            // range for per-event detail" but rows were inert).
+            .contextMenu(forSelectionType: IdentifiedAggregate.ID.self) { ids in
+                if let id = ids.first,
+                   let agg = identifiedAggregates.first(where: { $0.id == id }) {
+                    Button {
+                        drillIntoAggregate(agg.row)
+                    } label: {
+                        Label(String(localized: "events.aggregate.drillIn",
+                                     defaultValue: "Show Events for This Process"),
+                              systemImage: "list.bullet.rectangle")
+                    }
+                    Button {
+                        copyAggregate(agg.row)
+                    } label: {
+                        Label(String(localized: "events.copyRow", defaultValue: "Copy Row"),
+                              systemImage: "doc.on.doc")
+                    }
+                }
+            }
         }
     }
 
@@ -261,6 +291,157 @@ struct EventStream: View {
         }
         let since = timeRange.seconds.map { Date().addingTimeInterval(-$0) } ?? .distantPast
         return (since, .distantFuture)
+    }
+
+    /// Effective [endingAt, span] for the hot-tier histogram. During an
+    /// "Investigate in Events" navigation (`initialCenterTime` set) the
+    /// histogram must describe the SAME window the table query uses
+    /// (centre ± half-window) instead of one ending "now" — otherwise the
+    /// bars and the rows below them cover different time ranges. (#2)
+    private var histogramWindow: (endingAt: Date, span: TimeInterval) {
+        if let centre = initialCenterTime {
+            return (centre.addingTimeInterval(centerHalfWindowSeconds),
+                    centerHalfWindowSeconds * 2)
+        }
+        return (Date(), timeRange.seconds ?? 86400)
+    }
+
+    /// Bin granularity for the hot-tier histogram. `.last7d` / `.all` always
+    /// render in daily aggregate mode (see `isAggregateMode`), so no hot-tier
+    /// granularity is defined for them — the old `.last7d → .sixHour` mapping
+    /// was unreachable dead code. (#8)
+    private var hotHistogramGranularity: HistogramGranularity {
+        if initialCenterTime != nil {
+            // Centred window is typically an hour wide; pick bins that give a
+            // readable ~30-60 bars regardless of which chip is selected.
+            let span = centerHalfWindowSeconds * 2
+            if span < 7_200 { return .minute }      // ≤2h
+            if span < 86_400 { return .thirtyMin }  // ≤24h
+            return .sixHour
+        }
+        switch timeRange {
+        case .lastHour: return .minute
+        case .last24h:  return .thirtyMin
+        default:        return .hour            // .last7d / .all never reach here
+        }
+    }
+
+    /// Histogram task id: the range/category composite plus the live refresh
+    /// tick, so a live prepend re-runs the SQL bin query. (#16)
+    private var histogramInputsKey: String {
+        "\(aggregateInputsKey)|\(histogramRefreshTick)"
+    }
+
+    /// True once the oldest already-loaded event predates the active window's
+    /// floor — further "Load older" pages fall entirely outside the window and
+    /// would be filtered straight back out, so the button looks dead. Hide it
+    /// instead. Not applied when centred or for `.all` (no lower bound). (#11)
+    private var loadOlderCrossedWindow: Bool {
+        guard initialCenterTime == nil, let seconds = timeRange.seconds else { return false }
+        let cutoff = Date().addingTimeInterval(-seconds)
+        guard let oldest = appState.events.map(\.timestamp).min() else { return false }
+        return oldest < cutoff
+    }
+
+    // MARK: - Row actions (context menus, drill-in, export)
+
+    /// Copy one or more events as a plain-text block (mirrors the detail
+    /// panel's single-event copy). Used by the table row context menu. (#6)
+    private func copyEventDetails(_ events: [EventViewModel]) {
+        let blocks = events.map { e in
+            """
+            Event: \(e.action) (\(e.category.rawValue))
+            Time: \(e.dateTimeString)
+            Process: \(e.processName) (PID \(e.pid))
+            Signer: \(e.signerType)
+            Detail: \(e.detail)
+            ID: \(e.id.uuidString)
+            """
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(blocks.joined(separator: "\n\n"), forType: .string)
+    }
+
+    /// Pivot from a warm-tier aggregate summary into the hot-tier per-event
+    /// table filtered by the same category + process. The hot tier only
+    /// retains recent per-event detail, so this narrows the range to Last 24h
+    /// and prefills the process filter; older days may have no per-event rows
+    /// left (retention), which is expected. (#5)
+    private func drillIntoAggregate(_ row: EventStore.AggregateRow) {
+        if let appCat = EventCategory(rawValue: row.category.rawValue) {
+            filterCategory = appCat
+        }
+        filterText = row.processPath.isEmpty ? row.processSigner : row.processPath
+        timeRange = .last24h
+    }
+
+    private func copyAggregate(_ row: EventStore.AggregateRow) {
+        let text = "\(row.day)\t\(row.category.rawValue)\t\(row.processSigner)\t\(row.processPath)\t\(row.count)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// RFC-4180 CSV field escaping: quote when the value contains a comma,
+    /// quote, or newline; double any embedded quotes.
+    private func csvField(_ s: String) -> String {
+        if s.contains(",") || s.contains("\"") || s.contains("\n") {
+            return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return s
+    }
+
+    /// Prompt for a destination and write `contents`. (#15)
+    private func saveExport(_ contents: String, suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+        panel.title = String(localized: "events.export.title", defaultValue: "Export Events")
+        if panel.runModal() == .OK, let url = panel.url {
+            try? contents.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func exportEventsCSV() {
+        let header = "Time,Action,Category,Process,PID,Signer,Detail"
+        let rows = filteredCache.map { e in
+            [e.dateTimeString,
+             RuleTranslations.translateAction(e.action),
+             e.category.rawValue,
+             e.processName,
+             String(e.pid),
+             e.signerType,
+             e.detail].map(csvField).joined(separator: ",")
+        }
+        saveExport(([header] + rows).joined(separator: "\n"), suggestedName: "maccrab-events.csv")
+    }
+
+    private func exportEventsJSON() {
+        let iso = ISO8601DateFormatter()
+        let objects: [[String: Any]] = filteredCache.map { e in
+            ["id": e.id.uuidString,
+             "timestamp": iso.string(from: e.timestamp),
+             "action": e.action,
+             "category": e.category.rawValue,
+             "process": e.processName,
+             "pid": Int(e.pid),
+             "signer": e.signerType,
+             "detail": e.detail]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: data, encoding: .utf8) else { return }
+        saveExport(str, suggestedName: "maccrab-events.json")
+    }
+
+    private func exportAggregatesCSV() {
+        let header = "Day,Category,Signer,Process Path,Count"
+        let rows = identifiedAggregates.map { a in
+            [a.row.day,
+             a.row.category.rawValue,
+             a.row.processSigner,
+             a.row.processPath,
+             String(a.row.count)].map(csvField).joined(separator: ",")
+        }
+        saveExport(([header] + rows).joined(separator: "\n"), suggestedName: "maccrab-event-aggregates.csv")
     }
 
     private func recomputeFilter() {
@@ -318,7 +499,10 @@ struct EventStream: View {
                 Picker("Category", selection: $filterCategory) {
                     Text("All Categories").tag(EventCategory?.none)
                     Divider()
-                    ForEach(EventCategory.allCases, id: \.self) { cat in
+                    // #9: `.registry` has no macOS collector — every event that
+                    // reaches this view is process/file/network/auth/tcc. Drop
+                    // it so the picker doesn't offer a permanently-empty option.
+                    ForEach(EventCategory.allCases.filter { $0 != .registry }, id: \.self) { cat in
                         Text(cat.rawValue.capitalized).tag(EventCategory?.some(cat))
                     }
                 }
@@ -378,7 +562,38 @@ struct EventStream: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .accessibilityLabel(isPaused ? "Resume event stream" : "Pause event stream")
-                .keyboardShortcut(" ", modifiers: [])
+                // #17: was a bare spacebar shortcut that fired while the user
+                // typed a space into the Filter field (and vice-versa). Move it
+                // to ⌘P so it no longer competes with text entry.
+                .keyboardShortcut("p", modifiers: .command)
+                .help(isPaused
+                    ? String(localized: "events.resume.help", defaultValue: "Resume the live event stream (⌘P)")
+                    : String(localized: "events.pause.help", defaultValue: "Pause the live event stream (⌘P)"))
+
+                // #15: export the currently-shown rows (per-event in hot mode,
+                // aggregate summaries past 24h) to CSV/JSON.
+                Menu {
+                    Button {
+                        if isAggregateMode { exportAggregatesCSV() } else { exportEventsCSV() }
+                    } label: {
+                        Label(String(localized: "events.export.csv", defaultValue: "Export as CSV"), systemImage: "tablecells")
+                    }
+                    if !isAggregateMode {
+                        Button {
+                            exportEventsJSON()
+                        } label: {
+                            Label(String(localized: "events.export.json", defaultValue: "Export as JSON"), systemImage: "curlybraces")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .menuIndicator(.hidden)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(isAggregateMode ? identifiedAggregates.isEmpty : filteredCache.isEmpty)
+                .help(String(localized: "events.export.help", defaultValue: "Export the current events to CSV or JSON"))
+                .accessibilityLabel("Export events")
             }
             .padding()
 
@@ -389,30 +604,31 @@ struct EventStream: View {
             // Toggled by the toolbar chart icon; off by default so existing
             // users see today's familiar layout until they opt in.
             if showHistogram {
-                // v1.8.0 polish: granularity tracks the selected time
-                // range so the chart shows ~24-60 bars across the window.
-                //   Last Hour  → 1m bins (60 bars)
-                //   Last 24h   → 30m bins (48 bars)
-                //   Last 7d    → 6h bins (28 bars) — hot mode, but typically aggregate
-                //   All Time   → days in aggregate mode, hourly otherwise
-                let now = Date()
-                let span = timeRange.seconds ?? 86400
-                let hotGranularity: HistogramGranularity = {
-                    switch timeRange {
-                    case .lastHour: return .minute
-                    case .last24h:  return .thirtyMin
-                    case .last7d:   return .sixHour
-                    case .all:      return .hour
-                    }
-                }()
+                // Granularity + window come from hotHistogramGranularity /
+                // histogramWindow so the bars honour an "Investigate in Events"
+                // centre time (#2) rather than always ending "now". The daily
+                // (aggregate) branch stays now-anchored to match its now-based
+                // aggregate fetch.
+                let hotGranularity = hotHistogramGranularity
                 let dailySpanDays = max(1, Int((timeRange.seconds ?? (7 * 86400)) / 86400))
                 EventTimeHistogram(
                     bins: isAggregateMode
-                        ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: now, spanDays: dailySpanDays)
-                        : EventTimeHistogram.bins(fromSQL: histogramRows, granularity: hotGranularity, endingAt: now, spanSeconds: span),
+                        ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: Date(), spanDays: dailySpanDays)
+                        : EventTimeHistogram.bins(fromSQL: histogramRows, granularity: hotGranularity, endingAt: histogramWindow.endingAt, spanSeconds: histogramWindow.span),
                     unitLabel: isAggregateMode ? "Day" : "Time",
                     granularity: isAggregateMode ? .day : hotGranularity
                 )
+                // #14: the SQL histogram counts ALL events in the window, not
+                // just the current FTS matches (fetchHistogramBins takes no text
+                // filter). Say so, so the bars aren't read as the filtered table.
+                if appState.eventSearchActive {
+                    Text(String(localized: "events.histogramAllEvents",
+                                defaultValue: "Histogram shows all events in range — not filtered by the search text"))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal)
+                        .padding(.bottom, 2)
+                }
                 Divider()
             }
 
@@ -497,6 +713,28 @@ struct EventStream: View {
                         }
                         .width(min: 60, ideal: 80, max: 100)
                     }
+                    // #6: per-row actions — copy the selected event(s), or
+                    // pivot the filter to the row's process.
+                    .contextMenu(forSelectionType: EventViewModel.ID.self) { ids in
+                        let selected = filteredCache.filter { ids.contains($0.id) }
+                        if !selected.isEmpty {
+                            Button {
+                                copyEventDetails(selected)
+                            } label: {
+                                Label(String(localized: "events.copyDetails", defaultValue: "Copy Event Details"),
+                                      systemImage: "doc.on.doc")
+                            }
+                            if let first = selected.first {
+                                Button {
+                                    filterText = first.processName
+                                } label: {
+                                    Label(String(localized: "events.filterByProcess",
+                                                 defaultValue: "Filter by \"\(first.processName)\""),
+                                          systemImage: "line.3.horizontal.decrease.circle")
+                                }
+                            }
+                        }
+                    }
 
                     // Event detail panel — only when selected
                     if let selectedID = selectedEventID,
@@ -515,11 +753,19 @@ struct EventStream: View {
             // anchored at the bottom. Hidden once we hit the end-of-table OR
             // when the user is in aggregate mode (the cursor only makes
             // sense over the hot-tier events table, not over rollup rows).
-            if appState.hasMoreEvents && !isAggregateMode {
+            if appState.hasMoreEvents && !isAggregateMode && !loadOlderCrossedWindow {
                 HStack {
                     Spacer()
                     Button {
-                        Task { await appState.loadOlderEvents() }
+                        Task {
+                            await appState.loadOlderEvents()
+                            // #13: an explicit user fetch — reflect it even
+                            // while Paused (Pause freezes the live firehose,
+                            // not on-demand paging, so the onReceive recompute
+                            // that's gated on !isPaused would otherwise swallow
+                            // the appended rows).
+                            recomputeFilter()
+                        }
                     } label: {
                         Label(
                             appState.isLoadingOlderEvents
@@ -630,11 +876,22 @@ struct EventStream: View {
                 await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
             }
         }
-        // Re-fetch when the time-range chip changes mid-search.
+        // #12: re-query the DB when the range changes — in BOTH the search
+        // and non-search paths. Pre-fix the non-search path only re-filtered
+        // the already-loaded ~500-row window (via onChange→recomputeFilter),
+        // so widening the range surfaced no additional DB rows and
+        // under-represented the window.
         .task(id: timeRange) {
-            guard !filterText.isEmpty else { return }
+            // When centred (Investigate in Events) the window is fixed to the
+            // centre ± half-window regardless of the chip, so a chip change
+            // need not re-query (onAppear + the filterText task already load).
+            guard initialCenterTime == nil else { return }
             let bounds = computeEventsTimeBounds()
-            await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
+            if filterText.isEmpty {
+                await appState.loadEvents(since: bounds.since, until: bounds.until)
+            } else {
+                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
+            }
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate
@@ -652,26 +909,21 @@ struct EventStream: View {
             identifiedAggregates = Self.identify(aggregateRows)
         }
         // v1.8.0 polish: SQL-side histogram. Re-fetched on time-range,
-        // category, or aggregate-mode change. Skips work in aggregate mode
-        // (the daily aggregate path drives that chart instead).
-        .task(id: aggregateInputsKey) {
+        // category, or aggregate-mode change — and now also on the live
+        // refresh tick (#16), so the chart tracks the live table instead of
+        // going stale. Skips work in aggregate mode (the daily aggregate path
+        // drives that chart instead). Window + granularity honour an
+        // "Investigate in Events" centre time (#2).
+        .task(id: histogramInputsKey) {
             guard !isAggregateMode else {
                 histogramRows = []
                 return
             }
-            let granularity: HistogramGranularity = {
-                switch timeRange {
-                case .lastHour: return .minute
-                case .last24h:  return .thirtyMin
-                case .last7d:   return .sixHour
-                case .all:      return .hour
-                }
-            }()
-            let span = timeRange.seconds ?? 86400
+            let window = histogramWindow
             histogramRows = await appState.fetchHistogramBins(
-                spanSeconds: span,
-                stepSeconds: granularity.stepSeconds,
-                endingAt: Date(),
+                spanSeconds: window.span,
+                stepSeconds: hotHistogramGranularity.stepSeconds,
+                endingAt: window.endingAt,
                 category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
             )
         }
@@ -688,6 +940,13 @@ struct EventStream: View {
         .onReceive(appState.$events) { _ in
             guard !isPaused else { return }
             recomputeFilter()
+            // #16: keep the histogram in step with the live table. The
+            // histogram task is keyed on this tick, so each live prepend
+            // re-queries the SQL bins — but only when the chart is actually
+            // shown and in hot-tier mode (the aggregate path has its own path).
+            if showHistogram && !isAggregateMode {
+                histogramRefreshTick &+= 1
+            }
         }
         // Resume: rebuild once from the current events so the frozen table
         // catches up to everything that arrived while paused.

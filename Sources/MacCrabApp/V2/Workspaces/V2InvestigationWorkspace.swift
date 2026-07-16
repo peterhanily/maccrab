@@ -17,7 +17,12 @@ struct V2InvestigationWorkspace: View {
     @State private var hoveredMemberId: String? = nil
     @State private var selectedMemberId: String? = nil
     @State private var graphAsList: Bool = false
-    @State private var copiedToast: Bool = false
+    /// Within-trace node search + entity-type filter. rc.3 deep-audit
+    /// (ui-investigation): with ~90 members per live trace there was no
+    /// way to find or isolate a specific entity / entity class in the
+    /// graph. Empty query + empty set means "show everything".
+    @State private var nodeSearchQuery: String = ""
+    @State private var entityTypeFilter: Set<String> = []
     /// Active layout algorithm for the trace graph. Defaults to radial
     /// (anchor at centre, members on a ring); user can switch via the
     /// top-left segmented control. The chosen layout drives
@@ -136,7 +141,12 @@ struct V2InvestigationWorkspace: View {
             guard response == .OK, let url = panel.url else { return }
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = V2InvestigationWorkspace.runMaccrabctl(
-                    arguments: ["trace", "export", trace.id, "--output", url.path]
+                    // rc.3 deep-audit (ui-investigation): the CLI parses
+                    // `--out <path>` (MacCrabCtl.swift firstIndex(of:
+                    // "--out")); `--output` never matched, so the bundle
+                    // was written to the process cwd — nowhere the user
+                    // picked — while the toast still claimed success.
+                    arguments: ["trace", "export", trace.id, "--out", url.path]
                 )
                 DispatchQueue.main.async {
                     if result.exitCode == 0 {
@@ -249,6 +259,34 @@ struct V2InvestigationWorkspace: View {
             tabBody
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick)") { await reload() }
+        // rc.3 deep-audit (ui-investigation): graph interaction state
+        // (drag positions, selection, hover, manual layout, node filter)
+        // is keyed by entity id — and entity ids are shared across
+        // traces — so without an explicit reset on trace switch a dragged
+        // position / selection from trace A bled into trace B. Fire only
+        // on a genuine id change: reload()'s 5 s snapshot refresh keeps the
+        // same id, so this does NOT reset mid-interaction.
+        .onChange(of: selectedTrace?.id) { _ in resetGraphInteractionState() }
+    }
+
+    /// Clear per-trace graph interaction state. Called when the selected
+    /// trace actually changes so nothing (custom drag positions, in-flight
+    /// drag offsets, selection, hover, node filter, or the cached layout)
+    /// carries over to the next trace. Zoom is intentionally preserved —
+    /// it's a view preference, not trace-specific.
+    private func resetGraphInteractionState() {
+        customPositions.removeAll()
+        dragModel.offsets.removeAll()
+        selectedMemberId = nil
+        hoveredMemberId = nil
+        nodeSearchQuery = ""
+        entityTypeFilter.removeAll()
+        cachedPositions.removeAll()
+        cachedPositionKey = ""
+        // Only .manual depends on the (now-cleared) custom positions;
+        // an explicit algorithm choice (grid / circular / …) is
+        // deterministic per-members and safe to keep.
+        if graphLayout == .manual { graphLayout = .radial }
     }
 
     @ViewBuilder
@@ -321,6 +359,166 @@ struct V2InvestigationWorkspace: View {
         .v2Panel()
     }
 
+    /// Navigate to Events pre-filtered to a trace member. rc.3
+    /// deep-audit (ui-investigation): filtering on the bare displayName
+    /// alone is over-broad — e.g. every `.npmrc` entity across every
+    /// trace collapses to one query. Scope the query to the current
+    /// trace's observation window (the same window "View as events"
+    /// uses) so results are bounded to this trace, not the firehose.
+    private func openMemberInEvents(_ m: V2TraceMember) {
+        state.pendingEventsFilter = m.displayName
+        if let trace = selectedTrace ?? traces.first {
+            applyTraceEventWindow(trace)
+        }
+        selectedMemberId = nil
+        state.switchWorkspace(.events)
+    }
+
+    /// Centre the Events time window on a trace's observation span
+    /// (first-seen … last-updated), padded 5 min either side. Shared by
+    /// the inspector "View as events" action and per-node "Open in
+    /// Events" so both land on a bounded, trace-scoped window.
+    private func applyTraceEventWindow(_ trace: V2MockTrace) {
+        let centre = Date(timeIntervalSince1970:
+            (trace.firstSeen.timeIntervalSince1970
+             + trace.lastUpdated.timeIntervalSince1970) / 2)
+        let halfWindow = max(
+            15 * 60,
+            trace.lastUpdated.timeIntervalSince(trace.firstSeen) / 2 + 5 * 60
+        )
+        state.pendingEventsCenterTime = centre
+        state.pendingEventsHalfWindowSeconds = halfWindow
+    }
+
+    /// Human-searchable term for a trace. rc.3 deep-audit
+    /// (ui-investigation): `trace.rootProcess` is the opaque
+    /// `process:<sha256>` root entity id, which no event's FTS text can
+    /// match → "View as events" always returned an empty table. Prefer
+    /// the anchor member's resolved displayName (the real process name),
+    /// falling back to the human trace title over the opaque id.
+    private func traceSearchTerm(for trace: V2MockTrace) -> String {
+        if let anchor = traceMembersCache[trace.id]?.first(where: { $0.isAnchor }) {
+            return anchor.displayName
+        }
+        return trace.title
+    }
+
+    /// Resolve the inspector "Trace path" rows from the loaded members:
+    /// the anchor (root) first, then the entities it touched in first-seen
+    /// order. Falls back to the human trace title when members haven't
+    /// resolved yet — never the opaque root entity id.
+    private func criticalPathSteps(for trace: V2MockTrace) -> [String] {
+        let members = traceMembersCache[trace.id] ?? []
+        guard !members.isEmpty else { return [trace.title] }
+        let ordered = members.sorted { l, r in
+            if l.isAnchor != r.isAnchor { return l.isAnchor }
+            return l.firstSeen < r.firstSeen
+        }
+        return ordered.map { $0.displayName }
+    }
+
+    /// True when a within-trace node search or entity-type filter is active.
+    private var nodeFilterActive: Bool {
+        !nodeSearchQuery.isEmpty || !entityTypeFilter.isEmpty
+    }
+
+    /// Does a member pass the active node search + entity-type filter?
+    /// Always true when no filter is active.
+    private func memberMatchesFilter(_ m: V2TraceMember) -> Bool {
+        if !entityTypeFilter.isEmpty
+            && !entityTypeFilter.contains(m.entityType.lowercased()) {
+            return false
+        }
+        if !nodeSearchQuery.isEmpty {
+            let q = nodeSearchQuery.lowercased()
+            return m.displayName.lowercased().contains(q)
+                || m.entityType.lowercased().contains(q)
+        }
+        return true
+    }
+
+    /// Entity types actually present in this trace, in a stable
+    /// canonical order (non-canonical types appended alphabetically).
+    /// Drives the entity-type toggle chips so we only offer filters for
+    /// classes the trace contains.
+    private func presentEntityTypes(_ members: [V2TraceMember]) -> [String] {
+        let canonical = ["process", "file", "network", "persistence", "tcc", "ai_agent"]
+        let present = Set(members.map { $0.entityType.lowercased() })
+        var out = canonical.filter { present.contains($0) }
+        for t in present.sorted() where !canonical.contains(t) { out.append(t) }
+        return out
+    }
+
+    /// Node search field + entity-type toggle chips. Shown above both
+    /// the graph and list renderings so filtering works in either mode.
+    @ViewBuilder
+    private func nodeFilterBar(_ members: [V2TraceMember]) -> some View {
+        let types = presentEntityTypes(members)
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .scaledSystem(11).foregroundStyle(V2Theme.mutedText)
+                TextField("Filter nodes by name or type…", text: $nodeSearchQuery)
+                    .textFieldStyle(.plain)
+                    .font(V2Theme.body())
+                if !nodeSearchQuery.isEmpty {
+                    Button { nodeSearchQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .scaledSystem(11).foregroundStyle(V2Theme.mutedText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear node search")
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .frame(maxWidth: 240)
+            .background(V2Theme.panelBackground)
+            .overlay(RoundedRectangle(cornerRadius: 4)
+                        .stroke(V2Theme.panelBorder, lineWidth: 1))
+
+            ForEach(types, id: \.self) { t in
+                let on = entityTypeFilter.contains(t)
+                Button {
+                    if on { entityTypeFilter.remove(t) } else { entityTypeFilter.insert(t) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: iconForEntityType(t))
+                            .scaledSystem(9, weight: .semibold)
+                        Text(t).scaledSystem(10, weight: .medium)
+                    }
+                    .foregroundStyle(on ? colorForEntityType(t) : V2Theme.mutedText)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(colorForEntityType(t).opacity(on ? 0.15 : 0.0))
+                    .overlay(RoundedRectangle(cornerRadius: 4)
+                                .stroke(on ? colorForEntityType(t).opacity(0.45)
+                                           : V2Theme.panelBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .help(on ? "Showing \(t) nodes — click to unfilter" : "Filter to \(t) nodes")
+            }
+
+            Spacer()
+
+            if nodeFilterActive {
+                let matchCount = members.filter(memberMatchesFilter).count
+                Text("\(matchCount) of \(members.count)")
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.tertiaryText)
+                    .monospacedDigit()
+                Button {
+                    nodeSearchQuery = ""
+                    entityTypeFilter.removeAll()
+                } label: {
+                    Text("Clear").scaledSystem(10, weight: .medium)
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+                .buttonStyle(.plain)
+                .help("Clear all node filters")
+            }
+        }
+    }
+
     /// Render a trace as a real hub-and-spoke graph (anchor at
     /// centre, other members radiating outward with edges drawn from
     /// the anchor). The "as list" toggle reveals an accessible text
@@ -383,10 +581,13 @@ struct V2InvestigationWorkspace: View {
                 Text("Trace members couldn't be resolved from the causal graph store. Either the daemon hasn't materialised this trace yet, or the local tracegraph.db is empty.")
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
-            } else if graphAsList {
-                memberListView(members)
             } else {
-                memberGraphView(members)
+                nodeFilterBar(members)
+                if graphAsList {
+                    memberListView(members)
+                } else {
+                    memberGraphView(members)
+                }
             }
         }
         .padding(16)
@@ -400,9 +601,18 @@ struct V2InvestigationWorkspace: View {
     /// menu as the graph nodes so the list isn't a read-only fallback.
     @ViewBuilder
     private func memberListView(_ members: [V2TraceMember]) -> some View {
+        // rc.3 deep-audit (ui-investigation): honour the node filter in
+        // list mode by hiding non-matching rows.
+        let shown = nodeFilterActive ? members.filter(memberMatchesFilter) : members
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(members) { m in
+                if shown.isEmpty {
+                    Text("No entities match the current node filter.")
+                        .font(V2Theme.body())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .padding(12)
+                }
+                ForEach(shown) { m in
                     let isSelected = selectedMemberId == m.id
                     HStack(spacing: 10) {
                         Image(systemName: m.isAnchor ? "flame.fill" : iconForEntityType(m.entityType))
@@ -456,12 +666,11 @@ struct V2InvestigationWorkspace: View {
                         } label: { Label("Copy entity ID", systemImage: "number") }
                         Divider()
                         Button {
-                            // Pre-fill the events FTS filter with the
-                            // member's display name so the user lands
-                            // on events for THIS entity, not the
-                            // unfiltered firehose.
-                            state.pendingEventsFilter = m.displayName
-                            state.switchWorkspace(.events)
+                            // Land on events for THIS entity, scoped to
+                            // the trace's time window so a non-unique
+                            // displayName (e.g. .npmrc) doesn't return an
+                            // over-broad cross-trace firehose.
+                            openMemberInEvents(m)
                         } label: { Label("Open in Events", systemImage: "list.bullet.rectangle") }
                     }
                     .popover(isPresented: Binding(
@@ -561,9 +770,13 @@ struct V2InvestigationWorkspace: View {
                                     zoom: graphZoom,
                                     isSelected: selectedMemberId == m.id,
                                     isHovered: hoveredMemberId == m.id,
-                                    isDimmed: hoveredMemberId != nil
+                                    // Dim on hover-of-another-node OR when
+                                    // a node filter is active and this node
+                                    // doesn't match (rc.3 deep-audit).
+                                    isDimmed: (hoveredMemberId != nil
                                         && hoveredMemberId != m.id
-                                        && !m.isAnchor,
+                                        && !m.isAnchor)
+                                        || (nodeFilterActive && !memberMatchesFilter(m)),
                                     iconForType: iconForEntityType,
                                     onTap: {
                                         selectedMemberId = (selectedMemberId == m.id) ? nil : m.id
@@ -604,8 +817,7 @@ struct V2InvestigationWorkspace: View {
                                             } label: { Label("Copy entity ID", systemImage: "number") }
                                             Divider()
                                             Button {
-                                                state.pendingEventsFilter = m.displayName
-                                                state.switchWorkspace(.events)
+                                                openMemberInEvents(m)
                                             } label: { Label("Open in Events", systemImage: "list.bullet.rectangle") }
                                         })
                                     },
@@ -982,82 +1194,6 @@ struct V2InvestigationWorkspace: View {
         return pos
     }
 
-    @ViewBuilder
-    private func memberNode(_ m: V2TraceMember) -> some View {
-        let isHover = hoveredMemberId == m.id
-        let dim = hoveredMemberId != nil && !isHover && !m.isAnchor
-        VStack(spacing: 4) {
-            ZStack {
-                Circle()
-                    .fill(m.isAnchor ? V2Theme.high.opacity(0.18) : V2Theme.dataAccent.opacity(0.12))
-                Circle()
-                    .stroke(m.isAnchor ? V2Theme.high : V2Theme.dataAccent,
-                            lineWidth: m.isAnchor ? 2 : 1)
-                Image(systemName: m.isAnchor ? "flame.fill" : iconForEntityType(m.entityType))
-                    .scaledSystem(m.isAnchor ? 14 : 11,
-                                  weight: m.isAnchor ? .bold : .regular)
-                    .foregroundStyle(m.isAnchor ? V2Theme.high : V2Theme.dataAccent)
-            }
-            .frame(width: m.isAnchor ? 36 : 26, height: m.isAnchor ? 36 : 26)
-            .opacity(dim ? 0.35 : 1.0)
-            Text(m.displayName)
-                .scaledSystem(10, weight: m.isAnchor ? .semibold : .regular)
-                .foregroundStyle(dim ? V2Theme.tertiaryText : V2Theme.primaryText)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 90)
-                .opacity(dim ? 0.5 : 1.0)
-        }
-        .padding(4)
-        .background(
-            (selectedMemberId == m.id ? V2Theme.brand.opacity(0.18) :
-                (isHover ? V2Theme.brand.opacity(0.10) : Color.clear))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            hoveredMemberId = hovering ? m.id : (hoveredMemberId == m.id ? nil : hoveredMemberId)
-        }
-        .onTapGesture {
-            // Tap toggles the detail popover for this node. Tapping a
-            // second time (or anywhere else) dismisses.
-            selectedMemberId = (selectedMemberId == m.id) ? nil : m.id
-        }
-        .contextMenu {
-            // Right-click / two-finger-click menu. Mirrors the actions
-            // exposed in the popover so the user can avoid opening it
-            // for quick operations like Copy.
-            Button {
-                selectedMemberId = m.id
-            } label: { Label("Show details", systemImage: "info.circle") }
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(m.displayName, forType: .string)
-                copiedToast = true
-                state.showToast(V2Toast(kind: .success, title: "Copied", detail: m.displayName))
-            } label: { Label("Copy label", systemImage: "doc.on.doc") }
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(m.id, forType: .string)
-                state.showToast(V2Toast(kind: .success, title: "Copied entity ID", detail: m.id))
-            } label: { Label("Copy entity ID", systemImage: "number") }
-            Divider()
-            Button {
-                state.pendingEventsFilter = m.displayName
-                state.switchWorkspace(.events)
-            } label: { Label("Open in Events", systemImage: "list.bullet.rectangle") }
-        }
-        .popover(isPresented: Binding(
-            get: { selectedMemberId == m.id },
-            set: { if !$0 { selectedMemberId = nil } }
-        ), arrowEdge: .leading) {
-            memberDetailPopover(m).frame(width: 320)
-        }
-        .help("\(m.displayName)\n\(m.entityType) · first seen \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · anchor" : "")")
-        .accessibilityLabel("\(m.isAnchor ? "Anchor: " : "")\(m.displayName), \(m.entityType)")
-        .accessibilityHint("Click to show details. Right-click for actions.")
-    }
-
     /// Detail popover shown when a node is clicked. Pre-rc12 had a much
     /// richer V2NodeDetailPopover with per-kind sections (process pid /
     /// cmdline / parent / code-sig, file sha256 / size / perms, network
@@ -1140,9 +1276,7 @@ struct V2InvestigationWorkspace: View {
                     state.showToast(V2Toast(kind: .success, title: "Copied", detail: m.displayName))
                 }
                 V2ActionButton("Open in Events", icon: "list.bullet.rectangle", style: .secondary) {
-                    state.pendingEventsFilter = m.displayName
-                    state.switchWorkspace(.events)
-                    selectedMemberId = nil
+                    openMemberInEvents(m)
                 }
             }
         }
@@ -1219,9 +1353,16 @@ struct V2InvestigationWorkspace: View {
         }
     }
 
-    /// Compute (anchor at centre, others on a ring) positions.
-    /// For >12 non-anchor members, splits into two concentric rings
-    /// to keep node spacing readable.
+    /// Compute (anchor at centre, others on concentric rings) positions.
+    /// rc.3 deep-audit (ui-investigation): the old two-ring split dumped
+    /// every member past 12 onto a single outer ring, so a real ~90-member
+    /// trace rendered as an unreadable single-ring hairball. Now the
+    /// non-anchor members spread across up to four concentric rings, with
+    /// outer (longer-circumference) rings carrying proportionally more
+    /// nodes so per-node spacing stays roughly constant. All radii are
+    /// bounded by `outerRadius` so nothing lands off-canvas. Aggregating /
+    /// collapsing layers by relation weight is deferred — it needs the real
+    /// causal edges the provider doesn't yet return (tracked separately).
     private func radialPositions(members: [V2TraceMember], in size: CGSize) -> [String: CGPoint] {
         var result: [String: CGPoint] = [:]
         guard !members.isEmpty, size.width > 0, size.height > 0 else { return result }
@@ -1232,17 +1373,45 @@ struct V2InvestigationWorkspace: View {
         }
         let nonAnchors = members.filter { $0.id != anchor?.id }
         guard !nonAnchors.isEmpty else { return result }
-        // Ring sizes: 60% of min dimension for primary, 90% for outer.
         let minDim = min(size.width, size.height)
-        let innerRadius = max(80, minDim * 0.30)
-        let outerRadius = max(140, minDim * 0.42)
-        let splitThreshold = 12
-        let ringSplit = nonAnchors.count > splitThreshold
-        let inner = ringSplit ? Array(nonAnchors.prefix(splitThreshold)) : nonAnchors
-        let outer = ringSplit ? Array(nonAnchors.suffix(from: splitThreshold)) : []
-        layoutRing(inner, radius: innerRadius, centre: centre, into: &result)
-        if !outer.isEmpty {
-            layoutRing(outer, radius: outerRadius, centre: centre, into: &result)
+        let innerRadius = max(80, minDim * 0.26)
+        let outerRadius = max(innerRadius + 60, minDim * 0.46)
+        let n = nonAnchors.count
+        // Ring count scales with node count (≤ ~16 nodes/ring), capped at 4.
+        let ringCount = n <= 12 ? 1 : (n <= 28 ? 2 : (n <= 54 ? 3 : 4))
+        func ringRadius(_ i: Int) -> CGFloat {
+            guard ringCount > 1 else { return innerRadius }
+            return innerRadius
+                + (outerRadius - innerRadius) * CGFloat(i) / CGFloat(ringCount - 1)
+        }
+        // Per-ring capacity weighted by radius so bigger rings hold more.
+        let weights = (0..<ringCount).map { ringRadius($0) }
+        let totalW = max(weights.reduce(0, +), 0.001)
+        var counts = weights.map { Int((Double($0 / totalW) * Double(n)).rounded()) }
+        // Reconcile rounding so the counts sum to exactly n (adjust from
+        // the outermost ring inward).
+        var diff = n - counts.reduce(0, +)
+        var k = ringCount - 1
+        while diff != 0 {
+            counts[k] += diff > 0 ? 1 : -1
+            diff += diff > 0 ? -1 : 1
+            k = (k - 1 + ringCount) % ringCount
+        }
+        var start = 0
+        for i in 0..<ringCount {
+            // The outermost ring absorbs whatever remains so count
+            // arithmetic can never drop (fail to place) a member.
+            let end = (i == ringCount - 1) ? n : min(start + max(0, counts[i]), n)
+            guard start < end else { continue }
+            // Offset alternate rings by a half-step so nodes on adjacent
+            // rings don't line up on the same radial spoke.
+            let phaseOffset = (i % 2 == 0) ? 0.0 : (Double.pi / Double(max(1, end - start)))
+            layoutRing(Array(nonAnchors[start..<end]),
+                       radius: ringRadius(i),
+                       centre: centre,
+                       phaseOffset: phaseOffset,
+                       into: &result)
+            start = end
         }
         return result
     }
@@ -1250,11 +1419,12 @@ struct V2InvestigationWorkspace: View {
     private func layoutRing(_ items: [V2TraceMember],
                             radius: CGFloat,
                             centre: CGPoint,
+                            phaseOffset: Double = 0,
                             into result: inout [String: CGPoint]) {
         guard !items.isEmpty else { return }
         let step = (.pi * 2.0) / Double(items.count)
         // Start from -90° (top) so the first node anchors visually.
-        let phase = -Double.pi / 2.0
+        let phase = -Double.pi / 2.0 + phaseOffset
         for (i, m) in items.enumerated() {
             let theta = phase + Double(i) * step
             let x = centre.x + CGFloat(cos(theta)) * radius
@@ -1603,6 +1773,10 @@ struct V2InvestigationWorkspace: View {
         }
         .buttonStyle(.plain)
         .disabled(direction < 0 ? currentTraceIndex == 0 : currentTraceIndex >= traces.count - 1)
+        // rc.3 deep-audit (ui-investigation): the tooltips advertised
+        // ⌥←/⌥→ but no shortcut was wired. Bind them for real (inert while
+        // the button is disabled, i.e. at either end of the list).
+        .keyboardShortcut(direction < 0 ? .leftArrow : .rightArrow, modifiers: .option)
         .help(tooltip)
     }
 
@@ -1610,12 +1784,17 @@ struct V2InvestigationWorkspace: View {
     private var graphCanvas: some View {
         if let trace = selectedTrace ?? traces.first {
             traceMembersList(trace)
-                .task(id: trace.id) {
-                    if traceMembersCache[trace.id] == nil {
-                        let members = await state.provider.traceMembers(traceId: trace.id)
-                        await MainActor.run {
-                            traceMembersCache[trace.id] = members
-                        }
+                // rc.3 deep-audit (ui-investigation): key the fetch on
+                // trace.id + lastUpdated (not id alone). The old nil-guard
+                // loaded members exactly once and never refreshed, so an
+                // active trace that kept accruing members showed a frozen
+                // snapshot despite the 5 s auto-refresh. Re-fetching only
+                // when lastUpdated advances (or the trace switches) keeps
+                // the graph live without polling every tick.
+                .task(id: "\(trace.id)@\(trace.lastUpdated.timeIntervalSince1970)") {
+                    let members = await state.provider.traceMembers(traceId: trace.id)
+                    await MainActor.run {
+                        traceMembersCache[trace.id] = members
                     }
                 }
         } else {
@@ -1695,7 +1874,10 @@ struct V2InvestigationWorkspace: View {
     @ViewBuilder
     private func traceInspector(_ trace: V2MockTrace) -> some View {
         V2Inspector(title: trace.title,
-                    subtitle: trace.rootProcess,
+                    // rc.3 deep-audit (ui-investigation): resolve the
+                    // opaque process:<sha256> root entity id to the real
+                    // anchor process name for the subtitle.
+                    subtitle: traceSearchTerm(for: trace),
                     onClose: {
                         // X button hides the inspector entirely.
                         // Re-open via the trace picker or the slim
@@ -1720,7 +1902,14 @@ struct V2InvestigationWorkspace: View {
                     V2StatusChip("\(trace.edgeCount) edges", kind: .neutral)
                 }
             }
-            V2InspectorSection(String(localized: "inspector.anchorVerdict", defaultValue: "Anchor verdict")) {
+            // rc.3 deep-audit (ui-investigation): `trace.anchorVerdict` is
+            // populated from Trace.status (a lifecycle value like "open"),
+            // not a risk verdict — so the old "Anchor verdict" label was
+            // misleading. The severity chip above already carries the
+            // assessment; label this honestly as the trace's status.
+            // (Surfacing a real anchor reason from summary_json/attack_json
+            // needs the provider to carry those fields — out of scope here.)
+            V2InspectorSection(String(localized: "inspector.traceStatus", defaultValue: "Status")) {
                 Text(trace.anchorVerdict)
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.primaryText)
@@ -1729,40 +1918,53 @@ struct V2InvestigationWorkspace: View {
                 V2InspectorKeyValue("First seen", V2TimeFormat.relative(trace.firstSeen))
                 V2InspectorKeyValue("Last update", V2TimeFormat.relative(trace.lastUpdated))
             }
-            V2InspectorSection(String(localized: "inspector.criticalPath", defaultValue: "Critical path")) {
-                ForEach(trace.rootProcess.split(separator: "→").map { $0.trimmingCharacters(in: .whitespaces) },
-                        id: \.self) { step in
+            // rc.3 deep-audit (ui-investigation): the old body split
+            // `trace.rootProcess` (an opaque process:<sha256> id, never
+            // containing "→") on "→", rendering one meaningless hash row.
+            // Resolve the real entity names from the loaded members
+            // (anchor first, then by first-seen — a lineage-order proxy).
+            // A true edge-derived path needs the causal edges the provider
+            // doesn't yet return (tracked with the trace-edges finding).
+            V2InspectorSection(String(localized: "inspector.tracePath", defaultValue: "Trace path")) {
+                let steps = criticalPathSteps(for: trace)
+                ForEach(Array(steps.prefix(12).enumerated()), id: \.offset) { _, step in
                     HStack(spacing: 6) {
                         Image(systemName: "circle.fill")
                             .foregroundStyle(V2Theme.dataAccent)
                             .scaledSystem(6)
-                        Text(step).font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
+                        Text(step)
+                            .font(V2Theme.mono())
+                            .foregroundStyle(V2Theme.primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
+                }
+                if steps.count > 12 {
+                    Text("+\(steps.count - 12) more entities")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
                 }
             }
             V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                 V2ActionButton("Open Agent Traces", icon: "wand.and.stars", style: .secondary) {
                     state.selectTab(.investigationAgentTraces)
                 }
-                V2ActionButton("Run AI analysis", icon: "brain.head.profile", style: .secondary) {
+                // rc.3 deep-audit (ui-investigation): this button ran no
+                // analysis — it only navigated to the AI Analysis tab — so
+                // "Run" over-promised. Relabelled to match what it does;
+                // the tab itself now renders real LLM investigation data.
+                V2ActionButton("Open AI analysis", icon: "brain.head.profile", style: .secondary) {
                     state.selectTab(.investigationAIAnalysis)
                 }
                 V2ActionButton("View as events", icon: "list.bullet", style: .secondary) {
-                    state.pendingEventsFilter = trace.rootProcess
-                    // Centre the events query on the trace's window:
-                    // since first-seen (anchor time), until last-
-                    // updated. Pad by 5 min on either side so events
-                    // immediately before/after the trace's
-                    // observation window are also visible.
-                    let centre = Date(timeIntervalSince1970:
-                        (trace.firstSeen.timeIntervalSince1970
-                         + trace.lastUpdated.timeIntervalSince1970) / 2)
-                    let halfWindow = max(
-                        15 * 60,
-                        trace.lastUpdated.timeIntervalSince(trace.firstSeen) / 2 + 5 * 60
-                    )
-                    state.pendingEventsCenterTime = centre
-                    state.pendingEventsHalfWindowSeconds = halfWindow
+                    // rc.3 deep-audit (ui-investigation): filter on a
+                    // human-searchable term (resolved anchor process name),
+                    // NOT trace.rootProcess — that's the opaque
+                    // process:<sha256> root entity id no event can match.
+                    state.pendingEventsFilter = traceSearchTerm(for: trace)
+                    // Centre the events query on the trace's observation
+                    // window (first-seen … last-updated, padded 5 min).
+                    applyTraceEventWindow(trace)
                     state.switchWorkspace(.events)
                 }
             }
@@ -1822,26 +2024,135 @@ struct V2InvestigationWorkspace: View {
         // unreachable" from being invisible and stops pointing the operator
         // at a control that doesn't reflect engine state.
         let engineLLM = engineHeartbeat?.llm
-        return VStack(alignment: .leading, spacing: 16) {
-            V2EmptyState(
-                title: "No AI investigation summary yet",
-                body: "MacCrab generates an LLM investigation when a campaign is detected at HIGH or CRITICAL severity. The detection engine runs it using its own backend — Settings → AI Backend pushes your configuration to the engine (Ollama local is recommended). Trigger a campaign or open an alert detail to see analysis here.",
-                icon: "brain.head.profile"
-            )
-            .v2Panel()
-            if let llm = engineLLM {
-                Label("Engine LLM: \(llm.summary)",
-                      systemImage: llm.healthy ? "checkmark.seal"
-                        : (llm.configured ? "exclamationmark.triangle" : "minus.circle"))
-                    .font(.caption)
-                    .foregroundColor(llm.healthy ? .secondary
-                        : (llm.configured ? .orange : .secondary))
-                    .padding(.horizontal, 4)
+        // rc.3 deep-audit (ui-investigation): this tab was a permanent
+        // placeholder even when the provider already carried per-alert LLM
+        // investigations (the Alerts inspector renders them). Surface the
+        // recent HIGH/CRITICAL alerts that DO have an LLM investigation;
+        // fall back to the empty state only when none exist.
+        let analyzed = recentAlerts.filter { ($0.llmSummary?.isEmpty == false) }
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if analyzed.isEmpty {
+                    V2EmptyState(
+                        title: "No AI investigation summary yet",
+                        body: "MacCrab generates an LLM investigation when a campaign is detected at HIGH or CRITICAL severity. The detection engine runs it using its own backend — Settings → AI Backend pushes your configuration to the engine (Ollama local is recommended). Trigger a campaign or open an alert detail to see analysis here.",
+                        icon: "brain.head.profile"
+                    )
+                    .v2Panel()
+                } else {
+                    HStack {
+                        Text("Recent AI investigations")
+                            .font(V2Theme.sectionTitle())
+                            .foregroundStyle(V2Theme.primaryText)
+                        Spacer()
+                        Text("\(analyzed.count) analyzed alert\(analyzed.count == 1 ? "" : "s")")
+                            .font(V2Theme.meta())
+                            .foregroundStyle(V2Theme.mutedText)
+                    }
+                    ForEach(analyzed) { alert in
+                        aiAnalysisCard(alert)
+                    }
+                }
+                if let llm = engineLLM {
+                    Label("Engine LLM: \(llm.summary)",
+                          systemImage: llm.healthy ? "checkmark.seal"
+                            : (llm.configured ? "exclamationmark.triangle" : "minus.circle"))
+                        .font(.caption)
+                        .foregroundColor(llm.healthy ? .secondary
+                            : (llm.configured ? .orange : .secondary))
+                        .padding(.horizontal, 4)
+                }
             }
-            Spacer()
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// One alert's LLM investigation, rendered like the Alerts inspector's
+    /// "AI analysis" section (verdict chip + confidence + model + summary +
+    /// suggested actions), with a link back to the full alert detail.
+    @ViewBuilder
+    private func aiAnalysisCard(_ alert: V2MockAlert) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                V2SeverityDot(alert.severity.chipKind)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(alert.title)
+                        .font(V2Theme.sectionTitle())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .lineLimit(2)
+                    Text("\(alert.process) · \(alert.ruleId) · \(V2TimeFormat.relative(alert.timestamp))")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            HStack(spacing: 6) {
+                if let v = alert.llmVerdict {
+                    V2StatusChip(v.replacingOccurrences(of: "_", with: " "),
+                                 kind: verdictChipKind(v))
+                }
+                if let c = alert.llmConfidence {
+                    Text("\(Int(c * 100))% confidence")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+                Spacer()
+                if let m = alert.llmModel {
+                    Text(m)
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.tertiaryText)
+                }
+            }
+            if let summary = alert.llmSummary {
+                Text(summary)
+                    .font(V2Theme.body())
+                    .foregroundStyle(V2Theme.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if !alert.llmSuggestedActions.isEmpty {
+                Text("Suggested actions:")
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .padding(.top, 2)
+                ForEach(alert.llmSuggestedActions, id: \.self) { a in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "arrow.forward.circle.fill")
+                            .foregroundStyle(V2Theme.aiAccent)
+                            .scaledSystem(11)
+                            .padding(.top, 2)
+                        Text(a)
+                            .font(V2Theme.body())
+                            .foregroundStyle(V2Theme.primaryText)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                V2ActionButton("View alert", icon: "arrow.up.forward.square",
+                               style: .secondary, size: .compact) {
+                    state.goto(V2NavigationDestination(
+                        workspace: .alerts, tab: .alertsOpen, entityId: alert.id
+                    ))
+                }
+            }
+        }
+        .padding(14)
+        .v2Panel()
+    }
+
+    /// Map an LLM verdict raw value → chip colour (mirrors the Alerts
+    /// inspector's mapping for visual consistency).
+    private func verdictChipKind(_ v: String) -> V2ChipKind {
+        switch v {
+        case "true_positive":  return .high
+        case "benign":         return .healthy
+        case "needs_human":    return .warning
+        case "uncertain":      return .info
+        default:               return .neutral
+        }
     }
 
     // MARK: - Forensics moved banner (v1.17)

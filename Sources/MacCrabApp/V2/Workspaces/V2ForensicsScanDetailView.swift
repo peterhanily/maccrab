@@ -33,6 +33,19 @@ struct V2ForensicsScanDetailView: View {
     @State private var selectedContentType: String? = nil
     @State private var exportStatus: ExportStatus = .idle
     @State private var caseHandle: CaseHandle? = nil
+    // Content types whose on-demand load hit `perTypeLoadLimit` — the viewer is
+    // showing only a prefix of the true (sidebar) count for that type.
+    @State private var truncatedCTs: Set<String> = []
+    // True when the last export query hit `exportRowCap` (output may be partial).
+    @State private var exportTruncated = false
+
+    /// Per-content-type lazy load cap. Kept bounded (rc.15 memory design) — when
+    /// a type exceeds it the viewer surfaces a "showing first N" notice and
+    /// points the operator at Export for the complete set.
+    private let perTypeLoadLimit = 5000
+    /// Whole-scan / per-type export row cap. Large but finite so a runaway scan
+    /// can't exhaust memory during export; surfaced when reached.
+    private let exportRowCap = 50_000
 
     private enum ExportStatus: Equatable {
         case idle
@@ -110,12 +123,28 @@ struct V2ForensicsScanDetailView: View {
             Button {
                 Task { await exportNow(.csv) }
             } label: {
-                Label(String(localized: "scanDetail.exportAsCSV", defaultValue: "Export as CSV"), systemImage: "tablecells")
+                Label(String(localized: "scanDetail.exportAsCSV", defaultValue: "Export all as CSV"), systemImage: "tablecells")
             }
             Button {
                 Task { await exportNow(.json) }
             } label: {
-                Label(String(localized: "scanDetail.exportAsJSON", defaultValue: "Export as JSON"), systemImage: "curlybraces")
+                Label(String(localized: "scanDetail.exportAsJSON", defaultValue: "Export all as JSON"), systemImage: "curlybraces")
+            }
+            // Per-type export: just the content type the operator is viewing.
+            if let ct = selectedContentType ?? ctCounts.first?.contentType {
+                Divider()
+                Section(String(localized: "scanDetail.exportTypeSection", defaultValue: "This type: \(ScannerDisplay.name(forContentType: ct))")) {
+                    Button {
+                        Task { await exportNow(.csv, contentType: ct) }
+                    } label: {
+                        Label(String(localized: "scanDetail.exportTypeCSV", defaultValue: "Export this type as CSV"), systemImage: "tablecells")
+                    }
+                    Button {
+                        Task { await exportNow(.json, contentType: ct) }
+                    } label: {
+                        Label(String(localized: "scanDetail.exportTypeJSON", defaultValue: "Export this type as JSON"), systemImage: "curlybraces")
+                    }
+                }
             }
             if case .exported(let url) = exportStatus {
                 Divider()
@@ -166,10 +195,12 @@ struct V2ForensicsScanDetailView: View {
             }
         case .exported(let url):
             HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                Image(systemName: exportTruncated ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(exportTruncated ? .orange : .green)
                     .scaledSystem(11)
-                Text(String(localized: "scanDetail.savedTo", defaultValue: "Saved to ~/Downloads/\(url.lastPathComponent)"))
+                Text(exportTruncated
+                     ? String(localized: "scanDetail.savedToTruncated", defaultValue: "Saved to ~/Downloads/\(url.lastPathComponent) — capped at \(exportRowCap) rows, may be incomplete")
+                     : String(localized: "scanDetail.savedTo", defaultValue: "Saved to ~/Downloads/\(url.lastPathComponent)"))
                     .scaledSystem(10)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -263,14 +294,37 @@ struct V2ForensicsScanDetailView: View {
                 ProgressView(String(localized: "scanDetail.loadingContentType", defaultValue: "Loading \(ScannerDisplay.name(forContentType: ct))…"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ArtifactViewerDispatcher(
-                    contentType: ct,
-                    artifacts: selectedArtifacts,
-                    hint: hints[ct] ?? nil
-                )
-                .padding(8)
+                VStack(spacing: 0) {
+                    if truncatedCTs.contains(ct) {
+                        truncationBanner(for: ct)
+                    }
+                    ArtifactViewerDispatcher(
+                        contentType: ct,
+                        artifacts: selectedArtifacts,
+                        hint: hints[ct] ?? nil
+                    )
+                    .padding(8)
+                }
             }
         }
+    }
+
+    /// Shown above a viewer whose content type has more rows on disk than the
+    /// per-type load cap surfaced — the operator would otherwise trust an
+    /// incomplete view against a larger sidebar count.
+    private func truncationBanner(for ct: String) -> some View {
+        let trueCount = ctCounts.first(where: { $0.contentType == ct })?.count ?? 0
+        return HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .scaledSystem(10)
+            Text(String(localized: "scanDetail.truncatedType", defaultValue: "Showing up to the first \(perTypeLoadLimit) of \(trueCount) rows for this type — use Export for the complete set."))
+                .scaledSystem(10)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Color.orange.opacity(0.08))
     }
 
     // MARK: - Encrypted / empty
@@ -355,32 +409,40 @@ struct V2ForensicsScanDetailView: View {
             let rows = try await handle.store.query(ArtifactQuery(
                 caseID: scanID,
                 contentType: ct,
-                limit: 5000
+                limit: perTypeLoadLimit
             ))
+            // Raw count (pre-visibility-filter) hitting the cap means more rows
+            // exist on disk than we loaded for this type.
+            if rows.count >= perTypeLoadLimit { truncatedCTs.insert(ct) }
             loadedArtifacts[ct] = OperatorVisibilityFilter.filter(rows)
         } catch {
             loadedArtifacts[ct] = []
         }
     }
 
-    /// Export uses a fresh full-case load to guarantee complete
-    /// output (the lazy cache may only hold what the operator
-    /// happens to have visited).
-    private func exportNow(_ format: ArtifactExporter.Format) async {
+    /// Export uses a fresh full load (not the lazy cache) to guarantee complete
+    /// output. Pass `contentType` to export just that type; nil exports the
+    /// whole scan. The file name carries the type so per-type exports don't
+    /// collide with the whole-scan one.
+    private func exportNow(_ format: ArtifactExporter.Format, contentType: String? = nil) async {
         exportStatus = .exporting
+        exportTruncated = false
         guard let handle = caseHandle else {
             exportStatus = .failed(String(localized: "scanDetail.noOpenCaseHandle", defaultValue: "No open case handle."))
             return
         }
         do {
-            let rows = try await handle.store.query(ArtifactQuery(
-                caseID: scanID, limit: 50_000
-            ))
+            let query: ArtifactQuery = contentType.map {
+                ArtifactQuery(caseID: scanID, contentType: $0, limit: exportRowCap)
+            } ?? ArtifactQuery(caseID: scanID, limit: exportRowCap)
+            let rows = try await handle.store.query(query)
+            exportTruncated = rows.count >= exportRowCap
             let filtered = OperatorVisibilityFilter.filter(rows)
+            let name = contentType.map { "\(scanName) - \(ScannerDisplay.name(forContentType: $0))" } ?? scanName
             let url = try ArtifactExporter.export(
                 artifacts: filtered,
                 scanID: scanID,
-                scanName: scanName,
+                scanName: name,
                 format: format
             )
             exportStatus = .exported(url)

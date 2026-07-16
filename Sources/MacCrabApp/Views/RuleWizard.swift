@@ -17,6 +17,13 @@ struct RuleWizard: View {
     @State private var savedPath: String? = nil
     @State private var saving = false
     @State private var saveError: String? = nil
+    /// Deep-audit fix: generate the rule id ONCE for the lifetime of the
+    /// wizard. Pre-fix `toYAML()` defaulted its `id:` to a fresh UUID on
+    /// every call, so the preview pane, the "Copy YAML" clipboard, and the
+    /// actually-installed rule each carried a different id — a copied rule
+    /// never matched what was installed. Threading this single id through
+    /// PreviewStep and saveRule keeps all three in agreement.
+    @State private var ruleId = UUID().uuidString.lowercased()
 
     enum WizardStep: Int, CaseIterable {
         case metadata = 0
@@ -87,7 +94,7 @@ struct RuleWizard: View {
                     case .detection: DetectionStep(rule: $rule)
                     case .filters:   FiltersStep(rule: $rule)
                     case .options:   OptionsStep(rule: $rule)
-                    case .preview:   PreviewStep(rule: $rule, savedPath: $savedPath, saveError: $saveError)
+                    case .preview:   PreviewStep(rule: $rule, ruleId: ruleId, savedPath: $savedPath, saveError: $saveError)
                     }
                 }
                 .padding(24)
@@ -141,7 +148,11 @@ struct RuleWizard: View {
             }
             .padding(16)
         }
-        .frame(width: 700, height: 600)
+        // Deep-audit fix: was a FIXED 700×600 frame that fought its own sheet's
+        // minWidth 720 (the sheet couldn't shrink the wizard to 700, yet the
+        // wizard refused to grow for the wide YAML preview). Use minimums so the
+        // presenting sheet governs the floor and the wizard can grow.
+        .frame(minWidth: 720, minHeight: 600)
     }
 
     private var canAdvance: Bool {
@@ -161,7 +172,6 @@ struct RuleWizard: View {
     /// rules list and fires, instead of being written to ~/Downloads where
     /// nothing loads it.
     private func saveRule() {
-        let ruleId = UUID().uuidString.lowercased()
         let yaml = rule.toYAML(id: ruleId)
         saving = true
         saveError = nil
@@ -227,6 +237,20 @@ struct RuleDraft {
             tags.append(tid.hasPrefix("attack.") ? tid : "attack.\(tid)")
         }
 
+        // Deep-audit fix: only emit a references block when a technique id is
+        // present — an empty id previously produced ".../techniques//" — and
+        // map a sub-technique's dot to the slash MITRE uses in its URL path
+        // (T1059.004 → techniques/T1059/004/, not the 404-ing .../T1059.004/).
+        let referencesBlock: String = {
+            let raw = techniqueId
+                .uppercased()
+                .replacingOccurrences(of: "ATTACK.", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            guard !raw.isEmpty else { return "" }
+            let urlPath = raw.replacingOccurrences(of: ".", with: "/")
+            return "references:\n    - https://attack.mitre.org/techniques/\(urlPath)/"
+        }()
+
         var yaml = """
         title: \(title)
         id: \(id)
@@ -235,8 +259,7 @@ struct RuleDraft {
             \(description.isEmpty ? "Custom detection rule." : description)
         author: \(author)
         date: \(date)
-        references:
-            - https://attack.mitre.org/techniques/\(techniqueId.uppercased().replacingOccurrences(of: "ATTACK.", with: ""))/
+        \(referencesBlock)
         tags:
         \(tags.map { "    - \($0)" }.joined(separator: "\n"))
         logsource:
@@ -464,11 +487,11 @@ private struct DetectionStep: View {
 private struct FiltersStep: View {
     @Binding var rule: RuleDraft
 
-    let commonFilters: [(String, String, [String])] = [
-        ("SignerType", "equals", ["apple", "appStore", "devId"]),
-        ("SignerType", "equals", ["apple"]),
-        ("ParentImage", "endswith", ["/Terminal", "/iTerm2", "/login"]),
-    ]
+    // Deep-audit fix: removed the dead `commonFilters` array (never read —
+    // the "Quick add" buttons below hard-code their own filters). Added the
+    // same modifier set DetectionStep uses so a custom filter isn't stuck on
+    // an implicit "equals".
+    let modifiers = ["equals", "contains", "startswith", "endswith", "regex"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -481,6 +504,14 @@ private struct FiltersStep: View {
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.large)
                         .frame(width: 180)
+
+                    Picker("Modifier", selection: $filter.modifier) {
+                        ForEach(modifiers, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    .controlSize(.large)
+
                     TextField("Values (comma-separated)", text: Binding(
                         get: { filter.values.joined(separator: ", ") },
                         set: { filter.values = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
@@ -571,6 +602,9 @@ private struct SummaryRow: View {
 
 private struct PreviewStep: View {
     @Binding var rule: RuleDraft
+    /// The wizard's stable rule id — so the previewed YAML, the copied
+    /// YAML, and the installed rule all share one id (deep-audit fix).
+    let ruleId: String
     @Binding var savedPath: String?
     @Binding var saveError: String?
 
@@ -609,7 +643,7 @@ private struct PreviewStep: View {
                 .font(.caption).foregroundColor(.secondary)
 
             ScrollView {
-                Text(rule.toYAML())
+                Text(rule.toYAML(id: ruleId))
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -621,7 +655,7 @@ private struct PreviewStep: View {
             HStack {
                 Button {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(rule.toYAML(), forType: .string)
+                    NSPasteboard.general.setString(rule.toYAML(id: ruleId), forType: .string)
                 } label: {
                     Label("Copy YAML", systemImage: "doc.on.doc")
                 }

@@ -12,6 +12,18 @@ import ServiceManagement
 import Sparkle
 import os.log
 
+// MARK: - Settings tab identity
+
+/// Which Settings tab is shown. Backs the `TabView` selection binding and
+/// the deep-link bridge, so surfaces like Prevention → "Open Response
+/// Actions" can open a *specific* tab instead of whatever was last shown.
+/// Persisted (via @AppStorage) as a side effect so Settings re-opens on the
+/// last tab, which is the desired behaviour for a preferences window.
+public enum SettingsTab: String {
+    case general, appearance, notifications, forensics, daemon, responseActions, aiBackend, about
+    static let storageKey = "settings.selectedTab"
+}
+
 // MARK: - SettingsView
 
 struct SettingsView: View {
@@ -46,6 +58,11 @@ struct SettingsView: View {
     @AppStorage("enrich.packageFreshness") private var enrichPackageFreshness: Bool = false
     @AppStorage("enrich.certTransparency") private var enrichCertTransparency: Bool = false
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
+    /// Which tab the TabView shows. A shared @AppStorage key (not TabView's
+    /// internal state) so V2SettingsBridge can deep-link a specific tab: it
+    /// writes this key before opening the window, and an already-alive
+    /// Settings scene reacts and switches tabs.
+    @AppStorage(SettingsTab.storageKey) private var selectedSettingsTab: String = SettingsTab.general.rawValue
     // Launch at login is backed by macOS's ServiceManagement framework —
     // the @AppStorage value mirrors the registration state, so we can
     // present a SwiftUI-native Toggle while the actual login-item
@@ -161,30 +178,42 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        TabView {
+        // selection bound to the shared @AppStorage tab key so the
+        // Prevention → "Open Response Actions" deep-link (and any future
+        // deep-link) can target a specific tab instead of whatever was
+        // last shown. Tags are the SettingsTab raw values.
+        TabView(selection: $selectedSettingsTab) {
             generalTab
                 .tabItem { Label(String(localized: "settings.general", defaultValue: "General"), systemImage: "gear") }
+                .tag(SettingsTab.general.rawValue)
 
             appearanceTab
                 .tabItem { Label(String(localized: "settings.appearance", defaultValue: "Appearance"), systemImage: "eye") }
+                .tag(SettingsTab.appearance.rawValue)
 
             notificationsTab
                 .tabItem { Label(String(localized: "settings.notifications", defaultValue: "Notifications"), systemImage: "bell") }
+                .tag(SettingsTab.notifications.rawValue)
 
             forensicsTab
                 .tabItem { Label(String(localized: "settings.forensics", defaultValue: "Forensics"), systemImage: "doc.text.magnifyingglass") }
+                .tag(SettingsTab.forensics.rawValue)
 
             daemonTab
                 .tabItem { Label(String(localized: "settings.daemon", defaultValue: "Detection Engine"), systemImage: "server.rack") }
+                .tag(SettingsTab.daemon.rawValue)
 
             ResponseActionsView()
                 .tabItem { Label(String(localized: "settings.responseActions", defaultValue: "Response Actions"), systemImage: "bolt.shield") }
+                .tag(SettingsTab.responseActions.rawValue)
 
             llmTab
                 .tabItem { Label(String(localized: "settings.aiBackend", defaultValue: "AI Backend"), systemImage: "brain.head.profile") }
+                .tag(SettingsTab.aiBackend.rawValue)
 
             aboutTab
                 .tabItem { Label(String(localized: "settings.about", defaultValue: "About"), systemImage: "info.circle") }
+                .tag(SettingsTab.about.rawValue)
         }
         .padding(20)
         .frame(minWidth: 480, idealWidth: 520, maxWidth: 700, minHeight: 350, idealHeight: 500, maxHeight: 800)
@@ -361,7 +390,7 @@ struct SettingsView: View {
                                 step: 1
                             )
                         }
-                        Text(String(localized: "settings.pollHelp", defaultValue: "How often the app checks the detection engine's database for new events and alerts."))
+                        Text(String(localized: "settings.pollHelp", defaultValue: "How often the dashboard refreshes events, alerts, and status from the detection engine. The menu-bar icon and background alert notifications refresh on their own timers and are unaffected."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1012,6 +1041,14 @@ struct SettingsView: View {
                             // the newly-selected provider's Keychain slot.
                             .onChange(of: llmProvider) { _ in
                                 loadAPIKeyForProvider()
+                                // Reset the shared model field to the newly-
+                                // selected provider's default. One
+                                // @AppStorage("llm.model") backs all four cloud
+                                // providers, so without this the previous
+                                // provider's model (e.g. OpenAI's "gpt-4o")
+                                // bleeds into the new provider's config slot and
+                                // gets written to disk as, say, the Claude model.
+                                llmModel = defaultModel(for: llmProvider)
                                 syncLLMConfig()
                             }
 
@@ -1085,7 +1122,7 @@ struct SettingsView: View {
                 if llmEnabled {
                     GroupBox(String(localized: "settings.llmInfo", defaultValue: "How it works")) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(String(localized: "settings.llmInfoDesc", defaultValue: "The AI backend powers four features: natural language threat hunting, investigation summaries, detection rule generation, and defense recommendations."))
+                            Text(String(localized: "settings.llmInfoDesc", defaultValue: "The AI backend enhances analysis across alert triage, campaign investigation, behavioral and sequence analysis, natural-language threat hunting, defense recommendations, and report narratives. All output is advisory — nothing is ever auto-executed."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
@@ -1272,6 +1309,22 @@ struct SettingsView: View {
     }
 
     // MARK: - Keychain ↔ UI plumbing
+
+    /// Default model string for a cloud provider. Used to reset the shared
+    /// `llmModel` field when the provider changes so one provider's model
+    /// can't leak into another's config. Ollama has its own separate
+    /// `llmOllamaModel` field and returns "" here (llmModel is unused for it).
+    /// Keep these in sync with the per-provider `.isEmpty ? default` fallbacks
+    /// in `syncLLMConfig()` / `testLLMConnection()`.
+    private func defaultModel(for provider: String) -> String {
+        switch provider {
+        case "openai":  return "gpt-4o-mini"
+        case "claude":  return "claude-sonnet-4-6"
+        case "mistral": return "mistral-small-latest"
+        case "gemini":  return "gemini-2.0-flash"
+        default:        return ""
+        }
+    }
 
     /// Map the current provider string to its SecretsStore key.
     private func secretKeyForCurrentProvider() -> SecretKey? {
@@ -1588,14 +1641,15 @@ struct SettingsView: View {
             _ = try? FileManager.default.removeItem(atPath: path)
             try FileManager.default.moveItem(atPath: tmp, toPath: path)
         } catch { return }
-        // SIGHUP the sysext so the new config takes effect on the next
-        // notification. Best-effort — same pattern as syncWebhookConfig.
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "com.maccrab.agent"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        try? task.run()
+        // Ask the engine to re-read live. The old bare `pkill -HUP
+        // com.maccrab.agent` here was EPERM cross-uid against the root
+        // sysext (and hardened-runtime-blocked), so notification-config
+        // edits never took effect on release until an unrelated inbox
+        // reload happened to fire. reloadDetectionRules() drops a
+        // reload-rules request into the privileged inbox; the sysext
+        // raises SIGHUP to itself, which re-reads the alert-notification
+        // config alongside the rules. (Matches syncStorageOverrides.)
+        _ = V2DaemonControl.reloadDetectionRules()
     }
 
     /// v1.6.19: write the four webhook URLs + the minimum severity to
@@ -1645,14 +1699,14 @@ struct SettingsView: View {
             return
         }
 
-        // SIGHUP the sysext so NotificationIntegrations.reloadConfig
-        // picks up the new file. Best-effort.
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "com.maccrab.agent"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        try? task.run()
+        // Ask the engine to re-read live via the privileged inbox so
+        // NotificationIntegrations.reloadConfig picks up the new file. The
+        // old bare `pkill -HUP com.maccrab.agent` was EPERM cross-uid
+        // against the root sysext, so a pasted Slack/Teams/Discord webhook
+        // never actually POSTed until the daemon restarted. The inbox
+        // reload-rules request makes the sysext SIGHUP itself, which runs
+        // the same config-reload handler. (Matches syncStorageOverrides.)
+        _ = V2DaemonControl.reloadDetectionRules()
     }
 
     // MARK: - About
@@ -1994,7 +2048,12 @@ struct SettingsView: View {
         }
 
         if let legacyCap = defaults.object(forKey: "maxDatabaseSizeMB") as? Int {
-            if eventsMaxSizeMB == 200 {
+            // Only migrate when the new key has NEVER been set by the user.
+            // The old guard compared against a hard-coded 200 sentinel, but
+            // the default moved to 350 (v1.19.0), so a fresh install sits at
+            // 350 and the legacy value was silently dropped. Gate on absence
+            // of the key instead of a magic-number default.
+            if defaults.object(forKey: "storage.eventsMaxSizeMB") == nil {
                 eventsMaxSizeMB = max(100, min(legacyCap, 2000))
             }
         }

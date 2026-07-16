@@ -28,9 +28,15 @@ struct V2PreventionWorkspace: View {
             .padding(16)
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick)") {
-            // Pull a wider alert window so the prevention log isn't
-            // empty just because few alerts fired in the last hour.
-            let recent = await state.provider.alerts(limit: 200)
+            // In live mode the provider's toV2Alert hardcodes
+            // actionsTaken: [] (see responseHistoryUnavailable), so the
+            // 200-alert window would be fetched every tick only to filter
+            // down to nothing and never render. Skip it there and fetch
+            // just the heartbeat. Mock/offline previews DO carry sample
+            // actionsTaken, so keep the wider fetch for them.
+            let recent = responseHistoryUnavailable
+                ? []
+                : await state.provider.alerts(limit: 200)
             let h = await state.provider.heartbeat()
             await MainActor.run {
                 self.preventionAlerts = recent.filter { !$0.actionsTaken.isEmpty }
@@ -161,24 +167,29 @@ struct V2PreventionWorkspace: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 6) {
                 Text(String(localized: "prevention.configureTitle", defaultValue: "Configure prevention")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-                Text(String(localized: "prevention.configureBody", defaultValue: "Per-rule response actions (kill, block, sinkhole, quarantine, deny-allowlist) live in `actions.json` under the data dir. Edit them from Settings → Response Actions; the daemon picks up changes on the next SIGHUP (or restart)."))
+                Text(String(localized: "prevention.configureBody", defaultValue: "Per-rule response actions (kill, quarantine, block network, notify, escalate, run script, log) live in `actions.json` under the data dir. Edit them from Settings → Response Actions; the daemon picks up changes on the next SIGHUP (or restart). DNS sinkholing and the network allow/deny blocker are module-level prevention, not per-rule actions."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 Text(String(localized: "prevention.ruleDriven", defaultValue: "Response actions are rule-driven: each one fires automatically when its detection rule matches. They are not triggered manually from this screen."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 HStack(spacing: 8) {
                     V2ActionButton(String(localized: "prevention.openResponseActions", defaultValue: "Open Response Actions"), icon: "gearshape", style: .primary) {
-                        V2SettingsBridge.openSettings()
+                        // Deep-link straight to the Response Actions tab —
+                        // openSettings() alone lands on whatever tab was last
+                        // shown, which is not what this button promises.
+                        V2SettingsBridge.openSettings(selectingTab: .responseActions)
                     }
                     V2ActionButton(String(localized: "prevention.triggerSighup", defaultValue: "Trigger SIGHUP"), icon: "arrow.clockwise", style: .secondary,
-                                   tooltip: String(localized: "prevention.triggerSighupTooltip", defaultValue: "Reload rules + refresh threat intel feeds")) {
+                                   tooltip: String(localized: "prevention.triggerSighupTooltip", defaultValue: "Reload rules (threat-intel refresh runs only when feeds are enabled)")) {
                         Task {
-                            // C3: deliver a REAL SIGHUP. The daemon's handler reloads
-                            // the single/sequence/graph rulesets AND fires a one-shot
-                            // threat-intel refresh, so the "Reload rules + refresh
-                            // threat intel feeds" label is now accurate. The old call
-                            // (refreshThreatIntel) only did the intel half and never
-                            // reloaded rules. Detached so the file-IPC write + pkill
-                            // fallback never beachball the main thread.
+                            // C3: deliver a REAL SIGHUP. The daemon's handler always
+                            // reloads the single/sequence/graph rulesets; it ALSO fires
+                            // a one-shot threat-intel refresh, but only when the
+                            // threat-intel feeds are enabled (egress is opt-in). The
+                            // tooltip/toast are worded to reflect that conditional half
+                            // rather than promising a refresh unconditionally. The old
+                            // call (refreshThreatIntel) only did the intel half and
+                            // never reloaded rules. Detached so the file-IPC write +
+                            // pkill fallback never beachball the main thread.
                             let ok = await Task.detached(priority: .userInitiated) {
                                 V2DaemonControl.reloadDetectionRules()
                             }.value
@@ -186,7 +197,7 @@ struct V2PreventionWorkspace: View {
                                 state.showToast(V2Toast(
                                     kind: ok ? .info : .error,
                                     title: ok ? String(localized: "prevention.toastSighupSignaled", defaultValue: "SIGHUP signaled") : String(localized: "prevention.toastSignalFailed", defaultValue: "Signal failed"),
-                                    detail: ok ? String(localized: "prevention.toastReloading", defaultValue: "Rules + feeds reloading")
+                                    detail: ok ? String(localized: "prevention.toastReloading", defaultValue: "Rules reloading — threat-intel refresh runs only if feeds are enabled")
                                               : String(localized: "prevention.toastNoDaemon", defaultValue: "no daemon to signal")
                                 ))
                             }

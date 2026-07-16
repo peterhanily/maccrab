@@ -26,18 +26,28 @@ struct V2ForensicsFindingsView: View {
     @State private var skippedScanCount = 0
     @State private var scannerFilter: String = "all"
     @State private var severityFilter: FindingSeverity? = nil
+    // True when the load hit the 20-scan / 200-findings-per-scan display cap, so
+    // the "shown" count and severity chips undercount the true on-disk total.
+    @State private var countCapped = false
     @State private var copiedFindingID: Int64? = nil
+    // Persisted backing store. Parsed once into `seenIDs` (loaded on refresh);
+    // the raw string is only rewritten when the set actually changes — never
+    // re-parsed per row per render.
     @AppStorage("forensics.seenFindingIDs") private var seenIDsRaw: String = ""
+    @State private var seenIDs: Set<Int64> = []
 
-    private var seenIDs: Set<String> {
-        get { Set(seenIDsRaw.split(separator: ",").map(String.init)) }
+    private func loadSeenIDs() {
+        seenIDs = Set(seenIDsRaw.split(separator: ",").compactMap { Int64($0) })
+    }
+    private func persistSeenIDs() {
+        seenIDsRaw = seenIDs.sorted().map(String.init).joined(separator: ",")
     }
     private func markSeen(_ id: Int64) {
-        var s = seenIDs
-        s.insert(String(id))
-        seenIDsRaw = s.sorted().joined(separator: ",")
+        guard !seenIDs.contains(id) else { return }
+        seenIDs.insert(id)
+        persistSeenIDs()
     }
-    private func isSeen(_ id: Int64) -> Bool { seenIDs.contains(String(id)) }
+    private func isSeen(_ id: Int64) -> Bool { seenIDs.contains(id) }
 
     /// All distinct scanners across groups, for the filter chip row.
     private var allScanners: [String] {
@@ -90,6 +100,9 @@ struct V2ForensicsFindingsView: View {
                     ForEach(filteredGroups, id: \.scanID) { g in
                         scanGroupCard(g)
                     }
+                    if countCapped {
+                        countCappedFootnote
+                    }
                     if skippedScanCount > 0 {
                         skippedFootnote
                     }
@@ -113,7 +126,10 @@ struct V2ForensicsFindingsView: View {
             }
             Spacer()
             if !groups.isEmpty {
-                Text(String(localized: "findings.totalCount", defaultValue: "\(totalCount) total"))
+                // "shown", not "total": the feed is capped at the 20 most recent
+                // scans × 200 findings each, so this is a display count, not a
+                // true total (see countCappedFootnote).
+                Text(String(localized: "findings.shownCount", defaultValue: "\(totalCount) shown"))
                     .scaledSystem(11)
                     .foregroundStyle(.tertiary)
             }
@@ -169,6 +185,21 @@ struct V2ForensicsFindingsView: View {
                 .scaledSystem(10)
                 .foregroundStyle(.orange)
             Text(String(localized: "findings.skippedNote", defaultValue: "\(skippedScanCount) scan\(skippedScanCount == 1 ? "" : "s") couldn't be read and were skipped. Open them from the Scans tab to see why."))
+                .scaledSystem(10)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// Shown when the feed hit its display cap (20 most-recent scans, 200
+    /// findings each). Makes the "shown" count honest about undercounting and
+    /// points to the per-scan detail for the complete set.
+    private var countCappedFootnote: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .scaledSystem(10)
+                .foregroundStyle(.secondary)
+            Text(String(localized: "findings.cappedNote", defaultValue: "Showing the 20 most recent scans (up to 200 findings each). Older scans and any overflow aren't counted here — open a scan for its full detail."))
                 .scaledSystem(10)
                 .foregroundStyle(.secondary)
         }
@@ -325,9 +356,18 @@ struct V2ForensicsFindingsView: View {
         }
     }
 
+    /// Findings scoped by the active scanner filter only (NOT the severity
+    /// filter — the severity chips are themselves the severity selector, so they
+    /// must show every severity's count). Keeps the chips in agreement with the
+    /// scanner-filtered list below them.
+    private var scannerScopedFindings: [CommittedArtifact] {
+        groups.flatMap { g in
+            g.findings.filter { scannerFilter == "all" || $0.record.pluginID == scannerFilter }
+        }
+    }
+
     private var severitySummaryCard: some View {
-        let allFindings = groups.flatMap { $0.findings }
-        let t = FindingHeuristics.tally(allFindings)
+        let t = FindingHeuristics.tally(scannerScopedFindings)
         return HStack(spacing: 16) {
             severityChip(String(localized: "findings.sevCritical", defaultValue: "Critical"), t.critical, .red, value: .critical)
             severityChip(String(localized: "findings.sevNeedsReview", defaultValue: "Needs review"), t.attention, .orange, value: .attention)
@@ -388,8 +428,12 @@ struct V2ForensicsFindingsView: View {
 
     private func reload() async {
         loading = true
+        loadSeenIDs()
         var collected: [ScanGroup] = []
         var skipped = 0
+        var capped = false
+        let scanCap = 20
+        let perScanCap = 200
         do {
             let mgr = CaseManager(
                 casesRoot: CaseDirectoryLayout.defaultCasesRoot,
@@ -398,9 +442,11 @@ struct V2ForensicsFindingsView: View {
             let scans = OperatorVisibilityFilter.filter(
                 try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
             )
+            // More scans exist than we load into this passive feed.
+            if scans.count > scanCap { capped = true }
             // Plaintext scans only — encrypted scans require an
             // explicit Unlock action via Scans → View.
-            for scan in scans.prefix(20) where scan.encryptionState == .plaintext {
+            for scan in scans.prefix(scanCap) where scan.encryptionState == .plaintext {
                 // Per-scan do/catch: one corrupt/locked evidence DB used to
                 // jump to the outer catch and blank every group (and abort the
                 // remaining scans). Skip the bad scan and keep going instead.
@@ -408,8 +454,11 @@ struct V2ForensicsFindingsView: View {
                     let handle = try await mgr.openCase(id: scan.id)
                     let rows = try await handle.store.query(ArtifactQuery(
                         caseID: scan.id,
-                        limit: 200
+                        limit: perScanCap
                     ))
+                    // Hitting the per-scan row limit means this scan has more
+                    // findings than we show.
+                    if rows.count >= perScanCap { capped = true }
                     let filtered = OperatorVisibilityFilter.filter(rows)
                     if !filtered.isEmpty {
                         collected.append(ScanGroup(
@@ -433,6 +482,22 @@ struct V2ForensicsFindingsView: View {
         }
         groups = collected
         skippedScanCount = skipped
+        countCapped = capped
+        pruneSeenIDs(against: collected)
         loading = false
+    }
+
+    /// Drop seen-ids that are no longer present in the loaded feed so the
+    /// persisted string can't grow without bound as scans are deleted or age
+    /// out of the window. Only prunes when the load succeeded (non-empty), to
+    /// avoid wiping the set on a transient read error.
+    private func pruneSeenIDs(against loaded: [ScanGroup]) {
+        guard loadError == nil, !loaded.isEmpty else { return }
+        let live = Set(loaded.flatMap { $0.findings.map { $0.id } })
+        let kept = seenIDs.intersection(live)
+        if kept != seenIDs {
+            seenIDs = kept
+            persistSeenIDs()
+        }
     }
 }

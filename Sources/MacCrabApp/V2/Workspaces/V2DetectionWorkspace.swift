@@ -62,6 +62,7 @@ public struct V2DetectionWorkspace: View {
     @State private var extensions: [V2MockExtension] = []
     @State private var selectedExtension: V2MockExtension? = nil
     @State private var mcpServers: [V2MockMCP] = []
+    @State private var selectedMCP: V2MockMCP? = nil
     @State private var agentSessions: [V2AgentSession] = []
     /// v1.12.0: in-app YAML viewer sheet. Replaces the v1.11.x
     /// external-editor opener which exposed the read-only bundled
@@ -678,6 +679,17 @@ public struct V2DetectionWorkspace: View {
                     .foregroundStyle(V2Theme.mutedText).scaledSystem(12)
                 TextField("Filter rules (id, MITRE, category)…", text: ruleQuery)
                     .textFieldStyle(.plain).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                // Clear (X) button — matches V2DataTable.filterField so the rule
+                // search box behaves like every other filter field in the app.
+                if !state.ruleSearchQuery.isEmpty {
+                    Button { state.ruleSearchQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(V2Theme.mutedText).scaledSystem(12)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear filter")
+                    .accessibilityLabel("Clear rule filter")
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(V2Theme.panelBackground)
@@ -885,16 +897,16 @@ public struct V2DetectionWorkspace: View {
                 Text(r.description).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            V2InspectorSection(String(localized: "inspector.logic", defaultValue: "Logic")) {
-                Text(mockYAML(for: r))
-                    .font(V2Theme.mono())
-                    .foregroundStyle(V2Theme.neutral)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(V2Theme.sidebarBackground.opacity(0.6))
-                    .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
-                    .textSelection(.enabled)
-            }
+            // Deep-audit fix: the old inline "Logic" section rendered a
+            // FABRICATED Sigma snippet (mockYAML: ProcessName|contains +
+            // FileAction: write) for every rule regardless of its real
+            // predicate — a network/C2 rule looked like a file-write rule,
+            // misleading operators into disabling the wrong rules. The real
+            // logic is one click away via "View YAML" (single-event Sigma,
+            // sequence + graph rules), so the synthesized section is removed
+            // rather than left lying. Built-in maccrab.* rules are programmatic
+            // engines with no Sigma logic to show; their "Built-in settings"
+            // section already states the logic isn't editable.
             V2InspectorSection(String(localized: "inspector.mitre", defaultValue: "MITRE")) {
                 ForEach(r.mitre, id: \.self) { code in
                     HStack(spacing: 6) {
@@ -1056,20 +1068,6 @@ public struct V2DetectionWorkspace: View {
         }
     }
 
-    private func mockYAML(for r: V2MockRule) -> String {
-        """
-        title: \(r.title)
-        id: \(r.id)
-        level: \(r.severity.rawValue)
-        tags:\n  - \(r.mitre.joined(separator: "\n  - "))
-        detection:
-          selection:
-            ProcessName|contains: \(r.id.split(separator: "_").last ?? "—")
-            FileAction: write
-          condition: selection
-        """
-    }
-
     // MARK: - AI Guard
 
     private var aiGuardTab: some View {
@@ -1201,14 +1199,77 @@ public struct V2DetectionWorkspace: View {
                                 V2ActionButton("Export signed", icon: "square.and.arrow.up", style: .secondary, size: .compact,
                                                tooltip: "Export a Merkle-rooted, ECDSA-P256-signed .maccrabsession bundle (events + alerts) for this session.") {
                                     let sessionID = s.id
+                                    // Deep-audit fix: capture the CLI's exit status + stdout so the
+                                    // export reports success/failure and reveals the output bundle.
+                                    // Pre-fix `try? p.run()` swallowed a missing CLI and a non-zero
+                                    // exit, and the detached task gave no feedback at all — the
+                                    // operator couldn't tell whether the signed bundle was written.
                                     Task.detached(priority: .userInitiated) {
                                         guard let ctl = Bundle.main.url(forResource: "maccrabctl", withExtension: nil, subdirectory: "bin")
-                                            ?? Bundle.main.url(forResource: "maccrabctl", withExtension: nil) else { return }
+                                            ?? Bundle.main.url(forResource: "maccrabctl", withExtension: nil) else {
+                                            await MainActor.run {
+                                                state.showToast(V2Toast(
+                                                    kind: .error,
+                                                    title: "Export unavailable",
+                                                    detail: "The bundled maccrabctl CLI wasn't found in the app."
+                                                ))
+                                            }
+                                            return
+                                        }
                                         let p = Process()
                                         p.executableURL = ctl
                                         p.arguments = ["session", "export", sessionID]
-                                        try? p.run()
+                                        let outPipe = Pipe()
+                                        p.standardOutput = outPipe
+                                        p.standardError = outPipe
+                                        do {
+                                            try p.run()
+                                        } catch {
+                                            let message = error.localizedDescription
+                                            await MainActor.run {
+                                                state.showToast(V2Toast(
+                                                    kind: .error,
+                                                    title: "Export failed to start",
+                                                    detail: message
+                                                ))
+                                            }
+                                            return
+                                        }
+                                        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
                                         p.waitUntilExit()
+                                        let output = String(data: data, encoding: .utf8) ?? ""
+                                        let ok = p.terminationStatus == 0
+                                        // maccrabctl prints "  Path:        <bundle>" on success.
+                                        let bundlePath = output
+                                            .split(separator: "\n")
+                                            .first { $0.contains("Path:") }
+                                            .map { $0.replacingOccurrences(of: "Path:", with: "")
+                                                     .trimmingCharacters(in: .whitespaces) }
+                                        let status = p.terminationStatus
+                                        await MainActor.run {
+                                            if ok, let bundlePath, !bundlePath.isEmpty {
+                                                state.showToast(V2Toast(
+                                                    kind: .success,
+                                                    title: "Session exported",
+                                                    detail: "Signed bundle written — revealing in Finder."
+                                                ))
+                                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: bundlePath)])
+                                            } else if ok {
+                                                state.showToast(V2Toast(
+                                                    kind: .success,
+                                                    title: "Session exported",
+                                                    detail: "Signed bundle written to the session_bundles folder."
+                                                ))
+                                            } else {
+                                                state.showToast(V2Toast(
+                                                    kind: .error,
+                                                    title: "Export failed",
+                                                    detail: output.isEmpty
+                                                        ? "maccrabctl exited with status \(status)."
+                                                        : String(output.prefix(300))
+                                                ))
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1228,7 +1289,7 @@ public struct V2DetectionWorkspace: View {
     private var browserTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and the manifest path.")
+                Text("Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown.")
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 browserSummaryRow
                 HStack(alignment: .top, spacing: 0) {
@@ -1312,9 +1373,11 @@ public struct V2DetectionWorkspace: View {
     }
 
     /// Inspector for a selected extension. Surfaces the full
-    /// permissions list, manifest version, dev-mode flag, dangerous-
-    /// permissions sub-list, and the on-disk path with a Reveal-in-
-    /// Finder button.
+    /// permissions list, manifest version, dev-mode flag, and a
+    /// dangerous-permissions-weighted risk-score breakdown.
+    /// (The on-disk manifest path isn't carried on V2MockExtension yet —
+    /// surfacing it needs a `path` field on the model + provider; see the
+    /// deep-audit residual note.)
     @ViewBuilder
     private func extensionInspector(_ ext: V2MockExtension) -> some View {
         V2Inspector(
@@ -1412,35 +1475,96 @@ public struct V2DetectionWorkspace: View {
     private var mcpTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("MCP servers reachable from this device. Tool inflation and unsigned new servers raise trust scores.")
+                // Deep-audit fix: the old copy claimed "tool inflation and
+                // unsigned new servers raise trust scores" — a scoring model
+                // that isn't implemented (trust is a simple heuristic:
+                // /tmp-launched servers are flagged, everything else is Known).
+                // Describe what's actually shown instead of promising a feature.
+                Text("MCP servers configured for the AI coding tools on this device (Claude Code, Cursor, Continue, VS Code, Windsurf). A server launched from a temp directory is flagged for review; click a row for details.")
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
-                V2DataTable(
-                    columns: [
-                        V2DataColumn(id: "name", title: "Server", width: .flexible(min: 180)) { m in
-                            V2TableCellText(m.name)
-                        },
-                        V2DataColumn(id: "host", title: "Host", width: .fixed(140)) { m in
-                            V2TableCellText(m.host, mono: true)
-                        },
-                        V2DataColumn(id: "tools", title: "Tools", width: .fixed(80)) { m in
-                            V2TableCellText("\(m.toolCount)", mono: true)
-                        },
-                        V2DataColumn(id: "known", title: "Known to", width: .flexible(min: 160)) { m in
-                            V2TableCellText(m.knownTo.joined(separator: " · "), primary: false)
-                        },
-                        V2DataColumn(id: "trust", title: "Trust", width: .fixed(120)) { m in
-                            V2StatusChip(m.trust.label, kind: m.trust.chipKind)
-                        },
-                        V2DataColumn(id: "used", title: "Last used", width: .fixed(110)) { m in
-                            V2TableCellText(V2TimeFormat.relative(m.lastUsed), primary: false)
-                        },
-                    ],
-                    items: mcpServers,
-                    selection: .constant(nil)
-                )
-                .frame(minHeight: 280)
+                HStack(alignment: .top, spacing: 0) {
+                    // Deep-audit fix: every column is now click-to-sort (sortKey),
+                    // the table has a filter box (searchPrompt), and rows are
+                    // selectable into an inspector — pre-fix this was a read-only
+                    // dead end (selection: .constant(nil), no sort, no filter).
+                    V2DataTable(
+                        columns: [
+                            V2DataColumn(id: "name", title: "Server", width: .flexible(min: 180),
+                                         sortKey: { .text($0.name) }) { m in
+                                V2TableCellText(m.name)
+                            },
+                            V2DataColumn(id: "host", title: "Host", width: .fixed(140),
+                                         sortKey: { .text($0.host) }) { m in
+                                V2TableCellText(m.host, mono: true)
+                            },
+                            V2DataColumn(id: "tools", title: "Tools", width: .fixed(80),
+                                         sortKey: { .number(Double($0.toolCount)) }) { m in
+                                V2TableCellText("\(m.toolCount)", mono: true)
+                            },
+                            V2DataColumn(id: "known", title: "Known to", width: .flexible(min: 160),
+                                         sortKey: { .text($0.knownTo.joined(separator: " · ")) }) { m in
+                                V2TableCellText(m.knownTo.joined(separator: " · "), primary: false)
+                            },
+                            V2DataColumn(id: "trust", title: "Trust", width: .fixed(120),
+                                         sortKey: { .text($0.trust.label) }) { m in
+                                V2StatusChip(m.trust.label, kind: m.trust.chipKind)
+                            },
+                            V2DataColumn(id: "used", title: "Last used", width: .fixed(110),
+                                         sortKey: { .date($0.lastUsed) }) { m in
+                                V2TableCellText(V2TimeFormat.relative(m.lastUsed), primary: false)
+                            },
+                        ],
+                        items: mcpServers,
+                        selection: $selectedMCP,
+                        searchPrompt: "Filter MCP servers…"
+                    )
+                    .frame(minHeight: 280, maxHeight: .infinity)
+                    if let mcp = selectedMCP {
+                        mcpInspector(mcp)
+                    }
+                }
             }
             .padding(16)
+        }
+    }
+
+    /// Inspector for a selected MCP server. Surfaces the fields the
+    /// discovery scan actually carries: which AI tools reference it, its
+    /// trust classification, and when its config was last touched.
+    /// (Command / args / config-file path and a real tool count aren't on
+    /// V2MockMCP yet — the provider synthesizes `host: "localhost"` and a
+    /// `toolCount` proxy; surfacing the real launch command + a Reveal-in-
+    /// Finder for the config file needs those fields on the model + provider.
+    /// See the deep-audit residual note.)
+    @ViewBuilder
+    private func mcpInspector(_ mcp: V2MockMCP) -> some View {
+        V2Inspector(
+            title: mcp.name,
+            subtitle: mcp.host,
+            onClose: { selectedMCP = nil }
+        ) {
+            HStack(spacing: 8) {
+                V2StatusChip(mcp.trust.label, kind: mcp.trust.chipKind)
+            }
+            V2InspectorSection(String(localized: "inspector.referencedBy", defaultValue: "Referenced by")) {
+                if mcp.knownTo.isEmpty {
+                    Text("No AI tool config references this server.")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                } else {
+                    ForEach(mcp.knownTo, id: \.self) { tool in
+                        HStack(spacing: 6) {
+                            Image(systemName: "app.badge.checkmark").scaledSystem(11)
+                                .foregroundStyle(V2Theme.mutedText)
+                            Text(tool).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                        }
+                    }
+                }
+            }
+            V2InspectorSection(String(localized: "inspector.details", defaultValue: "Details")) {
+                V2InspectorKeyValue("Host", mcp.host, mono: true)
+                V2InspectorKeyValue("Tools (approx)", "\(mcp.toolCount)")
+                V2InspectorKeyValue("Config last modified", V2TimeFormat.relative(mcp.lastUsed))
+            }
         }
     }
 
@@ -1550,11 +1674,10 @@ private struct RuleYAMLEditorSheet: View {
     @State private var content: String = ""
     @State private var sourcePath: String = ""
     @State private var saving: Bool = false
-    @State private var validating: Bool = false
-    /// Most recent compile error, surfaced inline so the user can fix
-    /// YAML / Sigma mistakes without dismissing the editor. Cleared on
-    /// successful Validate or Save.
-    @State private var lastError: String = ""
+    // Deep-audit fix: removed dead `validating` + `lastError` @State — they
+    // were never set or displayed (an inline-validate footer was scaffolded
+    // but never wired). Save already surfaces compile errors via the
+    // `onError` callback → an error toast, so nothing is lost by dropping them.
     /// v1.12.0 RC27 audit fix (UX-B1): track the original content
     /// loaded at task time so Cancel can warn before discarding edits.
     @State private var originalContent: String = ""

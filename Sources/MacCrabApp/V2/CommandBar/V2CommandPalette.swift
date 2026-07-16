@@ -4,7 +4,7 @@
 // Phase 3 features:
 //   - Keyboard navigation (up/down/enter) via hidden shortcuts
 //   - Recent items at the top when query is empty
-//   - Saved views section
+//   - Doc-article rows (searchable Docs, deep-linked into the Docs workspace)
 //   - Entity prefix lookup: alert:<id>, rule:<id>, ip:<addr>, trace:<id>
 //   - Verbs always shown
 //   - Deep-link rows
@@ -246,6 +246,17 @@ public struct V2CommandPalette: View {
     }
 
     private func apply(_ item: V2PaletteItem) {
+        // The "Open Settings" verb opens the real (v1) Settings window —
+        // the same thing ⌘, does (V2DashboardShell). Its destination points
+        // at the preview-only System › Settings tab, so navigating there
+        // instead of opening the window contradicted the advertised ⌘,
+        // shortcut. Intercept it here so the palette row and the shortcut do
+        // the same thing.
+        if item.id == "verb:settings" {
+            state.paletteOpen = false
+            V2SettingsBridge.openSettings()
+            return
+        }
         state.goto(item.destination)
     }
 
@@ -275,12 +286,14 @@ public struct V2CommandPalette: View {
         let workspace = filter(V2PaletteItem.workspaceItems(), q: qLower)
         let tabs      = filter(V2PaletteItem.tabItems(),       q: qLower)
         let verbs     = filter(V2PaletteItem.verbItems(),      q: qLower)
+        let docs      = filter(V2PaletteItem.docItems(),       q: qLower)
         let recents   = filter(state.recentDestinations.map(V2PaletteItem.fromDestination), q: qLower)
 
         if !recents.isEmpty   { sections.append(V2PaletteSection(title: "Recent",     items: recents)) }
         if !workspace.isEmpty { sections.append(V2PaletteSection(title: "Workspaces", items: workspace)) }
         if !tabs.isEmpty      { sections.append(V2PaletteSection(title: "Tabs",       items: tabs)) }
         if !verbs.isEmpty     { sections.append(V2PaletteSection(title: "Actions",    items: verbs)) }
+        if !docs.isEmpty      { sections.append(V2PaletteSection(title: "Docs",       items: docs)) }
         return sections
     }
 
@@ -427,13 +440,12 @@ public struct V2PaletteItem: Identifiable, Equatable {
     public let category: Category
     public let destination: V2NavigationDestination
 
-    public enum Category: String { case workspace, tab, verb, savedView, doc, entity, recent
+    public enum Category: String { case workspace, tab, verb, doc, entity, recent
         var label: String {
             switch self {
             case .workspace: return "workspace"
             case .tab:       return "tab"
             case .verb:      return "action"
-            case .savedView: return "saved"
             case .doc:       return "doc"
             case .entity:    return "entity"
             case .recent:    return "recent"
@@ -521,6 +533,27 @@ public struct V2PaletteItem: Identifiable, Equatable {
                 destination: V2NavigationDestination(workspace: .system, tab: .systemPermissions)
             ),
         ]
+    }
+
+    /// Doc-article rows. Each deep-links into the Docs workspace with the
+    /// article slug as the entity id (V2DocsWorkspace resolves it to the
+    /// selected article), so Docs is searchable from the palette and the
+    /// previously-dead `.doc` category is now used.
+    public static func docItems() -> [V2PaletteItem] {
+        V2DocEntry.allCases.map { entry in
+            V2PaletteItem(
+                id: "doc:\(entry.rawValue)",
+                title: "Docs › \(entry.title)",
+                subtitle: entry.subtitle,
+                icon: entry.icon,
+                shortcut: nil,
+                keywords: ["docs", "help", "reference", entry.title],
+                category: .doc,
+                destination: V2NavigationDestination(
+                    workspace: .docs, entityId: entry.rawValue
+                )
+            )
+        }
     }
 
     public static func fromDestination(_ dest: V2NavigationDestination) -> V2PaletteItem {

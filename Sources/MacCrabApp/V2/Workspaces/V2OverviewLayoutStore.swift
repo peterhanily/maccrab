@@ -68,9 +68,6 @@ enum V2OverviewWidget: String, CaseIterable {
         }
     }
 
-    /// True for the fixed-height KPI tiles (so the grid can normalise their height).
-    var isKPITile: Bool { allowedSpans == [1, 2] }
-
     /// Nearest allowed span to `n` (used when migrating a persisted span that is
     /// no longer valid, e.g. after the allowed set changes).
     func clampSpan(_ n: Int) -> Int {

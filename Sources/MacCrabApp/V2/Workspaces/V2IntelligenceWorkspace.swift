@@ -38,6 +38,9 @@ public struct V2IntelligenceWorkspace: View {
     /// IOC-matches table. Loaded from the alert store via the provider
     /// on every workspace tick.
     @State private var matches: [V2MockAlert] = []
+    /// Selected IOC-match row — drives the drill-in inspector so a match
+    /// is no longer a triage dead-end (was a non-selectable table).
+    @State private var selectedMatch: V2MockAlert? = nil
 
     public init(state: V2DashboardState) { self.state = state }
 
@@ -106,7 +109,13 @@ public struct V2IntelligenceWorkspace: View {
             // IOC matches: alerts whose ruleId carries the
             // `maccrab.threat-intel.` prefix part A writes them under.
             // Reuses the provider's existing off-MainActor decode path.
-            let allAlerts = await state.provider.alerts(limit: 200)
+            // Fetch-then-filter: the provider has no ruleId-prefix query, so
+            // pull a wide window (7d, capped) and filter client-side. The cap
+            // is 1000 (was 200) so busy hosts with lots of non-match alerts in
+            // the 7-day window don't truncate the threat-intel hits out of the
+            // fetch and falsely read "none in window". A dedicated server-side
+            // matches query (provider) would remove the cap dependency entirely.
+            let allAlerts = await state.provider.alerts(limit: 1000)
             let matchRows = allAlerts.filter { $0.ruleId.hasPrefix(Self.iocMatchRulePrefix) || $0.ruleId == "maccrab.dns.threat-intel-match" }
             await MainActor.run { self.matches = matchRows }
 
@@ -127,11 +136,19 @@ public struct V2IntelligenceWorkspace: View {
                 async let i = state.provider.integrations()
                 let (pkgsResult, integResult) = await (p, i)
                 await MainActor.run {
-                    // Only seed packages from the live provider when the
-                    // user hasn't run an explicit scan (which uses the
-                    // older PackageFreshnessChecker for richer data).
-                    // Manual scan results win over auto-refresh.
-                    if self.packageLastScannedAt == nil && !pkgsResult.isEmpty {
+                    // Seed/refresh packages from the live provider. A manual
+                    // scan uses the richer PackageFreshnessChecker, so let it
+                    // WIN briefly (its installed-vs-latest data is more
+                    // accurate) — but don't freeze the table for the whole
+                    // session: once the manual scan is older than
+                    // PackageScanner's 5-min cache TTL, allow the auto path to
+                    // land newer background enrichment (typosquat/attestation).
+                    // Pre-fix this gated on `== nil`, so the first manual scan
+                    // froze the table permanently and no later enrichment ever
+                    // appeared.
+                    let manualIsFresh = self.packageLastScannedAt
+                        .map { Date().timeIntervalSince($0) < 300 } ?? false
+                    if !manualIsFresh && !pkgsResult.isEmpty {
                         self.packages = pkgsResult
                     }
                     self.integrations = integResult
@@ -228,6 +245,16 @@ public struct V2IntelligenceWorkspace: View {
         enrichThreatIntel || enrichVulnScan || enrichPackageFreshness || enrichCertTransparency
     }
 
+    /// The built-in abuse.ch feeds only fetch when threat-intel enrichment is
+    /// opted in (the daemon gates network egress on `enrich.threatIntel`). The
+    /// help/managed-feed copy must not claim "fetched every 4 hours"
+    /// unconditionally — that contradicted the opt-in card directly above it.
+    private var feedFetchPhrase: String {
+        enrichThreatIntel
+            ? "fetched every 4 hours"
+            : "off by default — opt in to threat-intel enrichment above to fetch every 4 hours (bundled IOCs work offline until then)"
+    }
+
     /// v1.19.1: enrichment opt-in/status card — the FIRST thing on the Threat
     /// Intel tab. Both a status headline (all-off = "on-device only") and the
     /// durable per-feed control. Binds the shared `enrich.*` keys and pushes to
@@ -299,7 +326,7 @@ public struct V2IntelligenceWorkspace: View {
                     Text("Add custom feeds & IOCs")
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("MacCrab's built-in feeds are abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours. To add operator-supplied indicators, drop a text file (one IOC per line) into the threat_intel directory:")
+                    Text("MacCrab's built-in feeds are abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, \(feedFetchPhrase). To add operator-supplied indicators, drop a text file (one IOC per line) into the threat_intel directory:")
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                     VStack(alignment: .leading, spacing: 2) {
@@ -354,7 +381,7 @@ public struct V2IntelligenceWorkspace: View {
                     Text("Managed feeds")
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours, see the table below for status. To bring in commercial feeds, drop their IOCs into the threat_intel folder above.")
+                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, \(feedFetchPhrase). See the table below for status. To bring in commercial feeds, drop their IOCs into the threat_intel folder above.")
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -511,10 +538,8 @@ public struct V2IntelligenceWorkspace: View {
         }
     }
 
-    /// Clickable feed chip with config sheet on click. Built-in
-    /// feeds show a read-only "always-on" sheet; roadmap feeds show
-    /// an API-key form that stores the key in Keychain via
-    /// SecretsStore so the v1.11 integration can pick it up.
+    /// Clickable feed chip that opens a read-only detail sheet describing the
+    /// built-in (keyless) abuse.ch feed and whether it's currently fetching.
     private func feedChipButton(_ feed: V2FeedConfig) -> some View {
         Button {
             feedSheet = feed
@@ -615,6 +640,12 @@ public struct V2IntelligenceWorkspace: View {
             HStack {
                 Text("Threat intel feeds").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
+                if !feeds.isEmpty {
+                    V2ActionButton("Export…", icon: "square.and.arrow.up", style: .ghost,
+                                   tooltip: "Save the feed table as a CSV file") {
+                        exportFeedsCSV(feeds)
+                    }
+                }
                 V2ActionButton("Refresh now", icon: "arrow.clockwise", style: .secondary,
                                tooltip: "Queue a refresh for the engine to fetch URLhaus / MalwareBazaar / Feodo") {
                     Task {
@@ -718,6 +749,12 @@ public struct V2IntelligenceWorkspace: View {
                      ? (searching ? "no matches for search" : "none in window")
                      : (searching ? "\(rows.count) matching" : "\(rows.count) in last 7d"))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                if !rows.isEmpty {
+                    V2ActionButton("Export…", icon: "square.and.arrow.up", style: .ghost,
+                                   tooltip: "Save the IOC matches below as a CSV file") {
+                        exportMatchesCSV(rows)
+                    }
+                }
             }
             if rows.isEmpty {
                 Text(searching
@@ -729,34 +766,82 @@ public struct V2IntelligenceWorkspace: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .v2Panel()
             } else {
-                V2DataTable(
-                    columns: [
-                        V2DataColumn(id: "hit", title: "What it hit", width: .flexible(min: 200),
-                                     sortKey: { .text($0.title) }) { m in
-                            V2TableCellText(m.title)
-                        },
-                        V2DataColumn(id: "type", title: "Type", width: .fixed(90),
-                                     sortKey: { .text(iocType(forRuleId: $0.ruleId)) }) { m in
-                            V2StatusChip(iocType(forRuleId: m.ruleId), kind: .data)
-                        },
-                        V2DataColumn(id: "indicator", title: "Indicator / source", width: .flexible(min: 220),
-                                     sortKey: { .text($0.description) }) { m in
-                            V2TableCellText(m.description, primary: false, mono: true, lineLimit: 2)
-                        },
-                        V2DataColumn(id: "process", title: "Process", width: .fixed(180),
-                                     sortKey: { .text($0.process) }) { m in
-                            V2TableCellText(m.process, primary: false)
-                        },
-                        V2DataColumn(id: "when", title: "When", width: .fixed(120),
-                                     sortKey: { .date($0.timestamp) }) { m in
-                            V2TableCellText(V2TimeFormat.relative(m.timestamp), primary: false)
-                        },
-                    ],
-                    items: rows,
-                    selection: .constant(nil),
-                    searchPrompt: "Filter matches…"
-                )
-                .frame(minHeight: 220)
+                // Floating inspector overlay (same pattern as packagesTable):
+                // selecting a match slides in a drill-in with the indicator,
+                // process, and ATT&CK context so triage isn't a dead end.
+                ZStack(alignment: .topTrailing) {
+                    V2DataTable(
+                        columns: [
+                            V2DataColumn(id: "hit", title: "What it hit", width: .flexible(min: 200),
+                                         sortKey: { .text($0.title) }) { m in
+                                V2TableCellText(m.title)
+                            },
+                            V2DataColumn(id: "type", title: "Type", width: .fixed(90),
+                                         sortKey: { .text(iocType(forRuleId: $0.ruleId)) }) { m in
+                                V2StatusChip(iocType(forRuleId: m.ruleId), kind: .data)
+                            },
+                            V2DataColumn(id: "indicator", title: "Indicator / source", width: .flexible(min: 220),
+                                         sortKey: { .text($0.description) }) { m in
+                                V2TableCellText(m.description, primary: false, mono: true, lineLimit: 2)
+                            },
+                            V2DataColumn(id: "process", title: "Process", width: .fixed(180),
+                                         sortKey: { .text($0.process) }) { m in
+                                V2TableCellText(m.process, primary: false)
+                            },
+                            V2DataColumn(id: "when", title: "When", width: .fixed(120),
+                                         sortKey: { .date($0.timestamp) }) { m in
+                                V2TableCellText(V2TimeFormat.relative(m.timestamp), primary: false)
+                            },
+                        ],
+                        items: rows,
+                        selection: $selectedMatch,
+                        searchPrompt: "Filter matches…"
+                    )
+                    .frame(minHeight: 220)
+                    if let m = selectedMatch {
+                        matchInspector(m)
+                            .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                            .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
+                    }
+                }
+                .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selectedMatch?.id)
+            }
+        }
+    }
+
+    /// Drill-in for a selected IOC match. Surfaces the full indicator/source,
+    /// the process it touched, severity, and any ATT&CK codes so the operator
+    /// can pivot instead of hitting a dead-end row.
+    @ViewBuilder
+    private func matchInspector(_ m: V2MockAlert) -> some View {
+        V2Inspector(title: m.title,
+                    subtitle: "\(iocType(forRuleId: m.ruleId)) match",
+                    onClose: { selectedMatch = nil }) {
+            V2InspectorSection(String(localized: "inspector.match", defaultValue: "Match")) {
+                V2InspectorKeyValue("Type", iocType(forRuleId: m.ruleId))
+                V2InspectorKeyValue("Severity", m.severity.label)
+                V2InspectorKeyValue("When", V2TimeFormat.relative(m.timestamp))
+            }
+            V2InspectorSection(String(localized: "inspector.indicator", defaultValue: "Indicator / source")) {
+                Text(m.description.isEmpty ? "—" : m.description)
+                    .font(V2Theme.mono())
+                    .foregroundStyle(V2Theme.primaryText)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            V2InspectorSection(String(localized: "inspector.process", defaultValue: "Process")) {
+                V2InspectorKeyValue("Name", m.process.isEmpty ? "—" : m.process)
+                if !m.processPath.isEmpty { V2InspectorKeyValue("Path", m.processPath, mono: true) }
+                if m.pid > 0 { V2InspectorKeyValue("PID", "\(m.pid)", mono: true) }
+                if !m.parent.isEmpty { V2InspectorKeyValue("Parent", m.parent, mono: true) }
+            }
+            if !m.mitre.isEmpty {
+                V2InspectorSection(String(localized: "inspector.attack", defaultValue: "ATT&CK")) {
+                    Text(m.mitre.joined(separator: ", "))
+                        .font(V2Theme.mono())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .textSelection(.enabled)
+                }
             }
         }
     }
@@ -768,17 +853,32 @@ public struct V2IntelligenceWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 packageScanRow
                 if packages.isEmpty {
-                    V2EmptyState(
-                        title: packageScanInProgress
-                            ? "Scanning installed packages…"
-                            : "No package scan yet",
-                        body: packageScanInProgress
-                            ? "Querying npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. The first scan can take 30-90 seconds depending on how many packages you have."
-                            : "Click \"Run scan\" above to query the npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. Slopsquatting, dependency-confusion, and freshly-published-malicious-package indicators all surface here.",
-                        icon: packageScanInProgress
-                            ? "magnifyingglass.circle"
-                            : "shippingbox"
-                    )
+                    // Three distinct empty states: scanning, scanned-but-empty
+                    // (a legit "no packages on this machine" result), and
+                    // never-scanned. Pre-fix a completed scan that found zero
+                    // packages fell through to "No package scan yet", telling
+                    // the operator to run a scan they had already run.
+                    Group {
+                        if packageScanInProgress {
+                            V2EmptyState(
+                                title: "Scanning installed packages…",
+                                body: "Querying npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. The first scan can take 30-90 seconds depending on how many packages you have.",
+                                icon: "magnifyingglass.circle"
+                            )
+                        } else if packageLastScannedAt != nil {
+                            V2EmptyState(
+                                title: "Scan complete — no packages found",
+                                body: "MacCrab found no npm, PyPI, Homebrew, or Cargo packages installed on this machine, so there's nothing to check for freshness. Install packages with one of those managers and re-scan.",
+                                icon: "checkmark.circle"
+                            )
+                        } else {
+                            V2EmptyState(
+                                title: "No package scan yet",
+                                body: "Click \"Run scan\" above to query the npm, PyPI, Homebrew, and Cargo registries for the packages installed on this machine. Slopsquatting, dependency-confusion, and freshly-published-malicious-package indicators all surface here.",
+                                icon: "shippingbox"
+                            )
+                        }
+                    }
                     .v2Panel()
                 } else {
                     packageSummaryRow
@@ -1044,18 +1144,22 @@ public struct V2IntelligenceWorkspace: View {
             }
             if pkg.vulnCount > 0 {
                 V2InspectorSection(String(localized: "inspector.cves", defaultValue: "CVEs")) {
-                    Text("Vulnerability detail is available via the CLI:")
+                    // `maccrabctl vulns` takes only --hours / --severity — it has
+                    // no package positional and ignores any name argument, so
+                    // suggest the real command and tell the operator to look for
+                    // this package in the (unfiltered) list.
+                    Text("List all CVE-scanner vuln alerts via the CLI, then look for “\(pkg.name)”:")
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                     HStack(spacing: 6) {
-                        Text("maccrabctl vulns \(pkg.name)")
+                        Text("maccrabctl vulns")
                             .font(V2Theme.mono())
                             .foregroundStyle(V2Theme.primaryText)
                             .textSelection(.enabled)
                         Spacer()
                         V2ActionButton("Copy", icon: "doc.on.doc", style: .ghost) {
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("maccrabctl vulns \(pkg.name)", forType: .string)
+                            NSPasteboard.general.setString("maccrabctl vulns", forType: .string)
                             state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
                         }
                     }
@@ -1234,6 +1338,68 @@ public struct V2IntelligenceWorkspace: View {
         }
     }
 
+    // MARK: - CSV export
+
+    /// Save the (already-filtered) IOC-match rows as CSV via NSSavePanel.
+    private func exportMatchesCSV(_ rows: [V2MockAlert]) {
+        let header = ["what_it_hit", "type", "indicator_source", "process", "when"]
+        let records = rows.map { m in
+            [m.title, iocType(forRuleId: m.ruleId), m.description, m.process,
+             Self.csvTimestamp.string(from: m.timestamp)]
+        }
+        writeCSV(header: header, rows: records, suggestedName: "maccrab-ioc-matches")
+    }
+
+    /// Save the feed table as CSV via NSSavePanel.
+    private func exportFeedsCSV(_ rows: [V2MockFeed]) {
+        let header = ["feed", "kind", "entries", "last_fetch", "status", "last_error"]
+        let records = rows.map { f -> [String] in
+            let status = f.lastError != nil ? "Failing" : (f.staleness > 60 * 60 ? "Stale" : "Healthy")
+            return [f.name, f.kind, "\(f.entries)",
+                    Self.csvTimestamp.string(from: f.lastFetch),
+                    status, f.lastError ?? ""]
+        }
+        writeCSV(header: header, rows: records, suggestedName: "maccrab-threat-intel-feeds")
+    }
+
+    /// Shared CSV writer: RFC-4180 quoting, off-main write, success/failure
+    /// toast. Uses `.data` content type so macOS doesn't append a second
+    /// extension (same reason V2AlertsWorkspace's JSONL export does).
+    private func writeCSV(header: [String], rows: [[String]], suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.title = "Export CSV"
+        panel.allowedContentTypes = [.data]
+        panel.allowsOtherFileTypes = true
+        let stamp = Self.csvFilenameStamp.string(from: Date())
+        panel.nameFieldStringValue = "\(suggestedName)-\(stamp).csv"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                func esc(_ s: String) -> String {
+                    guard s.contains(",") || s.contains("\"") || s.contains("\n") else { return s }
+                    return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+                }
+                var out = header.map(esc).joined(separator: ",") + "\n"
+                for r in rows { out += r.map(esc).joined(separator: ",") + "\n" }
+                let ok = (try? out.write(to: url, atomically: true, encoding: .utf8)) != nil
+                DispatchQueue.main.async {
+                    state.showToast(V2Toast(
+                        kind: ok ? .success : .error,
+                        title: ok ? "Exported" : "Export failed",
+                        detail: ok ? url.lastPathComponent : nil))
+                }
+            }
+        }
+    }
+
+    private static let csvTimestamp: ISO8601DateFormatter = ISO8601DateFormatter()
+    private static let csvFilenameStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd-HHmm"
+        f.timeZone = TimeZone.current
+        return f
+    }()
+
     // MARK: - Shared
 
     private func metricCard(title: String, value: String, trend: String, trendKind: V2ChipKind,
@@ -1253,18 +1419,18 @@ public struct V2IntelligenceWorkspace: View {
 
 // MARK: - V2FeedConfig + V2FeedConfigSheet
 
-/// Identity / metadata for the threat-intel feed chips. Encodes
-/// whether a feed is built-in (keyless, always-on) or roadmap
-/// (needs an API key + a v1.11 integration). The Keychain key is
-/// shared with `SecretsStore.SecretKey` so the daemon side picks
-/// up any keys the user paste here.
+/// Identity / metadata for the threat-intel feed chips. All shipped feeds are
+/// the built-in, keyless abuse.ch sources.
+// NOTE: the commercial API-key feeds (VirusTotal / GreyNoise / AlienVault OTX)
+// were removed here — they were orphaned: no chip ever rendered them, and any
+// key saved to the Keychain was never read by a live consumer (the
+// ThreatIntelAPIs actor is never instantiated). See the deep-audit residual
+// note to also drop the now-unreferenced ThreatIntelAPIs actor + the
+// SecretKey.virusTotalKey/.greyNoiseKey/.alienVaultKey cases in MacCrabCore.
 public enum V2FeedConfig: String, Identifiable, CaseIterable {
     case urlhaus
     case malwareBazaar
     case feodoTracker
-    case virusTotal
-    case greyNoise
-    case alienVaultOTX
 
     public var id: String { rawValue }
 
@@ -1273,18 +1439,12 @@ public enum V2FeedConfig: String, Identifiable, CaseIterable {
         case .urlhaus:        return "abuse.ch URLhaus"
         case .malwareBazaar:  return "abuse.ch MalwareBazaar"
         case .feodoTracker:   return "abuse.ch Feodo Tracker"
-        case .virusTotal:     return "VirusTotal"
-        case .greyNoise:      return "GreyNoise"
-        case .alienVaultOTX:  return "AlienVault OTX"
         }
     }
 
-    public var isBuiltIn: Bool {
-        switch self {
-        case .urlhaus, .malwareBazaar, .feodoTracker: return true
-        case .virusTotal, .greyNoise, .alienVaultOTX: return false
-        }
-    }
+    /// All shipped feeds are built-in (keyless). Retained as a property so the
+    /// chip / sheet styling reads intent, and so a future keyed feed can flip it.
+    public var isBuiltIn: Bool { true }
 
     public var description: String {
         switch self {
@@ -1294,56 +1454,26 @@ public enum V2FeedConfig: String, Identifiable, CaseIterable {
             return "abuse.ch MalwareBazaar — SHA-256 hashes for known-bad samples. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
         case .feodoTracker:
             return "abuse.ch Feodo Tracker — IP addresses of active C2 infrastructure for Emotet, Dridex, TrickBot and similar bankers. Keyless, download-only. OFF by default — opt in to threat-intel enrichment to fetch every 4 hours."
-        case .virusTotal:
-            return "Multi-engine malware scanner with billions of samples + URL / domain / IP intel. Requires a free or paid API key from virustotal.com."
-        case .greyNoise:
-            return "Internet-wide noise scanner. Tells you whether an IP is mass-scanning or targeted. Requires a free community or paid commercial API key from greynoise.io."
-        case .alienVaultOTX:
-            return "Open Threat Exchange — community-driven IOC sharing platform. Free API key from otx.alienvault.com."
-        }
-    }
-
-    /// Where to point the user for an API key.
-    public var keyURL: String? {
-        switch self {
-        case .virusTotal:    return "https://www.virustotal.com/gui/my-apikey"
-        case .greyNoise:     return "https://viz.greynoise.io/account/"
-        case .alienVaultOTX: return "https://otx.alienvault.com/api"
-        default: return nil
-        }
-    }
-
-    /// Maps to the on-disk SecretKey used by SecretsStore. Built-in
-    /// feeds return nil because they don't store a key.
-    public var secretKey: SecretKey? {
-        switch self {
-        case .virusTotal:    return .virusTotalKey
-        case .greyNoise:     return .greyNoiseKey
-        case .alienVaultOTX: return .alienVaultKey
-        default: return nil
         }
     }
 }
 
-/// Modal sheet for configuring (or describing) a managed feed.
-/// Built-in feeds show a read-only descriptive view; roadmap feeds
-/// show an API-key field with Save / Clear actions.
+/// Modal sheet describing a built-in threat-intel feed. Read-only: every
+/// shipped feed is a keyless abuse.ch source, so there is no API-key form.
 public struct V2FeedConfigSheet: View {
     let feed: V2FeedConfig
     let onClose: () -> Void
 
-    @State private var apiKey: String = ""
-    @State private var keyExists: Bool = false
-    @State private var saved: Bool = false
-    @State private var errorMessage: String? = nil
-
-    private let secrets = SecretsStore()
+    // The built-in feeds only fetch when threat-intel enrichment is opted in
+    // (the daemon gates egress on this key), so the status chip reflects that
+    // rather than claiming "always-on" — which contradicted the opt-in card.
+    @AppStorage("enrich.threatIntel") private var enrichThreatIntel: Bool = false
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Image(systemName: feed.isBuiltIn ? "checkmark.seal.fill" : "clock.badge")
-                    .foregroundStyle(feed.isBuiltIn ? V2Theme.healthy : V2Theme.dataAccent)
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(V2Theme.healthy)
                     .scaledSystem(18, weight: .semibold)
                 Text(feed.label)
                     .font(V2Theme.workspaceTitle())
@@ -1362,100 +1492,18 @@ public struct V2FeedConfigSheet: View {
                 .keyboardShortcut(.cancelAction)
             }
 
-            if feed.isBuiltIn {
-                V2StatusChip("Built-in · always-on", kind: .healthy, icon: "checkmark.seal")
+            if enrichThreatIntel {
+                V2StatusChip("Built-in · active — fetched every 4h", kind: .healthy, icon: "checkmark.seal")
             } else {
-                V2StatusChip("Requires an API key", kind: .info, icon: "key")
+                V2StatusChip("Built-in · opt in to enable fetching", kind: .info, icon: "checkmark.seal")
             }
 
             Text(feed.description)
                 .font(V2Theme.body())
                 .foregroundStyle(V2Theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
-
-            if let secretKey = feed.secretKey {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("API key")
-                            .font(V2Theme.cardTitle())
-                            .foregroundStyle(V2Theme.mutedText)
-                        Spacer()
-                        if let url = feed.keyURL {
-                            Link("Get a key →", destination: URL(string: url)!)
-                                .font(V2Theme.meta())
-                        }
-                    }
-                    SecureField(keyExists ? "•••••••••••• (saved — replace to change)" : "Paste your API key…",
-                                text: $apiKey)
-                        .textFieldStyle(.plain)
-                        .padding(8)
-                        .background(V2Theme.panelBackground)
-                        .overlay(RoundedRectangle(cornerRadius: 6)
-                                    .stroke(V2Theme.panelBorder, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    if let err = errorMessage {
-                        Text(err)
-                            .font(V2Theme.meta())
-                            .foregroundStyle(V2Theme.critical)
-                    }
-                    if saved {
-                        Text("Saved to Keychain.")
-                            .font(V2Theme.meta())
-                            .foregroundStyle(V2Theme.healthy)
-                    }
-                    HStack {
-                        Spacer()
-                        if keyExists {
-                            Button {
-                                clearKey(secretKey)
-                            } label: {
-                                Text("Clear saved key")
-                                    .font(V2Theme.meta())
-                                    .foregroundStyle(V2Theme.critical)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        V2ActionButton("Save", icon: "key.fill", style: .primary,
-                                       disabled: apiKey.trimmingCharacters(in: .whitespaces).isEmpty) {
-                            saveKey(secretKey)
-                        }
-                    }
-                }
-            }
         }
         .padding(20)
         .frame(width: 460)
-        .onAppear {
-            if let secretKey = feed.secretKey {
-                let stored = (try? secrets.get(secretKey)) ?? nil
-                keyExists = (stored?.isEmpty == false)
-            }
-        }
-    }
-
-    private func saveKey(_ secretKey: SecretKey) {
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        do {
-            try secrets.set(secretKey, value: trimmed)
-            saved = true
-            keyExists = true
-            errorMessage = nil
-            apiKey = ""
-        } catch {
-            errorMessage = "Couldn't save: \(error.localizedDescription)"
-        }
-    }
-
-    private func clearKey(_ secretKey: SecretKey) {
-        do {
-            try secrets.set(secretKey, value: "")
-            keyExists = false
-            saved = false
-            apiKey = ""
-        } catch {
-            errorMessage = "Couldn't clear: \(error.localizedDescription)"
-        }
     }
 }
