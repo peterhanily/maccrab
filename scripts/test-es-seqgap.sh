@@ -85,9 +85,24 @@ if ! native_es_active "$HB"; then
     echo ""; echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"; exit 0
 fi
 
-# --- Marker binary (benign; a copy of /bin/echo, exec'd with a unique arg) ---
-cp /bin/echo "$MARKER"
-chmod +x "$MARKER"
+# --- Marker binary (benign no-op, exec'd with a unique arg) ---
+# v1.21.4 (audit): must NOT be a copy of a platform binary. macOS AMFI
+# SIGKILLs a copied signed binary (its embedded signature no longer validates
+# at the new inode/path), so the exec is killed before it completes and NO
+# NOTIFY_EXEC is generated — silently voiding the exec-drop experiments on any
+# hardened Mac. A freshly-compiled binary gets a valid ad-hoc signature the
+# kernel accepts, so the exec actually runs and the ES event fires.
+if command -v cc >/dev/null 2>&1; then
+    printf 'int main(int a,char**v){(void)a;(void)v;return 0;}\n' > "$MARKER.c"
+    cc -o "$MARKER" "$MARKER.c" 2>/dev/null || true
+    rm -f "$MARKER.c"
+fi
+if [ ! -x "$MARKER" ]; then
+    # Fallback (no cc): a shell script still generates a NOTIFY_EXEC and, not
+    # being a copied platform binary, is not AMFI-killed.
+    printf '#!/bin/sh\nexit 0\n' > "$MARKER"
+    chmod +x "$MARKER"
+fi
 run_marker_execs() {
     local n="$1" i=0
     while [ "$i" -lt "$n" ]; do
