@@ -70,6 +70,27 @@ struct V2InvestigationWorkspace: View {
         let t = await state.provider.traces(limit: 50)
         await MainActor.run {
             self.traces = t
+            // D6: cross-workspace deep-link (palette `trace:` link,
+            // notification, or a trace: deep link) requests a specific
+            // trace by id via selectedEntities. Drain it here so it wins
+            // on arrival, mirroring how Alerts/Detection consume their
+            // keys. Clearing the key means the drain fires once — later
+            // reloads fall through to the #17 pin below and keep the
+            // user's selection rather than re-forcing the deep-link target.
+            // entityKey format matches V2DashboardState.entityKey:
+            // "<workspace>:<tab>" or just "<workspace>".
+            var deepLinked = false
+            let candidateKeys = ["investigation:investigationTraceGraph", "investigation"]
+            for key in candidateKeys {
+                if let pendingId = state.selectedEntities[key],
+                   let match = t.first(where: { $0.id == pendingId }) {
+                    self.selectedTrace = match
+                    self.traceInspectorOpen = true
+                    state.selectedEntities[key] = nil
+                    deepLinked = true
+                    break
+                }
+            }
             // #17: pin / preserve the selected trace across the 5 s
             // reload. Pre-fix `selectedTrace` stayed nil and every
             // render fell back to `traces.first`; when a reload reordered
@@ -79,10 +100,12 @@ struct V2InvestigationWorkspace: View {
             // freshest trace; later reloads keep the user's current
             // selection (refreshed to the new snapshot), only falling
             // back to the freshest when no selection exists yet.
-            if let current = self.selectedTrace {
-                self.selectedTrace = t.first(where: { $0.id == current.id }) ?? current
-            } else {
-                self.selectedTrace = t.first
+            if !deepLinked {
+                if let current = self.selectedTrace {
+                    self.selectedTrace = t.first(where: { $0.id == current.id }) ?? current
+                } else {
+                    self.selectedTrace = t.first
+                }
             }
         }
 

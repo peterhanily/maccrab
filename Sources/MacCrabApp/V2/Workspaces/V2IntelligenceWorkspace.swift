@@ -155,6 +155,9 @@ public struct V2IntelligenceWorkspace: View {
     private var threatIntelTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let q = state.pendingIntelQuery, !q.isEmpty {
+                    intelQueryBanner(q)
+                }
                 enrichmentCard
                 apiKeysHelpCard
                 feedsSummaryRow
@@ -163,6 +166,62 @@ public struct V2IntelligenceWorkspace: View {
             }
             .padding(16)
         }
+    }
+
+    /// D8: the command-palette `ip:<addr>` "Search IOC matches" item hands
+    /// a needle in via `state.pendingIntelQuery`. It narrows the IOC-matches
+    /// table (`filteredMatches`) to rows mentioning it. Persists on state
+    /// until the user clears this banner — mirroring the Events "Investigate"
+    /// pre-fill flow. Pre-fix `applyFilters` had no `.intelligence` branch, so
+    /// the palette item navigated here but never searched anything.
+    private var filteredMatches: [V2MockAlert] {
+        guard let q = state.pendingIntelQuery?
+                .trimmingCharacters(in: .whitespaces).lowercased(),
+              !q.isEmpty else { return matches }
+        return matches.filter { m in
+            m.title.lowercased().contains(q)
+                || m.description.lowercased().contains(q)
+                || m.process.lowercased().contains(q)
+        }
+    }
+
+    private func intelQueryBanner(_ query: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(V2Theme.brand)
+                .scaledSystem(12, weight: .semibold)
+            Text("Searching IOC matches for")
+                .font(V2Theme.meta())
+                .foregroundStyle(V2Theme.primaryText)
+            Text(query)
+                .font(V2Theme.mono())
+                .foregroundStyle(V2Theme.brand)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button { state.pendingIntelQuery = nil } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark")
+                        .scaledSystem(9, weight: .semibold)
+                    Text("Clear search")
+                        .font(V2Theme.meta())
+                }
+                .foregroundStyle(V2Theme.mutedText)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(V2Theme.panelBackground)
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                            .stroke(V2Theme.panelBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear IOC search")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(V2Theme.brand.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
+                    .stroke(V2Theme.brand.opacity(0.4), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
     }
 
     private var anyEnrichmentOn: Bool {
@@ -647,15 +706,23 @@ public struct V2IntelligenceWorkspace: View {
     /// process it touched, and when. Reads from `matches`, populated
     /// in the workspace `.task` from the alert store.
     private var matchesTable: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // D8: honor the palette `ip:` "Search IOC matches" pre-filter so the
+        // count + empty-state + rows all reflect the searched needle.
+        let rows = filteredMatches
+        let searching = (state.pendingIntelQuery?.isEmpty == false)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("IOC matches").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
-                Text(matches.isEmpty ? "none in window" : "\(matches.count) in last 7d")
+                Text(rows.isEmpty
+                     ? (searching ? "no matches for search" : "none in window")
+                     : (searching ? "\(rows.count) matching" : "\(rows.count) in last 7d"))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
             }
-            if matches.isEmpty {
-                Text("No threat-intel feed matches recorded. When a process touches a known-bad hash, IP, domain or URL from the loaded feeds, the hit appears here.")
+            if rows.isEmpty {
+                Text(searching
+                     ? "No IOC matches mention this indicator. Clear the search above to see all recent threat-intel feed matches."
+                     : "No threat-intel feed matches recorded. When a process touches a known-bad hash, IP, domain or URL from the loaded feeds, the hit appears here.")
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
                     .padding(14)
@@ -685,7 +752,7 @@ public struct V2IntelligenceWorkspace: View {
                             V2TableCellText(V2TimeFormat.relative(m.timestamp), primary: false)
                         },
                     ],
-                    items: matches,
+                    items: rows,
                     selection: .constant(nil),
                     searchPrompt: "Filter matches…"
                 )

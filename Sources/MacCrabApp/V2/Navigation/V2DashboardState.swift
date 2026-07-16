@@ -99,6 +99,14 @@ public final class V2DashboardState: ObservableObject {
     /// promise of "last 7 days".
     @Published public var alertTimeRange: String = "7d"
     @Published public var ruleSearchQuery: String = ""
+    /// Pending IOC/threat-intel search needle. Set by the command
+    /// palette's `ip:<addr>` "Search IOC matches" item (→ Intelligence ›
+    /// Threat Intel) and consumed once by V2IntelligenceWorkspace, which
+    /// applies it to the Threat Intel search field and clears it. Pre-fix
+    /// `applyFilters` had no `.intelligence` branch and Intelligence had no
+    /// query reader, so the `q` filter was silently dropped and the palette
+    /// item navigated but never searched.
+    @Published public var pendingIntelQuery: String? = nil
     /// Pending pre-fill for the Events workspace's FTS filter. Set by
     /// "Investigate in Events" buttons (alert / campaign inspectors)
     /// and consumed once by V2EventsWorkspace on mount, then cleared
@@ -115,6 +123,16 @@ public final class V2DashboardState: ObservableObject {
     /// callers can pick a different window (e.g. campaigns are
     /// inherently broader and may want ±2h).
     @Published public var pendingEventsHalfWindowSeconds: TimeInterval = 30 * 60
+    /// Pending [start, end] time-window narrowing for the Alerts Open
+    /// list. Set by the Overview alert-histogram bar tap (each bar is one
+    /// time bucket) so tapping "14:00–15:00" opens Alerts constrained to
+    /// that hour — analogous to `pendingEventsCenterTime` for Events.
+    /// Persists on state (survives the 5 s reload) until the user picks a
+    /// time-range chip or clears the banner; the Alerts workspace reads it
+    /// to bound its list and surfaces a dismissable banner. Pre-fix
+    /// `applyFilters` had no from/to branch for `.alerts`, so the bucket
+    /// window was silently dropped and the list stayed on the 7d default.
+    @Published public var pendingAlertsWindow: V2TimeWindow? = nil
 
     // MARK: - Persistence keys
 
@@ -372,9 +390,30 @@ public final class V2DashboardState: ObservableObject {
                 alertSeverityFilter = sev
             }
             if let q = filters["q"] { alertSearchQuery = q }
+            // D7: Overview alert-histogram bar tap emits epoch-second
+            // "from"/"to" for the tapped bucket. Store it as a pending
+            // window the Alerts workspace bounds its Open list on. Pre-fix
+            // only severity/q were handled, so the window was dropped and
+            // the tap looked like a plain "go to Alerts" with no narrowing.
+            if let fromRaw = filters["from"], let toRaw = filters["to"],
+               let from = TimeInterval(fromRaw), let to = TimeInterval(toRaw),
+               to > from {
+                pendingAlertsWindow = V2TimeWindow(
+                    start: Date(timeIntervalSince1970: from),
+                    end: Date(timeIntervalSince1970: to)
+                )
+            }
         }
         if workspace == .detection, tab == .detectionRules, let q = filters["q"] {
             ruleSearchQuery = q
+        }
+        // D8: command-palette `ip:<addr>` → "Search IOC matches" navigates
+        // to Intelligence › Threat Intel with a `q` needle. Store it so the
+        // Intelligence workspace pre-fills its Threat Intel search. Pre-fix
+        // there was no `.intelligence` branch, so `q` was dropped and the
+        // "Search IOC matches" item navigated but never actually searched.
+        if workspace == .intelligence, let q = filters["q"] {
+            pendingIntelQuery = q
         }
         // Modal-intent filter. The command palette's "Create Detection Rule"
         // navigates here with modal=new; V2DetectionWorkspace observes
@@ -416,5 +455,16 @@ public final class V2DashboardState: ObservableObject {
         if let data = try? JSONEncoder().encode(urls) {
             UserDefaults.standard.set(data, forKey: Self.recentsKey)
         }
+    }
+}
+
+/// A closed [start, end] time window used for cross-workspace
+/// navigation narrowing (e.g. the Overview histogram → Alerts hand-off).
+public struct V2TimeWindow: Equatable, Sendable {
+    public let start: Date
+    public let end: Date
+    public init(start: Date, end: Date) {
+        self.start = start
+        self.end = end
     }
 }

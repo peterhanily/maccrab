@@ -840,8 +840,6 @@ final class AppState: ObservableObject {
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
-    enum Tab: String, CaseIterable { case overview, alerts, events, rules, tcc, aiGuard, prevention, threatIntel, integrations, docs }
-
     /// Threat intel stats for the dashboard
     struct ThreatIntelStats {
         var hashes: Int = 0
@@ -930,8 +928,6 @@ final class AppState: ObservableObject {
     /// `AlertDetailView`. Keyed by alert ID. `nil` value = "still
     /// thinking" placeholder; entry absent = "not yet requested".
     @Published var triageRecommendations: [String: TriageRecommendation?] = [:]
-
-    @Published var selectedTab: Tab = .overview
 
     /// Security posture score (0-100) and letter grade.
     /// Computed by SecurityScorer on first load and refreshed every 5 minutes.
@@ -1028,13 +1024,6 @@ final class AppState: ObservableObject {
     private var lastTracesDbMtime: Date?
     private var lastEventsDbMtimeForAgent: Date?
     private var lastOverridesDbMtime: Date?
-
-    /// Cross-view navigation request. Set by alert detail's "Show in
-    /// Agent Traces" button; observed by `MainView` to switch the
-    /// sidebar selection AND set `selectedTraceId`. Cleared after the
-    /// view consumes it. Decoupled from a hard NavigationLink because
-    /// SidebarSection isn't reachable from AlertDashboard's call site.
-    @Published var requestedTraceFocus: String?
 
     // MARK: - v1.9 Phase-3: agent-traces receiver toggle
 

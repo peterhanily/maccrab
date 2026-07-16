@@ -51,6 +51,12 @@ struct V2AlertsWorkspace: View {
         Binding(get: { state.alertSearchQuery },
                 set: { state.alertSearchQuery = $0 })
     }
+    /// Stable key for the reload `.task(id:)` so a new histogram-window
+    /// (D7) triggers a re-fetch bounded to that window; empty when none.
+    private var windowTaskKey: String {
+        guard let w = state.pendingAlertsWindow else { return "" }
+        return "\(Int(w.start.timeIntervalSince1970))-\(Int(w.end.timeIntervalSince1970))"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -64,7 +70,7 @@ struct V2AlertsWorkspace: View {
             tabBody
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task(id: "\(state.provider.mode):\(state.refreshTick):\(state.alertTimeRange)") { await reload() }
+        .task(id: "\(state.provider.mode):\(state.refreshTick):\(state.alertTimeRange):\(windowTaskKey)") { await reload() }
     }
 
     private func reload() async {
@@ -90,10 +96,19 @@ struct V2AlertsWorkspace: View {
             }
         }()
 
+        // D7: an Overview histogram bar tap constrains the Open list to a
+        // single [start, end] bucket. When present it overrides the range
+        // chip's lower bound (fetch `since:` its start) and adds an upper
+        // bound (filtered below). Persists until the user picks a chip or
+        // clears the banner, so it survives the 5 s refresh reload.
+        let window = state.pendingAlertsWindow
+        let lowerBound = window?.start ?? cutoff
+
         // Wide ranges need a higher ceiling than the default 200 so All-time
-        // doesn't silently truncate the history the chip just unlocked.
-        let fetchLimit = (state.alertTimeRange == "24h" || state.alertTimeRange == "7d") ? 200 : 1000
-        let a = await state.provider.alerts(since: cutoff, limit: fetchLimit)
+        // doesn't silently truncate the history the chip just unlocked. A
+        // window is a tight bucket, so the default 200 is ample there.
+        let fetchLimit = (window != nil || state.alertTimeRange == "24h" || state.alertTimeRange == "7d") ? 200 : 1000
+        let a = await state.provider.alerts(since: lowerBound, limit: fetchLimit)
         await MainActor.run {
             // v1.12.7 Wave 9R: overlay pending optimistic mutations
             // on top of the DB read. The daemon's inbox poller has
@@ -131,7 +146,12 @@ struct V2AlertsWorkspace: View {
             let dbIds = Set(a.map(\.id))
             pendingDeletedAlertIds = pendingDeletedAlertIds.intersection(dbIds)
 
-            self.alerts = merged.filter { $0.timestamp >= cutoff }
+            self.alerts = merged.filter { alert in
+                // D7: bound below by the range cutoff (or window start) and,
+                // when a histogram window is active, above by its end.
+                alert.timestamp >= lowerBound
+                    && (window.map { alert.timestamp <= $0.end } ?? true)
+            }
             // Reconcile the floating inspector against the fresh data:
             // drop the selection if its row is gone (deleted, or aged
             // past the time-range cutoff), otherwise refresh it to the
@@ -651,6 +671,9 @@ struct V2AlertsWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 daemonStaleBanner
                 timeRangeChips
+                if let window = state.pendingAlertsWindow {
+                    histogramWindowBanner(window)
+                }
                 severityCards
                 searchBarMemoized(visible: visible)
                 if daemonReporting && loaded && !hasOpenAlerts {
@@ -693,7 +716,12 @@ struct V2AlertsWorkspace: View {
                     }
                 }()
                 let on = state.alertTimeRange == key
-                Button { state.alertTimeRange = key } label: {
+                Button {
+                    // D7: an explicit range chip overrides any active
+                    // histogram window — clear it so the chip's range wins.
+                    state.pendingAlertsWindow = nil
+                    state.alertTimeRange = key
+                } label: {
                     Text(label)
                         .font(V2Theme.meta())
                         .foregroundStyle(on ? V2Theme.primaryText : V2Theme.mutedText)
@@ -712,6 +740,55 @@ struct V2AlertsWorkspace: View {
             }
             Spacer()
         }
+    }
+
+    /// D7: banner surfaced when an Overview histogram bar tap narrowed the
+    /// Open list to a single time bucket. Explains why the list is tighter
+    /// than the highlighted range chip and offers a one-click clear — the
+    /// same affordance the Events "Investigate" banner provides.
+    private func histogramWindowBanner(_ window: V2TimeWindow) -> some View {
+        let tf: DateFormatter = {
+            let f = DateFormatter()
+            f.dateStyle = .short
+            f.timeStyle = .short
+            return f
+        }()
+        return HStack(spacing: 8) {
+            Image(systemName: "chart.bar.xaxis")
+                .foregroundStyle(V2Theme.brand)
+                .scaledSystem(12, weight: .semibold)
+            Text("Filtered to the tapped window")
+                .font(V2Theme.meta())
+                .foregroundStyle(V2Theme.primaryText)
+            Text("\(tf.string(from: window.start)) – \(tf.string(from: window.end))")
+                .font(V2Theme.mono())
+                .foregroundStyle(V2Theme.brand)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button { state.pendingAlertsWindow = nil } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark")
+                        .scaledSystem(9, weight: .semibold)
+                    Text("Clear window")
+                        .font(V2Theme.meta())
+                }
+                .foregroundStyle(V2Theme.mutedText)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(V2Theme.panelBackground)
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                            .stroke(V2Theme.panelBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear histogram time window")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(V2Theme.brand.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
+                    .stroke(V2Theme.brand.opacity(0.4), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
     }
 
     private var severityCards: some View {
