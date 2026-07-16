@@ -16,7 +16,15 @@ public actor OpenAIBackend: LLMBackend {
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "openai")
-    private let session: URLSession = SecureURLSession.make(for: .openai)
+    // corr/sec-network-llm: the SPKI-pinned `.openai` session pins api.openai.com's
+    // key, so it CANNOT complete a TLS handshake to an allowlisted Azure OpenAI
+    // (`*.openai.azure.com`) or a localhost gateway — those endpoints silently
+    // failed under the default strict pinning. Resolve the session from the final
+    // baseURL host: pin only when actually talking to api.openai.com; use the
+    // hardened-but-unpinned generic session (TLS 1.2 floor + SSRF redirect
+    // re-validation, OS trust) for the other allowlisted hosts, which can't share
+    // OpenAI's SPKI. Set in init once `baseURL` is resolved.
+    private let session: URLSession
 
     /// Hosts an operator can legitimately point an OpenAI-compatible
     /// backend at. Pre-fix any user-set `baseURL` was accepted —
@@ -79,6 +87,23 @@ public actor OpenAIBackend: LLMBackend {
         }
         self.apiKey = apiKey
         self.model = model
+        // Pin ONLY for api.openai.com; every other allowlisted host (Azure,
+        // loopback gateways) uses the hardened generic session so strict SPKI
+        // pinning can't block a legitimately-configured endpoint.
+        if Self.shouldPin(host: self.baseURL.host) {
+            self.session = SecureURLSession.make(for: .openai)
+        } else {
+            self.session = SecureURLSession.makeGeneric()
+        }
+    }
+
+    /// Whether the SPKI-pinned `.openai` session should be used for `host`.
+    /// True only for api.openai.com (whose SPKI the `.openai` provider pins);
+    /// Azure / loopback gateways return false → hardened-but-unpinned session.
+    /// `internal` + `nonisolated` so the pin/no-pin matrix is unit-testable
+    /// synchronously, like `isHostAllowed`.
+    nonisolated static func shouldPin(host: String?) -> Bool {
+        host?.lowercased() == "api.openai.com"
     }
 
     public func isAvailable() async -> Bool {

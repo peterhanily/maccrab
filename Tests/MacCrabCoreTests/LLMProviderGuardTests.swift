@@ -40,6 +40,18 @@ struct LLMProviderGuardTests {
         #expect(OpenAIBackend.isHostAllowed("") == false)
     }
 
+    @Test("SPKI pinning applies ONLY to api.openai.com — allowlisted Azure/loopback use the unpinned session")
+    func openAIPinsOnlyCanonicalHost() {
+        // Pinning the api.openai.com SPKI would break TLS to these OTHER
+        // allowlisted hosts, which can't present OpenAI's certificate key.
+        #expect(OpenAIBackend.shouldPin(host: "api.openai.com"))
+        #expect(OpenAIBackend.shouldPin(host: "API.OpenAI.com"))            // case-insensitive
+        #expect(OpenAIBackend.shouldPin(host: "mycorp.openai.azure.com") == false)
+        #expect(OpenAIBackend.shouldPin(host: "localhost") == false)
+        #expect(OpenAIBackend.shouldPin(host: "127.0.0.1") == false)
+        #expect(OpenAIBackend.shouldPin(host: nil) == false)
+    }
+
     // MARK: - Gemini model-name allowlist
 
     @Test("Accepts well-formed model names")
