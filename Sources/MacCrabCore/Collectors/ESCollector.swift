@@ -183,6 +183,13 @@ public final class ESCollector: @unchecked Sendable {
     /// adds avoidable allocation pressure on the ES callback queue.
     fileprivate static let sharedAIRegistry = AIToolRegistry()
 
+    /// v1.21.4 (P6): low-volume operator-visible signal for the agent-trace
+    /// self-stamp path. Logs at `.info` ONLY when a TRACEPARENT is actually
+    /// found on an exec (rare — never per-exec), so `log stream --predicate
+    /// 'category == "agent-traces"'` confirms the traceparent path fires
+    /// on-device without FDA/eslogger.
+    private static let traceLogger = Logger(subsystem: "com.maccrab.agent", category: "agent-traces")
+
     /// Public accessor for the master gate (env seed OR'd with the
     /// config master applied at boot). Tests and the dashboard status
     /// panel can read this without touching ProcessInfo themselves.
@@ -1141,11 +1148,31 @@ public final class ESCollector: @unchecked Sendable {
             // v1.9 Agent Traces side-channel. Computed BEFORE normalise so the
             // env-scan can lift TRACEPARENT off the retained es_message_t before
             // normalise drops the env reference. Cheap no-op when the flag is off.
+            var selfTrace: TraceContext? = nil
             if agentTracesEnabled {
-                emitTraceSignals(message: message, into: traceContinuation)
+                selfTrace = emitTraceSignals(message: message, into: traceContinuation)
             }
 
-            let event = normalise(message: message)
+            var event = normalise(message: message)
+            // v1.21.4 (P6 fix): SELF-STAMP this exec's OWN event with the
+            // TRACEPARENT it inherited in its env. The parallel `.bind` signal
+            // yielded above only ever helps DESCENDANTS — the exec event of the
+            // header-carrying process itself is direct-correlated before the
+            // detached bind Task lands, so without this its agent_trace_id
+            // stayed null (the P6 bug). `selfTrace` is non-nil only for a
+            // NOTIFY_EXEC that actually carried a header; gate on the event
+            // type explicitly too. Only write keys not already present so a
+            // future upstream stamp is never clobbered.
+            if let ctx = selfTrace,
+               evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
+               var stamped = event {
+                for (k, v) in TraceCorrelator.selfStampEnrichments(context: ctx, pid: stamped.process.pid)
+                where stamped.enrichments[k] == nil {
+                    stamped.enrichments[k] = v
+                }
+                event = stamped
+            }
+
             var yielded = false
             var yieldDropped = false
             if let event = event {
@@ -1183,13 +1210,18 @@ public final class ESCollector: @unchecked Sendable {
     /// (NOTIFY_EXEC env scan, NOTIFY_EXIT pid eviction) and emit
     /// `TraceBindingSignal`s onto the side-channel stream.
     ///
-    /// Runs only when `agentTracesEnabled == true`. Pure side-effect; the
-    /// caller still runs `normalise(...)` immediately after to produce
-    /// the normal Event for the detection pipeline.
+    /// Runs only when `agentTracesEnabled == true`. Still yields the
+    /// `.bind`/`.evict` signals for DESCENDANT correlation exactly as before.
+    ///
+    /// - Returns: the extracted `TraceContext` for a NOTIFY_EXEC that carried
+    ///   a TRACEPARENT (so `processRetained` can SELF-STAMP the SAME exec
+    ///   event synchronously, avoiding the async-bind race that left the
+    ///   process's own event unstamped); nil for EXIT, non-exec, or an exec
+    ///   with no inherited trace context.
     private static func emitTraceSignals(
         message: UnsafePointer<es_message_t>,
         into continuation: AsyncStream<TraceBindingSignal>.Continuation
-    ) {
+    ) -> TraceContext? {
         let msg = message.pointee
         switch msg.event_type {
         case ES_EVENT_TYPE_NOTIFY_EXEC:
@@ -1200,7 +1232,7 @@ public final class ESCollector: @unchecked Sendable {
             // `msg.event.exec.target`.
             let target = msg.event.exec.target
             guard let context = traceContextFromExecMessage(message) else {
-                return
+                return nil
             }
             let executablePath = esFileToPath(target.pointee.executable)
             let identity = ProcessIdentity(from: target, executablePath: executablePath)
@@ -1216,15 +1248,25 @@ public final class ESCollector: @unchecked Sendable {
                 kind: .bind(identity: identity, context: context, agentTool: aiTool)
             )
             continuation.yield(signal)
+            // v1.21.4 (P6): low-volume confirmation the traceparent path fired.
+            // Only reached on an actual TRACEPARENT hit, so this is rare and
+            // safe at `.info`. trace_id truncated to its first 8 hex chars.
+            let traceIdPrefix = String(context.traceId.prefix(8))
+            let lastComponent = (executablePath as NSString).lastPathComponent
+            traceLogger.info(
+                "agent-traces: self-stamp trace_id=\(traceIdPrefix, privacy: .public) pid=\(identity.pid, privacy: .public) path=\(lastComponent, privacy: .public)"
+            )
+            return context
 
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             // The exiting process is `msg.process`. EventLoop's consumer
             // no-ops if no binding exists for this pid.
             let exitingPid = audit_token_to_pid(msg.process.pointee.audit_token)
             continuation.yield(TraceBindingSignal(kind: .evict(pid: exitingPid)))
+            return nil
 
         default:
-            break
+            return nil
         }
     }
 

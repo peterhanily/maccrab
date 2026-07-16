@@ -172,3 +172,87 @@ struct AgentTraceCorrelationIdentityTests {
                 "enrichment must NOT drop auditIdentity — the agent-trace correlation depends on it")
     }
 }
+
+// v1.21.4 (P6 fix, real): the async TraceRegistry bind only ever helps
+// DESCENDANTS — the header-carrying process's OWN exec event is direct-
+// correlated before the detached bind lands, so its agent_trace_id stayed
+// null. The fix SELF-STAMPS the exec event synchronously in ESCollector via
+// TraceCorrelator.selfStampEnrichments (no registry round-trip, no race).
+// These tests pin the enrichment shape and the anti-downgrade guard.
+// The collector wiring (emitTraceSignals return -> processRetained stamp)
+// needs a native es_message_t, so it is covered by the on-device fixture
+// (TRACEPARENT=X /bin/sleep); here we exercise the pure helper + apply guard.
+@Suite("P6: agent-trace exec self-stamp")
+struct AgentTraceSelfStampTests {
+
+    private static let traceId = "4bf92f3577b34da6a3ce929d0e0e4736"
+    private static let spanId = "00f067aa0ba902b7"
+    private static let pid: pid_t = 4242
+
+    private static var context: TraceContext {
+        TraceContext(traceId: traceId, parentSpanId: spanId,
+                     flagsByte: 0x01, tracestatePresent: false)
+    }
+
+    @Test("selfStampEnrichments carries trace id, span id, and traceparent confidence")
+    func selfStampShape() {
+        let e = TraceCorrelator.selfStampEnrichments(context: Self.context, pid: Self.pid)
+        #expect(e[TraceCorrelator.EnrichmentKey.traceId] == Self.traceId,
+                "agent_trace_id must equal the inherited trace id")
+        #expect(e[TraceCorrelator.EnrichmentKey.confidence] == "traceparent",
+                "machine_agent_confidence must be the high-confidence traceparent")
+        #expect(e[TraceCorrelator.EnrichmentKey.spanId] == Self.spanId,
+                "agent_span_id must be set (the inherited parent span)")
+        #expect(e[TraceCorrelator.EnrichmentKey.evidenceJson] != nil,
+                "agent_evidence_json must be populated for the audit trail")
+        // Self-stamp is pure env provenance; no tool tag leaks in.
+        #expect(e[TraceCorrelator.EnrichmentKey.agentTool] == nil,
+                "self-stamp asserts no agent_tool — the .bind signal carries the tool for descendants")
+    }
+
+    private static func execEvent() -> Event {
+        let p = MacCrabCore.ProcessInfo(
+            pid: pid, ppid: 1, rpid: 0,
+            name: "sleep", executable: "/bin/sleep",
+            commandLine: "sleep 1", args: [], workingDirectory: "/",
+            userId: 501, userName: "u", groupId: 20,
+            startTime: Date(timeIntervalSince1970: 1_700_000_000),
+            codeSignature: nil, ancestors: [], architecture: nil,
+            isPlatformBinary: true, auditIdentity: nil)
+        return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: p)
+    }
+
+    /// A lineage-confidence correlation (no trace id) — what the isAIChild
+    /// pass would produce if the registry bind hadn't landed yet.
+    private static var lineageCorrelation: TraceCorrelation {
+        let ev = AttributionEvidence(
+            source: .lineageRegistry, confidence: .lineage,
+            agentTool: .claudeCode, traceId: nil, spanId: nil, parentSpanId: nil,
+            matchedPid: pid, matchedAncestorPid: 100, hopCount: 1)
+        return TraceCorrelation(evidence: ev, enrichments: TraceCorrelator.flatten(ev))
+    }
+
+    @Test("apply must NOT downgrade a self-stamped traceparent to lineage")
+    func applyDoesNotDowngrade() {
+        var event = Self.execEvent()
+        for (k, v) in TraceCorrelator.selfStampEnrichments(context: Self.context, pid: Self.pid) {
+            event.enrichments[k] = v
+        }
+        // The isAIChild lineage pass tries to overwrite — the guard must hold.
+        TraceCorrelator.apply(Self.lineageCorrelation, to: &event)
+        #expect(event.enrichments[TraceCorrelator.EnrichmentKey.confidence] == "traceparent",
+                "a self-stamped traceparent must never be replaced by lineage")
+        #expect(event.enrichments[TraceCorrelator.EnrichmentKey.traceId] == Self.traceId,
+                "the trace id must survive the lineage apply")
+        #expect(event.enrichments[TraceCorrelator.EnrichmentKey.agentTool] == nil,
+                "the lineage tool tag must not leak onto the traceparent-stamped event")
+    }
+
+    @Test("apply still stamps lineage on a fresh (unstamped) event — guard is one-directional")
+    func applyStampsWhenNotYetTraceparent() {
+        var event = Self.execEvent()
+        TraceCorrelator.apply(Self.lineageCorrelation, to: &event)
+        #expect(event.enrichments[TraceCorrelator.EnrichmentKey.confidence] == "lineage",
+                "with no prior traceparent stamp, the lineage attribution applies normally")
+    }
+}

@@ -169,9 +169,56 @@ public enum TraceCorrelator {
         return out
     }
 
+    /// Build the flat enrichment dictionary for SELF-STAMPING a process's
+    /// own NOTIFY_EXEC event with the W3C TRACEPARENT it inherited in its
+    /// exec env block.
+    ///
+    /// v1.21.4 (P6 fix): the async TraceRegistry bind created from the same
+    /// exec's env-scan only ever helps DESCENDANTS — the exec event of the
+    /// TRACEPARENT-carrying process itself flows through the pipeline and is
+    /// direct-correlated BEFORE the detached bind Task lands, so the
+    /// registry lookup misses and `agent_trace_id` was never stamped on the
+    /// process's OWN event. Stamping the exec event directly here (high
+    /// confidence, no registry round-trip, no race) closes that gap. The
+    /// NOTIFY_EXEC event represents the post-exec target image — the same
+    /// process whose env carried the header — so attributing it to that
+    /// trace is correct.
+    ///
+    /// Reuses `flatten` so the keys match the registry-correlation path
+    /// exactly (`agent_trace_id` / `agent_span_id` / `machine_agent_confidence`
+    /// / `agent_evidence_json`). `agentTool` is nil: self-stamp is a pure
+    /// env-provenance fact; the collector's best-effort tool tag is carried
+    /// by the parallel `.bind` signal for descendant correlation, not here.
+    public static func selfStampEnrichments(context: TraceContext, pid: pid_t) -> [String: String] {
+        let evidence = AttributionEvidence(
+            source: .traceparentEnv,
+            confidence: .traceparent,
+            agentTool: nil,
+            traceId: context.traceId,
+            spanId: context.parentSpanId,
+            parentSpanId: context.parentSpanId,
+            matchedPid: pid
+        )
+        return flatten(evidence)
+    }
+
     /// Apply a `TraceCorrelation` to a mutable event. Pure helper — no
     /// async, no actor hop. Caller is expected to hold `event` by value.
     public static func apply(_ correlation: TraceCorrelation, to event: inout Event) {
+        // v1.21.4 (P6 fix): never DOWNGRADE an already-`.traceparent`
+        // attribution to a lower-confidence one. The exec self-stamp in
+        // ESCollector writes machine_agent_confidence=traceparent directly
+        // onto the TRACEPARENT-carrying process's OWN exec event. If that
+        // same event is also recognised as an isAIChild and the registry
+        // bind hasn't landed yet, the isAIChild correlate() can fall through
+        // to the lineage pass, whose unconditional apply here would otherwise
+        // overwrite the traceparent stamp with `.lineage`. Guard that single
+        // direction only — an equal/higher-confidence re-apply (the same
+        // binding resolving) stays idempotent.
+        if event.enrichments[EnrichmentKey.confidence] == AttributionEvidence.Confidence.traceparent.rawValue,
+           correlation.evidence.confidence != .traceparent {
+            return
+        }
         for (k, v) in correlation.enrichments {
             event.enrichments[k] = v
         }

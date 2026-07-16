@@ -26,7 +26,81 @@ enum IntentEvidenceClassifier {
 
     /// Map an enriched event to zero or more Evidence values. Returns
     /// an empty array when no signal is present (the common case).
+    ///
+    /// v1.21.4 FP fix (intent-posterior): after raw extraction, apply a
+    /// platform-trust discount. Routine developer tooling (git, gh, sed,
+    /// rm, touch, bsdtar, …) is Apple-platform / Apple-signed / Developer-
+    /// ID-notarized and legitimately performs write-shaped actions that
+    /// the raw predicates score as persistence / config / destructive
+    /// evidence — git checking out `.github/workflows/*.yml`, bsdtar
+    /// extracting a package's `.npmrc`, `rm -rf ~/build`, `sed -i ~/.zshrc`.
+    /// Because the tree key anchors on the ROOT ancestor (the long-lived
+    /// login shell / terminal session), these individually-benign signals
+    /// from many UNRELATED processes pool into one posterior, sail past
+    /// the ≥3-distinct + 0.85 alert gate, and — the posterior being
+    /// sticky — re-fire on every subsequent evidence-producing leaf,
+    /// attributed to whichever benign tool ran (git/gh/rm/sed/touch/
+    /// bsdtar). That is the observed HIGH false-positive class.
+    ///
+    /// The discount is deliberately NARROW and conjunction-safe:
+    ///  - It drops ONLY the low-specificity, write-shaped / destructive
+    ///    evidence types (`trustDiscountedEvidence`) and ONLY when the
+    ///    ACTOR is platform-trusted.
+    ///  - It KEEPS the high-signal evidence that is alarming regardless of
+    ///    signer — credentialRead, nonRegistryEgress, registryEgress,
+    ///    obfuscatedContent, runtimeDrop, VM/locale probes — so a real
+    ///    credential-read → data-exfiltration chain still fires.
+    ///  - It touches ONLY the Bayesian intent posterior; the single-event
+    ///    Sigma rules covering `rm -rf /`, LaunchAgent writes, etc. are
+    ///    unaffected.
+    ///  - An UNTRUSTED (unsigned / ad-hoc) actor performing the SAME
+    ///    writes still produces full evidence — worm payloads are not
+    ///    Apple-signed — so this is a trust discount, not a feature kill.
     static func extract(_ event: Event) -> [BayesianIntentEngine.Evidence] {
+        var out = rawExtract(event)
+        if !out.isEmpty, isTrustedPlatformActor(event) {
+            out.removeAll { trustDiscountedEvidence.contains($0) }
+        }
+        return out
+    }
+
+    /// Evidence types discounted for a platform-trusted actor (see
+    /// `extract`). Each is a write-shaped or destructive-command signal
+    /// that routine build / checkout / archive / dotfile workflows emit;
+    /// none is the crux of a credential-theft or exfiltration chain.
+    private static let trustDiscountedEvidence: Set<BayesianIntentEngine.Evidence> = [
+        .workflowWrite,      // git checkout / bsdtar extract of .github/workflows/*
+        .configFileTampered, // git checkout / bsdtar extract of .npmrc / .pypirc
+        .shellRcWrite,       // sed / editor rewrite of ~/.zshrc, ~/.bashrc, …
+        .launchAgentWrite,   // signed installer / `touch` of a LaunchAgent plist
+        .destructiveCmd,     // `rm -rf ~/build`, `rm -rf $HOME/.cache`, …
+    ]
+
+    /// True when the event's actor is a platform-trusted binary: an Apple
+    /// platform binary (kernel-attested, unspoofable), an Apple-signed
+    /// binary (already re-verified against `anchor apple` by EventEnricher
+    /// upstream — see CodeSignatureInfo.withSignerType), an App Store
+    /// binary, or a NOTARIZED Developer-ID binary (Homebrew ships `gh` /
+    /// `git` this way). Ad-hoc and unsigned actors are NOT trusted: a worm
+    /// payload is typically one of these, so its evidence is never
+    /// discounted. An un-notarized Developer-ID binary is likewise not
+    /// trusted here (notarization is the meaningful supply-chain signal).
+    static func isTrustedPlatformActor(_ event: Event) -> Bool {
+        if event.process.isPlatformBinary { return true }
+        guard let cs = event.process.codeSignature else { return false }
+        switch cs.signerType {
+        case .apple, .appStore:
+            return true
+        case .devId:
+            return cs.isNotarized
+        case .adHoc, .unsigned:
+            return false
+        }
+    }
+
+    /// Raw event → Evidence mapping, before the platform-trust discount
+    /// applied by `extract`.
+    private static func rawExtract(_ event: Event) -> [BayesianIntentEngine.Evidence] {
         // v1.12.0 post-audit (H-Perf1): the prior implementation called
         // `.lowercased()` on event.process.commandLine (2–8KB for npm /
         // cargo / python builds) on EVERY event regardless of category,
