@@ -301,6 +301,11 @@ struct MCPProtocolHarnessTests {
         let forensicsMutators: Set<String> = [
             "forensics_install_plugin", "forensics_uninstall_plugin",
             "forensics_pin_plugin", "forensics_install_plugin_update",
+            // v1.21.4 (audit): these execute plugin/enricher code or read back
+            // collected sensitive data and are now .response-gated — pin them so
+            // a future ungate fails the build (the v1.18 fail-open bypass class).
+            "forensics_run_collector", "forensics_run_analyzer",
+            "forensics_run_all", "forensics_create_case", "forensics_enrich",
         ]
         let observed = names.filter { n in
             !n.contains(".") && (mutatingPrefixes.contains { n.hasPrefix($0) } || forensicsMutators.contains(n))
@@ -317,6 +322,10 @@ struct MCPProtocolHarnessTests {
             "set_response_action",
             "forensics_install_plugin", "forensics_uninstall_plugin",
             "forensics_pin_plugin", "forensics_install_plugin_update",
+            // v1.21.4 (audit): code-executing / case-mutating forensics tools now
+            // .response-gated (the v1.18 fail-open bypass class).
+            "forensics_run_collector", "forensics_run_analyzer",
+            "forensics_run_all", "forensics_create_case", "forensics_enrich",
         ]
         for n in observed {
             #expect(expectedGated.contains(n),

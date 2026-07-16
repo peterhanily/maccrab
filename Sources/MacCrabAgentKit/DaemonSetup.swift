@@ -1055,20 +1055,55 @@ enum DaemonSetup {
         let tccRevocation = TCCRevocation()
 
         if preventionEnabled {
+            // The abuse.ch / threat-intel feeds drive the DNS sinkhole + PF
+            // blocklist directly. Transport is already the hardened
+            // SecureURLSession (TLS 1.2 floor + SSRF-redirect re-validation), and
+            // DNSSinkhole/NetworkBlocker already exclude critical/protected
+            // domains + IPs (Apple/OCSP/resolvers/RFC1918/gateway) so a poisoned
+            // feed can't sever the host's own connectivity. These public feeds
+            // can't be practically SPKI-pinned or content-signed, so add the
+            // remaining guardrail: a sane per-refresh ceiling. A legitimate feed
+            // set stays well under this; exceeding it is itself a poisoning /
+            // MITM signal, so refuse to enforce that refresh (keeping the prior
+            // smaller set) and log it. Detection/alerting still sees the IOCs —
+            // this bounds ENFORCEMENT blast radius only.
+            //
+            // Content-integrity follow-up (tracked): a signed feed channel
+            // (Ed25519, like the rave catalog / rules channels) would let us
+            // authenticate abuse.ch content rather than sanity-bounding it.
+            let maxFeedEnforcedDomains = 100_000
+            let maxFeedEnforcedIPs = 100_000
+
             // Register threat intel update callback to populate prevention modules
-            await threatIntel.onUpdate { [dnsSinkhole, networkBlocker] ips, domains in
-                await dnsSinkhole.enable(domains: domains)
-                await networkBlocker.enable(ips: ips)
+            await threatIntel.onUpdate { [dnsSinkhole, networkBlocker, maxFeedEnforcedDomains, maxFeedEnforcedIPs] ips, domains in
+                if domains.count > maxFeedEnforcedDomains {
+                    print("Prevention: refusing to sinkhole \(domains.count) feed domains — exceeds \(maxFeedEnforcedDomains) sanity cap (possible feed poisoning); enforcement skipped this refresh")
+                } else {
+                    await dnsSinkhole.enable(domains: domains)
+                }
+                if ips.count > maxFeedEnforcedIPs {
+                    print("Prevention: refusing to PF-block \(ips.count) feed IPs — exceeds \(maxFeedEnforcedIPs) sanity cap (possible feed poisoning); enforcement skipped this refresh")
+                } else {
+                    await networkBlocker.enable(ips: ips)
+                }
             }
 
             // Initial population from any cached threat intel
             let cachedIPs = await threatIntel.maliciousIPSet()
             let cachedDomains = await threatIntel.maliciousDomainSet()
             if !cachedDomains.isEmpty {
-                await dnsSinkhole.enable(domains: cachedDomains)
+                if cachedDomains.count > maxFeedEnforcedDomains {
+                    print("Prevention: refusing to sinkhole \(cachedDomains.count) cached feed domains — exceeds \(maxFeedEnforcedDomains) sanity cap (possible feed poisoning); initial enforcement skipped")
+                } else {
+                    await dnsSinkhole.enable(domains: cachedDomains)
+                }
             }
             if !cachedIPs.isEmpty {
-                await networkBlocker.enable(ips: cachedIPs)
+                if cachedIPs.count > maxFeedEnforcedIPs {
+                    print("Prevention: refusing to PF-block \(cachedIPs.count) cached feed IPs — exceeds \(maxFeedEnforcedIPs) sanity cap (possible feed poisoning); initial enforcement skipped")
+                } else {
+                    await networkBlocker.enable(ips: cachedIPs)
+                }
             }
 
             // Lock persistence directories

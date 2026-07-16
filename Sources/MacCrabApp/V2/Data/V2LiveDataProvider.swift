@@ -829,7 +829,15 @@ public final class V2LiveDataProvider: V2DataProvider {
         // and the Supply chain inspector renders the result once it
         // lands. The 5-min cache absorbs repeated enrichment calls.
         let infos = await Self.packageScanner.scan()
-        await Self.kickOffBackgroundEnrichment(infos: infos)
+        // Privacy opt-in: scan() above is fully on-device (local brew/npm/pip3
+        // inventory + bundled typosquat DB). The background enrich() step reaches
+        // npm/PyPI over the network for attestation/metadata, so gate it on the
+        // same `enrich.packageFreshness` opt-in the enrichment card exposes and
+        // the daemon honors (EventLoop). A user who left enrichment off must not
+        // have their package names silently phone home on a background tick.
+        if UserDefaults.standard.bool(forKey: "enrich.packageFreshness") {
+            await Self.kickOffBackgroundEnrichment(infos: infos)
+        }
         let enrichedInfos = await Self.enrichmentResults.snapshot()
         return infos.map { info in
             let merged = enrichedInfos[info.id] ?? info

@@ -17,6 +17,17 @@
 // as a rollback) instead of re-opening the rollback window. A *missing* file is
 // still a legitimate first-run bootstrap.
 //
+// A1-03 upgrade path: a user upgrading FROM a pre-A1-03 build has a legacy FLAT
+// file (counters at the top level, no envelope) and NO host `.signkey`. Reading
+// that as `.tampered` would fail-close a legitimate upgrade — breaking the store,
+// revocation refresh, and installed-plugin execution with no self-heal. So a flat
+// file is migrated ONCE — but only when no host key has ever sealed here (the
+// unforgeable "first upgrade" signal): its marks are adopted and immediately
+// re-sealed into an envelope. After any successful seal a flat file is a
+// downgrade/tamper again and fails closed, so the migration cannot reset a mark
+// that was ever sealed. A flat file that claims schema_version ≥ 2 (a forged
+// downgrade) is rejected, not migrated.
+//
 //   <supportDir>/rave_trust_state.json
 //     {
 //       "schema_version": 2,
@@ -140,28 +151,66 @@ public struct RaveTrustStateStore: Sendable {
         case missing
         /// A present file that verified against this host's signing key.
         case verified(RaveTrustState)
+        /// A legacy pre-A1-03 FLAT file on a host that has never sealed an
+        /// envelope here — a one-time upgrade. The caller adopts these marks and
+        /// re-seals them into an envelope (never `.tampered`).
+        case legacyMigration(RaveTrustState)
         /// A present file that is unsigned, corrupt, or forged with another key.
         case tampered
     }
 
     /// Read + integrity-check the state file. A *missing* file is bootstrap
-    /// (first-seen). A *present* file must be a host-signed envelope that
-    /// verifies; anything else (legacy-unsigned flat file, garbage, mutated body,
-    /// or a signature from a foreign key) is `.tampered`.
+    /// (first-seen). A *present* file that is a host-signed envelope must verify
+    /// (mutated body / foreign key / missing host key → `.tampered`, unchanged).
+    /// A *present* file that is NOT an envelope is either a legacy pre-A1-03 FLAT
+    /// file to migrate once (A1-03: recognizable flat shape AND no host signing
+    /// key has ever sealed here) or genuine garbage/tamper (`.tampered`).
     private func loadOutcome() -> LoadOutcome {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
             return .missing
         }
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              LocalTrustSigner.isEnvelope(obj),
-              let body = signer.open(obj) else {
-            // Present but not a valid host-signed envelope → reset attempt.
-            FileHandle.standardError.write(Data(
-                "MacCrab: rave trust-state integrity check FAILED (unsigned/tampered) at \(path) — refusing to trust it (A1-03)\n".utf8
-            ))
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            warnTampered()
             return .tampered
         }
-        // JSONSerialization decodes integers as NSNumber; pull as Int.
+        // NEW format (A1-03): a sealed host-signed envelope. It MUST open + verify
+        // against this host's key; anything else (mutated body, foreign key,
+        // missing host key) is genuine tamper and fails closed. This path is
+        // unchanged — the legacy migration below never reaches or weakens it.
+        if LocalTrustSigner.isEnvelope(obj) {
+            guard let body = signer.open(obj) else {
+                warnTampered()
+                return .tampered
+            }
+            return .verified(Self.state(fromBody: body))
+        }
+        // NOT an envelope. Distinguish a legacy pre-A1-03 FLAT file (one-time
+        // upgrade) from genuine garbage/tamper. Gate the migration on the ABSENCE
+        // of a host signing key: a pre-A1-03 build had no LocalTrustSigner, so a
+        // genuine first upgrade has never sealed anything here (no `.signkey`).
+        // Once this host HAS sealed an envelope, a subsequent flat file is a
+        // downgrade/tamper and still fails closed — so the migration can never be
+        // abused to reset a mark that was ever sealed.
+        if signer.pinnedPublicKeyDER() == nil, let legacy = Self.legacyFlatBody(obj) {
+            FileHandle.standardError.write(Data(
+                "MacCrab: migrating legacy (pre-A1-03) rave trust-state at \(path) into a host-signed envelope (A1-03 one-time upgrade)\n".utf8
+            ))
+            return .legacyMigration(Self.state(fromBody: legacy))
+        }
+        warnTampered()
+        return .tampered
+    }
+
+    private func warnTampered() {
+        FileHandle.standardError.write(Data(
+            "MacCrab: rave trust-state integrity check FAILED (unsigned/tampered) at \(path) — refusing to trust it (A1-03)\n".utf8
+        ))
+    }
+
+    /// Parse a state body (the verified envelope body, or a migrated legacy flat
+    /// object — both carry the counters under the same keys). JSONSerialization
+    /// decodes integers as NSNumber; pull as Int.
+    private static func state(fromBody body: [String: Any]) -> RaveTrustState {
         let cat = (body["catalog_serial"] as? NSNumber)?.intValue
         let rev = (body["revocations_serial"] as? NSNumber)?.intValue
         // C-E: round-trip the revocations freshness clock (a malformed/absent
@@ -169,7 +218,26 @@ public struct RaveTrustStateStore: Sendable {
         let verifiedAt = (body["revocations_verified_at"] as? String)
             .flatMap { ISO8601DateFormatter().date(from: $0) }
         let rulesSerial = (body["rules_manifest_serial"] as? NSNumber)?.intValue
-        return .verified(RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt, rulesManifestSerial: rulesSerial))
+        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt, rulesManifestSerial: rulesSerial)
+    }
+
+    /// Recognize a legacy pre-A1-03 FLAT state file: the counters live at the TOP
+    /// level (no `body`/`signature`/`public_key_der` envelope) and the file is
+    /// schema_version 1 or older. Returns the flat object (usable directly as a
+    /// body) for a one-time migration, or nil when it isn't the legacy shape — in
+    /// which case the caller fails closed (`.tampered`) rather than laundering
+    /// random JSON into an accepted state. A FLAT object claiming schema_version
+    /// ≥ 2 is a forged downgrade, not a legacy file, and is rejected here.
+    private static func legacyFlatBody(_ obj: [String: Any]) -> [String: Any]? {
+        if let sv = (obj["schema_version"] as? NSNumber)?.intValue,
+           sv >= LocalTrustSigner.schemaVersion {
+            return nil
+        }
+        let hasCounter = obj["catalog_serial"] != nil
+            || obj["revocations_serial"] != nil
+            || obj["rules_manifest_serial"] != nil
+            || obj["revocations_verified_at"] != nil
+        return hasCounter ? obj : nil
     }
 
     /// Load the persisted state. A missing file is empty (first-seen) — a fresh
@@ -184,6 +252,18 @@ public struct RaveTrustStateStore: Sendable {
         switch loadOutcome() {
         case .missing: return RaveTrustState()
         case .verified(let s): return s
+        case .legacyMigration(let s):
+            // A1-03 one-time upgrade: re-seal the adopted legacy marks into a
+            // host-signed envelope so the flat file is replaced (and a `.signkey`
+            // generated — after which a flat file reads as tamper). Best-effort:
+            // a read must never throw. If the seal fails the flat file stays and a
+            // later load re-migrates; the marks returned here are correct either
+            // way. (Residual: if the seal generates the key but the envelope write
+            // fails, the still-flat file then reads as `.tampered` — fail-closed
+            // and recoverable by deleting the file; the two writes hit the same
+            // dir, so this is a near-impossible correlated failure.)
+            try? save(s)
+            return s
         case .tampered: return Self.tamperedSentinel
         }
     }
@@ -202,6 +282,9 @@ public struct RaveTrustStateStore: Sendable {
         switch loadOutcome() {
         case .missing: return RaveTrustState()
         case .verified(let s): return s
+        // A1-03 one-time upgrade: adopt the legacy marks; the subsequent save()
+        // re-seals them into an envelope (record* only ever advances the mark).
+        case .legacyMigration(let s): return s
         case .tampered: throw RaveTrustStateError.tampered
         }
     }

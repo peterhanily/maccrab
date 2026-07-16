@@ -812,7 +812,7 @@ public struct V2IntelligenceWorkspace: View {
                 packageScanInProgress ? "Scanning…" : (packages.isEmpty ? "Run scan" : "Re-scan"),
                 icon: "magnifyingglass.circle",
                 style: .primary,
-                disabled: packageScanInProgress
+                disabled: packageScanInProgress || !enrichPackageFreshness
             ) {
                 Task { await runPackageScan() }
             }
@@ -824,6 +824,9 @@ public struct V2IntelligenceWorkspace: View {
     private var scanStatusLine: String {
         if packageScanInProgress {
             return "Querying registries… this can take 30-90 s on a fresh scan."
+        }
+        if !enrichPackageFreshness {
+            return "Enable “Package freshness” in the Threat Intel tab to query npm / PyPI / Homebrew / Cargo. A scan uploads installed-package names; off by default."
         }
         if let last = packageLastScannedAt {
             return "Last scan completed \(V2TimeFormat.relative(last)). Click Re-scan to refresh."
@@ -839,6 +842,17 @@ public struct V2IntelligenceWorkspace: View {
     /// `latest` were both set to `info.latestVersion` so every row
     /// rendered "Up to date" regardless of actual local state.
     private func runPackageScan() async {
+        // Privacy opt-in: a package scan uploads the installed-package inventory
+        // names to npm/PyPI/Homebrew/crates. Honor the same
+        // `enrich.packageFreshness` opt-in the enrichment card exposes (and the
+        // daemon gates on) so nothing leaves the Mac until the user turns it on.
+        guard enrichPackageFreshness else {
+            state.showToast(V2Toast(
+                kind: .warning,
+                title: "Package freshness is off",
+                detail: "Enable “Package freshness” in the Threat Intel tab to query registries."))
+            return
+        }
         await MainActor.run { self.packageScanInProgress = true }
         let (scanned, installedMap): ([PackageFreshnessChecker.PackageInfo], [String: String]) =
             await withTaskGroup(of: ScanComponent.self) { group in

@@ -9,6 +9,8 @@
 //   - revocations high-water mark is independent of the catalog one
 //   - missing file degrades to empty (first-seen)
 //   - A1-03: present-but-unsigned/tampered/forged file fails CLOSED (not first-seen)
+//   - A1-03 upgrade: a legacy FLAT file migrates ONCE on a no-host-key host, but
+//     a flat file written AFTER a seal is a downgrade and still fails closed
 
 import Testing
 import Foundation
@@ -142,14 +144,47 @@ struct RaveTrustStateTests {
         expectFailClosed(RaveTrustStateStore(path: path), "garbage")
     }
 
-    @Test("A1-03: legacy/forged unsigned flat file fails closed")
-    func unsignedFlatFileFailsClosed() throws {
+    @Test("A1-03: legacy flat file MIGRATES on first upgrade (no host key yet), then re-seals")
+    func legacyFlatFileMigrates() throws {
         let path = Self.tmpPath()
-        // The pre-A1-03 shape — a same-uid attacker could write this to reset the
-        // mark. It must be rejected, not honored as first-seen.
+        // Pre-A1-03 shape on a host that has never sealed here (no `.signkey`) — a
+        // genuine upgrade. Its marks are adopted (NOT fail-closed) and re-sealed,
+        // so the store/revocation/plugin-exec paths keep working across upgrade.
+        try Data(#"{"schema_version":1,"catalog_serial":5,"revocations_serial":2}"#.utf8)
+            .write(to: URL(fileURLWithPath: path))
+        let store = RaveTrustStateStore(path: path)
+        #expect(store.load().catalogSerial == 5)          // carried across the upgrade
+        #expect(store.currentRevocationsSerial() == 2)
+        // The carried marks still enforce anti-rollback (a lower serial is stale).
+        #expect(store.evaluateCatalog(incoming: 4) == .rollback(stored: 5, incoming: 4))
+        // load() re-sealed the flat file into a host-signed envelope.
+        let obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: path))) as! [String: Any]
+        #expect(LocalTrustSigner.isEnvelope(obj))
+    }
+
+    @Test("A1-03: a flat file written AFTER a seal is a downgrade → fails closed (not migrated)")
+    func flatDowngradeAfterSealFailsClosed() throws {
+        let path = Self.tmpPath()
+        let store = RaveTrustStateStore(path: path)
+        try store.recordCatalog(serial: 5)   // seals → this host's `.signkey` now exists
+        // A same-uid attacker rewrites the sealed envelope as a flat LOW mark to
+        // reset the high-water mark. A host key now exists, so this is a
+        // downgrade/tamper — NOT a legacy upgrade — and must be rejected. This is
+        // the reset-attack the migration must never re-open on an established mark.
         try Data(#"{"schema_version":1,"catalog_serial":0}"#.utf8)
             .write(to: URL(fileURLWithPath: path))
-        expectFailClosed(RaveTrustStateStore(path: path), "unsigned flat")
+        expectFailClosed(store, "flat downgrade after seal")
+    }
+
+    @Test("A1-03: a FLAT file claiming schema_version >= 2 is a forged downgrade → fails closed")
+    func flatSchemaV2FailsClosed() throws {
+        let path = Self.tmpPath()
+        // A v2 state is REQUIRED to be a sealed envelope; a flat object claiming
+        // v2 is a forgery, not a legacy file — reject even with no key present.
+        try Data(#"{"schema_version":2,"catalog_serial":0}"#.utf8)
+            .write(to: URL(fileURLWithPath: path))
+        expectFailClosed(RaveTrustStateStore(path: path), "flat schema_version 2")
     }
 
     @Test("A1-03: a body mutated after signing is detected and rejected")

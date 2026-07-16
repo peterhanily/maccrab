@@ -121,6 +121,26 @@ let agentToolCapability: [String: AgentCapability] = [
     "forensics_run_collector": .response,
     "forensics_run_analyzer": .response,
     "forensics_run_all": .response,
+    // forensics_enrich EXECUTES enricher plugin code against an operator-named
+    // path — the same code-execution class as run_collector / run_analyzer — so
+    // it sits at the top tier too. Previously absent: the map's fail-open
+    // default let an agent with ZERO granted tiers run arbitrary enricher code.
+    "forensics_enrich": .response,
+    // Reading COLLECTED forensic artifacts back out of a case (Safari visits,
+    // TCC grants, quarantine downloads, app-usage, per-content-type / posture
+    // rollups) is the exfil half of the collection the operator gated behind
+    // .response. Collection is .response-gated (above); gate the read-back at
+    // the same tier so the forensic surface is one coherent .response-tier
+    // capability and a zero-tier agent cannot extract sensitive local metadata
+    // that a prior scan committed. Plugin / case ENUMERATION
+    // (forensics_list_plugins / list_cases / list_installed_plugins /
+    // search_catalog / check_plugin_updates / verify_installed_plugins) stays
+    // ungated — it reveals no collected personal data.
+    "forensics_search_artifacts": .response,
+    "forensics_get_artifact": .response,
+    "forensics_timeline": .response,
+    "forensics_explain_case": .response,
+    "forensics_posture_findings": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +
@@ -169,6 +189,23 @@ func agentCapabilityDenial(forTool name: String, args: [String: Any]) -> [String
     }
     if granted.contains(required) { return nil }
     return toolError("MacCrab agent capability '\(required.rawValue)' is not enabled. A human must turn it on in the dashboard (Settings → Agent Control); the grant is stored in a root-owned file that agents cannot write. All agent-control tiers are off by default.")
+}
+
+/// Fail-CLOSED gate for the dynamically-registered per-plugin collector tools
+/// (imessage_*, mail_*, safari_*, knowledgec_*, quarantine_*, launchd_*, tcc_*,
+/// macho_analyze_path, pkg_analyze_path, …). These names are declared by
+/// installed collector manifests and advertised via `pluginMCPTools()`, so they
+/// can NEVER appear in the static `agentToolCapability` map — and that map FAILS
+/// OPEN. Each one executes plugin scanner code and commits (often sensitive:
+/// messages / mail / browser history / TCC state) artifacts into a case, i.e.
+/// exactly what forensics_run_collector does, so it requires the top `.response`
+/// tier. Called at the single plugin-dispatch chokepoint (handlePluginMCPTool);
+/// without it a zero-capability agent could run arbitrary personal-data
+/// collection by naming a per-plugin tool directly. Returns a toolError dict
+/// when `.response` isn't granted; nil to proceed.
+func perPluginCollectorCapabilityDenial(forTool name: String) -> [String: Any]? {
+    if loadAgentCapabilities().contains(.response) { return nil }
+    return toolError("MacCrab agent capability 'response' is not enabled. The per-plugin collector tool '\(name)' executes plugin scanner code and commits forensic artifacts (sensitive local data) into a case, so it requires the top 'response' tier — the same gate as forensics_run_collector. A human must turn it on in the dashboard (Settings → Agent Control); the grant is stored in a root-owned file that agents cannot write. All agent-control tiers are off by default.")
 }
 
 // MARK: - Read-only: capabilities + built-in rule catalog + audit log

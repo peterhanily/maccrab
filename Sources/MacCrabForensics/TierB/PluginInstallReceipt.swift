@@ -88,6 +88,11 @@ public enum PluginInstallReceiptError: Error, CustomStringConvertible {
     case readFailed(String)
     case malformed(String)
     case signatureInvalid
+    /// The receipt's own signature verifies, but its embedded signer key is not
+    /// this host's install-receipt key — a self-signed / foreign-signed receipt.
+    /// Raised only by the PINNED verify path (a local trust decision); the
+    /// unpinned offline verify never raises it.
+    case untrustedSigner
 
     public var description: String {
         switch self {
@@ -95,6 +100,7 @@ public enum PluginInstallReceiptError: Error, CustomStringConvertible {
         case .readFailed(let m):  return "Receipt read failed: \(m)"
         case .malformed(let m):   return "Receipt malformed: \(m)"
         case .signatureInvalid:   return "Receipt signature does not verify (tampered or wrong key)."
+        case .untrustedSigner:    return "Receipt is signed by a key that is not this host's install-receipt key (unpinned/self-signed — provenance refused)."
         }
     }
 }
@@ -176,6 +182,11 @@ public struct PluginInstallReceiptStore: Sendable {
     /// Returns the parsed body on success; throws on malformed JSON or a bad
     /// signature (tamper). Static so a third-party validator can call it
     /// without constructing a substrate.
+    ///
+    /// NOTE: this is UNPINNED — it proves the body wasn't mutated after signing,
+    /// NOT who signed it. A self-signed receipt an attacker drops on disk passes
+    /// it. For any LOCAL trust decision (e.g. granting `.store` provenance) use
+    /// the pinned overload `verify(at:pinnedPublicKeyDER:)`.
     public static func verify(at url: URL) throws -> PluginInstallReceiptBody {
         let data: Data
         do { data = try Data(contentsOf: url) }
@@ -184,7 +195,39 @@ public struct PluginInstallReceiptStore: Sendable {
     }
 
     /// Verify receipt bytes directly (test seam + in-memory verification).
+    /// UNPINNED — see `verify(at:)`.
     public static func verify(data: Data) throws -> PluginInstallReceiptBody {
+        try verifyCore(data: data).body
+    }
+
+    /// Verify a receipt at `url` AND pin its signer to `pinnedPublicKeyDER` (this
+    /// host's TrustSubstrate public key, SPKI DER). Use for a LOCAL trust
+    /// decision: the unpinned verify only proves tamper-freedom, so it would
+    /// accept a self-signed receipt; pinning rejects a receipt whose embedded key
+    /// isn't ours. Mirrors LocalTrustSigner.open()'s key pin.
+    public static func verify(at url: URL, pinnedPublicKeyDER: Data) throws -> PluginInstallReceiptBody {
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch { throw PluginInstallReceiptError.readFailed("\(url.path): \(error)") }
+        return try verify(data: data, pinnedPublicKeyDER: pinnedPublicKeyDER)
+    }
+
+    /// Pinned verification of receipt bytes: tamper-check PLUS a constant-time
+    /// requirement that the embedded signer key equals `pinnedPublicKeyDER`.
+    public static func verify(data: Data, pinnedPublicKeyDER: Data) throws -> PluginInstallReceiptBody {
+        let (body, embeddedPubDER) = try verifyCore(data: data)
+        guard constantTimeEquals(embeddedPubDER, pinnedPublicKeyDER) else {
+            throw PluginInstallReceiptError.untrustedSigner
+        }
+        return body
+    }
+
+    /// Core tamper-check: parses the envelope, re-canonicalizes the parsed body,
+    /// and verifies the DER ECDSA-P256-SHA256 signature against the EMBEDDED key.
+    /// Returns the body and the embedded signer key (SPKI DER) so a pinned caller
+    /// can additionally require the key to be this host's. On its own this proves
+    /// the body wasn't mutated after signing — NOT who signed it.
+    private static func verifyCore(data: Data) throws -> (body: PluginInstallReceiptBody, publicKeyDER: Data) {
         guard let top = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw PluginInstallReceiptError.malformed("not a JSON object")
         }
@@ -227,6 +270,16 @@ public struct PluginInstallReceiptStore: Sendable {
         guard p256Key.isValidSignature(p256Sig, for: canonical) else {
             throw PluginInstallReceiptError.signatureInvalid
         }
-        return body
+        return (body, pubDER)
+    }
+
+    /// Length-checked, byte-for-byte comparison that doesn't early-out on the
+    /// first differing byte (the keys aren't secret, but a public pin compare is
+    /// the natural place to keep the habit).
+    private static func constantTimeEquals(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for (x, y) in zip(a, b) { diff |= x ^ y }
+        return diff == 0
     }
 }

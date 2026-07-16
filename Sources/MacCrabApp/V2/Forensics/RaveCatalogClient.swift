@@ -350,12 +350,19 @@ public actor RaveCatalogClient {
     }
 
     private func fetch(url: URL) async throws -> Data {
-        // Trust data (catalog + revocations.json) must be fresh: a stale cached
-        // revocations.json could keep a just-revoked plugin shown as trusted.
-        // Bypass the URL cache so a revocation is never masked by a 304/cache hit.
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (data, response) = try await URLSession.shared.data(for: request)
+        // Route through SecureURLSession.shared (TLS 1.2 floor, ephemeral no-disk
+        // cache, SSRF-redirect re-validation) — the hardened session every other
+        // outbound caller uses. This is the highest-trust channel (catalog +
+        // revocations drive plugin trust), so it must not fall back to raw
+        // URLSession.shared. Matches the maccrabctl PluginCatalogFetch path.
+        //
+        // Trust data (catalog + revocations.json) must also be fresh: a stale
+        // cached revocations.json could keep a just-revoked plugin shown as
+        // trusted. Bypass local AND remote caches so a revocation is never masked
+        // by a 304/cache hit.
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await SecureURLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw RaveCatalogError.fetchFailed(url: url, status: -1)
         }

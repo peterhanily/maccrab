@@ -909,8 +909,19 @@ public actor SequenceEngine {
             return event.process.codeSignature.map { String($0.isNotarized) }
         case "process.is_platform_binary":
             return String(event.process.isPlatformBinary)
-        case "process.architecture":
+        case "process.architecture", "Architecture":
             return event.process.architecture
+        // v1.21.4: Sigma passthrough aliases the single-event RuleEngine
+        // resolves but SequenceEngine.resolveField had diverged from — without
+        // them multi-step rules predicating on these fields silently never fire
+        // (e.g. Rules/sequences/notarized_dropper_pattern.yml on NotarizationStatus).
+        case "NotarizationStatus":
+            if let enriched = event.enrichments["notarization.status"], !enriched.isEmpty {
+                return enriched
+            }
+            return event.process.codeSignature.map { $0.isNotarized ? "notarized" : "not_notarized" }
+        case "IsNotarized", "process.is_notarized":
+            return event.process.codeSignature.map { String($0.isNotarized) }
 
         // --- File fields ---
         case "file.path", "TargetFilename":
@@ -923,7 +934,7 @@ public actor SequenceEngine {
             return event.file?.extension_
         case "file.size":
             return event.file?.size.map { String($0) }
-        case "file.action":
+        case "file.action", "FileAction":
             return event.file?.action.rawValue
         case "file.source_path", "SourceFilename":
             return event.file?.sourcePath

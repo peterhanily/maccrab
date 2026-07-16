@@ -45,6 +45,30 @@ private let mcpResponseValidSeverities: Set<String> = ["critical", "high", "medi
 /// Destructive actions default requireConfirmation to true (the safer default).
 private let mcpResponseConfirmByDefault: Set<String> = ["kill", "quarantine", "blockNetwork"]
 
+/// The root-managed dirs the ROOT engine will execute response scripts from
+/// (mirrors ResponseAction.scriptAllowlistedDirs). A script anywhere else is
+/// rejected by the engine at exec time; we reject it here at WRITE time too so
+/// the MCP never persists an actions.json the engine would silently refuse.
+private let mcpScriptAllowlistedDirs: [String] = [
+    "/Library/Application Support/MacCrab/scripts/",
+    "/usr/local/maccrab/scripts/",
+]
+
+/// Belt-and-suspenders server-side validation for `set_response_action`'s
+/// `script_path`. The tool wrote whatever the client sent and relied entirely on
+/// the engine's downstream enforcement (client-honesty). Reject here anything
+/// the engine would never run: a non-absolute path, or a path outside the two
+/// root-managed script dirs. We deliberately do NOT check ownership / existence
+/// / symlink here — the script may be installed after this config is written,
+/// and only the ROOT engine (ResponseAction.validateScriptPath, which also
+/// enforces root:owner + no group/world-write + no-symlink at exec time) can
+/// authoritatively lstat it. Standardizes first to defeat `..` traversal.
+private func mcpValidateScriptPath(_ path: String) -> Bool {
+    guard path.hasPrefix("/") else { return false }            // absolute only
+    let canonical = URL(fileURLWithPath: path).standardizedFileURL.path  // defeat ..
+    return mcpScriptAllowlistedDirs.contains { canonical.hasPrefix($0) }
+}
+
 // MARK: - Paths
 
 /// READ path: prefer the system actions.json when readable + at least as recent
@@ -162,6 +186,13 @@ func handleSetResponseAction(_ args: [String: Any]) -> Any {
     let scriptPath = args["script_path"] as? String
     if action == "script" && (scriptPath == nil || scriptPath?.isEmpty == true) {
         return toolError("action 'script' requires 'script_path'")
+    }
+    // Server-side validation (don't trust the client / rely solely on the engine):
+    // any script_path we persist must be an absolute path under a root-managed
+    // script dir the engine will actually execute from — otherwise the arming is
+    // a silent no-op at best and a misdirection at worst.
+    if let sp = scriptPath, !sp.isEmpty, !mcpValidateScriptPath(sp) {
+        return toolError("'script_path' must be an absolute path under a root-managed scripts dir (\(mcpScriptAllowlistedDirs.joined(separator: " or "))). The ROOT engine only executes scripts that live there and are owned by root with no group/world-write, so a path elsewhere would never run.")
     }
     let blockDuration = args["block_duration_seconds"] as? Int
     let ruleId = (args["rule_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }

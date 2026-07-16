@@ -87,7 +87,13 @@ actor BatchedEventWriter {
             do {
                 try await store.insert(events: batch)
             } catch {
+                // The batch is lost (disk full, corruption, etc.) — retrying the
+                // same transaction would just fail again. Record the error AND
+                // count the lost events as storage-write drops so they are not
+                // silently uncounted (the audit caught this gap): `droppedCount`
+                // now reflects both hard-cap overflow and flush failures.
                 await StorageErrorTracker.shared.recordEventError(error)
+                drops.add(batch.count)
             }
         }
     }

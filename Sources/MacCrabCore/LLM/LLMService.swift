@@ -303,6 +303,19 @@ public actor LLMService {
         let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
         let finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
 
+        // Strict no-leak mode: same hard boundary the regular query() path
+        // enforces. If the sanitized prompt STILL has residual high-entropy
+        // content the best-effort regex may have missed, refuse rather than risk
+        // leaking a novel secret shape to a cloud endpoint. This path was
+        // previously missing the gate — a strict-mode leak could slip through the
+        // extended-thinking route.
+        if shouldSanitize && strictSanitize &&
+            (LLMSanitizer.hasResidualSensitiveContent(finalSystem) ||
+             LLMSanitizer.hasResidualSensitiveContent(finalUser)) {
+            logger.warning("LLM strict mode: refusing cloud call (extended thinking) — sanitized prompt still has residual high-entropy content")
+            return nil
+        }
+
         let elapsed = Date().timeIntervalSince(lastCallTime)
         if elapsed < minInterval {
             try? await Task.sleep(nanoseconds: UInt64((minInterval - elapsed) * 1_000_000_000))

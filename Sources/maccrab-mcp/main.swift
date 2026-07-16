@@ -1067,15 +1067,24 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleForensicsRunAnalyzer(args)
     case "forensics_enrich":
         return await handleForensicsEnrich(args)
+    // v1.21.4 (audit): these read back collected sensitive forensic data
+    // (Safari/TCC/quarantine/personal-comms) and are now .response-gated — audit
+    // the access for forensic accountability (who read what), consistent with
+    // the gated-tool audit invariant.
     case "forensics_search_artifacts":
+        auditLog("forensics_search_artifacts", details: "case_id=\(args["case_id"] ?? "?") ppid=\(getppid())")
         return await handleForensicsSearchArtifacts(args)
     case "forensics_get_artifact":
+        auditLog("forensics_get_artifact", details: "case_id=\(args["case_id"] ?? "?") ppid=\(getppid())")
         return await handleForensicsGetArtifact(args)
     case "forensics_timeline":
+        auditLog("forensics_timeline", details: "case_id=\(args["case_id"] ?? "?") ppid=\(getppid())")
         return await handleForensicsTimeline(args)
     case "forensics_explain_case":
+        auditLog("forensics_explain_case", details: "case_id=\(args["case_id"] ?? "?") ppid=\(getppid())")
         return await handleForensicsExplainCase(args)
     case "forensics_posture_findings":
+        auditLog("forensics_posture_findings", details: "case_id=\(args["case_id"] ?? "?") ppid=\(getppid())")
         return await handleForensicsPostureFindings(args)
     case "forensics_list_installed_plugins":
         return await handleTierBListPlugins()
@@ -2840,11 +2849,20 @@ private func pluginForMCPTool(_ name: String) async -> PluginManifest? {
 /// through. Requires `case_id` (the artifact destination); the artifacts
 /// are then read via forensics_search_artifacts / forensics_timeline.
 func handlePluginMCPTool(name: String, manifest: PluginManifest, args: [String: Any]) async -> Any {
+    // SECURITY (fail-CLOSED): the per-plugin collector tools are advertised
+    // dynamically from installed collector manifests, so they can't live in the
+    // `agentToolCapability` map — which FAILS OPEN. This is the single plugin
+    // dispatch chokepoint, so gate the whole class at `.response` here (matching
+    // forensics_run_collector). Without this, a zero-capability agent could run
+    // arbitrary personal-data collection by naming a per-plugin tool directly.
+    if let denial = perPluginCollectorCapabilityDenial(forTool: name) { return denial }
     guard let caseID = args["case_id"] as? String else {
         let optional = manifest.inputs.filter { $0.type != .caseID }.map { $0.name }
         let extra = optional.isEmpty ? "" : " Inputs: \(optional.joined(separator: ", "))."
         return toolError("'\(name)' requires 'case_id' (create one with forensics_create_case).\(extra)")
     }
+    // Audit the (gated) execution like every other code-executing forensic tool.
+    auditLog(name, details: "plugin_id=\(manifest.id) case_id=\(caseID) ppid=\(getppid())")
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
@@ -3136,6 +3154,10 @@ func handleForensicsEnrich(_ args: [String: Any]) async -> Any {
           let path = args["path"] as? String, !path.isEmpty else {
         return toolError("missing required arguments: plugin_id, case_id, path")
     }
+    // Gated (.response, via agentToolCapability) — executes enricher plugin code
+    // against an operator-named path. Audit it like every other code-executing
+    // forensic tool.
+    auditLog("forensics_enrich", details: "plugin_id=\(pluginID) case_id=\(caseID) ppid=\(getppid())")
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         guard let reg = await PluginRegistry.shared.registration(forID: pluginID) else {

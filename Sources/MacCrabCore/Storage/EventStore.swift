@@ -1435,7 +1435,14 @@ public actor EventStore {
     public func prune(
         olderThan date: Date,
         protecting protectedCategory: EventCategory? = nil,
-        newerThan floorCutoff: Date? = nil
+        newerThan floorCutoff: Date? = nil,
+        // v1.21.4 (audit): set true when the CALLER already holds an open write
+        // transaction (rollUpAndPrune). Inside a transaction we must NOT suspend
+        // (Task.yield) — the actor would reenter and a concurrent insert(events:)
+        // would issue a nested BEGIN, which SQLite rejects, silently losing that
+        // insert's whole batch. We also skip incremental_vacuum (illegal inside a
+        // transaction); the caller vacuums after COMMIT.
+        withinTransaction: Bool = false
     ) async throws -> Int {
         let batchSize: Int32 = 100_000
         let timestamp = date.timeIntervalSince1970
@@ -1505,8 +1512,12 @@ public actor EventStore {
             if rowsDeleted == 0 { break }
 
             // Yield to the actor's cooperative executor so concurrent inserts and
-            // queries are not starved between batches.
-            await Task.yield()
+            // queries are not starved between batches — but NEVER while a caller
+            // holds an open transaction (see withinTransaction: a suspension here
+            // lets a reentrant insert issue a nested BEGIN and lose its batch).
+            if !withinTransaction {
+                await Task.yield()
+            }
         }
 
         // v1.10.0 perf: incremental_vacuum reclaims pages freed by the
@@ -1517,7 +1528,9 @@ public actor EventStore {
         // and operates on the already-released pages from this prune.
         // Cap to 5K pages (~20 MB) per call so we don't stall the
         // actor on a freshly-pruned giant DB.
-        if totalDeleted > 0, let db {
+        // incremental_vacuum is illegal inside a transaction — skip it when the
+        // caller holds one (rollUpAndPrune runs it after COMMIT instead).
+        if !withinTransaction, totalDeleted > 0, let db {
             sqlite3_exec(db, "PRAGMA incremental_vacuum(5000)", nil, nil, nil)
         }
 
@@ -2121,11 +2134,21 @@ public actor EventStore {
         let deleted = try await prune(
             olderThan: cutoff,
             protecting: protectedCategory,
-            newerThan: floorCutoff
+            newerThan: floorCutoff,
+            // We hold BEGIN IMMEDIATE — prune must not suspend (nested-BEGIN
+            // reentrancy data-loss) or vacuum (illegal mid-transaction).
+            withinTransaction: true
         )
 
         try execute("COMMIT")
         transactionCommitted = true
+
+        // v1.21.4 (audit): prune skipped incremental_vacuum inside the
+        // transaction (illegal there) — reclaim the freed pages now that the
+        // write lock is released. Bounded (5K pages), non-blocking.
+        if deleted > 0 {
+            sqlite3_exec(db, "PRAGMA incremental_vacuum(5000)", nil, nil, nil)
+        }
 
         // Step 3: trim aggregates older than `aggregateRetentionDays`.
         // Independent + idempotent — runs outside the main transaction so it

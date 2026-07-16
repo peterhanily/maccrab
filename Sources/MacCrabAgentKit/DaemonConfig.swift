@@ -424,6 +424,15 @@ struct DaemonConfig: Codable {
             "event_tap_poll_interval": "eventTapPollInterval",
             "system_policy_poll_interval": "systemPolicyPollInterval",
             "btm_poll_interval": "btmPollInterval",
+            // v1.21.4 (audit): these 4 keys were added to the struct but never
+            // to this map, so the JSONDecoder (no `.convertFromSnakeCase`) never
+            // matched the snake_case key and silently used the default. Most
+            // importantly `rule_profile: "all"` — the documented F-04 override to
+            // re-enable the experimental rule corpus — was a complete no-op.
+            "rule_profile": "ruleProfile",
+            "subscribe_file_open_events": "subscribeFileOpenEvents",
+            "subscribe_introspection_events": "subscribeIntrospectionEvents",
+            "suppress_selftest_noise": "suppressSelftestNoise",
             // v1.19.1 opt-in network-enrichment flags
             "threat_intel_enabled": "threatIntelEnabled",
             "vuln_scan_enabled": "vulnScanEnabled",

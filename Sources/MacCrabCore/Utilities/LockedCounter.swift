@@ -13,6 +13,15 @@ public final class LockedCounter: @unchecked Sendable {
 
     public init() {}
 
+    /// Add `n` (e.g. a whole dropped batch) atomically. No-op for n <= 0.
+    @discardableResult
+    public func add(_ n: Int) -> Int {
+        guard n > 0 else { return get() }
+        lock.lock(); defer { lock.unlock() }
+        value += n
+        return value
+    }
+
     @discardableResult
     public func increment() -> Int {
         lock.lock()

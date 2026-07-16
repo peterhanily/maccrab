@@ -240,6 +240,32 @@ struct PluginInstallerSecurityTests {
 
         #expect(await installer.currentTrustedKeys().isEmpty)   // fail-closed
     }
+
+    @Test("A1-03 upgrade: a legacy FLAT trusted-keys.json migrates once (no host key yet)")
+    func legacyFlatTrustedKeysMigrates() async throws {
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        // Pre-A1-03 install: a flat {"keys":[...]} list and NO `.trusted-keys.signkey`.
+        try FileManager.default.createDirectory(
+            atPath: installer.pluginsRootPath, withIntermediateDirectories: true)
+        let legit = String(repeating: "a", count: 64)
+        let trustedPath = installer.pluginsRootPath + "/trusted-keys.json"
+        try Data("{\"keys\":[\"\(legit)\"]}".utf8)
+            .write(to: URL(fileURLWithPath: trustedPath))
+
+        // The operator's existing trust is adopted (plugins keep running across
+        // the upgrade), not silently dropped.
+        let trusted = await installer.currentTrustedKeys()
+        #expect(trusted.contains(legit))
+
+        // It was re-sealed into a host-signed envelope, so it now round-trips
+        // through the signed path (and a later flat downgrade would fail closed).
+        let obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: trustedPath))) as! [String: Any]
+        #expect(LocalTrustSigner.isEnvelope(obj))
+        let reopened = PluginInstaller(pluginsRoot: URL(fileURLWithPath: installer.pluginsRootPath))
+        #expect(await reopened.currentTrustedKeys().contains(legit))
+    }
 }
 
 @Suite("TierBRegistry security — audit-4: TOCTOU verify-to-spawn")

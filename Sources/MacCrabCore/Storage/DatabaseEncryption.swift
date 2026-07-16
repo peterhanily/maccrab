@@ -11,8 +11,14 @@
 //
 // v2 format (current, encrypt + decrypt): "ENC2:" + base64( SealedBox.combined )
 //   AES-256-GCM via CryptoKit. SealedBox.combined = nonce (12) + ciphertext
-//   + tag (16). Authenticated — tamper produces a decrypt failure, which
-//   the daemon logs and reports as a tamper alert.
+//   + tag (16). Authenticated — tamper produces an authentication failure,
+//   which increments a tamper counter (`authenticatedDecryptFailures`) and
+//   logs at fault level so the daemon can raise a tamper alert.
+//
+// Fail-closed contract: `encrypt` never returns plaintext on a crypto
+// failure while encryption is enabled, and key generation never accepts an
+// RNG failure — both terminate the process rather than silently persist
+// plaintext or a weak key. See `failClosed`.
 //
 // Migration is transparent: v1.8.1+ writes v2; reads dispatch on prefix
 // and accept both. Old rows stay v1 until naturally rewritten or migrated
@@ -51,6 +57,18 @@ public final class DatabaseEncryption: Sendable {
 
     /// Whether encryption is enabled.
     public let isEnabled: Bool
+
+    /// Count of AES-GCM authenticated-decryption failures since process
+    /// start. For GCM an authentication failure means the stored ciphertext
+    /// or tag was modified — i.e. tamper against an encrypted DB column — so
+    /// a non-zero value is a tamper signal, not a benign decode miss.
+    private let tamperCounter = LockedCounter()
+
+    /// Number of authenticated-decryption (tamper) failures observed so far.
+    /// 0 under normal operation; any increase means a modified ciphertext /
+    /// tag in one of the encrypted DB columns. The daemon should poll this
+    /// to raise a (rate-limited) tamper alert.
+    public var authenticatedDecryptFailures: Int { tamperCounter.get() }
 
     /// v1 prefix — legacy AES-CBC + PKCS7. Decrypt-only going forward.
     private static let encryptedPrefixV1 = "ENC:"
@@ -91,16 +109,26 @@ public final class DatabaseEncryption: Sendable {
     /// input is empty.
     public func encrypt(_ plaintext: String) -> String {
         guard isEnabled, !plaintext.isEmpty else { return plaintext }
-        guard let data = plaintext.data(using: .utf8) else { return plaintext }
+        // Fail CLOSED past this point: with encryption enabled we must never
+        // return plaintext on a crypto failure, or the caller would persist
+        // sensitive columns unencrypted while believing they are encrypted.
+        // Every branch below is unreachable under a well-formed 32-byte key
+        // (a Swift String is always valid UTF-8; AES-GCM.seal with a valid
+        // key does not fail and always yields a non-nil combined box), so
+        // reaching one means a broken key/CryptoKit invariant.
+        guard let data = plaintext.data(using: .utf8) else {
+            Self.failClosed("UTF-8 encoding of plaintext failed")
+        }
 
         let symKey = SymmetricKey(data: key)
         do {
             let sealed = try AES.GCM.seal(data, using: symKey)
-            guard let combined = sealed.combined else { return plaintext }
+            guard let combined = sealed.combined else {
+                Self.failClosed("AES-GCM SealedBox.combined was nil")
+            }
             return Self.encryptedPrefixV2 + combined.base64EncodedString()
         } catch {
-            logger.error("AES-GCM seal failed: \(error.localizedDescription, privacy: .public)")
-            return plaintext
+            Self.failClosed("AES-GCM seal failed: \(error.localizedDescription)")
         }
     }
 
@@ -119,10 +147,15 @@ public final class DatabaseEncryption: Sendable {
         return encrypted
     }
 
-    /// AES-GCM decrypt. Tamper detection lives here: a modified
-    /// ciphertext / tag throws, and the caller falls through to the
-    /// passthrough return — making tamper visible as garbage in the UI
-    /// and a logged error in the unified log.
+    /// AES-GCM decrypt. Tamper detection lives here: a modified ciphertext
+    /// / tag fails authentication, which increments `tamperCounter` and logs
+    /// at fault level (distinct from a benign non-encrypted value) so the
+    /// daemon can raise a tamper alert; the value then falls through to the
+    /// passthrough return (visible as garbage in the UI).
+    ///
+    /// Follow-up (needs a daemon/store hook, not in this file): poll
+    /// `authenticatedDecryptFailures` from the maintenance timer and emit a
+    /// structured, rate-limited tamper Alert/Event.
     private func decryptV2(_ encrypted: String) -> String {
         let base64 = String(encrypted.dropFirst(Self.encryptedPrefixV2.count))
         guard let combined = Data(base64Encoded: base64) else { return encrypted }
@@ -132,9 +165,12 @@ public final class DatabaseEncryption: Sendable {
             let plain = try AES.GCM.open(sealed, using: symKey)
             return String(data: plain, encoding: .utf8) ?? encrypted
         } catch {
-            // Authenticated decryption failure — explicitly logged so a
-            // tamper attempt against events.db produces a visible signal.
-            logger.warning("AES-GCM open failed (possible tamper): \(error.localizedDescription, privacy: .public)")
+            // AES-GCM authentication failure == tamper: the stored ciphertext
+            // or tag was modified. Record it distinctly (tamper counter +
+            // fault log) so it surfaces as a security signal the daemon can
+            // alert on, rather than being swallowed as a benign warning.
+            let count = tamperCounter.increment()
+            logger.fault("DB tamper detected: AES-GCM authentication failed (tamper_count=\(count, privacy: .public)): \(error.localizedDescription, privacy: .public)")
             return encrypted
         }
     }
@@ -186,11 +222,29 @@ public final class DatabaseEncryption: Sendable {
     /// Generate a cryptographically random 32-byte AES-256 key.
     private static func generateKey() -> Data {
         var key = Data(count: kCCKeySizeAES256)
-        _ = key.withUnsafeMutableBytes { keyPtr -> OSStatus in
+        let status = key.withUnsafeMutableBytes { keyPtr -> OSStatus in
             guard let base = keyPtr.baseAddress else { return errSecParam }
             return SecRandomCopyBytes(kSecRandomDefault, kCCKeySizeAES256, base)
         }
+        // Fail CLOSED on RNG failure: proceeding would persist the all-zero
+        // `Data(count:)` buffer as an AES-256 key to the Keychain — a
+        // catastrophic, silent key-generation failure. A key-generation path
+        // must never accept an RNG error.
+        guard status == errSecSuccess else {
+            failClosed("SecRandomCopyBytes failed (OSStatus \(status)) — refusing to persist a weak key")
+        }
         return key
+    }
+
+    /// Fail CLOSED. A security product's at-rest encryption must never fall
+    /// back to persisting plaintext, nor accept a weak key, on a crypto
+    /// failure. Callers reach here only on a broken key/RNG/CryptoKit
+    /// invariant; we log at fault level (unified log) and terminate rather
+    /// than silently leak plaintext or write with a possibly-weak key.
+    private static func failClosed(_ reason: String) -> Never {
+        Logger(subsystem: "com.maccrab.storage", category: "encryption")
+            .fault("DatabaseEncryption failed closed: \(reason, privacy: .public)")
+        fatalError("DatabaseEncryption failed closed: \(reason)")
     }
 
     /// v1.8.1: shared keychain access group between the dashboard and

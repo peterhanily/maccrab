@@ -111,4 +111,41 @@ struct PluginInstallReceiptTests {
             try PluginInstallReceiptStore.verify(data: notAReceipt)
         }
     }
+
+    @Test("pinned verify accepts a receipt signed by the pinned key")
+    func pinnedVerifyAcceptsMatchingKey() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-receipt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let substrate = makeSubstrate()
+        let store = PluginInstallReceiptStore(receiptsDir: dir, substrate: substrate)
+        let url = try await store.emit(sampleBody())
+        let hostKey = try await substrate.publicKey().derBytes
+        let body = try PluginInstallReceiptStore.verify(at: url, pinnedPublicKeyDER: hostKey)
+        #expect(body.catalogSerial == 42)
+    }
+
+    @Test("pinned verify REJECTS a well-signed receipt whose key isn't the pin (untrustedSigner)")
+    func pinnedVerifyRejectsForeignKey() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-receipt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Receipt is validly self-signed by an attacker substrate...
+        let attacker = makeSubstrate()
+        let store = PluginInstallReceiptStore(receiptsDir: dir, substrate: attacker)
+        let url = try await store.emit(sampleBody())
+        // ...but the pin is a DIFFERENT host key. Unpinned verify still passes
+        // (tamper-free) — pinned verify must reject as untrustedSigner.
+        _ = try PluginInstallReceiptStore.verify(at: url)   // unpinned: tamper-free
+        let hostKey = try await makeSubstrate().publicKey().derBytes
+        do {
+            _ = try PluginInstallReceiptStore.verify(at: url, pinnedPublicKeyDER: hostKey)
+            Issue.record("pinned verify accepted a foreign-signed receipt")
+        } catch let error as PluginInstallReceiptError {
+            guard case .untrustedSigner = error else {
+                Issue.record("expected .untrustedSigner, got \(error)")
+                return
+            }
+        }
+    }
 }

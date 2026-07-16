@@ -58,18 +58,51 @@ public enum PluginProvenance: String, Sendable, Codable, CaseIterable {
         }
     }
 
-    /// Classify an INSTALLED (Tier B) plugin from its install receipt. A valid,
-    /// signature-verified receipt that carries a catalog_serial means the plugin
-    /// was installed from the rave store; anything else (no receipt, an
-    /// unverifiable/tampered receipt, or a receipt without a catalog serial) is
-    /// an operator-trusted third-party sideload. A tampered "store" receipt thus
-    /// safely DOWNGRADES to third-party, never the reverse. Built-in plugins are
-    /// classified `.builtIn` at the Tier A registry, not here.
-    public static func forInstalled(pluginID: String, receiptsDir: URL) -> PluginProvenance {
+    /// Classify an INSTALLED (Tier B) plugin from its install receipt. A `.store`
+    /// classification grants real leniency (the 30-day revocation-staleness
+    /// window), so it must come from a receipt signed by THIS host's install-
+    /// receipt key — NOT any self-signed receipt an attacker dropped into
+    /// `plugin_receipts/`. Verification is therefore PINNED to the host
+    /// TrustSubstrate public key (mirroring the catalog Ed25519 pin). Anything
+    /// that fails the pin or the tamper-check — no receipt, an unverifiable /
+    /// self-signed / foreign-signed receipt, no host key yet, or a receipt
+    /// without a catalog serial — safely DOWNGRADES to `.thirdParty`, never the
+    /// reverse. Built-in plugins are classified `.builtIn` at the Tier A
+    /// registry, not here.
+    ///
+    /// `pinnedPublicKeyDER` overrides the pin source (tests inject their
+    /// substrate's key); in production it is nil and the host key is read from
+    /// disk at the conventional sibling path.
+    public static func forInstalled(
+        pluginID: String,
+        receiptsDir: URL,
+        pinnedPublicKeyDER: Data? = nil
+    ) -> PluginProvenance {
         let url = receiptsDir.appendingPathComponent("\(pluginID).receipt.json")
-        if let body = try? PluginInstallReceiptStore.verify(at: url), body.catalogSerial != nil {
+        // No host key ⇒ no genuine store receipt from this host can exist ⇒ we
+        // cannot establish `.store`; downgrade rather than accept an unpinned one.
+        guard let pinned = pinnedPublicKeyDER ?? hostReceiptSigningKeyDER(receiptsDir: receiptsDir) else {
+            return .thirdParty
+        }
+        if let body = try? PluginInstallReceiptStore.verify(at: url, pinnedPublicKeyDER: pinned),
+           body.catalogSerial != nil {
             return .store
         }
         return .thirdParty
+    }
+
+    /// This host's install-receipt signing key (TrustSubstrate public key, SPKI
+    /// DER), used to PIN receipt verification. It is persisted by the
+    /// TrustSubstrate storage at `<dataDir>/keys/trace-signing.pub` — a sibling of
+    /// the `<dataDir>/plugin_receipts` receipts dir (the layout established by the
+    /// receipt store + FilesystemTrustSubstrateStorage). Reading the public key
+    /// from disk is the documented third-party-validator contract (see
+    /// TrustSubstrate). Returns nil when no host key exists yet.
+    private static func hostReceiptSigningKeyDER(receiptsDir: URL) -> Data? {
+        let keyURL = receiptsDir
+            .deletingLastPathComponent()
+            .appendingPathComponent("keys")
+            .appendingPathComponent("trace-signing.pub")
+        return try? Data(contentsOf: keyURL)
     }
 }

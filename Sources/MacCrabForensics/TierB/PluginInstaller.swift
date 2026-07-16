@@ -457,26 +457,54 @@ public actor PluginInstaller {
     }
 
     /// Read the SIGNED trusted-keys list. Missing → empty (bootstrap: nothing
-    /// trusted yet). A present file that is unsigned (legacy/forged) or fails
-    /// verification fails CLOSED to the empty set: an unverifiable trust list
-    /// grants no trust, so an install then refuses rather than honoring a key an
-    /// attacker slipped in. (Legacy unsigned lists from a pre-A1-03 install read
-    /// as empty once — the operator re-trusts via `plugin install --trust`, which
-    /// re-seals the list.)
+    /// trusted yet). A present host-signed envelope must open + verify; a mutated
+    /// body / foreign key / missing host key fails CLOSED to the empty set (an
+    /// unverifiable trust list grants no trust, so an install refuses rather than
+    /// honoring a key an attacker slipped in).
+    ///
+    /// A1-03 upgrade path: a legacy pre-A1-03 FLAT list ({"keys":[...]}, no
+    /// envelope) on a host that has never sealed one (no `.trusted-keys.signkey`)
+    /// is MIGRATED ONCE — its operator-added keys are adopted and re-sealed — so
+    /// installed plugins keep running across the upgrade instead of all silently
+    /// losing trust. Once a key exists, a flat file is a downgrade/tamper and
+    /// still fails closed. (This gate is the unforgeable "first upgrade" signal:
+    /// a pre-A1-03 build had no LocalTrustSigner, so a genuine upgrade has no key
+    /// yet; a same-uid attacker cannot reset a list that was ever sealed.)
     private func readTrustedKeys() -> Set<String> {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: trustedKeysPath)) else {
             return []
         }
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              LocalTrustSigner.isEnvelope(obj),
-              let body = trustedKeysSigner.open(obj),
-              let arr = body["keys"] as? [String] else {
-            FileHandle.standardError.write(Data(
-                "MacCrab: trusted-keys.json integrity check FAILED (unsigned/tampered) at \(trustedKeysPath) — trusting no publisher key (A1-03)\n".utf8
-            ))
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            warnTrustedKeysTampered()
             return []
         }
-        return Set(arr)
+        if LocalTrustSigner.isEnvelope(obj) {
+            guard let body = trustedKeysSigner.open(obj),
+                  let arr = body["keys"] as? [String] else {
+                warnTrustedKeysTampered()
+                return []
+            }
+            return Set(arr)
+        }
+        // Legacy FLAT list — migrate once, gated on no host key ever having sealed.
+        if trustedKeysSigner.pinnedPublicKeyDER() == nil, let arr = obj["keys"] as? [String] {
+            let keys = Set(arr)
+            FileHandle.standardError.write(Data(
+                "MacCrab: migrating legacy (pre-A1-03) trusted-keys.json at \(trustedKeysPath) into a host-signed envelope (\(keys.count) key\(keys.count == 1 ? "" : "s"), A1-03 one-time upgrade)\n".utf8
+            ))
+            // Best-effort re-seal (a read must never throw). If it fails the flat
+            // file stays and a later read re-migrates.
+            try? writeTrustedKeys(keys)
+            return keys
+        }
+        warnTrustedKeysTampered()
+        return []
+    }
+
+    private func warnTrustedKeysTampered() {
+        FileHandle.standardError.write(Data(
+            "MacCrab: trusted-keys.json integrity check FAILED (unsigned/tampered) at \(trustedKeysPath) — trusting no publisher key (A1-03)\n".utf8
+        ))
     }
 
     /// Rewrite trusted-keys.json as a host-signed envelope (0o600).
