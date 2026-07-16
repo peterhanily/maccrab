@@ -20,6 +20,12 @@ struct V2PreventionWorkspace: View {
     /// heartbeat confirms the engine reached it (reconciled in `.task`), so the
     /// switch doesn't visibly snap back during the ~30s apply window.
     @State private var pendingToggles: [String: Bool] = [:]
+    /// When each optimistic toggle was sent — so the overlay clears on the first
+    /// heartbeat WRITTEN AFTER the toggle (authoritative), even if the engine's
+    /// applied state diverges from the request. Without this a permanent
+    /// divergence (e.g. the threat-intel refresh re-enabling sinkhole/blocker)
+    /// strands the switch showing a state the engine never reached (pre-GA review).
+    @State private var pendingToggleSentAt: [String: Date] = [:]
 
     init(state: V2DashboardState) { self.state = state }
 
@@ -48,12 +54,18 @@ struct V2PreventionWorkspace: View {
             await MainActor.run {
                 self.preventionAlerts = recent.filter { !$0.actionsTaken.isEmpty }
                 self.heartbeat = h
-                // Drop any optimistic pending toggle the engine has now caught
-                // up to (only trust a FRESH heartbeat as ground truth).
-                if let p = h?.prevention, !(h?.isStale ?? true) {
-                    if pendingToggles["sinkhole"] == p.sinkhole.enabled { pendingToggles["sinkhole"] = nil }
-                    if pendingToggles["network_blocker"] == p.networkBlocker.enabled { pendingToggles["network_blocker"] = nil }
-                    if pendingToggles["persistence_guard"] == p.persistenceGuard.enabled { pendingToggles["persistence_guard"] = nil }
+                // Drop the optimistic overlay once a FRESH heartbeat WRITTEN
+                // AFTER the toggle arrives — the heartbeat is then ground truth
+                // whether or not the engine matched the request, so a permanent
+                // divergence can't strand the switch (pre-GA review). A stale or
+                // pre-toggle heartbeat is ignored.
+                if let h, h.prevention != nil, !h.isStale {
+                    for key in ["sinkhole", "network_blocker", "persistence_guard"] {
+                        guard pendingToggles[key] != nil else { continue }
+                        if let sentAt = pendingToggleSentAt[key], h.writtenAt <= sentAt { continue }
+                        pendingToggles[key] = nil
+                        pendingToggleSentAt[key] = nil
+                    }
                 }
             }
         }
@@ -78,6 +90,7 @@ struct V2PreventionWorkspace: View {
             get: { pendingToggles[key] ?? enabled },
             set: { newValue in
                 pendingToggles[key] = newValue
+                pendingToggleSentAt[key] = Date()
                 pushPrevention(module: key, enabled: newValue)
             }
         )
@@ -101,6 +114,7 @@ struct V2PreventionWorkspace: View {
             // Honest failure: no inbox dir means no daemon is installed. Roll the
             // optimistic value back so the switch reflects reality.
             pendingToggles[key] = nil
+            pendingToggleSentAt[key] = nil
             state.showToast(V2Toast(
                 kind: .error,
                 title: String(localized: "prevention.toastNoDaemonTitle", defaultValue: "No daemon"),

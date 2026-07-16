@@ -2777,8 +2777,14 @@ enum DaemonTimers {
     ) async {
         guard !names.isEmpty else { return }
         let fm = FileManager.default
-        // Coalesce: apply only the newest authorized request.
-        var newest: (mtime: Date, payload: [String: Any], uid: Int)?
+        // MERGE partial per-key payloads (pre-GA review fix). The app sends ONE
+        // module per request (V2DaemonControl.sendPreventionConfig), so
+        // coalescing to a single newest-mtime request would silently DROP a
+        // second module toggled in the same 5s poll window, leaving the
+        // enforcing engine in a state that contradicts the user's action + the
+        // UI overlay. Collect all authorized requests, apply per-module
+        // last-write-wins by mtime.
+        var requests: [(mtime: Date, payload: [String: Any], uid: Int)] = []
         for name in names {
             let path = inboxDir + "/" + name
             defer { try? fm.removeItem(atPath: path) }
@@ -2794,9 +2800,19 @@ enum DaemonTimers {
             }
             let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
                 ?? Date(timeIntervalSince1970: 0)
-            if newest == nil || mtime > newest!.mtime { newest = (mtime, json, uid) }
+            requests.append((mtime, json, uid))
         }
-        guard let chosen = newest else { return }
+        guard !requests.isEmpty else { return }
+        requests.sort { $0.mtime < $1.mtime }
+        // Last-write-wins per module key across the batch, in mtime order.
+        var merged: [String: Bool] = [:]
+        for req in requests {
+            for key in ["sinkhole", "network_blocker", "persistence_guard"] {
+                if let v = req.payload[key] as? Bool { merged[key] = v }
+            }
+        }
+        let latestUID = requests.last!.uid
+        let chosen = (payload: merged as [String: Any], uid: latestUID)
 
         var applied: [String] = []
         if let on = chosen.payload["sinkhole"] as? Bool {

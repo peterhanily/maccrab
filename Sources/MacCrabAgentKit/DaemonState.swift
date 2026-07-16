@@ -662,8 +662,17 @@ final class DaemonState {
     /// tcc/auth/registry) rides the `priority` stream and is protected from that
     /// eviction. Explicit + testable so a future high-volume category isn't
     /// silently routed onto the priority stream (which would reopen the gap).
-    static func ridesFileStream(_ category: EventCategory) -> Bool {
-        category == .file
+    static func ridesFileStream(_ category: EventCategory, action: String) -> Bool {
+        guard category == .file else { return false }
+        // Pre-GA review: keep the RARE, high-value file signals on the PRIORITY
+        // stream so a file-WRITE flood (the exact case A2's file stream is meant
+        // to absorb) can't shed them. Only the write-family flood rides the file
+        // stream; credential-read OPENs and BTM launch-item registrations (both
+        // low-volume, both persistence/credential-critical) go to priority.
+        switch action {
+        case "open", "btm_add": return false   // → priority stream
+        default: return true                    // write-family → file stream
+        }
     }
 
     /// Merges all event sources into TWO async streams, split by category so a
@@ -692,7 +701,7 @@ final class DaemonState {
         let pDrops = mergedStreamDrops
         let fDrops = fileStreamDrops
         let yield: @Sendable (Event) -> Void = { event in
-            if DaemonState.ridesFileStream(event.eventCategory) {
+            if DaemonState.ridesFileStream(event.eventCategory, action: event.eventAction) {
                 if case .dropped = fCont.yield(event) { fDrops.increment() }
             } else {
                 if case .dropped = pCont.yield(event) { pDrops.increment() }

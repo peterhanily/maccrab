@@ -918,6 +918,14 @@ struct EventStream: View {
             } else {
                 await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until, category: coreCategory)
             }
+            // Pre-GA review fix: a category/range change is a USER action, not a
+            // live tick — recompute the displayed set directly. The
+            // `.onReceive(appState.$events)` recompute is gated on `!isPaused`,
+            // so without this an operator who paused the stream and then changed
+            // the category saw a stale/empty table (fresh category-filtered rows
+            // sat in appState.events but never reached the view). Same bypass the
+            // "Load older" button uses.
+            recomputeFilter()
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate

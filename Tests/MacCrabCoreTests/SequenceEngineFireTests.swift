@@ -223,4 +223,34 @@ struct SequenceEngineFireTests {
         #expect(!final.contains { $0.ruleId == "seq-ooo-exp" },
                 "an expired buffered step must have been pruned and cannot backfill")
     }
+
+    @Test("REGRESSION (pre-GA #1): a process.lineage rule's `.any` step completes for an UNRELATED process")
+    func processLineageAnyStepNotBlockedByLineageGate() async throws {
+        // Mirrors archive_to_cloud_exfil.yml: ordered, correlation process.lineage,
+        // whose `upload` step declares `.any` (the author's explicit "no process
+        // constraint" — the upload tool is launched independently by the shell,
+        // never in the archive process's ancestry). The #274 lineage gate must
+        // NOT override that `.any`, or the HIGH bulk-exfil rule can never fire.
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(SequenceRule(
+            id: "seq-lineage-any", title: "archive then upload (test)", description: "test",
+            level: .high, tags: ["attack.exfiltration", "attack.t1567"],
+            window: 60, correlationType: .processLineage, ordered: true,
+            steps: [
+                SequenceStep(id: "archive", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: .endswith, values: ["/tar"], negate: false)],
+                             condition: .allOf, afterStep: nil, processRelation: nil),
+                SequenceStep(id: "upload", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: .endswith, values: ["/rclone"], negate: false)],
+                             condition: .allOf, afterStep: "archive",
+                             processRelation: ProcessRelationSpec(relation: .any, relativeToStep: "archive")),
+            ],
+            trigger: .allSteps, enabled: true))
+        _ = await engine.evaluate(procEvent("/usr/bin/tar", pid: 100))
+        // rclone: a DIFFERENT, unrelated process (not in tar's ancestry) — the
+        // two-process staging+upload pattern the rule targets.
+        let final = await engine.evaluate(procEvent("/usr/bin/rclone", pid: 200))
+        #expect(final.contains { $0.ruleId == "seq-lineage-any" },
+                "a `.any` step under process.lineage must complete for an unrelated process")
+    }
 }

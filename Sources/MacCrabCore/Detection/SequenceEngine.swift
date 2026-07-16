@@ -1018,9 +1018,24 @@ public actor SequenceEngine {
         // Skip if this step is already matched in this partial.
         guard partial.matchedSteps[step.id] == nil else { return nil }
 
-        // Correlation constraint.
-        if !(await checkCorrelation(rule.correlationType, partial: partial, candidate: matched)) {
-            return nil
+        // Correlation constraint. For `.processLineage`, a step that declares
+        // its OWN `processRelation` governs its process linkage, so the
+        // rule-level lineage gate must NOT additionally reject it. Pre-GA review
+        // regression: the #274 lineage gate (added to stop processLineage rules
+        // with NO step relation firing on unrelated processes) also killed steps
+        // that INTENTIONALLY declare `.any` — e.g. archive_to_cloud_exfil's
+        // `cloud_upload` (`archive_sensitive.any`), where the upload tool is
+        // launched independently by the shell rather than spawned by the archive
+        // process, so it's never in the archive step's ancestry. `.any` is an
+        // explicit "no process constraint" by the rule author; honor it here and
+        // let the step-level relation below be the authoritative check. Steps
+        // with NO explicit relation still get the #274 lineage gate.
+        let stepGovernsProcessLinkage =
+            rule.correlationType == .processLineage && step.processRelation != nil
+        if !stepGovernsProcessLinkage {
+            if !(await checkCorrelation(rule.correlationType, partial: partial, candidate: matched)) {
+                return nil
+            }
         }
         // Ordering constraint.
         if rule.ordered {
