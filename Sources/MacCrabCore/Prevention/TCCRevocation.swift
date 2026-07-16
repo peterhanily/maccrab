@@ -1,8 +1,43 @@
 import Foundation
 import os.log
 
-/// Auto-revokes TCC permissions when anomalous grants are detected.
-/// Uses `tccutil` to reset permissions for specific services and bundle IDs.
+/// TCC-permission revocation **mechanism** — resets permissions for a specific
+/// service + bundle ID via `tccutil reset`.
+///
+/// STATUS (v1.21.4): ADVISORY / NOT-YET-WIRED. This is the mechanism only. As of
+/// this build `shouldRevoke(...)` / `revoke(...)` have **no production caller** —
+/// they are exercised by unit tests alone (grep: the only non-test reference is
+/// this type being constructed + `enable()`d in `DaemonSetup`). Nothing in any
+/// collector or event path invokes them, so **no TCC grant is ever auto-revoked
+/// at runtime.** Do not describe this as an active prevention: it is dormant-but-
+/// ready. `enable()` merely un-gates the methods for a future caller; it does not
+/// itself wire anything.
+///
+/// WIRING RESIDUAL (owner action, OUT OF THIS FILE'S SCOPE — needs an edit to the
+/// TCCMonitor emission path or the EventLoop that consumes its stream, neither of
+/// which this type may reach on its own):
+///   In `TCCMonitor.emitEvent(...)` on a NEW allowed grant (`eventAction ==
+///   "tcc_grant"`), the `service`, `client` (bundleId) and resolved `SignerType`
+///   are all already in hand. Give the monitor (or the event loop) the shared
+///   `DaemonState.tccRevocation` handle and add the single gated call:
+///
+///       if await tccRevocation.shouldRevoke(service: entry.service,
+///                                            bundleId: entry.client,
+///                                            signerType: signerType) {
+///           _ = await tccRevocation.revoke(service: entry.service,
+///                                          bundleId: entry.client,
+///                                          reason: "unsigned app granted \(entry.service)")
+///       }
+///
+///   That call site MUST also apply the RESPONSE_SAFETY TCC service-name allowlist
+///   (SafePIDValidator-style) so a revocation can never brick the operator's own /
+///   the dashboard's TCC grants — `sensitiveServices` here is a fire-on set, NOT a
+///   safe-to-revoke allowlist.
+///
+/// DOC RECONCILIATION RESIDUAL (owner): the startup banner
+/// (`DaemonSetup`/`StartupBanner`) and `docs/RESPONSE_SAFETY.md` currently list
+/// "TCC revocation" among ACTIVE preventions. Until the wiring above lands, those
+/// over-claim — reword them to "advisory / mechanism-only" or add the wiring.
 public actor TCCRevocation {
 
     /// MITRE D3FEND defensive technique this module implements.
@@ -40,6 +75,8 @@ public actor TCCRevocation {
 
     /// Revoke a TCC permission for a specific bundle ID.
     /// Returns true if the revocation succeeded.
+    /// DORMANT: no production caller yet — see the type doc's WIRING RESIDUAL. A
+    /// caller MUST gate this behind a service-name allowlist (RESPONSE_SAFETY).
     public func revoke(service: String, bundleId: String, reason: String) -> Bool {
         guard isEnabled else { return false }
 
@@ -73,6 +110,9 @@ public actor TCCRevocation {
     }
 
     /// Check if a TCC grant should be auto-revoked based on the granting process.
+    /// DORMANT: no production caller yet — see the type doc's WIRING RESIDUAL.
+    /// `true` here means "this grant is in the fire-on set", NOT "safe to revoke";
+    /// the caller must still apply the service-name allowlist before `revoke(...)`.
     public func shouldRevoke(service: String, bundleId: String, signerType: String?) -> Bool {
         guard isEnabled else { return false }
 

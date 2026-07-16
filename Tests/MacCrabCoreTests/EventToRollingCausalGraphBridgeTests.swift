@@ -20,7 +20,9 @@ struct EventToRollingCausalGraphBridgeTests {
     private func processInfo(
         pid: Int32,
         executable: String,
-        appleSigned: Bool = true
+        appleSigned: Bool = true,
+        startTime: Date? = nil,
+        auditIdentity: AuditIdentity? = nil
     ) -> MacCrabCore.ProcessInfo {
         MacCrabCore.ProcessInfo(
             pid: pid, ppid: 1, rpid: pid,
@@ -29,12 +31,23 @@ struct EventToRollingCausalGraphBridgeTests {
             commandLine: executable,
             args: [], workingDirectory: "/",
             userId: 501, userName: "test", groupId: 20,
-            startTime: now,
+            startTime: startTime ?? now,
             codeSignature: CodeSignatureInfo(
                 signerType: appleSigned ? .apple : .unsigned,
                 isNotarized: appleSigned
             ),
-            isPlatformBinary: appleSigned
+            isPlatformBinary: appleSigned,
+            auditIdentity: auditIdentity
+        )
+    }
+
+    /// ES-sourced audit identity. `pidversion` is the kernel anti-recycle
+    /// counter; `asid`/`pid` default to fixed values so the recomputed
+    /// key payload ("pid|pidversion|asid|executable") is deterministic.
+    private func audit(pidversion: UInt32, asid: Int32 = 42, pid: Int32 = 100) -> AuditIdentity {
+        AuditIdentity(
+            auid: 501, euid: 501, egid: 20, ruid: 501, rgid: 20,
+            pid: pid, pidversion: pidversion, asid: asid
         )
     }
 
@@ -220,6 +233,102 @@ struct EventToRollingCausalGraphBridgeTests {
         )
         let traces = await bridge.process(event)
         #expect(traces.isEmpty)
+        await store.close()
+    }
+
+    // MARK: - Anti-recycle process identity (rc.4 CRITICAL)
+    //
+    // Guards the v1.21.4 P6/A2 invariant: when an event carries the ES
+    // `AuditIdentity`, `synthesizeProcessKey` MUST fold `pidversion` (the
+    // kernel anti-recycle counter) into the process key so a recycled pid +
+    // same executable in the same wall-clock second maps to a DISTINCT graph
+    // node — and MUST exclude `startTime` so collector timestamp jitter can't
+    // split one logical process. A future contributor hashing pid+startTime
+    // alone (as the non-ES fallback still does) would reintroduce the
+    // cross-attribution these tests exist to catch.
+
+    @Test("Anti-recycle: same pid+path+wall-second, DIFFERENT pidversion → DISTINCT process nodes")
+    func antiRecyclePidversionDiscriminatesNodes() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let materializer = TraceMaterializer(store: store)
+        let rollingGraph = RollingCausalGraph(store: store, materializer: materializer)
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        // Two DISTINCT processes: an attacker's process reuses a just-freed pid
+        // (100) running the same executable inside the same wall-clock second.
+        // Only `pidversion` tells them apart.
+        func execEvent(pidversion: UInt32) -> Event {
+            Event(
+                timestamp: now,
+                eventCategory: .process,
+                eventType: .start,
+                eventAction: "exec",
+                process: processInfo(
+                    pid: 100, executable: "/usr/bin/curl",
+                    auditIdentity: audit(pidversion: pidversion)
+                )
+            )
+        }
+        _ = await bridge.process(execEvent(pidversion: 1))
+        _ = await bridge.process(execEvent(pidversion: 2))
+
+        // ES-branch key = SHA256("pid|pidversion|asid|executable").
+        let keyV1 = SHA256_hex("100|1|42|/usr/bin/curl")
+        let keyV2 = SHA256_hex("100|2|42|/usr/bin/curl")
+        #expect(keyV1 != keyV2)   // sanity: the payloads really differ
+
+        // Load-bearing: two DISTINCT graph nodes exist — the recycled pid did
+        // NOT graft its events onto the prior process's node.
+        #expect(try await store.entity(id: "process:\(keyV1)") != nil)
+        #expect(try await store.entity(id: "process:\(keyV2)") != nil)
+
+        // And the ES branch was actually taken (not the fallback): the old
+        // (pid, startTime-second, executable) key must NOT have been produced —
+        // if it were, BOTH observations would have collapsed onto one node.
+        let fallbackKey = SHA256_hex("100|\(Int(now.timeIntervalSince1970))|/usr/bin/curl")
+        #expect(try await store.entity(id: "process:\(fallbackKey)") == nil)
+        await store.close()
+    }
+
+    @Test("Anti-recycle: identical pidversion across timestamp jitter → SAME process node")
+    func antiRecycleSamePidversionCollapsesNode() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let materializer = TraceMaterializer(store: store)
+        let rollingGraph = RollingCausalGraph(store: store, materializer: materializer)
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        // ONE logical process observed twice with 3s of collector timestamp
+        // jitter. `pidversion` is stable for the process lifetime and
+        // `startTime` is deliberately EXCLUDED from the ES-branch key, so both
+        // observations must collapse onto a SINGLE node.
+        func obs(at t: Date) -> Event {
+            Event(
+                timestamp: t,
+                eventCategory: .process,
+                eventType: .start,
+                eventAction: "exec",
+                process: processInfo(
+                    pid: 100, executable: "/usr/bin/curl",
+                    startTime: t,
+                    auditIdentity: audit(pidversion: 7)
+                )
+            )
+        }
+        _ = await bridge.process(obs(at: now))
+        _ = await bridge.process(obs(at: now.addingTimeInterval(3)))
+
+        // Single node keyed by the audit identity (startTime excluded).
+        let key = SHA256_hex("100|7|42|/usr/bin/curl")
+        #expect(try await store.entity(id: "process:\(key)") != nil)
+
+        // Timestamp jitter must NOT have split the process: neither would-be
+        // startTime-based fallback key exists as a second node.
+        let jitterKeyA = SHA256_hex("100|\(Int(now.timeIntervalSince1970))|/usr/bin/curl")
+        let jitterKeyB = SHA256_hex("100|\(Int(now.addingTimeInterval(3).timeIntervalSince1970))|/usr/bin/curl")
+        #expect(try await store.entity(id: "process:\(jitterKeyA)") == nil)
+        #expect(try await store.entity(id: "process:\(jitterKeyB)") == nil)
         await store.close()
     }
 
