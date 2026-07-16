@@ -234,6 +234,33 @@ final class SensorDegradationState: @unchecked Sendable {
     }
 }
 
+/// Rising-edge latch for the DB-tamper meta-alert — LOCAL to `DaemonTimers.start`
+/// (captured by the heartbeat closure) so overlapping ticks can't race the
+/// read-modify-write. `DatabaseEncryption.authenticatedDecryptFailures` is a
+/// monotonic count of AES-GCM authentication failures (a tampered encrypted DB
+/// column/row). `shouldAlert(current:)` returns true only when the count grew
+/// since the last observation, so a new alert is raised per fresh tamper burst
+/// rather than every 30 s tick; the AlertSink's dedup/suppression backstops the
+/// rate limit if failures keep climbing tick-over-tick.
+final class TamperAlertState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastSeen = 0
+
+    /// True when `current` exceeds the last observed value (a fresh tamper
+    /// failure occurred since the last tick). Updates the watermark. `current`
+    /// is monotonic, but a defensive `current < lastSeen` (e.g. a fresh
+    /// DatabaseEncryption instance after a reload) never fires and re-seeds.
+    func shouldAlert(current: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard current > lastSeen else {
+            if current < lastSeen { lastSeen = current }
+            return false
+        }
+        lastSeen = current
+        return true
+    }
+}
+
 // MARK: - v1.21.4 Phase-2 D3 — coverage-canary two-point verdict
 //
 // The watchdog spawns `/usr/bin/true` with a per-run nonce, then checks two
@@ -1324,6 +1351,9 @@ enum DaemonTimers {
         // meta-alert. Captured by the heartbeat closure below; lives here (not
         // on DaemonState) and is lock-guarded so overlapping ticks are safe.
         let sensorDegradation = SensorDegradationState()
+        // v1.21.4 (audit): rising-edge latch so a fresh AES-GCM decrypt failure
+        // (DB tamper) raises a rate-limited alert, not just a heartbeat counter.
+        let tamperAlertState = TamperAlertState()
 
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
@@ -1543,6 +1573,29 @@ enum DaemonTimers {
             // modified. Previously only fault-logged; now visible so the operator
             // (and the dashboard) can see + act on it. Monotonic since boot.
             let dbTamperFailures = state.dbEncryption.authenticatedDecryptFailures
+            // v1.21.4 (audit): the counter above is surfaced in the heartbeat,
+            // but a non-zero value is a security event that must actively page —
+            // an encrypted DB column failed AES-GCM authentication (its stored
+            // ciphertext/tag was modified at rest). On a fresh failure since the
+            // last tick, raise a structured tamper Alert. Routed through
+            // AlertSink so it inherits dedup/suppression (the rate limiter if
+            // failures keep climbing tick-over-tick) — the same pattern the D2
+            // sensor-degraded meta-alert above uses.
+            if tamperAlertState.shouldAlert(current: dbTamperFailures) {
+                let tamperAlert = Alert(
+                    ruleId: "maccrab.self-defense.db-tamper",
+                    ruleTitle: "Database Tamper Detected: AES-GCM authentication failure",
+                    severity: .critical,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "maccrabd",
+                    description: "An encrypted database column failed AES-GCM authentication (tamper_count=\(dbTamperFailures)) — the stored ciphertext or authentication tag of an encrypted event/trace field was modified at rest. AES-GCM is authenticated, so this is tamper, not a benign decode miss. Investigate for unauthorized access to the MacCrab databases.",
+                    mitreTactics: "attack.defense_evasion",
+                    mitreTechniques: "attack.t1565.001",
+                    suppressed: false
+                )
+                _ = try? await state.alertSink.submit(alert: tamperAlert)
+            }
             let rulesActive = await state.ruleEngine.enabledRuleCount
 
             let payload: [String: Any] = [
@@ -1788,6 +1841,12 @@ enum DaemonTimers {
                 // mcp_capabilities.json so an agent (console user) can't grant
                 // itself power; the dashboard routes the human's choice here.
                 let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
+                // v1.21.4 (audit): the dashboard's "Clear Now" retention button
+                // and the Agent-Traces receiver toggle drop these — the app
+                // (uid-501) can't write the root-owned alerts.db / config, so it
+                // routes through the same authorized inbox IPC as delete-alert.
+                let pruneAlertsReqs = files.filter { $0.hasPrefix("prune-alerts-") && $0.hasSuffix(".json") }
+                let agentTracesReqs = files.filter { $0.hasPrefix("apply-agent-traces-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1803,6 +1862,8 @@ enum DaemonTimers {
                 await handleRemoveRuleRequests(removeRuleReqs, inboxDir: inboxDir, state: state)
                 await handleSetAgentCapabilitiesRequests(agentCapReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
+                await handlePruneAlertsRequests(pruneAlertsReqs, inboxDir: inboxDir, state: state)
+                await handleApplyAgentTracesRequests(agentTracesReqs, inboxDir: inboxDir, state: state)
             }
         }
         inboxPoller.resume()
@@ -2566,6 +2627,95 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "failed:\(error)")
             }
         }
+    }
+
+    /// v1.21.4 (audit): bulk retention prune of alerts older than N days.
+    /// The dashboard "Clear Now" button owns only a read-only alerts.db handle
+    /// (the root daemon owns the writable one), so it drops a `prune-alerts-*`
+    /// request here. Same uid/symlink auth + audit as delete-alert. Coalesces to
+    /// the largest window requested in one tick.
+    private static func handlePruneAlertsRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        var chosenDays: Int?
+        var chosenUID = -1
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let days = json["olderThanDays"] as? Int, days >= 0 else {
+                auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "malformed")
+                continue
+            }
+            // Prune the SMALLEST window (most aggressive) requested this tick.
+            if chosenDays == nil || days < chosenDays! { chosenDays = days; chosenUID = uid }
+        }
+        guard let days = chosenDays else { return }
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        do {
+            let removed = try await state.alertStore.prune(olderThan: cutoff)
+            print("[inbox] prune-alerts olderThanDays=\(days) uid=\(chosenUID) removed=\(removed)")
+            auditLogInbox(state: state, prefix: "prune-alerts", id: "\(days)d", uid: chosenUID, result: "removed=\(removed)")
+        } catch {
+            print("[inbox] prune-alerts olderThanDays=\(days) uid=\(chosenUID) failed: \(error)")
+            auditLogInbox(state: state, prefix: "prune-alerts", id: "\(days)d", uid: chosenUID, result: "failed:\(error)")
+        }
+    }
+
+    /// v1.21.4 (audit): apply the Agent-Traces OTLP-receiver toggle. The app
+    /// (uid-501) can't write the root-owned config nor SIGHUP the sysext
+    /// (EPERM), so the toggle drops an `apply-agent-traces-*` request; the
+    /// daemon persists it to the system config and restarts the receiver.
+    /// Coalesces to the newest request.
+    private static func handleApplyAgentTracesRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        var newest: (mtime: Date, payload: [String: Any], uid: Int)?
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "malformed")
+                continue
+            }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                ?? Date(timeIntervalSince1970: 0)
+            if newest == nil || mtime > newest!.mtime { newest = (mtime, json, uid) }
+        }
+        guard let chosen = newest else { return }
+
+        // Preserve the master `enabled` (env/config seed); override only the
+        // receiver toggle + port from the request.
+        let current = AgentTracesConfigStore.loadEffective()
+        let receiverEnabled = (chosen.payload["receiverEnabled"] as? Bool) ?? current.receiverEnabled
+        let port = (chosen.payload["port"] as? Int).map { UInt16(clamping: $0) } ?? current.port
+        let updated = AgentTracesConfig(enabled: current.enabled, receiverEnabled: receiverEnabled, port: port)
+        let wrote = AgentTracesConfigStore.write(updated, to: AgentTracesConfigStore.systemPath)
+        guard wrote else {
+            auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: chosen.uid, result: "write_failed")
+            return
+        }
+        await DaemonSetup.applyAgentTracesConfig(
+            state: state, supportDir: state.supportDir, dbEncryption: state.dbEncryption
+        )
+        print("[inbox] apply-agent-traces receiver=\(receiverEnabled) port=\(port) uid=\(chosen.uid) applied")
+        auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: chosen.uid, result: "receiver=\(receiverEnabled) port=\(port)")
     }
 
     /// v1.17: threat-intel refresh over the inbox channel. The

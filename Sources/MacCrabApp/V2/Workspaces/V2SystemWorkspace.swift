@@ -8,15 +8,17 @@ public struct V2SystemWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @State private var heartbeat: V2HeartbeatSnapshot?
     @State private var permissions: [V2MockPermission] = []
-    /// Cached trust-substrate info. Pre-fix the trustSubstrateCard
+    /// Cached trust-substrate status. Pre-fix the trustSubstrateCard
     /// computed `V2TrustSubstrateInfo.read(...)` inline on every body
     /// re-evaluation — that's two `Data(contentsOf:)` disk reads on
     /// the main thread on every refresh tick (5s) and on every other
     /// state change (tab switch, hover). On a cold cache that's 50-
     /// 200 ms of main-thread blocking, which produced infrequent
     /// beachballs. Now: load once per refresh tick off-main, render
-    /// from this @State.
-    @State private var trustInfo: V2TrustSubstrateInfo?
+    /// from this @State. `.status` (vs the old `.read`) also surfaces
+    /// the release-install "root-protected, not readable here" case
+    /// instead of mislabelling it "Not generated".
+    @State private var trustStatus: V2TrustSubstrateInfo.Status = .notGenerated
     /// Owned so its delegate survives the async OS activation callback while
     /// this workspace is on screen (the "Reactivate System Extension" repair
     /// action). Independent of the app's primary manager — sysextd dedups.
@@ -55,9 +57,9 @@ public struct V2SystemWorkspace: View {
             // disk I/O doesn't block main.
             let dir = state.provider.dataDir ?? "/Library/Application Support/MacCrab"
             let ts = await Task.detached(priority: .userInitiated) {
-                V2TrustSubstrateInfo.read(dataDir: dir)
+                V2TrustSubstrateInfo.status(dataDir: dir)
             }.value
-            await MainActor.run { self.trustInfo = ts }
+            await MainActor.run { self.trustStatus = ts }
 
             let p = await state.provider.permissions()
             await MainActor.run { self.permissions = p }
@@ -137,7 +139,7 @@ public struct V2SystemWorkspace: View {
     private func exportDiagnostics() {
         let hb = heartbeat
         let perms = permissions
-        let ti = trustInfo
+        let ti = trustStatus.info
         let providerMode = state.provider.mode.label
         let dataDirPath = state.provider.dataDir ?? "—"
         let lastError = state.provider.lastErrorDescription
@@ -504,26 +506,55 @@ public struct V2SystemWorkspace: View {
         // Reads the public key from disk (the daemon writes it under
         // <dataDir>/keys/trace-signing.pub on first run). The
         // activated timestamp comes from the file's mtime, and the
-        // mode comes from trust-substrate.json. Falls back to a
-        // "Not generated" pill when no key exists.
+        // mode comes from trust-substrate.json. Shows "Managed by
+        // engine" when the key is root-protected (unreadable from the
+        // uid-501 app) and "Not generated" only when no key exists.
         //
         // Pre-fix this called `V2TrustSubstrateInfo.read(...)` here in
         // the body, which means two synchronous disk reads on every
         // refresh tick + every body re-evaluation. Now we read once
         // off-main inside the workspace's .task and cache into
-        // `self.trustInfo`.
-        let info = trustInfo
+        // `self.trustStatus`.
+        let info = trustStatus.info
+        // Chip reflects the three states honestly: the real mode label when the
+        // public key is readable; "Managed by engine" when the key exists but is
+        // root-protected (release: `keys/` is 0o700 root-owned, so the uid-501
+        // app can't read the 0o644 pubkey inside it); and "Not generated" only
+        // when there is genuinely no key. Pre-fix the middle case rendered as
+        // "Not generated", so this card sat permanently dead on every release.
+        let chipLabel: String
+        let chipKind: V2ChipKind
+        let chipIcon: String
+        switch trustStatus {
+        case .available(let i):
+            chipLabel = i.modeLabel; chipKind = i.modeChipKind; chipIcon = "lock.shield.fill"
+        case .managedByEngine:
+            chipLabel = String(localized: "system.trustManagedByEngine", defaultValue: "Managed by engine")
+            chipKind = .info; chipIcon = "lock.shield.fill"
+        case .notGenerated:
+            chipLabel = String(localized: "system.trustNotGenerated", defaultValue: "Not generated")
+            chipKind = .neutral; chipIcon = "questionmark.shield.fill"
+        }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(String(localized: "system.trustSubstrateSection", defaultValue: "Trust substrate")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
-                V2StatusChip(info?.modeLabel ?? String(localized: "system.trustNotGenerated", defaultValue: "Not generated"),
-                             kind: info?.modeChipKind ?? .neutral,
-                             icon: info == nil ? "questionmark.shield.fill" : "lock.shield.fill")
+                V2StatusChip(chipLabel, kind: chipKind, icon: chipIcon)
             }
             Text(String(localized: "system.trustSubstrateDesc", defaultValue: "MacCrab signs and verifies trace bundles using an ECDSA P-256 keypair. Secure Enclave is preferred; falls back to filesystem when the SE is unavailable. The public key is exported on first run for fleet attestation."))
                 .font(V2Theme.body())
                 .foregroundStyle(V2Theme.neutral)
+            if case .managedByEngine = trustStatus {
+                // Honest explanation so "no detail below" doesn't read as "no key".
+                // The engine (root) owns the signing key; the menubar app (uid 501)
+                // legitimately can't read it. Root can view it from the CLI.
+                Text(String(localized: "system.trustManagedDetail",
+                            defaultValue: "The signing key is owned and protected by the engine (root), so it isn't readable from the app on this install. To view it, run: sudo maccrabctl debug trust-substrate"))
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(String(localized: "system.trustFingerprint", defaultValue: "FINGERPRINT")).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.tertiaryText)

@@ -209,26 +209,18 @@ struct ResponseActionsView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
             return
         }
-        // SIGHUP the sysext so ResponseEngine.loadConfig picks up the new
-        // file. v1.6.21 HIGH fix: tell the truth in the banner — pre-fix
-        // the message said "Daemon reloaded" regardless of whether pkill
-        // succeeded, which lied when the sysext wasn't running yet (first
-        // install).
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "com.maccrab.agent"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        var sighupDelivered = false
-        do {
-            try task.run()
-            task.waitUntilExit()
-            sighupDelivered = task.terminationStatus == 0
-        } catch {
-            sighupDelivered = false
-        }
-        saveStatus = sighupDelivered
-            ? "Saved. Daemon reloaded."
+        // Ask the engine to re-read the response-action config. v1.21.4 (audit):
+        // the old bare `pkill -HUP com.maccrab.agent` here was EPERM cross-uid
+        // (uid-501 app → root sysext), so on a release build the SIGHUP never
+        // fired and ResponseEngine.loadConfig never ran — yet the banner still
+        // claimed "Daemon reloaded" whenever pkill *exited 0* (which it does
+        // even when it matches nothing). Route through the proven inbox path
+        // like the webhook / notification config writers, and base the banner
+        // on the inbox-drop success (dev `maccrabd` still honors SIGHUP via the
+        // same helper), so the message tells the truth on release.
+        let reloaded = V2DaemonControl.reloadDetectionRules()
+        saveStatus = reloaded
+            ? "Saved. Daemon reloading."
             : "Saved. Daemon will reload on next start."
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
     }

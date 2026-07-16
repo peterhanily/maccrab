@@ -82,7 +82,7 @@ enum EventLoop {
         )
     }
 
-    static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter, alertCount: LockedCounter) async {
+    static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter) async {
         for await event in eventStream {
             eventCount.increment()
 
@@ -891,23 +891,39 @@ enum EventLoop {
                     processPath: enrichedEvent.process.executable,
                     timestamp: enrichedEvent.timestamp
                 ) {
-                    let alert = Alert(
-                        ruleId: "maccrab.correlator.cross-process",
-                        ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",
-                        severity: chain.severity,
-                        eventId: UUID().uuidString,
-                        processPath: chain.events.last?.processPath,
-                        processName: chain.events.last?.processName,
-                        description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
-                        mitreTactics: "attack.execution",
-                        mitreTechniques: "attack.t1204",
-                        suppressed: false
-                    )
-                    do {
-                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                            await state.notifier.notify(alert: alert)
-                        }
-                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    // Dedup on the SHARED FILE (not the triggering executable) —
+                    // mirror of the network path's dedup on destination below.
+                    // A cross-process file chain is defined by the file every
+                    // process converged on; keying dedup on the executable (the
+                    // AlertSink default) leaves each converging process emitting a
+                    // fresh alert as the correlator window re-evaluates — the
+                    // residual the campaign wave's chainDominatedByShellUtilities
+                    // widening missed (field: 1344 mostly-benign alerts). Atomic
+                    // check+record closes the same TOCTOU window the network path
+                    // documents.
+                    let ruleId = "maccrab.correlator.cross-process"
+                    let dedupKey = file.path
+                    if await state.deduplicator.shouldSuppressAndRecord(ruleId: ruleId, processPath: dedupKey) {
+                        // Suppressed at the per-file layer.
+                    } else {
+                        let alert = Alert(
+                            ruleId: ruleId,
+                            ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",
+                            severity: chain.severity,
+                            eventId: UUID().uuidString,
+                            processPath: chain.events.last?.processPath,
+                            processName: chain.events.last?.processName,
+                            description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
+                            mitreTactics: "attack.execution",
+                            mitreTechniques: "attack.t1204",
+                            suppressed: false
+                        )
+                        do {
+                            if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
+                                await state.notifier.notify(alert: alert)
+                            }
+                        } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    }
                 }
             }
             if let net = enrichedEvent.network {
@@ -1993,7 +2009,13 @@ enum EventLoop {
                         continue
                     }
 
-                    alertCount.increment()
+                    // NOTE: the shared alerts-emitted counter is incremented
+                    // INSIDE AlertSink (the single chokepoint all ~60 emission
+                    // paths flow through) — see AlertSink.alertCounter. The
+                    // pre-fix increment here counted ONLY the single-event
+                    // rule-match path (~16x undercount); the batch insert below
+                    // (insertEngineBatch) now counts these alerts, so counting
+                    // here too would double-count.
 
                     // Feedback-driven severity auto-tuning: rules the user
                     // repeatedly dismisses get downgraded one level (critical

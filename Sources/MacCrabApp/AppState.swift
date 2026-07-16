@@ -408,9 +408,6 @@ final class AppState: ObservableObject {
         lastHeartbeatMtime = combined
     }
 
-    /// mtime of the TCC snapshot the last time we decoded it (v1.7.1).
-    private var lastTCCSnapshotMtime: Date?
-
     /// v1.7.11: mtime tracking for the three refresh paths that previously
     /// re-parsed and re-published their snapshot every 5 s regardless of
     /// whether the underlying file had changed. Each unconditional
@@ -423,21 +420,6 @@ final class AppState: ObservableObject {
     private var lastHeartbeatMtime: Date?
     private var lastStorageHealthMtime: Date?
     private var lastRuleTamperMtime: Date?
-
-    /// Refresh TCC current-state matrix from the daemon's
-    /// `<dataDir>/tcc_snapshot.json`. The rebuilt Permissions panel
-    /// uses this for the app × service matrix views.
-    func refreshTCCSnapshot() {
-        let path = dataDir + "/tcc_snapshot.json"
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-        if let mtime, let last = lastTCCSnapshotMtime, mtime <= last {
-            return
-        }
-        guard let snapshot = TCCMonitor.readSnapshot(at: path) else { return }
-        tccSnapshotEntries = snapshot.entries
-        tccSnapshotLastRefresh = snapshot.writtenAt
-        lastTCCSnapshotMtime = mtime
-    }
 
     /// Path to the daemon-written security-tool integrations snapshot.
     /// `IntegrationsView` reads this instead of re-running its own
@@ -456,10 +438,6 @@ final class AppState: ObservableObject {
     /// Worst-case payload is ~38 MB at theoretical caps and we don't
     /// want to burn UI thread time decoding it twice for nothing.
     private var lastLineageMtime: Date?
-
-    /// mtime of the MCP-baseline snapshot the last time we decoded it.
-    /// Same skip-on-unchanged optimization as `lastLineageMtime`.
-    private var lastMCPBaselineMtime: Date?
 
     /// mtime of the rule-telemetry snapshot. v1.7.1.
     private var lastRuleTelemetryMtime: Date?
@@ -481,23 +459,6 @@ final class AppState: ObservableObject {
         ruleTelemetry = dict
         ruleTelemetryLastRefresh = snapshot.writtenAt
         lastRuleTelemetryMtime = mtime
-    }
-
-    /// Refresh the MCP baseline snapshot. Daemon writes
-    /// `<dataDir>/mcp_baselines.json` every 30 s on the heartbeat
-    /// tick; the dashboard's `MCPActivityView` consumes this.
-    func refreshMCPBaselines() {
-        let path = dataDir + "/mcp_baselines.json"
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-        if let mtime, let last = lastMCPBaselineMtime, mtime <= last {
-            return
-        }
-        guard let snapshot = MCPBaselineService.readSnapshot(at: path) else {
-            return
-        }
-        mcpBaselines = snapshot.baselines
-        mcpBaselinesLastRefresh = snapshot.writtenAt
-        lastMCPBaselineMtime = mtime
     }
 
     /// Refresh the AI agent-lineage timeline from the daemon-written
@@ -838,7 +799,6 @@ final class AppState: ObservableObject {
     @Published var isLoadingOlderAlerts: Bool = false
     @Published var isLoadingOlderEvents: Bool = false
     @Published var rules: [RuleViewModel] = []
-    @Published var tccEvents: [TCCEventViewModel] = []
 
     /// Threat intel stats for the dashboard
     struct ThreatIntelStats {
@@ -883,22 +843,10 @@ final class AppState: ObservableObject {
     /// the timeline view to render a "Updated <relative time>" caption.
     @Published var aiSessionsLastRefresh: Date?
 
-    /// MCP behavioral baselines, populated from `mcp_baselines.json`
-    /// (v1.7.0). Most-recently-active baseline first. Each entry is a
-    /// per-(tool, server) fingerprint with file basenames, domains, and
-    /// child process names that the daemon's `MCPBaselineService` has
-    /// observed during the learning window or after promotion.
-    @Published var mcpBaselines: [MCPServerBaseline] = []
-    @Published var mcpBaselinesLastRefresh: Date?
-
     /// Per-rule runtime telemetry, populated from `rule_telemetry.json`
     /// (v1.7.1). Keyed by ruleId for O(1) lookup when rendering rows.
     @Published var ruleTelemetry: [String: RuleEngine.RuleStats] = [:]
     @Published var ruleTelemetryLastRefresh: Date?
-
-    /// Current TCC permission matrix entries (v1.7.1).
-    @Published var tccSnapshotEntries: [TCCMonitor.PublicEntry] = []
-    @Published var tccSnapshotLastRefresh: Date?
 
     // MARK: - LLM-orchestration services (v1.6.10 "move out of sysext")
     //
@@ -942,7 +890,9 @@ final class AppState: ObservableObject {
     // MARK: Private
 
     private var pollTimer: AnyCancellable?
-    private var previousEventCount: Int = 0
+    /// nil until the first `updateStats()` sample primes it — see
+    /// `eventsPerSecondFrom` (deep-audit fix for the first-poll rate spike).
+    private var previousEventCount: Int? = nil
     private var lastStatsUpdate: Date = Date()
     private var rulesLoaded_cached = false
     /// v1.11.1 (audit perf MEDIUM): mtime gate ported from
@@ -1252,7 +1202,14 @@ final class AppState: ObservableObject {
     /// hammering SQLite for updates nobody is looking at.
     func startPolling() {
         guard pollTimer == nil else { return }
-        pollTimer = Timer.publish(every: 10.0, on: .main, in: .common)
+        // Deep-audit fix: honor the "Poll detection engine every N seconds"
+        // setting (pollIntervalSeconds) rather than a hardcoded 10 s, so the
+        // menubar/notifier DB poll matches the cadence the V2 dashboard already
+        // drives from the same key (V2DashboardState.refreshIntervalSeconds).
+        // 2 s floor mirrors the dashboard clamp. Read at (re)start — a scene
+        // toggle or setting change re-arms the timer at the new interval.
+        let interval = Double(max(2, UserDefaults.standard.object(forKey: "pollIntervalSeconds") as? Int ?? 5))
+        pollTimer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -1690,22 +1647,73 @@ final class AppState: ObservableObject {
             receiverEnabled: agentTracesReceiverEnabled,
             port: 4318
         )
+        // Dev path: the user-owned maccrabd reads this config file directly and
+        // responds to the SIGHUP below.
         guard AgentTracesConfigStore.write(cfg, to: path) else { return }
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-HUP", "com.maccrab.agent"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        try? task.run()
-        // Also SIGHUP the dev maccrabd binary, which uses a different
-        // process name. Best-effort.
-        let task2 = Process()
-        task2.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task2.arguments = ["-HUP", "maccrabd"]
-        task2.standardOutput = Pipe()
-        task2.standardError = Pipe()
-        try? task2.run()
+        // Deep-audit fix (1695): the RELEASE sysext runs as root and owns the
+        // system-side agent_traces_config.json; `pkill -HUP com.maccrab.agent`
+        // is EPERM cross-uid, so the toggle was a silent no-op on release.
+        // Route it through the privileged inbox file-drop IPC every other
+        // dashboard→sysext control already uses. The daemon handler writes the
+        // system-side config and (re)starts the receiver lifecycle.
+        _ = dropAgentTracesRequest(receiverEnabled: agentTracesReceiverEnabled, port: 4318)
+
+        // Dev only: SIGHUP the maccrabd binary (same-uid, so this works). The
+        // release sysext is driven by the inbox request above, not this pkill.
+        let devTask = Process()
+        devTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        devTask.arguments = ["-HUP", "maccrabd"]
+        devTask.standardOutput = Pipe()
+        devTask.standardError = Pipe()
+        try? devTask.run()
+    }
+
+    /// Drop an `apply-agent-traces-<token>.json` request into the daemon's
+    /// inbox (both system + user support dirs) so the root sysext applies the
+    /// receiver toggle it can't be pkill'd for cross-uid. Returns true if at
+    /// least one write landed.
+    ///
+    /// DAEMON-SIDE HANDLER REQUIRED (residual): add an `apply-agent-traces-`
+    /// verb to the inbox poller in DaemonTimers.swift (partition +
+    /// handleApplyAgentTracesRequests) that reads `receiverEnabled`/`port`,
+    /// writes `<systemSupportDir>/agent_traces_config.json` via
+    /// AgentTracesConfigStore (setting agent_traces_enabled + receiverEnabled),
+    /// (re)starts the OTLP receiver, and applies the same uid/symlink auth gate
+    /// + audit as the reload-rules / llm-config verbs.
+    private func dropAgentTracesRequest(receiverEnabled: Bool, port: Int) -> Bool {
+        let dirs = ["/Library/Application Support/MacCrab/inbox",
+                    NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"]
+        var wrote = false
+        for dir in dirs where Self.writeAgentTracesRequest(inboxDir: dir, receiverEnabled: receiverEnabled, port: port) {
+            wrote = true
+        }
+        return wrote
+    }
+
+    /// Write one `apply-agent-traces-*.json` into `inboxDir`. Static + pure so
+    /// it's unit-testable against a temp dir (mirrors writeInboxRefreshRequest).
+    nonisolated static func writeAgentTracesRequest(inboxDir: String, receiverEnabled: Bool, port: Int) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        let obj: [String: Any] = [
+            "schema_version": 1,
+            "receiverEnabled": receiverEnabled,
+            "port": port,
+            "requester": "MacCrabApp",
+            "queuedAt": ISO8601DateFormatter().string(from: Date())
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return false }
+        let token = "\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8))"
+        let path = inboxDir + "/apply-agent-traces-\(token).json"
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Trigger an immediate events.db size-cap sweep on the daemon.
@@ -1962,6 +1970,9 @@ final class AppState: ObservableObject {
 
         guard dbExists else {
             eventsPerSecond = 0
+            // Drop the baseline so a DB that (re)appears re-primes on its next
+            // sample instead of spiking off a stale count (see eventsPerSecondFrom).
+            previousEventCount = nil
             return
         }
 
@@ -1977,9 +1988,7 @@ final class AppState: ObservableObject {
         refreshRuleTamper()
         await refreshThreatIntelStats()
         await refreshAgentLineage()
-        refreshMCPBaselines()
         refreshRuleTelemetry()
-        refreshTCCSnapshot()
         maybeKickWatchdog()
 
         // Rules rarely change — load once, BUT only latch on a SUCCESSFUL load.
@@ -1989,15 +1998,8 @@ final class AppState: ObservableObject {
         // "Protection degraded"). Retry each poll until rules actually load.
         if !rulesLoaded_cached {
             await loadRules()
-            await loadTCCEvents()
             if rulesLoaded > 0 { rulesLoaded_cached = true }
         }
-
-        // v1.6.8: keep the allowlist-count badge (Manage button on
-        // AlertDashboard) in sync with the on-disk SuppressionManager
-        // state. Refreshed every poll so a CLI-added entry shows up
-        // without requiring a dashboard reopen.
-        await refreshAllowlistEntryCount()
     }
 
     /// If the heartbeat has been stale for long enough AND we haven't
@@ -2213,27 +2215,6 @@ final class AppState: ObservableObject {
         rulesLoaded = 0
     }
 
-    func loadTCCEvents() async {
-        do {
-            let store = try eventStore()
-            let tccRaw = try await store.events(since: Date.distantPast, category: .tcc, limit: 200)
-            tccEvents = tccRaw.compactMap { event -> TCCEventViewModel? in
-                guard let tcc = event.tcc else { return nil }
-                return TCCEventViewModel(
-                    id: event.id.uuidString,
-                    timestamp: event.timestamp,
-                    serviceName: tcc.service,
-                    clientName: tcc.client,
-                    clientPath: tcc.clientPath,
-                    allowed: tcc.allowed,
-                    authReason: tcc.authReason
-                )
-            }
-        } catch {
-            // DB may not exist yet
-        }
-    }
-
     func unsuppressAlert(_ alertId: String) async {
         // Update authoritative set and in-memory state immediately
         suppressedIDs.remove(alertId)
@@ -2251,33 +2232,6 @@ final class AppState: ObservableObject {
 
     /// Suppression rules: (ruleTitle, processName) patterns to auto-hide.
     @Published var suppressionPatterns: [(ruleTitle: String, processName: String)] = []
-
-    /// Active v2 allowlist entry count (non-expired Suppression records
-    /// loaded from `suppressions.json`). Kept in sync with what
-    /// `SuppressionManagerView` shows so the "Manage (N)" button's
-    /// count is authoritative. Refreshed on view-open and on view-
-    /// close; the SuppressionManager is the source of truth, we just
-    /// cache the count for a fast read on the main actor.
-    @Published var allowlistEntryCount: Int = 0
-
-    /// Fetch the current v2 allowlist count from disk and publish it.
-    /// Safe to call from any context; always lands the mutation on
-    /// the main actor.
-    func refreshAllowlistEntryCount() async {
-        let dir = allowlistDataDir()
-        let mgr = SuppressionManager(dataDir: dir)
-        await mgr.load()
-        let count = await mgr.list(includeExpired: false).count
-        await MainActor.run { self.allowlistEntryCount = count }
-    }
-
-    private func allowlistDataDir() -> String {
-        if let env = ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"],
-           FileManager.default.fileExists(atPath: env) { return env }
-        let system = "/Library/Application Support/MacCrab"
-        if FileManager.default.fileExists(atPath: system) { return system }
-        return NSHomeDirectory() + "/Library/Application Support/MacCrab"
-    }
 
     func suppressAlert(_ alertId: String) async {
         // Update authoritative set and in-memory state immediately — no loadAlerts() needed.
@@ -2572,7 +2526,74 @@ final class AppState: ObservableObject {
                 ? "No alerts older than \(days) days"
                 : "Deleted \(deleted) alerts older than \(days) days"
         } catch {
-            lastPruneResult = "Prune failed: \(error.localizedDescription)"
+            // Deep-audit fix (2568): the dashboard opens alerts.db read-only
+            // (the root daemon owns it), so a direct prune always throws
+            // "attempt to write a readonly database" on a release install —
+            // "Clear Now" never worked. Route the bulk delete through the
+            // privileged inbox the same way alert suppress/delete already do;
+            // the daemon owns the writable handle and applies it on its next
+            // poll. We can't report an exact count synchronously, so the
+            // feedback becomes "requested".
+            if Self.isReadOnlyError(error), dropPruneAlertsRequest(olderThanDays: days) {
+                lastPruneResult = "Requested cleanup of alerts older than \(days) days — the engine will apply it shortly."
+            } else {
+                lastPruneResult = "Prune failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// True when a SQLite write failed because the dashboard holds a
+    /// read-only handle on a root-owned DB (the common release case).
+    /// Mirrors V2LiveDataProvider.isReadOnlyError.
+    nonisolated static func isReadOnlyError(_ error: Error) -> Bool {
+        let s = "\(error)".lowercased()
+        return s.contains("readonly") || s.contains("read-only")
+            || s.contains("permission denied") || s.contains("operation not permitted")
+    }
+
+    /// Drop a `prune-alerts-<token>.json` request into the daemon's inbox so
+    /// the root engine (which owns alerts.db) performs the retention delete.
+    /// Written to BOTH the system and user support dirs — whichever daemon is
+    /// running polls its own inbox (matches writeClickFixPayloadToInbox /
+    /// dropBuiltinRuleSetting). Returns true if at least one write landed.
+    ///
+    /// DAEMON-SIDE HANDLER REQUIRED (residual): add a `prune-alerts-` verb to
+    /// the inbox poller in DaemonTimers.swift (partition + handlePruneAlertsRequests)
+    /// that reads `olderThanDays`, opens alerts.db read-write, calls
+    /// AlertStore.prune(olderThan:), and applies the same uid/symlink auth gate
+    /// + audit as the delete-alert verb.
+    private func dropPruneAlertsRequest(olderThanDays days: Int) -> Bool {
+        let dirs = ["/Library/Application Support/MacCrab/inbox",
+                    NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"]
+        var wrote = false
+        for dir in dirs where Self.writePruneAlertsRequest(inboxDir: dir, olderThanDays: days) {
+            wrote = true
+        }
+        return wrote
+    }
+
+    /// Write one `prune-alerts-*.json` into `inboxDir`. Static + pure so it's
+    /// unit-testable against a temp dir (mirrors writeInboxRefreshRequest).
+    /// Returns false on an unwritable path (honest failure, no fake success).
+    nonisolated static func writePruneAlertsRequest(inboxDir: String, olderThanDays days: Int) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        let obj: [String: Any] = [
+            "schema_version": 1,
+            "olderThanDays": days,
+            "requester": "MacCrabApp",
+            "queuedAt": ISO8601DateFormatter().string(from: Date())
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return false }
+        let token = "\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8))"
+        let path = inboxDir + "/prune-alerts-\(token).json"
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -2805,24 +2826,36 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Compute events/sec from two count samples. Returns nil for the very
+    /// first sample (previousCount == nil) so the caller primes the baseline
+    /// without publishing a spurious spike equal to the entire event backlog.
+    /// Static + pure for unit testing.
+    nonisolated static func eventsPerSecondFrom(previousCount: Int?, currentCount: Int, elapsedSeconds: Int) -> Int? {
+        guard let previous = previousCount else { return nil }
+        let delta = currentCount - previous
+        let elapsed = max(1, elapsedSeconds)
+        return delta > 0 ? max(1, delta / elapsed) : 0
+    }
+
     private func updateStats() async {
         do {
             let store = try eventStore()
             let currentCount = try await store.count()
             let now = Date()
             let elapsed = max(1, Int(now.timeIntervalSince(lastStatsUpdate)))
-            let delta = currentCount - previousEventCount
-            let newValue = delta > 0 ? max(1, delta / elapsed) : 0
-            // Only publish when the displayed value actually changes. Every
-            // @Published assignment invalidates every SwiftUI view that
-            // subscribes to AppState — and many views (OverviewDashboard,
-            // StatusBarMenu, ESHealthView) read eventsPerSecond. On a quiet
-            // system the computed value is frequently 0, and re-publishing
-            // the same 0 every 10s forced a full-dashboard redraw with no
-            // visible change. Guarding on inequality drops idle re-renders
-            // to zero.
-            if newValue != eventsPerSecond {
-                eventsPerSecond = newValue
+            // Deep-audit fix (2814): skip the FIRST sample. With no baseline the
+            // delta is the entire backlog, which published a spurious events/sec
+            // spike on the first poll. `eventsPerSecondFrom` returns nil until
+            // primed. Only publish when the displayed value actually changes —
+            // every @Published assignment invalidates every SwiftUI view that
+            // subscribes to AppState (OverviewDashboard, StatusBarMenu,
+            // ESHealthView read eventsPerSecond), and re-publishing the same 0
+            // every tick forced a full-dashboard redraw with no visible change.
+            if let rate = Self.eventsPerSecondFrom(previousCount: previousEventCount,
+                                                   currentCount: currentCount,
+                                                   elapsedSeconds: elapsed),
+               rate != eventsPerSecond {
+                eventsPerSecond = rate
             }
             previousEventCount = currentCount
             lastStatsUpdate = now

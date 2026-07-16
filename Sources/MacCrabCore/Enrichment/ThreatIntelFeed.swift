@@ -1074,6 +1074,7 @@ public actor ThreatIntelFeed {
             let suffixOK = file.hasSuffix(".hashes.txt")
                 || file.hasSuffix(".ips.txt")
                 || file.hasSuffix(".domains.txt")
+                || file.hasSuffix(".urls.txt")   // v1.21.4 (audit): custom URL IOCs
             guard suffixOK else { continue }
 
             // Reject path traversal — file name must be a leaf inside cacheDir.
@@ -1111,6 +1112,11 @@ public actor ThreatIntelFeed {
                 _ = try? loadCustomFile(path: path, type: .ip)
             } else if file.hasSuffix(".domains.txt") {
                 _ = try? loadCustomFile(path: path, type: .domain)
+            } else if file.hasSuffix(".urls.txt") {
+                // v1.21.4 (audit): the app's custom-IOC UI already writes
+                // custom.urls.txt and offers the URLs option, but this loader
+                // never consumed it — the URL IOCs were silently ignored.
+                _ = try? loadCustomFile(path: path, type: .url)
             }
         }
     }

@@ -411,7 +411,10 @@ public struct V2IntelligenceWorkspace: View {
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                     V2ActionButton("Open AI Backend settings", icon: "gearshape", style: .secondary) {
-                        V2SettingsBridge.openSettings()
+                        // v1.21.4 (audit): target the AI Backend tab directly
+                        // (the tab-selection infra shipped in 4943d55) instead
+                        // of opening whatever tab was last shown.
+                        V2SettingsBridge.openSettings(selectingTab: .aiBackend)
                     }
                 }
                 Spacer()

@@ -94,17 +94,20 @@ public enum DaemonBootstrap {
         // DaemonState's actors + Sendable counters); cross-collector reordering
         // into the engines already existed before the split.
         let streams = handles.state.mergedEventStreams()
+        // v1.21.4 (audit #211): the alerts-emitted counter is no longer passed
+        // to the loop — AlertSink now owns the increment (the single chokepoint
+        // every emission path flows through), and it was wired the SAME
+        // `_sharedAlertCount` instance in DaemonState.init, so the heartbeat
+        // read below is unchanged.
         async let priorityConsumer: Void = EventLoop.run(
             state: handles.state,
             eventStream: streams.priority,
-            eventCount: _sharedEventCount,
-            alertCount: _sharedAlertCount
+            eventCount: _sharedEventCount
         )
         async let fileConsumer: Void = EventLoop.run(
             state: handles.state,
             eventStream: streams.file,
-            eventCount: _sharedEventCount,
-            alertCount: _sharedAlertCount
+            eventCount: _sharedEventCount
         )
         _ = await (priorityConsumer, fileConsumer)
         // Both streams ended (SIGTERM / sysextd teardown) — flush anything still

@@ -36,24 +36,34 @@ struct V2ForensicsSettingsSheet: View {
             header
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    installedPointerSection
-                    Divider()
-                    trustSection
-                    if !devResidue.isEmpty {
+                // Show a spinner while the async reload (installer.list +
+                // registry manifests + trust/revocation keys) is in flight, so the
+                // sheet doesn't flash empty sections before data lands — matching
+                // the sibling forensics views (Findings/Scans/ScanDetail).
+                if loading {
+                    ProgressView(String(localized: "forensicsSettings.loading", defaultValue: "Loading…"))
+                        .frame(maxWidth: .infinity)
+                        .padding(40)
+                } else {
+                    VStack(alignment: .leading, spacing: 18) {
+                        installedPointerSection
                         Divider()
-                        maintenanceSection
+                        trustSection
+                        if !devResidue.isEmpty {
+                            Divider()
+                            maintenanceSection
+                        }
+                        Divider()
+                        pluginsRootSection
+                        if let msg = actionMessage {
+                            Text(msg)
+                                .scaledSystem(12)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 6)
+                        }
                     }
-                    Divider()
-                    pluginsRootSection
-                    if let msg = actionMessage {
-                        Text(msg)
-                            .scaledSystem(12)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 6)
-                    }
+                    .padding(20)
                 }
-                .padding(20)
             }
         }
         .frame(width: 600, height: 580)

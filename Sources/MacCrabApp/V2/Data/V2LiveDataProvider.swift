@@ -695,6 +695,12 @@ public final class V2LiveDataProvider: V2DataProvider {
                     let cmd = spec["command"] as? String ?? ""
                     let args = spec["args"] as? [String] ?? []
                     let toolCount = args.count + 1   // proxy until we can introspect
+                    // Deep-audit fix (710): a remote (SSE / streamable-HTTP)
+                    // server declares a `url`; only stdio servers genuinely run
+                    // on localhost. Pre-fix every row read "localhost" even for a
+                    // server pointed at a third-party host — hiding exactly the
+                    // entries worth scrutinising.
+                    let host = Self.mcpHost(for: spec)
                     let trust: V2StatusLevel = cmd.contains("/tmp/")
                         || cmd.contains("/var/tmp/") ? .warning : .info
                     if let existing = byKey[key] {
@@ -707,7 +713,7 @@ public final class V2LiveDataProvider: V2DataProvider {
                         )
                     } else {
                         byKey[key] = V2MockMCP(
-                            id: key, name: name, host: "localhost",
+                            id: key, name: name, host: host,
                             toolCount: toolCount, knownTo: [cfg.tool],
                             trust: trust, lastUsed: mtime
                         )
@@ -716,6 +722,26 @@ public final class V2LiveDataProvider: V2DataProvider {
             }
             return Array(byKey.values).sorted { $0.name < $1.name }
         }.value
+    }
+
+    /// Resolve the display host for one MCP server config entry. Remote
+    /// (SSE / streamable-HTTP) servers declare a `url`; stdio servers only
+    /// carry command/args and genuinely execute on localhost. Static + pure
+    /// so it's unit-testable without a live provider.
+    nonisolated static func mcpHost(for spec: [String: Any]) -> String {
+        // A `url` (or `serverUrl`, the Continue spelling) marks a remote
+        // transport. Show its real host so a third-party endpoint isn't
+        // disguised as "localhost".
+        let urlString = (spec["url"] as? String) ?? (spec["serverUrl"] as? String)
+        if let urlString, !urlString.isEmpty {
+            if let host = URLComponents(string: urlString)?.host, !host.isEmpty {
+                return host
+            }
+            // Unparseable but non-empty — surface it verbatim rather than
+            // silently claiming localhost.
+            return urlString
+        }
+        return "localhost"
     }
 
     // v1.11.0: collectors + permissions wired from existing daemon
@@ -765,7 +791,12 @@ public final class V2LiveDataProvider: V2DataProvider {
                 id: "\(e.service)|\(e.client)",
                 service: prettyTCCService(e.service),
                 granted: e.authValue == 2,                          // 2 = allowed
-                required: Self.requiredTCCServices.contains(e.service), // FDA + ES are load-bearing
+                // Deep-audit fix (768): scope "required" to MacCrab's OWN
+                // engine/app identity, not by service across ALL clients.
+                // Pre-fix a denied FDA row for any unrelated app (common)
+                // counted toward the System tab's "Blocking missing" tally,
+                // producing a false red "investigate" alarm on a healthy Mac.
+                required: Self.isRequiredMacCrabPermission(service: e.service, client: e.client),
                 description: "\(e.client) (\(authValueLabel(e.authValue)))"
             )
         }
@@ -775,6 +806,26 @@ public final class V2LiveDataProvider: V2DataProvider {
         "kTCCServiceSystemPolicyAllFiles",  // Full Disk Access
         "kTCCServiceEndpointSecurityClient",
     ]
+
+    /// TCC client identifiers that belong to MacCrab itself: the System
+    /// Extension (plain + `.systemextension` suffix seen on some macOS
+    /// builds) and the menubar app. Matches the closed set used by
+    /// AppState.querySysextFDAInDB — a prefix/LIKE match would collide
+    /// with any future `com.maccrab.agent.*`.
+    private static let macCrabTCCClients: Set<String> = [
+        "com.maccrab.agent",
+        "com.maccrab.agent.systemextension",
+        "com.maccrab.app",
+    ]
+
+    /// A permission is "required" only when it is load-bearing for MacCrab
+    /// (Full Disk Access or the Endpoint Security client) AND it is granted
+    /// to a MacCrab identity. Static + pure so it's unit-testable. The ES
+    /// client is only ever requested by the agent; FDA can be held by either
+    /// the agent (authoritative — the engine reads the disk) or the app.
+    nonisolated static func isRequiredMacCrabPermission(service: String, client: String) -> Bool {
+        requiredTCCServices.contains(service) && macCrabTCCClients.contains(client)
+    }
 
     private nonisolated func prettyTCCService(_ raw: String) -> String {
         // Strip the kTCCService prefix; insert spaces ahead of capitals

@@ -403,6 +403,40 @@ struct V2InvestigationWorkspace: View {
         return trace.title
     }
 
+    /// Human-readable root-process label for a trace-picker row, or nil
+    /// when it can't be shown honestly. rc.3 deep-audit related-instance
+    /// (ui-investigation): the picker row rendered `trace.rootProcess`
+    /// under a terminal icon, but the live provider maps that field from
+    /// `rootEntityId` — the opaque `process:<stableKey>` entity id — so
+    /// the row showed a hash dressed up as a command line. This is the
+    /// same opaque-id-display class the fix pass resolved for the
+    /// inspector subtitle / critical-path / "View as events", but the
+    /// picker row was missed. Prefer the resolved anchor process name
+    /// when this trace's members are already cached; otherwise suppress
+    /// the opaque id (the human title is already shown above the line)
+    /// rather than mislead.
+    private func pickerRootProcess(for trace: V2MockTrace) -> String? {
+        if let anchor = traceMembersCache[trace.id]?.first(where: { $0.isAnchor }) {
+            return anchor.displayName
+        }
+        return Self.isOpaqueEntityId(trace.rootProcess) ? nil : trace.rootProcess
+    }
+
+    /// True when `s` is an opaque causal-graph entity id (`<type>:<key>`,
+    /// e.g. `process:9f3a…`) or the "—" placeholder — i.e. not something
+    /// to present to a human as a process name. Entity ids are built as
+    /// `"\(entityType):\(stableKey)"` (TraceGraphNode.canonicalId).
+    /// `static` so it's unit-testable without standing up the whole View.
+    static func isOpaqueEntityId(_ s: String) -> Bool {
+        if s == "—" || s.isEmpty { return true }
+        let knownTypes = ["process", "file", "network", "ai_agent",
+                          "persistence", "tcc", "alert"]
+        if let colon = s.firstIndex(of: ":") {
+            return knownTypes.contains(String(s[s.startIndex..<colon]).lowercased())
+        }
+        return false
+    }
+
     /// Resolve the inspector "Trace path" rows from the loaded members:
     /// the anchor (root) first, then the entities it touched in first-seen
     /// order. Falls back to the human trace title when members haven't
@@ -698,8 +732,19 @@ struct V2InvestigationWorkspace: View {
             graphToolbar(members)
             GeometryReader { geo in
                 // Cached layout: skip recomputing the force solver
-                // unless an input changed.
-                let key = "\(graphLayout.rawValue)|\(members.count)|\(Int(geo.size.width))|\(Int(geo.size.height))|\((selectedTrace ?? traces.first)?.id ?? "")"
+                // unless an input changed. rc.3 deep-audit
+                // (perf-dashboard): the size component of the cache key
+                // was full-pixel (`Int(geo.size.width/height)`), so a
+                // live window resize busted the cache on every single
+                // pixel — and for `.force` that re-ran 200 iters of
+                // O(N²) synchronously on the main thread per pixel,
+                // beachballing the drag/resize. Quantize the size to
+                // 20-pt buckets so a resize only re-solves once per
+                // bucket crossing; positions are approximate + clamped
+                // anyway, so the intra-bucket staleness is invisible.
+                let wBucket = Int(geo.size.width / 20)
+                let hBucket = Int(geo.size.height / 20)
+                let key = "\(graphLayout.rawValue)|\(members.count)|\(wBucket)|\(hBucket)|\((selectedTrace ?? traces.first)?.id ?? "")"
                 let basePositions: [String: CGPoint] = {
                     if cachedPositionKey == key && !cachedPositions.isEmpty {
                         return cachedPositions
@@ -1677,14 +1722,16 @@ struct V2InvestigationWorkspace: View {
                         Spacer()
                         V2StatusChip(trace.severityHint.label, kind: trace.severityHint.chipKind)
                     }
-                    HStack(spacing: 6) {
-                        Image(systemName: "terminal").scaledSystem(9)
-                            .foregroundStyle(V2Theme.mutedText)
-                        Text(trace.rootProcess)
-                            .font(V2Theme.mono())
-                            .foregroundStyle(V2Theme.neutral)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    if let proc = pickerRootProcess(for: trace) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "terminal").scaledSystem(9)
+                                .foregroundStyle(V2Theme.mutedText)
+                            Text(proc)
+                                .font(V2Theme.mono())
+                                .foregroundStyle(V2Theme.neutral)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                     HStack(spacing: 8) {
                         // v1.11.0 (audit functionality MEDIUM): only render

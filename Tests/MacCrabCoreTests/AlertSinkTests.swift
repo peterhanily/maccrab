@@ -257,6 +257,60 @@ struct AlertSinkTests {
         #expect(stats.inserted == 3)
         #expect(stats.suppressed == 1)
     }
+
+    // MARK: - Shared alerts-emitted counter (audit #211)
+
+    @Test("shared alert counter increments once per emitted alert across all submit paths (post-dedup)")
+    func sharedCounterCountsEveryEmissionPath() async throws {
+        // Regression net for the ~16x HEARTBEAT alerts_emitted / Prometheus
+        // alerts_total undercount: pre-fix only the single-event rule-match
+        // site incremented the counter, so the ~59 direct-emission paths
+        // (graph/intent/sequence/campaign/AI-guard/meta) that flow through
+        // AlertSink.submit were invisible. The daemon injects the SAME
+        // LockedCounter the heartbeat reads; the sink must increment it once
+        // per successfully-inserted (post-dedup) alert on EVERY path.
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-alertsink-counter-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try AlertStore(directory: tempDir.path)
+        let counter = LockedCounter()
+        let sink = AlertSink(
+            alertStore: store,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            alertCounter: counter
+        )
+        let ev = event()
+
+        // Three distinct direct emissions (the non-rule-match submit path that
+        // used to bypass the counter entirely).
+        _ = try await sink.submit(alert: makeAlert(ruleId: "graph"), event: ev)
+        _ = try await sink.submit(alert: makeAlert(ruleId: "intent"), event: ev)
+        _ = try await sink.submit(alert: makeAlert(ruleId: "campaign"), event: ev)
+        #expect(counter.get() == 3)
+
+        // A dedup-suppressed submit must NOT count (post-dedup semantics).
+        let dup = try await sink.submit(alert: makeAlert(ruleId: "graph"), event: ev)
+        #expect(dup == false)
+        #expect(counter.get() == 3)
+
+        // The event-less submit path also counts.
+        _ = try await sink.submit(alert: makeAlert(ruleId: "selfdefense", processPath: "/bin/z"))
+        #expect(counter.get() == 4)
+
+        // The engine batch path counts once per inserted alert (this is the
+        // rule-match path — the old EventLoop per-match increment was removed,
+        // so exactly the batch size is added, no double-count).
+        try await sink.insertEngineBatch(alerts: [
+            makeAlert(ruleId: "rule.a"),
+            makeAlert(ruleId: "rule.b"),
+        ])
+        #expect(counter.get() == 6)
+
+        // The shared counter agrees with the sink's own inserted tally.
+        let stats = await sink.stats()
+        #expect(counter.get() == stats.inserted)
+    }
 }
 
 // MARK: - FP recalibration (v1.19.3)

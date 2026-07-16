@@ -244,8 +244,20 @@ public actor TraceMaterializer {
         // entry certifying that this trace was materialized, in this position,
         // at this time. Best-effort: a ledger-append failure must never fail
         // the detection path (materialize is on the hot ingest path), but it
-        // is logged so a persistent failure is visible. The signed per-export
-        // bundle + unified-log witness anchor the head independently.
+        // is logged so a persistent failure is visible.
+        //
+        // Honest scope (audit sec-storage-crypto): this per-materialization
+        // entry is deliberately UNSIGNED and NOT anchored to the unified log
+        // (`signature: nil, publishedToUnifiedLog: false`). It buys intra-chain
+        // CONTENT integrity + linkage on every surviving row (see
+        // `HashChainVerification`), but NOT tail-truncation detection — dropping
+        // the newest rows leaves the retained prefix internally consistent. The
+        // signed, unified-log-anchored chain HEAD is emitted only at
+        // `maccrabctl trace export` time (TrustSubstrate.sign + the
+        // SystemUnifiedLogAnchor), so tail-truncation is bounded THERE, not per
+        // materialized trace. A throttled signed head at materialization would
+        // require threading a TrustSubstrate + log anchor onto the hot ingest
+        // path; that is intentionally deferred to keep `materialize` light.
         do {
             _ = try await store.appendTraceContinuity(
                 traceId: trace.id,

@@ -15,7 +15,13 @@ import Darwin
 /// - Binary integrity (hash at startup vs current)
 /// - Rule file tampering (hash of compiled rules directory)
 /// - Configuration file modification
-/// - Database tampering
+/// - Evidence-database path presence (the `events.db` path is watched, but
+///   in-place CONTENT tampering is deliberately NOT flagged here — the daemon
+///   writes to it constantly, so a write is expected, not tamper. DB content
+///   integrity is covered by field-level AES-GCM authentication
+///   (`db_tamper_decrypt_failures`) and the trace continuity hash-chain, not
+///   by this FSEvents monitor. The other evidence DBs are not path-watched
+///   here for the same reason.)
 /// - Debugger attachment (anti-debug)
 /// - Signal interception (SIGKILL/SIGTERM from non-system sources)
 /// - LaunchDaemon plist removal
@@ -474,8 +480,21 @@ public actor SelfDefense {
                         }
                         return
                     } else if path.contains("events.db") {
-                        // The daemon writes to events.db constantly — this is normal.
-                        // Only flag DB modifications as tampering for critical paths.
+                        // Honest scope (audit sec-storage-crypto): the daemon
+                        // writes to events.db continuously, so an in-place
+                        // `.write` is EXPECTED, not tampering. events.db is
+                        // registered non-critical precisely so these writes are
+                        // ignored here — meaning this FSEvents monitor does NOT
+                        // detect in-place database CONTENT tampering. That
+                        // coverage lives elsewhere: field-level AES-GCM
+                        // authentication (surfaced as db_tamper_decrypt_failures)
+                        // and the trace continuity hash-chain. The other evidence
+                        // DBs are not path-monitored here for the same reason.
+                        // Kept as an explicit branch (rather than falling through
+                        // to the generic "modified" alert) so a hypothetical
+                        // critical-flagged DB path can't silently FP on every
+                        // write; today events.db is always non-critical, so the
+                        // guard below always returns.
                         if !critical { return }
                         eventType = .databaseModified
                     } else if path.contains("/MacOS/") || path.contains("maccrabd") || path.contains("com.maccrab.agent") {

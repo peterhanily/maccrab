@@ -40,16 +40,31 @@ public actor AlertSink {
     private(set) public var suppressedCount: Int = 0
     private(set) public var insertedCount: Int = 0
 
+    /// Shared "alerts emitted" counter incremented once per successfully
+    /// inserted (post-dedup) alert across EVERY emission path — the sink is
+    /// the single chokepoint all ~60 alert paths flow through, so counting
+    /// here is the only place that counts every alert exactly once. The
+    /// daemon injects the same `LockedCounter` the heartbeat reads
+    /// (`_sharedAlertCount`), so `alerts_emitted` / Prometheus `alerts_total`
+    /// reflect the true total rather than only the single-event-rule path
+    /// (the pre-fix ~16x undercount). A synchronous LockedCounter (not an
+    /// actor) so the heartbeat's read stays a lock-guarded, actor-hop-free
+    /// snapshot. Defaults to a fresh counter so existing/test constructors
+    /// that don't wire the shared instance keep working.
+    private let alertCounter: LockedCounter
+
     public init(
         alertStore: AlertStore,
         deduplicator: AlertDeduplicator,
         eventStore: EventStore? = nil,
-        builtinSettingsDir: String? = nil
+        builtinSettingsDir: String? = nil,
+        alertCounter: LockedCounter = LockedCounter()
     ) {
         self.alertStore = alertStore
         self.eventStore = eventStore
         self.deduplicator = deduplicator
         self.builtinSettingsDir = builtinSettingsDir
+        self.alertCounter = alertCounter
     }
 
     /// Built-in `maccrab.*` rule gating (v1.18). Returns the (possibly
@@ -236,6 +251,9 @@ public actor AlertSink {
         let enriched = recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: settled, event: event))
         try await alertStore.insert(alert: enriched)
         insertedCount += 1
+        // Count this emitted alert exactly once, here at the chokepoint (post
+        // built-in-mute + post-dedup) — see `alertCounter`.
+        alertCounter.increment()
         await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
         return true
     }
@@ -267,6 +285,9 @@ public actor AlertSink {
         let enriched = recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: settled))
         try await alertStore.insert(alert: enriched)
         insertedCount += 1
+        // Count this emitted alert exactly once, here at the chokepoint (post
+        // built-in-mute + post-dedup) — see `alertCounter`.
+        alertCounter.increment()
         await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
         return true
     }
@@ -300,6 +321,11 @@ public actor AlertSink {
         }
         try await alertStore.insert(alerts: toInsert)
         insertedCount += toInsert.count
+        // Count every alert in the batch exactly once (the rule-match path's
+        // per-match increment was REMOVED from EventLoop so it isn't
+        // double-counted) — see `alertCounter`. Callers pre-apply
+        // NoiseFilter + dedup, so `toInsert` is the true emitted set.
+        alertCounter.add(toInsert.count)
         // Evidence capture is per-alert because each alert's window center
         // is its own timestamp. The PRIMARY KEY (alert_id, id) on
         // alert_evidence dedupes overlapping windows automatically.

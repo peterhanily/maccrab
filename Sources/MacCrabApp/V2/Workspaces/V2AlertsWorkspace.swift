@@ -702,7 +702,19 @@ struct V2AlertsWorkspace: View {
     /// The live provider's `mode` is hardcoded `.live` and never flips
     /// when the daemon dies, so we cross-check the heartbeat instead.
     private var daemonReporting: Bool {
-        state.provider.mode == .live && !(appState.heartbeat?.isStale ?? true)
+        Self.isDaemonReporting(mode: state.provider.mode,
+                               heartbeatStale: appState.heartbeat?.isStale)
+    }
+
+    /// Pure decision seam for the B6 daemon-liveness gate. A live provider
+    /// with a fresh (non-stale) heartbeat is the only state in which an
+    /// empty Open / Campaigns / Suppressions list can be trusted as an
+    /// "all clear" — offline/mock, a missing heartbeat, or a stale one all
+    /// read as not-reporting, so the empty state is withheld and the stale
+    /// banner shows instead. Extracted so the gate is unit-testable without
+    /// standing up a SwiftUI view.
+    static func isDaemonReporting(mode: V2DataSourceMode, heartbeatStale: Bool?) -> Bool {
+        mode == .live && !(heartbeatStale ?? true)
     }
 
     /// Warning banner for the Open/History tabs when we can't trust the
@@ -2006,7 +2018,12 @@ struct V2AlertsWorkspace: View {
                 Text("Active suppressions silence specific (rule, scope) pairs until expiry. Lift a suppression with the per-row button — the daemon's SuppressionManager re-evaluates immediately.")
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
-                if suppressionEntries.isEmpty && loaded {
+                // B6: only assert "no active suppressions" when the engine is
+                // actually reporting — on a dead/stale daemon an empty list is
+                // a read failure, not a fact. Gate the empty state on
+                // daemonReporting (the stale banner above already explains the
+                // gap), mirroring the Open + Campaigns tabs.
+                if suppressionEntries.isEmpty && loaded && daemonReporting {
                     V2EmptyState(
                         title: "No active suppressions",
                         body: "When you suppress an alert from the Open tab (Actions → Suppress), it appears here as an entry. The list is read from the daemon's `suppressions.json` on every refresh.",

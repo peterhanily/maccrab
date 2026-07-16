@@ -496,11 +496,18 @@ final class DaemonState {
         // event window into `alert_evidence` on every alert insert.
         // Backs the dashboard's alert detail view after the 24h hot
         // tier drops the originating events.
+        // Inject the SAME shared "alerts emitted" counter the heartbeat reads
+        // (`_sharedAlertCount`, file-scope in DaemonBootstrap). The sink
+        // increments it once per emitted alert across every path, so
+        // heartbeat `alerts_emitted` / Prometheus `alerts_total` count all
+        // ~60 alert paths — not just the single-event rule-match site, which
+        // was the pre-fix ~16x undercount.
         self.alertSink = AlertSink(
             alertStore: alertStore,
             deduplicator: deduplicator,
             eventStore: eventStore,
-            builtinSettingsDir: supportDir
+            builtinSettingsDir: supportDir,
+            alertCounter: _sharedAlertCount
         )
         self.enricher = enricher
         self.ruleEngine = ruleEngine
