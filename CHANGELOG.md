@@ -3,6 +3,34 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.4] — 2026-07-16
+
+Quality release: a broad correctness and reliability pass across the detection
+engine, storage, and dashboard.
+
+### Fixed
+- **Multi-step detections hold under heavy file activity.** Ordered kill-chain
+  rules (download → execute → connect) could miss when the system was busy
+  writing files; they now correlate reliably regardless of event ordering.
+- **Process-lineage correlation is enforced.** Several sequence rules — including
+  the ransomware kill chain — now require their steps to share a process tree
+  instead of matching unrelated processes.
+- **Alert metrics count every alert.** The `alerts_emitted` heartbeat / Prometheus
+  counter previously counted only single-rule alerts, undercounting the total.
+- **Complete evidence wipe on alert delete**, and databases now reclaim disk space
+  correctly after an upgrade.
+- **Trust Substrate card** no longer reads as "not generated" on a healthy
+  install; **Retention "Clear Now"** and the **Agent-Traces receiver toggle** now
+  take effect; the graph view no longer stutters while resizing.
+- **Honest status** for the MCP server host, the permissions panel (no more false
+  "investigate" on a healthy Mac), and the daemon-down suppressions view.
+- **Azure OpenAI / self-hosted OpenAI-compatible endpoints** connect correctly
+  (certificate pinning now applies only to api.openai.com).
+
+### Changed
+- Custom threat-intel IOC lists can now include URLs (`custom.urls.txt`).
+- The dashboard poll interval setting now also governs the menu-bar refresh.
+
 ## [1.21.4-rc.3] — 2026-07-16
 
 Reliability release: fixes several dashboard crashes, makes the UI honest when the
