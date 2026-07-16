@@ -157,4 +157,18 @@ struct AgentTraceCorrelationIdentityTests {
             MacCrabCore.ProcessInfo.self, from: try JSONEncoder().encode(legacy))
         #expect(legacyBack.auditIdentity == nil)
     }
+
+    // P6 fix part 2 (the audit caught this): EventEnricher rebuilds ProcessInfo,
+    // and if it drops auditIdentity the direct correlation reads nil and skips
+    // on EVERY event — making the whole P6 fix INERT in production. Lock in that
+    // enrichment preserves it end to end.
+    @Test("EventEnricher preserves ProcessInfo.auditIdentity through the rebuild")
+    func enricherPreservesAuditIdentity() async {
+        let p = Self.eventProcess(withAudit: Self.realAudit)
+        let event = Event(
+            eventCategory: .process, eventType: .start, eventAction: "exec", process: p)
+        let enriched = await EventEnricher().enrich(event)
+        #expect(enriched.process.auditIdentity == Self.realAudit,
+                "enrichment must NOT drop auditIdentity — the agent-trace correlation depends on it")
+    }
 }

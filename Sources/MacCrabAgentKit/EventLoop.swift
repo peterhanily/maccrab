@@ -209,15 +209,21 @@ enum EventLoop {
                     // of — both attribution lenses are independent and a
                     // single event can carry both sets of enrichments.
                     if let traceRegistry = state.traceRegistry {
-                        // Build a ProcessIdentity from the enriched ProcessInfo
-                        // shape we already have. PR-2 uses a best-effort
-                        // identity here — pidversion/audit_token live in the
-                        // ESCollector bind path, so the lookup matches by pid
-                        // and pathHash. Confirmed by the PID-recycle pin test:
-                        // a recycled pid with a different pathHash will be
-                        // treated as a miss.
+                        // v1.21.4 (P6 fix, part 3): use the REAL audit identity
+                        // (carried on the enriched ProcessInfo) for the direct
+                        // lookup — ProcessIdentity equality is the FULL
+                        // AuditIdentity, so the old zeroed pidversion/asid here
+                        // NEVER matched an ES-created binding (this branch's
+                        // high-confidence traceparent path silently degraded to
+                        // lineage on every AI-child event). Fall back to the
+                        // best-effort zeroed shape only for non-ES sources
+                        // (auditIdentity == nil), where a match isn't possible
+                        // anyway. Ancestor identities still can't carry the audit
+                        // token (ProcessAncestor is pid+path only), so the
+                        // ancestor walk continues to rely on the lineage-by-path
+                        // fallback below, not registry identity.
                         let lookupIdentity = ProcessIdentity(
-                            auditIdentity: AuditIdentity(
+                            auditIdentity: aiProc.auditIdentity ?? AuditIdentity(
                                 auid: 0, euid: aiProc.userId, egid: 0,
                                 ruid: aiProc.userId, rgid: 0,
                                 pid: aiProc.pid, pidversion: 0, asid: 0

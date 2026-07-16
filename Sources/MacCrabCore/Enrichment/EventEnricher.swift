@@ -222,7 +222,12 @@ public actor EventEnricher {
             isPlatformBinary: proc.isPlatformBinary,
             hashes: hashes,
             session: session,
-            envVars: resolveEnvVars(for: event, existing: proc.envVars)
+            envVars: resolveEnvVars(for: event, existing: proc.envVars),
+            // v1.21.4 (P6 fix, part 2): preserve the real audit identity through
+            // enrichment. This ProcessInfo rebuild otherwise dropped the field
+            // (defaulting to nil), which made the agent-trace direct correlation
+            // in EventLoop skip on EVERY event — the P6 fix was inert without it.
+            auditIdentity: proc.auditIdentity
         )
 
         // --- 5. Build enriched Event ---
