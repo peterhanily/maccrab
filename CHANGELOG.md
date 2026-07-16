@@ -3,6 +3,20 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.5] — 2026-07-16
+
+Follow-up to rc.4 from on-device testing.
+
+### Fixed
+- **Fewer false positives on developer tools.** Routine, trusted tools (git,
+  gh, package extraction, dotfile edits) no longer accumulate toward a
+  high-severity "intent" alert on their own — while genuine credential-read →
+  network-exfil chains still fire, including from signed binaries.
+- **Agent-trace attribution now stamps a process's own events.** A process
+  that carries a W3C `traceparent` is linked to its AI-agent trace on its own
+  activity, not only on its children's — closing a gap where a short-lived
+  agent action went unlinked.
+
 ## [1.21.4-rc.4] — 2026-07-16
 
 Quality release: a broad correctness and reliability pass across the detection
