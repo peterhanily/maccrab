@@ -1316,7 +1316,11 @@ public final class ESCollector: @unchecked Sendable {
                 codeSignature: targetInfo.codeSignature,
                 ancestors: targetInfo.ancestors,
                 architecture: targetInfo.architecture,
-                isPlatformBinary: targetInfo.isPlatformBinary
+                isPlatformBinary: targetInfo.isPlatformBinary,
+                // v1.21.4 (P6 fix): preserve the target's real audit identity
+                // through the args/commandLine reconstruction so exec events
+                // carry it for agent-trace correlation (matches the binding).
+                auditIdentity: targetInfo.auditIdentity
             )
 
             return Event(

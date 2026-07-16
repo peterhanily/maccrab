@@ -70,6 +70,12 @@ struct ESProcessFields {
     /// keys on a stable per-process identity (agent-session id, trace anti-
     /// recycle).
     var startTime: Date = Date()
+    /// v1.21.4 (P6 fix): the real audit identity of this process, extracted
+    /// from the ES `audit_token`. Defaulted nil so test constructors stay
+    /// source-compatible and the eslogger/kdebug parity paths (which have no
+    /// audit_token) simply carry nil. The live ES path always supplies it so
+    /// agent-trace correlation can match the TraceRegistry binding.
+    var auditIdentity: AuditIdentity? = nil
 }
 
 /// Pure, unit-testable mapping from decoded ES fields to `ProcessInfo`. Mirrors
@@ -133,7 +139,8 @@ func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
         codeSignature: codeSignature,
         ancestors: ancestors,
         architecture: architecture,
-        isPlatformBinary: f.isPlatformBinary
+        isPlatformBinary: f.isPlatformBinary,
+        auditIdentity: f.auditIdentity
     )
 }
 
@@ -159,7 +166,11 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         // doesn't drift. Falls back to now if the field is unset (tv_sec<=0).
         startTime: p.start_time.tv_sec > 0
             ? Date(timeIntervalSince1970: Double(p.start_time.tv_sec) + Double(p.start_time.tv_usec) / 1_000_000)
-            : Date()
+            : Date(),
+        // v1.21.4 (P6 fix): the real audit identity (pidversion/asid/uids) so
+        // agent-trace correlation reconstructs the SAME ProcessIdentity the
+        // TraceRegistry binding was keyed on.
+        auditIdentity: AuditIdentity(from: p.audit_token)
     ))
 }
 

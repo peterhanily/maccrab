@@ -93,6 +93,16 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
     /// (AWS_SECRET_*, etc.) are never captured.
     public let envVars: [String: String]?
 
+    /// v1.21.4 (P6 fix): the subject process's real audit identity
+    /// (pidversion/asid/uids from the ES `audit_token`), when this event came
+    /// from Endpoint Security. Nil for non-ES sources (eslogger / FSEvents dev
+    /// fallback). Load-bearing for agent-trace correlation: the TraceRegistry
+    /// binding is keyed on the FULL `AuditIdentity`, so the correlator must
+    /// reconstruct the SAME identity to match it — it cannot be synthesized
+    /// with zeroed pidversion/asid (which is exactly why direct correlation
+    /// silently missed before this field existed).
+    public let auditIdentity: AuditIdentity?
+
     // MARK: Initializer
 
     public init(
@@ -115,7 +125,8 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
         isPlatformBinary: Bool = false,
         hashes: ProcessHashes? = nil,
         session: SessionInfo? = nil,
-        envVars: [String: String]? = nil
+        envVars: [String: String]? = nil,
+        auditIdentity: AuditIdentity? = nil
     ) {
         self.pid = pid
         self.ppid = ppid
@@ -137,6 +148,7 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
         self.hashes = hashes
         self.session = session
         self.envVars = envVars
+        self.auditIdentity = auditIdentity
     }
 }
 

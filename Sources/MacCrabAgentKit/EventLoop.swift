@@ -569,15 +569,20 @@ enum EventLoop {
             // direct lookup on this pid's exact identity. No-op (registry
             // nil) when the feature master is off. Direct-only: the
             // ancestor walk / lineage Pass-2 stays in the isAIChild branch.
+            // v1.21.4 (P6 fix): the direct lookup matches the TraceRegistry
+            // binding on the FULL AuditIdentity (pidversion + asid + uids). Only
+            // the ES path carries the process's real audit identity; without it
+            // we CANNOT build a matching identity — a zeroed pidversion never
+            // equals the binding's, so the pre-fix reconstruction here missed on
+            // every event and agent_trace_id was never stamped. Use the real
+            // identity when present; skip otherwise (non-ES sources don't feed
+            // the env-scan binding anyway, so a lookup would be a guaranteed miss).
             if let traceRegistry = state.traceRegistry,
-               enrichedEvent.enrichments[TraceCorrelator.EnrichmentKey.confidence] == nil {
+               enrichedEvent.enrichments[TraceCorrelator.EnrichmentKey.confidence] == nil,
+               let realAudit = enrichedEvent.process.auditIdentity {
                 let p = enrichedEvent.process
                 let ownIdentity = ProcessIdentity(
-                    auditIdentity: AuditIdentity(
-                        auid: 0, euid: p.userId, egid: 0,
-                        ruid: p.userId, rgid: 0,
-                        pid: p.pid, pidversion: 0, asid: 0
-                    ),
+                    auditIdentity: realAudit,
                     pathHash: ProcessIdentity.fnv1a64(p.executable),
                     pid: p.pid,
                     startTime: UInt64(p.startTime.timeIntervalSince1970)
