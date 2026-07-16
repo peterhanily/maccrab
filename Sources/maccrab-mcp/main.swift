@@ -2314,13 +2314,16 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
     // Audit log: state-modifying operation
     auditLog("suppress_alert", details: "alert_id=\(alertId) ppid=\(getppid())")
 
-    do {
-        let store = try AlertStore(directory: dataDir)
-        try await store.suppress(alertId: alertId)
-        return ["content": [["type": "text", "text": "Alert \(alertId) suppressed successfully."]]]
-    } catch {
-        return toolError("suppressing alert: \(error.localizedDescription)")
+    // v1.21.5 (audit sec-storage-crypto): route the mutation through the
+    // privileged inbox instead of opening alerts.db read-write. The evidence
+    // DBs are root-owned 0o640 (group-read, NOT group-write), so a non-root
+    // MCP can no longer write them directly; the root daemon applies the
+    // suppression from its inbox handler (uid-gated to root or the admin
+    // console user) — the same channel the dashboard uses.
+    if let err = dropInboxRequest(verb: "suppress-alert", payload: ["id": alertId, "source": "maccrab-mcp"]) {
+        return toolError("suppressing alert: \(err)")
     }
+    return ["content": [["type": "text", "text": "Suppress request for alert \(alertId) queued — the daemon applies it within ~5s."]]]
 }
 
 func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
@@ -2395,7 +2398,9 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
     }
 
     do {
-        let store = try AlertStore(directory: dataDir)
+        // The fan-out confirmation gate only needs to COUNT — open the store
+        // read-only so it works against the root-owned 0o640 alerts.db.
+        let store = try AlertStore(directory: dataDir, forceReadOnly: true)
 
         // v1.18: fan-out confirmation. A campaign can suppress many alerts;
         // require an explicit confirm for large fan-outs so an agent can't
@@ -2417,16 +2422,16 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
 
         auditLog("suppress_campaign", details: "campaign_id=\(campaignId) pending=\(pending) confirm=\(confirmed) ppid=\(getppid())")
 
-        // Suppress the campaign alert itself.
-        try await store.suppress(alertId: campaignId)
-
-        // v1.11.1 (audit perf HIGH): single SQL UPDATE for the fan-out
-        // instead of a 10K-row pull + N-serial-write loop. Pre-fix the
-        // worst case wedged the handler ~30s on 5K matching alerts.
-        let count = try await store.suppress(campaignId: campaignId)
-
-        let extra = count == 0 ? "" : " Also suppressed \(count) contributing alert(s)."
-        return ["content": [["type": "text", "text": "Campaign \(campaignId) suppressed.\(extra)"]]]
+        // v1.21.5 (audit sec-storage-crypto): route the mutation through the
+        // privileged inbox. The daemon's suppress-campaign handler suppresses
+        // the campaign-as-alert row, fans out to every contributing alert, and
+        // flips the campaigns.db row — all as root. The MCP no longer opens the
+        // root-owned evidence DBs read-write.
+        if let err = dropInboxRequest(verb: "suppress-campaign", payload: ["id": campaignId, "source": "maccrab-mcp"]) {
+            return toolError("suppressing campaign: \(err)")
+        }
+        let extra = pending == 0 ? "" : " The daemon will also suppress \(pending) contributing alert(s)."
+        return ["content": [["type": "text", "text": "Suppress request for campaign \(campaignId) queued — the daemon applies it within ~5s.\(extra)"]]]
     } catch {
         return toolError("\(error.localizedDescription)")
     }

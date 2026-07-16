@@ -18,12 +18,22 @@ import Foundation
 import MacCrabCore
 
 func runRollup(olderThanHours: Double, dbPathOverride: String? = nil) async {
-    let dbPath: String
-    if let override = dbPathOverride {
-        dbPath = override
-    } else {
-        dbPath = maccrabDataDir() + "/events.db"
+    // v1.21.5 (audit sec-storage-crypto): the live events.db is now root-owned
+    // 0o640 (group-read, NOT group-write), so a non-root CLI can no longer open
+    // it read-write — and the root daemon already runs the tier-rollup + prune
+    // sweep on its own timer. For the LIVE DB we therefore trigger the daemon
+    // via the privileged `flush-request` inbox verb (the same channel the
+    // dashboard's "Run cleanup now" uses) instead of writing the store directly.
+    //
+    // The `--db <path>` override still runs directly: it targets a user-supplied
+    // COPY (tests / soak harnesses), never the root-owned live DB. If someone
+    // points it at the live DB anyway, the tightened perms make the read-write
+    // open fall back to read-only and the sweep fails cleanly — no write.
+    guard let override = dbPathOverride else {
+        await triggerDaemonRollup(olderThanHours: olderThanHours)
+        return
     }
+    let dbPath = override
 
     guard FileManager.default.fileExists(atPath: dbPath) else {
         print("No events.db at \(dbPath) — daemon hasn't run yet, or wrong data dir.")
@@ -54,6 +64,48 @@ func runRollup(olderThanHours: Double, dbPathOverride: String? = nil) async {
     } catch {
         print("Tier rollup FAILED: \(error.localizedDescription)")
     }
+}
+
+/// Trigger the ROOT daemon's size-cap prune + VACUUM sweep (which runs
+/// `rollUpAndPrune` internally) by dropping a `flush-request` file into the
+/// privileged inbox. This is the non-root, cross-uid-safe path for the live
+/// events.db, which the CLI can no longer (and should not) write directly.
+/// The daemon authorizes the request by file-owner uid (root or the admin
+/// console user) and removes it after processing.
+private func triggerDaemonRollup(olderThanHours: Double) async {
+    let dataDir = maccrabDataDir()
+    let dbPath = dataDir + "/events.db"
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: dbPath) else {
+        print("No events.db at \(dbPath) — daemon hasn't run yet, or wrong data dir.")
+        return
+    }
+
+    let inboxDir = dataDir + "/inbox"
+    try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+    let payload: [String: Any] = [
+        "schema_version": 1,
+        "requested_at_unix": Date().timeIntervalSince1970,
+        "requester": "maccrabctl rollup",
+        "requester_pid": getpid(),
+    ]
+    let path = inboxDir + "/flush-request-\(Int(Date().timeIntervalSince1970))-\(getpid()).json"
+    guard let data = try? JSONSerialization.data(withJSONObject: payload),
+          (try? data.write(to: URL(fileURLWithPath: path))) != nil else {
+        print("Tier rollup: could not queue a flush request in \(inboxDir).")
+        print("  The daemon runs the tier-rollup + prune sweep automatically on its timer.")
+        return
+    }
+
+    print("Tier rollup: requested — the root daemon runs its size-cap prune + VACUUM")
+    print("  sweep (which rolls events up first) within ~5s. It also does this")
+    print("  automatically on its own timer.")
+    print("  Request: \(path)")
+    if olderThanHours != 24 {
+        print("  Note: --hours \(Int(olderThanHours)) is honored only with --db <copy>; the live")
+        print("        sweep uses the daemon's configured retention cutoffs.")
+    }
+    print("  Watch: log show --predicate 'subsystem == \"com.maccrab.agent\"' --last 2m")
 }
 
 /// db + wal + shm in MB. Same shape as `measureDatabaseFootprintMB` in

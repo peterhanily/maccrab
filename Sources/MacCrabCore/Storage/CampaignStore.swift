@@ -367,17 +367,20 @@ public actor CampaignStore {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
 
         self.databasePath = dir.appendingPathComponent("campaigns.db").path
-        // See EventStore.init for rationale behind 0o007/0o660.
-        let oldUmask = umask(0o007)
+        // v1.21.5 (audit sec-storage-crypto): 0o027/0o640 — group read-only,
+        // not group-write. See EventStore.init: a non-root admin process
+        // must not be able to open campaigns.db read-write and rewrite
+        // campaign state. Mutations route through the inbox IPC (root daemon).
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: forceReadOnly)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
         if !forceReadOnly {
-            chmod(databasePath, 0o660)
-            chmod(databasePath + "-wal", 0o660)
-            chmod(databasePath + "-shm", 0o660)
+            chmod(databasePath, 0o640)
+            chmod(databasePath + "-wal", 0o640)
+            chmod(databasePath + "-shm", 0o640)
         }
     }
 

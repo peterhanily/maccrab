@@ -1529,6 +1529,11 @@ enum DaemonTimers {
             // rather than the on-disk file count that overstates protection.
             // Cheap actor reads, off the hot path (30 s cadence).
             let rulesLoaded = await state.ruleEngine.ruleCount
+            // v1.21.4 (audit): surface DB tamper-evidence — an AES-GCM
+            // authenticated-decrypt failure means an encrypted DB column/row was
+            // modified. Previously only fault-logged; now visible so the operator
+            // (and the dashboard) can see + act on it. Monotonic since boot.
+            let dbTamperFailures = state.dbEncryption.authenticatedDecryptFailures
             let rulesActive = await state.ruleEngine.enabledRuleCount
 
             let payload: [String: Any] = [
@@ -1573,6 +1578,7 @@ enum DaemonTimers {
                 "eslogger_dropped_total": esloggerDroppedTotal,
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
+                "db_tamper_decrypt_failures": dbTamperFailures,
                 "rules_active": rulesActive,
                 // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
                 // detection-input drops folded into `events_dropped`; surfaced

@@ -421,12 +421,15 @@ public actor AlertStore {
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("alerts.db").path
-        // See EventStore.init for why 0o007/0o660 (not 0o077/0o600 or
-        // 0o027/0o640): sysext writes as root, dashboard runs as the
-        // admin-group user and needs *write* access to suppress alerts.
-        // 0o660 gives the admin-group dashboard the rw it needs without
-        // making DBs world-readable.
-        let oldUmask = umask(0o007)
+        // v1.21.5 (audit sec-storage-crypto): 0o027/0o640 (owner rw, group
+        // read-only) — NOT the old 0o007/0o660. The default macOS user is
+        // in the admin group (gid 80), so a group-WRITE bit let a non-root
+        // admin process open alerts.db read-write and INSERT suppression
+        // rows to silence the EDR with no escalation. Suppression now
+        // routes through the privileged inbox IPC (dashboard + MCP), which
+        // the root daemon applies; the dashboard only READS (group-read).
+        // See EventStore.init for the full rationale.
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: forceReadOnly)
         umask(oldUmask)
         self.db = handle
@@ -435,9 +438,9 @@ public actor AlertStore {
         // Skip chmod when forceReadOnly: the dashboard is not the owner
         // and has no business touching the daemon-owned file's mode bits.
         if !forceReadOnly {
-            chmod(databasePath, 0o660)
-            chmod(databasePath + "-wal", 0o660)
-            chmod(databasePath + "-shm", 0o660)
+            chmod(databasePath, 0o640)
+            chmod(databasePath + "-wal", 0o640)
+            chmod(databasePath + "-shm", 0o640)
         }
     }
 

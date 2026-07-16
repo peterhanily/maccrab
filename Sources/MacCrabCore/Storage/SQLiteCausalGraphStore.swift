@@ -62,6 +62,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var db: OpaquePointer?
     private let databasePath: String
     private let encryption: DatabaseEncryption?
+    /// True when the handle ended up read-only — either because the caller
+    /// asked (`forceReadOnly`) or because a read-write open failed and we
+    /// fell back (e.g. a non-root reader against the root-owned 0o640 DB).
+    /// Migrations / chmod / WAL-setup are all gated on this being false.
+    private var isReadOnly = false
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "graph-store")
 
     // SQLITE_TRANSIENT lives at file scope (see bottom of file) — used
@@ -242,8 +247,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // Migrations write to the schema (CREATE INDEX, ALTER TABLE). A
         // RO connection cannot run them — and shouldn't need to: the
         // daemon's RW connection has already applied the migrations
-        // before the dashboard's RO open ever happens.
-        if !forceReadOnly {
+        // before any RO open (dashboard, MCP, CLI) ever happens. Gate on
+        // the ACTUAL open outcome, not just the requested mode, so a
+        // read-write request that FELL BACK to read-only (non-root reader
+        // against the root-owned 0o640 DB) also skips migrations instead
+        // of failing.
+        if !isReadOnly {
             try applyMigrations()
         }
     }
@@ -274,27 +283,43 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         try Self.rejectIfSymlink(databasePath + "-shm")
         try Self.rejectIfSymlink(databasePath + "-journal")
 
-        // umask 0o007 ⇒ new SQLite WAL/SHM files get created 0o660.
-        // Mirror EventStore/AlertStore/CampaignStore/TraceStore: the
-        // dashboard runs as the admin-group user and needs write
-        // access to mutate. 0o640 (the historical default) breaks any
-        // future trace mutation flow with "database is read only".
+        // v1.21.5 (audit sec-storage-crypto): umask 0o027 ⇒ new SQLite
+        // WAL/SHM files are created 0o640 (owner rw, group read-only),
+        // mirroring EventStore/AlertStore/CampaignStore/TraceStore. The
+        // evidence DBs are root-owned; a non-root admin process must not be
+        // able to open tracegraph.db read-write. Column payloads are
+        // AES-GCM encrypted, so the group-write exposure was deletion / DoS
+        // rather than forgery, but it's still closed here.
         //
-        // When forceReadOnly == true the dashboard is the caller: it
-        // never creates new files (no CREATE flag) and never chmods —
-        // the daemon owns the file and the dashboard has no business
-        // touching its mode bits.
+        // When the open ends up read-only — either forceReadOnly (the
+        // dashboard guaranteeing its long-lived handle never holds locks
+        // that block the daemon's VACUUM) or a read-write open that FALLS
+        // BACK to read-only because the caller can't write the root-owned
+        // file — we skip chmod, the WAL setup, and (in init) migrations:
+        // the daemon's RW connection owns all of that.
         var handle: OpaquePointer?
-        let flags: Int32
-        let rc: Int32
+        var flags: Int32
+        var rc: Int32
         if forceReadOnly {
             flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
             rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+            self.isReadOnly = true
         } else {
             flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-            let oldUmask = umask(0o007)
+            let oldUmask = umask(0o027)
             rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
             umask(oldUmask)
+            // Fall back to a read-only handle if the read-write open failed
+            // — e.g. a non-root MCP/CLI trace reader against the root-owned
+            // 0o640 DB. Mirrors the sibling stores' openDatabase so the
+            // trace-read tools keep working after the perms were tightened.
+            if rc != SQLITE_OK {
+                if let handle { sqlite3_close(handle) }
+                handle = nil
+                flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+                rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+                self.isReadOnly = true
+            }
         }
         guard rc == SQLITE_OK, let openedHandle = handle else {
             let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -302,13 +327,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             throw CausalGraphStoreError.databaseOpenFailed(msg)
         }
         self.db = openedHandle
-        // Re-clamp existing files from prior installs that were created
-        // under the older 0o640 default. Skip when forceReadOnly — see
-        // umask block above.
-        if !forceReadOnly {
-            chmod(databasePath, 0o660)
-            chmod(databasePath + "-wal", 0o660)
-            chmod(databasePath + "-shm", 0o660)
+        // Re-clamp existing files (incl. any created 0o660 by an older
+        // build) to 0o640. Skip on a read-only handle — the caller isn't
+        // the owner and has no business touching the mode bits.
+        if !isReadOnly {
+            chmod(databasePath, 0o640)
+            chmod(databasePath + "-wal", 0o640)
+            chmod(databasePath + "-shm", 0o640)
         }
 
         // Per-connection pragmas: smaller than EventStore (graph data is
@@ -326,7 +351,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // auto_vacuum, so it stayed in mode 0 (NONE) and incrementalVacuum
         // was a no-op. Field-confirmed bug: tracegraph.db at 11 GB in
         // mode 0 on a v1.12.6 RC1 user machine.
-        if !forceReadOnly {
+        if !isReadOnly {
             sqlite3_exec(openedHandle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
             sqlite3_exec(openedHandle, "PRAGMA journal_mode = WAL", nil, nil, nil)
             sqlite3_exec(openedHandle, "PRAGMA synchronous = NORMAL", nil, nil, nil)

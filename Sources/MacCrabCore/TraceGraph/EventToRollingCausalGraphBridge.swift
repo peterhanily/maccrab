@@ -20,18 +20,19 @@
 //
 // Per §10.1 of the v1.10.0 spec, `ProcessIdentity` (and hence
 // `processKey`) requires the kernel-truth `audit_token` +
-// `pidversion` for full anti-recycle correctness. By the time an
-// event reaches this bridge, the audit_token is no longer attached —
-// it was consumed at NOTIFY_EXEC time inside `ESCollector`.
+// `pidversion` for full anti-recycle correctness.
 //
-// For v1.10.0 production wiring, the bridge synthesizes a stable
-// `processKey` from `(pid, startTime_epoch_seconds, executable_path)`
-// — sufficient for non-recycled cases, which is the overwhelming
-// majority of observed processes. Full anti-recycle integration
-// requires `ESCollector` to thread the v1.9 `ProcessIdentity`
-// through to `Event` (a separate small change in v1.9 code that
-// adds an `enrichments["process_key"]` value); the bridge prefers
-// that key when present.
+// Since the v1.21.4 P6 fix, ES-sourced events carry the normalized
+// audit identity (`pidversion`/`asid`) on `ProcessInfo.auditIdentity`
+// all the way through `EventEnricher` to this bridge. When present,
+// `synthesizeProcessKey` folds `pidversion` (+ `asid`) into the key so
+// a recycled pid running the same executable in the same wall-clock
+// second maps to a DISTINCT graph node. For non-ES sources (eslogger /
+// kdebug / FSEvents dev fallback) `auditIdentity` is nil and the bridge
+// falls back to `(pid, startTime_epoch_seconds, executable_path)` —
+// sufficient for the non-recycled common case. An
+// `enrichments["process_key"]` value, if ever set upstream, still takes
+// precedence over both.
 
 import Foundation
 import CryptoKit
@@ -141,7 +142,12 @@ public actor EventToRollingCausalGraphBridge {
         enrichments: [String: String]
     ) -> RollingCausalGraph.ProcessObservation {
         let processKey = enrichments[Self.processKeyEnrichmentKey]
-            ?? synthesizeProcessKey(pid: info.pid, startTime: info.startTime, executable: info.executable)
+            ?? synthesizeProcessKey(
+                pid: info.pid,
+                startTime: info.startTime,
+                executable: info.executable,
+                auditIdentity: info.auditIdentity
+            )
         let parentProcessKey = enrichments[Self.parentProcessKeyEnrichmentKey]
         return RollingCausalGraph.ProcessObservation(
             processKey: processKey,
@@ -225,12 +231,33 @@ public actor EventToRollingCausalGraphBridge {
         }
     }
 
-    private func synthesizeProcessKey(pid: Int32, startTime: Date, executable: String) -> String {
-        // Lowercase-hex SHA-256 over (pid, startTime epoch seconds,
-        // executable_path) — sufficient for the non-recycled common
-        // case. Real anti-recycle integration via audit_token +
-        // pidversion lives in the ESCollector wiring increment that
-        // sets the `process_key` enrichment directly.
+    private func synthesizeProcessKey(
+        pid: Int32,
+        startTime: Date,
+        executable: String,
+        auditIdentity: AuditIdentity?
+    ) -> String {
+        // v1.21.4 anti-recycle: when the event came from Endpoint Security, the
+        // P6 fix carries the kernel-truth audit identity on `ProcessInfo`. Its
+        // `pidversion` (the kernel's anti-recycle counter, bumped on every exec)
+        // is the discriminator the old (pid, startTime-second, executable) tuple
+        // lacked — a recycled pid running the same executable inside the same
+        // wall-clock second gets a DIFFERENT pidversion, so folding it in keeps
+        // the two distinct processes on distinct graph nodes. `asid` (audit
+        // session id) further separates processes across login sessions. Both are
+        // STABLE for a process's lifetime, so every observation of the SAME
+        // process still yields the SAME key. `startTime` is deliberately EXCLUDED
+        // from this branch for the same reason `ProcessIdentity.processKey` omits
+        // it: collector timestamp jitter would otherwise split one logical
+        // process across observations.
+        if let audit = auditIdentity {
+            let payload = "\(pid)|\(audit.pidversion)|\(audit.asid)|\(executable)"
+            return SHA256.hash(data: Data(payload.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        }
+        // Non-ES sources (eslogger / kdebug / FSEvents dev fallback) have no
+        // audit_token → fall back to (pid, startTime epoch seconds, executable),
+        // sufficient for the non-recycled common case.
         let payload = "\(pid)|\(Int(startTime.timeIntervalSince1970))|\(executable)"
         return SHA256.hash(data: Data(payload.utf8))
             .map { String(format: "%02x", $0) }.joined()

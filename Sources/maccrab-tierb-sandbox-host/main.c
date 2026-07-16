@@ -155,13 +155,25 @@ static void validate_exec_target(const char *path) {
 
 // Close every inherited fd above the three std streams + the reserved broker fd 3,
 // so the untrusted plugin inherits ONLY 0/1/2/3 — never a stray host descriptor.
-// (macOS has no closefrom(); loop to the current descriptor-table cap.)
-static void close_inherited_fds(void) {
-    int cap = getdtablesize();
+// (macOS has no closefrom(); loop to `cap`.)
+//
+// `cap` MUST be the descriptor-table size snapshotted at process start, BEFORE any
+// RLIMIT_NOFILE lowering — NOT `getdtablesize()` read here. setrlimit(RLIMIT_NOFILE)
+// only caps NEW fd allocation; an fd inherited above a lowered limit stays valid and
+// closable, but getdtablesize() would then report the LOWERED value and this loop
+// would stop short of it, leaking that host descriptor across the privilege boundary
+// into the untrusted plugin.
+static void close_inherited_fds(int cap) {
     for (int fd = 4; fd < cap; fd++) (void)close(fd);
 }
 
 int main(int argc, char *argv[]) {
+    // Snapshot the descriptor-table cap NOW, before any RLIMIT_NOFILE lowering
+    // below. close_inherited_fds() loops to this so EVERY inherited host fd is
+    // closed — including any numerically above a lowered RLIMIT_NOFILE (setrlimit
+    // caps only new allocations; pre-existing higher fds remain open and would
+    // otherwise leak into the untrusted plugin).
+    const int fd_table_cap = getdtablesize();
     const char *profile_path = NULL;
     const char *exec_path = NULL;
     // 0 == "not specified" → leave the inherited limit alone.
@@ -227,7 +239,7 @@ int main(int argc, char *argv[]) {
     // std streams + the reserved broker fd 3, so the untrusted plugin inherits ONLY
     // 0/1/2/3 — never a stray host descriptor. Then run the verified plugin with a
     // clean argv[0] == the plugin path; inherit the (host-scrubbed) environ.
-    close_inherited_fds();
+    close_inherited_fds(fd_table_cap);
     char *child_argv[2] = { (char *)exec_path, NULL };
     execv(exec_path, child_argv);
 

@@ -511,12 +511,17 @@ public actor EventStore {
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
 
-        // umask 0o007 ⇒ new SQLite WAL/SHM files get created 0o660. The
-        // dashboard runs as the admin-group user and needs write access
-        // (suppress, mutate). 0o640 (the v1.3.8 → v1.10.0 default) gave
-        // group-read only, which made bulk-suppress fail with
-        // "database is read only". 0o660 keeps non-admin users locked
-        // out while letting the dashboard mutate without an XPC broker.
+        // v1.21.5 (audit sec-storage-crypto): umask 0o027 ⇒ new SQLite
+        // WAL/SHM files are created 0o640 (owner rw, group read-only).
+        // The evidence DBs are root-owned; the console-user dashboard/CLI
+        // READ them (group-read) but must NOT write them directly. The
+        // default macOS account is in the admin group (gid 80), so the
+        // old group-WRITE bit (0o660) let any non-root admin process open
+        // events.db read-write and DELETE the rows recording its own
+        // activity (anti-forensics) with no sudo / escalation. All
+        // legitimate mutations now route through the privileged inbox IPC
+        // (the daemon applies them as root); 0o640 keeps group-read for
+        // display while closing the direct-write tamper path.
         // (Skip umask + chmod entirely when forceReadOnly — see Wave 9A.)
         if forceReadOnly {
             let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: true)
@@ -524,17 +529,17 @@ public actor EventStore {
             self.isReadOnly = ro
             self.insertStmt = stmt
         } else {
-            let oldUmask = umask(0o007)
+            let oldUmask = umask(0o027)
             let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
             umask(oldUmask)
             self.db = handle
             self.isReadOnly = ro
             self.insertStmt = stmt
-            // Re-clamp existing files from prior installs that were created
-            // under the older 0o640 default.
-            chmod(databasePath, 0o660)
-            chmod(databasePath + "-wal", 0o660)
-            chmod(databasePath + "-shm", 0o660)
+            // Re-clamp existing files (incl. any created 0o660 by an older
+            // build) to 0o640: owner rw, group read-only, no other.
+            chmod(databasePath, 0o640)
+            chmod(databasePath + "-wal", 0o640)
+            chmod(databasePath + "-shm", 0o640)
         }
     }
 
@@ -2463,13 +2468,18 @@ public actor EventStore {
         // Reopen from the (now-empty) path. openDatabase re-applies pragmas +
         // schema + re-prepares the insert statement.
         do {
-            let oldUmask = umask(0o007)
+            // v1.21.5 (audit sec-storage-crypto): recreate the fresh DB with
+            // the same 0o027/0o640 (group read-only, not group-write) as the
+            // primary init — a self-heal must not silently re-loosen perms.
+            let oldUmask = umask(0o027)
             let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
             umask(oldUmask)
             db = handle
             isReadOnly = ro
             insertStmt = stmt
-            chmod(databasePath, 0o660)
+            chmod(databasePath, 0o640)
+            chmod(databasePath + "-wal", 0o640)
+            chmod(databasePath + "-shm", 0o640)
             log.notice("EventStore: reopened fresh DB after corruption self-heal.")
             return true
         } catch {

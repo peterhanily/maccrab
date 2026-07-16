@@ -251,16 +251,23 @@ public actor TraceStore {
             [.posixPermissions: 0o755], ofItemAtPath: url.path
         )
         self.databasePath = url.appendingPathComponent("traces.db").path
-        let oldUmask = umask(0o007)
+        // v1.21.5 (audit sec-storage-crypto): 0o027/0o640 — group read-only,
+        // not group-write. traces.db carries the continuity hash-chain +
+        // trace evidence; column payloads are AES-GCM encrypted, so the
+        // group-write exposure was deletion / DoS / continuity-ledger
+        // rewrite rather than forgery, but it's still closed here. Non-root
+        // readers open via the `path:` init (openDatabase falls back to a
+        // read-only handle when it can't get write access).
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
         self.encryption = encryption
-        chmod(databasePath, 0o660)
-        chmod(databasePath + "-wal", 0o660)
-        chmod(databasePath + "-shm", 0o660)
+        chmod(databasePath, 0o640)
+        chmod(databasePath + "-wal", 0o640)
+        chmod(databasePath + "-shm", 0o640)
     }
 
     /// Open at a custom path (used by tests).

@@ -787,8 +787,12 @@ struct V2OverviewWorkspace: View {
 
     private var protectionCoverageCard: some View {
         let collectors = appState.heartbeat?.collectorHealth ?? []
+        // v1.21.4 (audit): a PRESENT-but-stale heartbeat (120–300s old) was shown
+        // as a green "all healthy" shield — the daemon-down "looks safe" class.
+        // Gate the green state on freshness; stale ⇒ last-known, not current.
+        let stale = appState.heartbeat?.isStale ?? true
         let healthy = collectors.filter { $0.healthy }.count
-        let allHealthy = !collectors.isEmpty && healthy == collectors.count
+        let allHealthy = !stale && !collectors.isEmpty && healthy == collectors.count
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(String(localized: "overview.coverageTitle", defaultValue: "Protection coverage"))
@@ -806,7 +810,9 @@ struct V2OverviewWorkspace: View {
                 HStack(spacing: 6) {
                     Image(systemName: allHealthy ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
                         .foregroundStyle(allHealthy ? Color.green : V2Theme.high)
-                    Text(String(localized: "overview.coverageSummary", defaultValue: "\(healthy) of \(collectors.count) sensors healthy"))
+                    Text(stale
+                         ? String(localized: "overview.coverageStale", defaultValue: "Daemon not reporting — last-known \(healthy) of \(collectors.count) sensors")
+                         : String(localized: "overview.coverageSummary", defaultValue: "\(healthy) of \(collectors.count) sensors healthy"))
                         .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                 }
                 let sortedCollectors = collectors.sorted { ($0.healthy ? 1 : 0) < ($1.healthy ? 1 : 0) }
