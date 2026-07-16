@@ -59,7 +59,8 @@ enum EventLoop {
     static func correlateAgentTrace(
         identity: ProcessIdentity,
         ancestors: [ProcessAncestor],
-        registry: TraceRegistry
+        registry: TraceRegistry,
+        telemetryGapActive: Bool = false
     ) async -> TraceCorrelation? {
         await TraceCorrelator.correlate(
             identity: identity,
@@ -76,7 +77,8 @@ enum EventLoop {
                     startTime: 0
                 )
             },
-            aiToolForPath: { _ in nil }
+            aiToolForPath: { _ in nil },
+            telemetryGapActive: telemetryGapActive
         )
     }
 
@@ -583,7 +585,18 @@ enum EventLoop {
             // every event and agent_trace_id was never stamped. Use the real
             // identity when present; skip otherwise (non-ES sources don't feed
             // the env-scan binding anyway, so a lookup would be a guaranteed miss).
+            // v1.21.4 (audit #259): short-circuit on the nonisolated
+            // `hasBindingsHint` BEFORE the registry actor hop. With no agent
+            // bound (the overwhelming common case) this direct lookup can only
+            // miss, so the per-ES-event `await` into the registry actor was pure
+            // overhead. The hint is a lock-guarded Bool mirror of the binding
+            // set — reading it is free. It stays true when a telemetry gap is
+            // active only if a binding exists, so the honest-degradation branch
+            // below is still reachable whenever it can legitimately fire (an
+            // empty registry has nothing to degrade from).
+            let telemetryGapActive = enrichedEvent.process.session?.launchSource == .telemetryGap
             if let traceRegistry = state.traceRegistry,
+               traceRegistry.hasBindingsHint,
                enrichedEvent.enrichments[TraceCorrelator.EnrichmentKey.confidence] == nil,
                let realAudit = enrichedEvent.process.auditIdentity {
                 let p = enrichedEvent.process
@@ -593,10 +606,15 @@ enum EventLoop {
                     pid: p.pid,
                     startTime: UInt64(p.startTime.timeIntervalSince1970)
                 )
+                // v1.21.4 (audit #258): pass the active-gap signal so the
+                // honest-degradation branch can distinguish a drop-induced
+                // attribution loss from a benign orphan. Stamped by EventEnricher
+                // from the TelemetryGapProbe over ESCollector.esGlobalDropped().
                 if let correlation = await correlateAgentTrace(
                     identity: ownIdentity,
                     ancestors: [],
-                    registry: traceRegistry
+                    registry: traceRegistry,
+                    telemetryGapActive: telemetryGapActive
                 ) {
                     TraceCorrelator.apply(correlation, to: &enrichedEvent)
                 }

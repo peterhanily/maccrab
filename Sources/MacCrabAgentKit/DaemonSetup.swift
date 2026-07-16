@@ -1557,7 +1557,24 @@ enum DaemonSetup {
             // curated stable tier ships enabled; "all" (daemon_config.json
             // rule_profile) restores every non-deprecated rule. Operator per-rule
             // overlays (user_rules, loaded below) are unaffected by the profile.
-            let ruleStatuses: Set<String>? = (config.ruleProfile.lowercased() == "all") ? nil : ["stable"]
+            //
+            // corr-detection #273: validate the value against the known set. A
+            // typo ("stabel", "full", …) previously fell through to "stable"
+            // SILENTLY — an operator who set rule_profile: all with a typo ran
+            // with ~352 rules disabled and no signal. Warn loudly and keep the
+            // safe default (stable) on an unrecognized value.
+            let profile = config.ruleProfile.lowercased()
+            let ruleStatuses: Set<String>?
+            switch profile {
+            case "all":
+                ruleStatuses = nil
+            case "stable":
+                ruleStatuses = ["stable"]
+            default:
+                logger.warning("Unknown rule_profile '\(config.ruleProfile)' — expected 'stable' or 'all'. Falling back to 'stable'.")
+                print("Warning: unknown rule_profile '\(config.ruleProfile)' — expected 'stable' or 'all'. Using 'stable'.")
+                ruleStatuses = ["stable"]
+            }
             let count = try await ruleEngine.loadRules(from: rulesURL, enabledStatuses: ruleStatuses)
             logger.info("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")
             print("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")

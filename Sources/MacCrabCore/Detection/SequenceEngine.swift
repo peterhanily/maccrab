@@ -284,6 +284,31 @@ public actor SequenceEngine {
     /// Active partial matches keyed by rule ID.
     private var partialMatches: [String: [PartialMatch]] = [:]
 
+    /// A later (non-initial) step that matched an ordered rule but arrived
+    /// BEFORE its initial step, so there was no partial to advance yet.
+    private struct PendingStep: Sendable {
+        let step: SequenceStep
+        let matched: MatchedStep
+        let arrivedAt: Date
+    }
+
+    /// v1.21.4 (corr-event-pipeline #95): backfill buffer for out-of-order
+    /// later steps, keyed by rule ID. The A2 event-pipeline split routes `.file`
+    /// events to a separate consumer from process/network events; under a file
+    /// flood the file consumer lags, so a cross-family ordered rule's later
+    /// step (process/network, on the fast priority consumer) can reach
+    /// `evaluate` BEFORE its `step[0]` file event. Ordered mode only seeds a
+    /// partial from `step[0]`, so that later step would otherwise be dropped and
+    /// 23 of the highest-value kill chains (supply-chain, dropper→C2, ransomware)
+    /// would silently never complete. We stash the un-advanceable later step
+    /// here and replay it once `step[0]` seeds a partial. Bounded per rule +
+    /// window-pruned so a later step whose predicate matches broadly (an exec
+    /// with no preceding download) can't grow the buffer unbounded.
+    private var pendingLaterSteps: [String: [PendingStep]] = [:]
+
+    /// Per-rule cap on buffered out-of-order later steps. Oldest evicted first.
+    private static let maxPendingPerRule = 256
+
     /// Running count of all partial matches across all rules, to enforce the
     /// global cap without iterating every time.
     private var totalPartialCount: Int = 0
@@ -357,6 +382,11 @@ public actor SequenceEngine {
             regexAccessSeq[pattern] = regexAccessCounter
             return cached
         }
+        // v1.21.4 (corr-detection #271): `.caseInsensitive` is a deliberate
+        // engine-wide choice (matches RuleEngine.cachedRegex and the case-folding
+        // string modifiers), NOT Sigma's case-sensitive `|re` default. Rule
+        // authors who need a case-sensitive sub-match use an inline ICU flag
+        // group — `(?-i:...)` — which overrides this base option for its scope.
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
         }
@@ -541,6 +571,46 @@ public actor SequenceEngine {
         totalPartialCount
     }
 
+    /// Number of ENABLED sequence rules — the count that actually evaluates,
+    /// distinct from `ruleCount` (loaded). Mirrors `RuleEngine.enabledRuleCount`
+    /// so a caller/heartbeat can surface effective temporal-tier coverage
+    /// separately from the single-event tier (corr-detection #272).
+    public var activeRuleCount: Int {
+        rules.values.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
+    }
+
+    // MARK: - Telemetry (corr-detection #272)
+
+    /// Per-rule runtime telemetry for the temporal tier. `RuleEngine` has had
+    /// per-rule `RuleStats` since v1.7.1, but sequence (and graph) rules had
+    /// NONE — a sequence rule that never evaluates or never fires was invisible
+    /// (the heartbeat's `rules_active` counts only single-event rules). These
+    /// counters make a dead sequence rule observable.
+    public struct SequenceRuleStats: Codable, Sendable, Hashable {
+        public let ruleId: String
+        public var evaluationCount: UInt64
+        public var fireCount: UInt64
+        public var lastFiredAt: Date?
+        public init(ruleId: String,
+                    evaluationCount: UInt64 = 0,
+                    fireCount: UInt64 = 0,
+                    lastFiredAt: Date? = nil) {
+            self.ruleId = ruleId
+            self.evaluationCount = evaluationCount
+            self.fireCount = fireCount
+            self.lastFiredAt = lastFiredAt
+        }
+    }
+
+    private var ruleStats: [String: SequenceRuleStats] = [:]
+
+    /// Snapshot of per-rule sequence telemetry (evaluations, fires, last-fire),
+    /// sorted most-fired first. Lets a caller/heartbeat/status surface a
+    /// never-evaluated or never-fired sequence rule that was previously invisible.
+    public func statsSnapshot() -> [SequenceRuleStats] {
+        Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount }
+    }
+
     // MARK: - Event Evaluation
 
     /// Evaluate an event against all applicable sequence rules.
@@ -583,6 +653,12 @@ public actor SequenceEngine {
         for ruleId in candidateRuleIds {
             guard let rule = rules[ruleId], rule.enabled else { continue }
 
+            // corr-detection #272: this rule was dispatched for evaluation
+            // (its category matched this event and it is enabled). Count it so a
+            // sequence rule that is loaded+enabled but never actually exercised
+            // is distinguishable from one that fires.
+            ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
+
             // Find which steps of this rule match the event's category AND predicates.
             let matchingSteps = rule.steps.filter { step in
                 step.logsourceCategory == category && evaluateStepPredicates(step, against: event)
@@ -606,6 +682,10 @@ public actor SequenceEngine {
             // --- Phase 1: Try to advance existing partial matches ---
             var advancedPartials: [(Int, PartialMatch)] = []  // (index, updated partial)
             var completedIndices: Set<Int> = []
+            // #95: step IDs that advanced at least one partial on this event. A
+            // matching later step NOT in this set found no partial to advance and
+            // is a backfill-buffer candidate (see Phase 3 below).
+            var advancedStepIds: Set<String> = []
 
             let existingPartials = partialMatches[ruleId] ?? []
             for (idx, partial) in existingPartials.enumerated() {
@@ -615,64 +695,21 @@ public actor SequenceEngine {
                 }
 
                 for step in matchingSteps {
-                    // Skip if this step is already matched in this partial.
-                    guard partial.matchedSteps[step.id] == nil else { continue }
-
-                    let matched = eventMatchedStep(step)
-
-                    // Check correlation constraint.
-                    if !checkCorrelation(rule.correlationType, partial: partial, candidate: matched) {
-                        continue
-                    }
-
-                    // Check ordering constraint.
-                    if rule.ordered {
-                        if !checkOrdering(step: step, rule: rule, partial: partial, candidateTimestamp: event.timestamp) {
-                            continue
-                        }
-                    }
-
-                    // Check explicit afterStep constraint.
-                    if let afterStepId = step.afterStep {
-                        guard let afterMatched = partial.matchedSteps[afterStepId],
-                              event.timestamp >= afterMatched.timestamp else {
-                            continue
-                        }
-                    }
-
-                    // Check process relationship constraint.
-                    if let spec = step.processRelation {
-                        guard let refStep = partial.matchedSteps[spec.relativeToStep] else {
-                            continue
-                        }
-                        let relationHolds = await checkProcessRelation(
-                            spec.relation,
-                            eventPid: event.process.pid,
-                            eventPath: event.process.executable,
-                            referencePid: refStep.processPid,
-                            referencePath: refStep.processPath
-                        )
-                        guard relationHolds else { continue }
-                    }
-
-                    // All constraints passed -- advance this partial.
-                    var updated = partial
-                    updated.matchedSteps[step.id] = matched
+                    // Advance is delegated to the shared `advancePartial` (used
+                    // identically by the Phase-3 replay path) so the correlation/
+                    // ordering/afterStep/processRelation checks can never drift
+                    // between the live and replayed paths (cf. corr-detection #275).
+                    guard let updated = await advancePartial(
+                        rule: rule, step: step,
+                        matched: eventMatchedStep(step), partial: partial
+                    ) else { continue }
                     advancedPartials.append((idx, updated))
+                    advancedStepIds.insert(step.id)
 
                     // Check if trigger condition is now satisfied.
                     if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
                         completedIndices.insert(idx)
-                        let match = RuleMatch(
-                            ruleId: rule.id,
-                            ruleName: rule.title,
-                            severity: rule.level,
-                            description: buildDescription(rule: rule, partial: updated),
-                            mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
-                            tags: rule.tags,
-                            suppressible: rule.suppressible ?? true
-                        )
-                        completedMatches.append(match)
+                        completedMatches.append(makeMatch(rule: rule, partial: updated))
                     }
 
                     // Only advance once per step per partial -- break to next partial.
@@ -701,6 +738,10 @@ public actor SequenceEngine {
             }
 
             // --- Phase 2: Create new partial matches for initial steps ---
+            // #95: track whether this event seeded a fresh partial from the
+            // initial step — only then is it worth replaying any buffered
+            // out-of-order later steps against the rule (Phase 3).
+            var seededInitial = false
             for step in matchingSteps {
                 let isInitialStep: Bool
                 if rule.ordered {
@@ -740,21 +781,31 @@ public actor SequenceEngine {
 
                 // Edge case: single-step rule or anySteps(1).
                 if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(newPartial.matchedSteps.keys), totalSteps: rule.steps.count) {
-                    let match = RuleMatch(
-                        ruleId: rule.id,
-                        ruleName: rule.title,
-                        severity: rule.level,
-                        description: buildDescription(rule: rule, partial: newPartial),
-                        mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
-                        tags: rule.tags,
-                        suppressible: rule.suppressible ?? true
-                    )
-                    completedMatches.append(match)
+                    completedMatches.append(makeMatch(rule: rule, partial: newPartial))
                     // Don't store the partial -- it's already complete.
                 } else {
                     partialMatches[ruleId, default: []].append(newPartial)
                     totalPartialCount += 1
                     evictionQueue.append(PartialMatchRef(ruleId: ruleId, createdAt: now))
+                    seededInitial = true
+                }
+            }
+
+            // --- Phase 3 (#95): out-of-order backfill for ordered rules ---
+            // If this event just seeded an initial partial, replay any later
+            // steps that arrived early (via the fast priority consumer while the
+            // file consumer lagged) so the sequence can still complete.
+            if seededInitial, let buffered = pendingLaterSteps[ruleId], !buffered.isEmpty {
+                completedMatches.append(contentsOf: await replayPendingSteps(ruleId: ruleId, rule: rule, now: now))
+            }
+            // Buffer this event's matching later step(s) that found NO partial to
+            // advance — they may belong to an initial step still queued on the
+            // other consumer. Ordered rules only (unordered mode seeds from any
+            // constraint-free step, so there is no out-of-order gap to bridge).
+            if rule.ordered {
+                let initialStepId = rule.steps.first?.id
+                for step in matchingSteps where step.id != initialStepId && !advancedStepIds.contains(step.id) {
+                    bufferPendingStep(ruleId: ruleId, step: step, matched: eventMatchedStep(step), now: now)
                 }
             }
         }
@@ -762,6 +813,15 @@ public actor SequenceEngine {
         // Enforce the global partial match cap.
         if totalPartialCount > maxPartialMatches {
             evictOldest(count: totalPartialCount - maxPartialMatches)
+        }
+
+        // corr-detection #272: record fires for every sequence completed on
+        // this event (both Phase-1 advances and Phase-2 single-step completions
+        // land in `completedMatches`), so per-rule fire counts + last-fire are
+        // observable via `statsSnapshot()`.
+        for match in completedMatches {
+            ruleStats[match.ruleId, default: SequenceRuleStats(ruleId: match.ruleId)].fireCount &+= 1
+            ruleStats[match.ruleId]?.lastFiredAt = event.timestamp
         }
 
         return completedMatches
@@ -862,127 +922,18 @@ public actor SequenceEngine {
 
     /// Resolve a Sigma/ECS field name to a string value from the event.
     ///
-    /// Self-contained copy of `RuleEngine.resolveField` for actor isolation.
+    /// v1.21.4 (corr-detection #275): delegates to the ONE canonical
+    /// `RuleEngine.resolveField` (a nonisolated static, so this call is
+    /// synchronous). Previously this was a hand-copied switch that drifted from
+    /// RuleEngine's ~50-alias table — every alias RuleEngine gained but this
+    /// copy missed (grandparent, hashes, session, honeyfile, ProcessAncestors,
+    /// env, AiTool, TCCDecision, …) silently dead-lettered any sequence rule
+    /// that predicated on it (the FileAction/Architecture/NotarizationStatus
+    /// trio in #11 was one instance). Sharing the table makes that class of
+    /// drift-bug structurally impossible; the shared cases are semantically
+    /// identical to what this copy returned.
     private func resolveField(_ path: String, from event: Event) -> String? {
-        switch path {
-
-        // --- Process fields ---
-        case "process.executable", "Image":
-            return event.process.executable
-        case "process.name":
-            return event.process.name
-        case "process.commandline", "process.command_line", "CommandLine":
-            return event.process.commandLine
-        case "process.pid", "ProcessId":
-            return String(event.process.pid)
-        case "process.ppid":
-            return String(event.process.ppid)
-        case "process.args":
-            return event.process.args.joined(separator: " ")
-        case "process.working_directory":
-            return event.process.workingDirectory
-        case "process.user.name", "User":
-            return event.process.userName
-        case "process.user.id":
-            return String(event.process.userId)
-
-        // --- Parent process fields ---
-        case "process.parent.executable", "ParentImage":
-            return event.process.ancestors.first?.executable
-        case "process.parent.name":
-            return event.process.ancestors.first?.name
-        case "process.parent.pid":
-            return event.process.ancestors.first.map { String($0.pid) }
-        case "process.parent.commandline", "process.parent.command_line", "ParentCommandLine":
-            return event.enrichments["parent.commandline"]
-
-        // --- Code signature fields ---
-        case "process.code_signature.signer_type", "SignerType":
-            return event.process.codeSignature?.signerType.rawValue
-        case "process.code_signature.team_id":
-            return event.process.codeSignature?.teamId
-        case "process.code_signature.signing_id":
-            return event.process.codeSignature?.signingId
-        case "process.code_signature.flags", "CodeSigningFlags":
-            return event.process.codeSignature.map { String($0.flags) }
-        case "process.code_signature.notarized":
-            return event.process.codeSignature.map { String($0.isNotarized) }
-        case "process.is_platform_binary":
-            return String(event.process.isPlatformBinary)
-        case "process.architecture", "Architecture":
-            return event.process.architecture
-        // v1.21.4: Sigma passthrough aliases the single-event RuleEngine
-        // resolves but SequenceEngine.resolveField had diverged from — without
-        // them multi-step rules predicating on these fields silently never fire
-        // (e.g. Rules/sequences/notarized_dropper_pattern.yml on NotarizationStatus).
-        case "NotarizationStatus":
-            if let enriched = event.enrichments["notarization.status"], !enriched.isEmpty {
-                return enriched
-            }
-            return event.process.codeSignature.map { $0.isNotarized ? "notarized" : "not_notarized" }
-        case "IsNotarized", "process.is_notarized":
-            return event.process.codeSignature.map { String($0.isNotarized) }
-
-        // --- File fields ---
-        case "file.path", "TargetFilename":
-            return event.file?.path
-        case "file.name":
-            return event.file?.name
-        case "file.directory":
-            return event.file?.directory
-        case "file.extension":
-            return event.file?.extension_
-        case "file.size":
-            return event.file?.size.map { String($0) }
-        case "file.action", "FileAction":
-            return event.file?.action.rawValue
-        case "file.source_path", "SourceFilename":
-            return event.file?.sourcePath
-
-        // --- Network fields ---
-        case "network.destination.ip", "DestinationIp":
-            return event.network?.destinationIp
-        case "network.destination.port", "DestinationPort":
-            return event.network.map { String($0.destinationPort) }
-        case "network.destination.hostname", "DestinationHostname":
-            return event.network?.destinationHostname
-        case "network.source.ip", "SourceIp":
-            return event.network?.sourceIp
-        case "network.source.port", "SourcePort":
-            return event.network.map { String($0.sourcePort) }
-        case "network.direction":
-            return event.network?.direction.rawValue
-        case "network.transport":
-            return event.network?.transport
-
-        // --- Network computed fields ---
-        case "DestinationIsPrivate":
-            return event.network.map { String($0.destinationIsPrivate) }
-
-        // --- TCC fields ---
-        case "tcc.service", "TCCService":
-            return event.tcc?.service
-        case "tcc.client", "TCCClient":
-            return event.tcc?.client
-        case "tcc.client_path":
-            return event.tcc?.clientPath
-        case "tcc.allowed", "TCCAllowed":
-            return event.tcc.map { String($0.allowed) }
-        case "tcc.auth_reason":
-            return event.tcc?.authReason
-
-        // --- Event metadata fields ---
-        case "event.category":
-            return event.eventCategory.rawValue
-        case "event.type":
-            return event.eventType.rawValue
-        case "event.action":
-            return event.eventAction
-
-        // --- Enrichment fallback ---
-        default:
-            return event.enrichments[path]
-        }
+        RuleEngine.resolveField(path, from: event)
     }
 
     // MARK: - Category Mapping
@@ -1046,13 +997,150 @@ public actor SequenceEngine {
         }
     }
 
+    // MARK: - Advance / Match Construction (#95 shared helpers)
+
+    /// Try to advance `partial` by matching `step` with an already-built
+    /// `MatchedStep`. Returns the updated partial if every constraint
+    /// (correlation, ordering, afterStep, processRelation) passes, else nil.
+    ///
+    /// Operates purely on `MatchedStep` — never a live `Event` — so the Phase-1
+    /// live path and the Phase-3 replay path share ONE constraint implementation
+    /// and cannot drift (cf. corr-detection #275). Callers own trigger/completion
+    /// and list mutation. `matched.timestamp`/`processPid`/`processPath` stand in
+    /// for the former `event.timestamp`/`process.pid`/`process.executable`, which
+    /// are identical because `MatchedStep` is built from that same event.
+    private func advancePartial(
+        rule: SequenceRule,
+        step: SequenceStep,
+        matched: MatchedStep,
+        partial: PartialMatch
+    ) async -> PartialMatch? {
+        // Skip if this step is already matched in this partial.
+        guard partial.matchedSteps[step.id] == nil else { return nil }
+
+        // Correlation constraint.
+        if !(await checkCorrelation(rule.correlationType, partial: partial, candidate: matched)) {
+            return nil
+        }
+        // Ordering constraint.
+        if rule.ordered {
+            if !checkOrdering(step: step, rule: rule, partial: partial, candidateTimestamp: matched.timestamp) {
+                return nil
+            }
+        }
+        // Explicit afterStep constraint.
+        if let afterStepId = step.afterStep {
+            guard let afterMatched = partial.matchedSteps[afterStepId],
+                  matched.timestamp >= afterMatched.timestamp else {
+                return nil
+            }
+        }
+        // Process relationship constraint.
+        if let spec = step.processRelation {
+            guard let refStep = partial.matchedSteps[spec.relativeToStep] else {
+                return nil
+            }
+            let relationHolds = await checkProcessRelation(
+                spec.relation,
+                eventPid: matched.processPid,
+                eventPath: matched.processPath,
+                referencePid: refStep.processPid,
+                referencePath: refStep.processPath
+            )
+            guard relationHolds else { return nil }
+        }
+
+        var updated = partial
+        updated.matchedSteps[step.id] = matched
+        return updated
+    }
+
+    /// Build the `RuleMatch` for a completed sequence. Single construction point
+    /// shared by Phase 1, Phase 2, and the Phase-3 replay so the emitted fields
+    /// can't diverge between paths.
+    private func makeMatch(rule: SequenceRule, partial: PartialMatch) -> RuleMatch {
+        RuleMatch(
+            ruleId: rule.id,
+            ruleName: rule.title,
+            severity: rule.level,
+            description: buildDescription(rule: rule, partial: partial),
+            mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
+            tags: rule.tags,
+            suppressible: rule.suppressible ?? true
+        )
+    }
+
+    /// Buffer an ordered rule's later step that arrived before its initial step
+    /// (the A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule
+    /// (oldest evicted) and deduped by (eventId, stepId) so the same event can't
+    /// be buffered twice across re-evaluations.
+    private func bufferPendingStep(ruleId: String, step: SequenceStep, matched: MatchedStep, now: Date) {
+        var buf = pendingLaterSteps[ruleId] ?? []
+        if buf.contains(where: { $0.matched.eventId == matched.eventId && $0.step.id == step.id }) {
+            return
+        }
+        buf.append(PendingStep(step: step, matched: matched, arrivedAt: now))
+        if buf.count > Self.maxPendingPerRule {
+            buf.removeFirst(buf.count - Self.maxPendingPerRule)
+        }
+        pendingLaterSteps[ruleId] = buf
+    }
+
+    /// Replay buffered out-of-order later steps for `ruleId` against the rule's
+    /// current partials (called right after an initial step seeds a new partial).
+    /// Buffered steps are tried oldest-first BY EVENT TIMESTAMP so a 3+ step chain
+    /// that arrived fully reversed still assembles in rule order. A step that
+    /// advances a partial is consumed (removed from the buffer); one that
+    /// completes a sequence returns a `RuleMatch`. Window-expired buffered steps
+    /// are pruned. Uses the SAME `advancePartial` as the live path.
+    private func replayPendingSteps(ruleId: String, rule: SequenceRule, now: Date) async -> [RuleMatch] {
+        guard var pending = pendingLaterSteps[ruleId], !pending.isEmpty else { return [] }
+
+        // Drop buffered steps older than the rule window.
+        pending.removeAll { now.timeIntervalSince($0.arrivedAt) > rule.window }
+        guard !pending.isEmpty else { pendingLaterSteps[ruleId] = nil; return [] }
+
+        var matches: [RuleMatch] = []
+        var consumed = Set<Int>()
+        var partials = partialMatches[ruleId] ?? []
+
+        let order = pending.indices.sorted {
+            pending[$0].matched.timestamp < pending[$1].matched.timestamp
+        }
+        for pi in order {
+            let pend = pending[pi]
+            for (idx, partial) in partials.enumerated() {
+                if now.timeIntervalSince(partial.createdAt) > rule.window { continue }
+                guard let updated = await advancePartial(
+                    rule: rule, step: pend.step, matched: pend.matched, partial: partial
+                ) else { continue }
+                consumed.insert(pi)
+                if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
+                    partials.remove(at: idx)
+                    totalPartialCount -= 1
+                    matches.append(makeMatch(rule: rule, partial: updated))
+                } else {
+                    partials[idx] = updated
+                }
+                break  // one partial advanced per buffered step
+            }
+        }
+
+        partialMatches[ruleId] = partials
+        if !consumed.isEmpty {
+            pending = pending.enumerated().filter { !consumed.contains($0.offset) }.map(\.element)
+        }
+        pendingLaterSteps[ruleId] = pending.isEmpty ? nil : pending
+        return matches
+    }
+
     /// Check whether a candidate matched step satisfies the rule's correlation
     /// constraint with respect to an existing partial match.
     private func checkCorrelation(
         _ type: CorrelationType,
         partial: PartialMatch,
         candidate: MatchedStep
-    ) -> Bool {
+    ) async -> Bool {
         switch type {
         case .none:
             // No correlation required -- always passes.
@@ -1064,13 +1152,25 @@ public actor SequenceEngine {
             return String(candidate.processPid) == key
 
         case .processLineage:
-            // Actual ancestry is checked via processRelation constraints on
-            // individual steps. At the correlation level we do a loose check:
-            // the candidate must share at least one PID already in the partial
-            // match's process set, OR be in the same lineage. Since lineage
-            // checking is async and we want this to be fast, we accept at
-            // this level and rely on step-level processRelation for precision.
-            return true
+            // v1.21.4 (corr-detection #274): a rule declaring
+            // `correlation: process.lineage` must ACTUALLY enforce that its
+            // steps belong to one process tree. This branch previously returned
+            // `true` unconditionally — a silent no-op — so the 6 processLineage
+            // rules that carry NO step-level `process:` relation (incl. the
+            // CRITICAL ransomware_kill_chain) fired on wholly unrelated
+            // processes (any shell exec + any tmutil disable + any dd wipe in
+            // the window), a large false-positive surface. Now: the candidate
+            // must be in the same process tree (self / ancestor / descendant) as
+            // at least one already-bound step. For ordered kill chains the first
+            // (root) step stays bound, so sibling steps spawned by that root
+            // still correlate through it. Step-level `processRelation` (checked
+            // separately in Phase 1) further refines rules that declare it.
+            for bound in partial.matchedSteps.values {
+                if candidate.processPid == bound.processPid { return true }
+                if await lineage.isDescendant(candidate.processPid, of: bound.processPid) { return true }
+                if await lineage.isDescendant(bound.processPid, of: candidate.processPid) { return true }
+            }
+            return false
 
         case .filePath:
             guard let key = partial.correlationKey else { return true }
@@ -1212,6 +1312,19 @@ public actor SequenceEngine {
             let surviving = partials.filter { now.timeIntervalSince($0.createdAt) <= rule.window }
             partialMatches[ruleId] = surviving.isEmpty ? nil : surviving
             totalPartialCount -= (beforeCount - surviving.count)
+        }
+
+        // #95: prune the out-of-order backfill buffer on the same cadence — a
+        // buffered later step older than its rule's window can never combine
+        // with a future initial step, so drop it (and any buffer whose rule was
+        // removed) to keep the buffer from accreting under sustained load.
+        for (ruleId, buffered) in pendingLaterSteps {
+            guard let rule = rules[ruleId] else {
+                pendingLaterSteps.removeValue(forKey: ruleId)
+                continue
+            }
+            let surviving = buffered.filter { now.timeIntervalSince($0.arrivedAt) <= rule.window }
+            pendingLaterSteps[ruleId] = surviving.isEmpty ? nil : surviving
         }
 
         // Trim eviction queue: remove front entries whose partial matches

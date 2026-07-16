@@ -49,12 +49,19 @@ actor BatchedEventWriter {
     /// fully processed by the pipeline; only its events.db row was dropped.
     nonisolated var droppedCount: Int { drops.get() }
 
+    /// - Note: In production `flushThreshold` / `hardCap` are FIXED at their
+    ///   defaults — the sole caller (`DaemonState.init`) constructs this writer
+    ///   with no arguments, and there is deliberately NO `daemon_config.json`
+    ///   surface for them (unlike the upstream priority/file stream caps, which
+    ///   ARE config-tunable via `DaemonConfig.storage`). The parameters exist
+    ///   only so tests can inject small values to exercise the flush / hard-cap
+    ///   overflow branches. Should a config surface ever be added, the caller —
+    ///   not this initializer — must keep `flushThreshold <= hardCap`: we apply
+    ///   floors only and do NOT silently clamp one to the other (clamping hid
+    ///   the overflow branch and papered over misconfig). The defaults already
+    ///   satisfy 1000 <= 250_000.
     init(store: EventStore, flushThreshold: Int = 1000, hardCap: Int = 250_000) {
         self.store = store
-        // Floors only — the caller (DaemonConfig) is responsible for keeping
-        // flushThreshold <= hardCap; we do NOT silently clamp one to the other
-        // (that hid the overflow branch and papered over misconfig). Defaults
-        // already satisfy 1000 <= 250_000.
         self.flushThreshold = max(1, flushThreshold)
         self.hardCap = max(1, hardCap)
     }

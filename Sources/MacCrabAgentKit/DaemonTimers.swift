@@ -1459,7 +1459,16 @@ enum DaemonTimers {
                 // Phase-4/collector AsyncStream). These, not kernel drops, are
                 // what a real flood produces after the retain-worker + client
                 // split — so D2 gates on them too (see Input.collectorDropDelta).
-                collectorDropCumulative: esCopyBackpressureDropped &+ esStreamYieldDropped,
+                // v1.21.4 (audit): include the DOWNSTREAM merged-stream evictions
+                // (priority + file AsyncStream, drained by the two consumers) in
+                // D2's coverage-loss signal — that is the exact stage of the
+                // original 400k-drop incident, and it was previously invisible to
+                // the sensor-degraded conjunction (only the ES copy/kernel stage
+                // was folded in). These are already in `events_dropped`; D2 now
+                // sees them too so it fires when enrichment/detection is the
+                // bottleneck, not just the ES stage.
+                collectorDropCumulative: esCopyBackpressureDropped &+ esStreamYieldDropped
+                    &+ UInt64(state.mergedStreamDropCount) &+ UInt64(state.fileStreamDropCount),
                 benignHighIOSigner: benignHighIOSigner
             )
             var esSensorDegraded = false
@@ -2537,8 +2546,21 @@ enum DaemonTimers {
             }
             do {
                 let removed = try await state.alertStore.delete(alertId: id)
-                print("[inbox] delete-alert id=\(id) uid=\(uid) removed=\(removed)")
-                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "removed=\(removed)")
+                // corr-storage #284: the alert's evidence copy lives in
+                // events.db (`alert_evidence`), a DIFFERENT store — deleting the
+                // alert row alone left that copy (with its PII: command lines,
+                // paths, user names) until retention. Purge it in the same
+                // authorized operation so a user-initiated delete is a complete
+                // wipe. Best-effort: a failure here must not fail the alert
+                // delete that already succeeded.
+                var evidenceRemoved = 0
+                do {
+                    evidenceRemoved = try await state.eventStore.deleteEvidence(alertId: id)
+                } catch {
+                    print("[inbox] delete-alert id=\(id) evidence purge failed: \(error)")
+                }
+                print("[inbox] delete-alert id=\(id) uid=\(uid) removed=\(removed) evidence=\(evidenceRemoved)")
+                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "removed=\(removed) evidence=\(evidenceRemoved)")
             } catch {
                 print("[inbox] delete-alert id=\(id) uid=\(uid) failed: \(error)")
                 auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "failed:\(error)")

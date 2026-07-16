@@ -683,6 +683,34 @@ struct CrossProcessCorrelatorTests {
                 "A curl→evil-binary chain is below the 80% shell threshold and must still fire")
     }
 
+    @Test("Three-utility write-only script chain is suppressed (≥3 distinct-utility gate)")
+    func threeUtilityWriteOnlyChainSuppressed() async {
+        // v1.21.4 (deep-audit corr-campaign-anomaly): the shell-utility gate's
+        // distinct-utility floor was lowered 4 → 3. bash + cat + sed all writing
+        // (never executing) the same file is a build/config script shape, not an
+        // attack. Pre-fix the ≥4 gate let this common 3-utility shape through and
+        // minted a benign file chain. The `execute` carve-out is unchanged, so a
+        // write-then-run payload (droppedBinaryChainStillFires) still fires.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let shared = "/Users/me/work/generated.conf"
+        let utils: [(String, String)] = [
+            ("bash", "/bin/bash"),
+            ("cat",  "/bin/cat"),
+            ("sed",  "/usr/bin/sed"),
+        ]
+        var chain: CrossProcessCorrelator.CorrelationChain?
+        for (i, (name, path)) in utils.enumerated() {
+            chain = await correlator.recordFileEvent(
+                path: shared, action: i == 0 ? "write" : "close_modified",
+                pid: Int32(21_000 + i), processName: name, processPath: path,
+                timestamp: now.addingTimeInterval(Double(i))
+            )
+        }
+        #expect(chain == nil,
+                "A 3-distinct-shell write-only chain (bash/cat/sed) is script activity, not an attack")
+    }
+
     @Test("/dev/ttys terminal I/O is not correlated")
     func terminalDeviceNotCorrelated() async {
         let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)

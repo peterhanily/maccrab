@@ -73,6 +73,40 @@ public actor EventStore {
     /// predictable across collectors.
     internal static let argTruncationThreshold: Int = 4_096
 
+    /// Hard cap on the bytes bound into the indexed `process_commandline`
+    /// column (audit corr-storage). `raw_json` is bounded by
+    /// `maxRawJsonBytes`, but the command line is bound to its OWN column and
+    /// tokenized into the `events_fts` index independently of raw_json, so an
+    /// oversized argv (e.g. an inline base64 payload) blows up both the column
+    /// and the FTS index — defeating the raw_json cap for the exact vector it
+    /// cites. 16 KB comfortably fits any real command line (P99 raw_json is
+    /// <16 KB and the command line is only part of that) while bounding the
+    /// pathological case. Applied to the stored + indexed copy only; the full
+    /// (still per-arg-truncated) command line remains in raw_json.
+    internal static let maxIndexedCommandLineBytes: Int = 16_384
+
+    /// Truncate `s` so its UTF-8 encoding is at most `maxBytes`, cutting on a
+    /// Character boundary (never mid-scalar) and appending a byte-count marker
+    /// when truncation occurs. The common case (short command line) returns the
+    /// input untouched after a single O(n) length check.
+    static func boundIndexedText(_ s: String, maxBytes: Int) -> String {
+        let utf8Count = s.utf8.count
+        if utf8Count <= maxBytes { return s }
+        let marker = "…<truncated:\(utf8Count) bytes>"
+        let budget = max(0, maxBytes - marker.utf8.count)
+        var kept = 0
+        var end = s.startIndex
+        var idx = s.startIndex
+        while idx < s.endIndex {
+            let n = String(s[idx]).utf8.count
+            if kept + n > budget { break }
+            kept += n
+            idx = s.index(after: idx)
+            end = idx
+        }
+        return String(s[s.startIndex..<end]) + marker
+    }
+
     /// Number of events whose raw_json was truncated to fit `maxRawJsonBytes`.
     /// Snapshot via `payloadTruncatedTotal()`. Surfaced into
     /// `heartbeat_rich.json` as `payload_truncated_total` (Wave 9K,
@@ -123,16 +157,20 @@ public actor EventStore {
         ),
         // v1.8.0: tiered retention model. The `events` table becomes a
         // 24-hour hot tier; older rows get aggregated into
-        // `event_aggregates` (≤30 day rollup) and any alert-anchored ±60s
-        // window of events gets copied into `alert_evidence` (kept
-        // forever, bounded by alert count).
+        // `event_aggregates` (≤30 day rollup) and the events LEADING UP TO an
+        // alert get copied into `alert_evidence` (kept forever, bounded by
+        // alert count). Capture is synchronous at alert-fire time, so it is
+        // BACKWARD-looking — the ~windowSeconds of already-persisted events
+        // before the alert; events after the alert have not happened yet.
+        // (audit corr-storage: earlier "±60s"/"~120s" framing overstated a
+        // forward window that is always empty at capture time.)
         //
         // Replaces the size-cap-and-VACUUM dance at DaemonTimers.swift —
         // pre-fix that approach silently let the file grow to 1.8 GB+ on
         // busy machines because per-tick VACUUM kept failing or being
         // skipped. The tier model is bounded by design: events table
         // never holds more than ~24h, aggregates are <5 MB, evidence
-        // grows as alerts × ~120s of events.
+        // grows as alerts × ~windowSeconds of preceding events.
         Migration(
             version: 3,
             name: "add_tiered_retention_tables",
@@ -391,6 +429,31 @@ public actor EventStore {
                     new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
             END
             """,
+            // events_au AFTER UPDATE (audit corr-storage): keep the external-
+            // content FTS index in sync when an existing event row is UPDATED
+            // in place. The insert path is an UPSERT (INSERT … ON CONFLICT(id)
+            // DO UPDATE) rather than INSERT OR REPLACE precisely so a re-insert
+            // of the same event id UPDATES the row (preserving its rowid)
+            // instead of delete+reinsert with a new rowid — which would orphan
+            // the old FTS posting (no delete trigger fires for a REPLACE with
+            // recursive_triggers off). This trigger removes the stale postings
+            // (via the FTS5 'delete' command with old.* values, which does not
+            // depend on the content row) and re-adds the fresh ones. The prune
+            // paths delete FTS rows explicitly (while the content row is still
+            // present) and are unaffected — no AFTER DELETE trigger exists, so
+            // there is no double-delete.
+            """
+            CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON events BEGIN
+                INSERT INTO events_fts(events_fts, rowid, process_name, process_path, process_commandline,
+                    file_path, network_dest_ip, tcc_service, tcc_client)
+                VALUES ('delete', old.rowid, old.process_name, old.process_path, old.process_commandline,
+                    old.file_path, old.network_dest_ip, old.tcc_service, old.tcc_client);
+                INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
+                    file_path, network_dest_ip, tcc_service, tcc_client)
+                VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
+                    new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
+            END
+            """,
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
 
@@ -443,8 +506,14 @@ public actor EventStore {
         // are append-only. NULL/0 for fields that aren't present on a
         // given event category (e.g. tcc_decision is only set for TCC
         // events; ai_tool only when a TraceCorrelator binding exists).
+        // audit corr-storage: UPSERT (ON CONFLICT DO UPDATE) rather than
+        // INSERT OR REPLACE. A duplicate `id` now UPDATES the row IN PLACE,
+        // preserving its rowid, so it cannot orphan the external-content
+        // events_fts entry (REPLACE would delete+reinsert with a fresh rowid
+        // and no delete trigger fires). The `events_au` AFTER UPDATE trigger
+        // refreshes the FTS index for the updated row.
         let insertSQL = """
-            INSERT OR REPLACE INTO events (
+            INSERT INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
                 process_pid, process_name, process_path, process_commandline,
                 process_ppid, process_signer, process_team_id, process_signing_id,
@@ -459,6 +528,30 @@ public actor EventStore {
                 parent_signer_type, ai_tool, ai_tool_child,
                 session_launch_source, tcc_decision
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45)
+            ON CONFLICT(id) DO UPDATE SET
+                timestamp=excluded.timestamp, event_category=excluded.event_category,
+                event_type=excluded.event_type, event_action=excluded.event_action,
+                severity=excluded.severity, process_pid=excluded.process_pid,
+                process_name=excluded.process_name, process_path=excluded.process_path,
+                process_commandline=excluded.process_commandline, process_ppid=excluded.process_ppid,
+                process_signer=excluded.process_signer, process_team_id=excluded.process_team_id,
+                process_signing_id=excluded.process_signing_id, file_path=excluded.file_path,
+                file_action=excluded.file_action, network_dest_ip=excluded.network_dest_ip,
+                network_dest_port=excluded.network_dest_port, tcc_service=excluded.tcc_service,
+                tcc_client=excluded.tcc_client, raw_json=excluded.raw_json,
+                mcp_server_name=excluded.mcp_server_name, mcp_server_category=excluded.mcp_server_category,
+                ai_tool_session_id=excluded.ai_tool_session_id, agent_trace_id=excluded.agent_trace_id,
+                agent_span_id=excluded.agent_span_id, agent_tool=excluded.agent_tool,
+                machine_agent_confidence=excluded.machine_agent_confidence,
+                agent_evidence_json=excluded.agent_evidence_json, user_id=excluded.user_id,
+                user_name=excluded.user_name, group_id=excluded.group_id,
+                working_directory=excluded.working_directory, responsible_pid=excluded.responsible_pid,
+                architecture=excluded.architecture, is_platform_binary=excluded.is_platform_binary,
+                is_notarized=excluded.is_notarized, process_sha256=excluded.process_sha256,
+                parent_name=excluded.parent_name, parent_executable=excluded.parent_executable,
+                parent_signer_type=excluded.parent_signer_type, ai_tool=excluded.ai_tool,
+                ai_tool_child=excluded.ai_tool_child, session_launch_source=excluded.session_launch_source,
+                tcc_decision=excluded.tcc_decision
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -737,8 +830,11 @@ public actor EventStore {
         bindText(stmt, index: 8, value: event.process.name)
         // 9: process_path (executable)
         bindText(stmt, index: 9, value: event.process.executable)
-        // 10: process_commandline (sanitized)
-        bindText(stmt, index: 10, value: sanitizedCommandLine)
+        // 10: process_commandline (sanitized, length-bounded). Bounded
+        // independently of raw_json because this column feeds the events_fts
+        // index directly — an oversized argv would otherwise blow up the FTS
+        // index unbounded. See maxIndexedCommandLineBytes.
+        bindText(stmt, index: 10, value: Self.boundIndexedText(sanitizedCommandLine, maxBytes: Self.maxIndexedCommandLineBytes))
         // 11: process_ppid
         sqlite3_bind_int(stmt, 11, event.process.ppid)
         // 12: process_signer
@@ -1812,13 +1908,22 @@ public actor EventStore {
         return results
     }
 
-    /// Capture a snapshot of events within `windowSeconds` of the alert's
-    /// timestamp into `alert_evidence`. Idempotent — re-running for the same
-    /// `alertId` is safe (PRIMARY KEY on (alert_id, id) silently dedupes).
+    /// Capture a snapshot of the `windowSeconds` of events immediately
+    /// PRECEDING the alert into `alert_evidence`. Idempotent — re-running for
+    /// the same `alertId` is safe (PRIMARY KEY on (alert_id, id) silently
+    /// dedupes).
     ///
-    /// Called from the alert-firing path so the dashboard's alert detail view
-    /// can show "what else was happening when this fired?" even after the
-    /// hot-tier retention drops the surrounding events.
+    /// Called synchronously from the alert-firing path so the dashboard's alert
+    /// detail view can show "what led up to this?" even after the hot-tier
+    /// retention drops the surrounding events.
+    ///
+    /// BACKWARD-looking by construction (audit corr-storage): because capture
+    /// runs at fire time, only events already persisted at/before the alert
+    /// timestamp exist, so the window is `[alertTimestamp - windowSeconds,
+    /// alertTimestamp]`. There is no forward half to populate — the prior
+    /// "±windowSeconds" framing described a range that is always empty at
+    /// capture time. (A caller wanting post-alert context would have to
+    /// schedule a deferred second capture; none does today.)
     ///
     /// v1.8.0-rc6: capped at `maxRows` (default 50) to keep the evidence table
     /// bounded on high-volume hosts. Pre-cap, a 264 events/sec machine could
@@ -1833,9 +1938,13 @@ public actor EventStore {
         windowSeconds: TimeInterval = 30,
         maxRows: Int = 50
     ) throws {
-        let lo = alertTimestamp.timeIntervalSince1970 - windowSeconds
-        let hi = alertTimestamp.timeIntervalSince1970 + windowSeconds
         let alertTs = alertTimestamp.timeIntervalSince1970
+        let lo = alertTs - windowSeconds
+        // Backward-only: the upper bound is the alert timestamp itself. A
+        // forward bound (alertTs + windowSeconds) never matched anything —
+        // those events do not exist yet when this runs at fire time — so it is
+        // dropped to make the contract honest and the SQL intent explicit.
+        let hi = alertTs
         let sql = """
             INSERT OR IGNORE INTO alert_evidence (
                 alert_id, id, timestamp,
@@ -2020,11 +2129,35 @@ public actor EventStore {
     }
 
     /// Read events captured for `alertId` by `recordAlertEvidence`. Returns
-    /// the surrounding ±windowSeconds of activity that the alert detail view
+    /// the ~windowSeconds of preceding activity that the alert detail view
     /// renders. Empty if the alert pre-dates v1.8 evidence capture.
     public func evidenceFor(alertId: String) throws -> [Event] {
         let sql = "SELECT raw_json FROM alert_evidence WHERE alert_id = ?1 ORDER BY timestamp ASC"
         return try queryEvents(sql: sql, bindings: [(1, .text(alertId))])
+    }
+
+    /// Delete all `alert_evidence` rows copied for `alertId`. Returns the row
+    /// count removed.
+    ///
+    /// Companion to `AlertStore.delete(alertId:)` (audit corr-storage):
+    /// `recordAlertEvidence` copies the surrounding events into events.db's
+    /// `alert_evidence`, but deleting the alert row only touches alerts.db —
+    /// the evidence copy (which can hold the very PII the operator is trying to
+    /// wipe) survives until the retention sweep. The caller that owns BOTH
+    /// stores (the delete-alert path) must invoke this alongside
+    /// `AlertStore.delete` so the wipe is complete. Idempotent — a no-match is
+    /// a successful 0.
+    @discardableResult
+    public func deleteEvidence(alertId: String) throws -> Int {
+        let sql = "DELETE FROM alert_evidence WHERE alert_id = ?1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: alertId)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.stepFailed("deleteEvidence failed: \(msg)")
+        }
+        return Int(sqlite3_changes(db))
     }
 
     /// The 24h roll-up sweep that replaces the legacy size-cap-and-VACUUM
@@ -2205,6 +2338,17 @@ public actor EventStore {
     public func vacuum() async throws {
         guard let db = db else { return }
         _ = await walCheckpoint()
+        // One-shot auto_vacuum conversion (audit corr-storage): `PRAGMA
+        // auto_vacuum = INCREMENTAL` is a SILENT no-op on an already-populated
+        // DB — the mode only changes on the next VACUUM. Fresh installs get
+        // mode 2 from applyEventStorePragmas (the pragma DOES take on an empty
+        // header), but a DB that existed before that shipped stays in mode 0
+        // (NONE) forever, so incrementalVacuum() — the low-disk reclaim path —
+        // is permanently a no-op. Setting the pragma here means this full
+        // VACUUM (already disk-pre-flighted by the size-cap caller) also
+        // converts the file to INCREMENTAL, so subsequent low-disk sweeps can
+        // reclaim in place. Idempotent + harmless once already mode 2.
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
@@ -2323,6 +2467,10 @@ public actor EventStore {
         // pre-checkpoint so VACUUM rebuilds a drained main DB; post-checkpoint
         // (best-effort TRUNCATE) so the on-disk footprint reflects the rebuild.
         sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
+        // Convert a legacy mode-0 (NONE) file to INCREMENTAL on this rewrite —
+        // see the actor `vacuum()` above for the full rationale. No-op once the
+        // file is already mode 2.
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))

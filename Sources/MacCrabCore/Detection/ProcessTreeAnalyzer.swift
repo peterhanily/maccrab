@@ -64,6 +64,12 @@ public actor ProcessTreeAnalyzer {
     /// Maximum number of unique transition edges before pruning least-frequent ones.
     private let maxUniqueTransitions: Int = 50_000
 
+    /// Maximum number of unique 2nd-order (bigram) edges before pruning. Bigram
+    /// prefixes ("grandparent>parent") are more numerous than 1st-order parents,
+    /// so this cap is higher. Before v1.21.4 the bigram maps were NEVER pruned
+    /// (nor persisted), so they grew unbounded across the daemon's lifetime.
+    private let maxUniqueBigrams: Int = 100_000
+
     /// Learning vs active detection mode.
     public enum Mode: String, Sendable {
         case learning   // Accumulating transition data, no scoring
@@ -252,8 +258,10 @@ public actor ProcessTreeAnalyzer {
         // Get the root process name.
         guard let rootName = await lineage.name(of: rootPid) else { return nil }
 
-        // Walk the tree and collect edges + metrics.
-        var edges: [(parent: String, child: String)] = []
+        // Walk the tree and collect edges + metrics. Each edge carries its
+        // grandparent (the edge-parent's own parent) so 2nd-order scoring can use
+        // P(child | grandparent, parent) when that bigram has been learned.
+        var edges: [(grandparent: String?, parent: String, child: String)] = []
         var maxDepth = 0
         var nodeCount = 1  // Count the root.
 
@@ -261,10 +269,11 @@ public actor ProcessTreeAnalyzer {
         struct QueueEntry {
             let pid: pid_t
             let name: String
+            let parentName: String?   // normalized name of THIS node's parent (nil for root)
             let depth: Int
         }
 
-        var queue: [QueueEntry] = [QueueEntry(pid: rootPid, name: rootName, depth: 0)]
+        var queue: [QueueEntry] = [QueueEntry(pid: rootPid, name: rootName, parentName: nil, depth: 0)]
         var visited: Set<pid_t> = [rootPid]
         var head = 0
 
@@ -276,6 +285,7 @@ public actor ProcessTreeAnalyzer {
                 maxDepth = current.depth
             }
 
+            let parentNorm = normalizeName(current.name)
             let childPids = await lineage.children(of: current.pid)
             for childPid in childPids {
                 guard !visited.contains(childPid) else { continue }
@@ -283,28 +293,35 @@ public actor ProcessTreeAnalyzer {
 
                 guard let childName = await lineage.name(of: childPid) else { continue }
 
-                let parentNorm = normalizeName(current.name)
                 let childNorm = normalizeName(childName)
 
                 // Skip self-transitions and launchd.
                 if parentNorm != childNorm && parentNorm != "launchd" {
-                    edges.append((parent: parentNorm, child: childNorm))
+                    edges.append((grandparent: current.parentName, parent: parentNorm, child: childNorm))
                 }
 
                 nodeCount += 1
-                queue.append(QueueEntry(pid: childPid, name: childName, depth: current.depth + 1))
+                queue.append(QueueEntry(pid: childPid, name: childName, parentName: parentNorm, depth: current.depth + 1))
             }
         }
 
         // No edges means a single-node tree (nothing to score).
         guard !edges.isEmpty else { return nil }
 
-        // Compute aggregate log-probability.
+        // Compute aggregate log-probability. Prefer the 2nd-order (bigram) model
+        // when a grandparent is known and that bigram prefix has been observed;
+        // fall back to the 1st-order model otherwise.
         var totalLogProb = 0.0
         var anomalousEdges: [AnomalousEdge] = []
 
         for edge in edges {
-            let lp = logProbability(parent: edge.parent, child: edge.child)
+            let lp: Double
+            if let gp = edge.grandparent, gp != "launchd",
+               let bigramLP = logProbabilityBigram(grandparent: gp, parent: edge.parent, child: edge.child) {
+                lp = bigramLP
+            } else {
+                lp = logProbability(parent: edge.parent, child: edge.child)
+            }
             totalLogProb += lp
 
             // Track individually rare edges.
@@ -410,6 +427,14 @@ public actor ProcessTreeAnalyzer {
             self.parentTotals[parent] = children.values.reduce(0, +)
         }
 
+        // v1.21.4: restore 2nd-order (bigram) counts and rebuild their totals.
+        // Absent in pre-v1.21.4 files → start the 2nd-order layer fresh.
+        self.bigramCounts = persisted.bigrams ?? [:]
+        self.bigramTotals = [:]
+        for (prefix, children) in self.bigramCounts {
+            self.bigramTotals[prefix] = children.values.reduce(0, +)
+        }
+
         // Restore mode: if we have enough transitions, go active.
         if totalTransitions >= minTransitions {
             mode = .active
@@ -439,9 +464,15 @@ public actor ProcessTreeAnalyzer {
 
     // MARK: - Model Size Management
 
+    /// Prune both the 1st-order and 2nd-order models when they exceed their caps.
+    private func pruneIfNeeded() {
+        pruneFirstOrderIfNeeded()
+        pruneBigramsIfNeeded()
+    }
+
     /// Prune the least-frequent transitions if the model exceeds `maxUniqueTransitions`
     /// unique edges. Removes the bottom ~20% of transitions by count to create headroom.
-    private func pruneIfNeeded() {
+    private func pruneFirstOrderIfNeeded() {
         let uniqueEdges = transitionCounts.values.reduce(0) { $0 + $1.count }
         guard uniqueEdges > maxUniqueTransitions else { return }
 
@@ -475,6 +506,42 @@ public actor ProcessTreeAnalyzer {
         }
 
         logger.info("Pruned \(removedCount) least-frequent transitions (was \(uniqueEdges) edges, cap \(self.maxUniqueTransitions))")
+    }
+
+    /// Prune the least-frequent 2nd-order (bigram) edges when the model exceeds
+    /// `maxUniqueBigrams`. Mirrors the 1st-order pruner; keeps `bigramTotals`
+    /// consistent with `bigramCounts` after removals.
+    private func pruneBigramsIfNeeded() {
+        let uniqueEdges = bigramCounts.values.reduce(0) { $0 + $1.count }
+        guard uniqueEdges > maxUniqueBigrams else { return }
+
+        var allEdges: [(prefix: String, child: String, count: Int)] = []
+        for (prefix, children) in bigramCounts {
+            for (child, count) in children {
+                allEdges.append((prefix, child, count))
+            }
+        }
+
+        allEdges.sort { $0.count < $1.count }
+        let toRemove = allEdges.count / 5  // 20%
+
+        var removedCount = 0
+        for i in 0..<toRemove {
+            let edge = allEdges[i]
+            if var children = bigramCounts[edge.prefix] {
+                children.removeValue(forKey: edge.child)
+                if children.isEmpty {
+                    bigramCounts.removeValue(forKey: edge.prefix)
+                    bigramTotals.removeValue(forKey: edge.prefix)
+                } else {
+                    bigramCounts[edge.prefix] = children
+                    bigramTotals[edge.prefix] = children.values.reduce(0, +)
+                }
+                removedCount += 1
+            }
+        }
+
+        logger.info("Pruned \(removedCount) least-frequent bigram transitions (was \(uniqueEdges) edges, cap \(self.maxUniqueBigrams))")
     }
 
     // MARK: - Markov Chain Scoring
@@ -522,20 +589,40 @@ public actor ProcessTreeAnalyzer {
 
     // MARK: - Name Normalization
 
-    /// Normalize a process name to its basename, stripped of paths and version info.
+    /// Normalize a process name to its basename, stripped of trailing version
+    /// info so version churn doesn't fragment the Markov model (and inflate
+    /// anomaly scores) as tools bump minor/patch releases. Examples:
+    ///   "/opt/homebrew/bin/python3.11" -> "python3"   (dotted version dropped)
+    ///   "ruby2.7.1" -> "ruby2"                        (all dotted segments dropped)
+    ///   "clang-16"  -> "clang" ,  "node_18" -> "node" (separator + digits dropped)
+    /// Intentionally conservative — undelimited digit tails and architecture
+    /// tokens are left intact so we don't merge distinct binaries:
+    ///   "x86_64" -> "x86_64"  (separator preceded by a DIGIT, not a letter)
+    ///   "sha256" -> "sha256", "base64" -> "base64"    (no separator)
     private func normalizeName(_ name: String) -> String {
-        // If the name contains a path separator, take the last component.
-        let basename: String
-        if name.contains("/") {
-            basename = (name as NSString).lastPathComponent
-        } else {
-            basename = name
+        var s = name.contains("/") ? (name as NSString).lastPathComponent : name
+
+        // Repeatedly strip a trailing ".<digits>" segment: python3.11 -> python3,
+        // ruby2.7.1 -> ruby2. Keeps any leading digit that is part of the
+        // canonical binary name (python3 vs python2 stay distinct).
+        while let dotIdx = s.lastIndex(of: "."),
+              dotIdx < s.index(before: s.endIndex),
+              s[s.index(after: dotIdx)...].allSatisfy({ $0.isNumber }) {
+            s = String(s[..<dotIdx])
         }
 
-        // Strip common suffixes that vary between versions.
-        // e.g., "python3.11" -> "python3", "node18" -> "node"
-        // But keep names like "x86_64" intact.
-        return basename
+        // Strip one trailing separator-delimited numeric version: node-18 -> node,
+        // clang_16 -> clang. The char before the '-'/'_' must be a LETTER, which
+        // keeps "x86_64" (separator preceded by a digit) intact.
+        if let sepIdx = s.lastIndex(where: { $0 == "-" || $0 == "_" }),
+           sepIdx > s.startIndex,
+           sepIdx < s.index(before: s.endIndex),
+           s[s.index(before: sepIdx)].isLetter,
+           s[s.index(after: sepIdx)...].allSatisfy({ $0.isNumber }) {
+            s = String(s[..<sepIdx])
+        }
+
+        return s
     }
 
     // MARK: - Persistence
@@ -556,7 +643,8 @@ public actor ProcessTreeAnalyzer {
         let persisted = PersistedModel(
             version: 1,
             totalTransitions: totalTransitions,
-            transitions: transitionCounts
+            transitions: transitionCounts,
+            bigrams: bigramCounts
         )
 
         let encoder = JSONEncoder()
@@ -589,4 +677,10 @@ private struct PersistedModel: Codable {
     let version: Int
     let totalTransitions: Int
     let transitions: [String: [String: Int]]
+    /// v1.21.4: 2nd-order (bigram) counts, keyed "grandparent>parent".
+    /// Optional for backward compatibility — a pre-v1.21.4 file has no
+    /// `bigrams` key and decodes with nil, so the loaded 1st-order model is
+    /// preserved and the 2nd-order layer simply relearns. `bigramTotals` is
+    /// derived on load, so it isn't stored.
+    let bigrams: [String: [String: Int]]?
 }

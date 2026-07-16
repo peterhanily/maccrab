@@ -483,6 +483,10 @@ final class DaemonState {
         self.sequenceRulesDir = sequenceRulesDir
         self.effectiveRulesDir = effectiveRulesDir
         self.eventStore = eventStore
+        // Constructed with default flushThreshold/hardCap/flush-interval — these
+        // are intentionally NOT config-surfaced (no daemon_config.json key),
+        // unlike the priority/file stream caps below (DaemonSetup wires those
+        // from DaemonConfig.storage). See BatchedEventWriter.init's note.
         self.eventWriter = BatchedEventWriter(store: eventStore)
         self.alertStore = alertStore
         // Build AlertSink from the already-stored alertStore + deduplicator so

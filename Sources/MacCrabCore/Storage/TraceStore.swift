@@ -562,10 +562,15 @@ public actor TraceStore {
     }
 
     /// Best-effort VACUUM. Required as the second leg of the Wave 9B
-    /// low-disk fallback (full VACUUM also rewrites the file with
-    /// the new auto_vacuum mode if PRAGMA was changed beforehand).
+    /// low-disk fallback. Also performs the one-shot auto_vacuum
+    /// conversion (audit corr-storage): the pragma is a silent no-op on a
+    /// populated DB, so a traces.db created before the INCREMENTAL default
+    /// stays mode 0 (NONE) and incrementalVacuum() never reclaims. Issuing
+    /// the pragma right before VACUUM rewrites the file in INCREMENTAL mode;
+    /// idempotent once already mode 2.
     public func vacuum() async throws {
         guard let db = db else { return }
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))

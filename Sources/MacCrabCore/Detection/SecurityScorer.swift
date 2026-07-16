@@ -71,22 +71,16 @@ public actor SecurityScorer {
         let sshDisabled = !checkSSHEnabled()
         factors.append(Factor(name: "Remote Login (SSH)", category: "system", score: sshDisabled ? 4 : 2, maxScore: 4, status: sshDisabled ? "pass" : "warn", detail: sshDisabled ? "SSH is disabled" : "SSH is enabled — ensure this is intentional"))
 
-        // === Runtime Security (35 points max) ===
+        // === Runtime Security (25 points max) ===
 
-        // Unsigned processes running? (10 points)
-        let unsignedCount = countUnsignedProcesses()
-        let unsignedScore: Int
-        if unsignedCount == 0 {
-            unsignedScore = 10
-        } else if unsignedCount < 3 {
-            unsignedScore = 6
-        } else if unsignedCount < 10 {
-            unsignedScore = 3
-        } else {
-            unsignedScore = 0
-        }
-        factors.append(Factor(name: "Unsigned Processes", category: "runtime", score: unsignedScore, maxScore: 10, status: unsignedCount == 0 ? "pass" : "warn", detail: "\(unsignedCount) unsigned process(es) running"))
-        if unsignedCount > 3 { recommendations.append("Investigate \(unsignedCount) unsigned processes — run: maccrabctl hunt 'unsigned processes'") }
+        // v1.21.4 (deep-audit corr-campaign-anomaly): the "Unsigned Processes"
+        // factor was removed. Its `countUnsignedProcesses()` was a hardcoded
+        // `return 0`, so the factor ALWAYS awarded a full 10/10 and reported
+        // "0 unsigned process(es)" regardless of reality — inflating every
+        // machine's score by a check that never ran. Rather than ship a
+        // dishonest full-marks factor (or a heavyweight per-PID codesign probe
+        // on the score hot path), the factor is dropped; the total is computed
+        // from the remaining factors' maxScores so the percentage stays honest.
 
         // Processes from /tmp? (8 points)
         let tmpCount = countTmpProcesses()
@@ -291,14 +285,6 @@ public actor SecurityScorer {
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: sshDir) else { return true }
         let privateKeys = files.filter { $0.hasPrefix("id_") && !$0.hasSuffix(".pub") }
         return privateKeys.isEmpty  // Simplified: true if no private keys (or would need to check passphrase)
-    }
-
-    private nonisolated func countUnsignedProcesses() -> Int {
-        // Use ps to count processes — simplified (bounded via runProbe so a
-        // wedged ps can't stall the score). Approximate — would need a codesign
-        // check on each; conservatively returns 0.
-        _ = runProbe("/bin/ps", ["-A", "-o", "pid="])
-        return 0
     }
 
     private nonisolated func countTmpProcesses() -> Int {

@@ -585,6 +585,12 @@ public actor CampaignStore {
     /// callers want a consistent API across all four stores.
     public func vacuum() async throws {
         guard let db = db else { return }
+        // One-shot auto_vacuum conversion (audit corr-storage): the pragma is
+        // a silent no-op on a populated DB, so a campaigns.db created before
+        // the INCREMENTAL default stays mode 0 (NONE) and incrementalVacuum()
+        // never reclaims. Issuing it right before VACUUM converts the file on
+        // this rewrite; idempotent once already mode 2.
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))

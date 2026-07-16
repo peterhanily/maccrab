@@ -304,4 +304,58 @@ struct CampaignDetectorFPRegressionTests {
         #expect(!coordinated.isEmpty)
         #expect(coordinated.first?.severity == .critical)  // 3 tactics → CRITICAL Persistent Threat Actor
     }
+
+    // MARK: - v1.21.4 (deep-audit corr-campaign-anomaly)
+
+    @Test("Same executable across multiple short-lived PIDs mints a coordinated attack (path branch)")
+    func multiPidSameExecutableCoordinated() async {
+        let detector = CampaignDetector()
+        // Attacker respawns /tmp/payload under three short-lived PIDs, each firing
+        // exactly ONE distinct rule for a different tactic. Every PID has 1 distinct
+        // ruleId, so the per-PID branch never qualifies — pre-fix the function
+        // `return nil`-ed and the process-path branch (which aggregates across PIDs)
+        // was dead code. The shared binary spanning 3 tactics must now fire.
+        let payload = "/tmp/payload"
+        _ = await detector.processAlert(
+            .init(ruleId: "discovery.a", ruleTitle: "A", severity: .medium,
+                  processPath: payload, pid: 3001, tactics: ["attack.discovery"]))
+        _ = await detector.processAlert(
+            .init(ruleId: "persistence.b", ruleTitle: "B", severity: .medium,
+                  processPath: payload, pid: 3002, tactics: ["attack.persistence"]))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "c2.c", ruleTitle: "C", severity: .medium,
+                  processPath: payload, pid: 3003, tactics: ["attack.command_and_control"]))
+        let coordinated = campaigns.filter { $0.type == .coordinatedAttack }
+        #expect(!coordinated.isEmpty, "same-binary/multi-PID 3-tactic attack must mint a coordinated attack")
+        // Also exercises the dedup severity-escalation fix: a HIGH coordinated
+        // attack was emitted at the 2nd alert (2 tactics), and the 3rd alert
+        // escalates it to CRITICAL inside the dedup window instead of being
+        // swallowed as a same-type duplicate.
+        #expect(coordinated.first?.severity == .critical)  // 3 tactics → Persistent Threat Actor
+    }
+
+    @Test("Coordinated attacks on two different executables are not deduped against each other")
+    func coordinatedAttackDedupIsPerTarget() async {
+        let detector = CampaignDetector()
+        // Executable A: two distinct MEDIUM rules, two tactics → HIGH coordinated.
+        _ = await detector.processAlert(
+            .init(ruleId: "a.1", ruleTitle: "A1", severity: .medium,
+                  processPath: "/tmp/a", pid: 4001, tactics: ["attack.discovery"]))
+        let firstBatch = await detector.processAlert(
+            .init(ruleId: "a.2", ruleTitle: "A2", severity: .medium,
+                  processPath: "/tmp/a", pid: 4001, tactics: ["attack.persistence"]))
+        #expect(firstBatch.contains { $0.type == .coordinatedAttack })
+
+        // Executable B (a DIFFERENT target) inside the same dedup window must NOT
+        // be suppressed by A's campaign — pre-fix the type-only dedup key collapsed
+        // every coordinated attack into a single key.
+        _ = await detector.processAlert(
+            .init(ruleId: "b.1", ruleTitle: "B1", severity: .medium,
+                  processPath: "/tmp/b", pid: 4002, tactics: ["attack.discovery"]))
+        let secondBatch = await detector.processAlert(
+            .init(ruleId: "b.2", ruleTitle: "B2", severity: .medium,
+                  processPath: "/tmp/b", pid: 4002, tactics: ["attack.credential_access"]))
+        #expect(secondBatch.contains { $0.type == .coordinatedAttack },
+                "a coordinated attack on a different executable must not be deduped away")
+    }
 }

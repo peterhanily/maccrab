@@ -49,7 +49,7 @@ struct TieredRetentionTests {
 
     // MARK: - Alert evidence
 
-    @Test("recordAlertEvidence snapshots the ±60s window")
+    @Test("recordAlertEvidence snapshots the backward window (events up to the alert)")
     func evidenceCapturesSurroundingEvents() async throws {
         let (store, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -57,15 +57,18 @@ struct TieredRetentionTests {
         let alertTime = Date()
         let alertId = UUID().uuidString
 
-        // 5 events: -120s, -30s, 0s, +30s, +120s. The ±60s window
-        // captures the middle three.
+        // 5 events: -120s, -30s, 0s, +30s, +120s. Capture is BACKWARD-looking
+        // (audit corr-storage): with the default 30s window, the range is
+        // [alertTime-30, alertTime], so only the -30s and 0s events are
+        // captured. The +30s / +120s events are after the alert (a real capture
+        // at fire time could not see them), and -120s is outside the window.
         for offset in [-120.0, -30.0, 0.0, 30.0, 120.0] {
             try await store.insert(event: sampleEvent(at: alertTime.addingTimeInterval(offset)))
         }
 
         try await store.recordAlertEvidence(alertId: alertId, alertTimestamp: alertTime)
         let evidence = try await store.evidenceFor(alertId: alertId)
-        #expect(evidence.count == 3)
+        #expect(evidence.count == 2)
     }
 
     @Test("recordAlertEvidence is idempotent")

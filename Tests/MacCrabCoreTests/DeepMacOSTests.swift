@@ -266,6 +266,72 @@ struct BehaviorScoringIndicatorTests {
         let sipWeight = BehaviorScoring.weights["sip_disabled"] ?? 0
         #expect(sipWeight >= 9.0, "SIP disabled should have weight >= 9.0")
     }
+
+    // v1.21.4 (deep-audit corr-campaign-anomaly): every indicator the live
+    // pipeline (EventLoop / MonitorTasks) emits must have an explicit weight —
+    // absent names silently used the 3.0 `effectiveWeight` default (un-tuned and
+    // invisible to feedback adjustment). Keep this list in sync with the
+    // `addIndicator(named:)` / `Indicator(name:)` call sites.
+    @Test("Every pipeline-emitted behavioral indicator has a weight entry")
+    func emittedIndicatorsAreTabled() {
+        let emitted = [
+            "ai_tool_boundary_violation", "ai_tool_credential_access",
+            "ai_tool_downloads_and_exec", "ai_tool_installs_unknown_pkg",
+            "ai_tool_persistence_write", "ai_tool_runs_sudo", "ai_tool_spawns_shell",
+            "ai_tool_unapproved_network", "anomalous_process_tree",
+            "event_tap_keylogger", "executed_from_tmp", "fresh_package_install",
+            "high_entropy_commandline", "known_malicious_domain", "known_malicious_hash",
+            "known_malicious_ip", "library_injection", "mcp_server_suspicious",
+            "not_notarized", "statistical_frequency_anomaly", "unsigned_binary",
+            "unsigned_dev_tooling", "writes_launch_agent", "writes_launch_daemon",
+            // Emitted via the raw Indicator(name:) form:
+            "suspicious_certificate", "typosquat_domain",
+        ]
+        for name in emitted {
+            #expect(BehaviorScoring.weights[name] != nil,
+                    "emitted indicator '\(name)' is missing from BehaviorScoring.weights")
+        }
+    }
+
+    // v1.21.4 (deep-audit corr-campaign-anomaly): applyDecay must reset the decay
+    // clock on EVERY application, including cooldown-suppressed calls. Before the
+    // fix each suppressed repeat re-decayed from the last successful add, so decay
+    // compounded quadratically and crushed a slow-burn process's score.
+    @Test("Cooldown-suppressed indicator repeats do not compound decay")
+    func cooldownSuppressedDoesNotOverDecay() async {
+        // High thresholds so nothing alerts; short half-life so sub-second gaps
+        // produce measurable — but memoryless — decay.
+        let halfLife = 0.5
+        let scoring = BehaviorScoring(alertThreshold: 100, criticalThreshold: 200, decayHalfLife: halfLife)
+        let pid: Int32 = 4242
+        let path = "/tmp/slowburn"
+
+        let start = Date()
+        // Seed a score of 8 with one indicator.
+        _ = await scoring.addIndicator(
+            BehaviorScoring.Indicator(name: "ai_tool_unapproved_network", weight: 8),
+            forProcess: pid, path: path)
+
+        // Fire the SAME indicator repeatedly within the 120s cooldown — each call
+        // is suppressed (returns nil) but still runs applyDecay.
+        for _ in 0..<6 {
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+            _ = await scoring.addIndicator(
+                BehaviorScoring.Indicator(name: "ai_tool_unapproved_network", weight: 8),
+                forProcess: pid, path: path)
+        }
+
+        let elapsed = Date().timeIntervalSince(start)
+        let score = await scoring.score(forPid: pid, path: path)
+        // Decay is memoryless: N clock-advancing steps over `elapsed` == ONE decay
+        // over `elapsed`. So the score must track the single-step value regardless
+        // of how long the sleeps actually took. The pre-fix compounded value is
+        // far below this (≈1.8 vs ≈5.3 for ~0.3s), so a 0.7× margin cleanly
+        // separates fixed from buggy while tolerating CI timing jitter.
+        let singleStep = 8.0 * pow(0.5, elapsed / halfLife)
+        #expect(score >= singleStep * 0.7,
+                "score \(score) over-decayed vs single-step \(singleStep) — applyDecay must reset the decay clock")
+    }
 }
 
 // MARK: - Phase 3+4: Persistence, Policy, Forensic

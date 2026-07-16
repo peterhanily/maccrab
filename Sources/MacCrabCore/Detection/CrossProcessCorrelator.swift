@@ -679,8 +679,9 @@ public actor CrossProcessCorrelator {
     /// (curl writes payload, bash executes it) has only 2 shell
     /// utilities AND includes an `execute` action, so it escapes this
     /// gate and still fires. The detection latency cost of requiring
-    /// ≥4 distinct utilities is zero for real attacks — they don't
-    /// involve 4 different shell helpers touching the same file.
+    /// a variety of distinct utilities is zero for real attacks — the
+    /// write-then-execute payload is protected by the `execute` carve-out
+    /// below regardless of the utility count.
     private func chainDominatedByShellUtilities(_ events: [ChainEvent]) -> Bool {
         // Execute is the attack signal. If anything in the chain
         // executed the shared file, keep the chain — this is exactly
@@ -689,9 +690,15 @@ public actor CrossProcessCorrelator {
         if actions.contains("execute") { return false }
 
         // Require both coverage (≥80% of events are shell helpers) AND
-        // variety (≥4 distinct utilities). Variety distinguishes a
-        // build script from a 2-process attack that happens to use two
-        // shell tools.
+        // variety (≥3 distinct utilities). Variety distinguishes a
+        // build/install script from a 2-process attack.
+        //
+        // v1.21.4 (deep-audit corr-campaign-anomaly): lowered the variety
+        // floor from 4 → 3. The ≥4 gate let the very common 3-utility
+        // write-only script shapes (bash/cat/sed, cp/rm/touch) slip through
+        // and mint benign file-chain alerts. This can only ADD suppression to
+        // write-only chains — any chain containing an `execute` still fires via
+        // the carve-out above, so no download-and-run attack is affected.
         var shellHits = 0
         var distinctShellNames: Set<String> = []
         for e in events {
@@ -702,7 +709,7 @@ public actor CrossProcessCorrelator {
             }
         }
         let coverage = Double(shellHits) / Double(events.count)
-        return coverage >= 0.8 && distinctShellNames.count >= 4
+        return coverage >= 0.8 && distinctShellNames.count >= 3
     }
 
     /// Small shell helpers that legitimately chain through shared paths.

@@ -204,8 +204,11 @@ public actor CampaignDetector {
     /// Per-rule timestamps for storm detection.
     private var ruleAlertCounts: [String: [Date]] = [:]
 
-    /// Recently emitted campaigns keyed by dedup key → detection time.
-    private var emittedCampaigns: [String: Date] = [:]
+    /// Recently emitted campaigns keyed by dedup key → (detection time, the
+    /// highest severity emitted for that key within the window). The severity is
+    /// tracked so a genuine escalation (e.g. a HIGH coordinated attack becoming
+    /// CRITICAL) can re-emit inside the dedup window instead of being swallowed.
+    private var emittedCampaigns: [String: (date: Date, severity: Severity)] = [:]
 
     /// Detected campaigns (kept for `activeCampaigns` queries).
     private var detectedCampaigns: [Campaign] = []
@@ -600,19 +603,27 @@ public actor CampaignDetector {
         let allTactics = Set(tacticContributingAlerts.flatMap(\.tactics).map(normalizeTactic))
         guard allTactics.count >= 2 else { return nil }
 
-        // Check specific 2-tactic combos first
+        // Check specific 2-tactic combos first.
+        //
+        // v1.21.4 (deep-audit corr-campaign-anomaly): attach the FILTERED
+        // `tacticContributingAlerts`, not the full unfiltered `recentAlerts`.
+        // The campaign's aggregate attribution (affectedUsers / affectedExecutables
+        // / techniques / aiTools, computed in Campaign.init) and the auto-generated
+        // rules are derived from `alerts`; feeding the whole window over-reported
+        // the blast radius and polluted rule generation with benign/sub-threshold
+        // alerts that never contributed a tactic to this chain.
         for (combo, result) in Self.twoTacticCombinations {
             if combo.isSubset(of: allTactics) {
-                let description = "Detected tactics: \(allTactics.sorted().joined(separator: ", ")) across \(recentAlerts.count) alerts within \(Int(campaignWindow))s"
+                let description = "Detected tactics: \(allTactics.sorted().joined(separator: ", ")) across \(tacticContributingAlerts.count) alerts within \(Int(campaignWindow))s"
                 return Campaign(
                     id: makeCampaignId(),
                     type: .killChain,
                     severity: result.severity,
                     title: result.title,
                     description: description,
-                    alerts: recentAlerts,
+                    alerts: tacticContributingAlerts,
                     tactics: allTactics,
-                    timeSpanSeconds: timeSpan(of: recentAlerts),
+                    timeSpanSeconds: timeSpan(of: tacticContributingAlerts),
                     detectedAt: Date()
                 )
             }
@@ -644,16 +655,16 @@ public actor CampaignDetector {
                 severity = .high
             }
 
-            let description = "Detected \(allTactics.count) tactics: \(allTactics.sorted().joined(separator: ", ")) across \(recentAlerts.count) alerts within \(Int(campaignWindow))s"
+            let description = "Detected \(allTactics.count) tactics: \(allTactics.sorted().joined(separator: ", ")) across \(tacticContributingAlerts.count) alerts within \(Int(campaignWindow))s"
             return Campaign(
                 id: makeCampaignId(),
                 type: .killChain,
                 severity: severity,
                 title: title,
                 description: description,
-                alerts: recentAlerts,
+                alerts: tacticContributingAlerts,
                 tactics: allTactics,
-                timeSpanSeconds: timeSpan(of: recentAlerts),
+                timeSpanSeconds: timeSpan(of: tacticContributingAlerts),
                 detectedAt: Date()
             )
         }
@@ -829,97 +840,84 @@ public actor CampaignDetector {
             return latestAlert.aiTool != nil && ruleIds.isSubset(of: keychainSingleEventRuleIds)
         }
 
-        // Group by PID — alerts from same process spanning multiple tactics
-        if let pid = latestAlert.pid {
+        // v1.21.4 (deep-audit corr-campaign-anomaly): evaluate BOTH the per-PID
+        // and per-executable groupings, then return the higher-severity campaign.
+        //
+        // The old code `return nil`-ed out of the whole function from inside the
+        // PID branch whenever that PID had < 2 distinct rules (or was an AI
+        // keychain breadcrumb), which made the process-path branch below dead
+        // code: an attacker respawning one executable under several short-lived
+        // PIDs — each PID firing exactly one distinct rule (PID1: discovery,
+        // PID2: persistence, PID3: C2) — never minted a coordinated_attack even
+        // though the shared binary spanned 3 tactics. Computing each candidate
+        // independently lets the path branch aggregate across PIDs while the
+        // per-branch FP guards (≥2 distinct rules, AI-keychain, ≥2 tactics) still
+        // apply to each grouping.
+
+        // Group by PID — alerts from the same process spanning multiple tactics.
+        // The ≥2-distinct-ruleIds gate keeps a single alert that happens to carry
+        // both `attack.discovery` AND `attack.defense_evasion` tags (the classic
+        // csrutil-status pattern) from inflating the tactic count.
+        let pidCampaign: Campaign? = latestAlert.pid.flatMap { pid in
             let pidAlerts = windowAlerts.filter { $0.pid == pid }
-            let pidTactics = aggregateNormalizedTactics(pidAlerts)
-            // v1.6.4: require ≥2 distinct rule IDs before claiming a
-            // "coordinated attack." A single alert that happens to carry
-            // both `attack.discovery` AND `attack.defense_evasion` tags
-            // (the classic csrutil-status pattern) inflated tactic count
-            // to 2 without actually being two events. This gate forces
-            // the campaign to reflect genuine multi-step activity —
-            // multiple rules firing, not one rule with rich tags.
             let distinctRuleIds = Set(pidAlerts.map(\.ruleId))
-            guard distinctRuleIds.count >= 2 else { return nil }
-            if isAIKeychainBreadcrumb(distinctRuleIds) { return nil }
-
-            if pidTactics.count >= 3 {
-                let description = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
-                return Campaign(
-                    id: makeCampaignId(),
-                    type: .coordinatedAttack,
-                    severity: .critical,
-                    title: "Persistent Threat Actor",
-                    description: description,
-                    alerts: pidAlerts,
-                    tactics: pidTactics,
-                    timeSpanSeconds: timeSpan(of: pidAlerts),
-                    detectedAt: Date()
-                )
-            }
-
-            if pidTactics.count >= 2 {
-                let description = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
-                return Campaign(
-                    id: makeCampaignId(),
-                    type: .coordinatedAttack,
-                    severity: .high,
-                    title: "Coordinated Attack from single process",
-                    description: description,
-                    alerts: pidAlerts,
-                    tactics: pidTactics,
-                    timeSpanSeconds: timeSpan(of: pidAlerts),
-                    detectedAt: Date()
-                )
-            }
+            guard distinctRuleIds.count >= 2, !isAIKeychainBreadcrumb(distinctRuleIds) else { return nil }
+            let pidTactics = aggregateNormalizedTactics(pidAlerts)
+            let desc = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
+            return coordinatedCampaign(tactics: pidTactics, alerts: pidAlerts, description: desc)
         }
 
-        // Group by process path — alerts from same executable spanning multiple tactics
-        if let path = latestAlert.processPath {
+        // Group by process path — alerts from the same executable spanning
+        // multiple tactics, aggregated across every PID that ran that binary.
+        let pathCampaign: Campaign? = latestAlert.processPath.flatMap { path in
             let pathAlerts = windowAlerts.filter { $0.processPath == path }
-            let pathTactics = aggregateNormalizedTactics(pathAlerts)
-            // Same ≥2-distinct-ruleIds gate as the PID branch above —
-            // prevents multi-tag single-rule alerts from inflating
-            // the coordinated-attack signal.
             let distinctRuleIds = Set(pathAlerts.map(\.ruleId))
-            guard distinctRuleIds.count >= 2 else { return nil }
-            if isAIKeychainBreadcrumb(distinctRuleIds) { return nil }
-
-            if pathTactics.count >= 3 {
-                let lastComponent = (path as NSString).lastPathComponent
-                let description = "Process \(lastComponent) (\(path)) triggered alerts spanning \(pathTactics.count) tactics: \(pathTactics.sorted().joined(separator: ", "))"
-                return Campaign(
-                    id: makeCampaignId(),
-                    type: .coordinatedAttack,
-                    severity: .critical,
-                    title: "Persistent Threat Actor",
-                    description: description,
-                    alerts: pathAlerts,
-                    tactics: pathTactics,
-                    timeSpanSeconds: timeSpan(of: pathAlerts),
-                    detectedAt: Date()
-                )
-            }
-
-            if pathTactics.count >= 2 {
-                let lastComponent = (path as NSString).lastPathComponent
-                let description = "Process \(lastComponent) (\(path)) triggered alerts spanning \(pathTactics.count) tactics: \(pathTactics.sorted().joined(separator: ", "))"
-                return Campaign(
-                    id: makeCampaignId(),
-                    type: .coordinatedAttack,
-                    severity: .high,
-                    title: "Coordinated Attack from single process",
-                    description: description,
-                    alerts: pathAlerts,
-                    tactics: pathTactics,
-                    timeSpanSeconds: timeSpan(of: pathAlerts),
-                    detectedAt: Date()
-                )
-            }
+            guard distinctRuleIds.count >= 2, !isAIKeychainBreadcrumb(distinctRuleIds) else { return nil }
+            let pathTactics = aggregateNormalizedTactics(pathAlerts)
+            let lastComponent = (path as NSString).lastPathComponent
+            let desc = "Process \(lastComponent) (\(path)) triggered alerts spanning \(pathTactics.count) tactics: \(pathTactics.sorted().joined(separator: ", "))"
+            return coordinatedCampaign(tactics: pathTactics, alerts: pathAlerts, description: desc)
         }
 
-        return nil
+        switch (pidCampaign, pathCampaign) {
+        case let (.some(p), .some(q)): return p.severity >= q.severity ? p : q
+        case let (.some(p), .none):    return p
+        case let (.none, .some(q)):    return q
+        case (.none, .none):           return nil
+        }
+    }
+
+    /// Build a coordinated_attack campaign from a grouped alert set given its
+    /// normalized tactics. Returns nil when the group spans fewer than 2 tactics.
+    /// ≥3 tactics ⇒ CRITICAL "Persistent Threat Actor"; exactly 2 ⇒ HIGH
+    /// "Coordinated Attack from single process".
+    private func coordinatedCampaign(
+        tactics: Set<String>,
+        alerts: [AlertSummary],
+        description: String
+    ) -> Campaign? {
+        let severity: Severity
+        let title: String
+        if tactics.count >= 3 {
+            severity = .critical
+            title = "Persistent Threat Actor"
+        } else if tactics.count >= 2 {
+            severity = .high
+            title = "Coordinated Attack from single process"
+        } else {
+            return nil
+        }
+        return Campaign(
+            id: makeCampaignId(),
+            type: .coordinatedAttack,
+            severity: severity,
+            title: title,
+            description: description,
+            alerts: alerts,
+            tactics: tactics,
+            timeSpanSeconds: timeSpan(of: alerts),
+            detectedAt: Date()
+        )
     }
 
     // MARK: - Lateral Movement Detection
@@ -953,13 +951,22 @@ public actor CampaignDetector {
 
     // MARK: - Deduplication
 
-    /// Build a dedup key from campaign type (and rule ID for storms).
+    /// Build a dedup key from campaign type (plus a discriminator for storms and
+    /// coordinated attacks so distinct targets aren't collapsed into one key).
     private func dedupKey(for campaign: Campaign) -> String {
         switch campaign.type {
         case .alertStorm:
-            // Dedup per-rule for storms
+            // Dedup per-rule for storms.
             let ruleId = campaign.alerts.first?.ruleId ?? "unknown"
             return "\(campaign.type.rawValue):\(ruleId)"
+        case .coordinatedAttack:
+            // v1.21.4 (deep-audit corr-campaign-anomaly): dedup per-executable.
+            // A type-only key meant a coordinated attack on /tmp/a suppressed a
+            // simultaneous, unrelated one on /tmp/b for the whole dedup window.
+            // affectedExecutables is the distinct process paths across the
+            // contributing alerts (usually a single binary for this type).
+            let target = campaign.affectedExecutables.sorted().joined(separator: ",")
+            return "\(campaign.type.rawValue):\(target)"
         default:
             return campaign.type.rawValue
         }
@@ -967,16 +974,21 @@ public actor CampaignDetector {
 
     private func isDuplicate(_ campaign: Campaign) -> Bool {
         let key = dedupKey(for: campaign)
-        guard let lastEmitted = emittedCampaigns[key] else { return false }
-        let interval = campaign.detectedAt.timeIntervalSince(lastEmitted)
+        guard let last = emittedCampaigns[key] else { return false }
+        let interval = campaign.detectedAt.timeIntervalSince(last.date)
         // Guard against clock going backward (NTP adjustment, DST): a negative
         // interval must not suppress the new campaign.
-        return interval >= 0 && interval < campaignDedupWindow
+        guard interval >= 0 && interval < campaignDedupWindow else { return false }
+        // v1.21.4 (deep-audit corr-campaign-anomaly): a strict severity
+        // ESCALATION (e.g. HIGH → CRITICAL) is not a duplicate — the operator
+        // needs to see that a campaign got worse even inside the dedup window.
+        // A same-or-lower-severity repeat is still suppressed.
+        return campaign.severity <= last.severity
     }
 
     private func markEmitted(_ campaign: Campaign) {
         let key = dedupKey(for: campaign)
-        emittedCampaigns[key] = campaign.detectedAt
+        emittedCampaigns[key] = (campaign.detectedAt, campaign.severity)
     }
 
     // MARK: - Helpers
@@ -1078,8 +1090,8 @@ public actor CampaignDetector {
 
     private func purgeStaleDedup() {
         let now = Date()
-        emittedCampaigns = emittedCampaigns.filter { _, date in
-            now.timeIntervalSince(date) < campaignDedupWindow
+        emittedCampaigns = emittedCampaigns.filter { _, value in
+            now.timeIntervalSince(value.date) < campaignDedupWindow
         }
     }
 }

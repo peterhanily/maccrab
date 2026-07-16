@@ -1211,12 +1211,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// Walk the whole ledger (ordered by sequence_number) and verify:
     ///   1. content — every row's current_hash recomputes from its stored
     ///      fields (catches an in-place UPDATE or a sequence-number reorder);
-    ///   2. linkage — every row past the first retained one has
-    ///      previous_hash == the preceding retained row's current_hash
-    ///      (catches a deleted or inserted interior row).
-    /// The first retained row's inbound link is intentionally NOT enforced:
-    /// retention prunes the oldest entries (a prefix) and that shifted start
-    /// is authorized. See `HashChainVerification` for the full scope.
+    ///   2. linkage — a row whose sequence_number is CONTIGUOUS with the
+    ///      preceding retained row (seq == previous.seq + 1) must chain to it
+    ///      (previous_hash == previous.currentHash).
+    ///
+    /// Linkage is enforced across contiguous rows only, NOT across gaps (audit
+    /// sec-storage-crypto). The earlier implementation assumed retention
+    /// deletes a clean sequence-number PREFIX, but retention prunes traces by
+    /// `traces.updated_at` (see pruneTraces / pruneOldestTraces) and
+    /// `sequence_number` is assigned in materialization order — the two orders
+    /// diverge (a trace's updated_at is bumped on status changes), so
+    /// authorized retention deletes INTERIOR chain rows and leaves gaps.
+    /// Enforcing linkage across such a gap produced a FALSE `.brokenLinkage`
+    /// on any host that had ever pruned. Treating a sequence gap as authorized
+    /// deletion removes that false positive; the cost is that a retention-style
+    /// interior deletion is (correctly) not treated as tampering. Content
+    /// integrity — recomputing each surviving row's hash — is unaffected and
+    /// still catches in-place edits and sequence-number reorders.
+    /// See `HashChainVerification` for the full scope.
     public func verifyHashChain() async throws -> HashChainVerification {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         let sql = """
@@ -1249,8 +1261,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     entriesChecked: checked
                 )
             }
-            // 2. Linkage — enforced for every row after the first retained one.
-            if let previous, entry.previousHash != previous.currentHash {
+            // 2. Linkage — enforced only across CONTIGUOUS sequence numbers.
+            // A gap (entry.seq > previous.seq + 1) is authorized retention
+            // (prune-by-updated_at deletes interior rows), not tampering, so
+            // its broken inbound link is not flagged. See the docstring.
+            if let previous,
+               entry.sequenceNumber == previous.sequenceNumber + 1,
+               entry.previousHash != previous.currentHash {
                 return HashChainVerification(
                     status: .brokenLinkage(atSequence: entry.sequenceNumber),
                     entriesChecked: checked
@@ -1609,8 +1626,15 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// ~= DB-size of scratch space, which is exactly the low-disk
     /// problem Wave 9B exists to work around. The size-cap caller
     /// pre-flights free space and skips this when too tight.
+    ///
+    /// One-shot auto_vacuum conversion (audit corr-storage): setting the
+    /// pragma just before VACUUM rewrites a legacy mode-0 (NONE) file into
+    /// INCREMENTAL, so subsequent incremental_vacuum calls actually reclaim
+    /// (previously this was the ONLY reclaim path on such a file). Idempotent
+    /// once already mode 2.
     public func vacuum() async throws {
         guard let db = db else { return }
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))

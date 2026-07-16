@@ -121,19 +121,54 @@ struct CausalGraphHashChainContinuityTests {
         await store.close()
     }
 
-    @Test("A deleted interior row is detected as a linkage break")
-    func deletedRowDetected() async throws {
+    @Test("A deleted interior row (retention gap) is TOLERATED, not a false linkage break")
+    func interiorGapToleratedAsRetention() async throws {
+        // audit sec-storage-crypto: retention prunes traces by updated_at,
+        // which does not track sequence_number order, so authorized retention
+        // deletes INTERIOR chain rows and leaves a sequence gap. Deleting seq 2
+        // leaves [1, 3] — a gap (3 != 1+1). verifyHashChain must NOT flag the
+        // broken link across that gap (the old behaviour false-flagged every
+        // host that had ever pruned). Content integrity of the survivors is
+        // untouched, so the chain verifies clean.
         let (store, path) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: path) }
         _ = try await appendN(store, 3)
 
-        // Delete the middle row: seq 3's previous_hash now points at a hash
-        // that no longer precedes it → linkage fails.
         tamper(path, "DELETE FROM trace_hash_chain WHERE sequence_number = 2")
 
         let result = try await store.verifyHashChain()
-        #expect(result.status == .brokenLinkage(atSequence: 3))
-        #expect(result.entriesChecked == 1)
+        #expect(result.status == .ok)
+        #expect(result.entriesChecked == 2)   // seq 1 and seq 3 both verified
+        await store.close()
+    }
+
+    @Test("A contiguous linkage break (spliced self-consistent row) is still detected")
+    func contiguousLinkageBreakStillDetected() async throws {
+        // Linkage enforcement survives for CONTIGUOUS rows: splice a forged row
+        // whose own current_hash recomputes (content passes) but whose
+        // previous_hash does not match its immediate predecessor. Because
+        // seq 2 stays contiguous with seq 1, the broken inbound link is flagged.
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let entries = try await appendN(store, 3)
+
+        let forgedPrev = "0000000000000000000000000000000000000000000000000000000000000000"
+        // Recompute a SELF-CONSISTENT current_hash for the tampered previous_hash
+        // so the content check passes and only linkage can catch it.
+        let forgedHash = TraceHashChainEntry.computeCurrentHash(
+            id: entries[1].id,
+            traceId: entries[1].traceId,
+            sequenceNumber: entries[1].sequenceNumber,
+            previousHash: forgedPrev,
+            eventId: entries[1].eventId,
+            edgeId: entries[1].edgeId,
+            createdAt: entries[1].createdAt
+        )
+        tamper(path, "UPDATE trace_hash_chain SET previous_hash = '\(forgedPrev)', current_hash = '\(forgedHash)' WHERE sequence_number = 2")
+
+        let result = try await store.verifyHashChain()
+        #expect(result.status == .brokenLinkage(atSequence: 2))
+        #expect(result.entriesChecked == 1)   // seq 1 verified before the break
         await store.close()
     }
 

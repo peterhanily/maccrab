@@ -509,20 +509,25 @@ public struct TraceHashChainEntry: Sendable, Equatable, Codable {
 
 /// Outcome of walking the on-DB continuity chain (`verifyHashChain()`).
 ///
-/// The chain detects three tamper classes on the retained rows:
+/// The chain detects these tamper classes on the retained rows:
 ///   - **content** — a row's `current_hash` no longer recomputes from its
 ///     stored fields (an in-place UPDATE, or a sequence-number swap / reorder).
-///   - **linkage** — a row's `previous_hash` does not equal the immediately
-///     preceding retained row's `current_hash` (a deleted or inserted row).
+///   - **linkage** — a row that is CONTIGUOUS with the preceding retained row
+///     (sequence_number == previous + 1) does not chain to it
+///     (`previous_hash` != previous `current_hash`).
 ///   - clean otherwise (also for the empty chain).
 ///
-/// Honest scope: the check tolerates a *shifted start* — the oldest retained
-/// row's back-link is not enforced, because retention prunes the oldest
-/// entries (a prefix) and that is authorized. Tail-truncation (deleting the
-/// newest rows) leaves the retained prefix internally consistent and is
-/// therefore NOT caught by the on-DB chain alone; it is bounded by the
-/// external unified-log witness and per-export daemon signature. Local root
-/// can rewrite the whole chain and is out of scope (see docs/THREAT_MODEL.md).
+/// Honest scope (audit sec-storage-crypto): linkage is enforced across
+/// contiguous sequence numbers only, NOT across gaps. Retention prunes traces
+/// by `updated_at`, which does not track `sequence_number` order, so authorized
+/// retention deletes INTERIOR chain rows and leaves gaps — enforcing linkage
+/// across a gap would false-flag every host that had ever pruned. Consequently
+/// a retention-style interior deletion is not, by itself, caught by the on-DB
+/// chain (nor is tail-truncation — deleting the newest rows leaves the survivors
+/// internally consistent); both are bounded by the external unified-log witness
+/// and the per-export daemon signature. Content integrity still catches
+/// in-place edits and reorders on every surviving row. Local root can rewrite
+/// the whole chain and is out of scope (see docs/THREAT_MODEL.md).
 public struct HashChainVerification: Sendable, Equatable {
 
     public enum Status: Sendable, Equatable {

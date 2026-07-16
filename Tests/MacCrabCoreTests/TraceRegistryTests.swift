@@ -381,3 +381,153 @@ struct TraceCorrelatorTests {
         #expect(event.enrichments[TraceCorrelator.EnrichmentKey.confidence] == "traceparent")
     }
 }
+
+// MARK: - rc.3 audit (corr-agent-traces): sliding TTL / eviction
+
+@Suite("TraceRegistry: sliding TTL reclaim")
+struct TraceRegistryTTLTests {
+
+    @Test("Idle binding past TTL is reclaimed at lookup; ttlEvictions increments; not a recycle")
+    func idleExpiresAtLookup() async {
+        let reg = TraceRegistry(bindingTTL: 60)
+        let t0 = Date()
+        let id = ProcessIdentity.make(pid: 1)
+        await reg.bind(
+            TraceRegistry.Binding(identity: id, context: .canonical, agentTool: .claudeCode, boundAt: t0),
+            now: t0
+        )
+        // Within TTL → hit (and slides boundAt forward to t0+30).
+        #expect(await reg.lookupDirect(identity: id, now: t0.addingTimeInterval(30)) != nil)
+        // 50 s after the last refresh (< 60 TTL) → still a hit (sliding window).
+        #expect(await reg.lookupDirect(identity: id, now: t0.addingTimeInterval(80)) != nil)
+        // 120 s idle since the last refresh (t0+80) → expired, reclaimed.
+        #expect(await reg.lookupDirect(identity: id, now: t0.addingTimeInterval(200)) == nil)
+        #expect(await reg.count() == 0)
+        let m = await reg.metricsSnapshot()
+        #expect(m.ttlEvictions == 1)
+        #expect(m.pidRecycleRejected == 0) // expiry is not a recycle rejection
+    }
+
+    @Test("sweepExpired reclaims all idle bindings and returns the count")
+    func sweepExpiredReclaims() async {
+        let reg = TraceRegistry(bindingTTL: 60)
+        let t0 = Date()
+        for i in 1...5 {
+            let id = ProcessIdentity.make(pid: pid_t(i))
+            await reg.bind(
+                TraceRegistry.Binding(identity: id, context: .canonical, agentTool: .claudeCode, boundAt: t0),
+                now: t0
+            )
+        }
+        #expect(await reg.count() == 5)
+        let reclaimed = await reg.sweepExpired(now: t0.addingTimeInterval(120))
+        #expect(reclaimed == 5)
+        #expect(await reg.count() == 0)
+        #expect(await reg.metricsSnapshot().ttlEvictions == 5)
+    }
+
+    @Test("bindingTTL <= 0 disables expiry (pre-audit behaviour)")
+    func ttlDisabled() async {
+        let reg = TraceRegistry(bindingTTL: 0)
+        let t0 = Date()
+        let id = ProcessIdentity.make(pid: 1)
+        await reg.bind(
+            TraceRegistry.Binding(identity: id, context: .canonical, agentTool: .claudeCode, boundAt: t0),
+            now: t0
+        )
+        // Far past any plausible TTL — still present because TTL is off.
+        #expect(await reg.lookupDirect(identity: id, now: t0.addingTimeInterval(86_400)) != nil)
+        #expect(await reg.sweepExpired(now: t0.addingTimeInterval(86_400)) == 0)
+    }
+}
+
+// MARK: - rc.3 audit (corr-agent-traces, finding F): recycle-counter gating
+
+@Suite("TraceRegistry: pidRecycleRejected only counts real (non-zero-pidversion) tokens")
+struct TraceRegistryRecycleCounterGateTests {
+
+    @Test("Direct mismatch from a zeroed-pidversion identity is NOT counted")
+    func zeroedDirectNotCounted() async {
+        let reg = TraceRegistry()
+        let real = ProcessIdentity.make(pid: 42, pidversion: 7)
+        await reg.bind(TraceRegistry.Binding(identity: real, context: .canonical, agentTool: .claudeCode))
+        // Same pid, zeroed token (the non-ES / degraded-source shape).
+        let zeroed = makeZeroedIdentity(pid: 42)
+        #expect(await reg.lookupDirect(identity: zeroed) == nil)
+        #expect(await reg.metricsSnapshot().pidRecycleRejected == 0)
+    }
+
+    @Test("Ancestor mismatch from a zeroed-pidversion resolver is NOT counted")
+    func zeroedAncestorNotCounted() async {
+        let reg = TraceRegistry()
+        let parent = ProcessIdentity.make(pid: 50, pidversion: 5, path: "/usr/local/bin/claude")
+        await reg.bind(TraceRegistry.Binding(identity: parent, context: .canonical, agentTool: .claudeCode))
+        let child = ProcessIdentity.make(pid: 51, path: "/bin/bash")
+        let anc = ProcessAncestor(pid: 50, executable: "/usr/local/bin/claude", name: "claude")
+        // Production lineage resolver shape: zeroed pidversion for the bound pid.
+        let zeroedAnc = makeZeroedIdentity(pid: 50)
+        let res = await reg.lookup(
+            forIdentity: child,
+            ancestors: [anc],
+            ancestorIdentity: { _ in zeroedAnc }
+        )
+        #expect(res == nil)
+        #expect(await reg.metricsSnapshot().pidRecycleRejected == 0)
+    }
+
+    @Test("Real recycle (non-zero pidversion mismatch) IS still counted")
+    func realRecycleStillCounted() async {
+        let reg = TraceRegistry()
+        let original = ProcessIdentity.make(pid: 42, pidversion: 7)
+        await reg.bind(TraceRegistry.Binding(identity: original, context: .canonical, agentTool: .claudeCode))
+        let recycled = ProcessIdentity.make(pid: 42, pidversion: 8)
+        #expect(await reg.lookupDirect(identity: recycled) == nil)
+        #expect(await reg.metricsSnapshot().pidRecycleRejected == 1)
+    }
+}
+
+// MARK: - rc.3 audit (corr-agent-traces): nonisolated hasBindingsHint
+
+@Suite("TraceRegistry: hasBindingsHint nonisolated fast-path")
+struct TraceRegistryHintTests {
+
+    @Test("Hint is false when empty, true after bind, false after evict")
+    func hintTracksEmptiness() async {
+        let reg = TraceRegistry()
+        #expect(reg.hasBindingsHint == false)
+        let id = ProcessIdentity.make(pid: 1)
+        await reg.bind(TraceRegistry.Binding(identity: id, context: .canonical, agentTool: .claudeCode))
+        #expect(reg.hasBindingsHint == true)
+        await reg.evict(pid: 1)
+        #expect(reg.hasBindingsHint == false)
+    }
+
+    @Test("Hint drops to false once the last binding expires")
+    func hintFalseAfterExpiry() async {
+        let reg = TraceRegistry(bindingTTL: 60)
+        let t0 = Date()
+        let id = ProcessIdentity.make(pid: 1)
+        await reg.bind(
+            TraceRegistry.Binding(identity: id, context: .canonical, agentTool: .claudeCode, boundAt: t0),
+            now: t0
+        )
+        #expect(reg.hasBindingsHint == true)
+        _ = await reg.sweepExpired(now: t0.addingTimeInterval(120))
+        #expect(reg.hasBindingsHint == false)
+    }
+}
+
+/// A zeroed-pidversion ProcessIdentity — the degraded shape the lineage
+/// ancestor resolvers and non-ES event sources build. Collides on the pid
+/// lookup key but can never equal a real audit token.
+private func makeZeroedIdentity(pid: pid_t, path: String = "/usr/local/bin/claude") -> ProcessIdentity {
+    ProcessIdentity(
+        auditIdentity: AuditIdentity(
+            auid: 0, euid: 0, egid: 0, ruid: 0, rgid: 0,
+            pid: Int32(pid), pidversion: 0, asid: 0
+        ),
+        pathHash: ProcessIdentity.fnv1a64(path),
+        pid: pid,
+        startTime: 0
+    )
+}

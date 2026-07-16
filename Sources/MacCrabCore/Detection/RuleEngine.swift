@@ -497,6 +497,16 @@ public actor RuleEngine {
             regexAccessSeq[pattern] = regexAccessCounter
             return cached
         }
+        // v1.21.4 (corr-detection #271): `.caseInsensitive` is a DELIBERATE
+        // engine-wide choice, NOT Sigma's `|re` default (which is
+        // case-sensitive). Every string modifier in this engine folds case
+        // (equals/contains/startswith/endswith all lowercase both sides — see
+        // evaluateModifier), so forcing regex case-insensitive keeps `|re`
+        // consistent with the rest of the rule surface. A rule author who needs
+        // a case-sensitive sub-match can opt back in with an inline ICU flag
+        // group — `(?-i:Malware)` — which NSRegularExpression honors and which
+        // overrides this base option for its scope. (No compiler-emitted
+        // per-predicate case flag exists; adding one is a Compiler/ change.)
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             logger.warning("Failed to compile regex pattern: \(pattern)")
             return nil
@@ -782,9 +792,22 @@ public actor RuleEngine {
             throw RuleEngineError.ruleCountRegression(loaded: count, previous: snapshotRules.count)
         }
 
-        // Restore enabled state for rules that were previously disabled.
+        // v1.21.4 (corr-detection #276): a successful reload is the operator's
+        // explicit "try again" — clear the runtime eval-budget guard so rules
+        // it auto-disabled (suspected pathological/ReDoS) get a fresh start.
+        // Without this, a rule the guard silenced under transient load stayed
+        // disabled forever (the reload restore below re-applied its false
+        // `enabled == false`), so even a SIGHUP couldn't recover it. Operator-
+        // or profile-disabled rules are NOT in `autoDisabledRules`, so they are
+        // still honored by the restore loop.
+        let previouslyAutoDisabled = autoDisabledRules
+        ruleBudgetBreaches.removeAll()
+        autoDisabledRules.removeAll()
+
+        // Restore enabled state for rules that were previously disabled — except
+        // ones the runtime guard auto-disabled, which are being given a clean slate.
         for (ruleId, wasEnabled) in previousEnabledState {
-            if var rule = allRules[ruleId], !wasEnabled {
+            if var rule = allRules[ruleId], !wasEnabled, !previouslyAutoDisabled.contains(ruleId) {
                 rule.enabled = false
                 allRules[ruleId] = rule
                 // Update in index as well.
@@ -835,6 +858,17 @@ public actor RuleEngine {
                 if shouldAutoDisable(elapsedNs: elapsed, breaches: breaches) {
                     rulesToDisable.append((rule.id, rule.title, ms, breaches))
                 }
+            } else if ruleBudgetBreaches[rule.id] != nil {
+                // v1.21.4 (corr-detection #276): the cumulative-breach path is
+                // CONSECUTIVE, not lifetime. A single under-budget eval clears
+                // the running count so a benign rule that only occasionally
+                // spikes (build/npm floods, thermal throttling) can never crawl
+                // to autoDisableMaxBreaches over hours and get permanently
+                // silenced. Only a rule that stays over budget for N evals IN A
+                // ROW is disabled; the single-catastrophic ReDoS path
+                // (elapsed >= autoDisablePathologicalNs) still trips immediately
+                // above, independent of this counter.
+                ruleBudgetBreaches[rule.id] = nil
             }
 
             if fired {
@@ -878,6 +912,16 @@ public actor RuleEngine {
         let category = rule.logsource.category
         if let idx = ruleIndex[category]?.firstIndex(where: { $0.id == ruleId }) {
             ruleIndex[category]?[idx] = rule
+        }
+
+        // v1.21.4 (corr-detection #276): an explicit re-enable is the operator's
+        // (or CLI/MCP's) "this rule is fine again" — fully reset the runtime
+        // eval-budget guard for it so a stale breach count can't immediately
+        // re-trip the auto-disable. Only on enable; the guard itself calls this
+        // with `false` and must not clear its own bookkeeping.
+        if enabled {
+            ruleBudgetBreaches[ruleId] = nil
+            autoDisabledRules.remove(ruleId)
         }
     }
 
@@ -976,10 +1020,10 @@ public actor RuleEngine {
 
         // For the "exists" modifier we only check field presence.
         if predicate.modifier == .exists {
-            let fieldValue = resolveField(predicate.field, from: event)
+            let fieldValue = Self.resolveField(predicate.field, from: event)
             rawResult = fieldValue?.isEmpty == false
         } else {
-            guard let fieldValue = resolveField(predicate.field, from: event) else {
+            guard let fieldValue = Self.resolveField(predicate.field, from: event) else {
                 // Field not present on event -- no match (unless negated).
                 rawResult = false
                 return predicate.negate ? !rawResult : rawResult
@@ -1076,7 +1120,16 @@ public actor RuleEngine {
     /// Supports both ECS-style paths (`process.executable`) and legacy Sigma
     /// field names (`Image`, `CommandLine`, `ParentImage`, etc.).
     /// Returns `nil` when the field is not present or not applicable.
-    private func resolveField(_ path: String, from event: Event) -> String? {
+    ///
+    /// v1.21.4 (corr-detection #275): `static` so `SequenceEngine.resolveField`
+    /// can delegate to this ONE canonical alias table instead of keeping a
+    /// hand-copy that silently drifted — a divergent copy dead-lettered any
+    /// sequence rule predicating on an alias only RuleEngine knew (root cause of
+    /// #11, where FileAction/Architecture/NotarizationStatus were missing).
+    /// Static members of an actor are nonisolated, so the cross-engine call is
+    /// synchronous and lock-free (this is a pure function of path + event, with
+    /// no engine state).
+    static func resolveField(_ path: String, from event: Event) -> String? {
         switch path {
 
         // --- Process fields ---

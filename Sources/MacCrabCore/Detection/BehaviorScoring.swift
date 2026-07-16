@@ -207,6 +207,20 @@ public actor BehaviorScoring {
         "sigma_rule_match_medium":      2.0,
         "sigma_rule_match_high":        4.0,
         "sigma_rule_match_critical":    6.0,
+
+        // v1.21.4 (deep-audit corr-campaign-anomaly): indicators the live
+        // pipeline actually emits (EventLoop / MonitorTasks) that previously had
+        // NO table entry and so silently used the 3.0 `effectiveWeight` default —
+        // un-tuned and invisible to the feedback-weight machinery. Explicit
+        // entries make each one tunable, and `BehaviorScoringIndicatorTests`
+        // asserts every emitted indicator name has an entry here.
+        "high_entropy_commandline":      3.0,   // aligned with obfuscated_commandline
+        "not_notarized":                 2.0,   // weaker than unsigned_binary (much legit software isn't notarized)
+        "ai_tool_unapproved_network":    2.0,   // the chatty indicator the 120s cooldown targets
+        "mcp_server_suspicious":         4.0,
+        "anomalous_process_tree":        4.0,   // ProcessTreeAnalyzer Markov tree anomaly
+        "statistical_frequency_anomaly": 3.0,   // StatisticalAnomalyDetector z-score drift
+        "fresh_package_install":         2.0,   // supply-chain freshness breadcrumb
     ]
 
     // MARK: - Weight Adjustment (learning from suppression feedback)
@@ -464,10 +478,21 @@ public actor BehaviorScoring {
 
     private func applyDecay(for key: ProcessKey) {
         guard var score = processScores[key] else { return }
-        let elapsed = Date().timeIntervalSince(score.lastUpdate)
+        let now = Date()
+        let elapsed = now.timeIntervalSince(score.lastUpdate)
         if elapsed > 0 {
             let decayFactor = pow(0.5, elapsed / decayHalfLife)
             score.rawScore *= decayFactor
+            // Advance the decay clock every time decay is applied. `applyDecay`
+            // runs on EVERY addIndicator call — including cooldown-suppressed
+            // calls that return early (below) without reaching the successful-add
+            // path that sets `lastUpdate`. Without resetting the clock here, each
+            // suppressed call re-decays from the same stale `lastUpdate`, so the
+            // decay compounds quadratically (0.5^(Σ elapsed) instead of one
+            // 0.5^(elapsed) step) and crushes the score far below its true value —
+            // a slow-burn process whose one indicator repeats (the exact case the
+            // 120s cooldown was added for) never reaches alertThreshold.
+            score.lastUpdate = now
             processScores[key] = score
         }
     }

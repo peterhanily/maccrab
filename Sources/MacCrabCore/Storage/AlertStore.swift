@@ -1149,11 +1149,13 @@ public actor AlertStore {
     // path on low-disk hosts where a full VACUUM can't get the
     // 1.3× scratch space it needs.
     //
-    // Returns pages physically removed from the file. Zero on
-    // pre-v1.10 alerts.db files that never had the one-shot
-    // VACUUM-to-INCREMENTAL conversion run; in that case the caller
-    // logs the gap but the file simply won't shrink between full
-    // VACUUMs (read-only DBs return 0 with no error).
+    // Returns pages physically removed from the file. Zero on a
+    // legacy alerts.db still in auto_vacuum mode 0 (NONE) — a file
+    // created before applyAlertStorePragmas set INCREMENTAL, which
+    // the pragma alone cannot flip on a populated DB. `vacuum()`
+    // below now performs the one-shot conversion on its next run,
+    // so the mode-0 window closes the first time a full VACUUM runs
+    // (read-only DBs return 0 with no error).
     @discardableResult
     public func incrementalVacuum(maxPages: Int) async throws -> Int {
         guard let db = db else { return 0 }
@@ -1169,6 +1171,12 @@ public actor AlertStore {
     /// once disk frees up).
     public func vacuum() async throws {
         guard let db = db else { return }
+        // One-shot auto_vacuum conversion (audit corr-storage): setting the
+        // pragma just before VACUUM rewrites a legacy mode-0 (NONE) alerts.db
+        // into INCREMENTAL, so incrementalVacuum() (the low-disk reclaim path)
+        // stops being a permanent no-op on upgraded installs. Idempotent once
+        // the file is already mode 2. See StoragePragmas ordering note.
+        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))

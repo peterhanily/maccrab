@@ -162,4 +162,65 @@ struct SequenceEngineFireTests {
         #expect(loaded == jsonCount,
                 "sequence rules silently dropped at load: \(loaded)/\(jsonCount) — a step uses a token the engine can't decode (unknown ProcessRelation/correlation). See SequenceEngine load catch.")
     }
+
+    // MARK: - #95: out-of-order (A2 cross-consumer) backfill
+
+    /// procEvent with an explicit event timestamp so a test can decouple the
+    /// event's REAL time (what ordering checks) from its delivery order (which
+    /// `evaluate` call comes first).
+    private func procEventAt(_ exec: String, pid: Int32, ts: Date) -> Event {
+        Event(timestamp: ts, eventCategory: .process, eventType: .start,
+              eventAction: "exec", process: proc(exec, pid: pid))
+    }
+
+    @Test("#95: ordered sequence still completes when the LATER step is DELIVERED before the initial step")
+    func outOfOrderBackfillCompletes() async throws {
+        // Models the A2 split: `download` (file consumer) lags, so `execute`
+        // (priority consumer) reaches evaluate() first — but its REAL event time
+        // is still after the download's. The backfill buffer + replay must
+        // assemble the chain once the initial step finally seeds a partial.
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(dlExecRule(id: "seq-ooo", window: 600))
+        let t0 = Date()
+        let downloadTs = t0
+        let executeTs = t0.addingTimeInterval(1)   // execute genuinely happened AFTER download
+
+        // Delivery order reversed: the later step arrives first.
+        let early = await engine.evaluate(procEventAt("/tmp/payload", pid: 100, ts: executeTs))
+        #expect(!early.contains { $0.ruleId == "seq-ooo" },
+                "the later step alone must not complete the sequence")
+
+        let final = await engine.evaluate(procEventAt("/usr/bin/curl", pid: 100, ts: downloadTs))
+        #expect(final.contains { $0.ruleId == "seq-ooo" },
+                "out-of-order later step must be backfilled once the initial step seeds the partial")
+    }
+
+    @Test("#95: backfill preserves timestamp ordering — a later step whose REAL time precedes the initial step must NOT complete")
+    func outOfOrderBackfillRespectsTimestamps() async throws {
+        // Even under delivery inversion, ordered-mode semantics hold: if the
+        // buffered step's real event time is BEFORE the initial step, it is not
+        // a valid step[1] and the chain must stay open (no false completion).
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(dlExecRule(id: "seq-ooo-neg", window: 600))
+        let t0 = Date()
+        // execute's real time is BEFORE download's — invalid ordering.
+        let early = await engine.evaluate(procEventAt("/tmp/payload", pid: 100, ts: t0))
+        _ = early
+        let final = await engine.evaluate(procEventAt("/usr/bin/curl", pid: 100, ts: t0.addingTimeInterval(1)))
+        #expect(!final.contains { $0.ruleId == "seq-ooo-neg" },
+                "a buffered step older than the initial step must not complete the ordered chain")
+    }
+
+    @Test("#95: a buffered later step older than the window is pruned and cannot complete")
+    func outOfOrderBackfillWindowExpiry() async throws {
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(dlExecRule(id: "seq-ooo-exp", window: 0.1))
+        // Deliver the later step, then let the buffer window lapse before the
+        // initial step arrives.
+        _ = await engine.evaluate(procEvent("/tmp/payload", pid: 100))
+        try await Task.sleep(nanoseconds: 300_000_000)   // 0.3 s > 0.1 s window
+        let final = await engine.evaluate(procEvent("/usr/bin/curl", pid: 100))
+        #expect(!final.contains { $0.ruleId == "seq-ooo-exp" },
+                "an expired buffered step must have been pruned and cannot backfill")
+    }
 }

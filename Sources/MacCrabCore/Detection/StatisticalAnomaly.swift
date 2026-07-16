@@ -61,13 +61,14 @@ public actor StatisticalAnomalyDetector {
 
     struct ProcessStats {
         var eventFrequency: RunningStats = .init()    // events per minute
-        var connectionRate: RunningStats = .init()     // connections per minute
-        var fileWriteRate: RunningStats = .init()      // file writes per minute
         var argCount: RunningStats = .init()           // argument count
         var argEntropy: RunningStats = .init()         // command-line entropy
         var lastEventTime: Date?
-        var eventCountInWindow: Int = 0
-        var windowStart: Date = Date()
+        // v1.21.4 (deep-audit corr-campaign-anomaly): removed four orphaned
+        // fields (connectionRate, fileWriteRate, eventCountInWindow, windowStart)
+        // that were never read or updated — they implied connection/file-write
+        // -rate coverage this detector does not have. Only event-frequency, arg
+        // count, and command-line entropy are actually tracked (see processEvent).
     }
 
     /// Result of a statistical anomaly check.

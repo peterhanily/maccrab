@@ -250,6 +250,13 @@ enum SignalHandlers {
                 // TIME_WAIT, which would make the next start fail to
                 // bind 4318. Cheap (no new actor hops) and idempotent.
                 await state.otlpReceiver?.stop()
+                // v1.21.4 (audit): flush the batched events writer BEFORE exit —
+                // the F2/A1 writer buffers up to flushThreshold/250ms of events,
+                // and the driveSource tasks never end on their own, so
+                // runEventLoop's post-stream shutdown flush is unreachable on a
+                // signal. Without this, the last partial batch is lost on every
+                // graceful SIGTERM/SIGINT (a regression vs the pre-F2 sync write).
+                await state.eventWriter.shutdown()
                 await supervisor.shutdown(deadline: 3.0)
                 exit(0)
             }
