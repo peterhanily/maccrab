@@ -325,10 +325,14 @@ private struct V2SidebarItem: View {
                         .scaledSystem(13.5, weight: isActive ? .semibold : .medium)
                         .foregroundStyle(textColor)
                     Spacer(minLength: 0)
-                    Text("⌘\(workspace.keyboardIndex)")
-                        .scaledSystem(11)
-                        .foregroundStyle(isActive ? V2Theme.mutedText : V2Theme.tertiaryText)
-                        .monospacedDigit()
+                    // Only 1–9 are real ⌘ shortcuts (see V2DashboardShell); don't
+                    // advertise "⌘10" for Docs — it has no keyboard shortcut.
+                    if workspace.keyboardIndex <= 9 {
+                        Text("⌘\(workspace.keyboardIndex)")
+                            .scaledSystem(11)
+                            .foregroundStyle(isActive ? V2Theme.mutedText : V2Theme.tertiaryText)
+                            .monospacedDigit()
+                    }
                 }
             }
             .padding(.horizontal, collapsed ? 6 : 10)
@@ -344,12 +348,14 @@ private struct V2SidebarItem: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help(collapsed ? workspace.title + "  ⌘\(workspace.keyboardIndex)" : "")
+        .help(collapsed ? workspace.title + (workspace.keyboardIndex <= 9 ? "  ⌘\(workspace.keyboardIndex)" : "") : "")
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
         .accessibilityLabel(String(localized: "sidebar.ax.workspace",
                                    defaultValue: "\(workspace.title) workspace"))
-        .accessibilityHint(String(localized: "sidebar.ax.workspaceHint",
-                                  defaultValue: "Command \(workspace.keyboardIndex)"))
+        .accessibilityHint(workspace.keyboardIndex <= 9
+                           ? String(localized: "sidebar.ax.workspaceHint",
+                                    defaultValue: "Command \(workspace.keyboardIndex)")
+                           : "")
     }
 
     // Mac-style accent on the active row: brand-tinted bg + brand

@@ -17,6 +17,13 @@ import MacCrabForensics
 struct V2ForensicsFindingsView: View {
     @State private var loading = true
     @State private var groups: [ScanGroup] = []
+    // Set when listCases() itself throws (disk error / corruption) — distinct
+    // from a genuinely-empty install, which shows "No findings yet."
+    @State private var loadError: String? = nil
+    // Number of scans skipped this refresh because their evidence DB couldn't
+    // be opened/queried (locked / corrupt / migrating). One bad scan no longer
+    // blanks the whole feed.
+    @State private var skippedScanCount = 0
     @State private var scannerFilter: String = "all"
     @State private var severityFilter: FindingSeverity? = nil
     @State private var copiedFindingID: Int64? = nil
@@ -68,8 +75,13 @@ struct V2ForensicsFindingsView: View {
                     ProgressView(String(localized: "findings.loading", defaultValue: "Loading findings…"))
                         .frame(maxWidth: .infinity)
                         .padding(40)
+                } else if let err = loadError {
+                    errorState(err)
                 } else if groups.isEmpty {
                     emptyState
+                    if skippedScanCount > 0 {
+                        skippedFootnote
+                    }
                 } else {
                     severitySummaryCard
                     if !allScanners.isEmpty {
@@ -77,6 +89,9 @@ struct V2ForensicsFindingsView: View {
                     }
                     ForEach(filteredGroups, id: \.scanID) { g in
                         scanGroupCard(g)
+                    }
+                    if skippedScanCount > 0 {
+                        skippedFootnote
                     }
                 }
             }
@@ -120,6 +135,44 @@ struct V2ForensicsFindingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
+    }
+
+    private func errorState(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(String(localized: "findings.errorTitle", defaultValue: "Couldn't load findings")).font(.headline)
+            }
+            Text(message)
+                .scaledSystem(12)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(String(localized: "findings.retry", defaultValue: "Retry")) {
+                Task { await reload() }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    /// Footnote shown when one or more scans couldn't be opened/queried during
+    /// the passive refresh. The rest of the feed still renders.
+    private var skippedFootnote: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .scaledSystem(10)
+                .foregroundStyle(.orange)
+            Text(String(localized: "findings.skippedNote", defaultValue: "\(skippedScanCount) scan\(skippedScanCount == 1 ? "" : "s") couldn't be read and were skipped. Open them from the Scans tab to see why."))
+                .scaledSystem(10)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 4)
     }
 
     private var scannerFilterBar: some View {
@@ -336,6 +389,7 @@ struct V2ForensicsFindingsView: View {
     private func reload() async {
         loading = true
         var collected: [ScanGroup] = []
+        var skipped = 0
         do {
             let mgr = CaseManager(
                 casesRoot: CaseDirectoryLayout.defaultCasesRoot,
@@ -347,25 +401,38 @@ struct V2ForensicsFindingsView: View {
             // Plaintext scans only — encrypted scans require an
             // explicit Unlock action via Scans → View.
             for scan in scans.prefix(20) where scan.encryptionState == .plaintext {
-                let handle = try await mgr.openCase(id: scan.id)
-                let rows = try await handle.store.query(ArtifactQuery(
-                    caseID: scan.id,
-                    limit: 200
-                ))
-                let filtered = OperatorVisibilityFilter.filter(rows)
-                if !filtered.isEmpty {
-                    collected.append(ScanGroup(
-                        scanID: scan.id,
-                        scanName: scan.name,
-                        createdAt: scan.createdAt,
-                        findings: filtered.sorted { $0.record.observedAt > $1.record.observedAt }
+                // Per-scan do/catch: one corrupt/locked evidence DB used to
+                // jump to the outer catch and blank every group (and abort the
+                // remaining scans). Skip the bad scan and keep going instead.
+                do {
+                    let handle = try await mgr.openCase(id: scan.id)
+                    let rows = try await handle.store.query(ArtifactQuery(
+                        caseID: scan.id,
+                        limit: 200
                     ))
+                    let filtered = OperatorVisibilityFilter.filter(rows)
+                    if !filtered.isEmpty {
+                        collected.append(ScanGroup(
+                            scanID: scan.id,
+                            scanName: scan.name,
+                            createdAt: scan.createdAt,
+                            findings: filtered.sorted { $0.record.observedAt > $1.record.observedAt }
+                        ))
+                    }
+                } catch {
+                    skipped += 1
+                    continue
                 }
             }
+            loadError = nil
         } catch {
-            collected = []
+            // The case listing itself failed (disk error / corruption) — this
+            // is distinct from a genuinely-empty install, so surface it instead
+            // of showing "No findings yet."
+            loadError = String(localized: "findings.loadErrorBody", defaultValue: "Couldn't read scans: \(error.localizedDescription)")
         }
         groups = collected
+        skippedScanCount = skipped
         loading = false
     }
 }

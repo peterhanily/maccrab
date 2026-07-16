@@ -177,58 +177,98 @@ public struct V2SystemWorkspace: View {
     /// real values. When absent (no daemon), shows an honest "—".
     private var healthSummaryRow: some View {
         let h = heartbeat
-        let collectorCount = h?.collectors.count ?? 0
-        let allHealthy = (h?.collectors.allSatisfy { $0.healthy }) ?? false
+        // v1.21.4 B2/B3: `readFreshest()` only nils heartbeats >300s old, so a
+        // 120–300s-old heartbeat is returned non-nil. Gate live/green on the
+        // canonical 120s `isStale`, not on the snapshot merely existing — a
+        // 2–5 min outage must read "Stale", not "Running".
+        let stale = h?.isStale ?? false          // present but >120s old
+        let live = h != nil && !stale
+        let staleAgeMin = (h?.ageSeconds ?? 0) / 60
+        // B3: `[].allSatisfy` is vacuously true — zero collectors = no event
+        // sources = NOT healthy. Only green on a fresh, non-empty, all-healthy set.
+        let collectors = h?.collectors ?? []
+        let collectorCount = collectors.count
+        let collectorsAllHealthy = !collectors.isEmpty && collectors.allSatisfy { $0.healthy }
+        let collectorsKind: V2ChipKind
+        let collectorsTrend: String
+        if h == nil {
+            collectorsKind = .neutral
+            collectorsTrend = "—"
+        } else if collectorCount == 0 {
+            collectorsKind = .warning
+            collectorsTrend = String(localized: "system.collectorsNone", defaultValue: "no event sources")
+        } else if stale {
+            collectorsKind = .warning
+            collectorsTrend = String(localized: "system.collectorsStale", defaultValue: "stale")
+        } else if collectorsAllHealthy {
+            collectorsKind = .healthy
+            collectorsTrend = String(localized: "system.collectorsAllHealthy", defaultValue: "all healthy")
+        } else {
+            collectorsKind = .warning
+            collectorsTrend = String(localized: "system.collectorsDegraded", defaultValue: "degraded")
+        }
         let eventsTotal = h.map { fmtCount($0.eventsProcessed) } ?? "—"
         let alertsTotal = h.map { fmtCount($0.alertsEmitted) } ?? "—"
         let memMB = h?.residentMemoryMB.map { "\($0) MB" } ?? "—"
         let rate = h.map { String(format: "%.1f /s", $0.eventsPerSecond1h) } ?? "—"
+        // When the heartbeat is stale, every "since boot / resident / 1h" card
+        // below is a frozen snapshot — flag it rather than present it as live.
+        let staleSuffix = stale ? " · " + String(localized: "system.metricStale", defaultValue: "stale") : ""
+        func liveKind(_ base: V2ChipKind) -> V2ChipKind { stale ? .warning : base }
         return HStack(spacing: 12) {
             metricCard(
                 title: String(localized: "system.metricDaemon", defaultValue: "Daemon"),
-                value: h == nil ? String(localized: "system.daemonOffline", defaultValue: "Offline") : String(localized: "system.daemonRunning", defaultValue: "Running"),
-                trend: h.map { String(localized: "system.daemonUptime", defaultValue: "uptime \($0.uptimeDisplay)") } ?? String(localized: "system.daemonNoHeartbeat", defaultValue: "no heartbeat"),
-                trendKind: h == nil ? .high : .healthy,
-                icon: h == nil ? "exclamationmark.shield.fill" : "checkmark.shield.fill",
-                iconColor: h == nil ? V2Theme.high : V2Theme.healthy
+                value: h == nil
+                    ? String(localized: "system.daemonOffline", defaultValue: "Offline")
+                    : (stale
+                        ? String(localized: "system.daemonStale", defaultValue: "Stale (\(staleAgeMin)m ago)")
+                        : String(localized: "system.daemonRunning", defaultValue: "Running")),
+                trend: h == nil
+                    ? String(localized: "system.daemonNoHeartbeat", defaultValue: "no heartbeat")
+                    : (stale
+                        ? String(localized: "system.daemonStaleTrend", defaultValue: "no recent heartbeat")
+                        : (h.map { String(localized: "system.daemonUptime", defaultValue: "uptime \($0.uptimeDisplay)") } ?? "")),
+                trendKind: h == nil ? .high : (stale ? .warning : .healthy),
+                icon: live ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
+                iconColor: h == nil ? V2Theme.high : (stale ? V2Theme.warning : V2Theme.healthy)
             )
             metricCard(
                 title: String(localized: "system.metricCollectors", defaultValue: "Collectors"),
                 value: h == nil ? "—" : "\(collectorCount)",
-                trend: h == nil ? "—" : (allHealthy ? String(localized: "system.collectorsAllHealthy", defaultValue: "all healthy") : String(localized: "system.collectorsDegraded", defaultValue: "degraded")),
-                trendKind: allHealthy ? .healthy : .warning,
+                trend: collectorsTrend,
+                trendKind: collectorsKind,
                 icon: "antenna.radiowaves.left.and.right",
-                iconColor: allHealthy ? V2Theme.healthy : V2Theme.warning
+                iconColor: collectorsKind.color
             )
             metricCard(
                 title: String(localized: "system.metricEventRate", defaultValue: "Event rate"),
                 value: rate,
-                trend: String(localized: "system.eventRate1h", defaultValue: "1h rolling"),
-                trendKind: .info,
+                trend: String(localized: "system.eventRate1h", defaultValue: "1h rolling") + staleSuffix,
+                trendKind: liveKind(.info),
                 icon: "waveform.path",
                 iconColor: V2Theme.dataAccent
             )
             metricCard(
                 title: String(localized: "system.metricEventsLifetime", defaultValue: "Events (lifetime)"),
                 value: eventsTotal,
-                trend: String(localized: "system.sinceBootEvents", defaultValue: "since boot"),
-                trendKind: .info,
+                trend: String(localized: "system.sinceBootEvents", defaultValue: "since boot") + staleSuffix,
+                trendKind: liveKind(.info),
                 icon: "tray.full.fill",
                 iconColor: V2Theme.dataAccent
             )
             metricCard(
                 title: String(localized: "system.metricAlertsLifetime", defaultValue: "Alerts (lifetime)"),
                 value: alertsTotal,
-                trend: String(localized: "system.sinceBootAlerts", defaultValue: "since boot"),
-                trendKind: h == nil ? .neutral : .info,
+                trend: String(localized: "system.sinceBootAlerts", defaultValue: "since boot") + staleSuffix,
+                trendKind: h == nil ? .neutral : liveKind(.info),
                 icon: "bell.fill",
                 iconColor: V2Theme.high
             )
             metricCard(
                 title: String(localized: "system.metricMemory", defaultValue: "Memory"),
                 value: memMB,
-                trend: String(localized: "system.memoryResident", defaultValue: "resident"),
-                trendKind: .healthy,
+                trend: String(localized: "system.memoryResident", defaultValue: "resident") + staleSuffix,
+                trendKind: liveKind(.healthy),
                 icon: "memorychip.fill",
                 iconColor: V2Theme.healthy
             )

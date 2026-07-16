@@ -124,6 +124,11 @@ struct JSONNodeView: View {
     let value: JSONValue
     let depth: Int
 
+    /// Cap recursion so a pathologically deep artifact payload (plugin output
+    /// is arbitrary, and JSONValue is an indirect enum) can't overflow the
+    /// stack building the view tree on the main thread.
+    static let maxDepth = 12
+
     private let leafFont = Font.system(size: 10, design: .monospaced)
 
     var body: some View {
@@ -139,25 +144,33 @@ struct JSONNodeView: View {
         case .null:
             Text("null").font(leafFont).foregroundStyle(.tertiary)
         case .array(let arr):
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(Array(arr.enumerated()), id: \.offset) { idx, item in
-                    HStack(alignment: .top, spacing: 4) {
-                        Text("[\(idx)]").font(leafFont).foregroundStyle(.tertiary)
-                        JSONNodeView(value: item, depth: depth + 1)
+            if depth >= Self.maxDepth {
+                Text("[…] (\(arr.count) items, max depth)").font(leafFont).foregroundStyle(.tertiary)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(arr.enumerated()), id: \.offset) { idx, item in
+                        HStack(alignment: .top, spacing: 4) {
+                            Text("[\(idx)]").font(leafFont).foregroundStyle(.tertiary)
+                            JSONNodeView(value: item, depth: depth + 1)
+                        }
                     }
                 }
+                .padding(.leading, 8)
             }
-            .padding(.leading, 8)
         case .object(let obj):
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(obj.keys.sorted(), id: \.self) { k in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("\(k):").font(leafFont).foregroundStyle(.orange).textSelection(.enabled)
-                        JSONNodeView(value: obj[k]!, depth: depth + 1)
+            if depth >= Self.maxDepth {
+                Text("{…} (\(obj.count) keys, max depth)").font(leafFont).foregroundStyle(.tertiary)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(obj.keys.sorted(), id: \.self) { k in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("\(k):").font(leafFont).foregroundStyle(.orange).textSelection(.enabled)
+                            JSONNodeView(value: obj[k]!, depth: depth + 1)
+                        }
                     }
                 }
+                .padding(.leading, depth > 1 ? 8 : 0)
             }
-            .padding(.leading, depth > 1 ? 8 : 0)
         }
     }
 }

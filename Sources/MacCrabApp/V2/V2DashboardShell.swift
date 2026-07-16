@@ -181,11 +181,16 @@ struct V2DashboardShell: View {
     private var workspaceShortcutHandlers: some View {
         ZStack {
             ForEach(V2Workspace.allCases) { wk in
-                Button {
-                    state.switchWorkspace(wk)
-                } label: { Color.clear }
-                .keyboardShortcut(KeyEquivalent(Character("\(wk.keyboardIndex)")), modifiers: .command)
-                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+                // Only single-digit indices (1–9) are valid ⌘ shortcuts.
+                // keyboardIndex 10 (Docs) would build KeyEquivalent(Character("10")),
+                // a two-grapheme string that traps Character.init — so skip it.
+                if wk.keyboardIndex <= 9 {
+                    Button {
+                        state.switchWorkspace(wk)
+                    } label: { Color.clear }
+                    .keyboardShortcut(KeyEquivalent(Character("\(wk.keyboardIndex)")), modifiers: .command)
+                    .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+                }
             }
 
             Button { state.paletteOpen.toggle() } label: { Color.clear }

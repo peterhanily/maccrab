@@ -37,6 +37,9 @@ public struct V2ActionButton: View {
     public let tooltip: String?
     public let action: () -> Void
 
+    /// Optional stable XCUITest identifier (v1.21.4 harness foundation).
+    public let axId: String?
+
     public init(
         _ label: String,
         icon: String? = nil,
@@ -45,6 +48,7 @@ public struct V2ActionButton: View {
         fullWidth: Bool = false,
         disabled: Bool = false,
         tooltip: String? = nil,
+        axId: String? = nil,
         action: @escaping () -> Void
     ) {
         self.label = label
@@ -54,6 +58,7 @@ public struct V2ActionButton: View {
         self.fullWidth = fullWidth
         self.disabled = disabled
         self.tooltip = tooltip
+        self.axId = axId
         self.action = action
     }
 
@@ -93,6 +98,7 @@ public struct V2ActionButton: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .help(tooltip ?? "")
+        .v2AXID(axId)
     }
 
     private var foreground: Color {

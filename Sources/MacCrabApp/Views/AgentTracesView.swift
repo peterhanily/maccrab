@@ -17,6 +17,14 @@ struct AgentTracesView: View {
 
     @State private var searchText: String = ""
 
+    // B8: local load-lifecycle flag so the detail pane can tell "still
+    // loading spans" apart from "load finished, zero spans / read failed".
+    // Owned here (not in AppState) because loadTrace is only ever driven
+    // from this view's selection onChange. Without it, a trace that
+    // resolves to empty spans (pruned, 0-span, or a traces.db read error)
+    // shows a ProgressView that spins forever.
+    @State private var isLoadingTrace: Bool = false
+
     private var filteredTraceIds: [String] {
         guard !searchText.isEmpty else { return appState.recentTraceIds }
         let q = searchText.lowercased()
@@ -333,8 +341,15 @@ struct AgentTracesView: View {
         .listStyle(.bordered)
         .frame(minWidth: 320, idealWidth: 360, maxWidth: 480)
         .onChange(of: appState.selectedTraceId) { newValue in
-            guard let id = newValue else { return }
-            Task { await appState.loadTrace(id) }
+            guard let id = newValue else {
+                isLoadingTrace = false
+                return
+            }
+            Task {
+                isLoadingTrace = true
+                await appState.loadTrace(id)
+                isLoadingTrace = false
+            }
         }
     }
 
@@ -344,12 +359,36 @@ struct AgentTracesView: View {
         Group {
             if appState.selectedTraceId == nil {
                 placeholderDetail
-            } else if appState.selectedTraceSpans.isEmpty {
+            } else if isLoadingTrace {
+                // B8: only spin while a load is actually in flight.
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if appState.selectedTraceSpans.isEmpty {
+                // B8: load finished with no spans — a distinct, terminal
+                // state instead of an endless spinner.
+                noSpansDetail
             } else {
                 traceDetail
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var noSpansDetail: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "questionmark.square.dashed")
+                .scaledSystem(32)
+                .foregroundStyle(.secondary)
+            Text(String(localized: "agentTraces.noSpansTitle",
+                         defaultValue: "No spans for this trace"))
+                .font(.headline)
+            Text(String(localized: "agentTraces.noSpansHint",
+                         defaultValue: "This trace has no stored spans, or they couldn't be read from traces.db — it may have been pruned, or the receiver recorded the trace id without span bodies. Try Refresh, or pick another trace."))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+                .padding(.horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -368,7 +407,12 @@ struct AgentTracesView: View {
 
     private var traceDetail: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            // E5: lazily instantiate span rows so a long trace doesn't
+            // build every row (each with a DisclosureGroup) up front.
+            // `computeDepths` still runs once over the full span set — it
+            // must, to resolve parent-chain indentation — but the rows
+            // themselves now materialise on scroll.
+            LazyVStack(alignment: .leading, spacing: 12) {
                 if let id = appState.selectedTraceId {
                     HStack(spacing: 6) {
                         Image(systemName: "scope")
@@ -399,7 +443,10 @@ struct AgentTracesView: View {
     /// children +1 per hop. Bounded to 8 to prevent runaway depth in
     /// pathological data.
     private static func computeDepths(spans: [SpanRecord]) -> [String: Int] {
-        let bySpanId: [String: SpanRecord] = Dictionary(uniqueKeysWithValues: spans.map { ($0.spanId, $0) })
+        // uniquingKeysWith (not uniqueKeysWithValues): a duplicate/retransmitted
+        // OTLP span_id must NOT trap the app — keep the first, drop the rest.
+        let bySpanId: [String: SpanRecord] = Dictionary(
+            spans.map { ($0.spanId, $0) }, uniquingKeysWith: { first, _ in first })
         var depths: [String: Int] = [:]
         func depth(of span: SpanRecord, visiting: Set<String>) -> Int {
             if let cached = depths[span.spanId] { return cached }

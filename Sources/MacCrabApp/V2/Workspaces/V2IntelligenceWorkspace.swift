@@ -35,8 +35,8 @@ public struct V2IntelligenceWorkspace: View {
     @State private var feedSheet: V2FeedConfig? = nil
     /// Recent IOC-match alerts (part A records each match as an Alert
     /// whose ruleId starts with `maccrab.threat-intel.`). Drives the
-    /// "Matches (24h)" metric and the IOC-matches table. Loaded from
-    /// the alert store via the provider on every workspace tick.
+    /// IOC-matches table. Loaded from the alert store via the provider
+    /// on every workspace tick.
     @State private var matches: [V2MockAlert] = []
 
     public init(state: V2DashboardState) { self.state = state }
@@ -110,18 +110,32 @@ public struct V2IntelligenceWorkspace: View {
             let matchRows = allAlerts.filter { $0.ruleId.hasPrefix(Self.iocMatchRulePrefix) || $0.ruleId == "maccrab.dns.threat-intel-match" }
             await MainActor.run { self.matches = matchRows }
 
-            async let p = state.provider.packages()
-            async let i = state.provider.integrations()
-            let (pkgsResult, integResult) = await (p, i)
-            await MainActor.run {
-                // Only seed packages from the live provider when the
-                // user hasn't run an explicit scan (which uses the
-                // older PackageFreshnessChecker for richer data).
-                // Manual scan results win over auto-refresh.
-                if self.packageLastScannedAt == nil && !pkgsResult.isEmpty {
-                    self.packages = pkgsResult
+            // packages()/integrations() shell out to brew + npm + pip3 and can
+            // take 5+ seconds on a cold cache — longer than the 5s auto-refresh
+            // tick. The enclosing `.task(id:)` is cancelled when refreshTick
+            // bumps, and (as the Wave 9G feeds fix above documents) a cancelled
+            // body drops any MainActor assignment that hasn't run yet. Feeds are
+            // assigned early to dodge that; the slow readers used to sit AFTER the
+            // long `await (p, i)`, so on a busy host they were cancelled every
+            // tick and never landed — integrations, which has no manual fallback,
+            // stayed empty forever. Run them in an UNSTRUCTURED Task that is not a
+            // child of `.task(id:)` and therefore survives the tick's
+            // cancellation; PackageScanner's 5-min actor cache keeps overlapping
+            // ticks cheap.
+            Task {
+                async let p = state.provider.packages()
+                async let i = state.provider.integrations()
+                let (pkgsResult, integResult) = await (p, i)
+                await MainActor.run {
+                    // Only seed packages from the live provider when the
+                    // user hasn't run an explicit scan (which uses the
+                    // older PackageFreshnessChecker for richer data).
+                    // Manual scan results win over auto-refresh.
+                    if self.packageLastScannedAt == nil && !pkgsResult.isEmpty {
+                        self.packages = pkgsResult
+                    }
+                    self.integrations = integResult
                 }
-                self.integrations = integResult
             }
         }
     }
@@ -508,7 +522,9 @@ public struct V2IntelligenceWorkspace: View {
     }
 
     private var feedsSummaryRow: some View {
-        let totalIOCs = feeds.reduce(0) { $0 + $1.entries }
+        // &+ (wrapping): a garbage `entries` value in a corrupt cache must not
+        // trap the reducer on Int overflow.
+        let totalIOCs = feeds.reduce(0) { $0 &+ max(0, $1.entries) }
         let staleCount = feeds.filter { $0.staleness > 60 * 60 }.count
         let iocText: String = {
             if totalIOCs >= 1_000_000 { return String(format: "%.1fM", Double(totalIOCs) / 1_000_000) }
@@ -610,12 +626,6 @@ public struct V2IntelligenceWorkspace: View {
     /// ruleId prefix part A writes IOC-match alerts under. The match
     /// type (Hash / IP / Domain / URL / DNS) is the suffix after this.
     static let iocMatchRulePrefix = "maccrab.threat-intel."
-
-    /// Count of IOC matches in the last 24h — drives the metric card.
-    private var matches24hCount: Int {
-        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
-        return matches.filter { $0.timestamp >= cutoff }.count
-    }
 
     /// Map a `maccrab.threat-intel.<suffix>` ruleId to a short IOC type.
     private func iocType(forRuleId ruleId: String) -> String {
@@ -812,8 +822,17 @@ public struct V2IntelligenceWorkspace: View {
                 installed: installedVer,
                 latest: latestVer,
                 manager: info.registry.rawValue,
-                vulnCount: info.isFresh ? 1 : 0,
-                staleness: info.ageInDays ?? 0,
+                // PackageFreshnessChecker carries no CVE data — `isFresh` is a
+                // "freshly published" signal, not a vulnerability count. Storing
+                // it here rendered brand-new packages as "Vulns: 1" and offered a
+                // bogus CVE lookup. Real vuln counts arrive via the auto-refresh
+                // PackageScanner path (currently 0 until OSV.dev wiring lands).
+                vulnCount: 0,
+                // `staleness` is a TimeInterval in SECONDS (V2TimeFormat.staleness
+                // reads it as seconds, matching the auto-refresh path's
+                // `stalenessSeconds`). `ageInDays` is DAYS, so scale up — pre-fix a
+                // 400-day-old package rendered as "6m".
+                staleness: (info.ageInDays ?? 0) * 86400,
                 typosquatScore: intelInfo?.typosquatScore,
                 typosquatSimilarTo: intelInfo?.typosquatSimilarTo,
                 attestationStatus: intelInfo?.attestationStatus,
@@ -843,7 +862,8 @@ public struct V2IntelligenceWorkspace: View {
     private var packageSummaryRow: some View {
         let total = packages.count
         let outdated = packages.filter { $0.installed != $0.latest }.count
-        let vulns = packages.reduce(0) { $0 + $1.vulnCount }
+        // &+ (wrapping): guard against Int overflow from a corrupt vulnCount.
+        let vulns = packages.reduce(0) { $0 &+ max(0, $1.vulnCount) }
         return HStack(spacing: 12) {
             metricCard(title: "Tracked", value: "\(total)",
                        trend: "brew + npm + pip", trendKind: .info,

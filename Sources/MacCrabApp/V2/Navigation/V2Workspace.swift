@@ -83,7 +83,8 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         }
     }
 
-    /// ⌘1-⌘7 indices.
+    /// 1-based position. Only indices 1–9 map to a ⌘ shortcut; index 10 (Docs)
+    /// has none (see V2DashboardShell — Character("10") would trap).
     public var keyboardIndex: Int {
         (V2Workspace.allCases.firstIndex(of: self) ?? 0) + 1
     }

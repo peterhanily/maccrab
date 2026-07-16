@@ -31,6 +31,9 @@ struct V2ForensicsScansView: View {
     @StateObject private var runner = KitRunner()
     @State private var scans: [CaseManifest] = []
     @State private var loading = true
+    // Set when listCases() throws (disk error / corruption) — distinct from an
+    // empty archive; gets an error card + Retry, not a silent blank list.
+    @State private var loadError: String? = nil
     @State private var openScanID: String? = nil
     @State private var pendingEncryptedKit: Kit? = nil
     @State private var fdaStatus: FullDiskAccessStatus = .unknown
@@ -92,6 +95,8 @@ struct V2ForensicsScansView: View {
                     ProgressView(String(localized: "scans.loading", defaultValue: "Loading…"))
                         .frame(maxWidth: .infinity)
                         .padding(20)
+                } else if let err = loadError {
+                    scansLoadErrorCard(err)
                 } else if !recentlyRun.isEmpty {
                     recentlyRunSection
                 }
@@ -264,6 +269,30 @@ struct V2ForensicsScansView: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(8)
         }
+    }
+
+    private func scansLoadErrorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(String(localized: "scans.loadErrorTitle", defaultValue: "Couldn't load past scans")).font(.headline)
+            }
+            Text(message)
+                .scaledSystem(12)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(String(localized: "scans.retry", defaultValue: "Retry")) {
+                Task { await reload() }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
     }
 
     // MARK: - Run a new scan
@@ -650,7 +679,16 @@ struct V2ForensicsScansView: View {
                 Spacer()
                 if tally.attention + tally.critical > 0 {
                     Button(String(localized: "scans.openFindings", defaultValue: "Open findings")) {
-                        openScanID = scanID
+                        Task {
+                            // The just-finished scan may not be in `scans` yet
+                            // (reload runs async on .done). Force-load first so we
+                            // open its real manifest instead of presenting an
+                            // empty sheet resolved out of a stale list.
+                            if !scans.contains(where: { $0.id == scanID }) {
+                                await loadScans()
+                            }
+                            openScanID = scanID
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -750,9 +788,16 @@ struct V2ForensicsScansView: View {
             if let m = try? TierBManifest.load(fromBundlePath: p.installRoot) { tpm[p.pluginID] = m }
         }
         thirdPartyManifests = tpm
+        // Load the local scan archive FIRST, then clear the spinner, so the
+        // "Recently run" list renders regardless of the network catalog fetch
+        // below (D4: the fetch was awaited before this, so a slow/unreachable
+        // catalog hung the spinner and starved the local list).
+        await loadScans()
+        loading = false
         // v1.19.3: surface "update available" — fetch the signed catalog's
         // current_version per id (best-effort; empty when offline so no badges
-        // show). The update itself reuses the Catalog tab's verified consent flow.
+        // show). The update itself reuses the Catalog tab's verified consent
+        // flow. Runs AFTER loading clears so a hanging fetch can't block the list.
         if !visible.isEmpty {
             do {
                 var av: [String: String] = [:]
@@ -764,6 +809,12 @@ struct V2ForensicsScansView: View {
         } else {
             availableVersions = [:]
         }
+    }
+
+    /// Load the local scan archive (the "Recently run" list). Extracted so the
+    /// done-card "Open findings" button can guarantee the just-finished scan is
+    /// present before opening its detail sheet.
+    private func loadScans() async {
         do {
             let mgr = CaseManager(
                 casesRoot: CaseDirectoryLayout.defaultCasesRoot,
@@ -771,9 +822,9 @@ struct V2ForensicsScansView: View {
             )
             let raw = try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
             scans = OperatorVisibilityFilter.filter(raw)
+            loadError = nil
         } catch {
-            scans = []
+            loadError = String(localized: "scans.loadErrorBody", defaultValue: "Couldn't read the scan archive: \(error.localizedDescription)")
         }
-        loading = false
     }
 }

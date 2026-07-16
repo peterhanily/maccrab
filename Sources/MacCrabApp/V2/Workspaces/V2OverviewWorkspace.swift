@@ -1051,6 +1051,9 @@ struct V2OverviewWorkspace: View {
                                         Image(systemName: factorIcon(f.status))
                                             .foregroundStyle(factorColor(f.status))
                                             .frame(width: 16)
+                                            // F4: status is otherwise icon+color only — give
+                                            // VoiceOver (and colorblind users) the spoken word.
+                                            .accessibilityLabel(factorStatusWord(f.status))
                                         VStack(alignment: .leading, spacing: 2) {
                                             HStack {
                                                 Text(f.name)
@@ -1102,6 +1105,18 @@ struct V2OverviewWorkspace: View {
         case "warn": return "exclamationmark.triangle.fill"
         case "fail": return "xmark.octagon.fill"
         default:     return "questionmark.circle"
+        }
+    }
+
+    /// F4: spoken status word so the pass/warn/fail state isn't conveyed by
+    /// icon shape + color alone (invisible to VoiceOver, ambiguous for
+    /// colorblind users).
+    private func factorStatusWord(_ status: String) -> String {
+        switch status {
+        case "pass": return String(localized: "overview.factor.pass", defaultValue: "Passed")
+        case "warn": return String(localized: "overview.factor.warn", defaultValue: "Warning")
+        case "fail": return String(localized: "overview.factor.fail", defaultValue: "Failed")
+        default:     return String(localized: "overview.factor.unknown", defaultValue: "Unknown")
         }
     }
 
@@ -1326,6 +1341,13 @@ fileprivate struct V2AlertHistogram: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // F3: the stacked bar conveys severity by color alone — spell out the
+        // counts for VoiceOver / colorblind users (bare "button" otherwise).
+        .accessibilityLabel(
+            total == 0
+            ? String(localized: "overview.hist.empty", defaultValue: "No alerts in this period")
+            : String(localized: "overview.hist.bar",
+                     defaultValue: "\(total) alerts: \(bucket.critical) critical, \(bucket.high) high, \(bucket.medium) medium, \(bucket.low) low"))
         .onHover { hoverBucketId = $0 ? bucket.id : (hoverBucketId == bucket.id ? nil : hoverBucketId) }
         .position(x: x + width / 2, y: chartFrame.midY)
     }

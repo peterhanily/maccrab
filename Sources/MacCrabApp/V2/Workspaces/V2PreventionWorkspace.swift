@@ -45,7 +45,16 @@ struct V2PreventionWorkspace: View {
     /// false reading.
     private var preventionStatusStrip: some View {
         HStack(spacing: 8) {
-            if let p = heartbeat?.prevention {
+            if let h = heartbeat, h.isStale {
+                // B4: a present-but-STALE heartbeat (>120s) is not a live reading.
+                // readFreshest returns snapshots up to 300s old, so during a 2–5 min
+                // daemon outage the modules would otherwise paint green "on" while
+                // the enforcing daemon is dead. Show a muted "unknown" state instead.
+                // (A fully-absent heartbeat still falls through to the
+                // "Status unavailable" branch below — that case was already correct.)
+                V2StatusChip(String(localized: "prevention.chip.stale", defaultValue: "Prevention status unknown — no daemon heartbeat for \(h.ageSeconds)s"),
+                             kind: .neutral, icon: "exclamationmark.triangle")
+            } else if let p = heartbeat?.prevention {
                 // Each module/state gets its OWN fully-localized format string so
                 // a translator owns the whole phrase (word order, punctuation) —
                 // not a shared "%@: on (%lld)" with an injected pre-localized noun.
@@ -78,7 +87,38 @@ struct V2PreventionWorkspace: View {
         }
     }
 
+    /// B1: the live provider's `toV2Alert` hardcodes `actionsTaken: []` (the
+    /// Alert model has no response-action field), so in `.live` mode this surface
+    /// can never learn which prevention actions actually fired. Rendering green
+    /// "0 / none" cards there is a false "nothing happened" on a protection
+    /// surface. Mock/offline previews carry sample actionsTaken, so only the live
+    /// build is treated as "not available".
+    private var responseHistoryUnavailable: Bool { state.provider.mode == .live }
+
+    private var responseHistoryUnavailableCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(V2Theme.mutedText)
+                .scaledSystem(14)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "prevention.historyUnavailableTitle", defaultValue: "Response-action history not available"))
+                    .font(V2Theme.cardTitle()).foregroundStyle(V2Theme.primaryText)
+                Text(String(localized: "prevention.historyUnavailableBody", defaultValue: "This daemon build doesn't report which response actions (kill / block / sinkhole / quarantine) fired per alert, so per-action counts can't be shown. This is a reporting gap — not a confirmation that no actions were taken."))
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            }
+            Spacer()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .v2Panel()
+    }
+
+    @ViewBuilder
     private var summaryRow: some View {
+        if responseHistoryUnavailable {
+            responseHistoryUnavailableCard
+        } else {
         let last24h = preventionAlerts.filter {
             $0.timestamp.timeIntervalSinceNow > -86_400
         }
@@ -92,7 +132,7 @@ struct V2PreventionWorkspace: View {
         let quarantineCount = last24h.filter { a in
             a.actionsTaken.contains(where: { $0.lowercased().contains("quarantine") })
         }.count
-        return HStack(spacing: 12) {
+        HStack(spacing: 12) {
             metricCard(title: String(localized: "prevention.metricActions24h", defaultValue: "Actions (24h)"), value: "\(last24h.count)",
                        trend: last24h.isEmpty ? String(localized: "prevention.trendNoTriggers", defaultValue: "no triggers") : String(localized: "prevention.trendReviewLog", defaultValue: "review log"),
                        trendKind: last24h.isEmpty ? .healthy : .info,
@@ -109,6 +149,7 @@ struct V2PreventionWorkspace: View {
                        trend: quarantineCount == 0 ? String(localized: "prevention.trendNone", defaultValue: "none") : String(localized: "prevention.trend24h", defaultValue: "24h"),
                        trendKind: quarantineCount == 0 ? .healthy : .warning,
                        icon: "tray.full", iconColor: V2Theme.dataAccent)
+        }
         }
     }
 
@@ -131,13 +172,22 @@ struct V2PreventionWorkspace: View {
                     V2ActionButton(String(localized: "prevention.triggerSighup", defaultValue: "Trigger SIGHUP"), icon: "arrow.clockwise", style: .secondary,
                                    tooltip: String(localized: "prevention.triggerSighupTooltip", defaultValue: "Reload rules + refresh threat intel feeds")) {
                         Task {
-                            let ok = await state.provider.refreshThreatIntel()
+                            // C3: deliver a REAL SIGHUP. The daemon's handler reloads
+                            // the single/sequence/graph rulesets AND fires a one-shot
+                            // threat-intel refresh, so the "Reload rules + refresh
+                            // threat intel feeds" label is now accurate. The old call
+                            // (refreshThreatIntel) only did the intel half and never
+                            // reloaded rules. Detached so the file-IPC write + pkill
+                            // fallback never beachball the main thread.
+                            let ok = await Task.detached(priority: .userInitiated) {
+                                V2DaemonControl.reloadDetectionRules()
+                            }.value
                             await MainActor.run {
                                 state.showToast(V2Toast(
                                     kind: ok ? .info : .error,
                                     title: ok ? String(localized: "prevention.toastSighupSignaled", defaultValue: "SIGHUP signaled") : String(localized: "prevention.toastSignalFailed", defaultValue: "Signal failed"),
                                     detail: ok ? String(localized: "prevention.toastReloading", defaultValue: "Rules + feeds reloading")
-                                              : (state.provider.lastErrorDescription ?? String(localized: "prevention.toastNoDaemon", defaultValue: "no daemon to signal"))
+                                              : String(localized: "prevention.toastNoDaemon", defaultValue: "no daemon to signal")
                                 ))
                             }
                         }
@@ -154,7 +204,13 @@ struct V2PreventionWorkspace: View {
     private var recentActionsCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(String(localized: "prevention.recentActionsTitle", defaultValue: "Recent prevention actions")).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            if preventionAlerts.isEmpty {
+            if responseHistoryUnavailable {
+                // B1: don't render an "empty == nothing happened" state when the
+                // data source structurally can't report response actions.
+                Text(String(localized: "prevention.recentActionsUnavailable", defaultValue: "Response-action history isn't reported by this daemon build, so recent kill / block / sinkhole / quarantine actions can't be listed here. Per-rule response actions still fire automatically — this is a reporting gap only."))
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                    .padding(.vertical, 16)
+            } else if preventionAlerts.isEmpty {
                 Text(String(localized: "prevention.recentActionsEmpty", defaultValue: "No prevention actions in the recent alert window. When a rule with a response action fires (kill, block, sinkhole, quarantine), the resulting alert appears here."))
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     .padding(.vertical, 16)

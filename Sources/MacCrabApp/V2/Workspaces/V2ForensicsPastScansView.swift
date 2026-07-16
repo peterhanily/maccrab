@@ -20,7 +20,11 @@ struct V2ForensicsPastScansView: View {
     @State private var openScanID: String? = nil
     @State private var query: String = ""
     @State private var pendingDelete: CaseManifest? = nil
-    @State private var deleteResult: String? = nil
+    @State private var deleteResult: DeleteToast? = nil
+    // A listCases() throw (disk error / corruption / migration) is
+    // indistinguishable from an empty install; surface it instead of
+    // collapsing into "No scans yet."
+    @State private var loadError: String? = nil
     // Bulk-delete: a selection mode operators toggle from the header.
     // While on, rows show a checkbox and the row click toggles
     // selection instead of opening the scan.
@@ -43,13 +47,15 @@ struct V2ForensicsPastScansView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                if let msg = deleteResult {
-                    deleteToast(msg)
+                if let toast = deleteResult {
+                    deleteToast(toast)
                 }
                 if loading {
                     ProgressView(String(localized: "pastScans.loading", defaultValue: "Loading…"))
                         .frame(maxWidth: .infinity)
                         .padding(40)
+                } else if let err = loadError {
+                    errorState(err)
                 } else if scans.isEmpty {
                     emptyState
                 } else {
@@ -145,9 +151,13 @@ struct V2ForensicsPastScansView: View {
                 HiddenScans.restore(scan.id)
                 let bcf = ByteCountFormatter()
                 bcf.countStyle = .file
-                deleteResult = String(localized: "pastScans.deletedToast", defaultValue: "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed)).")
+                deleteResult = DeleteToast(
+                    message: String(localized: "pastScans.deletedToast", defaultValue: "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed))."),
+                    success: true)
             } catch {
-                deleteResult = String(localized: "pastScans.deleteFailedToast", defaultValue: "Couldn't delete: \(error.localizedDescription)")
+                deleteResult = DeleteToast(
+                    message: String(localized: "pastScans.deleteFailedToast", defaultValue: "Couldn't delete: \(error.localizedDescription)"),
+                    success: false)
             }
             await reload()
         }
@@ -193,9 +203,13 @@ struct V2ForensicsPastScansView: View {
             let bcf = ByteCountFormatter()
             bcf.countStyle = .file
             if failed == 0 {
-                deleteResult = String(localized: "pastScans.bulkDeletedToast", defaultValue: "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed)).")
+                deleteResult = DeleteToast(
+                    message: String(localized: "pastScans.bulkDeletedToast", defaultValue: "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."),
+                    success: true)
             } else {
-                deleteResult = String(localized: "pastScans.bulkDeletedPartialToast", defaultValue: "Deleted \(ok), \(failed) failed · freed \(bcf.string(fromByteCount: freed)).")
+                deleteResult = DeleteToast(
+                    message: String(localized: "pastScans.bulkDeletedPartialToast", defaultValue: "Deleted \(ok), \(failed) failed · freed \(bcf.string(fromByteCount: freed))."),
+                    success: false)
             }
             selectedIDs = []
             selectionMode = false
@@ -267,12 +281,21 @@ struct V2ForensicsPastScansView: View {
         .cornerRadius(6)
     }
 
-    private func deleteToast(_ msg: String) -> some View {
+    /// Toast payload for a delete result. Carries an explicit success flag so
+    /// the icon isn't inferred from message text — the partial-failure string
+    /// ("Deleted N, M failed…") also starts with "Deleted", and localized
+    /// success strings don't start with "Deleted" at all.
+    private struct DeleteToast {
+        let message: String
+        let success: Bool
+    }
+
+    private func deleteToast(_ toast: DeleteToast) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: msg.hasPrefix("Deleted") ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(msg.hasPrefix("Deleted") ? .green : .orange)
+            Image(systemName: toast.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(toast.success ? .green : .orange)
                 .scaledSystem(13)
-            Text(msg)
+            Text(toast.message)
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -293,6 +316,30 @@ struct V2ForensicsPastScansView: View {
             Text(String(localized: "pastScans.emptyBody", defaultValue: "Run a scan from the Run a scan tab. Each scan you complete will appear here."))
                 .scaledSystem(12)
                 .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func errorState(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(String(localized: "pastScans.errorTitle", defaultValue: "Couldn't load scans")).font(.headline)
+            }
+            Text(message)
+                .scaledSystem(12)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(String(localized: "pastScans.retry", defaultValue: "Retry")) {
+                Task { await reload() }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.top, 2)
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -362,6 +409,7 @@ struct V2ForensicsPastScansView: View {
             )
             let raw = try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
             scans = OperatorVisibilityFilter.filter(raw)
+            loadError = nil
             // Disk-size walk is cheap (stat() per file) but still off
             // the main actor — let Task.detached handle it so the list
             // appears immediately and sizes populate as they're computed.
@@ -377,7 +425,9 @@ struct V2ForensicsPastScansView: View {
                 await MainActor.run { diskSizes = computed }
             }
         } catch {
-            scans = []
+            // Distinct from an empty install: a read failure gets an error
+            // state + Retry, not "No scans yet."
+            loadError = String(localized: "pastScans.loadErrorBody", defaultValue: "Couldn't read the scan archive: \(error.localizedDescription)")
         }
         loading = false
     }

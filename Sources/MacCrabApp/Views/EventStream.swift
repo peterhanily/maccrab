@@ -78,7 +78,6 @@ struct EventStream: View {
     }
 
     @State private var isPaused: Bool = false
-    @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
     // v1.8.0: default to Last 24h so the user lands in the hot tier on
     // open — `.all` immediately put them in aggregate mode against an
@@ -271,7 +270,18 @@ struct EventStream: View {
             results = results.filter { $0.category == category }
         }
 
-        if let seconds = timeRange.seconds {
+        // C2: when centred (an "Investigate in Events" click from an
+        // alert/trace set `initialCenterTime`), the DB query is already
+        // bounded to centre ± half-window by computeEventsTimeBounds().
+        // Re-applying the live `timeRange` cutoff here would drop every
+        // event older than the chip — producing an EMPTY table for any
+        // alert past the range (default 24h). Filter to the same centred
+        // window the query used instead. In the normal (non-centred) case
+        // the user's timeRange chip still drives the cutoff, unchanged.
+        if initialCenterTime != nil {
+            let bounds = computeEventsTimeBounds()
+            results = results.filter { $0.timestamp >= bounds.since && $0.timestamp <= bounds.until }
+        } else if let seconds = timeRange.seconds {
             let cutoff = Date().addingTimeInterval(-seconds)
             results = results.filter { $0.timestamp >= cutoff }
         }
@@ -342,11 +352,6 @@ struct EventStream: View {
 
                 Divider()
                     .frame(height: 16)
-
-                Toggle(String(localized: "events.autoScroll", defaultValue: "Auto-scroll"), isOn: $autoScroll)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .accessibilityLabel("Auto-scroll to newest events")
 
                 // v1.8.0: SIEM-style histogram toggle. Hidden behind a
                 // small icon button so the simple-mode UX stays clean
@@ -549,6 +554,17 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(localized: "events.paused", defaultValue: "Paused"))
                         .foregroundColor(.orange)
+                } else if appState.heartbeat?.isStale ?? true {
+                    // B5: don't reassure with green "Live" when the engine
+                    // isn't reporting. A stale (>120s) or missing heartbeat
+                    // means the daemon is hung, crashed, or replaced by a
+                    // no-op — the stream can read "Live" while nothing is
+                    // actually being collected. Show a muted stale state.
+                    Image(systemName: "moon.zzz.fill")
+                        .foregroundColor(.secondary)
+                        .accessibilityHidden(true)
+                    Text(String(localized: "events.stale", defaultValue: "Daemon not reporting"))
+                        .foregroundColor(.secondary)
                 } else {
                     Image(systemName: "circle.fill")
                         .foregroundColor(.green)
@@ -666,7 +682,18 @@ struct EventStream: View {
         // body on every @Published mutation in AppState (heartbeat,
         // agentLineage, etc.), driving 333 Auto Layout constraint
         // allocations/sec via NSTableView rebinds.
-        .onReceive(appState.$events) { _ in recomputeFilter() }
+        // C4: honour Pause. When paused, drop the live poll's prepended
+        // rows on the floor instead of rebuilding the table — the visible
+        // set stays frozen. Explicit filter/sort changes below still apply.
+        .onReceive(appState.$events) { _ in
+            guard !isPaused else { return }
+            recomputeFilter()
+        }
+        // Resume: rebuild once from the current events so the frozen table
+        // catches up to everything that arrived while paused.
+        .onChange(of: isPaused) { paused in
+            if !paused { recomputeFilter() }
+        }
         .onChange(of: filterCategory) { _ in recomputeFilter() }
         .onChange(of: timeRange) { _ in recomputeFilter() }
         .onChange(of: sortOrder) { _ in recomputeFilter() }

@@ -68,7 +68,23 @@ struct V2InvestigationWorkspace: View {
         // its await resolves so the trailing MainActor.run race
         // (Wave 9G shape) can't drop both writes.
         let t = await state.provider.traces(limit: 50)
-        await MainActor.run { self.traces = t }
+        await MainActor.run {
+            self.traces = t
+            // #17: pin / preserve the selected trace across the 5 s
+            // reload. Pre-fix `selectedTrace` stayed nil and every
+            // render fell back to `traces.first`; when a reload reordered
+            // the list (a newly-anchored trace jumping to the front) the
+            // graph / inspector / in-flight drag silently swapped to a
+            // different trace mid-interaction. Now: first load pins the
+            // freshest trace; later reloads keep the user's current
+            // selection (refreshed to the new snapshot), only falling
+            // back to the freshest when no selection exists yet.
+            if let current = self.selectedTrace {
+                self.selectedTrace = t.first(where: { $0.id == current.id }) ?? current
+            } else {
+                self.selectedTrace = t.first
+            }
+        }
 
         let a = await state.provider.alerts(limit: 30)
         await MainActor.run {
@@ -1580,11 +1596,25 @@ struct V2InvestigationWorkspace: View {
                     }
                 }
         } else {
+            // B7: an empty trace list can mean two very different things —
+            // a healthy-but-quiet machine (nothing worth anchoring yet), or
+            // a daemon that isn't reporting at all. Pre-fix both rendered
+            // the identical "No traces materialized yet" copy, so for a
+            // detection tool the dangerous case (engine blind) looked exactly
+            // like the safe one. Gate on the engine heartbeat we already
+            // fetch in reload(): stale (>120s) or absent → say so explicitly.
+            let daemonReporting = engineHeartbeat.map { !$0.isStale } ?? false
             VStack(alignment: .leading, spacing: 16) {
                 V2EmptyState(
-                    title: "No traces materialized yet",
-                    body: "MacCrab anchors a trace when a high-severity pattern fires (loader exec, persistence write, credential read, etc.). When the daemon's trace materializer runs, the most-recent matching events appear here as a causal graph.",
-                    icon: "point.3.connected.trianglepath.dotted"
+                    title: daemonReporting
+                        ? "No traces materialized yet"
+                        : "Daemon not reporting — traces unavailable",
+                    body: daemonReporting
+                        ? "MacCrab anchors a trace when a high-severity pattern fires (loader exec, persistence write, credential read, etc.). When the daemon's trace materializer runs, the most-recent matching events appear here as a causal graph."
+                        : "The detection engine hasn't sent a heartbeat in over two minutes, so the trace graph can't be shown and an empty list here does NOT mean the machine is clean. Check the daemon / System Extension status in the System workspace.",
+                    icon: daemonReporting
+                        ? "point.3.connected.trianglepath.dotted"
+                        : "exclamationmark.triangle"
                 )
                 .v2Panel()
 

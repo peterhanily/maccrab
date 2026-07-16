@@ -8,6 +8,18 @@ import Foundation
 
 public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let writtenAt: Date
+
+    /// v1.21.4: canonical staleness threshold — MUST match
+    /// AppState.HeartbeatSnapshot.staleThreshold (120s) so every workspace
+    /// agrees on "live vs degraded". `readFreshest()` only nils heartbeats
+    /// older than 300s, so a 120–300s-old heartbeat is returned NON-nil and
+    /// callers that treated non-nil as "live" (System "Daemon: Running",
+    /// Prevention "on" chips) falsely reassured during a 2–5 min outage. Gate
+    /// live/green state on `!isStale`, not merely on the snapshot existing.
+    public static let staleThreshold: TimeInterval = 120
+    public var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+    /// Whole seconds since the daemon last wrote a heartbeat (for "N m ago").
+    public var ageSeconds: Int { max(0, Int(Date().timeIntervalSince(writtenAt))) }
     public let uptimeSeconds: Int
     public let eventsProcessed: Int
     public let alertsEmitted: Int

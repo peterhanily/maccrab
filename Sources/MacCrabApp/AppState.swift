@@ -1092,6 +1092,19 @@ final class AppState: ObservableObject {
     private let dataDir: String = {
         let fm = FileManager.default
         let logger = Logger(subsystem: "com.maccrab.app", category: "data-dir")
+        // v1.21.4 (UI-test seam): honor MACCRAB_DATA_DIR so UI / integration
+        // tests can point the whole dashboard at a SEEDED fixture directory
+        // instead of the live daemon DB — making data-driven UI tests
+        // deterministic without a running root daemon. Gated on the
+        // `-ui-testing` launch arg AND the dir existing, so it can never affect
+        // a production launch. (Foundation.ProcessInfo — MacCrabCore defines its
+        // own ProcessInfo type.)
+        if CommandLine.arguments.contains("-ui-testing"),
+           let override = Foundation.ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"],
+           fm.fileExists(atPath: override) {
+            logger.info("dataDir=override (MACCRAB_DATA_DIR + -ui-testing)")
+            return override
+        }
         let userDir = fm.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask

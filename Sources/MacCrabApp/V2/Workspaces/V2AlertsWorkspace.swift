@@ -132,6 +132,16 @@ struct V2AlertsWorkspace: View {
             pendingDeletedAlertIds = pendingDeletedAlertIds.intersection(dbIds)
 
             self.alerts = merged.filter { $0.timestamp >= cutoff }
+            // Reconcile the floating inspector against the fresh data:
+            // drop the selection if its row is gone (deleted, or aged
+            // past the time-range cutoff), otherwise refresh it to the
+            // new snapshot so the inspector never shows a stale,
+            // pre-mutation copy. (suppress() clears `selected` outright;
+            // bulkSuppress / time-range changes previously left it
+            // pointing at an orphaned snapshot.)
+            if let sel = self.selected {
+                self.selected = self.alerts.first(where: { $0.id == sel.id })
+            }
             self.loaded = true
         }
 
@@ -310,6 +320,15 @@ struct V2AlertsWorkspace: View {
                     detail: "\(targets.count - failedCount) of \(targets.count) campaigns; \(state.provider.lastErrorDescription ?? "see logs")",
                     displayFor: 6
                 ))
+                // C1: drop the pending registrations for the whole batch
+                // (we don't track which campaign ids failed). The next
+                // reload restores DB truth — successfully-suppressed
+                // campaigns drop from the active list, the failed ones
+                // reappear. Leaving a failed id pending would hide a
+                // still-active campaign forever: it keeps showing up in
+                // the active list, so the intersection-prune never
+                // clears it and the overlay filters it out every tick.
+                pendingSuppressedCampaignIds.subtract(targetIds)
             } else {
                 // Total failure — drop pending registrations so the
                 // next reload restores the campaigns.
@@ -456,10 +475,19 @@ struct V2AlertsWorkspace: View {
                     detail: "\(count) of \(ids.count) suppressed; \(state.provider.lastErrorDescription ?? "see logs")",
                     displayFor: 6
                 ))
-                // Don't roll back partial successes — the reload's
-                // overlay will keep the optimistic state until the
-                // daemon catches up, and prune the registrations as
-                // the DB confirms each one individually.
+                // C1: the provider returns only a count, not which ids
+                // failed — so we can't tell the suppressed rows from the
+                // still-firing ones. Revert ALL optimistic flips and let
+                // the next reload restore DB truth (rows the daemon
+                // actually suppressed come back suppressed; the failed
+                // ones stay visible). Leaving the failed ids pending
+                // would overlay suppressed=true on a still-firing alert
+                // forever — its DB row never flips, so the prune at the
+                // top of reload() never drops it, hiding a live alert.
+                pendingSuppressedAlertIds.subtract(idSet)
+                for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
+                    self.alerts[idx].suppressed = false
+                }
             } else {
                 // Total failure — drop the pending registrations
                 // and flip the flags back.
@@ -548,6 +576,47 @@ struct V2AlertsWorkspace: View {
         }
     }
 
+    // MARK: - Daemon-liveness gating (B6)
+
+    /// A live provider with a fresh (<120 s) heartbeat — the only state
+    /// in which an empty alerts table can be trusted as "all clear".
+    /// The live provider's `mode` is hardcoded `.live` and never flips
+    /// when the daemon dies, so we cross-check the heartbeat instead.
+    private var daemonReporting: Bool {
+        state.provider.mode == .live && !(appState.heartbeat?.isStale ?? true)
+    }
+
+    /// Warning banner for the Open/History tabs when we can't trust the
+    /// numbers: a live/offline provider that isn't receiving fresh
+    /// heartbeats is rendering a zero that may be a read failure, not an
+    /// all-clear. Mock/dev sample data is exempt (it's knowingly
+    /// synthetic). Renders nothing when the daemon is reporting.
+    @ViewBuilder
+    private var daemonStaleBanner: some View {
+        if state.provider.mode != .mock && !daemonReporting {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle().fill(V2Theme.warning.opacity(0.18))
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(V2Theme.warning)
+                        .scaledSystem(16, weight: .semibold)
+                }
+                .frame(width: 38, height: 38)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(String(localized: "alerts.daemonStaleTitle", defaultValue: "Daemon not reporting — data may be stale"))
+                        .scaledSystem(13, weight: .semibold)
+                        .foregroundStyle(V2Theme.primaryText)
+                    Text(String(localized: "alerts.daemonStaleDetail", defaultValue: "MacCrab hasn't received a fresh heartbeat in over two minutes. The counts below may be out of date — an empty list does not mean the system is clear."))
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            .v2Panel()
+        }
+    }
+
     // MARK: - Open tab
 
     private var openTab: some View {
@@ -560,6 +629,11 @@ struct V2AlertsWorkspace: View {
         // also called it 5× more (once per severity case); that's
         // now precomputed as a counts dict.
         let visible = filteredAlerts(severity: severityFilter.wrappedValue, applyExternalFilter: true)
+        // B6: distinguish "genuinely no open alerts" (positive empty-
+        // state) from "filter/search returned nothing but alerts exist"
+        // (show the table). Based on the full un-suppressed population,
+        // not the filtered `visible`.
+        let hasOpenAlerts = alerts.contains { !$0.suppressed }
         // v1.12.9: inspector floats over the table's right edge
         // instead of pushing the table leftward. Pre-fix, an HStack
         // [table | inspector] forced the table + 340 pt inspector +
@@ -575,10 +649,21 @@ struct V2AlertsWorkspace: View {
         // un-covered ~620 pt on the left.
         return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
+                daemonStaleBanner
                 timeRangeChips
                 severityCards
                 searchBarMemoized(visible: visible)
-                alertsTableMemoized(items: visible)
+                if daemonReporting && loaded && !hasOpenAlerts {
+                    V2EmptyState(
+                        title: String(localized: "alerts.emptyOpenTitle", defaultValue: "No open alerts"),
+                        body: String(localized: "alerts.emptyOpenBody", defaultValue: "MacCrab hasn't raised any un-suppressed alerts in the selected time range, and the engine is reporting live — you're clear."),
+                        icon: "checkmark.shield"
+                    )
+                    .frame(minHeight: 280)
+                    .v2Panel()
+                } else {
+                    alertsTableMemoized(items: visible)
+                }
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1473,12 +1558,23 @@ struct V2AlertsWorkspace: View {
                 Spacer()
                 V2StatusChip(c.severity.label, kind: c.severity.chipKind)
                 V2ActionButton("Investigate", icon: "magnifyingglass", style: .secondary) {
-                    // Filter the Alerts Open list to this campaign's
-                    // contributing rule pattern so the user actually
-                    // sees the alerts that built it. The campaign's
-                    // ruleTitle is the most stable lookup key (campaign
-                    // id is a UUID; tactics are too broad).
-                    state.alertSearchQuery = c.name
+                    // Filter the Alerts Open list to the alerts that
+                    // built this campaign. Pre-fix this set the query to
+                    // `c.name`, but the alert search only matches
+                    // title/ruleId/process/mitre — a campaign name
+                    // matches none of them, so the table always came up
+                    // empty. The campaign carries no contributing-alert
+                    // ids, so we search on the strongest join key it
+                    // *does* expose: a shared ATT&CK technique (its
+                    // `techniques` are the union of its alerts' MITRE
+                    // codes, so this matches the MITRE column), falling
+                    // back to a contributing executable's binary name
+                    // (matches the Process column). With neither, clear
+                    // the search so the full Open list shows rather than
+                    // an empty one.
+                    let joinKey = c.techniques.first
+                        ?? c.affectedExecutables.first.map { ($0 as NSString).lastPathComponent }
+                    state.alertSearchQuery = joinKey ?? ""
                     state.alertSeverityFilter = nil
                     state.goto(V2NavigationDestination(
                         workspace: .alerts, tab: .alertsOpen
@@ -1576,6 +1672,7 @@ struct V2AlertsWorkspace: View {
     private var historyTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                daemonStaleBanner
                 timeRangeChips
                 Text("Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons.")
                     .font(V2Theme.body())
@@ -1584,8 +1681,17 @@ struct V2AlertsWorkspace: View {
                 // used to appear in both halves, giving the ForEach
                 // duplicate ids (undefined Table diffing + console warnings).
                 let suppressed = self.alerts.filter { $0.suppressed }
-                let suppressedIds = Set(suppressed.map(\.id))
-                let history = suppressed + self.alerts.suffix(4).filter { !suppressedIds.contains($0.id) }
+                // v1.21.4: the "Resolved" rows are the 4 *most recent*
+                // non-suppressed alerts. Pre-fix used `self.alerts.suffix(4)`
+                // on an unsorted array, so the rows were whatever happened
+                // to sit at the array tail — not the newest alerts. Filtering
+                // to non-suppressed also makes them disjoint from `suppressed`
+                // by construction (so the old id-dedup is no longer needed).
+                let resolved = self.alerts
+                    .filter { !$0.suppressed }
+                    .sorted { $0.timestamp > $1.timestamp }
+                    .prefix(4)
+                let history = suppressed + resolved
                 V2DataTable(
                     columns: [
                         V2DataColumn(id: "sev", title: "Severity", width: .fixed(96)) { a in
@@ -1649,25 +1755,30 @@ struct V2AlertsWorkspace: View {
             }
         }
         let ok = await state.provider.unsuppressAlert(id: alert.id)
-        if ok {
-            state.showToast(V2Toast(
-                kind: .success,
-                title: "Unsuppressed",
-                detail: alert.title
-            ))
-        } else {
-            // Rollback the pending registration and flag.
-            await MainActor.run {
+        // Mirror the 5 sibling mutations: touch @Published / main-actor
+        // state (toast + rollback) inside a single MainActor.run. This
+        // method is nonisolated (only `body` is @MainActor on a View),
+        // so the post-await continuation is NOT guaranteed on the main
+        // actor.
+        await MainActor.run {
+            if ok {
+                state.showToast(V2Toast(
+                    kind: .success,
+                    title: "Unsuppressed",
+                    detail: alert.title
+                ))
+            } else {
+                // Rollback the pending registration and flag.
                 pendingUnsuppressedAlertIds.remove(alert.id)
                 if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
                     self.alerts[idx].suppressed = true
                 }
+                state.showToast(V2Toast(
+                    kind: .error,
+                    title: "Couldn't unsuppress",
+                    detail: state.provider.lastErrorDescription
+                ))
             }
-            state.showToast(V2Toast(
-                kind: .error,
-                title: "Couldn't unsuppress",
-                detail: state.provider.lastErrorDescription
-            ))
         }
     }
 
@@ -1679,20 +1790,26 @@ struct V2AlertsWorkspace: View {
             if self.selected?.id == alert.id { self.selected = nil }
         }
         let ok = await state.provider.deleteAlert(id: alert.id)
-        if ok {
-            state.showToast(V2Toast(
-                kind: .success,
-                title: "Deleted",
-                detail: alert.title
-            ))
-        } else {
-            // Drop the pending delete; next reload restores the row.
-            await MainActor.run { pendingDeletedAlertIds.remove(alert.id) }
-            state.showToast(V2Toast(
-                kind: .error,
-                title: "Couldn't delete",
-                detail: state.provider.lastErrorDescription
-            ))
+        // Mirror the sibling mutations: all @Published / main-actor
+        // writes (toast + rollback) go through one MainActor.run —
+        // this method is nonisolated, so the continuation isn't
+        // guaranteed to resume on the main actor.
+        await MainActor.run {
+            if ok {
+                state.showToast(V2Toast(
+                    kind: .success,
+                    title: "Deleted",
+                    detail: alert.title
+                ))
+            } else {
+                // Drop the pending delete; next reload restores the row.
+                pendingDeletedAlertIds.remove(alert.id)
+                state.showToast(V2Toast(
+                    kind: .error,
+                    title: "Couldn't delete",
+                    detail: state.provider.lastErrorDescription
+                ))
+            }
         }
     }
 

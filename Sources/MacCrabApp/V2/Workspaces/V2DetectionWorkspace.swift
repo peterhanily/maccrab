@@ -166,6 +166,10 @@ public struct V2DetectionWorkspace: View {
             let r = await state.provider.rules()
             await MainActor.run {
                 self.rules = r
+                // C6: re-point the open inspector at the fresh rule so a
+                // mute/disable/severity change (or an external edit) reflects
+                // in its status chip + action labels on the next refresh tick.
+                self.resyncSelectedRule(from: r)
                 // Default (no filter): show all rules immediately.
                 if self.debouncedRuleQuery.isEmpty {
                     self.filteredRules = r
@@ -206,10 +210,13 @@ public struct V2DetectionWorkspace: View {
             // field concat + lowercase per row per keystroke. Detached so
             // the string work doesn't block main.
             let haystack = await Task.detached(priority: .userInitiated) {
-                Dictionary(uniqueKeysWithValues: r.map { rule -> (String, String) in
+                // uniquingKeysWith (not uniqueKeysWithValues): a duplicate rule id
+                // across single-event/sequence/graph/built-in sets must NOT trap
+                // the app on a rules refresh — keep the first.
+                Dictionary(r.map { rule -> (String, String) in
                     let h = V2DetectionWorkspace.ruleSearchHaystack(for: rule)
                     return (rule.id, h)
-                })
+                }, uniquingKeysWith: { first, _ in first })
             }.value
             await MainActor.run {
                 self.rulesHaystack = haystack
@@ -276,12 +283,28 @@ public struct V2DetectionWorkspace: View {
         userDisabledRuleIDs = ids
     }
 
+    /// C6: the inspector renders `selectedRule`, a value snapshot taken when
+    /// the row was clicked. Mute / Disable / severity actions and the 5 s
+    /// refresh rewrite `rules` but leave that snapshot frozen, so the status
+    /// chip + action-button labels went stale (built-ins have no self-heal).
+    /// Re-point the selection at the fresh rule with the same id. No-op when
+    /// nothing is selected or the rule is gone (keeps the inspector open
+    /// through a transient empty refresh rather than snapping it shut).
+    private func resyncSelectedRule(from source: [V2MockRule]) {
+        guard let selId = selectedRule?.id,
+              let fresh = source.first(where: { $0.id == selId }) else { return }
+        selectedRule = fresh
+    }
+
     /// Toggle a rule between bundled-default and user-override disabled.
     /// First disable in a session bootstraps the override directory
     /// (admin prompt). Subsequent toggles write directly — the dir is
     /// chmod'd 0775 root:admin during bootstrap so any admin user can
     /// edit overrides without re-prompting.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
+        // C6: re-sync the inspector snapshot on every exit path so its labels
+        // don't lag the action the user just took.
+        defer { resyncSelectedRule(from: rules) }
         // Built-in maccrab.* rules: enable/disable (mute) via the inbox IPC —
         // the root daemon owns builtin_rules_settings.json. Detection + any
         // protective action still run; only the alert is muted.
@@ -307,9 +330,21 @@ public struct V2DetectionWorkspace: View {
             ))
             return
         }
-        let currentlyDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
-        if currentlyDisabled {
+        if userDisabledRuleIDs.contains(rule.id) {
+            // A real user override exists on disk — removing it re-enables.
             await removeUserOverride(rule: rule)
+        } else if !rule.isEnabled {
+            // Disabled by the bundle/engine, not by a user override (deprecated
+            // content ships disabled; the engine can also auto-disable a rule at
+            // runtime). There's no override to remove, so remove-rule would be a
+            // no-op — don't fire it or claim "Rule re-enabled".
+            state.showToast(V2Toast(
+                kind: .info,
+                title: rule.isDeprecated ? "Deprecated rule" : "Disabled by the engine",
+                detail: rule.isDeprecated
+                    ? rule.title + " — deprecated rules ship disabled and don't fire; there's no user override to remove."
+                    : rule.title + " — this rule was disabled by the detection engine; there's nothing to re-enable here."
+            ))
         } else {
             await writeDisabledOverride(rule: rule)
         }
@@ -430,6 +465,8 @@ public struct V2DetectionWorkspace: View {
     /// sequence/graph rules are read-only (their engines don't read the
     /// user_rules overlay).
     private func setSeverityOverride(_ rule: V2MockRule, severityRaw: String?) async {
+        // C6: keep the inspector snapshot in step with the severity change.
+        defer { resyncSelectedRule(from: rules) }
         if rule.id.hasPrefix("maccrab.") {
             appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: severityRaw)
             state.showToast(V2Toast(
@@ -548,6 +585,9 @@ public struct V2DetectionWorkspace: View {
                 rulesSearchBar
                 if builtInDetectionSearchUnmatched {
                     builtInDetectionNote
+                }
+                if rules.isEmpty {
+                    rulesEmptyState
                 }
                 rulesTable
             }
@@ -709,6 +749,37 @@ public struct V2DetectionWorkspace: View {
         .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
     }
 
+    /// B9: zero loaded rules is not a neutral "nothing here" state — for a
+    /// detection tool it means protection is degraded (or the engine isn't
+    /// reporting). The bare header-only table reads as "fine", so surface the
+    /// real state. Uses the same 120 s heartbeat staleness the Overview
+    /// protection banner does.
+    @ViewBuilder
+    private var rulesEmptyState: some View {
+        let daemonNotReporting = appState.heartbeat?.isStale ?? false
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: daemonNotReporting
+                  ? "bolt.horizontal.circle"
+                  : "exclamationmark.triangle.fill")
+                .foregroundStyle(daemonNotReporting ? V2Theme.mutedText : V2Theme.warning)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(daemonNotReporting ? "Daemon not reporting" : "No detection rules loaded")
+                    .scaledSystem(12, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                Text(daemonNotReporting
+                     ? "The detection engine hasn't sent a heartbeat in over 120 s — rule status can't be shown. Check that MacCrab is running (System › Platform health)."
+                     : "The engine reports zero active detection rules — detection is degraded until rules load. Try Reload above, or reinstall the rule bundle.")
+                    .scaledSystem(11)
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(V2Theme.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+    }
+
     private var rulesTable: some View {
         // `filteredRules` is updated by a debounced `.task(id:)`
         // inside `tabBody` so we don't re-filter on every keystroke.
@@ -720,24 +791,39 @@ public struct V2DetectionWorkspace: View {
             columns: [
                 V2DataColumn(id: "on", title: "On", width: .fixed(50),
                              sortKey: { .number($0.isEnabled ? 0 : 1) }) { r in
-                    // v1.18.1: the static status dot is now the toggle —
-                    // enable/disable without opening the inspector.
-                    // toggleRuleDisabled routes builtin/user/read-only
-                    // rules correctly and toasts the outcome.
-                    Button {
-                        Task { await toggleRuleDisabled(r) }
-                    } label: {
+                    if r.category == "Sequence" || r.category == "Graph" {
+                        // Read-only: composite (sequence/graph) rules are managed
+                        // in their own rule files, not the single-event overlay —
+                        // toggleRuleDisabled only toasts "Read-only" for them, so
+                        // don't render a control that claims "click to disable".
                         Image(systemName: r.isEnabled ? "circle.fill" : "circle")
                             .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
                             .scaledSystem(8)
                             .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
+                            .help("Read-only — multi-step rules are managed in their rule files")
+                            .accessibilityLabel(r.isEnabled
+                                ? "Rule enabled (read-only)."
+                                : "Rule disabled (read-only).")
+                    } else {
+                        // v1.18.1: the static status dot is now the toggle —
+                        // enable/disable without opening the inspector.
+                        // toggleRuleDisabled routes builtin/user rules correctly
+                        // and toasts the outcome.
+                        Button {
+                            Task { await toggleRuleDisabled(r) }
+                        } label: {
+                            Image(systemName: r.isEnabled ? "circle.fill" : "circle")
+                                .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
+                                .scaledSystem(8)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(r.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
+                        .accessibilityLabel(r.isEnabled
+                            ? "Rule enabled. Activate to disable."
+                            : "Rule disabled. Activate to enable.")
                     }
-                    .buttonStyle(.plain)
-                    .help(r.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
-                    .accessibilityLabel(r.isEnabled
-                        ? "Rule enabled. Activate to disable."
-                        : "Rule disabled. Activate to enable.")
                 },
                 V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240),
                              sortKey: { .text($0.title) }) { r in
@@ -842,8 +928,13 @@ public struct V2DetectionWorkspace: View {
                         ) {
                             Task { await toggleRuleDisabled(r) }
                         }
-                        V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true) {
-                            state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                        V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true,
+                                       tooltip: "Show this rule's alerts in Alerts › Open") {
+                            // Pre-fill the alert search so Open filters to this
+                            // rule's fires (History ignores the query filter).
+                            // Same pattern as the campaign "view alerts" jump.
+                            state.alertSearchQuery = r.id
+                            state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
                         }
                     }
                 }
@@ -887,8 +978,13 @@ public struct V2DetectionWorkspace: View {
                             ) {
                                 Task { await toggleRuleDisabled(r) }
                             }
-                            V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true) {
-                                state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                            V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true,
+                                           tooltip: "Show this rule's alerts in Alerts › Open") {
+                                // Pre-fill the alert search so Open filters to
+                                // this rule's fires (History ignores the query
+                                // filter). Mirrors the campaign "view alerts" jump.
+                                state.alertSearchQuery = r.id
+                                state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsOpen))
                             }
                         }
                     }
@@ -905,6 +1001,13 @@ public struct V2DetectionWorkspace: View {
         @ObservedObject var appState: AppState
         @ObservedObject var state: V2DashboardState
         @State private var severitySel = "default"
+        /// C7: the last value actually pushed to the daemon. Seeded in
+        /// `.onAppear` alongside `severitySel` so the programmatic seed (which
+        /// flips "default" → the stored override) doesn't trip `.onChange` into
+        /// re-sending the override + a false "Severity override sent" toast with
+        /// no user action. Genuine picker selections still differ from this and
+        /// commit normally.
+        @State private var lastCommitted = "default"
 
         var body: some View {
             V2InspectorSection(String(localized: "inspector.builtInSettings", defaultValue: "Built-in settings")) {
@@ -926,6 +1029,11 @@ public struct V2DetectionWorkspace: View {
                         .labelsHidden()
                         .frame(width: 140)
                         .onChange(of: severitySel) { new in
+                            // C7: skip the .onAppear seed (and any redundant
+                            // re-pick of the already-committed value) — only a
+                            // real change should write an override + toast.
+                            guard new != lastCommitted else { return }
+                            lastCommitted = new
                             appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: new == "default" ? nil : new)
                             state.showToast(V2Toast(
                                 kind: .info,
@@ -941,7 +1049,9 @@ public struct V2DetectionWorkspace: View {
             // this the @State default ("default") always wins on first render
             // even when rule.severityOverrideRaw is set.
             .onAppear {
-                severitySel = rule.severityOverrideRaw ?? "default"
+                let stored = rule.severityOverrideRaw ?? "default"
+                severitySel = stored
+                lastCommitted = stored
             }
         }
     }

@@ -537,6 +537,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // it watches the clipboard whenever the menubar app is running — not only
         // while the dashboard window is open.
         appState.startClipboardBridge()
+
+        // v1.21.4 (UI-test seam): under `-ui-testing`, bring the dashboard window
+        // up immediately so XCUITest can attach to the WindowGroup without having
+        // to automate the menu-bar status item (which is flaky). Pairs with the
+        // MACCRAB_DATA_DIR fixture-DB seam in AppState.dataDir.
+        if CommandLine.arguments.contains("-ui-testing") {
+            showDashboard()
+        }
     }
 
     /// Upgrade-handoff gate for banner posting (see
