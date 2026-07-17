@@ -944,6 +944,121 @@ struct CrossProcessCorrelatorTests {
         )
         #expect(chain == nil, "ignored path must never form a chain")
     }
+
+    // v1.21.4 perf (#14): evaluateFileChain now bails in O(1) using an
+    // incrementally-maintained per-file distinct-PID upper bound instead of
+    // scanning the window on every event. These pin that the bail path is
+    // detection-identical to the pre-optimization full-window scan: a
+    // single-PID same-file flood never mints a chain (the fast-bail case),
+    // while a genuine 2-PID write→execute handoff still fires.
+    @Test("Single-PID same-file flood never forms a chain (O(1) distinct-PID bail)")
+    func singlePIDFloodBailsWithoutChain() async {
+        let correlator = CrossProcessCorrelator()   // production default
+        let now = Date()
+        // One process writes+executes the same non-ignored path repeatedly.
+        // Only 1 distinct PID ever touches the key, so the chain is provably
+        // impossible and must never fire — even with action diversity
+        // (write + execute) present, which is what the fast bail short-circuits.
+        var chain: CrossProcessCorrelator.CorrelationChain?
+        for i in 0..<50 {
+            chain = await correlator.recordFileEvent(
+                path: "/tmp/hot-writer.dat",
+                action: i % 2 == 0 ? "write" : "execute",
+                pid: 4242,
+                processName: "writer",
+                processPath: "/usr/local/bin/writer",
+                timestamp: now.addingTimeInterval(Double(i))
+            )
+            #expect(chain == nil, "single-PID flood must never form a chain")
+        }
+    }
+
+    @Test("2-PID write→execute still fires after the distinct-PID bail path")
+    func twoPIDChainStillFiresAfterBail() async {
+        let correlator = CrossProcessCorrelator()   // production default
+        let now = Date()
+        // First a single-PID write: distinct PIDs == 1, so evaluateFileChain
+        // takes the O(1) bail and returns nil.
+        let none = await correlator.recordFileEvent(
+            path: "/tmp/stage.bin", action: "write",
+            pid: 900, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        #expect(none == nil, "first single-PID write must bail without a chain")
+        // An unrelated tree then executes it → 2 distinct PIDs → the upper-bound
+        // guard clears and the full evaluation runs and fires, identically to
+        // the pre-optimization path.
+        let chain = await correlator.recordFileEvent(
+            path: "/tmp/stage.bin", action: "execute",
+            pid: 901, processName: "sh", processPath: "/var/tmp/dropper",
+            timestamp: now.addingTimeInterval(3)
+        )
+        #expect(chain != nil, "2-PID write→execute must still fire after the bail path")
+        #expect(chain?.processCount == 2)
+    }
+
+    // v1.21.4 perf (#18): the substring scan in shouldIgnoreFilePath now runs
+    // behind a cheap ASCII character-mask prefilter. This asserts the prefiltered
+    // predicate returns byte-identical verdicts to the full (pre-prefilter) scan
+    // across a corpus that includes every ignore category AND adversarial paths
+    // whose character set is a *superset* of an ignore substring's yet do not
+    // contain it — those must pass the mask gate and reach the `contains` scan,
+    // which correctly returns "not ignored."
+    @Test("ASCII-mask-prefiltered shouldIgnoreFilePath matches full-scan verdicts")
+    func shouldIgnoreFilePathPrefilterParity() {
+        // (path, expectedIgnored) — expectedIgnored is the pre-prefilter
+        // full-scan verdict derived from the ignore-sets.
+        let corpus: [(String, Bool)] = [
+            // Ignored — one+ per category.
+            ("/dev/null", true),                                       // exact
+            ("/dev/urandom", true),                                    // exact
+            ("/System/Library/Frameworks/Foo", true),                 // prefix
+            ("/usr/lib/dyld", true),                                   // prefix
+            ("/usr/share/man/x", true),                               // prefix
+            ("/Library/Apple/System/x", true),                        // prefix
+            ("/private/var/db/dyld/foo", true),                       // prefix
+            ("/Users/me/app.log", true),                              // suffix .log
+            ("/Users/me/session.log.gz", true),                       // suffix .log.gz
+            ("/Users/me/panic.crash", true),                          // suffix .crash
+            ("/Users/me/report.ips", true),                           // suffix .ips
+            ("/Users/me/Library/Caches/blob", true),                  // substring
+            ("/Users/me/Library/Preferences/x.plist", true),          // substring
+            ("/opt/homebrew/var/db", true),                           // substring
+            ("/opt/homebrew/Cellar/foo/bin", true),                   // substring
+            ("/Users/me/.cache/pip/http", true),                      // substring /.cache/
+            ("/Users/me/.npm/_cacache/x", true),                      // substring /.npm/
+            ("/Users/me/.venv/bin/python", true),                     // substring /.venv/
+            ("/Users/me/proj/node_modules/lib/x.js", true),           // substring
+            ("/Users/me/proj/.git/index", true),                      // substring /.git/
+            ("/dev/ttys003", true),                                   // substring /dev/ttys
+            ("/dev/ptmx", true),                                      // substring /dev/ptmx
+            ("/private/var/folders/ab/cd/T/x", true),                 // substring
+            ("/private/tmp/claude-501/scratch/out", true),            // substring
+            ("/Users/me/proj/.build/debug/App", true),                // substring /.build/
+            ("/Library/Application Support/MacCrab/events.db", true), // substring
+            ("/private/var/log/wifi.log.0", true),                    // substring + rotated
+            ("/Users/me/system.log.3", true),                         // rotated .log.N
+            ("/Users/me/app.log.12.gz", true),                        // rotated (strip .gz)
+            // Not ignored — the paths real cross-process chains form on, plus
+            // adversarial mask-pass-but-no-contiguous-match cases.
+            ("/tmp/payload.bin", false),
+            ("/Users/me/work/evil", false),
+            ("/Users/me/documents/report.txt", false),
+            ("/Users/me/Downloads/installer", false),
+            ("/Users/me/src/main.swift", false),
+            ("/var/folders/ab/cd/T/x", false),        // lacks /private → not /private/var/folders/
+            ("/opt/local/bin/wget", false),           // /opt/ but not /opt/homebrew/…
+            ("/Users/me/.gitignore", false),          // superset of /.git/ chars, no /.git/ substring
+            ("/Users/dev/notty", false),              // superset of /dev/tty chars, no /dev/tty substring
+            ("/Users/me/mynode_module/x", false),     // superset of /node_modules/ chars, no match
+        ]
+        for (path, expected) in corpus {
+            #expect(
+                CrossProcessCorrelator.shouldIgnoreFilePath(path) == expected,
+                "shouldIgnoreFilePath(\(path)) should be \(expected)"
+            )
+        }
+    }
 }
 
 // Database encryption tests moved to DatabaseEncryptionTests.swift in

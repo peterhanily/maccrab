@@ -878,6 +878,53 @@ public actor RuleEngine {
 
     // MARK: Evaluation
 
+    /// Per-event memo of resolved (and case-folded) field values.
+    ///
+    /// A single event is evaluated against every applicable rule, and the
+    /// compiled corpus references the SAME hot field paths (e.g.
+    /// `process.commandline`, `file.path`) across many predicates — the
+    /// per-event perf scoping counted ~121 redundant resolve+lowercase passes
+    /// over one event. This memoizes both the raw resolved value AND its
+    /// lowercased form, keyed by the EXACT field-path string, so each distinct
+    /// path is resolved (and folded) at most once per event.
+    ///
+    /// DETECTION-EXACT: `RuleEngine.resolveField` is a pure function of
+    /// (path, event) and `String.lowercased()` is pure, so a memoized value is
+    /// byte-identical to recomputing it. Keying by the EXACT path keeps aliases
+    /// that resolve to DIFFERENT values distinct (e.g. `file.name` vs
+    /// `TargetFilename` → `file.path`) — two paths can never collide onto one
+    /// entry. Lifetime is exactly one `evaluate(_:)` call: the instance is bound
+    /// to a single event at construction and is never shared, so a cached value
+    /// cannot cross-contaminate a later event. `internal` (not `private`) only so
+    /// the parity unit test can assert memo == `resolveField` directly, matching
+    /// the same test-visibility precedent as `resolveField` / `RuleStats`.
+    final class FieldMemo {
+        private let event: Event
+        /// `.some(nil)` = resolved, field absent; missing key = not yet resolved.
+        private var raw: [String: String?] = [:]
+        private var lowered: [String: String?] = [:]
+
+        init(event: Event) { self.event = event }
+
+        /// Raw resolved value for `path` (memoized). Byte-identical to
+        /// `RuleEngine.resolveField(path, from: event)`.
+        func value(for path: String) -> String? {
+            if let hit = raw[path] { return hit }
+            let v = RuleEngine.resolveField(path, from: event)
+            raw[path] = v
+            return v
+        }
+
+        /// Lowercased resolved value for `path` (memoized). Byte-identical to
+        /// `value(for: path)?.lowercased()`.
+        func lowercasedValue(for path: String) -> String? {
+            if let hit = lowered[path] { return hit }
+            let v = value(for: path)?.lowercased()
+            lowered[path] = v
+            return v
+        }
+    }
+
     /// Evaluate an event against all applicable rules.
     ///
     /// Only rules whose logsource category matches the event's category are
@@ -889,9 +936,15 @@ public actor RuleEngine {
         var matches: [RuleMatch] = []
         var rulesToDisable: [(id: String, title: String, ms: Double, breaches: Int)] = []
 
+        // Per-event field memo: resolve + case-fold each distinct field path at
+        // most once for THIS event, shared across every rule/predicate below.
+        // Bound to `event` and discarded when this call returns — never reused
+        // across events (see FieldMemo).
+        let fieldMemo = FieldMemo(event: event)
+
         for rule in rules where rule.enabled {
             let start = DispatchTime.now()
-            let fired = evaluateRule(rule, against: event)
+            let fired = evaluateRule(rule, against: event, memo: fieldMemo)
             let elapsed = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
 
             // v1.7.1: per-rule telemetry — fire count, total exec ns, last
@@ -1006,25 +1059,25 @@ public actor RuleEngine {
     // MARK: - Private Evaluation Logic
 
     /// Evaluate a single compiled rule against an event.
-    private func evaluateRule(_ rule: CompiledRule, against event: Event) -> Bool {
+    private func evaluateRule(_ rule: CompiledRule, against event: Event, memo: FieldMemo) -> Bool {
         let predicates = rule.predicates
         guard !predicates.isEmpty else { return false }
 
         // Use hierarchical condition tree if available (complex boolean expressions).
         if let tree = rule.conditionTree {
-            return evaluateConditionNode(tree, predicates: predicates, against: event)
+            return evaluateConditionNode(tree, predicates: predicates, against: event, memo: memo)
         }
 
         // Legacy flat condition evaluation.
         switch rule.condition {
         case .allOf:
-            return predicates.allSatisfy { evaluatePredicate($0, against: event) }
+            return predicates.allSatisfy { evaluatePredicate($0, against: event, memo: memo) }
         case .anyOf:
-            return predicates.contains { evaluatePredicate($0, against: event) }
+            return predicates.contains { evaluatePredicate($0, against: event, memo: memo) }
         case .oneOfEach:
             let groups = Dictionary(grouping: predicates, by: { $0.field })
             return groups.values.allSatisfy { group in
-                group.contains { evaluatePredicate($0, against: event) }
+                group.contains { evaluatePredicate($0, against: event, memo: memo) }
             }
         }
     }
@@ -1033,21 +1086,22 @@ public actor RuleEngine {
     private func evaluateConditionNode(
         _ node: ConditionNode,
         predicates: [Predicate],
-        against event: Event
+        against event: Event,
+        memo: FieldMemo
     ) -> Bool {
         switch node {
         case .and(let operands):
-            return operands.allSatisfy { evaluateConditionNode($0, predicates: predicates, against: event) }
+            return operands.allSatisfy { evaluateConditionNode($0, predicates: predicates, against: event, memo: memo) }
 
         case .or(let operands):
-            return operands.contains { evaluateConditionNode($0, predicates: predicates, against: event) }
+            return operands.contains { evaluateConditionNode($0, predicates: predicates, against: event, memo: memo) }
 
         case .not(let operand):
-            return !evaluateConditionNode(operand, predicates: predicates, against: event)
+            return !evaluateConditionNode(operand, predicates: predicates, against: event, memo: memo)
 
         case .predicate(let index):
             guard index >= 0 && index < predicates.count else { return false }
-            return evaluatePredicate(predicates[index], against: event)
+            return evaluatePredicate(predicates[index], against: event, memo: memo)
 
         case .predicateGroup(let range, let mode):
             let clamped = range.clamped(to: 0..<predicates.count)
@@ -1056,28 +1110,32 @@ public actor RuleEngine {
             let slice = predicates[clamped]
             switch mode {
             case .allOf:
-                return slice.allSatisfy { evaluatePredicate($0, against: event) }
+                return slice.allSatisfy { evaluatePredicate($0, against: event, memo: memo) }
             case .anyOf:
-                return slice.contains { evaluatePredicate($0, against: event) }
+                return slice.contains { evaluatePredicate($0, against: event, memo: memo) }
             case .oneOfEach:
                 let groups = Dictionary(grouping: slice, by: { $0.field })
                 return groups.values.allSatisfy { group in
-                    group.contains { evaluatePredicate($0, against: event) }
+                    group.contains { evaluatePredicate($0, against: event, memo: memo) }
                 }
             }
         }
     }
 
     /// Evaluate a single predicate against an event.
-    private func evaluatePredicate(_ predicate: Predicate, against event: Event) -> Bool {
+    private func evaluatePredicate(_ predicate: Predicate, against event: Event, memo: FieldMemo) -> Bool {
         let rawResult: Bool
 
+        // Resolution goes through the per-event memo so a hot field path is
+        // resolved (and later case-folded) once per event, not once per
+        // predicate. `memo.value(for:)` is byte-identical to
+        // `Self.resolveField(predicate.field, from: event)` (see FieldMemo).
         // For the "exists" modifier we only check field presence.
         if predicate.modifier == .exists {
-            let fieldValue = Self.resolveField(predicate.field, from: event)
+            let fieldValue = memo.value(for: predicate.field)
             rawResult = fieldValue?.isEmpty == false
         } else {
-            guard let fieldValue = Self.resolveField(predicate.field, from: event) else {
+            guard let fieldValue = memo.value(for: predicate.field) else {
                 // Field not present on event -- no match (unless negated).
                 rawResult = false
                 return predicate.negate ? !rawResult : rawResult
@@ -1086,8 +1144,10 @@ public actor RuleEngine {
             rawResult = evaluateModifier(
                 predicate.modifier,
                 fieldValue: fieldValue,
+                field: predicate.field,
                 values: predicate.values,
-                lowercasedValues: predicate.lowercasedValues
+                lowercasedValues: predicate.lowercasedValues,
+                memo: memo
             )
         }
 
@@ -1104,8 +1164,10 @@ public actor RuleEngine {
     private func evaluateModifier(
         _ modifier: PredicateModifier,
         fieldValue: String,
+        field: String,
         values: [String],
-        lowercasedValues: [String]
+        lowercasedValues: [String],
+        memo: FieldMemo
     ) -> Bool {
         // v1.12.0 RC25 (perf): only lowercase the field value when the
         // modifier actually compares case-insensitive. Pre-fix every
@@ -1118,7 +1180,15 @@ public actor RuleEngine {
             default: return false
             }
         }()
-        let fieldLower = needsLower ? fieldValue.lowercased() : ""
+        // Per-event #13: reuse the memoized case-fold so a hot field is
+        // lowercased once per event, not once per case-insensitive predicate
+        // that references it. `memo.lowercasedValue(for: field)` resolves the
+        // SAME field path to the SAME string as `fieldValue` (evaluatePredicate
+        // just took `fieldValue` from `memo.value(for: field)`), so this is
+        // byte-identical to `fieldValue.lowercased()`; the `?? fieldValue
+        // .lowercased()` fallback keeps the result exact even in the impossible
+        // miss case. Laziness is preserved — only computed when `needsLower`.
+        let fieldLower = needsLower ? (memo.lowercasedValue(for: field) ?? fieldValue.lowercased()) : ""
 
         switch modifier {
         case .equals:

@@ -108,6 +108,16 @@ public actor CrossProcessCorrelator {
     /// Domain name -> ordered list of events resolving/contacting that domain.
     private var domainArtifacts: [String: [ChainEvent]] = [:]
 
+    /// File path -> distinct PIDs observed touching that path. A conservative
+    /// UPPER BOUND on the windowed distinct-PID count used by
+    /// `evaluateFileChain`: grown on every append and never shrunk between
+    /// purges, then rebuilt from the surviving events on purge/eviction, so it
+    /// can never UNDER-count the in-window distinct PIDs. That lets
+    /// `evaluateFileChain` bail in O(1) when a key provably can't reach
+    /// `minFileChainLength`, skipping the window scan + pid-Set alloc on the
+    /// single-PID same-file flood (the log/build-writer hot path).
+    private var fileArtifactPIDs: [String: Set<Int32>] = [:]
+
     /// Tracks when we last ran a purge pass, to avoid purging on every call.
     private var lastPurge: Date
 
@@ -298,6 +308,43 @@ public actor CrossProcessCorrelator {
         "/Library/Application Support/MacCrab/",
     ]
 
+    /// Per-substring ASCII character mask for the `ignoredPathSubstrings`
+    /// prefilter (#18). A necessary condition for `path.contains(sub)` is that
+    /// `path` contains every character of `sub`, so comparing 128-bit ASCII
+    /// presence masks lets the per-event hot path skip the O(n) `contains`
+    /// scan for the (common) substrings a path provably can't contain — while
+    /// producing byte-identical ignore verdicts. Derived from
+    /// `ignoredPathSubstrings`, so the gate can never drift out of sync. A
+    /// substring with any non-ASCII byte is marked `pureASCII == false` and is
+    /// always scanned (never gated), keeping the gate sound if a future entry
+    /// ever contains non-ASCII characters.
+    private static let ignoredSubstringMasks: [(m0: UInt64, m1: UInt64, pureASCII: Bool, sub: String)] =
+        ignoredPathSubstrings.map { sub in
+            let mask = CrossProcessCorrelator.asciiMask(of: sub)
+            return (mask.m0, mask.m1, mask.pureASCII, sub)
+        }
+
+    /// Build a 128-bit ASCII presence mask over a string's UTF-8 bytes: bytes
+    /// 0–63 set a bit in `m0`, 64–127 set a bit in `m1`, and a byte ≥ 128
+    /// (non-ASCII) sets no bit and clears `pureASCII`. ASCII bytes never appear
+    /// inside a multi-byte UTF-8 sequence, so a set bit exactly means "this
+    /// ASCII character is present in the string."
+    private static func asciiMask(of s: String) -> (m0: UInt64, m1: UInt64, pureASCII: Bool) {
+        var m0: UInt64 = 0
+        var m1: UInt64 = 0
+        var pureASCII = true
+        for byte in s.utf8 {
+            if byte < 64 {
+                m0 |= (1 as UInt64) << UInt64(byte)
+            } else if byte < 128 {
+                m1 |= (1 as UInt64) << UInt64(byte - 64)
+            } else {
+                pureASCII = false
+            }
+        }
+        return (m0, m1, pureASCII)
+    }
+
     /// Network destinations that are never interesting.
     private static let ignoredNetworkPrefixes: [String] = [
         "127.",            // loopback
@@ -432,6 +479,7 @@ public actor CrossProcessCorrelator {
         )
 
         appendArtifact(to: &fileArtifacts, key: path, event: event)
+        fileArtifactPIDs[path, default: []].insert(pid)
         purgeIfNeeded()
 
         return evaluateFileChain(path: path)
@@ -492,6 +540,12 @@ public actor CrossProcessCorrelator {
         networkArtifacts = evictIfOverLimit(networkArtifacts)
         domainArtifacts = evictIfOverLimit(domainArtifacts)
 
+        // Rebuild the file-PID upper-bound index from the surviving file
+        // artifacts so it stays in sync with pruning/eviction: this bounds its
+        // memory (its keys track `fileArtifacts` exactly) and keeps it a valid
+        // upper bound (distinct PIDs of all stored events ⊇ in-window PIDs).
+        fileArtifactPIDs = rebuildFilePIDIndex(fileArtifacts)
+
         lastPurge = Date()
         logger.debug("Purge complete — files: \(self.fileArtifacts.count), network: \(self.networkArtifacts.count), domains: \(self.domainArtifacts.count)")
     }
@@ -518,6 +572,17 @@ public actor CrossProcessCorrelator {
 
     /// Evaluate whether the events for a given file path form a complete chain.
     private func evaluateFileChain(path: String) -> CorrelationChain? {
+        // O(1) fast bail (#14): the incrementally-maintained distinct-PID set is
+        // a conservative UPPER BOUND on the windowed distinct-PID count — it's a
+        // superset of the PIDs of the currently-stored events, which are a
+        // superset of the in-window events. So when it can't reach
+        // `minFileChainLength`, no window scan can either — the chain is
+        // provably impossible — and we skip `eventsWithinWindow`'s 2×O(n) scan
+        // plus the pid-Set alloc. When the index is absent we fall through to
+        // the full scan, so the outcome is byte-identical to the pre-opt path.
+        if let pids = fileArtifactPIDs[path], pids.count < minFileChainLength {
+            return nil
+        }
         guard let events = fileArtifacts[path] else { return nil }
 
         // Filter to events within the correlation window.
@@ -974,8 +1039,20 @@ public actor CrossProcessCorrelator {
         for suffix in ignoredPathSuffixes {
             if path.hasSuffix(suffix) { return true }
         }
-        for sub in ignoredPathSubstrings {
-            if path.contains(sub) { return true }
+        // Substring scan with a cheap ASCII-mask prefilter (#18): a path can
+        // only contain `sub` if it contains every character of `sub`, so skip
+        // the O(n) `contains` for any substring whose ASCII character mask is
+        // not a subset of the path's. Identical verdicts — only provably
+        // impossible matches are skipped; a non-ASCII substring is always
+        // scanned (`pureASCII == false`).
+        let pathMask = asciiMask(of: path)
+        for entry in ignoredSubstringMasks {
+            if entry.pureASCII &&
+                ((entry.m0 & pathMask.m0) != entry.m0 ||
+                 (entry.m1 & pathMask.m1) != entry.m1) {
+                continue
+            }
+            if path.contains(entry.sub) { return true }
         }
         if hasRotatedLogSuffix(path) { return true }
         return false
@@ -1030,6 +1107,23 @@ public actor CrossProcessCorrelator {
             if !live.isEmpty {
                 result[key] = live
             }
+        }
+        return result
+    }
+
+    /// Rebuild the per-file distinct-PID upper-bound index (`fileArtifactPIDs`)
+    /// from the surviving artifact map. Called after pruning/eviction so the
+    /// index tracks exactly the keys still present in `fileArtifacts` (bounding
+    /// its memory) and reflects only their stored PIDs — which remain an upper
+    /// bound on the windowed distinct-PID count, since the in-window events are
+    /// always a subset of the stored events.
+    private func rebuildFilePIDIndex(
+        _ map: [String: [ChainEvent]]
+    ) -> [String: Set<Int32>] {
+        var result: [String: Set<Int32>] = [:]
+        result.reserveCapacity(map.count)
+        for (key, events) in map {
+            result[key] = Set(events.map(\.pid))
         }
         return result
     }
