@@ -58,7 +58,12 @@ struct MacCrabCtl {
                     case "--category" where idx + 1 < args.count:
                         category = EventCategory(rawValue: args[idx + 1]); idx += 2
                     default:
-                        if let n = Int(args[idx]) { limit = n }
+                        // Clamp to >= 0: a NEGATIVE limit binds into SQLite's
+                        // `LIMIT ?`, which SQLite treats as "no limit" — an
+                        // unbounded dump of the whole table. max(0, …) keeps it
+                        // bounded (`LIMIT 0` returns nothing) for a fat-fingered
+                        // `events tail -5`.
+                        if let n = Int(args[idx]) { limit = max(0, n) }
                         idx += 1
                     }
                 }
@@ -83,7 +88,9 @@ struct MacCrabCtl {
                 case "--severity" where idx + 1 < args.count:
                     severityFilter = Severity(rawValue: args[idx + 1].lowercased()); idx += 2
                 default:
-                    if let n = Int(args[idx]) { limit = n }
+                    // Clamp to >= 0 — a negative binds into SQLite `LIMIT ?`
+                    // as "no limit" (unbounded dump). See `events tail` above.
+                    if let n = Int(args[idx]) { limit = max(0, n) }
                     idx += 1
                 }
             }
@@ -156,7 +163,9 @@ struct MacCrabCtl {
             if args.count >= 3 && args[2] == "watch" {
                 await watchCampaigns()
             } else {
-                let limit = args.count >= 3 ? Int(args[2]) ?? 10 : 10
+                // Clamp to >= 0 — a negative binds into SQLite `LIMIT ?` as
+                // "no limit" (unbounded dump). See `events tail` above.
+                let limit = max(0, args.count >= 3 ? Int(args[2]) ?? 10 : 10)
                 await listCampaigns(limit: limit)
             }
         case "watch":
@@ -186,7 +195,9 @@ struct MacCrabCtl {
                 usageError("Usage: maccrabctl cdhash <PID> | --all")
             }
         case "tree-score":
-            let limit = args.count >= 3 ? Int(args[2]) ?? 10 : 10
+            // Clamp to >= 0 — a negative binds into SQLite `LIMIT ?` as "no
+            // limit" (unbounded dump). See `events tail` above.
+            let limit = max(0, args.count >= 3 ? Int(args[2]) ?? 10 : 10)
             await showTreeScore(limit: limit)
         case "mcp":
             if args.count >= 3 && args[2] == "list" {

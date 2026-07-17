@@ -44,6 +44,13 @@ public enum SafeBlockableIP {
     public static let protectedIPv4CIDRs: [(network: UInt32, prefix: Int, label: String)] = [
         // Loopback — blocking 127.0.0.0/8 breaks everything
         (network: ipv4("127.0.0.0"), prefix: 8, label: "127.0.0.0/8 (loopback)"),
+        // RFC1918 private ranges (v1.21.4 audit MEDIUM). An unauthenticated
+        // threat feed or a poisoned IOC must never be able to push the user's
+        // own gateway/router, NAS, printer, or another LAN host into the PF
+        // blocklist and cut them off their local network.
+        (network: ipv4("10.0.0.0"), prefix: 8, label: "10.0.0.0/8 (RFC1918 private)"),
+        (network: ipv4("172.16.0.0"), prefix: 12, label: "172.16.0.0/12 (RFC1918 private)"),
+        (network: ipv4("192.168.0.0"), prefix: 16, label: "192.168.0.0/16 (RFC1918 private)"),
         // Apple's public IP range — sinkholing breaks iCloud, code-signing
         // OCSP, App Store, software update, etc.
         (network: ipv4("17.0.0.0"), prefix: 8, label: "17.0.0.0/8 (Apple)"),
@@ -67,6 +74,10 @@ public enum SafeBlockableIP {
         (network: ipv6("::"), prefix: 128, label: "::/128 (IPv6 unspecified)"),
         // fe80::/10 — IPv6 link-local
         (network: ipv6("fe80::"), prefix: 10, label: "fe80::/10 (IPv6 link-local)"),
+        // fc00::/7 — IPv6 unique-local (ULA), the v6 analogue of RFC1918.
+        // Covers fc00::/8 and fd00::/8; blocking it would sever local IPv6 LAN
+        // connectivity (v1.21.4 audit MEDIUM).
+        (network: ipv6("fc00::"), prefix: 7, label: "fc00::/7 (IPv6 unique-local)"),
         // ff00::/8 — IPv6 multicast (blocking breaks Bonjour over IPv6)
         (network: ipv6("ff00::"), prefix: 8, label: "ff00::/8 (IPv6 multicast)"),
         // 2606:4700:4700::/48 — Cloudflare DNS over IPv6

@@ -190,20 +190,41 @@ public actor NotarizationChecker {
             inFlightCount += 1
             return
         }
+        // At capacity — suspend until a releasing task HANDS us its slot.
+        // releaseSlot transfers the slot without decrementing, so the in-flight
+        // count already accounts for us on resume; we must NOT re-increment.
+        //
+        // v1.21.4 audit LOW: the previous code decremented in releaseSlot and
+        // re-incremented here after the await. Between the decrement and this
+        // increment a fresh acquireSlot could take the freed slot via the fast
+        // path, and then the woken waiter's increment pushed inFlightCount past
+        // maxConcurrent. Atomic hand-off keeps the count pinned at the cap while
+        // a waiter is queued, so an over-admission can't happen.
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             waiters.append(cont)
         }
-        inFlightCount += 1
     }
 
-    /// Release a slot, waking the next waiter if any.
+    /// Release a slot. Hand it directly to the next waiter when one is queued —
+    /// the count is unchanged (one holder replaced by another), so it can neither
+    /// exceed maxConcurrent nor transiently dip and let an extra fast-path
+    /// acquirer in. Only decrement when nobody is waiting.
     private func releaseSlot() {
-        inFlightCount -= 1
         if !waiters.isEmpty {
             let next = waiters.removeFirst()
             next.resume()
+        } else {
+            inFlightCount -= 1
         }
     }
+
+    // MARK: - Test Seam (concurrency limiter)
+
+    // Exposed for NotarizationCheckerTests to exercise the slot accounting
+    // without forking spctl. Not referenced by any production path.
+    func acquireSlotForTesting() async { await acquireSlot() }
+    func releaseSlotForTesting() { releaseSlot() }
+    var inFlightForTesting: Int { inFlightCount }
 
     /// Run `spctl --assess` and parse the output.
     private func performAssessment(binaryPath: String) async -> NotarizationResult {

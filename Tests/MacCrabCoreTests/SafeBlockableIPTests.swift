@@ -72,6 +72,36 @@ struct SafeBlockableIPTests {
         #expect(SafeBlockableIP.isSafeToBlock(ip: "100.127.255.255") == false)
     }
 
+    @Test("Refuses to block RFC1918 private ranges — the user's own LAN")
+    func rejectsRFC1918() {
+        // v1.21.4 audit MEDIUM: a poisoned feed / IOC must not be able to push
+        // the user's router, NAS, or another LAN host into the PF blocklist and
+        // sever their local network.
+        // 10.0.0.0/8
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "10.0.0.1") == false)
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "10.255.255.255") == false)
+        // 172.16.0.0/12
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "172.16.0.1") == false)
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "172.31.255.255") == false)
+        // 192.168.0.0/16 — the classic home-router range
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "192.168.0.1") == false)
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "192.168.1.254") == false)
+    }
+
+    @Test("172.12/172.32 sit OUTSIDE 172.16/12 and remain blockable")
+    func rfc1918Boundary() {
+        // Just below and just above 172.16.0.0/12 are public and must stay
+        // blockable — the /12 mask must be precise, not a naive 172.* match.
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "172.15.255.255"))
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "172.32.0.1"))
+    }
+
+    @Test("Refuses to block IPv6 unique-local fc00::/7 (ULA)")
+    func rejectsIPv6ULA() {
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "fc00::1") == false)
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "fd12:3456:789a::1") == false)
+    }
+
     // MARK: - Accepted: legitimate block targets
 
     @Test("Accepts public-but-non-protected IPs (real C2 candidates)")

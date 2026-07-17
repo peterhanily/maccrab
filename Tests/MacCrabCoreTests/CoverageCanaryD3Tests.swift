@@ -136,6 +136,56 @@ struct ESCanaryRegistryTests {
         reg.arm(nonce)   // new cycle for the same nonce string
         #expect(reg.seenAtCallback(nonce) == false)
     }
+
+    // MARK: - isArmed callback-boundary gate
+    //
+    // The recognizer now runs ON the ES callback boundary (so "seen at callback"
+    // means kernel delivery, not downstream worker processing). To keep the hot
+    // path cheap, the boundary gates the per-exec argv walk on `isArmed` — true
+    // only while a probe is in flight. The live boundary wiring is live-only
+    // (needs a root, ES-entitled client), but the `isArmed` gate it depends on
+    // is pure and tested here.
+
+    @Test("isArmed is false on a fresh / idle registry (hot path skips the argv walk)")
+    func isArmedIdleIsFalse() {
+        let reg = ESCanaryRegistry()
+        #expect(reg.isArmed == false)
+    }
+
+    @Test("isArmed is true only while a nonce is live")
+    func isArmedTracksLiveSet() {
+        let reg = ESCanaryRegistry()
+        let nonce = CoverageCanary.makeNonce()
+        #expect(reg.isArmed == false)
+        reg.arm(nonce)
+        #expect(reg.isArmed)                         // in flight ⇒ argv walk runs
+        reg.disarm(nonce)
+        #expect(reg.isArmed == false)                // retired ⇒ back to near-free
+    }
+
+    @Test("isArmed stays true until the LAST live nonce is disarmed")
+    func isArmedWithMultipleNonces() {
+        let reg = ESCanaryRegistry()
+        let a = CoverageCanary.makeNonce()
+        let b = CoverageCanary.makeNonce()
+        reg.arm(a); reg.arm(b)
+        #expect(reg.isArmed)
+        reg.disarm(a)
+        #expect(reg.isArmed)                         // b still live
+        reg.disarm(b)
+        #expect(reg.isArmed == false)
+    }
+
+    @Test("a sighting does not by itself keep the registry armed (only the live set does)")
+    func seenDoesNotArm() {
+        let reg = ESCanaryRegistry()
+        let nonce = CoverageCanary.makeNonce()
+        reg.arm(nonce)
+        reg.noteExecIfCanary(commandLine: "/usr/bin/true \(nonce)")
+        #expect(reg.seenAtCallback(nonce))
+        reg.disarm(nonce)
+        #expect(reg.isArmed == false)
+    }
 }
 
 // MARK: - 3. Suppression allowlist (NoiseFilter)

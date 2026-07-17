@@ -26,10 +26,20 @@ enum StoragePragmas {
     /// AlertStore page cache. Smaller table (alerts << events), 4 MB suffices.
     static let alertCacheSizeKB: Int32 = -4_000
 
-    /// EventStore mmap window. 64 MB lets index lookups page in without
-    /// reserving the full file address space. Below this, certain BLOB column
-    /// fetches fall back to read() syscalls — acceptable for the cold path.
-    static let eventMmapSizeBytes: Int64 = 67_108_864 // 64 MB
+    /// EventStore mmap window. mmap'd file pages count toward the daemon's
+    /// RSS when faulted in (they are clean/file-backed and reclaimable under
+    /// pressure, but they inflate the resident peak during scans/VACUUM).
+    /// v1.21.5 (pre-GA RSS audit): cut 64 → 32 MB. The background daemon's
+    /// hot path is inserts + timestamp-range scans of recent rows, both
+    /// served by the 16 MB page cache plus the mapped b-tree index interior;
+    /// 32 MB still maps that working set. Larger cold reads (hunt across the
+    /// full FTS index, BLOB column fetches on old rows) fall back to read()
+    /// syscalls beyond this window — acceptable for the cold path, and the
+    /// author of the prior 64 MB value already sanctioned sub-64 for exactly
+    /// that trade. Combined with the sibling stores this trims the daemon's
+    /// resident-file-page ceiling (events 64→32; see also the TraceStore /
+    /// CausalGraphStore mmap notes) without touching correctness.
+    static let eventMmapSizeBytes: Int64 = 33_554_432 // 32 MB
 
     /// AlertStore mmap window. 16 MB — alert JSON blobs are the only large
     /// values; the rest of the alerts schema fits comfortably in cache.

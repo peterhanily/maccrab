@@ -303,5 +303,14 @@ private func sessionVerify(args: [String]) async throws {
     print("  signed:       \(v.signed)")
     print("  signature_ok: \(v.signatureOk)")
     print("  verdict:      \(verdict)")
-    if verdict.hasPrefix("TAMPERED") { exit(1) }
+    // The exit code must be trustworthy for gating: return 0 ONLY for a
+    // genuinely signed-and-verified (authenticated) bundle. An UNSIGNED
+    // (forgeable, content-hash-rooted-only) bundle and a TAMPERED/invalid one
+    // BOTH exit non-zero, so a caller can't mistake a merely well-formed file
+    // for authenticated evidence. Distinct codes let a caller tell them apart:
+    //   0 = authenticated, 2 = unsigned, 1 = tampered/invalid.
+    let authenticated = v.merkleOk && v.signed && v.signatureOk
+    if !authenticated {
+        exit(v.merkleOk && !v.signed ? 2 : 1)
+    }
 }

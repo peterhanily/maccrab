@@ -358,4 +358,49 @@ struct CampaignDetectorFPRegressionTests {
         #expect(secondBatch.contains { $0.type == .coordinatedAttack },
                 "a coordinated attack on a different executable must not be deduped away")
     }
+
+    // MARK: - v1.21.4: lateral-movement detector was dead code
+    //
+    // checkLateralMovement filtered on the RAW tactic string
+    // (`.contains("lateral_movement")`), but alert tactics arrive Sigma-prefixed
+    // (`attack.lateral_movement`), so the match never succeeded and the detector
+    // could never fire. Normalizing the tactic — as checkKillChain and the
+    // coordinated-attack path already do — makes it live.
+
+    @Test("Lateral-movement alert across 2 user contexts mints a lateral_movement campaign")
+    func lateralMovementCampaignFires() async {
+        let detector = CampaignDetector()
+        // User 501: a genuine lateral-movement rule hit (ssh remote exec),
+        // tagged with the Sigma-prefixed tactic exactly as the engine feeds it.
+        _ = await detector.processAlert(
+            .init(ruleId: "lateral.ssh_remote_exec", ruleTitle: "SSH Remote Command Execution",
+                  severity: .high, processPath: "/usr/bin/ssh", pid: 9100,
+                  userId: "501", tactics: ["attack.lateral_movement"]))
+        // A second, distinct user context (root) — two user contexts is the
+        // lateral-movement precondition. The campaign fires on this alert.
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "discovery.host", ruleTitle: "Host Discovery",
+                  severity: .medium, processPath: "/usr/bin/whoami", pid: 9200,
+                  userId: "0", tactics: ["attack.discovery"]))
+        #expect(campaigns.contains { $0.type == .lateralMovement },
+                "an ssh lateral-movement alert across 2 user contexts must mint a lateral_movement campaign")
+    }
+
+    @Test("Two user contexts with NO lateral-movement tactic do not mint the campaign")
+    func lateralMovementRequiresLateralTactic() async {
+        let detector = CampaignDetector()
+        // Guard: the normalization fix must not resurrect the old "any two user
+        // contexts" FP. Two user contexts, but neither alert carries a
+        // lateral-movement tactic → no lateral_movement campaign.
+        _ = await detector.processAlert(
+            .init(ruleId: "discovery.a", ruleTitle: "A", severity: .medium,
+                  processPath: "/usr/bin/find", pid: 9300,
+                  userId: "501", tactics: ["attack.discovery"]))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "discovery.b", ruleTitle: "B", severity: .medium,
+                  processPath: "/usr/bin/ls", pid: 9400,
+                  userId: "0", tactics: ["attack.discovery"]))
+        #expect(!campaigns.contains { $0.type == .lateralMovement },
+                "two user contexts without a lateral-movement alert must not fire")
+    }
 }

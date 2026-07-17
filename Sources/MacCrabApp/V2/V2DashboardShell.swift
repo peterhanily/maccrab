@@ -111,6 +111,10 @@ struct V2DashboardShell: View {
         // already on a healthy live provider, so a healthy dashboard pays no
         // probe cost and this stays a no-op once recovered.
         .onChange(of: scenePhase) { phase in
+            // Pause the auto-refresh tick while the dashboard isn't frontmost so
+            // a hidden window stops re-rendering / re-querying every 5s; the
+            // hidden→active edge bumps once so it refreshes on return.
+            state.setForegroundActive(phase == .active)
             guard phase == .active,
                   state.provider.mode != .live || state.provider.lastErrorDescription != nil
             else { return }

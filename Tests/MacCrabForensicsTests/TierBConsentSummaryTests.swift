@@ -30,6 +30,21 @@ struct TierBConsentSummaryTests {
         #expect(s.tccReads == ["/Users/x/Library/Messages/chat.db"])
     }
 
+    @Test("MEDIUM: reading ~/.ssh/id_rsa is consent-gated like chat.db (flagged as a TCC read)")
+    func credentialReadConsentGated() {
+        // A credential store read must surface in the consent sheet with the same
+        // high-friction personalComms class as chat.db — not slip through as an
+        // undisclosed direct read.
+        let s = Self.manifest(reads: ["/Users/x/.ssh/id_rsa"]).consentSummary(home: "/Users/x")
+        #expect(s.derivedHighestPrivacy == "personalComms")
+        #expect(s.readsPersonalComms)
+        #expect(s.tccReads == ["/Users/x/.ssh/id_rsa"])
+        // Declaring a lower class while reading credentials is flagged as under-declared.
+        let under = Self.manifest(reads: ["/Users/x/.aws/credentials"], declared: "metadata").consentSummary(home: "/Users/x")
+        #expect(under.privacyUnderdeclared)
+        #expect(under.readsPersonalComms)
+    }
+
     @Test("declaring 'metadata' while reading chat.db is flagged as UNDER-declared")
     func underdeclared() {
         let s = Self.manifest(reads: ["/Users/x/Library/Messages/chat.db"], declared: "metadata").consentSummary(home: "/Users/x")

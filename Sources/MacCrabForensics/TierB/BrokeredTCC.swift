@@ -57,6 +57,21 @@ public enum TCCProtectedPaths {
         "Library/IdentityServices",
         "Library/Metadata/CoreSpotlight",
         "Pictures/Photos Library.photoslibrary",
+        // Credential + secret stores that live OUTSIDE ~/Library (home dotfiles).
+        // These are NOT under the ~/Library deny-by-default subtree, so without an
+        // explicit prefix the FDA-holding broker would serve them LIVE as a direct
+        // read root and the consent sheet would miss them entirely. They must be
+        // brokered (snapshotted, or denied if a directory/unreadable) and consent-
+        // gated exactly like chat.db / Mail / TCC.db. (`.config` is broad but
+        // over-classification is safe — it only forces brokering.)
+        ".ssh",                                          // SSH private keys / known_hosts
+        ".aws",                                          // AWS access keys + config
+        ".config",                                       // gcloud + many CLI credential stores
+        ".netrc",                                        // machine login tokens
+        ".docker",                                       // ~/.docker/config.json registry auth
+        ".gnupg",                                        // GPG keyrings
+        ".kube",                                         // kubeconfig (cluster credentials)
+        ".azure",                                        // Azure CLI credentials
     ]
 
     /// Absolute (non-home) TCC-protected prefixes.

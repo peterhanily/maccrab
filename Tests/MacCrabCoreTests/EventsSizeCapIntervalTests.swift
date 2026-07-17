@@ -160,7 +160,7 @@ struct EventsSizeCapIntervalTests {
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.storage.eventsSizeCapIntervalMinutes == 10)
         // Sibling storage fields untouched
-        #expect(cfg.storage.eventsMaxSizeMB == 350)   // v1.19.0 default
+        #expect(cfg.storage.eventsMaxSizeMB == 420)   // v1.21.4 default
         #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         // Unrelated top-level field untouched
@@ -197,7 +197,7 @@ struct EventsSizeCapIntervalTests {
             #expect(cfg.storage.processEventsFloorMinutes == value,
                     "\(key) should decode to \(value)")
             // Sibling storage fields untouched by the partial decode.
-            #expect(cfg.storage.eventsMaxSizeMB == 350)
+            #expect(cfg.storage.eventsMaxSizeMB == 420)
             #expect(cfg.storage.eventsHotTierMinutes == 30)
         }
     }

@@ -307,8 +307,22 @@ struct MCPProtocolHarnessTests {
             "forensics_run_collector", "forensics_run_analyzer",
             "forensics_run_all", "forensics_create_case", "forensics_enrich",
         ]
+        // v1.21.4 (audit): the sensitive-READ forensics tools read COLLECTED
+        // personal artifacts back out of a case (Safari visits, TCC grants,
+        // quarantine downloads, per-content-type / posture rollups) — the exfil
+        // half of the .response-gated collection (agentToolCapability marks each
+        // .response). They carry no verb prefix and mutate nothing, so the prefix
+        // heuristic misses them; pin them explicitly so an accidental UN-GATE of a
+        // data-read tool fails the build too, not only an un-gated mutator.
+        let forensicsSensitiveReads: Set<String> = [
+            "forensics_search_artifacts", "forensics_get_artifact",
+            "forensics_timeline", "forensics_explain_case",
+            "forensics_posture_findings",
+        ]
         let observed = names.filter { n in
-            !n.contains(".") && (mutatingPrefixes.contains { n.hasPrefix($0) } || forensicsMutators.contains(n))
+            !n.contains(".") && (mutatingPrefixes.contains { n.hasPrefix($0) }
+                || forensicsMutators.contains(n)
+                || forensicsSensitiveReads.contains(n))
         }
 
         // The canonical gated engine-mutation surface (mirrors agentToolCapability
@@ -326,6 +340,12 @@ struct MCPProtocolHarnessTests {
             // .response-gated (the v1.18 fail-open bypass class).
             "forensics_run_collector", "forensics_run_analyzer",
             "forensics_run_all", "forensics_create_case", "forensics_enrich",
+            // v1.21.4 (audit): sensitive-READ forensics tools — the exfil half of
+            // the .response-gated collection. A regression that un-gated one of
+            // these data-read tools would otherwise pass undetected.
+            "forensics_search_artifacts", "forensics_get_artifact",
+            "forensics_timeline", "forensics_explain_case",
+            "forensics_posture_findings",
         ]
         for n in observed {
             #expect(expectedGated.contains(n),

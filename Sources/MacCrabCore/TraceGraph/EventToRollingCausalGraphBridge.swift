@@ -169,16 +169,27 @@ public actor EventToRollingCausalGraphBridge {
         // v1.9 TraceCorrelator emits these enrichment keys.
         guard let traceId = enrichments[TraceCorrelator.EnrichmentKey.traceId] else { return nil }
         let confidenceRaw = enrichments[TraceCorrelator.EnrichmentKey.confidence] ?? ""
+        let agentTool = enrichments[TraceCorrelator.EnrichmentKey.agentTool]
         // confidence is a categorical string in v1.9 ("traceparent" / "lineage").
         // Map to the v1.10 numeric scale.
         let (confidence, method): (Double, AttributionMethod) = {
             switch confidenceRaw {
-            case "traceparent": return (0.95, .directTraceparent)
+            case "traceparent":
+                // A W3C TRACEPARENT is AI-specific ONLY when an AI tool was also
+                // identified (agent_tool). A BARE traceparent — the ESCollector
+                // self-stamp of a process that merely INHERITED the header in its
+                // env, with no AI-tool match (TraceCorrelator.selfStampEnrichments
+                // sets agentTool: nil) — could come from ANY OpenTelemetry-
+                // instrumented producer (CI, a distributed-tracing app), not an AI
+                // agent. So it must NOT be asserted as a high-confidence AI agent:
+                // without an AI-tool signal, drop below the §11.3 assertion
+                // threshold (0.85) so the AIAttributionRenderer renders it as
+                // inferred, not fact.
+                return agentTool != nil ? (0.95, .directTraceparent) : (0.5, .temporalProximity)
             case "lineage":     return (0.75, .processLineageMatch)
             default:            return (0.5, .temporalProximity)
             }
         }()
-        let agentTool = enrichments[TraceCorrelator.EnrichmentKey.agentTool]
         let displayName = agentTool?.replacingOccurrences(of: "_", with: " ").capitalized
             ?? "Unknown AI agent"
         return RollingCausalGraph.AgentEnrichment(

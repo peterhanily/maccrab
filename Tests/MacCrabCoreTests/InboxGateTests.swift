@@ -91,4 +91,91 @@ struct InboxGateTests {
         #expect(DaemonTimers.isAuthorizedInboxRequest(uid: -1) == false)  // stat failed
         #expect(DaemonTimers.isAuthorizedInboxRequest(uid: 99999) == false) // not root, not console
     }
+
+    // MARK: - readIdRequest local-DoS hardening (v1.21.4 audit HIGH)
+    //
+    // The inbox dir is mode 1777 so any local user can plant a hostile dir entry
+    // under a correctly-named request file. Before the fix, `readIdRequest` did
+    // a plain `Data(contentsOf:)`, which (A) blocks the poller forever on a FIFO
+    // — permanently wedging the privileged control plane — and (B) reads a
+    // multi-GB file wholesale, OOMing the daemon. The gate must reject each
+    // WITHOUT reading contents and WITHOUT blocking.
+
+    @Test("FIFO request file is rejected promptly — never blocks the poller")
+    func fifoNeverBlocks() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fifo = dir + "/suppress-alert-x.json"
+        try #require(mkfifo(fifo, 0o644) == 0)
+
+        // Run the (potentially blocking) read on a detached thread and wait on a
+        // semaphore with a timeout. With the O_NONBLOCK fix the writer-less FIFO
+        // is rejected in microseconds → .success. A regression that reverted to
+        // a blocking open would hang the thread forever → .timedOut fails HERE
+        // instead of wedging the whole daemon (and the whole test suite).
+        let done = DispatchSemaphore(value: 0)
+        let box = ReadIdResultBox()
+        Thread.detachNewThread {
+            box.set(DaemonTimers.readIdRequest(at: fifo))
+            done.signal()
+        }
+        let outcome = done.wait(timeout: .now() + 5)
+        #expect(outcome == .success)   // returned promptly, did NOT block
+        #expect(box.get() == nil)      // FIFO is not a regular file → rejected
+    }
+
+    @Test("Oversized but well-formed request is rejected before reading it in")
+    func oversizedRejected() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let big = dir + "/suppress-alert-big.json"
+        // Valid JSON whose id is > 64 KB: WITHOUT the size cap this parses and
+        // returns the huge id; WITH the cap the file is rejected (nil) via the
+        // fstat size gate before the bytes are pulled into memory.
+        let hugeId = String(repeating: "A", count: 100 * 1024)
+        try "{\"id\":\"\(hugeId)\"}".write(toFile: big, atomically: true, encoding: .utf8)
+        #expect(DaemonTimers.readIdRequest(at: big) == nil)
+    }
+
+    @Test("Symlinked request file is refused at open (O_NOFOLLOW)")
+    func symlinkRefused() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let target = dir + "/real.json"
+        try "{\"id\":\"abc\"}".write(toFile: target, atomically: true, encoding: .utf8)
+        let link = dir + "/suppress-alert-link.json"
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+        #expect(DaemonTimers.readIdRequest(at: link) == nil)
+    }
+
+    @Test("The auth gate can evaluate a FIFO's owner without opening it")
+    func ownerGateNeverOpensFifo() throws {
+        // The reordered handlers call requestOwnerUID (lstat, no open) FIRST, so
+        // a wrong-uid FIFO is rejected before any content read. Prove the owner
+        // check itself never opens/blocks on a FIFO: lstat reports its owner.
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fifo = dir + "/suppress-alert-y.json"
+        try #require(mkfifo(fifo, 0o644) == 0)
+        #expect(DaemonTimers.requestOwnerUID(at: fifo) == Int(getuid()))
+    }
+
+    @Test("Small well-formed request still parses (happy path intact)")
+    func validSmallRequestParses() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let file = dir + "/suppress-alert-ok.json"
+        try "{\"id\":\"3F2504E0-4F89-41D3-9A0C-0305E82C3301\"}"
+            .write(toFile: file, atomically: true, encoding: .utf8)
+        #expect(DaemonTimers.readIdRequest(at: file) == "3F2504E0-4F89-41D3-9A0C-0305E82C3301")
+    }
+}
+
+/// Thread-safe holder for a value produced on a detached thread and read back
+/// on the test thread after the semaphore signals (used by `fifoNeverBlocks`).
+private final class ReadIdResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+    func set(_ v: String?) { lock.lock(); value = v; lock.unlock() }
+    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
 }

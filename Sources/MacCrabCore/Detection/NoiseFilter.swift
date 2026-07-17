@@ -435,6 +435,56 @@ public enum NoiseFilter {
         return false
     }
 
+    /// Maps a browser bundle prefix to the path fragment(s) that identify THAT
+    /// browser's OWN profile / support directory. Used to distinguish a browser
+    /// reading its own credential store (expected first-party behaviour) from a
+    /// browser reading a FOREIGN credential store — ~/.ssh, ~/.aws, a keychain,
+    /// or ANOTHER browser's profile — which is never exempt. Fragments are
+    /// lowercased and slash-bounded so they can't match a look-alike source dir.
+    private static let browserOwnProfileFragments: [(bundlePrefix: String, storeFragments: [String])] = [
+        ("/Applications/Google Chrome.app/",             ["/application support/google/chrome/"]),
+        ("/Applications/Google Chrome Canary.app/",      ["/application support/google/chrome canary/"]),
+        ("/Applications/Chromium.app/",                  ["/application support/chromium/"]),
+        ("/Applications/Microsoft Edge.app/",            ["/application support/microsoft edge/"]),
+        ("/Applications/Microsoft Edge Canary.app/",     ["/application support/microsoft edge canary/"]),
+        ("/Applications/Microsoft Edge Dev.app/",        ["/application support/microsoft edge dev/"]),
+        ("/Applications/Microsoft Edge Beta.app/",       ["/application support/microsoft edge beta/"]),
+        ("/Applications/Brave Browser.app/",             ["/application support/bravesoftware/brave-browser/"]),
+        ("/Applications/Brave Browser Nightly.app/",     ["/application support/bravesoftware/brave-browser-nightly/"]),
+        ("/Applications/Brave Browser Dev.app/",         ["/application support/bravesoftware/brave-browser-dev/"]),
+        ("/Applications/Arc.app/",                       ["/application support/arc/"]),
+        ("/Applications/Vivaldi.app/",                   ["/application support/vivaldi/"]),
+        ("/Applications/Opera.app/",                     ["/application support/com.operasoftware.opera/"]),
+        // Firefox stable / Nightly / Developer Edition all share the same
+        // ~/Library/Application Support/Firefox/Profiles/ store.
+        ("/Applications/Firefox.app/",                   ["/application support/firefox/"]),
+        ("/Applications/Firefox Nightly.app/",           ["/application support/firefox/"]),
+        ("/Applications/Firefox Developer Edition.app/", ["/application support/firefox/"]),
+        // Safari keeps its profile outside Application Support.
+        ("/Applications/Safari.app/",                    ["/library/safari/", "/containers/com.apple.safari/"]),
+        ("/Applications/Orion.app/",                     ["/application support/orion/", "/containers/com.kagi.kagimacos/"]),
+    ]
+
+    /// True when a known browser (`processPath` inside its app bundle) is
+    /// accessing a credential / profile file INSIDE ITS OWN profile directory.
+    /// A signed browser reading its own Login Data / Cookies / profile is
+    /// expected first-party behaviour, not credential theft.
+    ///
+    /// Deliberately scoped to the browser's OWN store: the file must lie under
+    /// the profile directory that belongs to the SAME browser as the actor.
+    /// Chrome reading ~/.ssh/id_rsa, a keychain, or ANOTHER browser's profile
+    /// returns `false` (still scored as suspicious). This is the "signer +
+    /// path-belongs-to-that-browser" gate — both halves must hold.
+    public static func isBrowserReadingOwnProfile(processPath: String, filePath: String) -> Bool {
+        let file = filePath.lowercased()
+        for entry in browserOwnProfileFragments where processPath.hasPrefix(entry.bundlePrefix) {
+            for fragment in entry.storeFragments where file.contains(fragment) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// True when the event process is one of the admin-CLI basenames (ps,
     /// lsof, defaults, csrutil, …) AND at least one ancestor is a desktop
     /// terminal emulator (Terminal, iTerm, Warp, Alacritty, tmux, …). This

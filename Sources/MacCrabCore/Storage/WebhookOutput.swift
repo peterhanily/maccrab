@@ -157,14 +157,18 @@ public actor WebhookOutput {
             do {
                 resolved = try resolveHostBounded(host)
             } catch {
-                // Fail OPEN on resolve failure: a host that doesn't resolve is
-                // unreachable, so it carries no SSRF risk — the protection here
-                // is blocking hosts that DO resolve into private/metadata space
-                // (metadata IP literals are already blocked above, before this).
-                // Failing closed would also drop legitimate webhooks during a
-                // transient DNS outage. Let URLSession attempt (and fail) the
-                // connection itself.
-                return
+                // Fail CLOSED on resolve failure / timeout (v1.21.4 audit MEDIUM).
+                // This branch runs ONLY for the redirect SSRF guard (resolve=true):
+                // a 302 whose target host can't be resolved — or whose resolver
+                // hangs past the bounded timeout — must be BLOCKED, not followed.
+                // The previous fail-OPEN return contradicted the guard's
+                // fail-closed contract and left a hole: an attacker who stalls or
+                // fails resolution (slow-resolver / DNS-rebinding setup) would slip
+                // the redirect past the private/metadata range check entirely.
+                // Config-time validation uses resolve=false and never reaches this
+                // block, so a public webhook that isn't yet resolvable at startup
+                // is unaffected.
+                throw ValidationError.unresolvable(host)
             }
             // 169.254.169.254 etc. — the IP-literal subset of blockedMetadata,
             // matched against resolved addresses regardless of allowPrivate.

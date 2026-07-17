@@ -2,6 +2,7 @@
 // Spec §7.3 — process / trace / event / hunt / AI analysis.
 
 import SwiftUI
+import MacCrabCore   // AIAttributionRenderer — §11.3 AI-attribution honesty gate
 
 struct V2InvestigationWorkspace: View {
     @ObservedObject var state: V2DashboardState
@@ -440,6 +441,25 @@ struct V2InvestigationWorkspace: View {
             return knownTypes.contains(String(s[s.startIndex..<colon]).lowercased())
         }
         return false
+    }
+
+    /// §11.3 honesty gate for the graph VISUAL: an `associated_with_agent` edge
+    /// may be drawn SOLID (asserted) only when its attribution confidence is at /
+    /// above the active policy threshold; a below-threshold — or unknown (`nil`,
+    /// e.g. mock/offline providers) — confidence is INFERRED and must render
+    /// dashed + "suggested", never as asserted as a high-confidence one. Delegates
+    /// to `AIAttributionRenderer` so this mirrors the exact rule the prose gate
+    /// and deterministic explainer use (no drift). `static` so it's unit-testable.
+    static func agentEdgeIsInferred(
+        confidence: Double?,
+        assertionThreshold: Double = AIAttributionRenderer.defaultAssertionThreshold
+    ) -> Bool {
+        // Unknown confidence ⇒ cannot assert ⇒ inferred (map nil to 0, which is
+        // below any positive threshold, so `render` returns `.dashed`).
+        !AIAttributionRenderer.render(
+            confidence: confidence ?? 0,
+            assertionThreshold: assertionThreshold
+        ).assertedAsFact
     }
 
     /// Resolve the inspector "Trace path" rows from the loaded members:
@@ -2474,6 +2494,10 @@ private struct EdgeOverlay: View {
     let hoveredMemberId: String?
     let zoom: CGFloat
     @ObservedObject var dragModel: DragPositionsModel
+    /// §11.3 AI-attribution assertion threshold. Below it an
+    /// `associated_with_agent` edge renders inferred (dashed + "suggested").
+    /// Defaults to the policy default so the existing call site needn't change.
+    var assertionThreshold: Double = AIAttributionRenderer.defaultAssertionThreshold
 
     var body: some View {
         Canvas { ctx, _ in
@@ -2514,18 +2538,39 @@ private struct EdgeOverlay: View {
                         || hoveredMemberId == edge.source
                         || hoveredMemberId == edge.target
                     let style = Self.relationStyle(edge.relation)
+                    // §11.3 honesty gate: a low-/unknown-confidence agent edge is
+                    // INFERRED — force it dashed + muted (+ a "suggested" label)
+                    // so it never reads as asserted as a high-confidence one.
+                    let inferredAgent = edge.relation == "associated_with_agent"
+                        && V2InvestigationWorkspace.agentEdgeIsInferred(
+                            confidence: edge.confidence,
+                            assertionThreshold: assertionThreshold)
                     var stroke = StrokeStyle(
                         lineWidth: (touchesHover ? 1.5 : 1) / max(zoom, 0.5),
                         lineCap: .round
                     )
-                    if style.dashed {
+                    if style.dashed || inferredAgent {
                         stroke.dash = [4 / max(zoom, 0.5), 3 / max(zoom, 0.5)]
                     }
+                    let opacity: Double = inferredAgent
+                        ? (touchesHover ? 0.5 : 0.22)   // muted: not asserted
+                        : (touchesHover ? 0.8 : 0.3)
                     ctx.stroke(
                         path,
-                        with: .color(style.color.opacity(touchesHover ? 0.8 : 0.3)),
+                        with: .color(style.color.opacity(opacity)),
                         style: stroke
                     )
+                    // "suggested" label at the edge midpoint for inferred agent
+                    // attributions — mirrors the §11.3 prose ("'suggested' label").
+                    if inferredAgent {
+                        let mid = CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
+                        ctx.draw(
+                            Text(verbatim: "suggested")
+                                .font(.system(size: 8 / max(zoom, 0.5)))
+                                .foregroundColor(style.color.opacity(touchesHover ? 0.75 : 0.4)),
+                            at: mid
+                        )
+                    }
                 }
             }
         }

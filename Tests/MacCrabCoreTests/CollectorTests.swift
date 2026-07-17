@@ -166,6 +166,51 @@ struct SystemPolicyMonitorTests {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
+
+    // R1: XProtect-outdated is a PERSISTENT condition; the 5-min poll must not
+    // re-alert on every cycle. shouldEmitXProtectOutdated is the pure dedup
+    // decision the monitor consults.
+    @Test("Persistent XProtect-outdated alerts once per poll cycle, not every poll")
+    func xprotectOutdatedDedupPerPoll() throws {
+        let version = "2200"
+        let t0 = Date()
+
+        // First poll: no prior alert → emit.
+        #expect(SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: version, alertedVersion: nil, lastAlertAt: nil, now: t0
+        ))
+
+        // Simulate the monitor recording that emission, then re-poll 5 min and
+        // 1 h later on the SAME outdated version: must NOT re-alert.
+        let fiveMin = t0.addingTimeInterval(5 * 60)
+        #expect(!SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: version, alertedVersion: version, lastAlertAt: t0, now: fiveMin
+        ))
+        let oneHour = t0.addingTimeInterval(3600)
+        #expect(!SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: version, alertedVersion: version, lastAlertAt: t0, now: oneHour
+        ))
+    }
+
+    @Test("XProtect-outdated re-arms on version change or after 24h cooldown")
+    func xprotectOutdatedReArms() throws {
+        let t0 = Date()
+
+        // A DIFFERENT outdated version re-arms immediately.
+        #expect(SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: "2201", alertedVersion: "2200", lastAlertAt: t0, now: t0.addingTimeInterval(60)
+        ))
+
+        // The SAME version re-arms only after the 24h cooldown lapses.
+        let justUnder24h = t0.addingTimeInterval(24 * 3600 - 1)
+        #expect(!SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: "2200", alertedVersion: "2200", lastAlertAt: t0, now: justUnder24h
+        ))
+        let past24h = t0.addingTimeInterval(24 * 3600 + 1)
+        #expect(SystemPolicyMonitor.shouldEmitXProtectOutdated(
+            version: "2200", alertedVersion: "2200", lastAlertAt: t0, now: past24h
+        ))
+    }
 }
 
 // MARK: - SDR Device Monitor

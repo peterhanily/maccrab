@@ -151,6 +151,24 @@ struct V2DashboardStateTests {
         #expect(s.recentDestinations.first != head)
     }
 
+    @Test("setForegroundActive bumps refreshTick only on the hidden→active edge")
+    func foregroundEdgeBumpsRefreshOnce() {
+        let s = freshState()
+        let start = s.refreshTick
+        // Redundant "still active" must not bump (avoids a spurious refresh).
+        s.setForegroundActive(true)
+        #expect(s.refreshTick == start)
+        // Going hidden must not bump — the loop simply stops ticking.
+        s.setForegroundActive(false)
+        #expect(s.refreshTick == start)
+        // Returning to the foreground bumps exactly once so stale data refreshes.
+        s.setForegroundActive(true)
+        #expect(s.refreshTick == start + 1)
+        // A second active-while-active is again a no-op.
+        s.setForegroundActive(true)
+        #expect(s.refreshTick == start + 1)
+    }
+
     @Test("currentTab returns the workspace's default tab when none was explicitly chosen")
     func currentTabDefaults() {
         let s = freshState()

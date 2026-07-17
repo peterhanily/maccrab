@@ -1847,8 +1847,37 @@ enum EventLoop {
             // The single-step result still tells the analyst which
             // prevention capability could have blocked the impact
             // moment + the top-3 most-likely next tactics.
+            // R2 FP fix: a trusted browser reading/writing its OWN cookie/login
+            // store and then making outbound connections is normal first-party
+            // behaviour, not credential exfil. NoiseFilter Gate 3 already drops
+            // the PRIMARY sequence match for a trusted browser-helper subject
+            // (that is why `credential_theft_exfil` was lowered to `high`), but
+            // these advisory derivatives (Counterfactual / Forecast / LLM
+            // sequence) are spawned from the RAW sequence matches BEFORE
+            // NoiseFilter runs — so without this guard they outlive the
+            // suppressed primary and re-noise the analyst.
+            //
+            // Precise where possible: when the completing event carries the file
+            // (a browser-self READ), use the path-aware own-profile check so a
+            // browser reading a FOREIGN store (~/.ssh, another browser) is NOT
+            // exempted. The credential-read -> upload sequences complete on the
+            // network leg (no file), so we fall back to the trusted-browser-
+            // helper subject check that mirrors the already-applied Gate 3.
+            let subjectIsBrowserSelfAccess: Bool = {
+                if let filePath = enrichedEvent.file?.path {
+                    return NoiseFilter.isBrowserReadingOwnProfile(
+                        processPath: enrichedEvent.process.executable,
+                        filePath: filePath
+                    )
+                }
+                return NoiseFilter.isTrustedBrowserHelper(path: enrichedEvent.process.executable)
+            }()
+
+            // Skip advisory derivatives for a browser-self access whose primary
+            // match Gate 3 suppresses. `!suppressible` (must-fire) sequence
+            // matches always keep their derivatives — they survive Gate 3 too.
             if !sequenceMatches.isEmpty {
-                for seqMatch in sequenceMatches where seqMatch.severity == .high || seqMatch.severity == .critical {
+                for seqMatch in sequenceMatches where (seqMatch.severity == .high || seqMatch.severity == .critical) && !(subjectIsBrowserSelfAccess && seqMatch.suppressible) {
                     let matchCopy = seqMatch
                     let primitive = inferPreventionPrimitive(from: enrichedEvent)
                     let step = CounterfactualReasoner.ChainStep(
@@ -1910,9 +1939,12 @@ enum EventLoop {
                 }
             }
 
-            // LLM sequence analysis (non-blocking) — explains temporal attack chains
+            // LLM sequence analysis (non-blocking) — explains temporal attack chains.
+            // Same R2 browser-self-access guard as the counterfactual/forecast
+            // block above: don't spend an LLM call narrating a sequence whose
+            // primary match Gate 3 suppresses for a browser reading its own store.
             if let llm = state.llmService, !sequenceMatches.isEmpty {
-                for seqMatch in sequenceMatches {
+                for seqMatch in sequenceMatches where !(subjectIsBrowserSelfAccess && seqMatch.suppressible) {
                     let matchCopy = seqMatch
                     let procName = enrichedEvent.process.name
                     let procPath = enrichedEvent.process.executable

@@ -30,6 +30,7 @@ public actor PluginInstaller {
         case manifestUnreadable(message: String)
         case missingPluginID
         case invalidPluginID(message: String)
+        case forbiddenWriteLocation(path: String)
         case symlinkInSourceBundle(path: String)
         case verifyFailed(reason: String)
         case ioError(message: String)
@@ -41,6 +42,7 @@ public actor PluginInstaller {
             case .manifestUnreadable(let m): return "PluginInstaller: manifest unreadable: \(m)"
             case .missingPluginID: return "PluginInstaller: manifest has no 'id' field"
             case .invalidPluginID(let m): return "PluginInstaller: invalid plugin id: \(m)"
+            case .forbiddenWriteLocation(let p): return "PluginInstaller: fileWriteSubpaths entry is outside the plugin's case/scratch dir — persistence/system/credential/other-user write locations are refused: \(p)"
             case .symlinkInSourceBundle(let p): return "PluginInstaller: source bundle contains symlink (refused): \(p)"
             case .verifyFailed(let r): return "PluginInstaller: signature verification failed: \(r)"
             case .ioError(let m): return "PluginInstaller: I/O error: \(m)"
@@ -178,6 +180,64 @@ public actor PluginInstaller {
                 )
             }
         }
+        // Write subpaths carry an ADDITIONAL location restriction: a SANDBOXED
+        // store plugin may only write inside its own per-invocation case/scratch dir
+        // (auto-granted at runtime), so a manifest-declared write to a persistence
+        // (LaunchAgents/LaunchDaemons/login items), credential-store, system, cron,
+        // or other-user location is rejected here. Reads are broker-mediated (never
+        // in the SBPL) + TCC-guarded, and exec paths are a separate allowlist, so
+        // the restriction is WRITE-ONLY (keyed on the field name).
+        if field == "fileWriteSubpaths", isForbiddenWriteLocation(path) {
+            throw InstallError.forbiddenWriteLocation(path: path)
+        }
+    }
+
+    /// True iff `path` is a filesystem-write target a SANDBOXED store plugin must
+    /// never be granted. A store plugin's ONLY legitimate write target is its own
+    /// per-invocation case/scratch dir (auto-granted by the runner); a manifest
+    /// declaring a write elsewhere is either a mistake or an attempt to escape the
+    /// sandbox's intent — most dangerously a LaunchAgent/LaunchDaemon (persistence).
+    ///
+    /// This is the INSTALL-TIME denylist (a clear, early rejection with an
+    /// operator-facing error). The load-bearing PIN is at profile-build time
+    /// (`TierBManifest.toBrokeredSandboxProfileSpec` drops any write outside the
+    /// per-invocation scratch root), so this list need not be exhaustive — but it
+    /// names every category the sandboxed lane must refuse: persistence, credential
+    /// stores, system dirs, cron/at, and other users' homes.
+    ///
+    /// Matching is CASE-FOLDED (the default macOS boot volume is case-insensitive
+    /// APFS, so `~/library/launchagents` resolves to the real `Library/LaunchAgents`)
+    /// and prefix-based on path components. Over-inclusion is safe (it only refuses
+    /// an out-of-case write a legitimate plugin never declares).
+    public static func isForbiddenWriteLocation(
+        _ path: String,
+        home: String = NSHomeDirectory()
+    ) -> Bool {
+        func norm(_ s: String) -> String {
+            let t = (s.count > 1 && s.hasSuffix("/")) ? String(s.dropLast()) : s
+            return t.lowercased()
+        }
+        let p = norm(path)
+        let h = norm(home)
+        // Another user's home: under /Users but NOT this user's home tree. (Also
+        // catches /Users/Shared and the /Users root itself — fail-closed.)
+        if p == "/users" || p.hasPrefix("/users/") {
+            if !(p == h || p.hasPrefix(h + "/")) { return true }
+        }
+        let roots: [String] = [
+            // Persistence + login items + app-support all live under any Library.
+            h + "/library",    // ~/Library/LaunchAgents, login items (BTM), Application Support
+            "/library",         // /Library/LaunchAgents, /Library/LaunchDaemons, /Library/StartupItems
+            // Credential / secret stores (never plugin-writable).
+            h + "/.ssh", h + "/.aws", h + "/.config", h + "/.docker",
+            h + "/.netrc", h + "/.gnupg", h + "/.kube", h + "/.azure",
+            // System dirs (crontab + periodic live under /etc; cron under /usr).
+            "/system", "/usr", "/bin", "/sbin", "/etc", "/private/etc",
+            // at/cron spool + system databases.
+            "/var/at", "/private/var/at", "/var/db", "/private/var/db",
+        ]
+        for r in roots where p == r || p.hasPrefix(r + "/") { return true }
+        return false
     }
 
     /// Validate the full manifest payload as parsed from

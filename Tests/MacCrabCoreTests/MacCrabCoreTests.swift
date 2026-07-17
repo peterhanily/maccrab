@@ -1167,6 +1167,98 @@ struct BaselineEngineTests {
         #expect(await engine.status().state == BLState.learning)
         #expect(await engine.allEdges().isEmpty)
     }
+
+    @Test("Edge map is bounded and recurring edges survive the flood (v1.21.5 RSS audit)")
+    func edgeCapEvictsLeakedOneShotEdges() async {
+        // Long learning window so the engine stays in learning mode (no active-
+        // mode alert paths) and a tiny cap so eviction fires well under the
+        // 1000-new-edge learning save interval (this test performs NO disk I/O).
+        let config = BLConfig(
+            learningPeriod: 100_000,
+            sensitivity: .medium,
+            enabled: true,
+            focusPaths: [],
+            exemptParents: [],
+            exemptChildren: [],
+            exemptEdges: []
+        )
+        let engine = BaselineEngine(config: config, maxEdges: 100, maxNovelEdges: 5)
+
+        let hotParent = "/usr/local/bin/hotparent"
+        let hotChild = "/usr/local/bin/hotchild"
+        func touchHot() async {
+            _ = await engine.evaluate(makeEvent(processPath: hotChild, pid: 1, ppid: 2, parentPath: hotParent))
+        }
+
+        // Seed the recurring ("hot") relationship.
+        await touchHot()
+
+        // Flood with unique one-shot junk edges — the exact shape of a
+        // path-normalization leak (App Translocation / temp-extracted exec
+        // paths). Re-touch the hot edge every few inserts (but STOP well
+        // before the end) so its `lastSeen` stays firmly inside the
+        // most-recently-seen cohort. The final ~12 inserts are junk-only and
+        // there is NO closing re-touch: were eviction broken (e.g. newest-
+        // first), the hot edge would be dropped during that tail and stay
+        // dropped — a closing touch would re-INSERT and mask the bug — so the
+        // survival assertion below genuinely tests correct (oldest-first)
+        // eviction.
+        for i in 0..<252 {
+            _ = await engine.evaluate(makeEvent(
+                processPath: "/tmp/junk-child-\(i)",
+                pid: Int32(1000 + i),
+                ppid: 3,
+                parentPath: "/tmp/junk-parent-\(i)"
+            ))
+            if i < 240 && i % 3 == 0 { await touchHot() }
+        }
+
+        // Cap held despite 253 distinct edges having been observed.
+        let count = await engine.edgeCount
+        #expect(count <= 100)
+        #expect(count >= 1)
+
+        // The recurring edge survived; least-recently-seen (oldest) junk evicted.
+        let all = await engine.allEdges()
+        let hotEdge = BaselineEngine.ProcessEdge(parentPath: hotParent, childPath: hotChild)
+        #expect(all[hotEdge] != nil)
+    }
+
+    @Test("Novel-edge record list is bounded (v1.21.5 RSS audit)")
+    func novelEdgeRecordListCapped() async {
+        let config = BLConfig(
+            learningPeriod: 0,          // instant active on activateDetection
+            sensitivity: .high,          // alert on ANY novel edge
+            enabled: true,
+            focusPaths: [],
+            exemptParents: [],
+            exemptChildren: [],
+            exemptEdges: []
+        )
+        // Large edge cap (isolate the novel-list cap), tiny novel-list cap.
+        let engine = BaselineEngine(config: config, maxEdges: 100_000, maxNovelEdges: 10)
+
+        // Seed a known edge, then activate.
+        _ = await engine.evaluate(makeEvent(processPath: "/usr/bin/ls", pid: 1, ppid: 2, parentPath: "/usr/local/bin/app"))
+        await engine.activateDetection()
+
+        // 50 distinct novel edges — all alert, all appended to the record list.
+        for i in 0..<50 {
+            let match = await engine.evaluate(makeEvent(
+                processPath: "/tmp/novel-\(i)",
+                pid: Int32(500 + i),
+                ppid: 2,
+                parentPath: "/usr/local/bin/app"
+            ))
+            #expect(match != nil)
+        }
+
+        let novel = await engine.novelEdges()
+        #expect(novel.count == 10)   // capped
+        // Most-recent retained, oldest trimmed.
+        #expect(novel.contains(BaselineEngine.ProcessEdge(parentPath: "/usr/local/bin/app", childPath: "/tmp/novel-49")))
+        #expect(!novel.contains(BaselineEngine.ProcessEdge(parentPath: "/usr/local/bin/app", childPath: "/tmp/novel-0")))
+    }
 }
 
 // MARK: - SequenceEngine Tests

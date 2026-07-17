@@ -51,7 +51,14 @@ struct SecureURLSessionRedirectTests {
         let response = HTTPURLResponse(
             url: URL(string: "https://alerts.example.com/hook")!,
             statusCode: 301, httpVersion: "HTTP/1.1", headerFields: nil)!
-        let redirect = URLRequest(url: URL(string: "https://alerts.example.org/hook2")!)
+        // v1.21.4: the redirect guard now fails CLOSED on resolution failure
+        // (SSRF hardening), so use a LITERAL public IP as the target — like the
+        // sibling metadata-block test above — instead of a non-resolving
+        // placeholder hostname. 203.0.113.10 is RFC 5737 TEST-NET-3 (public,
+        // never private/metadata, parsed numerically without a DNS round-trip),
+        // so this deterministically exercises the "public destination is
+        // followed" path offline rather than depending on live DNS.
+        let redirect = URLRequest(url: URL(string: "https://203.0.113.10/hook2")!)
 
         let resolved: URLRequest? = await withCheckedContinuation { cont in
             delegate.urlSession(session, task: task,

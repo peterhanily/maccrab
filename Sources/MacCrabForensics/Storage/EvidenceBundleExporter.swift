@@ -19,10 +19,19 @@ public enum EvidenceBundleExporter {
         caseID: String,
         artifacts: [CommittedArtifact],
         exportedAt: Date,
-        appVersion: String
+        appVersion: String,
+        includeSensitive: Bool = false
     ) throws -> Data {
         let iso = ISO8601DateFormatter()
         let artifactObjs: [[String: Any]] = artifacts.map { a in
+            // Privacy-class filter: only `metadata` is safe to serialize in
+            // the clear. Every other class (content / personalComms /
+            // credentialAdjacent / secret) carries body/payload data — and
+            // summaries often embed it too (e.g. a FaceTime peer address) —
+            // so redact both `data` and `summary` unless the operator
+            // explicitly opts in with includeSensitive. Mirrors the codebase
+            // invariant that only metadata is exposable without a grant.
+            let redact = a.record.privacyClass != .metadata && !includeSensitive
             var o: [String: Any] = [
                 "id": a.id,
                 "content_type": a.record.contentType,
@@ -30,10 +39,17 @@ public enum EvidenceBundleExporter {
                 "privacy_class": a.record.privacyClass.rawValue,
                 "sha256": a.record.sha256,
             ]
-            if let s = a.record.summary { o["summary"] = s }
             if let src = a.record.sourcePath { o["source_path"] = src }
-            if !a.record.data.isEmpty {
-                o["data"] = a.record.data.mapValues { $0.foundationValue }
+            if redact {
+                // Keep the envelope (type / hash / privacy_class) so the
+                // export still attests the artifact EXISTS, without leaking
+                // its content.
+                o["redacted"] = true
+            } else {
+                if let s = a.record.summary { o["summary"] = s }
+                if !a.record.data.isEmpty {
+                    o["data"] = a.record.data.mapValues { $0.foundationValue }
+                }
             }
             return o
         }
@@ -60,9 +76,16 @@ public enum EvidenceBundleExporter {
         artifacts: [CommittedArtifact],
         to output: URL,
         exportedAt: Date = Date(),
-        appVersion: String = MacCrabVersion.current
+        appVersion: String = MacCrabVersion.current,
+        includeSensitive: Bool = false
     ) throws -> URL {
-        let data = try render(caseID: caseID, artifacts: artifacts, exportedAt: exportedAt, appVersion: appVersion)
+        let data = try render(
+            caseID: caseID,
+            artifacts: artifacts,
+            exportedAt: exportedAt,
+            appVersion: appVersion,
+            includeSensitive: includeSensitive
+        )
         try data.write(to: output, options: .atomic)
         return output
     }

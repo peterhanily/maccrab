@@ -149,4 +149,48 @@ struct SandboxDenyDefaultTests {
         }
         #expect(allowR.lowerBound < denyR.lowerBound)
     }
+
+    // MARK: - GA-blocker: sandboxed writes are PINNED to the case/scratch dir
+
+    @Test("brokered spec DROPS an out-of-case write (a LaunchAgent = persistence escape)")
+    func brokeredWriteContainmentDropsPersistencePath() {
+        // A hostile manifest declares a LaunchAgents write path. If granted verbatim
+        // in the deny-default SBPL the sandboxed plugin could plant a LaunchAgent =
+        // persistence, escaping the sandbox's intent. The brokered spec must pin
+        // writes to the plugin's own scratch dir and DROP the persistence path.
+        let m = TierBManifest(
+            id: "com.x.p", displayName: "P", version: "1.0", schemaVersion: 1,
+            description: "d", fileWriteSubpaths: ["/Users/victim/Library/LaunchAgents"])
+        let scratch = "/private/var/folders/xx/T/maccrab-tierb-scratch-ABC"
+        let spec = m.toBrokeredSandboxProfileSpec(scratchDir: scratch)
+        #expect(spec.fileWriteSubpaths == [scratch])   // LaunchAgents dropped; only scratch remains
+        // And it never reaches the emitted SBPL.
+        let sbpl = SandboxProfileBuilder.compileDenyDefault(spec)
+        #expect(!sbpl.contains("LaunchAgents"))
+        #expect(sbpl.contains("(allow file-write* (subpath \"\(scratch)\"))"))
+    }
+
+    @Test("brokered spec KEEPS a legit in-case write subpath (under the scratch root)")
+    func brokeredWriteContainmentKeepsInCasePath() {
+        let scratch = "/private/var/folders/xx/T/maccrab-tierb-scratch-ABC"
+        let inCase = scratch + "/out"
+        let m = TierBManifest(
+            id: "com.x.p", displayName: "P", version: "1.0", schemaVersion: 1,
+            description: "d", fileWriteSubpaths: [inCase])
+        let spec = m.toBrokeredSandboxProfileSpec(scratchDir: scratch)
+        #expect(spec.fileWriteSubpaths.contains(inCase))   // in-case write survives
+        #expect(spec.fileWriteSubpaths.contains(scratch))  // scratch is always granted
+    }
+
+    @Test("brokered spec drops system + other-user + credential writes, keeps only scratch")
+    func brokeredWriteContainmentDropsAllOutOfCase() {
+        let scratch = "/private/var/folders/xx/T/maccrab-tierb-scratch-ABC"
+        let m = TierBManifest(
+            id: "com.x.p", displayName: "P", version: "1.0", schemaVersion: 1,
+            description: "d",
+            fileWriteSubpaths: ["/System/Library/x", "/Users/other/Documents/x",
+                                "/Users/victim/.ssh/authorized_keys", "/etc/x"])
+        let spec = m.toBrokeredSandboxProfileSpec(scratchDir: scratch)
+        #expect(spec.fileWriteSubpaths == [scratch])   // every out-of-case write dropped
+    }
 }

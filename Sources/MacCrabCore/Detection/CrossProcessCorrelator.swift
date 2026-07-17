@@ -72,8 +72,20 @@ public actor CrossProcessCorrelator {
     /// Maximum elapsed time between first and last event for correlation.
     private let correlationWindow: TimeInterval
 
-    /// Minimum number of events (from different PIDs) to form a chain.
+    /// Minimum number of distinct PIDs required to emit a NETWORK / domain
+    /// fan-out chain. Network convergence needs more participants to be
+    /// meaningful — a browser + git legitimately hitting the same CDN is only
+    /// 2 PIDs — so this stays at 3. FILE chains use `minFileChainLength`.
     private let minChainLength: Int
+
+    /// Minimum number of distinct PIDs required to emit a FILE chain. Defaults
+    /// to 2 so the canonical write→execute handoff fires: process A writes
+    /// `/tmp/payload`, an *unrelated* process B executes it — two distinct PIDs,
+    /// no shared lineage. This is the engine's flagship cross-tree signal, and
+    /// lineage-based correlation (SequenceEngine) cannot catch it. File chains
+    /// are already gated on action diversity (write+execute, not write+write)
+    /// and the shell-utility guard, so 2 PIDs here is a strong signal, not noise.
+    private let minFileChainLength: Int
 
     /// Maximum number of distinct artifacts tracked per map before eviction.
     private let maxArtifactsPerMap: Int = 10_000
@@ -376,12 +388,21 @@ public actor CrossProcessCorrelator {
     /// - Parameters:
     ///   - correlationWindow: Maximum time span (seconds) for events to be
     ///     considered part of the same chain. Defaults to 300 (5 minutes).
-    ///   - minChainLength: Minimum number of events from different PIDs
-    ///     required to emit a chain. Defaults to 3 (reduces noise from
+    ///   - minChainLength: Minimum number of distinct PIDs required to emit a
+    ///     NETWORK / domain fan-out chain. Defaults to 3 (reduces noise from
     ///     normal multi-process traffic like browsers + git to same CDN).
-    public init(correlationWindow: TimeInterval = 300, minChainLength: Int = 3) {
+    ///   - minFileChainLength: Minimum number of distinct PIDs required to emit
+    ///     a FILE chain. Defaults to 2 so the canonical unrelated-tree
+    ///     write→execute handoff fires; file chains are already gated on action
+    ///     diversity + the shell-utility guard, which hold FP noise down.
+    public init(
+        correlationWindow: TimeInterval = 300,
+        minChainLength: Int = 3,
+        minFileChainLength: Int = 2
+    ) {
         self.correlationWindow = correlationWindow
         self.minChainLength = minChainLength
+        self.minFileChainLength = minFileChainLength
         self.lastPurge = Date()
     }
 
@@ -502,9 +523,12 @@ public actor CrossProcessCorrelator {
         // Filter to events within the correlation window.
         let windowEvents = eventsWithinWindow(events)
 
-        // Must involve multiple distinct PIDs.
+        // Must involve multiple distinct PIDs. File chains fire at
+        // `minFileChainLength` (2 by default) — the write→execute handoff
+        // across unrelated trees — while network fan-out needs `minChainLength`
+        // (3) to be meaningful.
         let distinctPIDs = Set(windowEvents.map(\.pid))
-        guard distinctPIDs.count >= minChainLength else { return nil }
+        guard distinctPIDs.count >= minFileChainLength else { return nil }
 
         // Must span different action types (write+execute, not just write+write).
         let actions = Set(windowEvents.map(\.action))
@@ -678,10 +702,10 @@ public actor CrossProcessCorrelator {
     /// Deliberately NARROW: a classic curl→bash two-process attack
     /// (curl writes payload, bash executes it) has only 2 shell
     /// utilities AND includes an `execute` action, so it escapes this
-    /// gate and still fires. The detection latency cost of requiring
-    /// a variety of distinct utilities is zero for real attacks — the
-    /// write-then-execute payload is protected by the `execute` carve-out
-    /// below regardless of the utility count.
+    /// gate. Combined with `minFileChainLength` == 2 (which lets a 2-PID
+    /// file chain through at all), that write→execute handoff now fires end
+    /// to end — the `execute` carve-out below protects it regardless of the
+    /// utility count.
     private func chainDominatedByShellUtilities(_ events: [ChainEvent]) -> Bool {
         // Execute is the attack signal. If anything in the chain
         // executed the shared file, keep the chain — this is exactly

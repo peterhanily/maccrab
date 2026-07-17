@@ -253,7 +253,7 @@ enum V2DocEntry: String, CaseIterable, Hashable {
             return [
                 DocSection(title: "daemon_config.json",
                            body: "All keys are optional. Missing keys use defaults from DaemonConfig.swift. Since v1.8 the per-tier retention / size caps live under a nested storage{} block (the legacy top-level retention_days / max_database_size_mb keys still decode but are deprecated). Common keys:",
-                           codeBlock: "{\n  \"behavior_alert_threshold\": 10.0,\n  \"behavior_critical_threshold\": 20.0,\n  \"statistical_z_threshold\": 3.0,\n  \"storage\": {\n    \"events_hot_tier_minutes\": 30,\n    \"events_max_size_mb\": 350,\n    \"alerts_retention_days\": 365,\n    \"campaigns_retention_days\": 365,\n    \"tracegraph_retention_days\": 90\n  }\n}"),
+                           codeBlock: "{\n  \"behavior_alert_threshold\": 10.0,\n  \"behavior_critical_threshold\": 20.0,\n  \"statistical_z_threshold\": 3.0,\n  \"storage\": {\n    \"events_hot_tier_minutes\": 30,\n    \"events_max_size_mb\": 420,\n    \"alerts_retention_days\": 365,\n    \"campaigns_retention_days\": 365,\n    \"tracegraph_retention_days\": 90\n  }\n}"),
             ]
         case .troubleshooting:
             return [

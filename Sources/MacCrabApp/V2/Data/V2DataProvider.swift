@@ -178,11 +178,19 @@ public struct V2TraceEdge: Identifiable, Sendable, Hashable {
     public let source: String
     public let target: String
     public let relation: String
-    public init(id: String, source: String, target: String, relation: String) {
+    /// Attribution confidence [0,1] carried straight from the causal-graph edge.
+    /// Consulted by the graph's §11.3 honesty gate so an `associated_with_agent`
+    /// edge below the assertion threshold renders as *inferred* (dashed +
+    /// "suggested") rather than asserted. `nil` when the source didn't supply a
+    /// confidence (mock/offline providers) — treated conservatively as inferred.
+    public let confidence: Double?
+    public init(id: String, source: String, target: String, relation: String,
+                confidence: Double? = nil) {
         self.id = id
         self.source = source
         self.target = target
         self.relation = relation
+        self.confidence = confidence
     }
 }
 

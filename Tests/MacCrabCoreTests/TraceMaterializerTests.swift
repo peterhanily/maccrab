@@ -365,4 +365,51 @@ struct TraceMaterializerTests {
         #expect(!summary.contains("attribution inferred"))
         await store.close()
     }
+
+    @Test("§11.3 gate: an AI-agent node that does NOT decode is hedged, not asserted (fail-open fix)")
+    func aiAttributionGateHedgesUndecodableAgent() async throws {
+        // Pre-GA audit (LOW): the honesty gate keyed on a successfully-DECODED
+        // AIAgentNode confidence, while the explainer asserts AI-agent prose from
+        // entityType ALONE (rootDisplay + "AI-agent associated …" severity
+        // reasons). An agent entity whose attributesJson doesn't decode was
+        // therefore asserted as fact with a confidence the gate never saw — fail
+        // open. The fix gates on the same signal the prose uses (entity presence)
+        // and treats an undecodable agent as confidence 0.0.
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        // An ai_agent ENTITY the explainer will name + assert, but whose
+        // attributes DON'T decode into an AIAgentNode ("{}" lacks every required
+        // field). The entity-row confidence is deliberately HIGH (0.99) to prove
+        // the gate reads the AIAgentNode confidence, not the row confidence — so a
+        // "fix" that read entity.confidence would wrongly re-assert.
+        let brokenAgent = TraceEntity(
+            id: "ai_agent:broken:trace-x",
+            entityType: AIAgentNode.entityType,
+            stableKey: "broken:trace-x",
+            displayName: "Claude Desktop",
+            firstSeen: now, lastSeen: now,
+            attributesJson: "{}",
+            source: "test",
+            confidence: 0.99
+        )
+        try await store.upsertEntity(brokenAgent)
+        let shell = try await upsertProcess(store, makeProcessNode(
+            key: "zsh", path: "/bin/zsh", isAppleSigned: true))
+        _ = try await upsertSpawn(store, from: brokenAgent, to: shell, confidence: 0.9)
+
+        let materializer = TraceMaterializer(store: store)
+        let trace = try await materializer.materialize(
+            anchorEntityId: shell.id, anchorEventId: "ev-1",
+            title: "Agent shell", severity: "high", confidence: 0.9,
+            now: now.addingTimeInterval(1)
+        )
+        let summary = try #require(trace.summaryJson)
+        // Must be hedged, never asserted, even though the node didn't decode.
+        #expect(!summary.contains("AI-agent associated"))
+        #expect(summary.contains("attribution inferred, not asserted"))
+        // The vendor-named root display is hedged too (via the displayName fallback).
+        #expect(summary.contains("appears to involve"))
+        await store.close()
+    }
 }

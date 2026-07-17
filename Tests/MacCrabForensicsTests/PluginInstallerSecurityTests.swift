@@ -132,6 +132,54 @@ struct PluginInstallerSecurityTests {
         #expect((try? PluginInstaller.validatePluginID(String(repeating: "a", count: 200))) == nil)
     }
 
+    // MARK: - GA-blocker: sandboxed plugin write-path containment (install-time)
+
+    @Test("install-time: a LaunchAgents write path is rejected (persistence escape)")
+    func rejectsLaunchAgentsWritePath() {
+        let json: [String: Any] = [
+            "id": "com.test.persist", "displayName": "x", "version": "1",
+            "schemaVersion": 1, "description": "x",
+            "fileWriteSubpaths": [NSHomeDirectory() + "/Library/LaunchAgents"],
+        ]
+        do {
+            try PluginInstaller.validateManifest(json)
+            Issue.record("expected forbiddenWriteLocation for a LaunchAgents write path")
+        } catch PluginInstaller.InstallError.forbiddenWriteLocation {
+            // expected
+        } catch {
+            Issue.record("got unexpected error: \(error)")
+        }
+    }
+
+    @Test("install-time: system / other-user / credential / cron write paths are forbidden")
+    func rejectsDangerousWritePaths() {
+        let home = NSHomeDirectory()
+        for bad in ["/Library/LaunchDaemons/x.plist",       // system persistence
+                    "/System/Library/x",                    // system dir
+                    "/usr/local/bin/x",                     // system dir
+                    "/private/var/at/tabs/x",               // cron/at spool
+                    "/Users/someoneelsexyz/Documents/x",    // another user's home
+                    home + "/.ssh/authorized_keys",         // credential store
+                    home + "/.aws/credentials",             // credential store
+                    home + "/library/launchagents/x.plist"] // case-folded persistence
+        {
+            #expect(PluginInstaller.isForbiddenWriteLocation(bad), "should be forbidden: \(bad)")
+        }
+    }
+
+    @Test("install-time: a legit in-scratch (temp) write path is accepted")
+    func acceptsInCaseWritePath() throws {
+        let scratch = NSTemporaryDirectory() + "maccrab-tierb-scratch-\(UUID().uuidString)/out"
+        #expect(!PluginInstaller.isForbiddenWriteLocation(scratch))
+        // And it passes full-manifest validation (no throw).
+        let json: [String: Any] = [
+            "id": "com.test.legit", "displayName": "x", "version": "1",
+            "schemaVersion": 1, "description": "x",
+            "fileWriteSubpaths": [scratch],
+        ]
+        try PluginInstaller.validateManifest(json)
+    }
+
     // MARK: - audit-2: symlinks in source bundle
 
     @Test("audit-2: rejects bundle with symlink")

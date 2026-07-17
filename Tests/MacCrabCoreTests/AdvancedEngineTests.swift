@@ -307,10 +307,15 @@ struct PackageFreshnessCheckerTests {
 @Suite("Cross-Process Correlator")
 struct CrossProcessCorrelatorTests {
 
-    @Test("File write + execute from different PIDs creates chain")
+    @Test("File write + execute from different PIDs creates chain (production default)")
     func fileWriteExecuteChain() async {
-        // Use minChainLength: 2 so two distinct PIDs suffice
-        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        // GA-blocker regression: use the PRODUCTION default correlator (no
+        // args) so this guards the real deployed config. minFileChainLength
+        // defaults to 2, so the canonical 2-PID write→execute handoff across
+        // unrelated trees must fire. Previously this test forced
+        // minChainLength: 2, which masked the fact that the production default
+        // (minChainLength 3) dropped this flagship signal.
+        let correlator = CrossProcessCorrelator()
 
         let now = Date()
 
@@ -339,7 +344,76 @@ struct CrossProcessCorrelatorTests {
             #expect(chain.processCount == 2)
             #expect(chain.sharedArtifact == "/tmp/payload.bin")
             #expect(chain.artifactType == "file")
+            #expect(chain.severity == .high, "2-PID write→execute is HIGH severity")
         }
+    }
+
+    @Test("2-PID download → execute handoff fires under production config")
+    func fileDownloadExecuteChainProductionDefault() async {
+        // Second flagship-signal guard, distinct from fileWriteExecuteChain:
+        // a `download` action (write-family) by one tree followed by an
+        // `execute` by an unrelated tree. Uses the production default so it
+        // pins the minFileChainLength == 2 behavior for the download alias too.
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+
+        await correlator.recordFileEvent(
+            path: "/tmp/stage2",
+            action: "download",
+            pid: 4100,
+            processName: "wget",
+            processPath: "/opt/local/bin/wget",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: "/tmp/stage2",
+            action: "execute",
+            pid: 4200,
+            processName: "sh",
+            processPath: "/var/tmp/dropper",   // unrelated tree, non-shell payload
+            timestamp: now.addingTimeInterval(4)
+        )
+
+        #expect(chain != nil, "download → execute across 2 unrelated PIDs must fire in production config")
+        #expect(chain?.processCount == 2)
+    }
+
+    @Test("Benign write-only shell-utility fan-out stays suppressed (production default)")
+    func benignShellWriteChainSuppressedProductionDefault() async {
+        // FP guard: lowering the file floor to 2 must not resurrect the
+        // build-script FP class. A write-only chain dominated by a *variety*
+        // of shell utilities (bash/cat/sed) with NO execute action is a
+        // script, not an attack — chainDominatedByShellUtilities must still
+        // suppress it even though 2 PIDs now suffice to form a file chain.
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+
+        await correlator.recordFileEvent(
+            path: "/private/tmp/build-scratch/config.h",
+            action: "write",
+            pid: 7100,
+            processName: "bash",
+            processPath: "/bin/bash",
+            timestamp: now
+        )
+        await correlator.recordFileEvent(
+            path: "/private/tmp/build-scratch/config.h",
+            action: "create",
+            pid: 7200,
+            processName: "cat",
+            processPath: "/bin/cat",
+            timestamp: now.addingTimeInterval(1)
+        )
+        let chain = await correlator.recordFileEvent(
+            path: "/private/tmp/build-scratch/config.h",
+            action: "close_modified",
+            pid: 7300,
+            processName: "sed",
+            processPath: "/usr/bin/sed",
+            timestamp: now.addingTimeInterval(2)
+        )
+
+        #expect(chain == nil, "write-only shell-utility fan-out must stay suppressed")
     }
 
     @Test("Same PID events do not create chain")

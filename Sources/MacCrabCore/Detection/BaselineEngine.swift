@@ -173,6 +173,37 @@ public actor BaselineEngine {
     /// Edges that were detected as anomalies (novel, never seen during learning).
     private var detectedNovelEdges: [ProcessEdge]
 
+    /// Hard cap on distinct baseline edges retained in memory (and persisted
+    /// to `baseline.json`). A well-behaved machine holds a few hundred to a
+    /// few thousand edges, so this cap NEVER fires in normal operation — it
+    /// exists only to bound the pathological tail. Exec paths that
+    /// `normalizePath` cannot collapse (App Translocation dirs, per-launch
+    /// temp-extracted binaries, random `/private/var/folders/.../T/<uuid>/…`
+    /// paths) mint a fresh one-shot edge on every launch, which would
+    /// otherwise grow `edges` (and the on-disk baseline) without bound.
+    /// Eviction is least-recently-SEEN first (oldest `lastSeen`), which
+    /// targets exactly those one-shot junk edges: a genuine recurring
+    /// relationship refreshes its `lastSeen` on every occurrence and stays
+    /// young, so it survives — and because the junk edges are unique per
+    /// launch, evicting them can never cause a re-alert. Injectable like the
+    /// sibling engines' caps (`ProcessLineage.maxProcessCount`,
+    /// `BehaviorScoring.maxTrackedProcesses`) so tests can exercise eviction
+    /// at small scale.
+    private let maxEdges: Int
+
+    /// Low-water mark for edge eviction: when `edges` exceeds `maxEdges` we
+    /// evict down to this in a single pass so the O(n log n) selection is
+    /// amortized across many subsequent inserts rather than running on every
+    /// insert while pinned at the cap. Derived as 90 % of `maxEdges`.
+    private let edgeEvictionLowWater: Int
+
+    /// Hard cap on the retained novel-edge record list. This list is
+    /// display / telemetry only (surfaced via `novelEdges()`); the anomaly
+    /// ALERTS themselves are durably persisted in AlertStore, so trimming
+    /// old records here loses no detection. Trimmed oldest-first so the most
+    /// recent anomalies stay visible.
+    private let maxNovelEdges: Int
+
     /// Engine configuration.
     private var config: Config
 
@@ -227,14 +258,27 @@ public actor BaselineEngine {
 
     /// Create a new baseline engine.
     ///
-    /// - Parameter config: Optional configuration. Uses defaults if nil.
-    public init(config: Config? = nil) {
+    /// - Parameters:
+    ///   - config: Optional configuration. Uses defaults if nil.
+    ///   - maxEdges: Hard cap on distinct retained baseline edges (LRU by
+    ///     `lastSeen`). Default 50 000 — never fires on a healthy machine;
+    ///     bounds a path-normalization leak. Lowered in tests to exercise
+    ///     eviction cheaply.
+    ///   - maxNovelEdges: Hard cap on the retained novel-edge record list.
+    ///     Default 5 000.
+    public init(config: Config? = nil, maxEdges: Int = 50_000, maxNovelEdges: Int = 5_000) {
         let cfg = config ?? Config()
         self.config = cfg
         self.state = cfg.enabled ? .learning : .disabled
         self.learningStarted = Date()
         self.edges = [:]
         self.detectedNovelEdges = []
+        // Floor the caps so a pathological small value can't make eviction
+        // thrash; low-water is 90 % of the (floored) cap.
+        let flooredMaxEdges = max(16, maxEdges)
+        self.maxEdges = flooredMaxEdges
+        self.edgeEvictionLowWater = max(1, Int(Double(flooredMaxEdges) * 0.9))
+        self.maxNovelEdges = max(1, maxNovelEdges)
 
         // Build persistence path: ~/Library/Application Support/MacCrab/baseline.json
         let appSupport = FileManager.default.urls(
@@ -295,14 +339,37 @@ public actor BaselineEngine {
 
         switch state {
         case .learning:
-            return recordLearningEdge(edge, at: now)
+            let match = recordLearningEdge(edge, at: now)
+            evictEdgesIfNeeded()
+            return match
 
         case .active:
-            return evaluateActiveEdge(edge, at: now, event: event)
+            let match = evaluateActiveEdge(edge, at: now, event: event)
+            evictEdgesIfNeeded()
+            return match
 
         case .disabled:
             return nil
         }
+    }
+
+    /// Enforce the `maxEdges` cap by evicting least-recently-seen edges down
+    /// to the low-water mark. COLD PATH — the `edges.count > maxEdges` guard
+    /// is an O(1) check on the common path; the O(n log n) selection runs
+    /// only when the cap is exceeded (a path-normalization leak), never in
+    /// normal operation. See `maxEdges` for why oldest-`lastSeen` eviction is
+    /// correctness-preserving.
+    private func evictEdgesIfNeeded() {
+        guard edges.count > maxEdges else { return }
+        let evictCount = edges.count - edgeEvictionLowWater
+        let victims = edges
+            .sorted { $0.value.lastSeen < $1.value.lastSeen }
+            .prefix(evictCount)
+            .map(\.key)
+        for key in victims { edges.removeValue(forKey: key) }
+        logger.notice(
+            "Baseline edge cap hit: evicted \(victims.count) least-recently-seen edges (now \(self.edges.count)/\(self.maxEdges))"
+        )
     }
 
     /// Force an immediate transition from learning to active detection mode.
@@ -411,6 +478,14 @@ public actor BaselineEngine {
 
         // Restore novel edges.
         self.detectedNovelEdges = persisted.novelEdges.compactMap { ProcessEdge.fromSerializationKey($0) }
+
+        // Enforce the in-memory caps on the restored state — a baseline written
+        // by a pre-cap build (or one that suffered a normalization leak before
+        // this cap existed) could exceed them.
+        evictEdgesIfNeeded()
+        if detectedNovelEdges.count > maxNovelEdges {
+            detectedNovelEdges.removeFirst(detectedNovelEdges.count - maxNovelEdges)
+        }
 
         logger.notice(
             "Loaded baseline: state=\(persisted.state.rawValue, privacy: .public), \(self.edges.count) edges, \(self.anomaliesDetected) anomalies"
@@ -619,6 +694,11 @@ public actor BaselineEngine {
         // Add the novel edge to the baseline so we don't alert on it repeatedly.
         edges[edge] = EdgeStats(count: 1, firstSeen: now, lastSeen: now)
         detectedNovelEdges.append(edge)
+        // Bound the novel-edge record list (display/telemetry only; alerts are
+        // persisted in AlertStore). Trim oldest-first.
+        if detectedNovelEdges.count > maxNovelEdges {
+            detectedNovelEdges.removeFirst(detectedNovelEdges.count - maxNovelEdges)
+        }
         anomaliesDetected += 1
 
         logger.warning(

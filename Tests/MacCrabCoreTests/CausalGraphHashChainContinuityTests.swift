@@ -228,6 +228,38 @@ struct CausalGraphHashChainContinuityTests {
         await store.close()
     }
 
+    // MARK: - 64-bit sequence-number bind (trap avoidance)
+
+    @Test("A sequence_number beyond Int32.max round-trips (64-bit bind — no trap)")
+    func sequenceNumberBeyondInt32MaxRoundTrips() async throws {
+        // Pre-GA audit (LOW): the INSERT bound sequence_number as a 32-bit int via
+        // `Int32(entry.sequenceNumber)` — a force-conversion that TRAPS once the
+        // monotonic sequence exceeds Int32.max (~2.1B), while the column and the
+        // read-back (sqlite3_column_int64) are 64-bit. The fix binds 64-bit. This
+        // exercises a value past Int32.max: on the old code the bind would trap
+        // (crash the process); on the fix it round-trips.
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let bigSeq = Int(Int32.max) + 1000
+        let id = UUID().uuidString
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let currentHash = TraceHashChainEntry.computeCurrentHash(
+            id: id, traceId: "t-big", sequenceNumber: bigSeq,
+            previousHash: nil, eventId: nil, edgeId: nil, createdAt: createdAt)
+        let entry = TraceHashChainEntry(
+            id: id, traceId: "t-big", sequenceNumber: bigSeq,
+            previousHash: nil, currentHash: currentHash, createdAt: createdAt)
+
+        // Must not trap on the bind, and the 64-bit value must survive the column.
+        try await store.appendHashChain(entry)
+        let head = try await store.globalChainHead()
+        #expect(head?.sequenceNumber == bigSeq)
+        // Content still recomputes (String(sequenceNumber) is width-agnostic).
+        #expect(try await store.verifyHashChain().status == .ok)
+        await store.close()
+    }
+
     // MARK: - Integration through the materializer
 
     @Test("TraceMaterializer extends the continuity chain (one entry per materialized trace)")

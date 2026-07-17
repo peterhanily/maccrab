@@ -163,6 +163,57 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    @Test("Bare W3C traceparent (no AI-tool signal) is NOT asserted at 0.95 directTraceparent")
+    func genericTraceparentNotAssertedAsAIAgent() async throws {
+        // Pre-GA audit (LOW): a GENERIC W3C TRACEPARENT — the ESCollector
+        // self-stamp of a process that merely INHERITED the header in its env,
+        // with NO agent_tool match (TraceCorrelator.selfStampEnrichments sets
+        // agentTool: nil) — could come from ANY OpenTelemetry producer (CI, a
+        // distributed-tracing app), not an AI agent. It must NOT be rendered as a
+        // high-confidence (0.95) asserted AI agent. Without an AI-tool signal the
+        // bridge drops it below the §11.3 assertion threshold (0.85).
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let materializer = TraceMaterializer(store: store)
+        let rollingGraph = RollingCausalGraph(store: store, materializer: materializer)
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        var enrichments: [String: String] = [
+            TraceCorrelator.EnrichmentKey.traceId:    "trace-generic-1",
+            TraceCorrelator.EnrichmentKey.confidence: "traceparent",
+            // NO agent_tool — the discriminator between an AI-agent traceparent
+            // and a bare inherited one.
+        ]
+        enrichments[EventToRollingCausalGraphBridge.processKeyEnrichmentKey] = "known-process-key"
+
+        let event = Event(
+            timestamp: now, eventCategory: .process, eventType: .start, eventAction: "exec",
+            process: processInfo(pid: 201, executable: "/usr/bin/curl"),
+            enrichments: enrichments
+        )
+        _ = await bridge.process(event)
+
+        // displayName falls back to "Unknown AI agent" when no agent_tool is set,
+        // so the agent-node id is ai_agent:unknown ai agent:<traceId>.
+        let edgeId = EdgeBuilder.edgeId(
+            sourceEntityId: "ai_agent:unknown ai agent:trace-generic-1",
+            targetEntityId: "process:known-process-key",
+            relation: .associatedWithAgent
+        )
+        let edge = try await store.edge(id: edgeId)
+        #expect(edge != nil)
+        // Load-bearing: NOT the 0.95 directTraceparent confidence, and strictly
+        // BELOW the assertion threshold so §11.3 renders it inferred, not fact.
+        #expect(edge?.confidence != 0.95)
+        #expect((edge?.confidence ?? 1.0) < AIAttributionRenderer.defaultAssertionThreshold)
+
+        // The agent ENTITY confidence (what the §11.3 gate reads) is below the bar too.
+        let agent = try await store.entity(id: "ai_agent:unknown ai agent:trace-generic-1")
+        #expect(agent != nil)
+        #expect((agent?.confidence ?? 1.0) < AIAttributionRenderer.defaultAssertionThreshold)
+        await store.close()
+    }
+
     @Test("Bridge maps file read on a credential file → triggers credential anchor")
     func credentialAccessAnchorViaBridge() async throws {
         let (store, dbPath) = try await makeStore()

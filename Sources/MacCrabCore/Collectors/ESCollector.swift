@@ -479,6 +479,102 @@ public final class ESCollector: @unchecked Sendable {
             && (path.hasSuffix(".keychain-db") || path.hasSuffix(".keychain"))
     }
 
+    // MARK: - Write-family hot-path noise guard (v1.21.4 Phase-7)
+    //
+    // The NOTIFY_WRITE firehose is dominated by benign, high-frequency LOG
+    // writers (measured on-device: ~3800 writes / 2 min, ~3200 of them
+    // `suricata` appending to /var/log/suricata/*). Unlike NOTIFY_OPEN, the
+    // write family had NO hot-path guard, so every such write paid the full
+    // heap-allocating processFromESProcess build (lineage/codesig) AND ran the
+    // whole 5-tier detection pipeline. This guard mirrors the OPEN credential
+    // allowlist: a cheap suffix/substring check on the TARGET path BEFORE
+    // processFromESProcess, so provably-irrelevant log-sink writes cost almost
+    // nothing and never enter the pipeline.
+    //
+    // SAFETY — why dropping these loses no detection (verified against the
+    // shipped rule corpus + downstream consumers):
+    //  * The drop set is ONLY well-known append-only LOG SINKS (`*.log`, and
+    //    writes under /var/log, /private/var/log, /Library/Logs). NO single-event
+    //    rule, sequence rule, or graph rule predicates on any of these as a
+    //    file-WRITE (file_event) target. The one rule that mentions /var/log
+    //    (defense_evasion/log_deletion) is a process_creation rule that fires on
+    //    the `rm`/`truncate` EXEC — not on a write event — so it is unaffected.
+    //  * The only file-WRITE signal behavioral scoring consumes is a write to
+    //    /LaunchAgents/ or /LaunchDaemons/ (EventLoop) — neither is a log sink.
+    //  * StatisticalAnomaly tracks process event-frequency/argc/entropy only (its
+    //    file-write-rate field was removed as orphaned) and UEBA is process-only,
+    //    so no volume-based detector loses a threat: dropping benign log noise can
+    //    only REDUCE false positives, never mask an attack (an attacker's payload
+    //    writes land on non-log paths, which are KEPT).
+    //  * Deliberately NARROWER than "log/cache/tmp": /Library/Caches, /private/tmp
+    //    and /var/folders are EXCLUDED because rules DO predicate on them as
+    //    malware drop/staging locations. Only true log sinks are dropped.
+    //  * KEEP overrides (err on the side of keeping) below: even a log-sink path
+    //    is kept when it is also a credential/wallet file (a wallet leveldb
+    //    `*.log`), an agent-content file, or a code drop (script/dylib/…).
+    //  * Residual (documented): a payload deliberately named `*.log` (or dropped
+    //    under a log dir) has its WRITE event dropped. Its interaction with the
+    //    cross-process write→execute chain (CrossProcessCorrelator, whose 2-PID
+    //    file chain was un-masked in this same v1.21.4 release) is:
+    //      - FRESH drop (create+write+execute): NOTIFY_CREATE is NOT guarded, so
+    //        the chain still forms as {create, execute} and STILL FIRES — at
+    //        .medium (computeFileSeverity requires a "write"/"download" action
+    //        for .high, so losing the write leg degrades HIGH→MEDIUM, but does
+    //        not suppress the alert). NOTIFY_EXEC also fires independently, and
+    //        single-event exec rules + behavioral scoring see the execution.
+    //      - OVERWRITE of a PRE-EXISTING executable `*.log` file (write+execute,
+    //        no create): {execute} alone → the cross-process chain does not form.
+    //        This narrow case is the only genuine loss; the EXEC is still
+    //        independently monitored (exec rules, behavior scoring). Not closed
+    //        by adding "create" to the write-equivalent set: that would elevate
+    //        legitimate install-then-run (mv/rename a binary into place, then
+    //        execute) MEDIUM→HIGH — a worse FP trade than this contrived gap.
+    //
+    // Pure + unit-tested (ESWriteHotPathGuardTests); ES delivery itself is
+    // live-only, exactly like isCredentialReadPath.
+
+    /// Executable/script/dylib/bundle write-target suffixes — a WRITE to code is
+    /// detection-relevant (dropper/loader staging) and is KEPT even under a log
+    /// root. Suffix match (cheap); Mach-O binaries have no canonical suffix and
+    /// are covered by the CREATE/EXEC paths instead (see the residual note).
+    static let codeWriteSuffixes: [String] = [
+        ".dylib", ".so", ".sh", ".bash", ".zsh", ".command",
+        ".py", ".pl", ".rb", ".php", ".js", ".mjs", ".cjs",
+        ".jar", ".scpt", ".applescript", ".plist",
+    ]
+
+    /// True iff `path` is a code/script/config drop we keep regardless of
+    /// location (suffix match plus bundle/framework/kext interiors).
+    static func isCodeWritePath(_ path: String) -> Bool {
+        for suffix in codeWriteSuffixes where path.hasSuffix(suffix) { return true }
+        return path.contains(".app/") || path.contains(".framework/") || path.contains(".kext/")
+    }
+
+    /// True iff `path` is a well-known append-only LOG SINK — the ONLY write
+    /// targets eligible for the noise drop. Tight by construction: `*.log` files
+    /// plus writes under the system/daemon/app log directories (where suricata &
+    /// friends append). Everything else returns false ⇒ KEPT. Note `/var/log/`
+    /// as a substring also covers `/private/var/log/`.
+    static func isLogSinkWritePath(_ path: String) -> Bool {
+        if path.hasSuffix(".log") { return true }
+        if path.contains("/var/log/") { return true }
+        if path.contains("/Library/Logs/") { return true }
+        return false
+    }
+
+    /// The write-family hot-path drop decision: `true` ⇒ this NOTIFY_WRITE /
+    /// modified-CLOSE is provably-irrelevant log noise and may be dropped BEFORE
+    /// processFromESProcess. Conservative: only log sinks are eligible, and a
+    /// log-sink path is still KEPT if it is a credential/wallet, agent-content,
+    /// or code drop. Default is KEEP.
+    static func shouldDropNoisyWrite(path: String) -> Bool {
+        guard isLogSinkWritePath(path) else { return false }   // not a log sink ⇒ KEEP
+        if isCredentialReadPath(path) { return false }         // wallet leveldb *.log, etc.
+        if isAgentContentReadPath(path) { return false }
+        if isCodeWritePath(path) { return false }
+        return true                                            // provable log noise ⇒ DROP
+    }
+
     /// Enrichment keys describing the TARGET of an actor->target introspection
     /// event (get_task_read / trace / remote_thread_create). Keys are the exact
     /// Sigma field names so RuleEngine.resolveField resolves them via its
@@ -684,10 +780,11 @@ public final class ESCollector: @unchecked Sendable {
 
     /// Build an `ESClientContext` (fresh tracker + its OWN bounded off-thread
     /// worker) for `types`. The worker closures capture LOCALS (the shared
-    /// continuations + this context's own tracker + the canary), never `self`, so
-    /// this is safe to call before `init` completes — mirroring the old inline
-    /// worker build. `canary` is non-nil only for the context that carries EXEC
-    /// (the D3 recognizer runs on exec events).
+    /// continuations + this context's own tracker), never `self`, so this is safe
+    /// to call before `init` completes — mirroring the old inline worker build.
+    /// `canary` is non-nil only for the context that carries EXEC; it is STORED
+    /// on the returned context (not captured by the worker) so the D3 recognizer
+    /// runs at the ES callback boundary in `openClient`, not downstream.
     private static func makeClientContext(
         label: String,
         types: [es_event_type_t],
@@ -710,7 +807,6 @@ public final class ESCollector: @unchecked Sendable {
                     continuation: continuation,
                     traceContinuation: traceContinuation,
                     tracker: tracker,
-                    canary: canary,
                     logger: logger
                 )
             },
@@ -722,7 +818,7 @@ public final class ESCollector: @unchecked Sendable {
                 es_release_message(box.message)
             }
         )
-        return ESClientContext(label: label, subscribedTypes: types, tracker: tracker, worker: worker)
+        return ESClientContext(label: label, subscribedTypes: types, tracker: tracker, worker: worker, canary: canary)
     }
 
     /// Wrap `makeClientContext` with this collector's captured continuations.
@@ -750,6 +846,11 @@ public final class ESCollector: @unchecked Sendable {
         context.tracker.reset()
         let tracker = context.tracker
         let worker = context.worker
+        // v1.21.4 Phase-2 (D3) FIX: the coverage-canary recognizer runs HERE, at
+        // the true ES callback boundary, so "seen at callback" means the kernel
+        // DELIVERED the probe exec — not that it survived the async hand-off +
+        // parse downstream. Non-nil only on the EXEC-carrying context.
+        let canary = context.canary
 
         var newClient: OpaquePointer?   // es_client_t*
         let result = es_new_client(&newClient) { _, message in
@@ -774,6 +875,18 @@ public final class ESCollector: @unchecked Sendable {
                 seqNum: message.pointee.seq_num,
                 globalSeq: message.pointee.global_seq_num
             )
+            // v1.21.4 Phase-2 (D3): coverage-canary recognizer, ON the callback
+            // boundary (kernel delivery). Gated on `isArmed` (a single locked
+            // `isEmpty`) so the per-exec argv walk only happens during the
+            // ~seconds a probe is in flight — near-free otherwise. Reads the
+            // live message synchronously within the callback (valid here), so no
+            // retain is needed for it. Only the EXEC context has a canary.
+            if let canary = canary,
+               evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
+               canary.isArmed {
+                let args = argsFromExecMessage(message)
+                canary.noteExecIfCanary(commandLine: args.joined(separator: " "))
+            }
             // D4 handler-entry timestamp — the worker measures end-to-end latency
             // (arrival → normalise-done, including queue wait) against it.
             let startNanos = DispatchTime.now().uptimeNanoseconds
@@ -1040,11 +1153,17 @@ public final class ESCollector: @unchecked Sendable {
         Self.mergeCountMaps(contexts.map { $0.tracker.processedByType() })
     }
 
-    /// p99-estimate of the ES callback handler wall-time in microseconds (D4) —
-    /// the leading indicator that rises before kernel drops appear. Two
-    /// independent per-queue histograms can't be merged into one true p99, so
-    /// this reports the WORST (max) per-queue p99 — the honest "worst handler
-    /// latency across both queues," which is what the leading-indicator gate wants.
+    /// p99-estimate of END-TO-END message latency in microseconds (D4) — the
+    /// leading indicator that rises before kernel drops appear. NOTE (v1.21.4):
+    /// this is NOT the inline ES-callback wall-time. The interval is timed from
+    /// `box.startNanos` (captured at the callback boundary) to the worker having
+    /// finished `normalise`, so it INCLUDES the time the retained message waited
+    /// in the worker's serial GCD queue plus normalise/trace-scan. The inline
+    /// callback itself is O(1) (retain + one heap alloc + a non-blocking
+    /// `queue.async`) and stays sub-millisecond; a high value here means worker
+    /// BACKLOG, not a slow handler. Two independent per-queue histograms can't be
+    /// merged into one true p99, so this reports the WORST (max) per-queue p99.
+    /// Surfaced under the telemetry key `es_msg_e2e_latency_p99_us`.
     public func esHandlerP99Micros() -> UInt64 {
         contexts.map { $0.tracker.handlerP99Micros() }.max() ?? 0
     }
@@ -1120,14 +1239,17 @@ public final class ESCollector: @unchecked Sendable {
 
     // MARK: - v1.21.4 Phase-3 (Mitigation B) — off-thread message processing
 
-    /// The full parse/yield/D4/canary pipeline that used to run inline on the ES
+    /// The full parse/yield/D4 pipeline that used to run inline on the ES
     /// callback boundary. Now runs on the per-client worker's serial queue against
     /// the RETAINED message (`box.message`), which stays valid until the worker's
     /// `free` closure calls `es_release_message`. Byte-for-byte the same work as
     /// the old inline handler (same single `yield`, same content, same downstream
-    /// order), minus the D1 seq accounting which must stay on the callback
-    /// boundary. Never frees the message — that is the worker's `free` closure's
-    /// sole responsibility, called exactly once after this returns.
+    /// order), minus the D1 seq accounting AND the D3 coverage-canary recognizer,
+    /// which both stay ON the callback boundary (D1 for kernel-drop gap
+    /// accounting, D3 so "seen at callback" measures kernel delivery not
+    /// downstream processing). Never frees the message — that is the worker's
+    /// `free` closure's sole responsibility, called exactly once after this
+    /// returns.
     ///
     /// Wrapped in an `autoreleasepool` so the CFString-backed `String`s that
     /// `esStringToSwift`/`normalise` create are reclaimed per message instead of
@@ -1138,7 +1260,6 @@ public final class ESCollector: @unchecked Sendable {
         continuation: AsyncStream<Event>.Continuation,
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
         tracker: ESSeqTracker,
-        canary: ESCanaryRegistry?,
         logger: Logger
     ) {
         autoreleasepool {
@@ -1178,15 +1299,10 @@ public final class ESCollector: @unchecked Sendable {
             if let event = event {
                 yielded = true
                 if case .dropped = continuation.yield(event) { yieldDropped = true }
-                // v1.21.4 Phase-2 (D3): coverage-canary recognizer. On an EXEC
-                // whose argv (already parsed by normalise) carries a live probe
-                // nonce, latch "seen at callback" for that nonce. Cheap no-op when
-                // no probe is in flight (registry armed-gate). `canary` is non-nil
-                // only on the EXEC/PROCESS client (Phase-4 split), which is the
-                // only client that delivers NOTIFY_EXEC.
-                if evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue {
-                    canary?.noteExecIfCanary(commandLine: event.process.commandLine)
-                }
+                // v1.21.4 Phase-2 (D3) NOTE: the coverage-canary recognizer no
+                // longer runs here. It was moved ONTO the ES callback boundary
+                // (see `openClient`) so "seen at callback" measures kernel
+                // delivery, not downstream worker processing.
             } else {
                 logger.debug("Dropped unhandled ES event type: \(evType)")
             }
@@ -1319,6 +1435,27 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ, ES_EVENT_TYPE_NOTIFY_TRACE,
              ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE, ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
             if msg.process.pointee.is_platform_binary { return nil }
+        default:
+            break
+        }
+
+        // v1.21.4 Phase-7 write hot-path guard: mirror the OPEN guard for the
+        // write family. The NOTIFY_WRITE firehose is dominated by benign log
+        // writers (suricata → /var/log/suricata/*, ~84% of measured write
+        // volume). Do the cheap TARGET-path check (a suffix/substring scan)
+        // BEFORE the heap-allocating processFromESProcess build so provably-
+        // irrelevant log-sink noise costs almost nothing and never runs the
+        // 5-tier pipeline. See the "Write-family hot-path noise guard" section
+        // above for the detection-safety argument (only log sinks drop; any
+        // credential / agent-content / code-drop path is kept). For CLOSE we
+        // also short-circuit the unmodified case here — it was already dropped
+        // downstream, but doing it before processFromESProcess is a free win.
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_WRITE:
+            if shouldDropNoisyWrite(path: esFileToPath(msg.event.write.target)) { return nil }
+        case ES_EVENT_TYPE_NOTIFY_CLOSE:
+            guard msg.event.close.modified else { return nil }
+            if shouldDropNoisyWrite(path: esFileToPath(msg.event.close.target)) { return nil }
         default:
             break
         }
@@ -1862,6 +1999,14 @@ public final class ESCanaryRegistry: @unchecked Sendable {
         return seen.contains(nonce)
     }
 
+    /// Cheap armed-gate for the ES callback boundary: `true` iff any nonce is
+    /// live. Lets the callback skip the (per-exec) argv walk entirely when no
+    /// probe is in flight — one locked `isEmpty` the rest of the time.
+    public var isArmed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !live.isEmpty
+    }
+
     /// Hot path: called for every EXEC. Latches any LIVE nonce present in the
     /// exec's command line. Near-free when no probe is armed.
     public func noteExecIfCanary(commandLine: String) {
@@ -1889,14 +2034,20 @@ private final class ESClientContext {
     let subscribedTypes: [es_event_type_t]
     let tracker: ESSeqTracker
     let worker: ESMessageWorker
+    /// v1.21.4 Phase-2 (D3): the coverage-canary recognizer, non-nil ONLY for
+    /// the context that carries NOTIFY_EXEC. Held here (not captured by the
+    /// worker) so the recognizer runs at the TRUE ES callback boundary —
+    /// confirming kernel delivery — rather than downstream on the worker.
+    let canary: ESCanaryRegistry?
     /// es_client_t*, set on a successful `es_new_client`; nil'd on teardown.
     var client: OpaquePointer?
 
-    init(label: String, subscribedTypes: [es_event_type_t], tracker: ESSeqTracker, worker: ESMessageWorker) {
+    init(label: String, subscribedTypes: [es_event_type_t], tracker: ESSeqTracker, worker: ESMessageWorker, canary: ESCanaryRegistry?) {
         self.label = label
         self.subscribedTypes = subscribedTypes
         self.tracker = tracker
         self.worker = worker
+        self.canary = canary
         self.client = nil
     }
 }

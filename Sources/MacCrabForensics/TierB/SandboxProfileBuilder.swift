@@ -229,6 +229,14 @@ public enum SandboxProfileBuilder {
          home + "/.ssh",
          home + "/.aws",
          home + "/.config",
+         // v1.21.4 audit #10 follow-up: mirror the credential stores now
+         // content-brokered by TCCProtectedPaths so a contained plugin can't
+         // learn their existence/size/mtime via stat() either.
+         home + "/.docker",
+         home + "/.gnupg",
+         home + "/.kube",
+         home + "/.azure",
+         home + "/.netrc",
          "/Library/Keychains",
          "/Library/Application Support/com.apple.TCC"]
     }

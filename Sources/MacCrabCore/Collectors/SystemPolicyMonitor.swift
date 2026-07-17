@@ -31,6 +31,26 @@ public actor SystemPolicyMonitor {
     private var mdmProfilesBaselined = false
     private var lastSIPStatus: String?
     private var lastXProtectVersion: String?
+    /// XProtect-outdated dedup: the version string we last emitted an
+    /// `xprotectOutdated` alert for, and when. XProtect being outdated is a
+    /// PERSISTENT condition — without this the 5-min poll re-alerted every
+    /// cycle (~25 identical "signatures are N days old" alerts/day of pure
+    /// noise). We alert once per outdated version and only re-arm when the
+    /// version changes OR the 24h cooldown lapses.
+    private var xprotectAlertedVersion: String?
+    private var xprotectLastAlertAt: Date?
+    private static let xprotectAlertCooldown: TimeInterval = 24 * 3600
+    /// AMFI boot-arg flags we have already emitted for. Boot-args are a
+    /// persistent, reboot-scoped condition (they can't change without a
+    /// reboot, which restarts this process and clears the set), so a plain
+    /// per-flag dedup within the process lifetime is sufficient. Without it,
+    /// every poll re-fired the same critical AMFI alert.
+    private var amfiAlertedFlags: Set<String> = []
+    /// MDM profiles we have already emitted a `rogueMDMProfile` content-
+    /// inspection alert for. A profile that modifies security policy stays
+    /// installed — without this the content-inspection loop re-alerted on the
+    /// same profile every poll.
+    private var mdmRogueContentAlerted: Set<String> = []
     /// Paths we have already emitted a "quarantine stripped" event for.
     /// Without this, every full scan re-alerts on the same Downloads items,
     /// which previously accounted for the bulk of SystemPolicyMonitor noise.
@@ -156,6 +176,11 @@ public actor SystemPolicyMonitor {
 
         for (flag, desc) in dangerous {
             if bootArgs.contains(flag) {
+                // Dedup: boot-args are persistent (reboot-scoped), so without
+                // this guard the same critical AMFI alert re-fired every poll.
+                // A reboot restarts this process and clears the set, re-arming.
+                guard !amfiAlertedFlags.contains(flag) else { continue }
+                amfiAlertedFlags.insert(flag)
                 emit(SystemPolicyEvent(
                     type: .amfiBypass,
                     description: "\(desc) via boot-args: \(flag)",
@@ -307,6 +332,19 @@ public actor SystemPolicyMonitor {
            let modDate = attrs[.modificationDate] as? Date {
             let daysSinceUpdate = Date().timeIntervalSince(modDate) / 86400
             if daysSinceUpdate > 30 {
+                // Dedup: XProtect being outdated is a persistent condition, so
+                // emitting once per poll (every 5 min) produced ~25 identical
+                // alerts/day. Alert once per outdated version; re-arm only when
+                // the version string changes OR the 24h cooldown lapses.
+                let now = Date()
+                guard Self.shouldEmitXProtectOutdated(
+                    version: version,
+                    alertedVersion: xprotectAlertedVersion,
+                    lastAlertAt: xprotectLastAlertAt,
+                    now: now
+                ) else { return }
+                xprotectAlertedVersion = version
+                xprotectLastAlertAt = now
                 emit(SystemPolicyEvent(
                     type: .xprotectOutdated,
                     description: "XProtect signatures are \(Int(daysSinceUpdate)) days old (version \(version)). Apple malware definitions may be outdated.",
@@ -317,6 +355,22 @@ public actor SystemPolicyMonitor {
                 ))
             }
         }
+    }
+
+    /// Pure per-poll dedup decision for the persistent XProtect-outdated
+    /// condition. Returns true when an alert SHOULD be emitted for `version`
+    /// given the last-alerted version/time. Extracted (and `static`) so the
+    /// dedup is unit-testable without shelling out to the real XProtect bundle.
+    /// Re-arms when the version changes OR the 24h cooldown lapses. (R1)
+    static func shouldEmitXProtectOutdated(
+        version: String,
+        alertedVersion: String?,
+        lastAlertAt: Date?,
+        now: Date
+    ) -> Bool {
+        let alreadyAlerted = alertedVersion == version
+            && (lastAlertAt.map { now.timeIntervalSince($0) < xprotectAlertCooldown } ?? false)
+        return !alreadyAlerted
     }
 
     /// Probe for the `com.apple.quarantine` extended attribute on a
@@ -508,6 +562,13 @@ public actor SystemPolicyMonitor {
                     "allowRoot", "com.apple.TCC",
                 ]
                 for keyword in suspicious where data.contains(keyword) {
+                    // Dedup: an installed policy-modifying profile is a
+                    // persistent condition; without this the content-inspection
+                    // loop re-alerted on the same profile every poll. Alert once
+                    // per profile path (installation drift is handled separately
+                    // above by the added/removed diff).
+                    guard !mdmRogueContentAlerted.contains(fullPath) else { break }
+                    mdmRogueContentAlerted.insert(fullPath)
                     emit(SystemPolicyEvent(
                         type: .rogueMDMProfile,
                         description: "MDM profile modifies security policy (\(keyword)): \(item)",

@@ -8,6 +8,7 @@
 import Foundation
 import Security
 import CryptoKit
+import Darwin
 
 // MARK: - CodeSigningCache
 
@@ -23,7 +24,29 @@ public actor CodeSigningCache {
     /// `NSCache` requires reference-type values, so we box the struct.
     private final class CachedEntry: NSObject {
         let info: CodeSignatureInfo
-        init(_ info: CodeSignatureInfo) { self.info = info }
+        /// On-disk identity of the binary at cache-write time. A cached verdict
+        /// is served only while the file's CURRENT identity still matches. An
+        /// in-place replacement (an attacker swaps a trusted signed binary for a
+        /// malicious one at the same path) changes mtime/size/inode/device, so
+        /// the stale trusted verdict is invalidated instead of returned
+        /// (v1.21.4 audit MEDIUM). Mirrors the FileContentEnricher scan-cache
+        /// fix (v1.12.0 RC4).
+        let identity: FileIdentity?
+        init(_ info: CodeSignatureInfo, identity: FileIdentity?) {
+            self.info = info
+            self.identity = identity
+        }
+    }
+
+    /// Cheap stat-derived identity used to detect in-place binary replacement.
+    /// Stored alongside the cached verdict so a swapped binary can't ride the
+    /// prior trusted verdict cached under the same path.
+    private struct FileIdentity: Equatable {
+        let dev: dev_t
+        let ino: ino_t
+        let size: off_t
+        let mtimeSec: time_t
+        let mtimeNsec: Int
     }
 
     // MARK: Storage
@@ -56,9 +79,16 @@ public actor CodeSigningCache {
     /// Look up a previously cached result.
     ///
     /// - Parameter path: Absolute path to the binary on disk.
-    /// - Returns: The cached `CodeSignatureInfo`, or `nil` on a cache miss.
+    /// - Returns: The cached `CodeSignatureInfo`, or `nil` on a cache miss
+    ///   (including a stale entry whose on-disk file was replaced in place).
     public func lookup(path: String) -> CodeSignatureInfo? {
-        cache.object(forKey: path as NSString)?.info
+        guard let entry = cache.object(forKey: path as NSString) else { return nil }
+        // Serve the cached verdict only if the on-disk identity is unchanged.
+        // A mismatch means the file was replaced in place (mtime/size/inode/dev
+        // differ) → treat as a miss so the caller re-evaluates the new bytes and
+        // can't inherit a stale trusted verdict.
+        guard entry.identity == currentIdentity(path: path) else { return nil }
+        return entry.info
     }
 
     /// Store a code-signing result in the cache.
@@ -67,7 +97,27 @@ public actor CodeSigningCache {
     ///   - path: Absolute path to the binary on disk.
     ///   - info: The signing information to cache.
     public func store(path: String, info: CodeSignatureInfo) {
-        cache.setObject(CachedEntry(info), forKey: path as NSString)
+        cache.setObject(
+            CachedEntry(info, identity: currentIdentity(path: path)),
+            forKey: path as NSString
+        )
+    }
+
+    /// Stat the file to capture its current (dev, inode, size, mtime) identity.
+    /// Returns nil when the path can't be stat'd (missing file); a nil identity
+    /// only matches another nil, so a file that appears/disappears at the path is
+    /// correctly treated as a cache miss. Follows symlinks (`stat`, not `lstat`)
+    /// so the identity tracks the actually-executed binary bytes.
+    private func currentIdentity(path: String) -> FileIdentity? {
+        var st = stat()
+        guard path.withCString({ stat($0, &st) }) == 0 else { return nil }
+        return FileIdentity(
+            dev: st.st_dev,
+            ino: st.st_ino,
+            size: st.st_size,
+            mtimeSec: st.st_mtimespec.tv_sec,
+            mtimeNsec: st.st_mtimespec.tv_nsec
+        )
     }
 
     // MARK: Evaluate

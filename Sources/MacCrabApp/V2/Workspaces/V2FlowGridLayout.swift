@@ -27,9 +27,22 @@ struct V2FlowGridLayout: Layout {
 
     /// One placed item: which subview, its origin, and the size it was given.
     /// Internal (not private) so the cached layout can be stored in `Cache`.
-    struct Placement {
+    struct Placement: Equatable {
         let index: Int
         let frame: CGRect
+    }
+
+    /// One subview's layout-affecting inputs: its column span and the natural
+    /// height it reported at the width its span resolves to. The masonry flow is
+    /// a pure function of `(totalWidth, [SubviewMetric])`, so an identical
+    /// signature across a re-render yields identical placements — that's the
+    /// memo key (see `resolved`). Measuring is the only unavoidable per-pass cost
+    /// (SwiftUI caches a subview's ideal size, so an unchanged subview is cheap),
+    /// but re-running the pack + reallocating the placement array on every
+    /// heartbeat / refresh tick is not — that is what the memo skips.
+    struct SubviewMetric: Equatable {
+        let span: Int
+        let height: CGFloat
     }
 
     private func columnWidth(for totalWidth: CGFloat) -> CGFloat {
@@ -41,21 +54,40 @@ struct V2FlowGridLayout: Layout {
         CGFloat(span) * colWidth + CGFloat(span - 1) * spacing
     }
 
-    /// Masonry pack: each widget keeps its NATURAL height and drops into the
-    /// column-group (its span's worth of adjacent columns) whose current bottom is
-    /// lowest — i.e. the shortest gap. Because items aren't forced to a
-    /// shared row height, a tall card next to a short one never leaves the dead
-    /// space a row-based layout would (the gaps that kept reappearing). A
-    /// full-width (span = columns) item lands below everything and resets the
-    /// shelf. Order is preserved (we iterate in order, leftmost column wins ties).
-    private func layout(subviews: Subviews, totalWidth: CGFloat) -> (placements: [Placement], totalHeight: CGFloat) {
+    /// Measure each subview against the width its span resolves to, producing the
+    /// signature the memo compares. Because the measured heights are IN the key,
+    /// a cache hit is only taken when the true layout inputs are unchanged — so a
+    /// content change that grows a card (e.g. a "recent activity" list) always
+    /// re-solves; there is no stale-height class of bug.
+    private func metrics(subviews: Subviews, totalWidth: CGFloat) -> [SubviewMetric] {
         let colWidth = columnWidth(for: totalWidth)
+        return subviews.indices.map { index in
+            let span = min(max(1, subviews[index][WidgetSpanKey.self]), columns)
+            let w = width(forSpan: span, colWidth: colWidth)
+            let h = subviews[index].sizeThatFits(.init(width: w, height: nil)).height
+            return SubviewMetric(span: span, height: h)
+        }
+    }
+
+    /// Masonry pack (pure — no view access, so it is unit-testable): each widget
+    /// keeps its NATURAL height and drops into the column-group (its span's worth
+    /// of adjacent columns) whose current bottom is lowest — i.e. the shortest
+    /// gap. Because items aren't forced to a shared row height, a tall card next
+    /// to a short one never leaves the dead space a row-based layout would. A
+    /// full-width (span = columns) item lands below everything and resets the
+    /// shelf. Order is preserved (iterate in order, leftmost column wins ties).
+    static func solve(metrics: [SubviewMetric], columns: Int, totalWidth: CGFloat,
+                      spacing: CGFloat, rowSpacing: CGFloat)
+        -> (placements: [Placement], totalHeight: CGFloat) {
+        let gaps = CGFloat(max(0, columns - 1)) * spacing
+        let colWidth = max(1, (totalWidth - gaps) / CGFloat(columns))
         var placements: [Placement] = []
+        placements.reserveCapacity(metrics.count)
         // Running bottom (y just past the last item + rowSpacing) of each column.
         var colBottoms = Array(repeating: CGFloat(0), count: columns)
 
-        for index in subviews.indices {
-            let span = min(max(1, subviews[index][WidgetSpanKey.self]), columns)
+        for (index, m) in metrics.enumerated() {
+            let span = min(max(1, m.span), columns)
             // Pick the start column (0...columns-span) that places this item
             // highest. Ties keep the leftmost column (iterate ascending, strict <).
             var bestStart = 0
@@ -69,11 +101,10 @@ struct V2FlowGridLayout: Layout {
                 }
             }
 
-            let w = width(forSpan: span, colWidth: colWidth)
+            let w = CGFloat(span) * colWidth + CGFloat(span - 1) * spacing
             let x = CGFloat(bestStart) * (colWidth + spacing)
-            let h = subviews[index].sizeThatFits(.init(width: w, height: nil)).height
-            placements.append(Placement(index: index, frame: CGRect(x: x, y: bestTop, width: w, height: h)))
-            let newBottom = bestTop + h + rowSpacing
+            placements.append(Placement(index: index, frame: CGRect(x: x, y: bestTop, width: w, height: m.height)))
+            let newBottom = bestTop + m.height + rowSpacing
             for c in bestStart..<(bestStart + span) { colBottoms[c] = newBottom }
         }
 
@@ -81,33 +112,62 @@ struct V2FlowGridLayout: Layout {
         return (placements, totalHeight)
     }
 
-    /// Remembers the width measured in `sizeThatFits` so `placeSubviews` lays
-    /// out against the *same* width — otherwise the height we reported (for the
-    /// proposed width) and the arrangement we place (for bounds.width) could
-    /// diverge and misalign the grid. It also caches the resolved placements so
-    /// `placeSubviews` reuses the measurement `sizeThatFits` already did (each
-    /// `layout()` call measures every subview — content cards aren't free), as
-    /// long as the width and subview count still match.
-    struct Cache { var width: CGFloat?; var count: Int = 0; var placements: [Placement] = [] }
+    /// Memoizes the resolved masonry pack across re-renders. `width` is the width
+    /// `sizeThatFits` measured against, kept so `placeSubviews` lays out against
+    /// the *same* width (otherwise the reported height and the placed arrangement
+    /// could diverge and misalign the grid). `metrics` is the measured signature
+    /// the memo compares to decide "same inputs → reuse the pack".
+    struct Cache {
+        var width: CGFloat?
+        var metrics: [SubviewMetric] = []
+        var placements: [Placement] = []
+        var totalHeight: CGFloat = 0
+    }
 
     func makeCache(subviews: Subviews) -> Cache { Cache() }
 
+    /// SwiftUI calls this when the subview set changes (add / remove / reorder).
+    /// Drop the memo so the next `sizeThatFits` re-measures + re-solves against
+    /// the new subviews rather than reusing a stale pack.
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = Cache()
+    }
+
+    /// Resolve placements + height for `totalWidth`, reusing the cached pack when
+    /// the measured `(width, metrics)` signature is unchanged — so a re-render
+    /// that didn't move or resize any widget pays only the (cheap) measurement,
+    /// not another masonry solve + array allocation.
+    private func resolved(subviews: Subviews, totalWidth: CGFloat, cache: inout Cache)
+        -> (placements: [Placement], totalHeight: CGFloat) {
+        let m = metrics(subviews: subviews, totalWidth: totalWidth)
+        if cache.width == totalWidth, cache.metrics == m, !cache.placements.isEmpty {
+            return (cache.placements, cache.totalHeight)
+        }
+        let solved = Self.solve(metrics: m, columns: columns, totalWidth: totalWidth,
+                                spacing: spacing, rowSpacing: rowSpacing)
+        cache.width = totalWidth
+        cache.metrics = m
+        cache.placements = solved.placements
+        cache.totalHeight = solved.totalHeight
+        return solved
+    }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let width = proposal.replacingUnspecifiedDimensions(by: .init(width: 600, height: 0)).width
-        let (placements, height) = layout(subviews: subviews, totalWidth: width)
-        cache.width = width
-        cache.count = subviews.count
-        cache.placements = placements
+        let (_, height) = resolved(subviews: subviews, totalWidth: width, cache: &cache)
         return CGSize(width: width, height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        // Lay out against the width `sizeThatFits` measured against. When that
+        // width is already resolved in the cache (the common sizeThatFits →
+        // placeSubviews sequence), reuse its pack directly — no re-measure.
         let width = cache.width ?? bounds.width
         let placements: [Placement]
-        if cache.width == width, cache.count == subviews.count, !cache.placements.isEmpty {
-            placements = cache.placements                                   // reuse sizeThatFits' work
+        if cache.width == width, !cache.placements.isEmpty {
+            placements = cache.placements
         } else {
-            placements = layout(subviews: subviews, totalWidth: width).placements
+            placements = resolved(subviews: subviews, totalWidth: width, cache: &cache).placements
         }
         for p in placements {
             // Top-align at the masonry slot: each item is its own natural height

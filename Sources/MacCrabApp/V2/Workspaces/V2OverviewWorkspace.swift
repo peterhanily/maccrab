@@ -27,6 +27,12 @@ struct V2OverviewWorkspace: View {
     @State private var forensicsInstalledCount = 0
     @State private var forensicsLastScan: CaseManifest? = nil
     @State private var lastForensicsCardToken: Date? = nil   // PERF-1: mtime gate
+    // PERF-2: change-token for the alerts/campaigns/KPI/histogram fan-out. When
+    // the engine reports no new events/alerts since our last fetch (same range),
+    // the rows can't have changed — skip the SQL and keep current @State so a
+    // quiet 5s tick costs nothing. nil while there's no heartbeat (offline/mock)
+    // ⇒ always fetch, preserving the pre-PERF-2 behaviour on those providers.
+    @State private var lastAlertsDataToken: String? = nil
     // Click-to-explain: which security factor row is expanded to its guidance.
     @State private var expandedFactorName: String? = nil
     // Store news on the forensics/plugins card.
@@ -45,6 +51,16 @@ struct V2OverviewWorkspace: View {
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
         self.appState = appState
+    }
+
+    /// PERF-2 change-token for the alerts/campaigns/KPI/histogram fan-out.
+    /// Combines the engine's monotonic counters with the selected range so a
+    /// quiet tick (no new events/alerts, same range) reuses the last token and
+    /// skips the SQL. Returns `nil` when there's no heartbeat (offline/mock),
+    /// which callers treat as "always fetch". Pure + internal so it's unit-tested.
+    static func overviewDataToken(eventsProcessed: UInt64?, alertsEmitted: UInt64?, rangeKey: String) -> String? {
+        guard let e = eventsProcessed, let a = alertsEmitted else { return nil }
+        return "\(e):\(a):\(rangeKey)"
     }
 
     private var securityGradeTrendKind: V2ChipKind {
@@ -134,17 +150,35 @@ struct V2OverviewWorkspace: View {
             // refreshTick to 0). Wave 9G fixed the same shape in
             // V2IntelligenceWorkspace; 9P extends to Overview /
             // Alerts / System.
-            let a = await state.provider.alerts(limit: 50)
-            await MainActor.run { self.alerts = a }
+            // PERF-2: gate the SQL fan-out on a cheap heartbeat change-token, and
+            // only write @State when the fetched value actually differs — so a
+            // quiet tick neither hits SQLite nor invalidates the view tree (a
+            // no-op @State assignment still re-renders). On a live+active host
+            // events flow constantly, so the token changes most ticks and the
+            // data stays current; the equality guards then keep the *unchanged*
+            // tiles (e.g. fixed-height KPI cards) from forcing a masonry relayout.
+            let dataToken = Self.overviewDataToken(
+                eventsProcessed: appState.heartbeat?.eventsProcessed,
+                alertsEmitted: appState.heartbeat?.alertsEmitted,
+                rangeKey: rangeKey
+            )
+            if dataToken == nil || dataToken != lastAlertsDataToken || !histogramLoaded {
+                let a = await state.provider.alerts(limit: 50)
+                await MainActor.run { if a != self.alerts { self.alerts = a } }
 
-            let c = await state.provider.campaigns(limit: 20)
-            await MainActor.run { self.campaigns = c }
+                let c = await state.provider.campaigns(limit: 20)
+                await MainActor.run { if c != self.campaigns { self.campaigns = c } }
 
-            let k = await state.provider.kpis()
-            await MainActor.run { self.kpis = k }
+                let k = await state.provider.kpis()
+                await MainActor.run { if k != self.kpis { self.kpis = k } }
 
-            let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
-            await MainActor.run { self.histogramBuckets = buckets; self.histogramLoaded = true }
+                let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
+                await MainActor.run {
+                    if buckets != self.histogramBuckets { self.histogramBuckets = buckets }
+                    self.histogramLoaded = true
+                    self.lastAlertsDataToken = dataToken
+                }
+            }
 
             // Populate the AI Guard + Threat Intel tiles (both @Published on
             // appState; mtime-gated so a tight refresh tick is cheap).

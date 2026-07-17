@@ -23,7 +23,15 @@ public struct OfficeDocumentPlugin: Collector {
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
-        inputs: [],
+        inputs: [
+            InputSpec(
+                name: "path",
+                description: "Absolute path to the .docx / .xlsx / .pptx to analyze. When omitted, scans ~/Downloads.",
+                type: .path,
+                default: nil,
+                required: false
+            ),
+        ],
         outputs: [
             OutputSpec(
                 contentType: "office.document",

@@ -41,7 +41,27 @@ public enum LiveDBSnapshotError: Error, CustomStringConvertible {
 }
 
 /// Result of a successful snapshot.
-public struct LiveDBSnapshotResult: Sendable {
+///
+/// This is a **reference type on purpose**: for the case-bundle
+/// (`layout`) snapshot it OWNS the on-disk snapshot file and removes it
+/// when the last reference is released (RAII). A layout snapshot is a
+/// transient parse artifact — a PLAINTEXT copy of a TCC-protected store
+/// (chat.db, TCC.db, Mail index, Safari history). Persisting it for the
+/// case lifetime would defeat `case.sqlite`'s at-rest SQLCipher
+/// encryption against offline-media theft (stolen disk / Time Machine),
+/// because the snapshot itself is not encrypted. Collectors hold this
+/// result for exactly the duration of their parse, so releasing it (end
+/// of `collect()`) is the natural "parse finished" signal — and because
+/// the collector's already-open SQLite fd survives an unlink, parsing is
+/// unaffected even if the file is removed while a parse is in flight.
+///
+/// The brokered-TCC path (`destDir` / `snapshotFile`) leaves the file in
+/// place (`autoDeletePath == nil`): the file broker must serve the
+/// snapshot fd to the sandboxed child AFTER this call returns.
+///
+/// `@unchecked Sendable`: all stored properties are immutable; the only
+/// side effect is the best-effort file removal in `deinit`.
+public final class LiveDBSnapshotResult: @unchecked Sendable {
     /// Final on-disk path of the snapshot inside the case's
     /// `snapshots/` directory. Filename is `<sha256>.db`.
     public let path: URL
@@ -53,6 +73,30 @@ public struct LiveDBSnapshotResult: Sendable {
     /// Size in bytes of the snapshot file. Useful for retention /
     /// disk-budget enforcement.
     public let sizeBytes: Int64
+
+    /// When non-nil, the snapshot at this path (plus any SQLite journal
+    /// siblings) is removed on `deinit`. Set only for the layout
+    /// (case-bundle) snapshot; nil for brokered-TCC snapshots that must
+    /// outlive this result so the broker can serve their fd.
+    private let autoDeletePath: URL?
+
+    init(path: URL, sha256: String, sizeBytes: Int64, autoDeletePath: URL? = nil) {
+        self.path = path
+        self.sha256 = sha256
+        self.sizeBytes = sizeBytes
+        self.autoDeletePath = autoDeletePath
+    }
+
+    deinit {
+        guard let base = autoDeletePath else { return }
+        let fm = FileManager.default
+        try? fm.removeItem(at: base)
+        // The backup API copies into a fresh file, but be defensive about
+        // any rollback-journal / WAL siblings SQLite may have left behind.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            try? fm.removeItem(at: URL(fileURLWithPath: base.path + suffix))
+        }
+    }
 }
 
 public enum LiveDBSnapshot {
@@ -65,7 +109,11 @@ public enum LiveDBSnapshot {
         sourcePath: String,
         layout: CaseDirectoryLayout
     ) throws -> LiveDBSnapshotResult {
-        try snapshot(sourcePath: sourcePath, destDir: layout.snapshotsRoot)
+        // autoDelete: the returned result OWNS the plaintext copy and
+        // removes it when the collector releases it (end of parse). A
+        // TCC-protected store must not sit unencrypted next to the
+        // SQLCipher case.sqlite for the case lifetime.
+        try snapshot(sourcePath: sourcePath, destDir: layout.snapshotsRoot, autoDelete: true)
     }
 
     /// Snapshot a live SQLite database into an ARBITRARY destination directory
@@ -75,9 +123,15 @@ public enum LiveDBSnapshot {
     /// serves the snapshot fd to the sandboxed plugin — so the untrusted child
     /// never opens the live protected store and never inherits host FDA/TCC.
     /// (Plan §3.1 / Invariant 2.) Same backup-API copy + sha256 filename.
+    ///
+    /// `autoDelete` (default false, for the brokered-TCC path which needs
+    /// the file to outlive the result): when true, the returned result
+    /// owns the snapshot and removes it on release. The `layout` overload
+    /// passes true so the case-bundle copy never persists past the parse.
     public static func snapshot(
         sourcePath: String,
-        destDir: URL
+        destDir: URL,
+        autoDelete: Bool = false
     ) throws -> LiveDBSnapshotResult {
 
         guard FileManager.default.fileExists(atPath: sourcePath) else {
@@ -171,7 +225,12 @@ public enum LiveDBSnapshot {
         let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
 
-        return LiveDBSnapshotResult(path: finalURL, sha256: sha, sizeBytes: size)
+        return LiveDBSnapshotResult(
+            path: finalURL,
+            sha256: sha,
+            sizeBytes: size,
+            autoDeletePath: autoDelete ? finalURL : nil
+        )
     }
 
     /// Snapshot a single NON-SQLite regular file (e.g. a plist or .emlx a plugin

@@ -92,4 +92,31 @@ struct WebhookValidationTests {
     func acceptsIPv6Public() throws {
         try WebhookOutput.validate(url: URL(string: "https://[2001:db8::1]/hook")!)
     }
+
+    // MARK: - Redirect SSRF guard (resolve=true) fail-closed behavior
+
+    @Test("Redirect guard (resolve=true) fails CLOSED when the host can't be resolved")
+    func redirectGuardFailsClosedOnUnresolvableHost() {
+        // `.invalid` is the RFC 2606 reserved TLD guaranteed never to resolve.
+        // Under the redirect SSRF guard (resolve=true) an unresolvable — or
+        // slow-to-resolve — target must be BLOCKED, not followed. Pre-fix this
+        // path failed OPEN and allowed the redirect (v1.21.4 audit MEDIUM).
+        #expect(throws: WebhookOutput.ValidationError.self) {
+            try WebhookOutput.validate(
+                url: URL(string: "https://maccrab-nonexistent-\(UUID().uuidString).invalid/hook")!,
+                resolve: true
+            )
+        }
+    }
+
+    @Test("Config-time validation (resolve=false) still passes a not-yet-resolvable public host")
+    func configTimeValidationDoesNotResolve() throws {
+        // The fail-closed behavior is scoped to the redirect guard only. With
+        // the default resolve=false, a public hostname that isn't resolvable at
+        // startup must NOT be blocked (no DNS lookup is performed) — otherwise a
+        // transient DNS outage would drop legitimate webhook config.
+        try WebhookOutput.validate(
+            url: URL(string: "https://maccrab-nonexistent-\(UUID().uuidString).invalid/hook")!
+        )
+    }
 }

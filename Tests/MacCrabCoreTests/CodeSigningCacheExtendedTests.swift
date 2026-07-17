@@ -85,4 +85,36 @@ struct CodeSigningCacheExtendedTests {
         let stats = await cache.stats()
         #expect(stats.hits >= 1, "Second lookup should be a cache hit")
     }
+
+    @Test("In-place file replacement invalidates the cached verdict")
+    func inPlaceReplacementInvalidatesCache() async throws {
+        let fm = FileManager.default
+        let path = fm.temporaryDirectory
+            .appendingPathComponent("maccrab_cs_\(UUID().uuidString)")
+            .path
+        // Initial 4 KB file (evaluates to .unsigned — it's not a Mach-O).
+        fm.createFile(atPath: path, contents: Data(repeating: 0x41, count: 4096))
+        defer { try? fm.removeItem(atPath: path) }
+
+        let cache = CodeSigningCache()
+
+        // First evaluation: cache miss, verdict stored with the file's identity.
+        _ = await cache.evaluate(path: path)
+        #expect(await cache.stats().misses == 1)
+
+        // Re-evaluating the unchanged file is a cache hit (identity matches).
+        _ = await cache.evaluate(path: path)
+        #expect(await cache.stats().hits == 1)
+
+        // Replace the binary in place with different bytes. The size (and mtime)
+        // change, so the on-disk identity no longer matches the cached entry —
+        // the stale (trusted-style) verdict MUST be invalidated and the file
+        // re-evaluated (v1.21.4 audit MEDIUM).
+        try Data(repeating: 0x42, count: 8192).write(to: URL(fileURLWithPath: path))
+        _ = await cache.evaluate(path: path)
+        #expect(
+            await cache.stats().misses == 2,
+            "in-place replacement must force a fresh evaluation, not serve the stale verdict"
+        )
+    }
 }

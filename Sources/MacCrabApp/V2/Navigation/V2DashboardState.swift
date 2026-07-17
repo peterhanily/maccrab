@@ -76,6 +76,23 @@ public final class V2DashboardState: ObservableObject {
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
     private var autoRefreshTask: Task<Void, Never>? = nil
+    /// Whether the dashboard is the active (frontmost) scene. Driven by the
+    /// shell's `scenePhase`. The auto-refresh loop keeps sleeping while this is
+    /// false but does NOT bump `refreshTick` — so a hidden / backgrounded
+    /// dashboard (the common state for a menubar app) stops re-rendering,
+    /// re-laying-out and re-querying every 5s. Not `@Published`: only the loop
+    /// and `setForegroundActive` touch it, so it must not invalidate any view.
+    /// Defaults true so refresh runs even if the shell never wires scenePhase.
+    private var foregroundActive: Bool = true
+
+    /// Wire from the shell's `.onChange(of: scenePhase)`. On the hidden→active
+    /// edge, bump once immediately so the user never sees data frozen at the
+    /// moment the window was hidden.
+    public func setForegroundActive(_ active: Bool) {
+        let wasActive = foregroundActive
+        foregroundActive = active
+        if active && !wasActive { refreshTick &+= 1 }
+    }
     /// Last sysext bootPhase seen, to edge-detect the non-ready→ready
     /// transition that drives a one-shot live-data reconnect after the
     /// daemon (re)boots — e.g. when the launch-time `connectLiveData()`
@@ -285,7 +302,12 @@ public final class V2DashboardState: ObservableObject {
                 let secs = await MainActor.run { self?.refreshIntervalSeconds ?? 5 }
                 try? await Task.sleep(nanoseconds: UInt64(secs) * 1_000_000_000)
                 guard !Task.isCancelled else { break }
-                await MainActor.run { self?.refreshTick &+= 1 }
+                await MainActor.run {
+                    // Skip the tick while hidden/backgrounded — the loop keeps
+                    // running so it resumes instantly, but no re-render fires.
+                    guard let self, self.foregroundActive else { return }
+                    self.refreshTick &+= 1
+                }
             }
         }
     }

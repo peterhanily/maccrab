@@ -361,7 +361,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             sqlite3_exec(openedHandle, "PRAGMA journal_size_limit = \(StoragePragmas.journalSizeLimitBytes)", nil, nil, nil)
         }
         sqlite3_exec(openedHandle, "PRAGMA cache_size = -16000", nil, nil, nil)
-        sqlite3_exec(openedHandle, "PRAGMA mmap_size = 67108864", nil, nil, nil)
+        sqlite3_exec(openedHandle, "PRAGMA mmap_size = 33554432", nil, nil, nil) // 32 MB (v1.21.4: trim daemon resident-file-page ceiling; pages are reclaimable/clean)
         sqlite3_exec(openedHandle, "PRAGMA temp_store = MEMORY", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA busy_timeout = 5000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA foreign_keys = ON", nil, nil, nil)
@@ -1220,7 +1220,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         try execBound(db: db, sql: sql) { stmt in
             sqlite3_bind_text(stmt, 1, entry.id, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 2, entry.traceId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_int(stmt, 3, Int32(entry.sequenceNumber))
+            // Bind as 64-bit to match the column (INTEGER) and the read-back
+            // (sqlite3_column_int64). The old `Int32(entry.sequenceNumber)` was a
+            // force-conversion that TRAPS once the monotonic sequence exceeds
+            // Int32.max (~2.1B) — a crash on a long-lived host, not a truncation.
+            sqlite3_bind_int64(stmt, 3, Int64(entry.sequenceNumber))
             Self.bindOptionalText(stmt, 4, entry.previousHash)
             sqlite3_bind_text(stmt, 5, entry.currentHash, -1, SQLITE_TRANSIENT)
             Self.bindOptionalText(stmt, 6, entry.eventId)

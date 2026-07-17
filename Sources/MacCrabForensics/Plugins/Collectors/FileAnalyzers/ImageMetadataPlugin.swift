@@ -19,7 +19,15 @@ public struct ImageMetadataPlugin: Collector {
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
-        inputs: [],
+        inputs: [
+            InputSpec(
+                name: "path",
+                description: "Absolute path to the image file to analyze. When omitted, scans ~/Downloads for images.",
+                type: .path,
+                default: nil,
+                required: false
+            ),
+        ],
         outputs: [
             OutputSpec(
                 contentType: "image.metadata",

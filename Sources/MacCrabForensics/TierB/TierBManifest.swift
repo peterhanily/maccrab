@@ -176,10 +176,22 @@ public struct TierBManifest: Codable, Sendable {
     /// host-owned scratch + any declared write subpaths) plus network/exec/fork
     /// (when declared) are in the profile. (Plan §3.1 file-access decision.)
     public func toBrokeredSandboxProfileSpec(scratchDir: String) -> SandboxProfileSpec {
-        SandboxProfileSpec(
+        // WRITE CONTAINMENT (defense in depth). A SANDBOXED store plugin may only
+        // write inside its own per-invocation case/scratch dir — the runner always
+        // grants `scratchDir`, and that is the plugin's whole legitimate write
+        // surface. Any manifest-declared fileWriteSubpath OUTSIDE that root — e.g.
+        // `~/Library/LaunchAgents` (persistence), a system dir, or another user's
+        // home — is DROPPED here fail-closed, so a manifest that slipped past the
+        // install-time denylist (PluginInstaller.isForbiddenWriteLocation) or was
+        // constructed in-process can never coax compileDenyDefault into emitting an
+        // out-of-case `(allow file-write* …)`. Reads stay brokered (never in the
+        // SBPL). scratchDir is always granted below.
+        let root = scratchDir.hasSuffix("/") ? String(scratchDir.dropLast()) : scratchDir
+        let inCaseWrites = fileWriteSubpaths.filter { $0 == root || $0.hasPrefix(root + "/") }
+        return SandboxProfileSpec(
             allowAllByDefault: false,
             fileReadSubpaths: [],                                  // brokered — never in the SBPL
-            fileWriteSubpaths: fileWriteSubpaths + [scratchDir],
+            fileWriteSubpaths: inCaseWrites + [scratchDir],
             networkConnectAllowlist: networkConnectAllowlist,
             machServiceConnects: machServiceConnects,
             processExecPaths: processExecPaths,

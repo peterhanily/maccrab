@@ -931,7 +931,14 @@ public actor CampaignDetector {
         // which produced a constant false "Possible Lateral Movement" on every
         // developer workstation. A real lateral-movement campaign has at
         // minimum one ssh / vnc / ard / remote-exec rule hit.
-        let lateralAlerts = recentAlerts.filter { $0.tactics.contains("lateral_movement") }
+        //
+        // Normalize before matching, exactly as checkKillChain / the
+        // coordinated-attack path do. Alert tactics arrive Sigma-prefixed
+        // (`attack.lateral_movement`), so the old raw `.contains("lateral_movement")`
+        // never matched and this detector was dead code — it could not fire.
+        let lateralAlerts = recentAlerts.filter {
+            $0.tactics.contains { normalizeTactic($0) == "lateral_movement" }
+        }
         guard !lateralAlerts.isEmpty else { return nil }
 
         let userIds = Set(userIdCounts.keys)

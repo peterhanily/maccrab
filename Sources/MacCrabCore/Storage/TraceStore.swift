@@ -172,7 +172,7 @@ public actor TraceStore {
             sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA cache_size = -8000", nil, nil, nil)   // 8 MB
-            sqlite3_exec(handle, "PRAGMA mmap_size = 33554432", nil, nil, nil) // 32 MB
+            sqlite3_exec(handle, "PRAGMA mmap_size = 16777216", nil, nil, nil) // 16 MB (v1.21.4: trim daemon resident-file-page ceiling; cold reads fall to read())
             sqlite3_exec(handle, "PRAGMA temp_store = MEMORY", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = 1000", nil, nil, nil)
         }

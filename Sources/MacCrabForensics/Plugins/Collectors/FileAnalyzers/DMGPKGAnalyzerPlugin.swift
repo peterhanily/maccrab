@@ -18,7 +18,15 @@ public struct DMGPKGAnalyzerPlugin: Collector {
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
-        inputs: [],
+        inputs: [
+            InputSpec(
+                name: "path",
+                description: "Absolute path to the .dmg or .pkg to analyze. When omitted, scans ~/Downloads for installers.",
+                type: .path,
+                default: nil,
+                required: false
+            ),
+        ],
         outputs: [
             OutputSpec(
                 contentType: "dmg.analysis",

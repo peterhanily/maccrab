@@ -275,6 +275,65 @@ struct TrustedBrowserHelperTests {
             path: "/Users/attacker/Downloads/Fake Chrome.app/Contents/MacOS/Chrome"
         ))
     }
+
+    // MARK: - R2: browser-self credential-store access (path-aware)
+
+    private static let chromeHelper =
+        "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper"
+
+    @Test("Chrome reading its OWN Login Data is browser-self access (exempt)")
+    func chromeOwnLoginData() async throws {
+        #expect(NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: Self.chromeHelper,
+            filePath: "/Users/any/Library/Application Support/Google/Chrome/Default/Login Data"
+        ))
+        // Cookies + wallet-extension storage under the same profile also count.
+        #expect(NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: Self.chromeHelper,
+            filePath: "/Users/any/Library/Application Support/Google/Chrome/Default/Cookies"
+        ))
+    }
+
+    @Test("Chrome reading ~/.ssh/id_rsa is NOT browser-self access (still flagged)")
+    func chromeForeignSSHKey() async throws {
+        #expect(!NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: Self.chromeHelper,
+            filePath: "/Users/any/.ssh/id_rsa"
+        ))
+        // Nor a keychain or an AWS credential file.
+        #expect(!NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: Self.chromeHelper,
+            filePath: "/Users/any/Library/Keychains/login.keychain-db"
+        ))
+    }
+
+    @Test("Chrome reading ANOTHER browser's profile is NOT self access")
+    func chromeReadingFirefoxStore() async throws {
+        #expect(!NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: Self.chromeHelper,
+            filePath: "/Users/any/Library/Application Support/Firefox/Profiles/abc.default/logins.json"
+        ))
+    }
+
+    @Test("Firefox / Safari reading their own store is self access")
+    func firefoxAndSafariOwnStore() async throws {
+        #expect(NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: "/Applications/Firefox.app/Contents/MacOS/firefox",
+            filePath: "/Users/any/Library/Application Support/Firefox/Profiles/abc.default/logins.json"
+        ))
+        #expect(NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            filePath: "/Users/any/Library/Safari/History.db"
+        ))
+    }
+
+    @Test("A non-browser process reading a browser store is NOT self access")
+    func nonBrowserReadingBrowserStore() async throws {
+        #expect(!NoiseFilter.isBrowserReadingOwnProfile(
+            processPath: "/tmp/stealer",
+            filePath: "/Users/any/Library/Application Support/Google/Chrome/Default/Login Data"
+        ))
+    }
 }
 
 // MARK: - Warm-up window

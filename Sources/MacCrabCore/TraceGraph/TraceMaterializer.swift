@@ -400,10 +400,27 @@ public actor TraceMaterializer {
         entities: [TraceEntity],
         rootCauseEntityId: String
     ) -> StructuredExplanation {
-        let agents = entities.compactMap { decodeAgent($0) }
-        guard let minConfidence = agents.map({ $0.confidence }).min() else {
+        // Gate on the SAME signal the prose uses: the presence of an AI-agent
+        // ENTITY (entityType), NOT a successful confidence DECODE. The
+        // DeterministicExplainer asserts AI-agent involvement from entityType
+        // alone — `rootDisplay` ("AI-agent activity from <name> preceded…") and
+        // the "AI-agent associated …" severity reasons are emitted whenever an
+        // `ai_agent` entity is present, regardless of whether its attributes
+        // decode. Keying the gate on a successful decode therefore FAILED OPEN:
+        // an agent whose `attributesJson` doesn't decode (schema drift, a
+        // different date encoding, malformed attributes) was asserted as fact
+        // with a confidence the gate never saw. Treat an undecodable agent as
+        // confidence 0.0 (unknown ⇒ cannot clear the assertion bar) so the same
+        // entity that drives the prose also drives the honesty decision.
+        let agentEntities = entities.filter { $0.entityType == AIAgentNode.entityType }
+        guard !agentEntities.isEmpty else {
             return explanation  // no AI-agent participates — nothing to gate
         }
+        // Lowest confidence across participating agents; an undecodable agent
+        // contributes 0.0. The lowest is used so a single weakly- or
+        // un-attributed agent softens the prose even if a better-attributed one
+        // is also present — honesty errs conservative.
+        let minConfidence = agentEntities.map { decodeAgent($0)?.confidence ?? 0.0 }.min() ?? 0.0
         let rendering = AIAttributionRenderer.render(
             confidence: minConfidence,
             assertionThreshold: policy.aiAttributionAssertionThreshold
@@ -414,14 +431,18 @@ public actor TraceMaterializer {
 
         // Below threshold. (1) Soften the vendor-named root display when the
         // root cause is itself an agent — that is the only site the explainer
-        // NAMES a vendor, and so the highest reputational-risk assertion.
+        // NAMES a vendor, and so the highest reputational-risk assertion. Use
+        // the decoded agent name + confidence when available; otherwise fall
+        // back to the entity's displayName (the SAME name `rootDisplay` asserted)
+        // and confidence 0.0, so an UNDECODABLE root agent is hedged too rather
+        // than leaving the asserted "AI-agent activity from …" prose in place.
         var display = explanation.rootCause.display
         if let rootEntity = entities.first(where: { $0.id == rootCauseEntityId }),
-           rootEntity.entityType == AIAgentNode.entityType,
-           let rootAgent = decodeAgent(rootEntity) {
+           rootEntity.entityType == AIAgentNode.entityType {
+            let rootAgent = decodeAgent(rootEntity)
             display = AIAttributionRenderer.explainerSentence(
-                agentName: rootAgent.agentName,
-                confidence: rootAgent.confidence,
+                agentName: rootAgent?.agentName ?? rootEntity.displayName,
+                confidence: rootAgent?.confidence ?? 0.0,
                 assertionThreshold: policy.aiAttributionAssertionThreshold
             )
         }

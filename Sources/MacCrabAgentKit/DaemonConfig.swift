@@ -191,7 +191,20 @@ struct DaemonConfig: Codable {
         /// settled ~300 MB; rc.2 live-test finding D4). 350 is honest about the
         /// file's real components. The events working set is still bounded by
         /// `eventsHotTierMinutes`; this only relaxes the whole-FILE ceiling.
-        var eventsMaxSizeMB: Int = 350
+        ///
+        /// v1.21.4: raised 350 → 420. This cap is enforced against the full
+        /// on-disk FOOTPRINT (`measureDatabaseFootprintMB` = db + -wal + -shm),
+        /// but the 350 justification above only accounted for the main-file
+        /// floor (~300 MB) and omitted the ≤64 MB WAL sidecar the footprint
+        /// measurement itself includes (+ ~4 MB shm). So even a healthy file at
+        /// its ~300 MB floor could measure ~300 + 64 + 4 ≈ 368 MB, and the
+        /// enforcer target `0.8 × 350 = 280 MB` sat BELOW the ~300 MB floor —
+        /// meaning the hourly sweep never converged and prune+VACUUMed on every
+        /// tick (perpetual file rewrites that fed both RSS churn and CPU). 420
+        /// makes the target `0.8 × 420 = 336 MB` sit above the ~300 MB floor so
+        /// the sweep converges instead of churning. Working set still bounded by
+        /// `eventsHotTierMinutes`.
+        var eventsMaxSizeMB: Int = 420
 
         /// Cadence (in minutes) for the events.db size-cap enforcer.
         ///

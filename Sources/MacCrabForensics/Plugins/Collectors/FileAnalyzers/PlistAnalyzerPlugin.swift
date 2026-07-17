@@ -21,7 +21,15 @@ public struct PlistAnalyzerPlugin: Collector {
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
-        inputs: [],
+        inputs: [
+            InputSpec(
+                name: "path",
+                description: "Absolute path to the .plist file to analyze. When omitted, analyzes a small system dogfood set.",
+                type: .path,
+                default: nil,
+                required: false
+            ),
+        ],
         outputs: [
             OutputSpec(
                 contentType: "plist.analysis",

@@ -1582,7 +1582,8 @@ public final class V2LiveDataProvider: V2DataProvider {
                     id: e.id,
                     source: e.sourceEntityId,
                     target: e.targetEntityId,
-                    relation: e.relation
+                    relation: e.relation,
+                    confidence: e.confidence
                 )
             }
         } catch {

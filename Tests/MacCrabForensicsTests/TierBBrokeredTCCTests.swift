@@ -76,6 +76,51 @@ struct TierBBrokeredTCCTests {
         }
     }
 
+    @Test("MEDIUM: credential stores outside ~/Library are brokered/consent-gated, not served live")
+    func credentialStoresProtected() {
+        let home = "/Users/x"
+        for p in ["/Users/x/.ssh/id_rsa",
+                  "/Users/x/.aws/credentials",
+                  "/Users/x/.config/gcloud/credentials.db",
+                  "/Users/x/.netrc",
+                  "/Users/x/.docker/config.json",
+                  "/Users/x/.gnupg/secring.gpg",
+                  "/Users/x/.kube/config",
+                  "/Users/x/.azure/accessTokens.json"] {
+            #expect(TCCProtectedPaths.isProtected(p, home: home), "credential path must be brokered/consent-gated: \(p)")
+        }
+        // A plain project file is unaffected (still a direct read).
+        #expect(!TCCProtectedPaths.isProtected("/Users/x/Documents/notes.txt", home: home))
+        // Case-folded bypass attempt is also caught (case-insensitive APFS).
+        #expect(TCCProtectedPaths.isProtected("/Users/x/.SSH/id_rsa", home: home))
+    }
+
+    @Test("MEDIUM: a broker read of ~/.ssh/id_rsa is gated exactly like a TCC source (snapshot, never live)")
+    func sshKeyBrokeredLikeTCC() throws {
+        let snapDir = URL(fileURLWithPath: NSTemporaryDirectory() + "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapDir) }
+        let home = NSTemporaryDirectory() + "tcc-home-\(UUID().uuidString)"
+        let key = home + "/.ssh/id_rsa"
+        try FileManager.default.createDirectory(atPath: (key as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try "-----BEGIN OPENSSH PRIVATE KEY-----".write(toFile: key, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+
+        // Gated exactly like chat.db: NOT a live direct read root — snapshotted + redirected.
+        let plan = BrokeredTCC.prepare(manifestReadPaths: [key], snapshotDir: snapDir, home: home)
+        #expect(plan.directReadRoots.isEmpty)
+        #expect(plan.denied.isEmpty)
+        #expect(plan.redirects.count == 1)
+        #expect(plan.redirects.first?.prefix == key)
+
+        // Defense in depth: even a broad ~/.ssh ancestor read root can't coax a live
+        // serve — the served-path TCC guard denies it (same control as chat.db).
+        let guarded = TierBFileBroker.Policy(allowedReadRoots: [home + "/.ssh"], tccGuardHome: home)
+        #expect(TierBFileBroker.resolve(key, policy: guarded) == nil)
+        // Without the guard it WOULD be served live — documents the guard is the control.
+        let unguarded = TierBFileBroker.Policy(allowedReadRoots: [home + "/.ssh"])
+        #expect(TierBFileBroker.resolve(key, policy: unguarded)?.path == key)
+    }
+
     // MARK: - Plan
 
     @Test("prepare: non-TCC read is a direct root; no snapshot")

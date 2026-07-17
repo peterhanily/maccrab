@@ -184,4 +184,60 @@ struct LiveDBSnapshotTests {
         #expect(snapshotCount == 2)
         #expect(snapshotCount == preWriteCount)
     }
+
+    /// GA-BLOCKER regression: a layout (case-bundle) snapshot is a
+    /// transient parse artifact. After a snapshot-backed collector finishes,
+    /// no plaintext `.db` may remain in the case `snapshots/` dir — it would
+    /// otherwise sit UNENCRYPTED next to the SQLCipher `case.sqlite` for the
+    /// case lifetime, defeating at-rest protection against offline-media
+    /// theft (stolen disk / Time Machine).
+    @Test("Layout snapshot auto-deletes once the collector-like scope releases it")
+    func layoutSnapshotAutoDeletesAfterParse() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
+        let sourcePath = NSTemporaryDirectory() + "test-autodelete-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+        try makeSourceDB(at: sourcePath)
+
+        // Mimic a snapshot-backed collector: snapshot → open+parse read-only
+        // → return. The result OWNS the snapshot file and is confined to this
+        // helper, so releasing it on return removes the plaintext copy.
+        func runCollectorLike() throws {
+            let snap = try LiveDBSnapshot.snapshot(sourcePath: sourcePath, layout: layout)
+            var db: OpaquePointer?
+            let rc = sqlite3_open_v2(
+                snap.path.path, &db,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil
+            )
+            #expect(rc == SQLITE_OK)   // parse works while the snapshot exists
+            if let h = db { sqlite3_close(h) }
+        }
+        try runCollectorLike()
+
+        let remaining = (try? FileManager.default.contentsOfDirectory(
+            atPath: layout.snapshotsRoot.path)) ?? []
+        #expect(!remaining.contains { $0.hasSuffix(".db") },
+                "plaintext snapshot leaked into case snapshots dir: \(remaining)")
+    }
+
+    /// The brokered-TCC path snapshots into a host-owned dir and must be able
+    /// to serve the snapshot fd to the sandboxed child AFTER the call returns,
+    /// so that (destDir) variant must NOT auto-delete.
+    @Test("destDir snapshot persists after its result is released")
+    func destDirSnapshotPersists() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-brokersnap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sourcePath = NSTemporaryDirectory() + "test-broker-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+        try makeSourceDB(at: sourcePath)
+
+        func snapshotPath() throws -> String {
+            let snap = try LiveDBSnapshot.snapshot(sourcePath: sourcePath, destDir: dir)
+            return snap.path.path
+        }
+        let path = try snapshotPath()
+        #expect(FileManager.default.fileExists(atPath: path))
+    }
 }

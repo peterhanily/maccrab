@@ -1638,7 +1638,8 @@ enum DaemonTimers {
                 "es_kernel_dropped_total": esGlobalDropped,
                 "es_kernel_dropped_by_type": esKernelDroppedByType,
                 // v1.21.4 Phase-0 D4: leading-indicator gauges.
-                "es_handler_p99_us": esHandlerP99Micros,
+                "es_msg_e2e_latency_p99_us": esHandlerP99Micros, // v1.21.4: end-to-end (callback→worker-done incl. queue wait), NOT inline callback wall-time
+
                 "es_processed_by_type": esProcessedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
@@ -1714,7 +1715,8 @@ enum DaemonTimers {
                 // v1.21.4 Phase-0 D1/D4 scalar counters (Prometheus-style; the
                 // per-type maps live in heartbeat_rich.json only).
                 "es_kernel_dropped_total": esGlobalDropped,
-                "es_handler_p99_us": esHandlerP99Micros,
+                "es_msg_e2e_latency_p99_us": esHandlerP99Micros, // v1.21.4: end-to-end (callback→worker-done incl. queue wait), NOT inline callback wall-time
+
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 "es_client_split_degraded": esClientSplitDegraded,
@@ -2204,7 +2206,7 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = json["payload"] as? String, !payload.isEmpty else {
                 print("[inbox] record-clipboard \(name): malformed payload")
@@ -2240,7 +2242,7 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let ruleId = json["ruleId"] as? String, ruleId.hasPrefix("maccrab.") else {
                 print("[inbox] builtin-rule-setting \(name): malformed")
@@ -2575,14 +2577,21 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { try? fm.removeItem(atPath: path) }
-            guard let id = readIdRequest(at: path) else {
-                print("[inbox] suppress-alert \(name): malformed payload (expected {\"id\":\"…\"})")
-                continue
-            }
+            // v1.21.4 (audit HIGH, local-DoS): authorize BEFORE reading the
+            // payload. The inbox is mode 1777, so any local user can plant a
+            // FIFO or multi-GB file named suppress-alert-*.json; reading it first
+            // would block the poller forever (FIFO) or OOM the daemon (huge
+            // file). requestOwnerUID lstat()s without opening the file, so an
+            // unauthorized request is rejected + removed (via defer) WITHOUT its
+            // bytes ever being read.
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
-                print("[inbox] suppress-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "suppress-alert", id: id, uid: uid, result: "rejected_uid")
+                print("[inbox] suppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "suppress-alert", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] suppress-alert \(name): malformed payload (expected {\"id\":\"…\"})")
                 continue
             }
             do {
@@ -2603,14 +2612,17 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { try? fm.removeItem(atPath: path) }
-            guard let id = readIdRequest(at: path) else {
-                print("[inbox] unsuppress-alert \(name): malformed payload")
-                continue
-            }
+            // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
+            // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
+            // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
-                print("[inbox] unsuppress-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "unsuppress-alert", id: id, uid: uid, result: "rejected_uid")
+                print("[inbox] unsuppress-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "unsuppress-alert", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] unsuppress-alert \(name): malformed payload")
                 continue
             }
             do {
@@ -2631,14 +2643,17 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { try? fm.removeItem(atPath: path) }
-            guard let id = readIdRequest(at: path) else {
-                print("[inbox] delete-alert \(name): malformed payload")
-                continue
-            }
+            // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
+            // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
+            // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
-                print("[inbox] delete-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "rejected_uid")
+                print("[inbox] delete-alert \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "delete-alert", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] delete-alert \(name): malformed payload")
                 continue
             }
             do {
@@ -2815,12 +2830,25 @@ enum DaemonTimers {
         let chosen = (payload: merged as [String: Any], uid: latestUID)
 
         var applied: [String] = []
+        // v1.21.4 (audit LOW #15): disabling enforcement is the security-
+        // sensitive direction, so record each module DISABLE as its OWN
+        // explicit, greppable audit event — not just folded into the coalesced
+        // `applied` summary line below (which mixes enables + disables and is
+        // attributed only to the batch's newest uid). The module actors don't
+        // expose their pre-toggle `isEnabled` to this handler, so the recorded
+        // transition is `enforcement=off` rather than a literal old→new.
+        func auditDisable(_ module: String) {
+            auditLogInbox(state: state, prefix: "prevention-disable",
+                          id: module, uid: chosen.uid,
+                          result: "action=disable module=\(module) enforcement=off")
+        }
         if let on = chosen.payload["sinkhole"] as? Bool {
             if on {
                 let domains = await state.threatIntel.maliciousDomainSet()
                 await state.dnsSinkhole.enable(domains: domains)
             } else {
                 await state.dnsSinkhole.disable()
+                auditDisable("sinkhole")
             }
             applied.append("sinkhole=\(on)")
         }
@@ -2830,12 +2858,16 @@ enum DaemonTimers {
                 await state.networkBlocker.enable(ips: ips)
             } else {
                 await state.networkBlocker.disable()
+                auditDisable("network_blocker")
             }
             applied.append("network_blocker=\(on)")
         }
         if let on = chosen.payload["persistence_guard"] as? Bool {
             if on { await state.persistenceGuard.enable() }
-            else { await state.persistenceGuard.disable() }
+            else {
+                await state.persistenceGuard.disable()
+                auditDisable("persistence_guard")
+            }
             applied.append("persistence_guard=\(on)")
         }
         guard !applied.isEmpty else {
@@ -3012,14 +3044,17 @@ enum DaemonTimers {
         for name in names {
             let path = inboxDir + "/" + name
             defer { try? fm.removeItem(atPath: path) }
-            guard let id = readIdRequest(at: path) else {
-                print("[inbox] suppress-campaign \(name): malformed payload")
-                continue
-            }
+            // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
+            // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
+            // must never reach readIdRequest on an unauthorized request.
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
-                print("[inbox] suppress-campaign id=\(id) REJECTED uid=\(uid) (not console-user or root)")
-                auditLogInbox(state: state, prefix: "suppress-campaign", id: id, uid: uid, result: "rejected_uid")
+                print("[inbox] suppress-campaign \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "suppress-campaign", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] suppress-campaign \(name): malformed payload")
                 continue
             }
             // Suppress the campaign-as-alert row (campaigns have a
@@ -3063,8 +3098,54 @@ enum DaemonTimers {
 
     /// Read a `{"id":"…"}` request file. Returns nil for missing /
     /// malformed / empty-id payloads so the caller can log + skip.
-    private static func readIdRequest(at path: String) -> String? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+    ///
+    /// **v1.21.4 (audit HIGH, local-DoS defense-in-depth):** the inbox dir is
+    /// mode 1777, so any local user can plant a hostile dir entry under a
+    /// correctly-named request file. A plain `Data(contentsOf:)` would (a) block
+    /// the poller forever on a FIFO — wedging the ENTIRE privileged control
+    /// plane, since every subsequent 5 s tick bails while `inboxPollerLock`'s
+    /// inFlight is held — and (b) read a multi-GB regular file wholesale, OOMing
+    /// the root daemon. The four id-based callers now authorize by file-owner
+    /// uid BEFORE calling this, but we ALSO gate here so no future caller can
+    /// re-introduce the block/OOM:
+    ///   - `O_NONBLOCK`: opening a FIFO returns immediately (never blocks on a
+    ///     writer) instead of hanging.
+    ///   - `O_NOFOLLOW`: a symlink dir entry is refused at open (ELOOP).
+    ///   - `fstat` the OPENED fd (no lstat→open TOCTOU) and accept only a
+    ///     regular file whose size is within a tiny cap — an id JSON is a few
+    ///     dozen bytes; 64 KB is already absurdly generous.
+    /// Safely read an inbox request file's bytes. The single hardened read path
+    /// shared by EVERY inbox reader (id-based and arbitrary-JSON alike), so the
+    /// 1777-inbox FIFO-wedge / OOM defense can never be reintroduced by a future
+    /// caller that reaches for a plain `Data(contentsOf:)`:
+    ///   - `O_NONBLOCK`: opening a FIFO returns immediately (never blocks on a
+    ///     writer) — a plain open would hang the poller and wedge the whole
+    ///     control plane while `inboxPollerLock`'s inFlight is held.
+    ///   - `O_NOFOLLOW`: a symlink dir entry is refused at open (ELOOP).
+    ///   - `fstat` the OPENED fd (no lstat→open TOCTOU) and accept only a
+    ///     regular file whose size is within a tiny cap (64 KB default) — no
+    ///     multi-GB wholesale read into memory.
+    /// Returns nil on any rejection. `internal` for unit-testing.
+    static func safeReadInboxData(at path: String, maxBytes: off_t = 64 * 1024) -> Data? {
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,   // regular file only — no FIFO/socket/dir
+              st.st_size <= maxBytes
+        else { return nil }
+        // O_NONBLOCK is a no-op for regular-file reads (always ready), and we
+        // hold the validated fd, so this cannot block. closeOnDealloc:false —
+        // the defer above owns the fd.
+        let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        return try? fh.readToEnd()
+    }
+
+    // `internal` (not private) so the DoS hardening is unit-testable against
+    // real FIFO / oversized on-disk files.
+    static func readIdRequest(at path: String) -> String? {
+        guard let data = safeReadInboxData(at: path),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = json["id"] as? String,
               !id.isEmpty
