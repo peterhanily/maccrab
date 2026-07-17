@@ -651,7 +651,7 @@ Because the request wiring is shared and lane-agnostic, Fix 3 needs nothing here
 Fix 1 changes a source constant that is baked into the **signed** app binary, so its custody equals the app binary's — it must be set at the offline ceremony and built on the trusted Mac (never read from file/env; see §2.3).
 
 1. Apply Fix 1 (§2.1) + the two test updates (§2.5); optionally Fix 2 (§3) and Fix 3's context note (§4).
-2. `swift test` → green. The suite is 2706 tests / 483 suites; the only expected changes are the two §2.5 assertions flipping from "unconfigured" to "configured".
+2. `swift test` → green. The only expected changes are the two §2.5 assertions flipping from "unconfigured" to "configured".
 3. `scripts/prerelease-check.sh <version>` → 0 errors.
 4. `VERSION=<version> ./scripts/build-release.sh` (local RC) or `./scripts/release.sh <version>` (GA) → Developer-ID sign + notarize + staple. (release.sh derives the site token from the login-Keychain git credential; the stapling fix is already in `notarize.sh`.)
 5. Install the DMG, then re-run the §0 command and confirm §6.

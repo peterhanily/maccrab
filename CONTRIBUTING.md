@@ -71,8 +71,8 @@ For temporal sequence rules (`type: sequence`), also verify:
 ### Setup
 
 ```bash
-git clone https://github.com/peterhanily/maccrab-detection.git
-cd maccrab-detection
+git clone https://github.com/peterhanily/maccrab.git
+cd maccrab
 swift build
 swift test
 ```

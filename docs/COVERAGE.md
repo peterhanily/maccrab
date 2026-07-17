@@ -14,6 +14,7 @@ ATT&CK technique tags from each rule's `tags:` block.
 | Status: stable | 92 |
 | Status: experimental | 374 |
 | Status: deprecated | 10 |
+| Status: test | 3 |
 | Severity: critical | 19 |
 | Severity: high | 111 |
 | Severity: medium | 228 |
@@ -21,6 +22,10 @@ ATT&CK technique tags from each rule's `tags:` block.
 | Severity: informational | 9 |
 | Distinct MITRE ATT&CK techniques covered | 170 |
 | Tactic directories | 18 |
+
+> Counts above are from `Rules/*.yml` only (438 single-event + 41 sequence).
+> The 7 multi-entity graph rules (`Rules/graph/*.json`) are counted separately;
+> including them the canonical corpus is **486**. See [`MODULES.md`](MODULES.md).
 
 ## Default rule profile
 
@@ -40,8 +45,13 @@ block declares it matches. It is NOT an executed benchmark
 against a labeled malware corpus. False-positive rate per
 rule under real workloads is currently measured
 opportunistically via field reports + the audit script's
-FP-risk pass (rules without `filter:` blocks). A formal
-benchmark + FP-rate publication is on the v1.9 roadmap.
+FP-risk pass (rules without `filter:` blocks). MacCrab ships a
+per-machine FP-rate measurement harness
+(`scripts/fp-rate-benchmark.sh`) that emits a privacy-safe
+per-rule alerts/day summary from a machine's own alert store; a
+formal benchmark against a labeled malware corpus, and an
+aggregated cross-machine FP-rate publication, are not yet
+available.
 
 ## By tactic
 

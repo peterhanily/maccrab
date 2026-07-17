@@ -60,7 +60,7 @@ MCFP v1's static-only form must achieve, on representative binaries:
 - **≥95% same-binary stability across reboots** (plan §6.4 R1 kill criterion).
 - **≥80% different-family separation** (plan §6.4 R2 ship criterion, evaluated in v1.15).
 
-Stability is checked empirically against a corpus committed to `docs/mcfp-research/corpus.jsonl` (corpus job lands with v1.14.0-rc.1; results land with each subsequent RC).
+These percentages are **targets / kill criteria**, not yet-validated results — the R1/R2 milestones the static form must clear before it can be relied on. They are to be checked empirically against a representative binary corpus; that corpus and its measured results are not yet committed to this repo.
 
 ## What v1 does NOT include
 

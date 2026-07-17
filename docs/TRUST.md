@@ -36,7 +36,7 @@ Each release's checksum is published in two places:
   checksum is included in the release commit that bumps the cask)
 
 ```bash
-shasum -a 256 ~/Downloads/MacCrab-v1.12.5.dmg
+shasum -a 256 ~/Downloads/MacCrab-v<version>.dmg
 # Compare to the value in Casks/maccrab.rb on main
 ```
 
@@ -48,7 +48,7 @@ Apple's `codesign` confirms the DMG was signed by Peter Hanily's
 Developer ID and hasn't been mutated since signing:
 
 ```bash
-codesign -dvv ~/Downloads/MacCrab-v1.12.5.dmg
+codesign -dvv ~/Downloads/MacCrab-v<version>.dmg
 ```
 
 Expected fragments in the output:
@@ -61,7 +61,7 @@ Apple's notarization confirms the binary passed Apple's malware scan and
 the ticket has been stapled to the DMG:
 
 ```bash
-spctl -a -t open --context context:primary-signature ~/Downloads/MacCrab-v1.12.5.dmg
+spctl -a -t open --context context:primary-signature ~/Downloads/MacCrab-v<version>.dmg
 ```
 
 Expected: `accepted` and `source=Notarized Developer ID`.
@@ -69,7 +69,7 @@ Expected: `accepted` and `source=Notarized Developer ID`.
 To verify the staple itself:
 
 ```bash
-xcrun stapler validate ~/Downloads/MacCrab-v1.12.5.dmg
+xcrun stapler validate ~/Downloads/MacCrab-v<version>.dmg
 ```
 
 Expected: `The validate action worked!`.
@@ -79,8 +79,8 @@ Expected: `The validate action worked!`.
 After mounting the DMG, repeat steps 2 + 3 against the `.app` bundle:
 
 ```bash
-codesign -dvv "/Volumes/MacCrab v1.12.5/MacCrab.app"
-spctl -a -t exec -vv "/Volumes/MacCrab v1.12.5/MacCrab.app"
+codesign -dvv "/Volumes/MacCrab v<version>/MacCrab.app"
+spctl -a -t exec -vv "/Volumes/MacCrab v<version>/MacCrab.app"
 ```
 
 The System Extension nested inside the app

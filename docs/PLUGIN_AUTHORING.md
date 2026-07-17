@@ -144,7 +144,8 @@ from the **enforced** `fileReadSubpaths` / `networkConnectAllowlist` /
   sets `privacyUnderdeclared = true` and the UI shows the derived class plus a
   `⚠ author under-declared` flag.
 - A personal-comms reader that *also* declares network egress is flagged
-  `isDisclosedExfilSurface` and requires a separate confirmation.
+  `isDisclosedExfilSurface` and shown as a HIGH RISK warning in the consent
+  prompt.
 
 Because the consent surface is derived from the **signed** manifest, a tampered
 catalog cannot soften it either.
@@ -497,8 +498,11 @@ catalog. The catalog vets the bundle, countersigns it, and serves
 `catalog.json` + per-plugin entries; the install path verifies the catalog's
 Ed25519 signature and the `artifact_sha256` before delegating to the local
 install + verify path. **Catalog submission is handled in the separate
-`maccrab-rave` repo and is out of scope for this guide.** (In this build,
-`plugin search` / `update` / `pin` are stubs pending the catalog fetcher.)
+`maccrab-rave` repo and is out of scope for this guide.** Once your plugin is
+listed, `plugin search`, `plugin update`, and `plugin pin` all work against the
+live catalog: `search` fetches and Ed25519-verifies the published index,
+`update` moves an installed plugin forward-only to the catalog's current
+version, and `pin` freezes it at the installed version.
 
 ---
 

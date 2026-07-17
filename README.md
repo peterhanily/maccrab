@@ -4,9 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-2720%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-3101%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.21.3-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.21.4-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -15,7 +15,7 @@
 > [!WARNING]
 > **Alpha software under active development.** MacCrab ships in public
 > alpha and is iterating rapidly on detection quality, UX, and the
-> release pipeline. Since v1.21.4-alpha the daemon defaults to the
+> release pipeline. Since v1.21.4 the daemon defaults to the
 > curated **stable** rule tier (the broader experimental corpus is
 > opt-in via `rule_profile: all` in `daemon_config.json`), so expect
 > fewer false positives than earlier alphas — but still occasional rule
@@ -88,7 +88,7 @@ Once running, MacCrab gives you:
 - **CLI threat hunting** -- `maccrabctl hunt "show processes connecting to unusual ports"` for natural-language queries against your event data
 - **Behavioral scoring** -- even if no single rule fires at critical severity, accumulated suspicious indicators across a process tree will still trigger an alert
 - **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
-- **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 5 other AI tools for credential access, project boundary escapes, and prompt injection
+- **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 6 other AI tools for credential access, project boundary escapes, and prompt injection
 - **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
 - **Out-of-band rule updates** -- new detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`); pushed rules are detection-only and can never override a built-in rule
 - **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
@@ -232,7 +232,7 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (~55 built-in, plus `forensics_*` plugin tools that register dynamically when forensic plugins are installed):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
+**Available tools (~90 built-in, plus `forensics_*` plugin tools that register dynamically when forensic plugins are installed):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
@@ -372,12 +372,12 @@ See the Monitors and Collectors table below for the full list including USB, cli
 <details>
 <summary><strong>AI Guard (click to expand)</strong></summary>
 
-Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, Codex, OpenClaw, Cursor, Aider, Copilot, Continue.dev, and Windsurf by executable path and process ancestry.
+Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, Codex, OpenClaw, Cursor, Aider, Copilot, Continue.dev, Windsurf, and Kiro IDE by executable path and process ancestry.
 
 | Component | Description |
 |-----------|-------------|
 | **AI process tracker** | Identifies and tracks AI tool processes and their child process trees |
-| **Credential fence** | Alerts when AI tool children access any of 28 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
+| **Credential fence** | Alerts when AI tool children access any of 29 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
 | **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
 | **Prompt injection scanner** | Scans for injection patterns in files read by AI tools using forensicate.ai analysis |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
@@ -517,7 +517,8 @@ Rules can trigger configurable response actions ranging from passive to active:
 | `kill` | Terminate the process that triggered the alert |
 | `quarantine` | Move the triggering file to a quarantine vault |
 | `script` | Run a custom shell script with alert context as environment variables |
-| `blockNetwork` | Block the network connection (requires Network Extension) |
+| `blockNetwork` | Block the destination IP via a PF (packet-filter) anchor rule (requires the privileged engine / root) |
+| `escalateNotification` | Send a high-priority macOS notification with the alert's action details |
 
 </details>
 
@@ -549,8 +550,8 @@ tactics:
 | `TA0011` | Command and Control | 53 |
 | `TA0040` | Impact | 27 |
 | — | **Sequences** (temporal multi-step) | **41** |
-| — | **Graph** (multi-entity TraceGraph) | **6** |
-| — | **Total** | **483** |
+| — | **Graph** (multi-entity TraceGraph) | **7** |
+| — | **Total** | **486** |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -618,10 +619,17 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-The current release is **v1.21.0**. See [CHANGELOG.md](CHANGELOG.md) for the full
+The current release is **v1.21.4**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.21.4** — the daemon now defaults to the curated **stable** rule tier (fewer
+  false positives; the experimental corpus is opt-in via `rule_profile: all`);
+  bulk alert actions with undo; full-history event-category filtering; a real
+  causal Investigation graph; and prevention-module toggles.
+- **v1.21.3** — a broker-client SDK so sandboxed store plugins read their declared
+  files; catalog Installed/Update state; and one-click Run for installed store
+  plugins.
 - **v1.21.0** — customizable masonry Overview with new Protection Coverage, Top
   Firing Rules, and companion-crab widgets; Forensics CLI ↔ MCP parity; honest
   engine-health reporting on the dashboard.

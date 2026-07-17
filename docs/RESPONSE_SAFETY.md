@@ -43,7 +43,7 @@ this with explicit consent.
 |---|---|---|---|
 | **kill (signal)** | `SafePIDValidator` | PID 0/1, daemons (launchd, kernel_task, WindowServer, loginwindow, hidd, mds, syslogd, etc.), processes signed by Apple unless explicitly allowed | `SafePIDValidatorTests.swift` |
 | **quarantine** | `SafeQuarantinePathValidator` | Paths under `/System/`, `/usr/`, `/bin/`, `/sbin/`, `/Library/`, `/Applications/`, symlinks, paths the user can't write, paths whose parent is not user-owned | `SafeQuarantinePathValidatorTests.swift` |
-| **networkBlock** | `SafeBlockableIPValidator` | Loopback (127.0.0.0/8, ::1), link-local (169.254.0.0/16, fe80::), reserved (0.0.0.0/8, multicast/broadcast), Apple infrastructure (gateway.icloud.com et al.) | `SafeBlockableIPTests.swift` |
+| **networkBlock** | `SafeBlockableIP` | Loopback (127.0.0.0/8, ::1), link-local (169.254.0.0/16, fe80::), reserved (0.0.0.0/8, multicast/broadcast), Apple infrastructure (gateway.icloud.com et al.) | `SafeBlockableIPTests.swift` |
 | **runScript** | `ResponseAction.validateScriptPath` | Scripts not in `/Library/Application Support/MacCrab/scripts/` or `/usr/local/maccrab/scripts/`; symlinks; non-root-owned; group-writable; world-writable | Coverage in `ResponseActionCoverageTests.swift` |
 | **TCC revoke** | TCC service name allowlist | TCC services not in known list; rejects anything that would brick the dashboard's own permissions | `PreventionTests.swift` |
 | **DNS sinkhole** | Domain shape + reserved-zone check | Shorter-than-3-label domains; reserved TLDs (.local, .arpa, .test); IP literals | `PreventionTests.swift` |
@@ -85,7 +85,7 @@ privileged path.
 relative-path traversal, parent-not-owned-by-user, system-prefix
 check, paths-with-..-components.
 
-### `SafeBlockableIPValidator` — network block
+### `SafeBlockableIP` — network block
 
 **Threat:** Blocking the wrong IP can wedge the operator's machine.
 Blocking `127.0.0.1` breaks every local service. Blocking

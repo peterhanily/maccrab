@@ -18,7 +18,8 @@ are. It reflects the code as shipped, including the gate's known limitations.
 ## Why a file-drop IPC exists
 
 The detection engine runs as **root** and owns its SQLite stores
-(`alerts.db`, `events.db`, `campaigns.db`, …) mode `0600`. The dashboard
+(`alerts.db`, `events.db`, `campaigns.db`, …) mode `0o640` (owner
+read-write, group read-only, no other). The dashboard
 (`MacCrab.app`) and the CLI run as the **logged-in user** (uid 501 on a typical
 single-user Mac). That user cannot mutate the engine's state directly:
 

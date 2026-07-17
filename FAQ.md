@@ -14,9 +14,11 @@ Without it, MacCrab silently drops file events for TCC-protected paths
 this now — if it's showing, click *Open Settings* and grant access.
 
 Other possibilities: the System Extension isn't activated (check *Overview
-→ Protection active*), no rules are compiled (`maccrabctl rules list | wc
--l` should be ~417), or you're inside the 60-second startup warm-up
-window that suppresses non-critical alerts.
+→ Protection active*), no rules are compiled (under the default **stable**
+rule tier, `maccrabctl rules list | wc -l` should be ~87 — the enabled set,
+not the full 486-rule corpus; a count of 0 means nothing compiled), or
+you're inside the 60-second startup warm-up window that suppresses
+non-critical alerts.
 
 Full diagnostic walkthrough in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -105,7 +107,7 @@ The *Suppress All Like This* button on an alert's detail panel adds a
 ### Does it work offline / in air-gapped environments?
 
 **Yes.** MacCrab's core detection pipeline needs zero network access. All
-481 rules are compiled at install time. Behavioral scoring, sequence
+486 rules are compiled at install time. Behavioral scoring, sequence
 correlation, campaign detection, and the SQLite store are fully local.
 
 Features that need network:
@@ -239,8 +241,8 @@ manually if you want a clean slate.
 ### What is the MacCrab MCP server and how do I use it?
 
 MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
-server (`maccrab-mcp`) that exposes 11 security tools to AI coding tools
-like Claude Code. Once wired up, your AI sessions can query alerts, hunt
+server (`maccrab-mcp`) that exposes ~90 built-in security tools (plus
+`forensics_*` plugin tools) to AI coding tools like Claude Code. Once wired up, your AI sessions can query alerts, hunt
 threats, and scan untrusted input — without leaving the editor.
 
 **Setup:** copy `.mcp.json` from the repo root into your project, update the
@@ -279,13 +281,14 @@ The check is synchronous and local. Input is capped at 10,000 characters. If
 
 ### What does AI Guard actually monitor — and what triggers an alert?
 
-AI Guard tracks 8 AI coding tools (Claude Code, Codex, Cursor, Copilot,
-Aider, Windsurf, Continue, OpenClaw) and their entire child process trees.
+AI Guard tracks 9 AI coding tools (Claude Code, Codex, Cursor, Copilot,
+Aider, Windsurf, Continue, OpenClaw, Kiro IDE) and their entire child
+process trees.
 
 Alerts fire on:
 
 - **Credential fence** (CRITICAL): any child process opens a file matching one
-  of 28 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
+  of 29 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
   keychains, browser credential stores, kubeconfig, `.npmrc`, `.pypirc`, etc.
 - **Project boundary** (HIGH): a child process writes a file outside the
   directory the AI tool was launched in.

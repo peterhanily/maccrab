@@ -205,7 +205,7 @@ Verifiers must:
 4. Verify `signature_base64` against the public key at
    `/Library/Application Support/MacCrab/keys/trace-signing.pub`.
 
-The verifier is implemented in PR-10c (`BundleVerifier`) and is **out of
+The verifier (`BundleVerifier`) is **out of
 scope for the v1.10.0 validator** — `validate` covers structure and
 manifest-claim checks; `verify` covers tamper-evidence.
 
@@ -354,20 +354,19 @@ Stable API per §18.9.
 | --: | --- |
 | 0  | Valid / verified successfully. |
 | 1  | Schema invalid. |
-| 2  | Hash-chain invalid (verifier; PR-10c). |
-| 3  | Signature invalid (verifier; PR-10c). |
-| 4  | Unified-log anchor mismatch or missing when explicitly required (verifier; PR-10c). |
+| 2  | Hash-chain invalid (verifier). |
+| 3  | Signature invalid (verifier). |
+| 4  | Unified-log anchor mismatch or missing when explicitly required (verifier). |
 | 5  | Incompatible bundle major version. |
 | 6  | Replay or normalization version incompatible. |
 | 7  | Redaction policy violation. |
 | 8  | Bundle archive malformed or unreadable. |
 | 9  | Internal validation error. |
 | 10 | Manifest claim does not match artifact content (e.g., `prov_compliant: true` but `prov/prov.jsonld` fails PROV-O validation). |
-| 11 | Replay scope exceeded (replay engine; PR-11). |
+| 11 | Replay scope exceeded (replay engine). |
 
-Codes 1, 5, 7, 9, 10 are produced by `BundleValidator` (PR-10a). The
-remaining codes belong to `BundleVerifier` (PR-10c) and `ReplayEngine`
-(PR-11).
+Codes 1, 5, 7, 9, 10 are produced by `BundleValidator`. The
+remaining codes belong to `BundleVerifier` and `ReplayEngine`.
 
 `validate` and `verify` are different contracts:
 
@@ -427,4 +426,4 @@ getting before opening a bundle.
 - `tracegraph-trust-substrate.md` — `TrustSubstrate` design (forthcoming)
 - `prov-dm-mapping.md` — PROV-O/PROV-DM mapping table (forthcoming)
 - `otel-semantic-conventions-mapping.md` — OTel mapping (forthcoming)
-- `tracegraph-rule-schema.md` — graph rule schema (forthcoming)
+- [`tracegraph-rule-schema.md`](tracegraph-rule-schema.md) — graph rule schema

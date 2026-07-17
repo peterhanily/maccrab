@@ -24,7 +24,7 @@ core for load-bearing decisions.
 
 | Module | Status | Summary |
 |---|---|---|
-| Rule engine | **stable** | Sigma-compatible YAML → JSON predicates. 483 rules (436 single-event + 41 sequence + 6 graph) indexed by category. |
+| Rule engine | **stable** | Sigma-compatible YAML → JSON predicates. 486 rules (438 single-event + 41 sequence + 7 graph) indexed by category. |
 | Endpoint Security collector | **stable** | Native ES client for exec/fork/exit/file/network/signal events. |
 | Alert + campaign storage | **stable** | Per-tier SQLite stores with retention + size-cap discipline. |
 | Alert deduplicator | **stable** | Single-sink chokepoint for alert insertion. Per-rule dismissal feedback. |

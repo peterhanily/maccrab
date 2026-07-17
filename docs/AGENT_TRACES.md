@@ -138,7 +138,7 @@ verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.s
   ComputerName patterns are also redacted.
 - **Prompt text: opt-in only.** Claude Code redacts prompt text from its
   spans by default; setting `OTEL_LOG_USER_PROMPTS=1` enables it on
-  the agent side, plus a separate MacCrab Settings toggle (PR-4) gates
+  the agent side, plus a separate MacCrab Settings toggle gates
   storage in `traces.db`.
 - **Storage contract.** `traces.db` lives next to `events.db` with the
   same 0640 root:admin permissions. **Span attributes are sanitised
@@ -162,7 +162,7 @@ hosts where the dashboard isn't running:
 ```bash
 # Daemon side — set in the daemon's environment.
 export MACCRAB_AGENT_TRACES=1     # turn on env-block scan + lineage tagging
-export MACCRAB_OTLP_RECEIVER=1    # (PR-4 wiring; reserved env var)
+export MACCRAB_OTLP_RECEIVER=1    # start the loopback OTLP receiver (127.0.0.1:4318)
 
 # Operator's shell, for Claude Code:
 export CLAUDE_CODE_ENABLE_TELEMETRY=1
@@ -209,24 +209,24 @@ Events that received a TRACEPARENT correlation carry the indexed columns
 - `Sources/MacCrabCore/Storage/TraceStore.swift` — append-only span store
   in `traces.db` (separate file from `events.db`)
 - `vendor/opentelemetry-proto/` — pinned upstream proto definitions
-- `scripts/regenerate-otlp-proto.sh` — regen helper (PR-3b ships a
+- `scripts/regenerate-otlp-proto.sh` — regen helper (MacCrab ships a
   hand-rolled wire-format reader; the script generates SwiftProtobuf
   types when protoc is installed)
 - `scripts/test-otlp-claude-code.sh` — manual integration smoke test
 
 ## Audit invariants
 
-- **Pass 12** (`scripts/pre-release-audit.sh`): `traces.db` has exactly
-  one long-lived opener.
-- **Pass 13** (`scripts/pre-release-audit.sh`): only the
-  `TraceExtractor`/`ESHelpers` pathway calls `es_exec_env` /
+The release audit (`scripts/pre-release-audit.sh`) enforces three
+invariants for this subsystem:
+
+- `traces.db` has exactly one long-lived opener.
+- Only the `TraceExtractor`/`ESHelpers` pathway calls `es_exec_env` /
   `es_exec_env_count`. Adding another caller requires an explicit
   allowlist entry plus a code review.
-- **Pass 14** (`scripts/pre-release-audit.sh`): every Sigma field
-  referenced by YAML rules in `Rules/` (currently `agent_trace_id`,
-  `agent_span_id`, `agent_tool`, `machine_agent_confidence`) has at
-  least one Swift producer. Catches rule-fields-without-enricher
-  drift before release.
+- Every Sigma field referenced by YAML rules in `Rules/` (currently
+  `agent_trace_id`, `agent_span_id`, `agent_tool`,
+  `machine_agent_confidence`) has at least one Swift producer. Catches
+  rule-fields-without-enricher drift before release.
 
 ## Detection rules shipped
 

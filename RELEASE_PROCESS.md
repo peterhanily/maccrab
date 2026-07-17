@@ -72,14 +72,14 @@ on the build Mac (Apple Silicon, macOS 14+).
   exists; Sparkle public key + appcast URL identical across
   project.yml and Info.plist; team ID consistent in Casks; rules
   compile cleanly with 0 skips; `Package.resolved` is committed.
-- `scripts/pre-release-audit.sh` — 15 architectural-invariant
+- `scripts/pre-release-audit.sh` — a suite of architectural-invariant
   passes covering AlertSink-bypass regressions, schema-migrator
   call sites, encryption pairings, env-block accessor confinement,
   unbounded-actor-collection bounds. Failure here blocks ship.
 
 ### Step 1 — tests
 
-`swift test`. 1490 tests across 284 suites (v1.12.0 baseline). Failure blocks ship.
+`swift test` — the full unit-test suite (3000+ tests across 500+ suites). Failure blocks ship.
 
 ### Step 1b — false-positive baseline (detection quality gate)
 
@@ -96,9 +96,9 @@ This is the gate that makes "we measured the FP rate" a fact, not a claim.
 ### Step 2 — rule compilation
 
 `python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/compiled_rules`.
-Reads 463 Sigma-compatible YAML rules (424 single-event + 39 sequence)
-and emits JSON predicates. Graph rules under `Rules/graph/*.json` (6
-in v1.12.0) ship as-is via `scripts/build-release.sh`.
+Reads 479 Sigma-compatible YAML rules (438 single-event + 41 sequence)
+and emits JSON predicates. Graph rules under `Rules/graph/*.json` (7)
+ship as-is via `scripts/build-release.sh`, for 486 rules total.
 Compiler validates duplicate YAML keys, unmapped Sigma fields, and
 boolean-as-value bugs. 0 skips required.
 
@@ -130,8 +130,9 @@ boolean-as-value bugs. 0 skips required.
 > deliberately, with the design QA done — not as a side effect of
 > updating Xcode.
 
-1. `swift build -c release` for ALL targets (MacCrabCore,
-   maccrabctl, maccrab-mcp, maccrabd, MacCrabApp, MacCrabAgent)
+1. `swift build -c release` for ALL release targets (MacCrabCore,
+   MacCrabAgentKit, maccrabctl, maccrab-mcp, maccrabd, MacCrabApp,
+   MacCrabAgent, and the Tier-B sandbox host `maccrab-tierb-sandbox-host`)
    twice — once each for arm64 and x86_64. Lipo'd into universal
    binaries. (`Xcode/project.yml` is IDE-only; nothing in the
    release pipeline runs `xcodebuild` or `xcodegen`.)

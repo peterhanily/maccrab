@@ -36,9 +36,14 @@ residual risk remains.
 - Endpoint Security captures process exec/fork/exit, file create/write/
   rename/unlink, network connect, and TCC permission changes in real
   time.
-- 483 Sigma-style rules match adversary-known patterns (LaunchAgent
-  drops, suspicious process trees, AMOS/Atomic Stealer wallet paths,
-  XCSSET clipboard injection, etc.).
+- 486 Sigma-style rules (438 single-event + 41 sequence + 7 graph)
+  match adversary-known patterns (LaunchAgent drops, suspicious process
+  trees, AMOS/Atomic Stealer wallet paths, XCSSET clipboard injection,
+  etc.). This count describes the full corpus. Since v1.21.4 the daemon
+  defaults to the stable rule profile — only rules marked `status: stable`
+  (~87 single-event rules) ship **enabled** by default; the majority are
+  disabled unless the operator opts into a broader profile. See
+  [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded
   windows (longest is `ransomware_kill_chain.yml` at 10 minutes).
 - Behavioral scoring + baseline anomaly detection flags novel process
@@ -69,8 +74,13 @@ escalate to root via the System Extension.
   `runScript`) require the script to live in a root-owned allowlisted
   directory and reject symlinks, group-writable, and world-writable
   paths.
-- Database, compiled rules, and config files are written 0o640 / 0o700
-  with O_NOFOLLOW symlink-safe writes.
+- Databases and config files are root-owned and written 0o640 with
+  O_NOFOLLOW symlink-safe writes. Compiled rules are the deliberate
+  exception: their directory is 0o755 and the files 0o644 (world-readable)
+  so the non-root dashboard (uid 501) can read them for rule display and
+  integrity hashing. `DaemonSetup` explicitly refuses to set 0o700 there
+  because that breaks the app's read path. This is a documented, intentional
+  read path — the trade is a small evasion-recon surface, not a write vector.
 - Self-defense layer monitors the sysext's own state and logs
   tampering attempts to the unified log.
 
@@ -114,6 +124,11 @@ embedded credentials) to an attacker-controlled URL.
 - SSRF policy validates URLs before request: rejects RFC1918 ranges,
   link-local, cloud-metadata addresses (169.254.169.254, fd00::/8,
   AWS/GCP/Azure metadata IPs).
+- The SSRF policy is re-applied on every 3xx redirect hop.
+  `SecureURLSession` attaches a redirect delegate that re-runs the host
+  check — with DNS resolution — so a 302/307 to a hostname that resolves
+  into RFC1918 / link-local / metadata space is rejected before the hop
+  is followed. Covered by `SecureURLSessionRedirectTests`.
 - Slack / Teams / Discord / PagerDuty notification webhooks share the
   same SSRF policy as the generic webhook output.
 - API tokens for output sinks are read from environment variables or
@@ -125,10 +140,9 @@ embedded credentials) to an attacker-controlled URL.
   the SSRF policy for intranet webhook targets — that's a deliberate
   bypass and the operator owns the consequences.
 - DNS rebinding — the SSRF check resolves the URL hostname at request
-  time, but doesn't pin the IP for the duration of the connection.
-  Allowlist-first egress for production targets is on the v1.9 roadmap.
-- Redirect-following hasn't been audited. If an output URL responds
-  with a 302 to a private IP, that's a gap.
+  time (and re-checks it on each redirect hop), but doesn't pin the IP
+  for the duration of an established connection. Allowlist-first egress
+  for production targets is a tracked future hardening, not yet shipped.
 
 ### 5. Compromised LLM backend
 
@@ -292,8 +306,10 @@ The reviewer-facing summary, in plain terms:
   benchmark.** [`COVERAGE.md`](COVERAGE.md) lists what each rule
   matches; we don't yet publish executed false-positive rates against
   a labeled corpus.
-- **Database tamper-resistance is on the v1.9 roadmap.** Today is
-  confidentiality-only.
+- **Database tamper-resistance is tracked future hardening, not yet
+  shipped.** Today the primary stores are confidentiality-only (root-owned
+  `0o640`; at-rest column encryption currently covers only the trace /
+  causal-graph stores).
 - **Fleet management isn't here.** Operators who want fleet rollout
   should treat MacCrab as a single-host tool inside their own
   deployment infrastructure.

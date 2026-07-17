@@ -70,7 +70,9 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 ### Other causes for silent detection
 
 - **No rules loaded.** Check `maccrabctl rules list | wc -l` — should be
-  ~380. If zero, run `make compile-rules` and look for errors.
+  non-zero (roughly ~87 under the default stable rule profile, up to ~486
+  with the full profile enabled). If zero, run `make compile-rules` and
+  look for errors.
 - **Warm-up window.** Non-critical alerts are suppressed in the first 60
   seconds of daemon start, to avoid floods during replay of backlogged
   events. Critical matches always survive.

@@ -6,7 +6,7 @@
 This document specifies the on-disk format for graph-native detection
 rules per §23 of the v1.10.0 TraceGraph spec.
 
-PR-13 ships JSON as the canonical authoring + on-disk form. The §23.1
+JSON is the canonical authoring + on-disk form. The §23.1
 YAML example in the v1.10.0 spec is illustrative; YAML compilation
 against the same `GraphRule` Swift type lands as a follow-up alongside
 the existing v1.9 rule compiler in `Compiler/`.
@@ -229,17 +229,20 @@ A rule yields zero or one `GraphRuleMatch` per trace.
 
 ---
 
-## 9. Starter rule set (v1.10.0)
+## 9. Shipped rule set
 
-Five rules ship in `Rules/graph/`:
+Seven rules ship in `Rules/graph/` (the set has grown since the v1.10.0
+baseline of five):
 
-| File | What it catches |
-| --- | --- |
-| `maccrab_ai_agent_credential_network_persistence.json` | Headline: AI-attributed shell + credential read + suspicious network + persistence creation, all sharing a common process ancestor. T1059 / T1555 / T1543.001 / T1105. |
-| `maccrab_unsigned_download_executes_then_persists.json` | Unsigned binary creates persistence — classic dropper signal. T1543.001 / T1547. |
-| `maccrab_mcp_server_spawns_shell_then_credential.json` | MCP server forked a shell that touched a credential file. T1059 / T1555. |
-| `maccrab_launchagent_after_credential_access.json` | Same process read credentials and created persistence within 10 minutes. T1543.001 / T1555. |
-| `maccrab_agent_associated_shell_writes_to_login_item.json` | AI-associated shell created a login item / launch agent. T1543.001 / T1547. |
+| File | Severity | What it catches |
+| --- | --- | --- |
+| `maccrab_ai_agent_credential_network_persistence.json` | high | Headline: AI-attributed shell + credential read + suspicious network + persistence creation, all sharing a common process ancestor. T1059 / T1555 / T1543.001 / T1105. |
+| `maccrab_ai_agent_lethal_trifecta.json` | critical | Lethal trifecta in one agent session: sensitive-data read + untrusted content + external egress. T1059 / T1555 / T1041. |
+| `maccrab_ai_agent_shell_touches_credential.json` | high | An AI agent's shell touched a credential file. T1059 / T1555. |
+| `maccrab_worm_self_propagation.json` | critical | Package-manager descendant read a credential then phoned home — self-propagation signal. T1195.001 / T1555 / T1567 / T1098. |
+| `maccrab_unsigned_download_executes_then_persists.json` | high | Unsigned binary from a download path creates persistence — classic dropper signal. T1543.001 / T1547. |
+| `maccrab_launchagent_after_credential_access.json` | high | Same process read credentials and created persistence within 10 minutes. T1543.001 / T1555. |
+| `maccrab_agent_associated_shell_writes_to_login_item.json` | high | AI-associated shell wrote to a login item / launch agent. T1543.001 / T1547. |
 
 ---
 

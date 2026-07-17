@@ -30,7 +30,11 @@ state, and retention/compaction behaviour change between MacCrab versions, and
 have done so repeatedly (e.g. alert history was split out of `events.db` into
 `alerts.db` in v1.8.0; attribution overrides were relocated to their own file;
 columns are added across versions). The stores are also opened by the root engine
-mode `0600`, may be encrypted (SQLCipher), and run in WAL mode with active
+with restrictive (`0600`/`0640`) permissions; sensitive columns are field-level
+AES-256-GCM encrypted at rest (CryptoKit; see
+`Sources/MacCrabCore/Storage/DatabaseEncryption.swift`) rather than whole-database
+SQLCipher `PRAGMA key` encryption — the SQLite build is SQLCipher-capable, but the
+engine stores do not key the whole file; and they run in WAL mode with active
 size-cap/rollup sweeps — so a file read out from under the engine is neither
 schema-stable nor read-safe.
 

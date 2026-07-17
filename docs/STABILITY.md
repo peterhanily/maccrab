@@ -17,7 +17,7 @@ here, and none should be inferred.
 
 ## 1. What "stable" means for an alpha
 
-This is an alpha build (`1.21.4-alpha.x`). "Stable" here does **not** mean
+This is a pre-1.0 build (`1.21.4-rc.x`). "Stable" here does **not** mean
 "proven at scale over long uptime." It means:
 
 - The engine's **failure mode is degrade-or-halt, never silent blindness.**
