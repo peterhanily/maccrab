@@ -3,6 +3,29 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4] — 2026-07-18
+
+Performance and hardening release.
+
+### Added
+- Kernel-level filtering of high-volume log writers to cut CPU under sustained file activity.
+- Background Task Management (BTM) / login-item detection coverage — launch items added without a matching on-disk plist, and untrusted background-item registrations.
+- AI-agent lethal-trifecta graph correlation (private-data access + untrusted input + external egress within an AI-tool lineage).
+- Download provenance (delivering app + origin) on high-severity credential/exfiltration alerts.
+
+### Changed
+- Significantly cheaper per-event detection pipeline; search-index maintenance moved off the write path.
+- Stable rule profile by default — experimental rules are opt-in via `rule_profile: all`.
+- Bounded, self-compacting event storage.
+- Accurate end-to-end dropped-event accounting, with an advisory sensor-degraded signal (and menu-bar indicator) when sustained load degrades coverage.
+- Tamper-evident event and trace storage with a verify-on-load continuity check.
+
+### Fixed
+- Trusted-signer verdicts stay cache-stable across app self-updates and moved/relocated binaries.
+- Persistent-condition checks (XProtect signatures, boot-arguments, rogue configuration profiles) no longer re-alert on an unchanged condition, and re-alert correctly when a cleared condition returns.
+- A browser reading its own profile is no longer flagged as credential access; reading another application's credentials still is.
+- Several archive-based rules now also match macOS's `bsdtar` (macOS's `/usr/bin/tar`).
+
 ## [1.21.4-rc.7] — 2026-07-17
 
 ### Fixed

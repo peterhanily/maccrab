@@ -132,7 +132,7 @@
 "settings.high" = "높음";
 "settings.criticalOnly" = "심각만";
 "settings.aboutTagline" = "로컬 우선 macOS 위협 탐지 엔진";
-"settings.aboutStats" = "17개 이벤트 소스 | 5개 탐지 레이어 | 483개 탐지 규칙";
+"settings.aboutStats" = "17개 이벤트 소스 | 5개 탐지 레이어 | 486개 탐지 규칙";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab 활성";

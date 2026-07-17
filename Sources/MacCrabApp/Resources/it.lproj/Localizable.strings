@@ -132,7 +132,7 @@
 "settings.high" = "Alta";
 "settings.criticalOnly" = "Solo critica";
 "settings.aboutTagline" = "Motore di rilevamento minacce macOS locale";
-"settings.aboutStats" = "17 fonti di eventi | 5 livelli di rilevamento | 483 regole di rilevamento";
+"settings.aboutStats" = "17 fonti di eventi | 5 livelli di rilevamento | 486 regole di rilevamento";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab Attivo";
