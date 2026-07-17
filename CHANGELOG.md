@@ -3,6 +3,30 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.6] — 2026-07-16
+
+Dashboard capabilities + a pre-GA correctness pass.
+
+### Added
+- **Bulk alert actions** — multi-select in the Alerts table with an Undo on bulk
+  suppress.
+- **Filter events by category across full history** (the category filter now
+  queries the database, not just the loaded window) and see each event's command
+  line in the drill-in.
+- **Investigation graph shows real causal relationships** between processes/
+  files/network instead of a generic hub-and-spoke.
+- **Toggle prevention modules** (DNS sinkhole, network blocker, persistence
+  guard) from the Prevention tab.
+
+### Fixed
+- A multi-step bulk-exfiltration detection (archive → cloud upload) could fail to
+  fire when the two stages ran in separate processes — now correlates correctly.
+- Changing the event category while the stream was paused could show a stale
+  table.
+- Reduced a false positive on administrative signals to security daemons.
+- High-value low-volume signals (credential reads, background-task registrations)
+  are no longer at risk of being shed during a file-write storm.
+
 ## [1.21.4-rc.5] — 2026-07-16
 
 Follow-up to rc.4 from on-device testing.
