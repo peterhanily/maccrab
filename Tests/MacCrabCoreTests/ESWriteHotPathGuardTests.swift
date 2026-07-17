@@ -16,6 +16,7 @@
 
 import Testing
 import Foundation
+import EndpointSecurity
 @testable import MacCrabCore
 
 @Suite("ESCollector write hot-path noise guard (v1.21.4 Phase-7)")
@@ -170,5 +171,55 @@ struct ESWriteHotPathGuardTests {
         #expect(ESCollector.isCodeWritePath("/x/com.evil.plist"))
         #expect(!ESCollector.isCodeWritePath("/x/notes.txt"))
         #expect(!ESCollector.isCodeWritePath("/x/data.json"))
+    }
+
+    // MARK: - Kernel-level log-sink mute (v1.21.4 post-rc.8 perf)
+    //
+    // The kernel counterpart to `shouldDropNoisyWrite`: the WRITE/CLOSE firehose
+    // to log DIRECTORIES is muted at the ES client (never delivered). These pin
+    // the pure prefix builder + the muted-event-type set that drive the live
+    // `es_mute_path_events` calls (which are themselves live-only).
+
+    @Test("log-sink mute prefixes: fixed system dirs plus each user's ~/Library/Logs/")
+    func logSinkMutePrefixesBuilt() {
+        let prefixes = ESCollector.logSinkMuteAllTargetPrefixes(userHomes: ["/Users/alice", "/Users/bob/"])
+        // Fixed system/daemon log dirs are always present.
+        #expect(prefixes.contains("/var/log/"))
+        #expect(prefixes.contains("/private/var/log/"))
+        #expect(prefixes.contains("/Library/Logs/"))
+        // Each real user home contributes its ~/Library/Logs/ (trailing slash on
+        // the home is normalised so we never emit a `//`).
+        #expect(prefixes.contains("/Users/alice/Library/Logs/"))
+        #expect(prefixes.contains("/Users/bob/Library/Logs/"))
+        #expect(!prefixes.contains { $0.contains("//") })
+        // No user homes → just the fixed set (no crash, no empties).
+        #expect(ESCollector.logSinkMuteAllTargetPrefixes(userHomes: []) == ESCollector.logSinkMuteTargetPrefixes)
+    }
+
+    @Test("only WRITE + CLOSE are muted — CREATE / EXEC / OPEN / RENAME stay live")
+    func logSinkMutedEventTypesAreWriteFamilyOnly() {
+        let muted = Set(ESCollector.logSinkMutedEventTypes.map(\.rawValue))
+        #expect(muted.contains(ES_EVENT_TYPE_NOTIFY_WRITE.rawValue))
+        #expect(muted.contains(ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue))
+        // Muting any of these would break the drop→execute chain / credential-read
+        // / persistence-create detection under a log dir — they MUST stay live.
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_CREATE.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_EXEC.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_OPEN.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_RENAME.rawValue))
+        #expect(!muted.contains(ES_EVENT_TYPE_NOTIFY_UNLINK.rawValue))
+    }
+
+    @Test("every kernel-muted log dir is also a userspace log sink (layers agree)")
+    func kernelMuteAgreesWithUserspaceDrop() {
+        // The kernel mute must be a SUBSET of what the userspace drop treats as a
+        // log sink — otherwise the two layers would disagree on what counts as
+        // noise. A representative file written under each muted prefix classifies
+        // as a log sink (and, absent a keep-case, would be dropped).
+        for prefix in ESCollector.logSinkMuteAllTargetPrefixes(userHomes: ["/Users/alice"]) {
+            let sample = prefix + "app.log"
+            #expect(ESCollector.isLogSinkWritePath(sample),
+                    "kernel-muted prefix not seen as a log sink by the userspace layer: \(sample)")
+        }
     }
 }

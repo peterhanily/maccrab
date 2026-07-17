@@ -359,6 +359,74 @@ public final class ESCollector: @unchecked Sendable {
             .filter { var isDir: ObjCBool = false; return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue }
     }
 
+    // MARK: - Log-sink write firehose kernel mute (v1.21.4, post-rc.8 perf)
+    //
+    // The KERNEL-LEVEL counterpart to the userspace `shouldDropNoisyWrite` (P1).
+    // The NOTIFY_WRITE firehose is dominated by append-only LOG SINKS (measured
+    // on the field host: ~3200 of ~3800 writes / 2 min were `suricata` appending
+    // to /var/log/suricata/*). The userspace drop still pays per-event message
+    // RECEIPT + path extraction before it can drop; muting these WRITE/CLOSE
+    // events by TARGET prefix at the ES client means the kernel never delivers
+    // them at all — strictly cheaper. On-device (rc.8) this class of write is
+    // what drives the sysext to ~100 % of a core under a log flood.
+    //
+    // SAFETY — what muting WRITE/CLOSE here does and does NOT give up:
+    //   * Write-family ONLY (WRITE + CLOSE). EXEC / OPEN / CREATE / RENAME /
+    //     UNLINK on these paths are NOT muted — so a payload dropped under a log
+    //     dir is still seen via CREATE + EXEC, the write→execute cross-process
+    //     chain still forms from CREATE + EXEC, and credential OPENs elsewhere are
+    //     untouched.
+    //   * Only the log DIRECTORIES are muted — never the bare `*.log` suffix
+    //     anywhere. Two of the userspace KEEP-cases genuinely live OUTSIDE these
+    //     dirs and are therefore fully preserved: credential/wallet `*.log` (a
+    //     wallet leveldb lives under `~/Library/Application Support/…`, never a
+    //     Logs dir) and agent-content. The bare-suffix + those keep-cases stay in
+    //     `shouldDropNoisyWrite`, the precise userspace fallback for `.log` files
+    //     elsewhere (`/tmp/x.log`, `~/Desktop/foo.log`).
+    //   * HONEST DIVERGENCE from P1 (accepted): `shouldDropNoisyWrite` KEEPS a
+    //     code-suffixed write (`.sh`/`.dylib`/`.py`/…) even under a log dir as a
+    //     malicious-staging signal; the coarse kernel mute (prefix-only, no suffix
+    //     logic) gives up the WRITE event for that narrow case. It is bounded and
+    //     proportionate: writing into these system/daemon log dirs needs root or
+    //     admin, and the file's CREATE + EXEC (hence the drop→execute chain) still
+    //     fire — only the write-event signal for an in-log-dir code stage is lost.
+    //     Traded for eliminating the firehose at the kernel (the dominant on-device
+    //     CPU cost). The userspace code-keep still applies to `.log`-suffix files
+    //     outside these dirs.
+    //   * Same TARGET-mute mechanism as the shipped observer-effect mute
+    //     (`muteForensicCopyTargets`), so it inherits its D1-seq-accounting
+    //     behavior (mutes suppress before sequencing).
+
+    /// Fixed system/daemon log-sink directory prefixes whose WRITE-family target
+    /// events are kernel-muted. Per-user `~/Library/Logs/` dirs are appended at
+    /// mute time (see `logSinkMuteAllTargetPrefixes`).
+    static let logSinkMuteTargetPrefixes: [String] = [
+        "/var/log/",
+        "/private/var/log/",
+        "/Library/Logs/",
+    ]
+
+    /// WRITE-family events muted for log sinks: the two events `shouldDropNoisyWrite`
+    /// drops (WRITE + modified-CLOSE). CREATE/RENAME/UNLINK stay live so a
+    /// drop→execute chain under a log dir still forms from CREATE + EXEC.
+    static let logSinkMutedEventTypes: [es_event_type_t] = [
+        ES_EVENT_TYPE_NOTIFY_WRITE,
+        ES_EVENT_TYPE_NOTIFY_CLOSE,
+    ]
+
+    /// Pure builder: the fixed system log dirs plus each supplied user home's
+    /// `~/Library/Logs/` (where app-log floods land). Split out so the path logic
+    /// is unit-testable without a live ES client — mirrors
+    /// `forensicCopyMuteTargetPrefixes`.
+    static func logSinkMuteAllTargetPrefixes(userHomes: [String]) -> [String] {
+        var prefixes = logSinkMuteTargetPrefixes
+        for home in userHomes {
+            let trimmed = home.hasSuffix("/") ? String(home.dropLast()) : home
+            prefixes.append(trimmed + "/Library/Logs/")
+        }
+        return prefixes
+    }
+
     // MARK: - Credential-read allowlist (v1.17.4)
     //
     // The ONLY paths for which a NOTIFY_OPEN emits an Event. The OPEN stream
@@ -1030,6 +1098,9 @@ public final class ESCollector: @unchecked Sendable {
             }
             if carriesFileFamily {
                 muteForensicCopyTargets(client: client)
+                // Kernel-level P1: drop the log-sink WRITE firehose before it
+                // is ever delivered (strictly cheaper than the userspace drop).
+                muteNoisyLogSinkWrites(client: client)
             }
         }
     }
@@ -1055,6 +1126,31 @@ public final class ESCollector: @unchecked Sendable {
                     logger.warning("Failed to target-mute forensic-copy prefix: \(prefix) (rc=\(rc.rawValue))")
                 } else {
                     logger.info("ESCollector target-muted write-family events under \(prefix)")
+                }
+            }
+        }
+    }
+
+    /// Kernel-mute the WRITE/CLOSE log-sink firehose by TARGET prefix — the
+    /// kernel-level counterpart to `shouldDropNoisyWrite` (P1). Applied only to
+    /// the file-family context (write/close ride there), so the suricata-class
+    /// /var/log flood is never delivered to userspace. See the
+    /// "Log-sink write firehose kernel mute" section for the safety argument.
+    private func muteNoisyLogSinkWrites(client: OpaquePointer) {
+        let prefixes = Self.logSinkMuteAllTargetPrefixes(userHomes: Self.realUserHomes())
+        Self.logSinkMutedEventTypes.withUnsafeBufferPointer { eventsBuf in
+            for prefix in prefixes {
+                let rc = es_mute_path_events(
+                    client,
+                    prefix,
+                    ES_MUTE_PATH_TYPE_TARGET_PREFIX,
+                    eventsBuf.baseAddress!,
+                    eventsBuf.count
+                )
+                if rc != ES_RETURN_SUCCESS {
+                    logger.warning("Failed to kernel-mute log-sink write prefix: \(prefix) (rc=\(rc.rawValue))")
+                } else {
+                    logger.info("ESCollector kernel-muted WRITE/CLOSE under log sink \(prefix)")
                 }
             }
         }
