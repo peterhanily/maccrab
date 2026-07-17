@@ -89,6 +89,7 @@ detection:
         Image|endswith:
             - '/rsync'
             - '/tar'
+            - '/bsdtar'   # macOS: /usr/bin/tar resolves to bsdtar
             - '/cp'
             - '/ditto'
     filter_backup_apps:

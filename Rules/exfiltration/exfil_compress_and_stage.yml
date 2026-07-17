@@ -21,6 +21,7 @@ detection:
     selection_tool:
         Image|endswith:
             - '/tar'
+            - '/bsdtar'   # macOS: /usr/bin/tar resolves to bsdtar
             - '/zip'
             - '/7z'
             - '/7za'

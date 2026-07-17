@@ -30,6 +30,7 @@ detection:
     selection_tar_layer:
         Image|endswith:
             - '/tar'
+            - '/bsdtar'   # macOS: /usr/bin/tar resolves to bsdtar
             - '/gzip'
             - '/gunzip'
         CommandLine|contains:

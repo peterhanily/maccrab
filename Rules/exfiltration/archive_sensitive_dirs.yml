@@ -18,6 +18,7 @@ detection:
         Image|endswith:
             - '/zip'
             - '/tar'
+            - '/bsdtar'   # macOS: /usr/bin/tar resolves to bsdtar
             - '/ditto'
             - '/gzip'
     selection_target:

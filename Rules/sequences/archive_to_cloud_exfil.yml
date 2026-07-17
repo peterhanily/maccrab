@@ -34,6 +34,7 @@ steps:
           selection_tool:
               Image|endswith:
                   - '/tar'
+                  - '/bsdtar'   # macOS: /usr/bin/tar resolves to bsdtar
                   - '/zip'
                   - '/gzip'
                   - '/7z'
