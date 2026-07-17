@@ -3,6 +3,13 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4-rc.7] — 2026-07-17
+
+### Fixed
+- Several detection rules that key on the `tar` archiver now also match macOS's
+  `bsdtar` (macOS's `/usr/bin/tar` is BSD tar), closing a gap where archive-based
+  collection/exfiltration steps could be missed on macOS.
+
 ## [1.21.4-rc.6] — 2026-07-16
 
 Dashboard capabilities + a pre-GA correctness pass.
