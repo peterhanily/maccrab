@@ -3574,6 +3574,18 @@ func runAdaptiveRollupSweep(
     // detection engine — this changes hunt latency, never any detection result.
     await eventStore.mergeFTS()
 
+    // v1.21.4 perf (#23): reclaim the events.db-wal sidecar. Raising
+    // `eventWalAutocheckpointPages` to 16 MB lets the WAL settle at a ~16 MB
+    // high-water mark (vs ~4 MB before) to cut per-write PASSIVE-checkpoint
+    // frequency during the flood. A RESTART checkpoint drains WAL *content*
+    // but leaves the *file* at that mark; TRUNCATE zeroes the sidecar. Run it
+    // once per sweep (unconditionally, like the trace/tracegraph sweeps above)
+    // so the raise is footprint-neutral in steady state. Placed after
+    // mergeFTS() so the merge's own WAL frames are drained too, and before the
+    // endMB measurement so the log reflects the reclaimed sidecar. Best-effort;
+    // degrades to RESTART-like progress under an active reader.
+    await eventStore.walCheckpointTruncate()
+
     let endMB = measureDatabaseFootprintMB(dbPath: dbPath)
     if startSizeMB != endMB || totalPruned > 0 {
         logger.notice("Tier-rollup sweep complete: DB \(startSizeMB) MB → \(endMB) MB, pruned \(totalPruned) events total.")

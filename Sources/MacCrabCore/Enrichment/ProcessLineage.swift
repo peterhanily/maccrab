@@ -81,6 +81,29 @@ public actor ProcessLineage {
     /// Reverse index: ppid -> set of child pids, for fast child lookups.
     private var childrenIndex: [pid_t: Set<pid_t>] = [:]
 
+    // MARK: Ancestor memoization (Tier-B #16)
+    //
+    // A live pid's ancestor chain is invariant, so a long-running writer's
+    // hundreds of file events would otherwise re-walk + re-allocate the same
+    // chain every event. This memo returns the previously computed array.
+    //
+    // INVALIDATION (detection-exactness): the ENTIRE memo is cleared on any
+    // *structural* mutation to the node graph — `recordProcess` (add or
+    // pid-reuse overwrite) and `removeNode` (LRU eviction / prune). A per-pid
+    // invalidation would be INSUFFICIENT: adding or removing ANY node changes
+    // the ancestor chain of that node's *descendants*, not just the node
+    // itself (a parent recorded AFTER its child extends the child's chain; a
+    // pruned/evicted ancestor shortens every descendant's chain; a pid-reuse
+    // overwrite rewrites the chain content). Clearing everything on those two
+    // mutations makes a stale chain impossible to observe.
+    //
+    // `recordExit` deliberately does NOT invalidate: it only sets `exitTime`,
+    // which `ancestors(of:)` never reads (the walk uses pid/ppid/path/name and
+    // node existence only) and it removes no node — so no ancestors() result
+    // changes. `setProcessKey` likewise only touches the v1.10 identity fields
+    // the walk doesn't read.
+    private var ancestorsMemo: [pid_t: [ProcessAncestor]] = [:]
+
     // MARK: v1.10 TraceGraph promotion buffer
     //
     // When a node carrying a `processKey` is evicted (LRU pressure or
@@ -161,9 +184,19 @@ public actor ProcessLineage {
         nodes[pid] = node
         childrenIndex[ppid, default: []].insert(pid)
 
+        // Structural change: a new/overwritten node can alter the ancestor
+        // chain of any descendant. Drop the whole memo. (See ancestorsMemo.)
+        invalidateAncestorsMemo()
+
         if nodes.count > maxProcessCount {
             evictLRUProcess()
         }
+    }
+
+    /// Clear the ancestor memo. Called on every structural mutation to the
+    /// node graph so `ancestors(of:)` can never return a stale chain.
+    private func invalidateAncestorsMemo() {
+        ancestorsMemo.removeAll(keepingCapacity: true)
     }
 
     /// Evict one process to stay within `maxProcessCount`.
@@ -208,6 +241,10 @@ public actor ProcessLineage {
             childrenIndex.removeValue(forKey: node.ppid)
         }
         childrenIndex.removeValue(forKey: pid)
+
+        // Removing a node shortens the chain of any descendant that walked
+        // through it. Drop the whole memo. (See ancestorsMemo.)
+        invalidateAncestorsMemo()
     }
 
     // MARK: - v1.10 TraceGraph public surface
@@ -284,6 +321,13 @@ public actor ProcessLineage {
     /// - Parameter pid: The process whose ancestry to retrieve.
     /// - Returns: Ordered ancestor list from direct parent outward.
     public func ancestors(of pid: pid_t) -> [ProcessAncestor] {
+        // Tier-B #16: return the memoized chain if present. The memo is
+        // cleared on every structural graph mutation (see ancestorsMemo), so
+        // a hit is byte-identical to a fresh walk. Caching the empty result is
+        // safe too: a parent recorded later triggers `recordProcess` →
+        // invalidate, so the next call re-walks.
+        if let cached = ancestorsMemo[pid] { return cached }
+
         var result: [ProcessAncestor] = []
         var visited: Set<pid_t> = [pid]
         var currentPid = pid
@@ -306,6 +350,15 @@ public actor ProcessLineage {
             currentPid = parentPid
         }
 
+        // Defensive bound: the memo is normally kept small by clearing on every
+        // structural mutation, but in a mutation-free window with many distinct
+        // queried pids it could otherwise grow. Cap it at the same ceiling as
+        // the node graph itself. (Correctness is unaffected — this only drops
+        // cached entries, which are recomputed on demand.)
+        if ancestorsMemo.count >= maxProcessCount {
+            ancestorsMemo.removeAll(keepingCapacity: true)
+        }
+        ancestorsMemo[pid] = result
         return result
     }
 
@@ -393,6 +446,20 @@ public actor ProcessLineage {
             parent.signerType,
             parent.path
         )
+    }
+
+    /// Combined accessor (Tier-B #10): return the ancestor chain AND the
+    /// direct parent's enrichment fields in a single actor hop.
+    ///
+    /// Semantically identical to calling `ancestors(of:)` and
+    /// `parentInfo(of:)` separately — it literally calls both — but crosses
+    /// the actor boundary once instead of twice. Because both reads happen in
+    /// one non-suspending actor section they also observe a single consistent
+    /// graph snapshot (the two separate `await`s could straddle a concurrent
+    /// mutation); that is strictly more consistent, never less.
+    public func ancestorsAndParentInfo(of pid: pid_t)
+        -> (ancestors: [ProcessAncestor], parentInfo: (commandLine: String?, signerType: String?, path: String?)?) {
+        (ancestors(of: pid), parentInfo(of: pid))
     }
 
     // MARK: Node Lookup

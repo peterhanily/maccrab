@@ -93,12 +93,18 @@ public actor StatisticalAnomalyDetector {
 
     /// Process an event and check for statistical anomalies.
     /// Returns any anomalies detected (may be empty).
+    /// - Parameter commandLineEntropy: A pre-computed
+    ///   `EntropyAnalysis.shannonEntropy(commandLine)`. When non-nil it is used
+    ///   directly instead of recomputing (the caller has already run the same
+    ///   pass over the identical string). Identical input → identical value, so
+    ///   the accumulated entropy statistics and any anomaly are unchanged.
     public func processEvent(
         processPath: String,
         argCount: Int,
         commandLine: String,
         category: String,
-        timestamp: Date
+        timestamp: Date,
+        commandLineEntropy: Double? = nil
     ) -> [AnomalyResult] {
         // Initialize if new
         if processStats[processPath] == nil {
@@ -151,8 +157,8 @@ public actor StatisticalAnomalyDetector {
             ))
         }
 
-        // Track command-line entropy
-        let entropy = EntropyAnalysis.shannonEntropy(commandLine)
+        // Track command-line entropy (reuse the caller-supplied value when present)
+        let entropy = commandLineEntropy ?? EntropyAnalysis.shannonEntropy(commandLine)
         let entropyZ = stats.argEntropy.zScore(entropy)
         stats.argEntropy.update(entropy)
         if stats.argEntropy.count >= minSamples && entropyZ > zThreshold && entropy > 4.5 {

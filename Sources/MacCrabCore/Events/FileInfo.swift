@@ -80,7 +80,14 @@ extension FileInfo {
         action: FileAction,
         sourcePath: String? = nil
     ) {
-        let url = URL(fileURLWithPath: path)
+        // `isDirectory: false` skips the filesystem `stat` that
+        // `URL(fileURLWithPath:)` otherwise performs to resolve directory-ness.
+        // File-event targets (write/create/open/close/unlink/rename) are always
+        // files, and the flag only controls a trailing slash on the URL — which
+        // does not affect `lastPathComponent`, `deletingLastPathComponent().path`,
+        // or `pathExtension`. See `FileInfoConvenienceInitParityTests` for the
+        // byte-for-byte parity proof (incl. real on-disk directories).
+        let url = URL(fileURLWithPath: path, isDirectory: false)
         self.path = path
         self.name = url.lastPathComponent
         self.directory = url.deletingLastPathComponent().path

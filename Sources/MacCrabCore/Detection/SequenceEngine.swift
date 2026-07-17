@@ -322,6 +322,29 @@ public actor SequenceEngine {
     /// Last time an expiration sweep was performed.
     private var lastSweep: Date = Date()
 
+    /// v1.21.4 (#20): last time the pre-emptive (>80%-capacity) sweep ran.
+    /// Before this, the pre-emptive sweep ran a full O(partials) `sweepExpired`
+    /// on EVERY event once partials exceeded 80% of the cap — under a sustained
+    /// flood that is one full pool scan per event. It is now throttled to at most
+    /// once per `preemptiveSweepInterval`.
+    ///
+    /// Detection-exactness is preserved: `sweepExpired` only removes ALREADY-
+    /// expired partials, and an expired partial is also skipped during Phase-1/3
+    /// advancement (`now - createdAt > window` → `continue`), so it can never
+    /// produce a match regardless of when it is physically removed. The ONE
+    /// operation that can drop a LIVE partial is `evictOldest`, and the cap-
+    /// enforcement path in `evaluate` now calls `sweepExpired` immediately before
+    /// `evictOldest`. That reproduces the pre-throttle invariant — whenever
+    /// `evictOldest` ran, the per-event pre-emptive sweep had already cleared
+    /// expired partials on the same event — so eviction still sees the identical
+    /// live-only set and drops the identical partials.
+    private var lastPreemptiveSweep: Date = .distantPast
+
+    /// Minimum interval between pre-emptive (>80%-capacity) sweeps. Smaller than
+    /// `sweepInterval` so memory is still trimmed between the 1s regular sweeps,
+    /// but bounded so a flood cannot force a per-event full-pool scan.
+    private static let preemptiveSweepInterval: TimeInterval = 0.25
+
     /// Reference to the process lineage graph for ancestry checks.
     private let lineage: ProcessLineage
 
@@ -636,9 +659,16 @@ public actor SequenceEngine {
 
         // Pre-emptive sweep: trigger early cleanup when at 80% capacity to
         // reduce the likelihood of hitting the hard cap during event bursts.
-        if totalPartialCount > maxPartialMatches * 8 / 10 {
+        // v1.21.4 (#20): throttled to at most once per `preemptiveSweepInterval`
+        // (was: a full O(partials) sweep on EVERY event above 80%). Any expired
+        // partial this throttle lets linger is cleared right before `evictOldest`
+        // (see the cap-enforcement block below), so eviction — the only path that
+        // can drop a LIVE partial — stays detection-exact. See `lastPreemptiveSweep`.
+        if totalPartialCount > maxPartialMatches * 8 / 10,
+           now.timeIntervalSince(lastPreemptiveSweep) >= Self.preemptiveSweepInterval {
             sweepExpired()
             lastSweep = now
+            lastPreemptiveSweep = now
         }
 
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
@@ -812,7 +842,16 @@ public actor SequenceEngine {
 
         // Enforce the global partial match cap.
         if totalPartialCount > maxPartialMatches {
-            evictOldest(count: totalPartialCount - maxPartialMatches)
+            // #20: sweep expired partials FIRST so `evictOldest` only ever drops
+            // LIVE partials as a genuine last resort. Before the pre-emptive-sweep
+            // throttle, the >80% sweep had already cleared expired partials on this
+            // same event before control reached here; the throttle can skip that,
+            // so we clear them here to keep eviction's input — and therefore which
+            // partials get dropped — identical to the pre-throttle path.
+            sweepExpired()
+            if totalPartialCount > maxPartialMatches {
+                evictOldest(count: totalPartialCount - maxPartialMatches)
+            }
         }
 
         // corr-detection #272: record fires for every sequence completed on

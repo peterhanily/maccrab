@@ -1071,12 +1071,20 @@ enum EventLoop {
             }
 
             // === Statistical anomaly detection ===
+            // Command-line Shannon entropy, computed ONCE here and shared with
+            // both consumers below (the statistical detector's entropy track and
+            // the high_entropy_commandline check), which previously each computed
+            // it independently over the identical string. Pure dedup — same input
+            // string → same value. Kept per-event (NOT gated to exec) so the
+            // statistical anomaly stats are byte-identical to before.
+            let commandLineEntropy = EntropyAnalysis.shannonEntropy(enrichedEvent.process.commandLine)
             let anomalies = await state.statisticalDetector.processEvent(
                 processPath: enrichedEvent.process.executable,
                 argCount: enrichedEvent.process.args.count,
                 commandLine: enrichedEvent.process.commandLine,
                 category: enrichedEvent.eventCategory.rawValue,
-                timestamp: enrichedEvent.timestamp
+                timestamp: enrichedEvent.timestamp,
+                commandLineEntropy: commandLineEntropy
             )
             for anomaly in anomalies {
                 await state.behaviorScoring.addIndicator(
@@ -1089,7 +1097,7 @@ enum EventLoop {
 
             // === Entropy analysis on command lines ===
             if !enrichedEvent.process.commandLine.isEmpty {
-                let (entropy, suspicious, _) = EntropyAnalysis.analyzeCommandLine(enrichedEvent.process.commandLine)
+                let (entropy, suspicious, _) = EntropyAnalysis.analyzeCommandLine(enrichedEvent.process.commandLine, fullEntropy: commandLineEntropy)
                 if suspicious {
                     await state.behaviorScoring.addIndicator(
                         named: "high_entropy_commandline",

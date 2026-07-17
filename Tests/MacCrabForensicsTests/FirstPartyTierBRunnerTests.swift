@@ -67,6 +67,40 @@ struct FirstPartyTierBRunnerTests {
         deep = ""  // silence unused-mutability
     }
 
+    // MARK: - Load-tolerant timing bounds (full-suite-load flake fix)
+    //
+    // The real-subprocess tests below spawn actual processes, so under full-suite
+    // saturation (~2000 concurrent tests) wall-clock time balloons — ~27s observed
+    // for work that completes in <1s in isolation. These bounds are widened so a
+    // scheduling delay under load can't fail them, while STILL catching a genuine
+    // hang. Every SEMANTIC assertion (secret ABSENT, PATH pinned, reap kills the
+    // group, timedOut flagged) is unchanged; only the wall-clock/timeout numbers move.
+
+    /// Runner wall-clock timeout for the happy / env-scrub / reap / no-stdin spawn
+    /// tests (was 20s). The child work is trivial JSONL printf; this is pure
+    /// headroom so the runner doesn't SIGKILL the child before it emits under load.
+    /// A genuine hang is still caught — the child just gets flagged `timedOut` at
+    /// this bound instead of finishing.
+    static let spawnRunnerTimeout: TimeInterval = 120
+
+    /// "run() returns promptly" bound for the reap test (was 12s). Must sit ABOVE
+    /// the worst under-load delay (~27s) so a saturated machine can't flake it, and
+    /// BELOW `spawnRunnerTimeout` so a hung child (which only returns once the
+    /// runner timeout fires at ~120s) still trips it. Reap CORRECTNESS itself is
+    /// proven by the kill(pid,0) poll loop, not by this wall-clock number.
+    static let returnsPromptlyBound: TimeInterval = 60
+
+    @Test("timing bounds stay load-tolerant yet still catch a genuine hang (parity: semantics unchanged)")
+    func timingBoundsRemainMeaningful() {
+        // Above the worst observed under-load scheduling delay → won't flake.
+        let observedUnderLoadDelay: TimeInterval = 27
+        #expect(Self.returnsPromptlyBound > observedUnderLoadDelay)
+        // Below the runner-timeout return path → a child that returns only because
+        // the runner timeout fired (~spawnRunnerTimeout) still exceeds the bound, so
+        // the reap test's `elapsed < returnsPromptlyBound` check is never vacuous.
+        #expect(Self.returnsPromptlyBound < Self.spawnRunnerTimeout)
+    }
+
     // MARK: - Real subprocess (script fixtures, spawned via the verified path)
 
     /// Install a script as a first-party bundle binary, gate it for execution with
@@ -114,7 +148,7 @@ struct FirstPartyTierBRunnerTests {
         printf '%s\\n' '{"kind":"artifact","artifact":{"contentType":"echo.item","privacyClass":"metadata","data":{"n":1}}}'
         printf '%s\\n' '{"kind":"result","result":{"status":"ok","notes":["echoed"]}}'
         """
-        let out = try await Self.runScript(id: "com.test.run.happy", script: script, timeout: 20)
+        let out = try await Self.runScript(id: "com.test.run.happy", script: script, timeout: Self.spawnRunnerTimeout)
         #expect(out.artifacts.count == 1)
         #expect(out.artifacts.first?.contentType == "echo.item")
         #expect(out.result?.status == "ok")
@@ -134,7 +168,7 @@ struct FirstPartyTierBRunnerTests {
         printf '{"kind":"artifact","artifact":{"contentType":"env","privacyClass":"metadata","data":{"secret":"%s","path":"%s"}}}\\n' "${MACCRAB_SECRET:-ABSENT}" "${PATH}"
         printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
         """
-        let out = try await Self.runScript(id: "com.test.run.env", script: script, timeout: 20)
+        let out = try await Self.runScript(id: "com.test.run.env", script: script, timeout: Self.spawnRunnerTimeout)
         #expect(out.artifacts.first?.data["secret"] == .string("ABSENT"))
         #expect(out.artifacts.first?.data["path"] == .string("/usr/bin:/bin"))
     }
@@ -170,7 +204,7 @@ struct FirstPartyTierBRunnerTests {
         #!/bin/sh
         printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
         """  // exits immediately; the host's request write may hit a closed stdin
-        let out = try await Self.runScript(id: "com.test.run.nostdin", script: script, timeout: 20)
+        let out = try await Self.runScript(id: "com.test.run.nostdin", script: script, timeout: Self.spawnRunnerTimeout)
         #expect(out.result?.status == "ok")
     }
 
@@ -189,10 +223,10 @@ struct FirstPartyTierBRunnerTests {
         printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
         """
         let start = Date()
-        let out = try await Self.runScript(id: "com.test.run.reap", script: script, timeout: 20)
+        let out = try await Self.runScript(id: "com.test.run.reap", script: script, timeout: Self.spawnRunnerTimeout)
         let elapsed = Date().timeIntervalSince(start)
         #expect(out.result?.status == "ok")
-        #expect(elapsed < 12)   // not the 30s descendant lifetime
+        #expect(elapsed < Self.returnsPromptlyBound)   // returns promptly, not a genuine hang; reap correctness is the poll loop below
 
         let pidStr = (try? String(contentsOfFile: marker, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

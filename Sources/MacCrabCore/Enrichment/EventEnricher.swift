@@ -131,8 +131,11 @@ public actor EventEnricher {
         // --- 1. Update lineage graph ---
         await updateLineage(for: event)
 
-        // --- 2. Retrieve ancestors ---
-        let ancestors = await lineage.ancestors(of: proc.pid)
+        // --- 2. Retrieve ancestors + direct-parent enrichment in one hop ---
+        // Tier-B #10: fold the former separate `ancestors(of:)` and
+        // `parentInfo(of:)` awaits into a single actor call. `parentInfo` is
+        // consumed later (step 5) when building the enriched event.
+        let (ancestors, parentInfo) = await lineage.ancestorsAndParentInfo(of: proc.pid)
 
         // --- 3. Evaluate code signing ---
         let codeSignature: CodeSignatureInfo?
@@ -246,8 +249,8 @@ public actor EventEnricher {
             ruleMatches: event.ruleMatches
         )
 
-        // Populate parent enrichment fields from lineage
-        if let parentInfo = await lineage.parentInfo(of: proc.pid) {
+        // Populate parent enrichment fields from lineage (fetched in step 2)
+        if let parentInfo {
             if let pcl = parentInfo.commandLine {
                 enrichedEvent.enrichments["parent.commandline"] = pcl
             }

@@ -24,7 +24,14 @@ public enum EntropyAnalysis {
 
     /// Check if a command line contains suspicious high-entropy segments.
     /// Returns the highest entropy segment and its value.
-    public static func analyzeCommandLine(_ cmdline: String) -> (entropy: Double, suspicious: Bool, segment: String?) {
+    ///
+    /// `fullEntropy` lets a caller that has already computed
+    /// `shannonEntropy(cmdline)` (e.g. the EventLoop hot path, which also feeds
+    /// the statistical anomaly detector) pass it in to avoid a redundant second
+    /// full-string pass. When `nil` the value is recomputed here — identical
+    /// input string yields the identical value, so this is a pure
+    /// recomputation-removal with no effect on the returned result.
+    public static func analyzeCommandLine(_ cmdline: String, fullEntropy precomputedFullEntropy: Double? = nil) -> (entropy: Double, suspicious: Bool, segment: String?) {
         // Split into arguments and check each
         let args = cmdline.split(separator: " ").map(String.init)
         var maxEntropy = 0.0
@@ -38,8 +45,8 @@ public enum EntropyAnalysis {
             }
         }
 
-        // Also check the full command line
-        let fullEntropy = shannonEntropy(cmdline)
+        // Also check the full command line (reuse the caller-supplied value when present)
+        let fullEntropy = precomputedFullEntropy ?? shannonEntropy(cmdline)
 
         let highestEntropy = max(maxEntropy, cmdline.count > 100 ? fullEntropy : 0)
         let suspicious = highestEntropy > 5.5 // Above base64 range

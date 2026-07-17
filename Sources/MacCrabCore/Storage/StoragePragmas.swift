@@ -49,7 +49,46 @@ enum StoragePragmas {
     /// before checkpoint. v1.6.21 had this at 10000 (40 MB), which let the
     /// WAL grow large during write storms before draining. 1000 keeps the
     /// `.db-wal` file small and reduces transient memory.
+    ///
+    /// Used by the low-volume stores (alerts, campaigns). EventStore uses the
+    /// higher `eventWalAutocheckpointPages` below — see the rationale there.
     static let walAutocheckpointPages: Int32 = 1000
+
+    /// EventStore WAL autocheckpoint threshold (pages). 4000 pages × 4 KB =
+    /// 16 MB before the writing connection auto-checkpoints (PASSIVE).
+    ///
+    /// v1.21.4 per-event perf (#23): events.db is the only high-write-rate
+    /// store (a file-write flood is ~474 ev/s, with FTS5 + ~11 secondary
+    /// indexes churning many pages per row). At the shared 1000-page (4 MB)
+    /// threshold, SQLite runs a synchronous PASSIVE checkpoint on the *writing*
+    /// connection ~4× more often mid-flood than at 16 MB — each checkpoint
+    /// scans the WAL index and copies frames back to the main DB. Raising the
+    /// events threshold to 16 MB cuts that per-write checkpoint frequency ~4×,
+    /// batching the frame copy into larger, more sequential drains.
+    ///
+    /// WAL-BOUND SAFETY (tensions the v1.18 WAL-bloat fix — must not regress
+    /// the field-observed 251 MB WAL): the bound is still owned by SQLite's own
+    /// auto-checkpoint, NOT by any background timer. In the healthy case the
+    /// auto-checkpoint fires at ~16 MB and resets the WAL write pointer (the
+    /// file is reused as a ring buffer at that high-water mark), so the WAL
+    /// settles at ~16 MB — a comfortable 4× under `journalSizeLimitBytes`
+    /// (64 MB), which remains the hard backstop that truncates the sidecar
+    /// after any checkpoint. The stalled-long-lived-reader failure mode (a
+    /// reader parking the PASSIVE checkpoint so the WAL grows) exists
+    /// IDENTICALLY at 4 MB and 16 MB — a stalled reader defeats PASSIVE
+    /// checkpointing at any threshold — and its recovery is unchanged (the
+    /// reader releases → next checkpoint drains → journal_size_limit truncates
+    /// to ≤64 MB). So this raises the healthy steady-state WAL from ~4 MB to
+    /// ~16 MB and changes nothing about unbounded-growth reachability. The
+    /// background size-cap sweep additionally runs a TRUNCATE checkpoint
+    /// (see `EventStore.walCheckpointTruncate` / DaemonTimers) to reclaim the
+    /// 16 MB high-water mark back to zero on its cadence — footprint-neutral in
+    /// steady state, matching the trace/tracegraph stores' WAL discipline.
+    ///
+    /// NOTE deliberately scoped to EventStore: alerts/campaigns keep the 4 MB
+    /// threshold so their (already tiny) WALs don't grow to 16 MB for no
+    /// benefit — they aren't the flood, and the v1.6.22 RSS budget is precious.
+    static let eventWalAutocheckpointPages: Int32 = 4000
 
     /// WAL size limit (bytes). After any checkpoint, SQLite truncates the
     /// `-wal` file back to at most this size rather than letting it grow
@@ -83,7 +122,7 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(eventWalAutocheckpointPages)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(eventCacheSizeKB)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA mmap_size = \(eventMmapSizeBytes)", nil, nil, nil)

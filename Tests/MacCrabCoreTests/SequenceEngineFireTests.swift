@@ -317,4 +317,83 @@ struct SequenceEngineFireTests {
         let r = await engine.evaluate(procEvent("/Users/Alice/Downloads/PaYLoAd.App", pid: 104))
         #expect(!r.contains { $0.ruleId == "fold-neg" }, "distinct paths must not match after folding")
     }
+
+    // MARK: - #20: pre-emptive-sweep throttle (detection-exactness under load)
+
+    /// A distinct seed-only rule used to flood the partial pool. Its download
+    /// step (`/wget`) is disjoint from `dlExecRule`'s (`/curl`) and its execute
+    /// step (`/var/`) is disjoint from `dlExecRule`'s (`/tmp/`), so its partials
+    /// never interfere with the rule under test and never complete in these
+    /// tests (a `/var/` execute is never sent).
+    private func fillerRule(id: String, window: TimeInterval) -> SequenceRule {
+        SequenceRule(
+            id: id, title: "filler (test)", description: "test",
+            level: .high, tags: ["attack.execution"],
+            window: window, correlationType: .processSame, ordered: true,
+            steps: [
+                SequenceStep(id: "download", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: .endswith, values: ["/wget"], negate: false)],
+                             condition: .allOf, afterStep: nil, processRelation: nil),
+                SequenceStep(id: "execute", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: .startswith, values: ["/var/"], negate: false)],
+                             condition: .allOf, afterStep: "download", processRelation: nil),
+            ],
+            trigger: .allSteps, enabled: true)
+    }
+
+    @Test("#20: throttled pre-emptive sweep still completes a live sequence above 80% capacity")
+    func throttledPreemptiveSweepStillFires() async throws {
+        // The pre-emptive sweep is throttled (no longer a full pool scan per
+        // event above 80% capacity). Ordinary completion under a partial-pool
+        // flood must be unaffected.
+        let engine = SequenceEngine(lineage: ProcessLineage(), maxPartialMatches: 20)
+        try await engine.addRule(dlExecRule(id: "seq-live", window: 600))
+        try await engine.addRule(fillerRule(id: "filler", window: 600))
+
+        // Seed the live sequence's first step, then flood with 18 unrelated
+        // filler seeds → 19 partials total, above 80% of 20 (=16) but under the
+        // cap, so the throttled pre-emptive path runs without any eviction.
+        _ = await engine.evaluate(procEvent("/usr/bin/curl", pid: 100))
+        for pid in Int32(200)...Int32(217) {
+            _ = await engine.evaluate(procEvent("/usr/bin/wget", pid: pid))
+        }
+        let final = await engine.evaluate(procEvent("/tmp/payload", pid: 100))
+        #expect(final.contains { $0.ruleId == "seq-live" },
+                "a live sequence must still complete when the pool is above the 80% pre-emptive-sweep threshold")
+    }
+
+    @Test("#20: expired partials are swept before eviction, so a live sequence is not crowded out")
+    func sweepBeforeEvictProtectsLivePartial() async throws {
+        // Detection-exactness guard for the throttle. `evictOldest` removes
+        // oldest-by-createdAt, so the FIRST-created partial (rule A, long window,
+        // still live) sits at the front of the eviction queue. Short-window
+        // EXPIRED filler partials then saturate the pool. Without the sweep-
+        // before-evict guard the throttle could let those expired filler partials
+        // push the total over the cap and evict the older, LIVE A partial first.
+        // The guard clears the expired filler before eviction, so A survives —
+        // matching the pre-throttle behavior where the per-event pre-emptive
+        // sweep had already cleared them.
+        let engine = SequenceEngine(lineage: ProcessLineage(), maxPartialMatches: 10)
+        try await engine.addRule(dlExecRule(id: "seq-live", window: 600))   // long window (live)
+        try await engine.addRule(fillerRule(id: "filler", window: 0.05))    // short window (expires)
+
+        // A's first step is the OLDEST partial (front of the eviction queue).
+        _ = await engine.evaluate(procEvent("/usr/bin/curl", pid: 100))
+        // Fill to the cap with short-window filler partials.
+        for pid in Int32(200)...Int32(208) {
+            _ = await engine.evaluate(procEvent("/usr/bin/wget", pid: pid))
+        }
+        // Let the filler partials expire (0.05s window); A stays live (600s). The
+        // 0.2s wait is under the 0.25s throttle so the next seeds take the
+        // sweep-before-evict path rather than a fresh pre-emptive sweep.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // Push over the cap: sweep-before-evict must drop the expired filler
+        // rather than the older, live A partial.
+        for pid in Int32(300)...Int32(305) {
+            _ = await engine.evaluate(procEvent("/usr/bin/wget", pid: pid))
+        }
+        let final = await engine.evaluate(procEvent("/tmp/payload", pid: 100))
+        #expect(final.contains { $0.ruleId == "seq-live" },
+                "the live long-window partial must survive eviction: expired filler is swept first")
+    }
 }

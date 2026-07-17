@@ -2431,6 +2431,32 @@ public actor EventStore {
         return rcRestart == SQLITE_OK && restartLog == restartCkpt
     }
 
+    /// TRUNCATE checkpoint — drains the WAL into the main DB AND shrinks the
+    /// `-wal` sidecar back to zero bytes. `walCheckpoint()` above (PASSIVE→
+    /// RESTART) drains the WAL *content* but leaves the *file* pinned at its
+    /// high-water mark; under `journalSizeLimitBytes` (64 MB) that means
+    /// events.db-wal can sit at up to 64 MB indefinitely — invisible to a
+    /// file-only size check yet real resident footprint.
+    ///
+    /// v1.21.4 (#23): with `eventWalAutocheckpointPages` raised to 16 MB the
+    /// healthy high-water mark is ~16 MB, so the background size-cap sweep
+    /// runs this each pass to reclaim it back to zero — footprint-neutral in
+    /// steady state, matching the trace/tracegraph stores' `walCheckpointTruncate`
+    /// discipline (DaemonTimers). Best-effort: TRUNCATE degrades to RESTART-
+    /// like progress under an active reader, which is still fine.
+    @discardableResult
+    public func walCheckpointTruncate() async -> Bool {
+        guard let db = db else { return false }
+        var log: Int32 = 0
+        var ckpt: Int32 = 0
+        let rc = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_TRUNCATE),
+            &log, &ckpt
+        )
+        return rc == SQLITE_OK
+    }
+
     // MARK: - Off-actor full VACUUM (B-03)
 
     /// Run a full `VACUUM` on a DEDICATED short-lived connection instead of the
