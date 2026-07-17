@@ -253,4 +253,68 @@ struct SequenceEngineFireTests {
         #expect(final.contains { $0.ruleId == "seq-lineage-any" },
                 "a `.any` step under process.lineage must complete for an unrelated process")
     }
+
+    // MARK: - Tier-A #8: pre-folded rule-constant parity
+
+    /// Single-step, unordered, uncorrelated rule that fires the instant its one
+    /// step's predicate matches (trigger .allSteps over one step). Lets a test
+    /// assert predicate case-folding directly through `evaluate`.
+    private func singleStepRule(
+        id: String,
+        modifier: PredicateModifier,
+        values: [String]
+    ) -> SequenceRule {
+        SequenceRule(
+            id: id, title: "single-step (test)", description: "test",
+            level: .high, tags: ["attack.execution"],
+            window: 60, correlationType: .none, ordered: false,
+            steps: [
+                SequenceStep(id: "only", logsourceCategory: "process_creation",
+                             predicates: [Predicate(field: "Image", modifier: modifier, values: values, negate: false)],
+                             condition: .allOf, afterStep: nil, processRelation: nil),
+            ],
+            trigger: .allSteps, enabled: true)
+    }
+
+    @Test("Tier-A #8: mixed-case rule constant matches a mixed-case event value across all string modifiers")
+    func preFoldedConstantParity() async throws {
+        // Rule constants and the event value use DIFFERENT casings. Case-insensitive
+        // matching (now via Predicate.lowercasedValues, folded once at rule LOAD)
+        // must still match — byte-identical to the prior per-comparison
+        // `$0.lowercased()`. One engine per case so no partial/correlation carries over.
+        let execPath = "/Users/Alice/Downloads/PaYLoAd.App"
+
+        let eqEngine = SequenceEngine(lineage: ProcessLineage())
+        try await eqEngine.addRule(singleStepRule(id: "fold-equals", modifier: .equals,
+                                                  values: ["/users/alice/downloads/payload.APP"]))
+        let eq = await eqEngine.evaluate(procEvent(execPath, pid: 100))
+        #expect(eq.contains { $0.ruleId == "fold-equals" }, "equals must fold both sides")
+
+        let coEngine = SequenceEngine(lineage: ProcessLineage())
+        try await coEngine.addRule(singleStepRule(id: "fold-contains", modifier: .contains,
+                                                  values: ["DOWNLOADS/payLOAD"]))
+        let co = await coEngine.evaluate(procEvent(execPath, pid: 101))
+        #expect(co.contains { $0.ruleId == "fold-contains" }, "contains must fold both sides")
+
+        let swEngine = SequenceEngine(lineage: ProcessLineage())
+        try await swEngine.addRule(singleStepRule(id: "fold-starts", modifier: .startswith,
+                                                  values: ["/USERS/alice/"]))
+        let sw = await swEngine.evaluate(procEvent(execPath, pid: 102))
+        #expect(sw.contains { $0.ruleId == "fold-starts" }, "startswith must fold both sides")
+
+        let ewEngine = SequenceEngine(lineage: ProcessLineage())
+        try await ewEngine.addRule(singleStepRule(id: "fold-ends", modifier: .endswith,
+                                                  values: ["PAYLOAD.app"]))
+        let ew = await ewEngine.evaluate(procEvent(execPath, pid: 103))
+        #expect(ew.contains { $0.ruleId == "fold-ends" }, "endswith must fold both sides")
+    }
+
+    @Test("Tier-A #8: a distinct mixed-case constant still does NOT match after folding")
+    func preFoldedConstantNegative() async throws {
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        try await engine.addRule(singleStepRule(id: "fold-neg", modifier: .equals,
+                                                values: ["/some/OTHER/path"]))
+        let r = await engine.evaluate(procEvent("/Users/Alice/Downloads/PaYLoAd.App", pid: 104))
+        #expect(!r.contains { $0.ruleId == "fold-neg" }, "distinct paths must not match after folding")
+    }
 }

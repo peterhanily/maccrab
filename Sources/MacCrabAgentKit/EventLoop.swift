@@ -913,7 +913,14 @@ enum EventLoop {
             }
 
             // === Cross-process correlation ===
-            if let file = enrichedEvent.file {
+            // v1.21.4 perf: `recordFileEvent` drops ignored (system-noise) paths
+            // as its first guard — inside the actor, after an await hop. Evaluate
+            // the same pure predicate here, one frame earlier, so ignored paths
+            // never pay the actor hop. Detection-identical: an ignored path
+            // returned nil inside the actor without mutating correlator state, so
+            // skipping the call yields the same nil and the same state.
+            if let file = enrichedEvent.file,
+               !CrossProcessCorrelator.shouldIgnoreFilePath(file.path) {
                 let action = enrichedEvent.eventAction == "exec" ? "execute" : enrichedEvent.eventAction
                 if let chain = await state.crossProcessCorrelator.recordFileEvent(
                     path: file.path, action: action,
@@ -1977,7 +1984,17 @@ enum EventLoop {
             }
 
             // Layer 3: Baseline anomaly detection (Phase 3)
-            let baselineMatchResult = await state.baselineEngine.evaluate(enrichedEvent)
+            // v1.21.4 perf: BaselineEngine.evaluate returns nil for anything that
+            // isn't a process-creation event (it guards on
+            // eventCategory==.process && eventType==.creation as its first check,
+            // before any state mutation). Gate the actor hop on that exact same
+            // condition. Detection-identical: for every other event the elided
+            // call and the internal early-nil produce the same nil result and
+            // leave engine state untouched.
+            let baselineMatchResult = (enrichedEvent.eventCategory == .process
+                                       && enrichedEvent.eventType == .creation)
+                ? await state.baselineEngine.evaluate(enrichedEvent)
+                : nil
             if let baselineMatch = baselineMatchResult {
                 matches.append(baselineMatch)
 

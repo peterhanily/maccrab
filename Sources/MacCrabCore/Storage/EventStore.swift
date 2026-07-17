@@ -457,6 +457,37 @@ public actor EventStore {
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
 
+        // v1.21.4 Tier-A perf: defer FTS5 index merging off the hot insert
+        // path. FTS5's default `automerge=4` runs an incremental b-tree
+        // segment merge once ~4 segments accumulate at a level — fired on the
+        // per-insert flush path (the profile sampled `fts5StorageSync →
+        // fts5IndexMergeLevel` there). Raising automerge to 16 defers that
+        // incremental merge until 4× as many segments pile up, so the write
+        // path pays the merge cost far less often; the `crisismerge` safety
+        // valve (default 16, the max allowed segments per level) still bounds
+        // worst-case segment growth so hunt queries can never degrade
+        // unboundedly. The index is compacted off-path by an explicit
+        // ('merge', N) crank driven from the background size-cap sweep (see
+        // `mergeFTS(pages:)` + DaemonTimers.runAdaptiveRollupSweep).
+        //
+        // DETECTION-SAFE: `events_fts` is read ONLY by `search()` (threat
+        // hunting) — the detection engine never queries it. `automerge` /
+        // `merge` change only the index's physical segment layout on disk,
+        // never which rowids a MATCH returns, so this alters hunt latency,
+        // never any detection outcome. The value persists in FTS5's `%_config`
+        // shadow table; we (re)assert it on each read-write open so existing
+        // DBs pick up the new value. Skipped on read-only opens (the
+        // dashboard's connection), which cannot write the shadow table.
+        //
+        // Best-effort: a bare `sqlite3_exec` (not `Self.exec`) so a refused
+        // write stays silent — this is a non-load-bearing perf tuning, and if
+        // it can't be applied (e.g. a user-uid CLI opened the root daemon's DB
+        // RW) the index just keeps the correct default automerge=4. Distinct
+        // from the load-bearing schema statements above, whose failures log.
+        if !isReadOnly {
+            sqlite3_exec(handle, "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 16)", nil, nil, nil)
+        }
+
         // Apply versioned schema migrations on top of the baseline tables above.
         // v1 marks "baseline schema present"; later versions add columns for
         // enrichment fields (file/process hashes, session context, etc).
@@ -2513,6 +2544,34 @@ public actor EventStore {
     public func autoVacuumMode() async -> Int {
         guard let db = db else { return 0 }
         return Int(StoragePragmas.readAutoVacuumMode(db))
+    }
+
+    // MARK: - FTS5 index merge (v1.21.4 Tier-A perf)
+    //
+    // Companion to the `automerge=16` deferral set in `openDatabase`. With
+    // per-insert automerge deferred to the crisismerge threshold (16), the
+    // `events_fts` index accumulates more small b-tree segments between
+    // compactions than the old default (4) allowed. This runs an explicit, BOUNDED incremental
+    // merge OFF the hot write path — driven from the background size-cap sweep
+    // — so hunt-query (`search()`) latency stays healthy without the insert
+    // path paying the merge cost.
+    //
+    // `pages` bounds the work: FTS5's `('merge', N)` command runs a merge
+    // until at least N leaf pages have been written to the database (or the
+    // index is fully merged), then stops. A bounded budget keeps the actor
+    // responsive; when there is nothing to merge the command is a cheap no-op.
+    //
+    // DETECTION-SAFE: `events_fts` is read ONLY by `search()` (threat
+    // hunting), never by the detection engine. A merge changes only the
+    // index's physical segment layout, never which rows a MATCH returns.
+    // No-op on a read-only store (the dashboard has no business rewriting the
+    // owner's index).
+    @discardableResult
+    public func mergeFTS(pages: Int = 1000) async -> Bool {
+        guard let db = db, !isReadOnly else { return false }
+        let n = max(1, pages)
+        let sql = "INSERT INTO events_fts(events_fts, rank) VALUES('merge', \(n))"
+        return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
     }
 
     // MARK: - Reentrancy guard for size-cap enforcement

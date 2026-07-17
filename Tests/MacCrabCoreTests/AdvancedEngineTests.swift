@@ -902,6 +902,48 @@ struct CrossProcessCorrelatorTests {
         )
         #expect(chain != nil, "User work-dir convergence must still fire")
     }
+
+    // v1.21.4 perf (#3): shouldIgnoreFilePath is now a nonisolated static pure
+    // predicate so the EventLoop hot path can drop ignored paths BEFORE the
+    // actor hop. These guard that the extracted predicate returns the same
+    // verdicts the in-actor guard used to, across every ignore category.
+    @Test("nonisolated shouldIgnoreFilePath verdicts match each ignore category")
+    func shouldIgnoreFilePathVerdicts() {
+        // Ignored — one representative per category the guard covers.
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath("/dev/null"))                       // exact
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath("/System/Library/foo"))             // prefix
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath("/Users/me/app.log"))               // suffix
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath("/Users/me/Library/Caches/x"))      // substring
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath("/Users/me/mylog.log.2"))           // rotated log
+
+        // Not ignored — the paths a real cross-process chain forms on.
+        #expect(!CrossProcessCorrelator.shouldIgnoreFilePath("/tmp/payload.bin"))
+        #expect(!CrossProcessCorrelator.shouldIgnoreFilePath("/Users/me/work/evil"))
+    }
+
+    @Test("Ignored path is dropped identically through recordFileEvent")
+    func ignoredPathDroppedByRecordFileEvent() async {
+        // Parity: a path the static predicate flags as ignored must still be
+        // dropped inside recordFileEvent (no chain) even for a 2-PID
+        // write→execute shape that would otherwise fire — the in-actor guard
+        // is unchanged.
+        let correlator = CrossProcessCorrelator()
+        let now = Date()
+        let ignored = "/Users/me/Library/Caches/dropped-payload"
+        #expect(CrossProcessCorrelator.shouldIgnoreFilePath(ignored))
+
+        await correlator.recordFileEvent(
+            path: ignored, action: "write",
+            pid: 8100, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: ignored, action: "execute",
+            pid: 8200, processName: "evil", processPath: "/Users/me/work/evil",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(chain == nil, "ignored path must never form a chain")
+    }
 }
 
 // Database encryption tests moved to DatabaseEncryptionTests.swift in

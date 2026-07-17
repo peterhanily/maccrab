@@ -865,7 +865,8 @@ public actor SequenceEngine {
             rawResult = evaluateModifier(
                 predicate.modifier,
                 fieldValue: fieldValue,
-                values: predicate.values
+                values: predicate.values,
+                lowercasedValues: predicate.lowercasedValues
             )
         }
 
@@ -874,22 +875,31 @@ public actor SequenceEngine {
 
     /// Apply a modifier comparison. The predicate matches when the field
     /// satisfies the comparison for *any* value in the list (OR semantics).
+    ///
+    /// `lowercasedValues` are pre-folded at `Predicate` init/decode time (rule
+    /// LOAD), so the case-insensitive string modifiers compare against them
+    /// directly instead of calling `.lowercased()` on the rule constant per
+    /// event. Detection is unchanged: `lowercasedValues == values.map { $0.lowercased() }`
+    /// by construction, so `fieldLower == $0.lowercased()` and `fieldLower == $0`
+    /// (over `lowercasedValues`) yield identical results. Mirrors
+    /// `RuleEngine.evaluateModifier`.
     private func evaluateModifier(
         _ modifier: PredicateModifier,
         fieldValue: String,
-        values: [String]
+        values: [String],
+        lowercasedValues: [String]
     ) -> Bool {
         let fieldLower = fieldValue.lowercased()
 
         switch modifier {
         case .equals:
-            return values.contains { fieldLower == $0.lowercased() }
+            return lowercasedValues.contains { fieldLower == $0 }
         case .contains:
-            return values.contains { fieldLower.contains($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.contains($0) }
         case .startswith:
-            return values.contains { fieldLower.hasPrefix($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.hasPrefix($0) }
         case .endswith:
-            return values.contains { fieldLower.hasSuffix($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.hasSuffix($0) }
         case .regex:
             return values.contains { pattern in
                 cachedRegex(for: pattern)

@@ -252,6 +252,25 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
 
 // MARK: - Rule Engine
 
+/// Fast, seeded, non-crypto PRNG (SplitMix64) used ONLY for reservoir
+/// sampling in per-rule telemetry (`RuleStats.record`). Telemetry is
+/// diagnostic profiling — NOT a detection signal — so a uniform non-crypto
+/// generator preserves the reservoir's statistical validity while avoiding an
+/// `arc4random` CSPRNG syscall per sample on the hot per-event path. The
+/// reservoir was already non-deterministic under the system RNG, so seeding it
+/// deterministically loses no reproducibility and changes no rule verdict.
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { self.state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
 /// The detection rule engine. Runs as an actor to guarantee safe concurrent
 /// access from multiple event-processing tasks.
 ///
@@ -343,6 +362,44 @@ public actor RuleEngine {
             self.lastFiredAt = lastFiredAt
             self.execSamplesNs = execSamplesNs
         }
+
+        /// In-place telemetry update for one rule evaluation. Kept as a single
+        /// `mutating` method so the caller can drive it through the `ruleStats`
+        /// dictionary's `_modify` subscript: the `execSamplesNs` buffer stays
+        /// uniquely referenced for the whole update, so the reservoir is
+        /// mutated with no COW copy of the ~2 KB sample buffer per event.
+        ///
+        /// Logic is byte-identical to the previous inline path (Vitter
+        /// Algorithm R); only the random source is injected so it can be a fast
+        /// seeded PRNG instead of an `arc4random` syscall. Counts
+        /// (`evaluationCount`/`fireCount`/`totalExecNs`/`lastFiredAt`) are
+        /// exact and independent of the RNG.
+        mutating func record<R: RandomNumberGenerator>(
+            elapsedNs: UInt64,
+            fired: Bool,
+            eventTimestamp: Date,
+            reservoirSize: Int,
+            rng: inout R
+        ) {
+            evaluationCount &+= 1
+            totalExecNs &+= elapsedNs
+            if fired {
+                fireCount &+= 1
+                lastFiredAt = eventTimestamp
+            }
+            // v1.7.2 Vitter Algorithm R: under reservoirSize, just append;
+            // once full, replace at index `random < n` with probability
+            // reservoirSize / n.
+            if execSamplesNs.count < reservoirSize {
+                execSamplesNs.append(elapsedNs)
+            } else {
+                let n = Int(evaluationCount)
+                let r = Int.random(in: 0..<n, using: &rng)
+                if r < reservoirSize {
+                    execSamplesNs[r] = elapsedNs
+                }
+            }
+        }
     }
 
     /// Reservoir size per rule. 256 samples × 8 B × 420 rules ≈ 860 KB
@@ -355,28 +412,25 @@ public actor RuleEngine {
 
     private var ruleStats: [String: RuleStats] = [:]
 
+    /// Seeded PRNG driving reservoir sampling in `recordEvaluation`. Held on the
+    /// (actor-isolated) engine so the draw is a couple of arithmetic ops instead
+    /// of an `arc4random` syscall per sampled event. Telemetry only — see
+    /// `SplitMix64`.
+    private var telemetryRNG = SplitMix64(seed: 0x2545_F491_4F6C_DD1D)
+
     private func recordEvaluation(ruleId: String, elapsedNs: UInt64, fired: Bool, eventTimestamp: Date) {
-        var entry = ruleStats[ruleId] ?? RuleStats(ruleId: ruleId)
-        entry.evaluationCount &+= 1
-        entry.totalExecNs &+= elapsedNs
-        if fired {
-            entry.fireCount &+= 1
-            entry.lastFiredAt = eventTimestamp
-        }
-        // v1.7.2: reservoir sample for percentile computation.
-        // Vitter Algorithm R: under reservoirSize, just append; once
-        // full, replace at index `random < n` with probability
-        // reservoirSize / n.
-        if entry.execSamplesNs.count < Self.reservoirSize {
-            entry.execSamplesNs.append(elapsedNs)
-        } else {
-            let n = Int(entry.evaluationCount)
-            let r = Int.random(in: 0..<n)
-            if r < Self.reservoirSize {
-                entry.execSamplesNs[r] = elapsedNs
-            }
-        }
-        ruleStats[ruleId] = entry
+        // Mutate the entry IN PLACE through the dictionary's `_modify` subscript.
+        // Pulling the struct into a local `var` and writing it back (the prior
+        // approach) COW-copied the ~2 KB `execSamplesNs` buffer on every event
+        // for every active rule; the default subscript yields uniquely-owned
+        // storage so the reservoir is updated with no buffer copy.
+        ruleStats[ruleId, default: RuleStats(ruleId: ruleId)].record(
+            elapsedNs: elapsedNs,
+            fired: fired,
+            eventTimestamp: eventTimestamp,
+            reservoirSize: Self.reservoirSize,
+            rng: &telemetryRNG
+        )
     }
 
     /// On-disk snapshot for the dashboard's RuleBrowser drill-down.

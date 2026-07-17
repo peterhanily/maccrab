@@ -421,7 +421,7 @@ public actor CrossProcessCorrelator {
         processPath: String,
         timestamp: Date = Date()
     ) -> CorrelationChain? {
-        guard !shouldIgnoreFilePath(path) else { return nil }
+        guard !Self.shouldIgnoreFilePath(path) else { return nil }
 
         let event = ChainEvent(
             timestamp: timestamp,
@@ -960,18 +960,24 @@ public actor CrossProcessCorrelator {
     // MARK: - Filtering Helpers
 
     /// Whether a file path should be ignored for correlation (system noise).
-    private func shouldIgnoreFilePath(_ path: String) -> Bool {
-        if Self.ignoredPaths.contains(path) { return true }
-        for prefix in Self.ignoredPathPrefixes {
+    ///
+    /// `nonisolated static` (v1.21.4 perf): a pure predicate over the immutable
+    /// ignore-sets, so the EventLoop hot path can short-circuit ignored paths
+    /// BEFORE the actor hop into `recordFileEvent`. `recordFileEvent` still calls
+    /// this as its first guard, so a direct caller — and every ignored path —
+    /// sees byte-identical behavior; only the wasted actor hop is elided.
+    public nonisolated static func shouldIgnoreFilePath(_ path: String) -> Bool {
+        if ignoredPaths.contains(path) { return true }
+        for prefix in ignoredPathPrefixes {
             if path.hasPrefix(prefix) { return true }
         }
-        for suffix in Self.ignoredPathSuffixes {
+        for suffix in ignoredPathSuffixes {
             if path.hasSuffix(suffix) { return true }
         }
-        for sub in Self.ignoredPathSubstrings {
+        for sub in ignoredPathSubstrings {
             if path.contains(sub) { return true }
         }
-        if Self.hasRotatedLogSuffix(path) { return true }
+        if hasRotatedLogSuffix(path) { return true }
         return false
     }
 

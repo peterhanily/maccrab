@@ -3564,6 +3564,16 @@ func runAdaptiveRollupSweep(
         }
     }
 
+    // v1.21.4 Tier-A perf: compact the events_fts index OFF the hot write
+    // path. Its per-insert automerge is deferred to the crisismerge threshold
+    // (16) in EventStore.openDatabase, so the index is merged here on the background
+    // sweep cadence instead of on every insert flush. Runs unconditionally
+    // (segments accrue from inserts, not from prunes) with a bounded page
+    // budget so the actor stays responsive; a no-op when there is nothing to
+    // merge. DETECTION-SAFE: events_fts feeds only search()/hunt, never the
+    // detection engine — this changes hunt latency, never any detection result.
+    await eventStore.mergeFTS()
+
     let endMB = measureDatabaseFootprintMB(dbPath: dbPath)
     if startSizeMB != endMB || totalPruned > 0 {
         logger.notice("Tier-rollup sweep complete: DB \(startSizeMB) MB → \(endMB) MB, pruned \(totalPruned) events total.")

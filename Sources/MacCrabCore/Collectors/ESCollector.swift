@@ -1546,12 +1546,21 @@ public final class ESCollector: @unchecked Sendable {
         // credential / agent-content / code-drop path is kept). For CLOSE we
         // also short-circuit the unmodified case here — it was already dropped
         // downstream, but doing it before processFromESProcess is a free win.
+        // #11: decode the write/close TARGET path exactly once. The drop guard
+        // reads it here; the kept WRITE/CLOSE branch below reuses it instead of
+        // calling esFileToPath(target) a second time on the same es_string_token
+        // (byte-identical — same stable pointer, same copy).
+        var writeFamilyTargetPath: String?
         switch msg.event_type {
         case ES_EVENT_TYPE_NOTIFY_WRITE:
-            if shouldDropNoisyWrite(path: esFileToPath(msg.event.write.target)) { return nil }
+            let targetPath = esFileToPath(msg.event.write.target)
+            if shouldDropNoisyWrite(path: targetPath) { return nil }
+            writeFamilyTargetPath = targetPath
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
             guard msg.event.close.modified else { return nil }
-            if shouldDropNoisyWrite(path: esFileToPath(msg.event.close.target)) { return nil }
+            let targetPath = esFileToPath(msg.event.close.target)
+            if shouldDropNoisyWrite(path: targetPath) { return nil }
+            writeFamilyTargetPath = targetPath
         default:
             break
         }
@@ -1571,31 +1580,15 @@ public final class ESCollector: @unchecked Sendable {
             let args = argsFromExecMessage(message)
             let commandLine = args.joined(separator: " ")
 
-            // The target of exec is in execEvent.target — use it if available.
-            let targetInfo = processFromESProcess(execEvent.target)
-
-            // Reconstruct ProcessInfo with args and commandLine populated.
-            let enrichedTarget = ProcessInfo(
-                pid: targetInfo.pid,
-                ppid: targetInfo.ppid,
-                rpid: targetInfo.rpid,
-                name: targetInfo.name,
-                executable: targetInfo.executable,
-                commandLine: commandLine,
-                args: args,
-                workingDirectory: targetInfo.workingDirectory,
-                userId: targetInfo.userId,
-                userName: targetInfo.userName,
-                groupId: targetInfo.groupId,
-                startTime: targetInfo.startTime,
-                codeSignature: targetInfo.codeSignature,
-                ancestors: targetInfo.ancestors,
-                architecture: targetInfo.architecture,
-                isPlatformBinary: targetInfo.isPlatformBinary,
-                // v1.21.4 (P6 fix): preserve the target's real audit identity
-                // through the args/commandLine reconstruction so exec events
-                // carry it for agent-trace correlation (matches the binding).
-                auditIdentity: targetInfo.auditIdentity
+            // The target of exec is in execEvent.target. Build its ProcessInfo
+            // ONCE with args + commandLine populated. Previously we built a full
+            // ProcessInfo and then reconstructed an entire second one just to
+            // attach args/commandLine; processFromESProcess now threads them
+            // straight through esProcessInfo, so this is field-for-field
+            // identical to the old enrichedTarget (incl. the P6 audit identity)
+            // with one allocation instead of two. Exec-only, below flood volume.
+            let enrichedTarget = processFromESProcess(
+                execEvent.target, args: args, commandLine: commandLine
             )
 
             return Event(
@@ -1664,7 +1657,9 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_WRITE:
             let writeEvent = msg.event.write
-            let path = esFileToPath(writeEvent.target)
+            // #11: reuse the path already decoded by the drop guard above (this
+            // branch is only reached for WRITE, where the guard always set it).
+            let path = writeFamilyTargetPath ?? esFileToPath(writeEvent.target)
             let fileInfo = FileInfo(
                 path: path,
                 action: .write
@@ -1710,7 +1705,9 @@ public final class ESCollector: @unchecked Sendable {
             let closeEvent = msg.event.close
             // Only emit events for files that were actually modified.
             guard closeEvent.modified else { return nil }
-            let path = esFileToPath(closeEvent.target)
+            // #11: reuse the path already decoded by the drop guard above (this
+            // branch is only reached for a modified CLOSE, where the guard set it).
+            let path = writeFamilyTargetPath ?? esFileToPath(closeEvent.target)
             let fileInfo = FileInfo(
                 path: path,
                 action: .close

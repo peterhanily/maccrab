@@ -81,7 +81,11 @@ struct ESProcessFields {
 /// Pure, unit-testable mapping from decoded ES fields to `ProcessInfo`. Mirrors
 /// the field set the eslogger path produces (EsloggerParser) so the two
 /// collectors can't silently diverge on what reaches detection.
-func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
+///
+/// `args` / `commandLine` are threaded straight onto the built struct so the
+/// exec path can populate them in a single allocation. Both default to the
+/// empty value non-exec callers already expect, so their behaviour is unchanged.
+func esProcessInfo(from f: ESProcessFields, args: [String] = [], commandLine: String = "") -> ProcessInfo {
     let processName = (f.executablePath as NSString).lastPathComponent
 
     // v1.17.1: classify via the shared SignerType.classify so the ES and
@@ -129,8 +133,8 @@ func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
         rpid: f.rpid,
         name: processName,
         executable: f.executablePath,
-        commandLine: "",
-        args: [],            // Populated separately for exec events
+        commandLine: commandLine,   // "" for non-exec callers; exec passes the real line
+        args: args,                 // [] for non-exec callers; exec passes the real argv
         workingDirectory: "",
         userId: f.euid,
         userName: "",        // Resolved later by enrichment
@@ -149,7 +153,11 @@ func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
 /// then delegate to the pure, testable `esProcessInfo(from:)`. The
 /// `responsible_audit_token` → `rpid` extraction here is the parity fix that
 /// restores responsible-originator lineage on the shipping sysext (was 0).
-func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
+///
+/// `args` / `commandLine` default to empty (the shape every non-exec caller
+/// already produced); the exec path passes the real argv so the target's
+/// ProcessInfo is built once with them populated instead of being rebuilt.
+func processFromESProcess(_ proc: UnsafePointer<es_process_t>, args: [String] = [], commandLine: String = "") -> ProcessInfo {
     let p = proc.pointee
     return esProcessInfo(from: ESProcessFields(
         pid: audit_token_to_pid(p.audit_token),
@@ -171,7 +179,7 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         // agent-trace correlation reconstructs the SAME ProcessIdentity the
         // TraceRegistry binding was keyed on.
         auditIdentity: AuditIdentity(from: p.audit_token)
-    ))
+    ), args: args, commandLine: commandLine)
 }
 
 // MARK: - Exec Argument Extraction
