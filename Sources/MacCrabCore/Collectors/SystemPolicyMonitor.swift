@@ -168,29 +168,38 @@ public actor SystemPolicyMonitor {
 
     private func checkAMFIBootArgs() {
         let bootArgs = runCommand("/usr/sbin/nvram", args: ["boot-args"]).lowercased()
+        // Match keys are lowercase to compare against the lowercased boot-args.
+        // (v1.21.4 review: `PE_i_can_has_debugger` was an UPPERCASE literal that
+        // could never match the lowercased read — a pre-existing dead flag,
+        // corrected here while diff-tracking is added.)
         let dangerous = [
             ("amfi_get_out_of_my_way", "AMFI code signing enforcement disabled"),
             ("cs_enforcement_disable", "Code signing enforcement disabled"),
-            ("PE_i_can_has_debugger", "Kernel debugging enabled"),
+            ("pe_i_can_has_debugger", "Kernel debugging enabled"),
         ]
 
-        for (flag, desc) in dangerous {
-            if bootArgs.contains(flag) {
-                // Dedup: boot-args are persistent (reboot-scoped), so without
-                // this guard the same critical AMFI alert re-fired every poll.
-                // A reboot restarts this process and clears the set, re-arming.
-                guard !amfiAlertedFlags.contains(flag) else { continue }
-                amfiAlertedFlags.insert(flag)
-                emit(SystemPolicyEvent(
-                    type: .amfiBypass,
-                    description: "\(desc) via boot-args: \(flag)",
-                    path: nil,
-                    severity: .critical,
-                    mitreTactic: "attack.defense_evasion",
-                    mitreTechnique: "attack.t1562.001"
-                ))
-            }
+        // v1.21.4 review fix (L5): nvram boot-args is RUNTIME-mutable, not merely
+        // reboot-scoped — a flag can be cleared (`nvram -d boot-args`) and re-added
+        // within one uptime. Diff-track like the MDM-profile check: alert on a
+        // newly-present flag, and DROP a flag from the alerted set once it's absent
+        // so a clear-then-re-add re-alerts. Without the drop, re-introduction of a
+        // critical AMFI/CS bypass stayed silent for the rest of the process life.
+        var present: Set<String> = []
+        for (flag, desc) in dangerous where bootArgs.contains(flag) {
+            present.insert(flag)
+            guard !amfiAlertedFlags.contains(flag) else { continue }
+            amfiAlertedFlags.insert(flag)
+            emit(SystemPolicyEvent(
+                type: .amfiBypass,
+                description: "\(desc) via boot-args: \(flag)",
+                path: nil,
+                severity: .critical,
+                mitreTactic: "attack.defense_evasion",
+                mitreTechnique: "attack.t1562.001"
+            ))
         }
+        // Re-arm flags that are no longer present so their return re-alerts.
+        amfiAlertedFlags.formIntersection(present)
     }
 
     // MARK: - Authorization Plugins

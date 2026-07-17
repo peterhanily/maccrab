@@ -137,6 +137,24 @@ struct InboxGateTests {
         #expect(DaemonTimers.readIdRequest(at: big) == nil)
     }
 
+    @Test("safeReadInboxData honors a larger explicit cap (M1: clipboard reader)")
+    func explicitLargerCapReadsPast64KB() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let path = dir + "/record-clipboard-big.json"
+        // A legit 100 KB clipboard record — larger than the 64 KB DEFAULT cap
+        // because ClickFix payloads are grapheme-bounded, not byte-bounded.
+        let payload = String(repeating: "x", count: 100 * 1024)
+        let json = "{\"payload\":\"\(payload)\"}"
+        try json.write(toFile: path, atomically: true, encoding: .utf8)
+        // Default 64 KB cap rejects it (this was the M1 evasion).
+        #expect(DaemonTimers.safeReadInboxData(at: path) == nil)
+        // The clipboard reader's 4 MB cap reads it in full.
+        let data = DaemonTimers.safeReadInboxData(at: path, maxBytes: 4 * 1024 * 1024)
+        #expect(data != nil)
+        #expect(data?.count == json.utf8.count)
+    }
+
     @Test("Symlinked request file is refused at open (O_NOFOLLOW)")
     func symlinkRefused() throws {
         let dir = try tempDir()

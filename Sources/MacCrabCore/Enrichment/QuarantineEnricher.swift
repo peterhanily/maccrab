@@ -75,13 +75,24 @@ public actor QuarantineEnricher {
     /// Look up download provenance for a file path.
     /// Returns nil if the file has no quarantine record.
     ///
-    /// Fast path: a file with no `com.apple.quarantine` xattr has no download
-    /// event, so we return nil after a single size-only `getxattr` probe —
-    /// without opening or full-table-scanning the external QuarantineEventsV2
-    /// DB. When the xattr *is* present we resolve by its event GUID (the
-    /// deterministic key for this exact file's LSQuarantineEvent row) rather
-    /// than a `LIKE %basename` scan of the download URL, which could otherwise
-    /// match a *different* file's row by basename coincidence.
+    /// Fast path: a file with no `com.apple.quarantine` xattr normally has no
+    /// resolvable download provenance, so we return nil after a single size-only
+    /// `getxattr` probe — without opening or full-table-scanning the external
+    /// QuarantineEventsV2 DB. When the xattr *is* present we resolve by its event
+    /// GUID (the deterministic key for this exact file's LSQuarantineEvent row)
+    /// rather than a `LIKE %basename` scan of the download URL, which could
+    /// otherwise match a *different* file's row by basename coincidence.
+    ///
+    /// v1.21.4 review NOTE (L3): this is a deliberate perf/provenance trade, NOT
+    /// "detection-exact". If the xattr was STRIPPED (`xattr -c`, itself a
+    /// Gatekeeper-bypass step that fires `quarantine_removed`) while the DB row
+    /// persists, the old basename scan would still have attached the download URL
+    /// here; the gate now returns nil. This loss is DISPLAY-ONLY: no rule,
+    /// sequence, or graph rule reads `quarantine.*` (verified), and
+    /// DeliveryProvenanceWeld resolves provenance via `lookupByGUID` on its own
+    /// path (unaffected). We accept it rather than re-introduce a per-file-event
+    /// external-DB scan (the whole point of the gate) for the rare stripped-xattr
+    /// case. The GUID join is strictly MORE precise for the common case.
     public func lookup(filePath: String) -> QuarantineInfo? {
         // Positive cache.
         if let cached = cache[filePath] { return cached }

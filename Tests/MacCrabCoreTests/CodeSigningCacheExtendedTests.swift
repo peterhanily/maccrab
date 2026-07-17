@@ -117,4 +117,28 @@ struct CodeSigningCacheExtendedTests {
             "in-place replacement must force a fresh evaluation, not serve the stale verdict"
         )
     }
+
+    @Test("A vanished path retains the cached verdict, not a re-eval to .unsigned (v1.21.4 L2)")
+    func vanishedPathRetainsCachedVerdict() async throws {
+        let fm = FileManager.default
+        let path = fm.temporaryDirectory
+            .appendingPathComponent("maccrab_cs_\(UUID().uuidString)")
+            .path
+        fm.createFile(atPath: path, contents: Data(repeating: 0x41, count: 4096))
+
+        let cache = CodeSigningCache()
+        // Prime the cache while the file is present (verdict + identity stored).
+        _ = await cache.evaluate(path: path)
+        #expect(await cache.lookup(path: path) != nil, "present file → cache hit")
+
+        // The file vanishes (app self-update / moved to another volume / transient
+        // network-mount error) → currentIdentity() can't stat it and returns nil.
+        try fm.removeItem(atPath: path)
+
+        // L2: a nil (un-stat-able) identity must RETAIN the cached verdict, NOT be
+        // treated as a miss — a miss would re-evaluate the gone path to .unsigned
+        // and falsely trip signer-negated rules on a live, legit-signed process.
+        #expect(await cache.lookup(path: path) != nil,
+                "a vanished path must serve the last cached verdict, not downgrade to a miss")
+    }
 }

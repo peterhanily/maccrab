@@ -752,6 +752,23 @@ public actor BaselineEngine {
     private func normalizePath(_ path: String) -> String {
         var normalized = path
 
+        // 0. Collapse per-launch temp / App-Translocation paths under
+        //    /var/folders/ (+ its /private twin). Gatekeeper's App Translocation
+        //    and per-launch temp-extracted binaries embed a FRESH random UUID dir
+        //    on (re)launch, which none of the rules below can collapse — so each
+        //    launch minted a distinct edge, and this leak was the ONLY real trigger
+        //    for the maxEdges cap (whose LRU eviction could then re-alert a legit
+        //    rare lineage as novel — v1.21.4 review L4). Collapse to a stable
+        //    "<var-folders>/.../<basename>" so relaunches of the same translocated
+        //    / temp-extracted binary map to ONE edge (a genuinely novel binary
+        //    still alerts once, by basename, then is learned — the correct signal).
+        for varFolders in ["/private/var/folders/", "/var/folders/"] {
+            if normalized.hasPrefix(varFolders) {
+                let basename = (normalized as NSString).lastPathComponent
+                return "\(varFolders).../\(basename)"
+            }
+        }
+
         // 1. Collapse .app bundle internals:
         //    "/Applications/Foo.app/Contents/MacOS/Foo" -> "/Applications/Foo.app/.../Foo"
         if let appRange = normalized.range(of: ".app/") {

@@ -2206,7 +2206,17 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = safeReadInboxData(at: path),
+            // v1.21.4 review fix (M1): clipboard content is bounded DOWNSTREAM by
+            // GRAPHEME count (prefix(8192)), not bytes — one extended grapheme
+            // cluster (combining marks / Zalgo) is unbounded in UTF-8 bytes, so
+            // 8192 legit graphemes can exceed the 64 KB default cap. A ClickFix
+            // page could pad the clipboard past 64 KB to make the daemon reject
+            // the record and blind `maccrab.clickfix.paste-and-run`. This reader
+            // authorizes by owner-uid FIRST (console-user/root), so a larger read
+            // cap carries no new OOM exposure a privileged user couldn't already
+            // cause; 4 MB comfortably covers 8192 graphemes of any realistic
+            // clipboard while staying bounded.
+            guard let data = safeReadInboxData(at: path, maxBytes: 4 * 1024 * 1024),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = json["payload"] as? String, !payload.isEmpty else {
                 print("[inbox] record-clipboard \(name): malformed payload")

@@ -562,11 +562,21 @@ public final class ESCollector: @unchecked Sendable {
     // SAFETY — why dropping these loses no detection (verified against the
     // shipped rule corpus + downstream consumers):
     //  * The drop set is ONLY well-known append-only LOG SINKS (`*.log`, and
-    //    writes under /var/log, /private/var/log, /Library/Logs). NO single-event
-    //    rule, sequence rule, or graph rule predicates on any of these as a
-    //    file-WRITE (file_event) target. The one rule that mentions /var/log
-    //    (defense_evasion/log_deletion) is a process_creation rule that fires on
-    //    the `rm`/`truncate` EXEC — not on a write event — so it is unaffected.
+    //    writes under /var/log, /private/var/log, /Library/Logs). No sequence or
+    //    graph rule predicates on any of these as a file-WRITE target, and the one
+    //    single-event rule that mentions /var/log (defense_evasion/log_deletion) is
+    //    a process_creation rule firing on the `rm`/`truncate` EXEC, not a write.
+    //    v1.21.4 review CORRECTION (L1): the earlier blanket "NO single-event rule
+    //    predicates on these" was INACCURATE — supply_chain/node_process_writes_to_
+    //    system_dirs matches file_event with TargetFilename|startswith ['/Library/',
+    //    '/System/'] and no FileAction filter, so it predicates on writes to any
+    //    /Library/ path, a superset of /Library/Logs. The residual is bounded and
+    //    accepted: (a) a FRESH drop still emits NOTIFY_CREATE (not muted → the rule
+    //    still fires on new-file drops); only an OVERWRITE of a pre-existing file
+    //    under /Library/Logs loses its event; (b) that rule is status:experimental,
+    //    so it is DISABLED under the default `stable` profile and this only manifests
+    //    under `rule_profile: all`; (c) writing system /Library/Logs needs admin.
+    //    The /var/log firehose win is worth this narrow, documented gap.
     //  * The only file-WRITE signal behavioral scoring consumes is a write to
     //    /LaunchAgents/ or /LaunchDaemons/ (EventLoop) — neither is a log sink.
     //  * StatisticalAnomaly tracks process event-frequency/argc/entropy only (its

@@ -83,11 +83,21 @@ public actor CodeSigningCache {
     ///   (including a stale entry whose on-disk file was replaced in place).
     public func lookup(path: String) -> CodeSignatureInfo? {
         guard let entry = cache.object(forKey: path as NSString) else { return nil }
-        // Serve the cached verdict only if the on-disk identity is unchanged.
-        // A mismatch means the file was replaced in place (mtime/size/inode/dev
-        // differ) → treat as a miss so the caller re-evaluates the new bytes and
-        // can't inherit a stale trusted verdict.
-        guard entry.identity == currentIdentity(path: path) else { return nil }
+        // Serve the cached verdict unless the on-disk identity CHANGED in place.
+        //
+        // v1.21.4 review fix (L2): only a NON-nil current identity that DIFFERS
+        // from the cached one means an in-place replacement (swap) → miss, so the
+        // caller re-evaluates the new bytes (the anti-spoof behavior the FileIdentity
+        // check was added for). A NIL current identity means the path can't be
+        // stat'd right now — the file was moved/unlinked (app self-update, or the
+        // binary lives on a network/removable mount that transiently errored), NOT
+        // that the running binary changed. Re-evaluating a vanished path returns
+        // `.unsigned` and would falsely trip ~126 signer-negated rules + defeat the
+        // Apple-signer trust gate on a live, legitimately-signed process. So on a
+        // nil identity we RETAIN the last trusted verdict rather than downgrade.
+        if let current = currentIdentity(path: path), current != entry.identity {
+            return nil
+        }
         return entry.info
     }
 
