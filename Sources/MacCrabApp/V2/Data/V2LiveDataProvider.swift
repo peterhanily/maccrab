@@ -682,7 +682,16 @@ public final class V2LiveDataProvider: V2DataProvider {
             ("VS Code",     "~/.vscode/mcp.json"),
             ("Windsurf",    "~/.windsurf/mcp.json"),
         ]
+        // v1.21.4: the daemon persists MCP behavioral baselines to
+        // <supportDir>/mcp_baselines.json on a timer (alongside the TCC + agent-
+        // lineage snapshots). Read them here to restore the consumer that the V2
+        // migration dropped, and to flag a remote MCP server MacCrab has not yet
+        // profiled. Detached off-MainActor like the permissions()/heartbeat reads.
+        let baselinePath = dataDir.map { $0 + "/mcp_baselines.json" }
         return await Task.detached(priority: .userInitiated) {
+            let baselineKeys: Set<String> = baselinePath
+                .flatMap { MCPBaselineService.readSnapshot(at: $0) }
+                .map { Set($0.baselines.map(\.serverKey)) } ?? []
             var byKey: [String: V2MockMCP] = [:]
             for cfg in configs {
                 let path = (cfg.path as NSString).expandingTildeInPath
@@ -701,8 +710,14 @@ public final class V2LiveDataProvider: V2DataProvider {
                     // server pointed at a third-party host — hiding exactly the
                     // entries worth scrutinising.
                     let host = Self.mcpHost(for: spec)
-                    let trust: V2StatusLevel = cmd.contains("/tmp/")
+                    var trust: V2StatusLevel = cmd.contains("/tmp/")
                         || cmd.contains("/var/tmp/") ? .warning : .info
+                    // v1.21.4: a REMOTE MCP server MacCrab has no learned
+                    // behavioral baseline for warrants a closer look than a
+                    // localhost stdio server it has already profiled.
+                    if trust == .info, host != "localhost", !baselineKeys.contains(key) {
+                        trust = .warning
+                    }
                     if let existing = byKey[key] {
                         var knownTo = existing.knownTo
                         if !knownTo.contains(cfg.tool) { knownTo.append(cfg.tool) }
