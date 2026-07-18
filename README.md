@@ -539,7 +539,7 @@ tactics:
 |---|---|---:|
 | `TA0001` | Initial Access | 101 |
 | `TA0002` | Execution | 94 |
-| `TA0003` | Persistence | 101 |
+| `TA0003` | Persistence | 103 |
 | `TA0004` | Privilege Escalation | 43 |
 | `TA0005` | Defense Evasion | 127 |
 | `TA0006` | Credential Access | 85 |
