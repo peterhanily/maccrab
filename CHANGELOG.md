@@ -3,6 +3,28 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5-rc.1] — 2026-07-21
+
+Correctness and honesty release.
+
+### Added
+- Rule-profile gating for sequence and graph rules — experimental sequence/graph rules stay disabled under the default `stable` profile, matching single-event rule behavior; `rule_profile: "all"` runs everything.
+- Welcome setup checklist verifies Full Disk Access and System Extension approval live; new installs choose a workspace density (Basic default).
+- Evidence-bundle exports write a real outer-archive SHA-256 sidecar (`<archive>.sha256`).
+- Burst-load benchmark (`make test-burst`) and documented experimental→stable rule-promotion criteria (`scripts/check-promotion.sh`).
+
+### Changed
+- Promoted six must-fire kill-chain sequence rules to the stable tier so they remain enabled by default (they ran enabled prior to the v1.21.5 profile gating).
+- Package Freshness reports "Not scanned" / "—" until a real registry scan runs, instead of defaulting to "up to date" with zero staleness; removed the always-zero vulnerabilities surface.
+- `get_intent_posterior` reads the daemon's recorded posteriors instead of an always-empty process-local engine.
+- Fleet telemetry is strictly outbound-only; the client requires HTTPS (loopback HTTP excepted), the reference server defaults to a loopback bind and authenticates its dashboard endpoint, and fleet is documented as a self-hosted prototype.
+- Onboarding wording for the optional response modules corrected (was "Active Prevention").
+
+### Fixed
+- Deprecated sequence and graph rules no longer run under `rule_profile: "all"`.
+- Sparkle release-key recovery documentation corrected to a technically sound procedure.
+- Cleared all Swift 6 language-mode concurrency warnings; release tooling now uses curated per-version release notes.
+
 ## [1.21.4] — 2026-07-18
 
 Performance and hardening release.

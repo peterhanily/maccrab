@@ -6,7 +6,7 @@
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-3230%20passing-brightgreen)]()
 [![Rules](https://img.shields.io/badge/rules-486%20(stable%20tier%20on%20by%20default)-blueviolet)](docs/COVERAGE.md)
-[![Version](https://img.shields.io/badge/version-1.21.4-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Version](https://img.shields.io/badge/version-1.21.5-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -619,10 +619,15 @@ and [docs/TRUST.md](docs/TRUST.md).
 ---
 ## What's New
 
-The current release is **v1.21.4**. See [CHANGELOG.md](CHANGELOG.md) for the full
+The current release is **v1.21.5**. See [CHANGELOG.md](CHANGELOG.md) for the full
 dated version history and [RELEASE_NOTES/](RELEASE_NOTES/) for per-release detail.
 Recent milestones:
 
+- **v1.21.5** — sequence and graph rules now honor the rule profile (six must-fire
+  kill-chain sequences promoted to the stable tier); a verified first-run setup
+  checklist with a workspace-density picker; Package Freshness and the intent MCP
+  tool report real data instead of placeholders; fleet telemetry is strictly
+  outbound-only over HTTPS.
 - **v1.21.4** — the daemon now defaults to the curated **stable** rule tier (fewer
   false positives; the experimental corpus is opt-in via `rule_profile: all`);
   bulk alert actions with undo; full-history event-category filtering; a real
