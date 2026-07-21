@@ -145,18 +145,6 @@
 "statusBar.settings" = "设置...";
 "statusBar.quit" = "退出MacCrab";
 
-/* ── Prevention View ── */
-"prevention.title" = "预防";
-"prevention.enableAll" = "全部启用";
-"prevention.enableAllHint" = "切换所有预防机制的开关";
-"prevention.description" = "主动预防在威胁造成损害之前将其阻止。每个机制可单独启用或禁用。";
-"prevention.threatsBlocked" = "已阻止威胁";
-"prevention.domainsSinkholed" = "已沉洞域名";
-"prevention.ipsBlocked" = "已阻止IP";
-"prevention.packagesGated" = "已管控包";
-"prevention.recentActivity" = "近期预防活动";
-"prevention.mechanisms" = "预防机制";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "威胁情报";
 "threatIntel.sectionPicker" = "威胁情报部分";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "点按以在“警报”中查看";
 "overview.allClear" = "一切正常 — 无严重警报";
 "overview.noRecentAlerts" = "无近期警报";
@@ -415,14 +402,14 @@
 "welcome.title" = "欢迎使用MacCrab";
 "welcome.chooseLanguage" = "选择您的语言";
 "welcome.whatIs" = "MacCrab是什么？";
-"welcome.allSet" = "一切就绪！";
+"welcome.allSet" = "设置清单";
 "welcome.ready" = "MacCrab已准备好保护您的Mac。";
 "welcome.feature.detection" = "实时检测";
 "welcome.feature.detectionDesc" = "数百条检测规则实时监控您的Mac以发现威胁";
 "welcome.feature.ai" = "AI安全";
 "welcome.feature.aiDesc" = "监控Claude、Cursor、Copilot等AI编程工具的凭据访问行为";
-"welcome.feature.prevention" = "主动预防";
-"welcome.feature.preventionDesc" = "阻止恶意域名、隔离文件并管控供应链攻击";
+"welcome.feature.prevention" = "自动响应";
+"welcome.feature.preventionDesc" = "可选模块可将恶意域名引入陷阱、拦截有害 IP、锁定持久化位置，并可在高危警报时终止进程或隔离文件 — 响应在检测之后进行";
 "welcome.feature.privacy" = "默认隐私保护";
 "welcome.feature.privacyDesc" = "默认在设备上运行 — 除非您开启可选的增强功能，否则数据不会离开您的 Mac";
 "welcome.setup.engineActive" = "检测引擎已激活";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "状态未知";
 "settings.useLocalhost" = "使用localhost:4321";
 "settings.useOfficial" = "使用官方";
+"welcome.almostReady" = "即将完成 — 完成以下事项即可激活保护。";
 "welcome.enableProtection" = "启用保护";
 "welcome.getStarted" = "开始使用";
+"welcome.mode.title" = "选择您的使用模式";
+"welcome.mode.basic" = "基础";
+"welcome.mode.standard" = "标准";
+"welcome.mode.advanced" = "高级";
+"welcome.mode.basicDesc" = "仅保留精要 — 警报与系统状态";
+"welcome.mode.standardDesc" = "增加事件、调查与预防控制";
+"welcome.mode.advancedDesc" = "所有工作区，包括取证与威胁情报";
+"welcome.mode.changeLater" = "您可以随时在“设置”中更改";
 "welcome.setup.checkAgain" = "再次检查";
 "welcome.setup.engineInactive" = "未检测到检测引擎 — 请先启动守护进程";
-"welcome.setup.es" = "端点安全性：当“系统设置”提示时，请批准系统扩展";
+"welcome.setup.esActive" = "系统扩展已激活";
+"welcome.setup.esAwaiting" = "系统扩展等待批准 — 请打开 系统设置 → 通用 → 登录项与扩展";
+"welcome.setup.esFailed" = "系统扩展激活失败 — 请点按“启用保护”重试";
+"welcome.setup.esPending" = "系统扩展：点按下方“启用保护”进行安装";
 "welcome.setup.fda" = "授予完全磁盘访问权限：系统设置 → 隐私与安全性 → 完全磁盘访问权限 → 添加MacCrab.app";
-"welcome.setup.noRules" = "未找到已编译的规则 — 请运行 make compile-rules";
+"welcome.setup.fdaGranted" = "已授予完全磁盘访问权限";
+"welcome.setup.noRules" = "检测规则将自动安装 — 如果此项未消失，请重新启动MacCrab";
 "workspace.alerts.title" = "警报";
 "workspace.detection.title" = "检测";
 "workspace.docs.title" = "文档";

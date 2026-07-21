@@ -260,7 +260,7 @@ Build the MCP binary with `swift build --target maccrab-mcp`.
 | `classify_package_intent` | (v1.12) LLM-backed verdict over a package-install BehaviorBrief |
 | `predict_next_technique` | (v1.12) Markov-1 forecast over MITRE tactics |
 | `score_text_style` | (v1.12) Stylometric / urgency / LLM-tells score on a commit message or PR body |
-| `get_intent_posterior` | (v1.12) Bayesian posterior over attacker goals for a tree key (MCP-local; see daemon alerts for live posterior) |
+| `get_intent_posterior` | (v1.12) Bayesian posterior over attacker goals for a process tree — reads the daemon-recorded `maccrab.intent.bayesian-posterior` alerts from the last 30 days, matching the tree key (`<root executable>@<pid>`) by substring |
 | `list_response_actions` | List configured per-rule response actions and their current settings |
 | `set_response_action` | Adjust a rule's response action (audit-logged; requires the matching capability tier) |
 | `forensics_*` | Plugin tools registered dynamically from installed forensic plugins — e.g. `forensics_run_collector`, `forensics_run_analyzer`, `forensics_search_artifacts`, `forensics_timeline`, `forensics_explain_case` (underscore-named since v1.19.1; legacy `forensics.*` dotted names still accepted as aliases) |

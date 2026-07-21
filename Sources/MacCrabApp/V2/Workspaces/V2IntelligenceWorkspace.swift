@@ -149,7 +149,15 @@ public struct V2IntelligenceWorkspace: View {
                     let manualIsFresh = self.packageLastScannedAt
                         .map { Date().timeIntervalSince($0) < 300 } ?? false
                     if !manualIsFresh && !pkgsResult.isEmpty {
-                        self.packages = pkgsResult
+                        // v1.21.5: merge, don't wholesale-replace. The
+                        // provider's PackageScanner rows are ALWAYS unscanned
+                        // (latest/staleness nil by design), so replacing here
+                        // discarded every manual scan's registry results five
+                        // minutes after Run Scan — the table flipped back to
+                        // "Not scanned yet" while scanStatusLine still said
+                        // "Last scan completed Xm ago".
+                        self.packages = Self.mergePackages(
+                            existing: self.packages, incoming: pkgsResult)
                     }
                     self.integrations = integResult
                 }
@@ -993,35 +1001,13 @@ public struct V2IntelligenceWorkspace: View {
 
         let mapped = scanned.map { info -> V2MockPackage in
             let key = "\(info.registry.rawValue):\(info.name)"
-            let installedVer = installedMap[key] ?? "—"
-            let latestVer = info.latestVersion ?? "—"
             // The v1.12 intelligence fields live on the
             // PackageScanner-provided `PackageInfo` keyed by
             // `<manager>:<name>` — same shape as `info.id`. Map by name
             // since registry namespaces match (npm <-> npm, pypi <-> pip).
             let intelInfo = intelligenceMap[managerKey(registry: info.registry.rawValue, name: info.name)]
-            return V2MockPackage(
-                id: key,
-                name: info.name,
-                installed: installedVer,
-                latest: latestVer,
-                manager: info.registry.rawValue,
-                // PackageFreshnessChecker carries no CVE data — `isFresh` is a
-                // "freshly published" signal, not a vulnerability count. Storing
-                // it here rendered brand-new packages as "Vulns: 1" and offered a
-                // bogus CVE lookup. Real vuln counts arrive via the auto-refresh
-                // PackageScanner path (currently 0 until OSV.dev wiring lands).
-                vulnCount: 0,
-                // `staleness` is a TimeInterval in SECONDS (V2TimeFormat.staleness
-                // reads it as seconds, matching the auto-refresh path's
-                // `stalenessSeconds`). `ageInDays` is DAYS, so scale up — pre-fix a
-                // 400-day-old package rendered as "6m".
-                staleness: (info.ageInDays ?? 0) * 86400,
-                typosquatScore: intelInfo?.typosquatScore,
-                typosquatSimilarTo: intelInfo?.typosquatSimilarTo,
-                attestationStatus: intelInfo?.attestationStatus,
-                contentRedFlags: intelInfo?.contentRedFlags
-            )
+            return Self.manualScanRow(
+                info, installed: installedMap[key] ?? "—", intelligence: intelInfo)
         }
         await MainActor.run {
             self.packages = mapped
@@ -1043,24 +1029,132 @@ public struct V2IntelligenceWorkspace: View {
         case installed([String: String])
     }
 
+    /// v1.21.5: build one packages-table row from a manual-scan result.
+    /// Extracted from `runPackageScan` so the mapper contract is testable
+    /// (mirrors the V2LiveDataProvider.toV2Package pattern).
+    static func manualScanRow(
+        _ info: PackageFreshnessChecker.PackageInfo,
+        installed: String,
+        intelligence: PackageInfo?
+    ) -> V2MockPackage {
+        V2MockPackage(
+            id: "\(info.registry.rawValue):\(info.name)",
+            name: info.name,
+            installed: installed,
+            // v1.21.5: nil-preserving — a package whose registry lookup
+            // failed mid-scan stays "Not scanned" rather than borrowing
+            // a placeholder that reads as a real result.
+            latest: info.latestVersion,
+            manager: info.registry.rawValue,
+            // Reserved (unwired until OSV.dev lands) — no UI renders it
+            // since v1.21.5. PackageFreshnessChecker carries no CVE data;
+            // its `isFresh` is a "freshly published" signal, not a count.
+            vulnCount: 0,
+            // `staleness` is a TimeInterval in SECONDS (V2TimeFormat.staleness
+            // reads it as seconds, matching the auto-refresh path's
+            // `stalenessSeconds`). `ageInDays` is DAYS, so scale up — pre-fix a
+            // 400-day-old package rendered as "6m". v1.21.5: unknown age maps
+            // to nil ("—"), not 0 ("<1m"); and with no latestVersion the row is
+            // uniformly "Not scanned", so a registry-supplied age is dropped
+            // too (npm unpublished stub: time map present, dist-tags gone) —
+            // otherwise one row would render "Not scanned" and a real
+            // "Behind 400d" simultaneously, and the Behind sort would treat
+            // it as scanned.
+            staleness: info.latestVersion == nil ? nil : info.ageInDays.map { $0 * 86400 },
+            typosquatScore: intelligence?.typosquatScore,
+            typosquatSimilarTo: intelligence?.typosquatSimilarTo,
+            attestationStatus: intelligence?.attestationStatus,
+            contentRedFlags: intelligence?.contentRedFlags
+        )
+    }
+
+    /// v1.21.5: merge an incoming provider refresh into the rows already on
+    /// screen instead of wholesale-replacing them. An incoming UNSCANNED row
+    /// (PackageScanner inventory — latest/staleness nil by design) must never
+    /// clobber an existing row's registry results: the scanned
+    /// latest/staleness carry forward (isScanned/isOutdated derive from
+    /// latest) while the incoming row's inventory + intelligence fields are
+    /// adopted. Incoming SCANNED rows (future daemon enrichment) replace
+    /// normally; genuinely new ids append; ids no longer present drop. Rows
+    /// are matched on the canonical key because manual-scan ids use the
+    /// PackageFreshnessChecker registry namespace ("pypi:x", "homebrew:x")
+    /// while provider ids use PackageScanner managers ("pip:x", "brew:x").
+    static func mergePackages(
+        existing: [V2MockPackage], incoming: [V2MockPackage]
+    ) -> [V2MockPackage] {
+        var scannedByKey: [String: V2MockPackage] = [:]
+        for pkg in existing where pkg.isScanned {
+            scannedByKey[canonicalPackageKey(pkg.id)] = pkg
+        }
+        return incoming.map { pkg in
+            guard !pkg.isScanned,
+                  let prior = scannedByKey[canonicalPackageKey(pkg.id)] else { return pkg }
+            return V2MockPackage(
+                id: pkg.id,
+                name: pkg.name,
+                installed: pkg.installed,
+                latest: prior.latest,
+                manager: pkg.manager,
+                vulnCount: pkg.vulnCount,
+                staleness: prior.staleness,
+                typosquatScore: pkg.typosquatScore,
+                typosquatSimilarTo: pkg.typosquatSimilarTo,
+                attestationStatus: pkg.attestationStatus,
+                contentRedFlags: pkg.contentRedFlags
+            )
+        }
+    }
+
+    /// v1.21.5: fold a `<namespace>:<name>` package id onto the PackageScanner
+    /// manager namespace so manual-scan rows (registry ids) and provider rows
+    /// (manager ids) key identically for the auto-refresh merge. Same mapping
+    /// `managerKey` has always applied for the intelligence-field join.
+    static func canonicalPackageKey(_ id: String) -> String {
+        guard let colon = id.firstIndex(of: ":") else { return id }
+        let namespace = String(id[id.startIndex..<colon]).lowercased()
+        let name = String(id[id.index(after: colon)...])
+        let manager: String
+        switch namespace {
+        case "npm":              manager = "npm"
+        case "pypi", "pip":      manager = "pip"
+        case "homebrew", "brew": manager = "brew"
+        default:                 manager = namespace
+        }
+        return "\(manager):\(name)"
+    }
+
     private var packageSummaryRow: some View {
+        // v1.21.5: freshness posture only counts packages a real registry
+        // scan enriched (`isScanned`). Pre-fix the unenriched placeholder
+        // (latest mirrored installed, staleness 0) counted every package
+        // as "Up to date" out of the box — asserting a posture nothing
+        // had verified. When nothing is scanned yet the tiles say so
+        // instead of claiming "0 outdated / N up to date". The "Vulns"
+        // tile is gone entirely: vulnCount is a reserved field that stays
+        // 0 until OSV.dev wiring lands, so the tile was a permanent
+        // false "0 vulnerabilities".
         let total = packages.count
-        let outdated = packages.filter { $0.installed != $0.latest }.count
-        // &+ (wrapping): guard against Int overflow from a corrupt vulnCount.
-        let vulns = packages.reduce(0) { $0 &+ max(0, $1.vulnCount) }
+        let scanned = packages.filter(\.isScanned).count
+        let outdated = packages.filter(\.isOutdated).count
         return HStack(spacing: 12) {
             metricCard(title: "Tracked", value: "\(total)",
                        trend: "brew + npm + pip", trendKind: .info,
                        icon: "shippingbox.fill", iconColor: V2Theme.dataAccent)
-            metricCard(title: "Outdated", value: "\(outdated)",
-                       trend: "non-blocking", trendKind: .warning,
-                       icon: "arrow.clockwise.circle", iconColor: V2Theme.warning)
-            metricCard(title: "Vulns", value: "\(vulns)",
-                       trend: "review queue", trendKind: .high,
-                       icon: "exclamationmark.shield", iconColor: V2Theme.high)
-            metricCard(title: "Up to date", value: "\(total - outdated)",
-                       trend: "no action", trendKind: .healthy,
-                       icon: "checkmark.seal", iconColor: V2Theme.healthy)
+            if scanned == 0 {
+                metricCard(title: "Outdated", value: "—",
+                           trend: "Not scanned yet", trendKind: .info,
+                           icon: "arrow.clockwise.circle", iconColor: V2Theme.mutedText)
+                metricCard(title: "Up to date", value: "—",
+                           trend: "Not scanned yet", trendKind: .info,
+                           icon: "checkmark.seal", iconColor: V2Theme.mutedText)
+            } else {
+                metricCard(title: "Outdated", value: "\(outdated)",
+                           trend: "non-blocking", trendKind: .warning,
+                           icon: "arrow.clockwise.circle", iconColor: V2Theme.warning)
+                metricCard(title: "Up to date", value: "\(scanned - outdated)",
+                           trend: "no action", trendKind: .healthy,
+                           icon: "checkmark.seal", iconColor: V2Theme.healthy)
+            }
         }
     }
 
@@ -1085,20 +1179,18 @@ public struct V2IntelligenceWorkspace: View {
                                  sortKey: { .text($0.installed) }) { p in
                         V2TableCellText(p.installed, primary: false, mono: true)
                     },
+                    // v1.21.5: nil latest/staleness = never scanned — render
+                    // "—", never a fabricated version or "Behind <1m". The
+                    // "Vulns" column was removed: vulnCount is reserved
+                    // (always 0 until OSV.dev lands) and a permanent "0"
+                    // column asserted a clean bill nothing had checked.
                     V2DataColumn(id: "latest", title: "Latest", width: .fixed(120),
-                                 sortKey: { .text($0.latest) }) { p in
-                        V2TableCellText(p.latest, primary: false, mono: true)
-                    },
-                    V2DataColumn(id: "vuln", title: "Vulns", width: .fixed(80),
-                                 sortKey: { .number(Double($0.vulnCount)) }) { p in
-                        if p.vulnCount > 0 {
-                            V2StatusChip("\(p.vulnCount)", kind: .high)
-                        } else {
-                            Text("0").foregroundStyle(V2Theme.tertiaryText).font(V2Theme.meta())
-                        }
+                                 sortKey: { .text($0.latest ?? "") }) { p in
+                        V2TableCellText(p.latest ?? "—", primary: false, mono: true)
                     },
                     V2DataColumn(id: "stale", title: "Behind", width: .fixed(110),
-                                 sortKey: { .number($0.staleness) }) { p in
+                                 // Unscanned rows sort below "current" (0) rows.
+                                 sortKey: { .number($0.staleness ?? -1) }) { p in
                         V2TableCellText(V2TimeFormat.staleness(p.staleness), primary: false)
                     },
                 ],
@@ -1123,11 +1215,17 @@ public struct V2IntelligenceWorkspace: View {
                     onClose: { selectedPackage = nil }) {
             V2InspectorSection(String(localized: "inspector.status", defaultValue: "Status")) {
                 V2InspectorKeyValue("Installed", pkg.installed, mono: true)
-                V2InspectorKeyValue("Latest", pkg.latest, mono: true)
-                let outdated = pkg.installed != pkg.latest
-                V2InspectorKeyValue("State", outdated ? "Outdated" : "Up to date")
+                // v1.21.5: nil latest = no registry scan has run for this
+                // package — say "Not scanned", never "Up to date" (which
+                // pre-fix rendered out of the box because the placeholder
+                // latest mirrored installed). The "Vulnerabilities" row was
+                // removed: vulnCount is reserved (always 0 until OSV.dev
+                // lands) and a permanent "0" asserted an unverified posture.
+                V2InspectorKeyValue("Latest", pkg.latest ?? "—", mono: true)
+                V2InspectorKeyValue("State", pkg.isScanned
+                    ? (pkg.isOutdated ? "Outdated" : "Up to date")
+                    : "Not scanned")
                 V2InspectorKeyValue("Behind", V2TimeFormat.staleness(pkg.staleness))
-                V2InspectorKeyValue("Vulnerabilities", "\(pkg.vulnCount)", mono: true)
             }
             V2InspectorSection(String(localized: "inspector.updateCommand", defaultValue: "Update command")) {
                 let cmd = upgradeCommand(for: pkg)
@@ -1145,29 +1243,11 @@ public struct V2IntelligenceWorkspace: View {
                     }
                 }
             }
-            if pkg.vulnCount > 0 {
-                V2InspectorSection(String(localized: "inspector.cves", defaultValue: "CVEs")) {
-                    // `maccrabctl vulns` takes only --hours / --severity — it has
-                    // no package positional and ignores any name argument, so
-                    // suggest the real command and tell the operator to look for
-                    // this package in the (unfiltered) list.
-                    Text("List all CVE-scanner vuln alerts via the CLI, then look for “\(pkg.name)”:")
-                        .font(V2Theme.meta())
-                        .foregroundStyle(V2Theme.mutedText)
-                    HStack(spacing: 6) {
-                        Text("maccrabctl vulns")
-                            .font(V2Theme.mono())
-                            .foregroundStyle(V2Theme.primaryText)
-                            .textSelection(.enabled)
-                        Spacer()
-                        V2ActionButton("Copy", icon: "doc.on.doc", style: .ghost) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("maccrabctl vulns", forType: .string)
-                            state.showToast(V2Toast(kind: .success, title: "Command copied", detail: nil))
-                        }
-                    }
-                }
-            }
+            // v1.21.5: the vulnCount-gated "CVEs" section was removed with
+            // the rest of the Vulnerabilities surface — vulnCount is a
+            // reserved field that stays 0 until OSV.dev wiring lands, so
+            // the section was unreachable. (Its "inspector.cves" key is
+            // now orphaned in the 14 Localizable.strings bundles.)
 
             // v1.12.0 — supply-chain intelligence section. Only renders
             // when at least one of the four fields is populated. Single
@@ -1209,14 +1289,9 @@ public struct V2IntelligenceWorkspace: View {
     /// Map the PackageFreshnessChecker's `registry` field to the
     /// PackageScanner's `manager:name` id shape.
     private func managerKey(registry: String, name: String) -> String {
-        let manager: String
-        switch registry.lowercased() {
-        case "npm":     manager = "npm"
-        case "pypi":    manager = "pip"
-        case "homebrew", "brew": manager = "brew"
-        default:        manager = registry.lowercased()
-        }
-        return "\(manager):\(name)"
+        // v1.21.5: single-sourced with the merge's canonical key so the
+        // registry→manager fold can't drift between the two joins.
+        Self.canonicalPackageKey("\(registry):\(name)")
     }
 
     // v1.12.0 — helpers extracted from the inspector ViewBuilder so the

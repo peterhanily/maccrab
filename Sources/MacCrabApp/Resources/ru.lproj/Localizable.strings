@@ -145,18 +145,6 @@
 "statusBar.settings" = "Настройки...";
 "statusBar.quit" = "Завершить MacCrab";
 
-/* ── Prevention View ── */
-"prevention.title" = "Предотвращение";
-"prevention.enableAll" = "Включить все";
-"prevention.enableAllHint" = "Включает или отключает все механизмы предотвращения";
-"prevention.description" = "Активное предотвращение блокирует угрозы до нанесения ущерба. Каждый механизм можно включать и отключать отдельно.";
-"prevention.threatsBlocked" = "Угроз заблокировано";
-"prevention.domainsSinkholed" = "Доменов перенаправлено";
-"prevention.ipsBlocked" = "IP заблокировано";
-"prevention.packagesGated" = "Пакетов проверено";
-"prevention.recentActivity" = "Недавняя активность предотвращения";
-"prevention.mechanisms" = "Механизмы предотвращения";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "Разведка угроз";
 "threatIntel.sectionPicker" = "Раздел разведки угроз";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "Нажмите для просмотра в «Оповещениях»";
 "overview.allClear" = "Всё чисто — критических оповещений нет";
 "overview.noRecentAlerts" = "Нет недавних оповещений";
@@ -415,14 +402,14 @@
 "welcome.title" = "Добро пожаловать в MacCrab";
 "welcome.chooseLanguage" = "Выберите язык";
 "welcome.whatIs" = "Что такое MacCrab?";
-"welcome.allSet" = "Всё готово!";
+"welcome.allSet" = "Контрольный список настройки";
 "welcome.ready" = "MacCrab готов защищать ваш Mac.";
 "welcome.feature.detection" = "Обнаружение в реальном времени";
 "welcome.feature.detectionDesc" = "Сотни правил обнаружения отслеживают угрозы на вашем Mac в реальном времени";
 "welcome.feature.ai" = "Безопасность ИИ";
 "welcome.feature.aiDesc" = "Отслеживает доступ к учётным данным у ИИ-инструментов разработки, таких как Claude, Cursor и Copilot";
-"welcome.feature.prevention" = "Активное предотвращение";
-"welcome.feature.preventionDesc" = "Блокирует вредоносные домены, изолирует файлы и пресекает атаки на цепочку поставок";
+"welcome.feature.prevention" = "Автоматизированное реагирование";
+"welcome.feature.preventionDesc" = "Дополнительные модули перенаправляют вредоносные домены, блокируют опасные IP-адреса, защищают места закрепления и могут завершать процессы или изолировать файлы при серьёзных оповещениях — реагирование следует за обнаружением";
 "welcome.feature.privacy" = "Конфиденциально по умолчанию";
 "welcome.feature.privacyDesc" = "По умолчанию работает на устройстве — ничего не покидает ваш Mac, пока вы не включите дополнительное обогащение";
 "welcome.setup.engineActive" = "Движок обнаружения активен";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "Статус неизвестен";
 "settings.useLocalhost" = "Использовать localhost:4321";
 "settings.useOfficial" = "Использовать официальный";
+"welcome.almostReady" = "Почти готово — выполните пункты ниже, чтобы активировать защиту.";
 "welcome.enableProtection" = "Включить защиту";
 "welcome.getStarted" = "Начать";
+"welcome.mode.title" = "Выберите свой режим";
+"welcome.mode.basic" = "Базовый";
+"welcome.mode.standard" = "Стандартный";
+"welcome.mode.advanced" = "Расширенный";
+"welcome.mode.basicDesc" = "Только главное — оповещения и состояние системы";
+"welcome.mode.standardDesc" = "Добавляет события, расследование и элементы управления предотвращением";
+"welcome.mode.advancedDesc" = "Все рабочие области, включая криминалистику и аналитику угроз";
+"welcome.mode.changeLater" = "Это можно изменить в любой момент в настройках";
 "welcome.setup.checkAgain" = "Проверить снова";
 "welcome.setup.engineInactive" = "Движок обнаружения не найден — сначала запустите демон";
-"welcome.setup.es" = "Endpoint Security: одобрите системное расширение, когда появится запрос в Системных настройках";
+"welcome.setup.esActive" = "Системное расширение активно";
+"welcome.setup.esAwaiting" = "Системное расширение ожидает одобрения — откройте Системные настройки → Основные → Объекты входа и расширения";
+"welcome.setup.esFailed" = "Не удалось активировать системное расширение — нажмите «Включить защиту», чтобы повторить";
+"welcome.setup.esPending" = "Системное расширение: нажмите «Включить защиту» ниже, чтобы установить его";
 "welcome.setup.fda" = "Предоставьте полный доступ к диску: Системные настройки → Конфиденциальность и безопасность → Полный доступ к диску → добавьте MacCrab.app";
-"welcome.setup.noRules" = "Скомпилированные правила не найдены — выполните make compile-rules";
+"welcome.setup.fdaGranted" = "Полный доступ к диску предоставлен";
+"welcome.setup.noRules" = "Правила обнаружения установятся автоматически — перезапустите MacCrab, если это не исчезнет";
 "workspace.alerts.title" = "Оповещения";
 "workspace.detection.title" = "Обнаружение";
 "workspace.docs.title" = "Документация";

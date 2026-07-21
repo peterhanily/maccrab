@@ -292,11 +292,11 @@ public actor BundleExporter {
         }
         try encoder.encode(signatureArtifact).write(to: bundleRoot.appendingPathComponent("integrity/chain_head_signature.json"))
 
-        // Outer-archive sha256 placeholder — only meaningful after tar.gz packaging.
-        try "PLACEHOLDER\n".write(
-            to: bundleRoot.appendingPathComponent("integrity/bundle_sha256.txt"),
-            atomically: true, encoding: .utf8
-        )
+        // v1.21.5: the former `integrity/bundle_sha256.txt` "PLACEHOLDER"
+        // write was removed — a file inside a tar.gz can never contain that
+        // archive's own hash. The outer-archive digest now ships as a
+        // `<archive>.sha256` sidecar written by `maccrabctl trace export`
+        // after packaging (see ArchiveDigest).
 
         // Step 6: emit chain head to the unified-log anchor when wired.
         if let unifiedLogAnchor, signatureArtifact.signatureBase64 != "UNSIGNED" {

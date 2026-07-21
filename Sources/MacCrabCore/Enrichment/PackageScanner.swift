@@ -14,18 +14,21 @@
 // The dashboard refreshes every 5 s so we don't want to re-shell on
 // every tick.
 //
-// Latest-version + vulnerability-count fields on `PackageInfo` stay
-// at sensible empty defaults — wiring them requires per-registry HTTP
+// Latest-version + staleness fields on `PackageInfo` stay nil (and
+// vulnCount stays 0) — wiring them requires per-registry HTTP
 // (Homebrew API, npm registry, PyPI JSON, OSV.dev) which is an
-// independent v1.11.x epic. The scanner ships now so the panel
-// populates with real installed-version data; latest/vuln land later.
+// independent epic. The scanner ships now so the panel populates with
+// real installed-version data; latest/vuln land later. v1.21.5: the
+// unenriched fields are explicitly nil rather than plausible-looking
+// defaults so the UI can render "Not scanned" instead of a false
+// "Up to date".
 
 import Foundation
 import os.log
 
 /// Minimal package metadata surfaced to the V2 Package Freshness panel.
-/// Latest-version + vulnerability fields are placeholder until the
-/// per-registry lookups land in v1.11.x.
+/// Latest-version + staleness are nil (and vulnCount 0) until the
+/// per-registry lookups land — nil means "not scanned", not "current".
 ///
 /// v1.12.0: intelligence fields (typosquatScore, isLikelyTyposquat,
 /// attestationStatus, contentRedFlags) carry the output of the
@@ -39,14 +42,21 @@ public struct PackageInfo: Sendable, Hashable, Codable {
     public let id: String
     public let name: String
     public let installedVersion: String
-    /// Currently `installedVersion` (no upstream lookup yet).
-    public let latestVersion: String
+    /// Nil until a real registry lookup lands one. v1.21.5: pre-fix this
+    /// defaulted to `installedVersion`, which made every unenriched
+    /// package indistinguishable from a genuinely up-to-date one — the
+    /// dashboard rendered "Up to date" out of the box with zero data
+    /// behind it. Nil now means "not scanned" and the UI must say so.
+    public let latestVersion: String?
     /// `"brew"` / `"npm"` / `"pip"`.
     public let manager: String
-    /// Reserved for v1.11.x OSV.dev integration.
+    /// Reserved for OSV.dev integration — unwired as of v1.21.5, always 0.
+    /// Kept so stored data shapes don't churn when the wiring lands.
     public let vulnCount: Int
-    /// Reserved for v1.11.x latest-version-vs-installed delta. Currently 0.
-    public let stalenessSeconds: TimeInterval
+    /// Latest-version-vs-installed delta in seconds. Nil until a real
+    /// registry lookup computes one (v1.21.5 — pre-fix the default was 0,
+    /// which the dashboard rendered as "Behind <1m" for never-scanned rows).
+    public let stalenessSeconds: TimeInterval?
 
     // MARK: - v1.12.0 intelligence fields
 
@@ -74,7 +84,7 @@ public struct PackageInfo: Sendable, Hashable, Codable {
     public init(name: String, installedVersion: String, manager: String,
                 latestVersion: String? = nil,
                 vulnCount: Int = 0,
-                stalenessSeconds: TimeInterval = 0,
+                stalenessSeconds: TimeInterval? = nil,
                 typosquatScore: Int? = nil,
                 typosquatSimilarTo: String? = nil,
                 attestationStatus: String? = nil,
@@ -82,7 +92,10 @@ public struct PackageInfo: Sendable, Hashable, Codable {
         self.id = "\(manager):\(name)"
         self.name = name
         self.installedVersion = installedVersion
-        self.latestVersion = latestVersion ?? installedVersion
+        // v1.21.5: no `?? installedVersion` fallback — nil stays nil so
+        // consumers can distinguish "scanned and current" from "never
+        // scanned" instead of asserting freshness that was never checked.
+        self.latestVersion = latestVersion
         self.manager = manager
         self.vulnCount = vulnCount
         self.stalenessSeconds = stalenessSeconds

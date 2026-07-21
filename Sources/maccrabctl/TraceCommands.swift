@@ -424,6 +424,19 @@ extension MacCrabCtl {
                 let attrs = try? FileManager.default.attributesOfItem(atPath: tarPath)
                 let sizeBytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
                 print("Archive: \(tarPath)  (\(sizeBytes) bytes)")
+                // v1.21.5 Phase 2c: outer-archive digest as a shasum-
+                // compatible `<archive>.sha256` sidecar, computed AFTER
+                // packaging (replaces the impossible in-bundle
+                // bundle_sha256.txt placeholder). Transport-integrity
+                // convenience only — the signed Merkle chain inside the
+                // bundle remains the tamper evidence, so a hashing
+                // failure warns without failing the export.
+                if let result = ArchiveDigest.writeSidecar(forArchiveAt: URL(fileURLWithPath: tarPath)) {
+                    print("SHA-256: \(result.hex)")
+                    print("Sidecar: \(result.sidecar.path)")
+                } else {
+                    print("WARNING: could not compute/write archive SHA-256 sidecar; the archive itself is unaffected.")
+                }
             } else {
                 print("tar exited with status \(proc.terminationStatus); directory left at \(target.path)")
             }

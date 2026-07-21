@@ -378,10 +378,17 @@ public struct V2MockPackage: Identifiable, Sendable, Hashable {
     public let id: String
     public let name: String
     public let installed: String
-    public let latest: String
+    /// Nil until a real registry scan landed a latest version (v1.21.5).
+    /// Pre-fix the unenriched placeholder mirrored `installed`, so every
+    /// never-scanned package rendered "Up to date".
+    public let latest: String?
     public let manager: String
+    /// Reserved for OSV.dev integration — unwired as of v1.21.5, always 0
+    /// (no UI renders it; kept so data shapes don't churn).
     public let vulnCount: Int
-    public let staleness: TimeInterval
+    /// Seconds behind latest. Nil until a real scan computed it (v1.21.5 —
+    /// pre-fix the 0 default rendered as "Behind <1m" for unscanned rows).
+    public let staleness: TimeInterval?
     // v1.12.0 supply-chain intelligence fields — optional so older
     // mock fixtures and PackageFreshnessChecker results still compile.
     public let typosquatScore: Int?
@@ -390,9 +397,17 @@ public struct V2MockPackage: Identifiable, Sendable, Hashable {
     public let attestationStatus: String?
     public let contentRedFlags: [String]?
 
+    /// v1.21.5: true once a real registry lookup landed a latest version.
+    /// The freshness UI must not assert any posture ("Up to date",
+    /// "Outdated", "Behind …") for unscanned packages.
+    public var isScanned: Bool { latest != nil }
+    /// v1.21.5: outdated is only a meaningful claim after a scan —
+    /// unscanned packages are "unknown", never "outdated" or "current".
+    public var isOutdated: Bool { isScanned && installed != latest }
+
     public init(
-        id: String, name: String, installed: String, latest: String,
-        manager: String, vulnCount: Int, staleness: TimeInterval,
+        id: String, name: String, installed: String, latest: String?,
+        manager: String, vulnCount: Int, staleness: TimeInterval?,
         typosquatScore: Int? = nil,
         typosquatSimilarTo: String? = nil,
         attestationStatus: String? = nil,
@@ -842,7 +857,11 @@ public enum V2TimeFormat {
         f.dateFormat = "HH:mm:ss"
         return f.string(from: date)
     }
-    public static func staleness(_ seconds: TimeInterval) -> String {
+    // v1.21.5: nil-aware — an unknown staleness renders the em-dash
+    // placeholder, never "<1m" (which asserts "current" for data that
+    // was never scanned). Non-optional callers promote transparently.
+    public static func staleness(_ seconds: TimeInterval?) -> String {
+        guard let seconds else     { return "—" }
         if seconds < 60          { return "<1m" }
         if seconds < 60 * 60     { return "\(Int(seconds / 60))m" }
         if seconds < 24 * 60 * 60 { return "\(Int(seconds / 3600))h" }

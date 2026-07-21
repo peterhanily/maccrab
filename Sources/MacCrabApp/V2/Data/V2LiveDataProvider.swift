@@ -912,8 +912,9 @@ public final class V2LiveDataProvider: V2DataProvider {
         // v1.11.1 (M2 backlog): wired to PackageScanner. brew + npm +
         // pip3 inventory; per-instance 5-min cache so the 5-s
         // dashboard refresh doesn't re-shell each tick. Latest-version
-        // + vulnCount stay at placeholder defaults — registry API
-        // wiring is a v1.11.x follow-up.
+        // + staleness stay nil (and vulnCount 0) until real registry
+        // wiring runs — nil flows through to the UI as "Not scanned"
+        // (v1.21.5).
         //
         // v1.12.0 post-audit (H-Int1): the bulk scan() output only
         // includes the pure-local typosquat score. Attestation +
@@ -934,22 +935,27 @@ public final class V2LiveDataProvider: V2DataProvider {
             await Self.kickOffBackgroundEnrichment(infos: infos)
         }
         let enrichedInfos = await Self.enrichmentResults.snapshot()
-        return infos.map { info in
-            let merged = enrichedInfos[info.id] ?? info
-            return V2MockPackage(
-                id: merged.id,
-                name: merged.name,
-                installed: merged.installedVersion,
-                latest: merged.latestVersion,
-                manager: merged.manager,
-                vulnCount: merged.vulnCount,
-                staleness: merged.stalenessSeconds,
-                typosquatScore: merged.typosquatScore,
-                typosquatSimilarTo: merged.typosquatSimilarTo,
-                attestationStatus: merged.attestationStatus,
-                contentRedFlags: merged.contentRedFlags
-            )
-        }
+        return infos.map { Self.toV2Package(enrichedInfos[$0.id] ?? $0) }
+    }
+
+    /// v1.21.5: extracted so the mapper contract is testable alongside
+    /// toV2Alert/toV2Trace. Nil latest/staleness pass through untouched —
+    /// they mean "never scanned" and the workspace renders "Not scanned"
+    /// / "—" instead of a fabricated "Up to date" / "Behind <1m".
+    nonisolated internal static func toV2Package(_ info: PackageInfo) -> V2MockPackage {
+        V2MockPackage(
+            id: info.id,
+            name: info.name,
+            installed: info.installedVersion,
+            latest: info.latestVersion,
+            manager: info.manager,
+            vulnCount: info.vulnCount,
+            staleness: info.stalenessSeconds,
+            typosquatScore: info.typosquatScore,
+            typosquatSimilarTo: info.typosquatSimilarTo,
+            attestationStatus: info.attestationStatus,
+            contentRedFlags: info.contentRedFlags
+        )
     }
 
     /// Shared across V2LiveDataProvider instances so the 5-min cache

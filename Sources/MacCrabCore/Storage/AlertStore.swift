@@ -654,6 +654,30 @@ public actor AlertStore {
         return try queryAlerts(sql: sql, bindings: bindings)
     }
 
+    /// Exact-rule-id variant of `alerts(since:)`. v1.21.5: the generic query
+    /// applies its row cap BEFORE any caller-side rule filter, so a
+    /// low-volume rule's alerts (e.g. `maccrab.intent.bayesian-posterior`)
+    /// could be crowded out of the 500-row window entirely on a busy box.
+    /// Filtering at the SQL layer (parameterized equality, mirroring the
+    /// `campaigns(before:)` rule_id-LIKE precedent) keeps the cap meaningful.
+    ///
+    /// - Parameters:
+    ///   - since: Only return alerts at or after this date.
+    ///   - ruleId: Exact `rule_id` to match.
+    ///   - limit: Maximum number of alerts to return (default 500).
+    /// - Returns: An array of `Alert` values, most recent first.
+    public func alerts(since: Date, ruleId: String, limit: Int = 500) throws -> [Alert] {
+        let sql = """
+            SELECT * FROM alerts WHERE timestamp >= ?1 AND rule_id = ?2
+            ORDER BY timestamp DESC LIMIT ?3
+            """
+        return try queryAlerts(sql: sql, bindings: [
+            (1, .double(since.timeIntervalSince1970)),
+            (2, .text(ruleId)),
+            (3, .int(Int32(limit))),
+        ])
+    }
+
     /// Keyset-paginated variant. Returns at most `pageSize` alerts strictly
     /// older than `cursor` (or the newest page if `cursor == nil`), plus
     /// the cursor for the next page.

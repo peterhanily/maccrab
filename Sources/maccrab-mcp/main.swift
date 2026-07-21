@@ -123,6 +123,17 @@ func appendJSONLine(_ obj: [String: Any], to path: String) {
 // MARK: - Data Directory Resolution
 
 func resolveDataDir() -> String {
+    // v1.21.5 (Phase 2d): explicit override so the MCP protocol harness can
+    // point a spawned server at a hermetic, seeded store. The harness's
+    // HOME redirect never reaches this function — FileManager.urls(for:
+    // .applicationSupportDirectory) resolves the home via getpwuid(3), not
+    // $HOME — so without this hook a dev box's live system store always wins
+    // the mtime race below. Honoring it crosses no privilege boundary: the
+    // server runs unprivileged in a caller-controlled environment.
+    if let override = ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"],
+       !override.isEmpty {
+        return override
+    }
     let fm = FileManager.default
     let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
         .first.map { $0.appendingPathComponent("MacCrab").path }
@@ -592,11 +603,11 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "get_intent_posterior",
-        "description": "Return the Bayesian-intent-engine posterior for a process tree (by tree key, typically the installer PID). NOTE: the MCP server holds its own process-local BayesianIntentEngine — this is NOT the daemon's posterior. Use this tool to feed evidence (via observe_intent_evidence in the future) and read it back inside an MCP session. For the daemon's per-tree posterior, query the alerts emitted by `maccrab.intent.bayesian-posterior` via get_alerts.",
+        "description": "Return the DAEMON's Bayesian-intent-engine posterior for a process tree, read back from the `maccrab.intent.bayesian-posterior` alerts the daemon records when a tree's top non-benign goal crosses the reporting threshold (default p >= 0.85 with >= 3 distinct evidence types). `tree_key` is matched as a case-insensitive substring of the recorded tree key (`<root executable>@<pid>` — a process path, name, or PID fragment works). Returns the most recent matching posteriors (at most 5) with timestamp, probability, and evidence log, or an explanatory not-found message when no posterior alert matches.",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "tree_key": ["type": "string", "description": "Process tree key (anchor PID or lineage identifier)"],
+                "tree_key": ["type": "string", "description": "Process tree key or substring to match — the daemon keys trees as `<root executable>@<pid>` (e.g. `/bin/zsh@812`)"],
             ],
             "required": ["tree_key"],
         ] as [String: Any],
@@ -1382,9 +1393,6 @@ private func tierBStatusPayload(_ status: TierBBootstrap.Status, builtinIDs: Set
 
 // MARK: - v1.12.0 Package Intelligence + Intent handlers
 
-/// Shared intent engine instance for posterior queries within the
-/// MCP server lifetime. Initialised on first use.
-private let sharedIntentEngine = BayesianIntentEngine()
 private let sharedTyposquatDB = TyposquatDatabase()
 private let sharedNextPredictor = NextTechniquePredictor()
 private let sharedStylometric = StylometricFingerprinter()
@@ -1603,25 +1611,75 @@ func handleScoreTextStyle(_ args: [String: Any]) async -> Any {
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
+/// The rule id EventLoop stamps on the posterior alerts this tool reads
+/// (EventLoop.swift, "Intent posterior crossed threshold").
+private let bayesianPosteriorRuleId = "maccrab.intent.bayesian-posterior"
+
+/// Extract the tree key the daemon embedded in a posterior alert's
+/// description ("Bayesian belief network reports p(goal)=0.93 for process
+/// tree <executable>@<pid> after N observations (...)"). Returns nil for
+/// any other description shape.
+private func parsePosteriorTreeKey(_ description: String?) -> String? {
+    guard let description,
+          let start = description.range(of: "for process tree "),
+          let end = description.range(of: " after ", range: start.upperBound..<description.endIndex)
+    else { return nil }
+    return String(description[start.upperBound..<end.lowerBound])
+}
+
+/// v1.21.5 (Phase 2d): read the DAEMON's Bayesian posteriors back out of the
+/// alerts DB. The previous implementation queried a process-local
+/// BayesianIntentEngine that never received observe() calls in the MCP
+/// process — evidence only flows in the daemon's EventLoop, into an
+/// in-memory actor with no persistence — so every call answered "no evidence
+/// observed yet". The daemon's only durable posterior surface is the
+/// `maccrab.intent.bayesian-posterior` alert it emits when a tree's top
+/// non-benign goal crosses the reporting threshold; query those instead.
 func handleGetIntentPosterior(_ args: [String: Any]) async -> Any {
     guard let treeKey = args["tree_key"] as? String, !treeKey.isEmpty else {
         return toolError("Error: 'tree_key' required")
     }
-    guard let posterior = await sharedIntentEngine.posterior(treeKey: treeKey) else {
-        return ["content": [["type": "text", "text": "No posterior found for tree '\(treeKey)' — no evidence has been observed yet"]]]
+    do {
+        let store = try AlertStore(directory: dataDir)
+        // Posterior alerts are low-volume by design (strict >= 0.85 + >= 3
+        // distinct-evidence gate). v1.21.5: filter on rule_id at the SQL
+        // layer — the generic alerts(since:) applied its 500-row cap BEFORE
+        // any rule filter, so on a busy box the noisy rules could crowd
+        // every posterior out of the 30-day window.
+        let since = Date().addingTimeInterval(-30 * 86400)
+        let posteriorAlerts = try await store.alerts(since: since, ruleId: bayesianPosteriorRuleId)
+        // Match against both the raw recorded key and its sanitized form —
+        // callers routinely copy tree keys out of get_alerts output, where
+        // /Users/<name>/ has already been redacted to /Users/[USER]/.
+        let matches = posteriorAlerts.filter { alert in
+            guard let key = parsePosteriorTreeKey(alert.description) else { return false }
+            return key.range(of: treeKey, options: .caseInsensitive) != nil
+                || LLMSanitizer.sanitize(key).range(of: treeKey, options: .caseInsensitive) != nil
+        }
+        guard !matches.isEmpty else {
+            return ["content": [["type": "text", "text": "No daemon-recorded posterior matches tree '\(treeKey)'. The daemon records a posterior as a `\(bayesianPosteriorRuleId)` alert only when a process tree's top non-benign goal crosses the reporting threshold (default p >= 0.85 with >= 3 distinct evidence types); no such alert matches this query in the last 30 days."]]]
+        }
+        // v1.21.5: say so when the render truncates — the old header claimed
+        // N posteriors while silently rendering only the first 5.
+        var lines: [String] = [matches.count > 5
+            ? "\(matches.count) daemon-recorded posterior(s) matching tree '\(treeKey)'; showing the 5 most recent:"
+            : "\(matches.count) daemon-recorded posterior(s) matching tree '\(treeKey)' (most recent first):"]
+        for alert in matches.prefix(5) {
+            lines.append("")
+            lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)\(alert.suppressed ? " (suppressed as false positive)" : "")")
+            lines.append("  Time: \(isoFormatter.string(from: alert.timestamp))")
+            lines.append("  Alert ID: \(alert.id)")
+            if let key = parsePosteriorTreeKey(alert.description) {
+                lines.append("  Tree: \(LLMSanitizer.sanitize(key))")
+            }
+            // The description carries the full posterior payload: p(topGoal),
+            // observation count, and the distinct evidence types observed.
+            if let desc = alert.description { lines.append("  Posterior: \(LLMSanitizer.sanitize(desc))") }
+        }
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return toolError("Error reading posterior alerts: \(error.localizedDescription)")
     }
-    var lines: [String] = ["Intent posterior for tree \(treeKey)"]
-    lines.append("Top goal: \(posterior.topGoal.rawValue) (\(String(format: "%.3f", posterior.topProbability)))")
-    let sorted = posterior.probabilities.sorted { $0.value > $1.value }
-    lines.append("Full distribution:")
-    for (goal, prob) in sorted {
-        lines.append("  \(goal.rawValue): \(String(format: "%.3f", prob))")
-    }
-    lines.append("Evidence log (last \(min(posterior.evidenceLog.count, 8))):")
-    for ev in posterior.evidenceLog.suffix(8) {
-        lines.append("  - \(ev.rawValue)")
-    }
-    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
 // MARK: - cluster_alerts (v1.6.7)

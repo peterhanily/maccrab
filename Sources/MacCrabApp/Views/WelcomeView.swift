@@ -10,10 +10,16 @@ struct WelcomeView: View {
     @ObservedObject var sysextManager: SystemExtensionManager
     @State private var selectedLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
     @State private var currentStep = 0
+    // v1.21.5: first-run installs pick a dashboard mode here (default
+    // Basic). Written to UIMode.storageKey only on wizard completion —
+    // upgrades never see the wizard and keep the .advanced fallback.
+    @State private var selectedUIMode: UIMode = .basic
 
     // MARK: - Daemon Health State
     @State private var daemonDBFound = false
     @State private var compiledRuleCount = 0
+    // v1.21.5: live FDA probe result (was a static instruction row).
+    @State private var fdaStatus: FullDiskAccessStatus = .unknown
     @State private var isChecking = false
 
     private let languages: [(code: String, name: String, native: String)] = [
@@ -89,7 +95,7 @@ struct WelcomeView: View {
                         ? String(localized: "welcome.getStarted", defaultValue: "Get Started")
                         : String(localized: "welcome.enableProtection", defaultValue: "Enable Protection")
                     ) {
-                        applyLanguage()
+                        applySetup()
                         if sysextManager.state != .activated {
                             sysextManager.activate()
                         }
@@ -101,7 +107,8 @@ struct WelcomeView: View {
             }
             .padding(20)
         }
-        .frame(width: 500, height: 460)
+        // v1.21.5: 460 → 500 to fit the experience picker on step 2.
+        .frame(width: 500, height: 500)
     }
 
     // MARK: - Step 1: Language
@@ -153,16 +160,68 @@ struct WelcomeView: View {
                 FeatureRow(icon: "brain",
                     title: String(localized: "welcome.feature.ai", defaultValue: "AI Safety"),
                     description: String(localized: "welcome.feature.aiDesc", defaultValue: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access"))
+                // v1.21.5: honest copy — ES is notify-only and the
+                // prevention modules default off, so this row must not
+                // promise inline blocking (see TCCRevocation.swift's
+                // "do not describe this as an active prevention" rule).
                 FeatureRow(icon: "hand.raised",
-                    title: String(localized: "welcome.feature.prevention", defaultValue: "Active Prevention"),
-                    description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Blocks malicious domains, quarantines files, and gates supply chain attacks"))
+                    title: String(localized: "welcome.feature.prevention", defaultValue: "Automated Response"),
+                    description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Optional modules sinkhole malicious domains, block bad IPs, lock persistence locations, and can kill or quarantine on high-severity alerts \u{2014} response follows detection"))
                 FeatureRow(icon: "lock.shield",
                     title: String(localized: "welcome.feature.privacy", defaultValue: "Private by default"),
                     description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Runs on-device by default \u{2014} nothing leaves your Mac unless you turn on optional enrichment"))
             }
             .padding(.horizontal, 20)
+
+            // v1.21.5: dashboard-mode picker for new installs. Default
+            // Basic; persisted by applySetup() on completion only, so
+            // upgrades (which never see this wizard) keep Advanced.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "welcome.mode.title", defaultValue: "Choose your experience"))
+                    .font(.headline)
+                Picker("", selection: $selectedUIMode) {
+                    ForEach(UIMode.allCases, id: \.self) { mode in
+                        Text(modeLabel(mode)).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(modeDescription(selectedUIMode))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(String(localized: "welcome.mode.changeLater", defaultValue: "You can change this anytime in Settings"))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 20)
         }
         .padding(.horizontal, 20)
+    }
+
+    /// v1.21.5: localized segment labels for the mode picker. The wizard
+    /// rendered UIMode.displayName — English in all 14 locales while the
+    /// per-mode descriptions below translated. Localized here, not on
+    /// UIMode.displayName itself (SettingsView renders that elsewhere).
+    private func modeLabel(_ mode: UIMode) -> String {
+        switch mode {
+        case .basic:
+            return String(localized: "welcome.mode.basic", defaultValue: "Basic")
+        case .standard:
+            return String(localized: "welcome.mode.standard", defaultValue: "Standard")
+        case .advanced:
+            return String(localized: "welcome.mode.advanced", defaultValue: "Advanced")
+        }
+    }
+
+    private func modeDescription(_ mode: UIMode) -> String {
+        switch mode {
+        case .basic:
+            return String(localized: "welcome.mode.basicDesc", defaultValue: "The essentials \u{2014} alerts and system status")
+        case .standard:
+            return String(localized: "welcome.mode.standardDesc", defaultValue: "Adds events, investigation, and prevention controls")
+        case .advanced:
+            return String(localized: "welcome.mode.advancedDesc", defaultValue: "Every workspace, including forensics and intelligence")
+        }
     }
 
     // MARK: - Step 3: Ready
@@ -175,7 +234,11 @@ struct WelcomeView: View {
             Text(String(localized: "welcome.allSet", defaultValue: "Setup Checklist"))
                 .font(.title2).fontWeight(.bold)
 
-            Text(String(localized: "welcome.ready", defaultValue: "MacCrab is ready to protect your Mac."))
+            // v1.21.5: only claim "ready" when the checklist is actually
+            // green — the old copy said it unconditionally.
+            Text(checklistComplete
+                ? String(localized: "welcome.ready", defaultValue: "MacCrab is ready to protect your Mac.")
+                : String(localized: "welcome.almostReady", defaultValue: "Almost there \u{2014} finish the items below to activate protection."))
                 .font(.callout)
                 .foregroundColor(.secondary)
 
@@ -188,24 +251,38 @@ struct WelcomeView: View {
                         ? String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active")
                         : String(localized: "welcome.setup.engineInactive", defaultValue: "Detection engine not detected \u{2014} start the daemon first"))
 
-                // Dynamic: compiled rule count
+                // Dynamic: compiled rule count. v1.21.5: the fallback lost
+                // its "run make compile-rules" dev jargon — the rare miss
+                // self-heals via RuleBundleInstaller.syncIfNeeded() at
+                // next launch.
                 SetupRow(
                     icon: compiledRuleCount > 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
                     color: compiledRuleCount > 0 ? .green : .orange,
                     text: compiledRuleCount > 0
                         ? "\(compiledRuleCount) detection rules loaded"
-                        : String(localized: "welcome.setup.noRules", defaultValue: "No compiled rules found \u{2014} run make compile-rules"))
+                        : String(localized: "welcome.setup.noRules", defaultValue: "Detection rules will install automatically \u{2014} restart MacCrab if this doesn't clear"))
 
                 // Language is always set
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
                     text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
 
-                SetupRow(icon: "exclamationmark.shield", color: .orange,
-                    text: String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app"))
-                SetupRow(icon: "exclamationmark.shield", color: .orange,
-                    text: String(localized: "welcome.setup.es", defaultValue: "Endpoint Security: approve the System Extension when prompted by System Settings"))
-                SetupRow(icon: "info.circle", color: .blue,
-                    text: String(localized: "overview.startDaemon", defaultValue: "Start detection: click Enable Protection on the Overview tab"))
+                // Dynamic: the APP's Full Disk Access (v1.21.5, was a
+                // static instruction). The engine self-probes its own FDA
+                // post-install and surfaces it in the System workspace.
+                // An .unknown probe gets the same no-false-alarm
+                // treatment as PermissionsProbe's other consumers.
+                SetupRow(
+                    icon: fdaStatus == .denied ? "exclamationmark.shield" : "checkmark.circle.fill",
+                    color: fdaStatus == .denied ? .orange : .green,
+                    text: fdaStatus == .denied
+                        ? String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app")
+                        : String(localized: "welcome.setup.fdaGranted", defaultValue: "Full Disk Access granted"))
+
+                // Dynamic: System Extension state (v1.21.5, was a static
+                // instruction). Live via @ObservedObject — approval in
+                // System Settings flips this row without Check Again.
+                SetupRow(icon: sysextRow.icon, color: sysextRow.color, text: sysextRow.text)
+
                 SetupRow(icon: "info.circle", color: .blue,
                     text: String(localized: "welcome.setup.prevention", defaultValue: "Enable prevention in the Prevention tab"))
             }
@@ -232,6 +309,33 @@ struct WelcomeView: View {
         .onAppear { checkDaemonHealth() }
     }
 
+    /// v1.21.5: all live checklist rows green?
+    private var checklistComplete: Bool {
+        WelcomeChecklist.isComplete(
+            daemonDBFound: daemonDBFound,
+            ruleCount: compiledRuleCount,
+            fda: fdaStatus,
+            sysext: sysextManager.state)
+    }
+
+    /// v1.21.5: live System Extension row content.
+    private var sysextRow: (icon: String, color: Color, text: String) {
+        switch sysextManager.state {
+        case .activated:
+            return ("checkmark.circle.fill", .green,
+                String(localized: "welcome.setup.esActive", defaultValue: "System Extension active"))
+        case .awaitingApproval:
+            return ("exclamationmark.shield", .orange,
+                String(localized: "welcome.setup.esAwaiting", defaultValue: "System Extension awaiting approval \u{2014} open System Settings \u{2192} General \u{2192} Login Items & Extensions"))
+        case .failed:
+            return ("exclamationmark.triangle.fill", .orange,
+                String(localized: "welcome.setup.esFailed", defaultValue: "System Extension activation failed \u{2014} click Enable Protection to retry"))
+        case .unknown, .notActivated, .activating:
+            return ("info.circle", .blue,
+                String(localized: "welcome.setup.esPending", defaultValue: "System Extension: click Enable Protection below to install"))
+        }
+    }
+
     // MARK: - Daemon Health Check
 
     /// Check if the daemon database exists (user or system path) and count compiled rules.
@@ -239,6 +343,11 @@ struct WelcomeView: View {
     private func checkDaemonHealth() {
         isChecking = true
         let fm = FileManager.default
+
+        // v1.21.5: refresh the app's FDA state alongside the daemon
+        // checks (synchronous + cheap — a few stat calls, same as the
+        // Forensics tab's .onAppear usage).
+        fdaStatus = PermissionsProbe.fullDiskAccess()
 
         // 1. Check daemon DB in both locations
         let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -304,14 +413,35 @@ struct WelcomeView: View {
 
     // MARK: - Apply
 
-    private func applyLanguage() {
+    /// v1.21.5: applies language + dashboard mode and marks setup
+    /// complete. This is the wizard's only completion path (an Esc
+    /// dismiss leaves hasCompletedSetup false, so the wizard returns) —
+    /// keeping the UIMode write here guarantees every completed
+    /// first-run has an explicit mode choice.
+    private func applySetup() {
         UserDefaults.standard.set([selectedLanguage], forKey: "AppleLanguages")
+        UserDefaults.standard.set(selectedUIMode.rawValue, forKey: UIMode.storageKey)
         UserDefaults.standard.set(true, forKey: "hasCompletedSetup")
         UserDefaults.standard.synchronize()
         if let bundleId = Bundle.main.bundleIdentifier {
             UserDefaults(suiteName: bundleId)?.set([selectedLanguage], forKey: "AppleLanguages")
             UserDefaults(suiteName: bundleId)?.synchronize()
         }
+    }
+}
+
+// MARK: - Checklist Predicate
+
+/// v1.21.5: pure seam so the "all checklist items green" rule is unit-
+/// testable (the SwiftUI view itself isn't). Language is always set, so
+/// only the four live rows participate. An `.unknown` FDA probe can't
+/// tell either way and must not block the "ready" line — the same
+/// no-false-alarm treatment PermissionsProbe's other consumers use.
+enum WelcomeChecklist {
+    static func isComplete(daemonDBFound: Bool, ruleCount: Int,
+                           fda: FullDiskAccessStatus,
+                           sysext: SystemExtensionState) -> Bool {
+        daemonDBFound && ruleCount > 0 && fda != .denied && sysext == .activated
     }
 }
 

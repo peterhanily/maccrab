@@ -251,7 +251,11 @@ struct V2OverviewWorkspace: View {
             case .degraded:
                 return String(localized: "overview.bannerBodyDegraded", defaultValue: "Live data is stale or score is low — open System health for details")
             case .inactive:
-                return String(localized: "overview.bannerBodyInactive", defaultValue: "Start the System Extension or run `swift run maccrabd` to begin protection")
+                // v1.21.5: end-user copy — the old string told release
+                // users to `swift run maccrabd`. Clicking the banner
+                // already navigates to System > System health, where the
+                // extension state and permissions live.
+                return String(localized: "overview.bannerBodyInactive", defaultValue: "The detection engine isn't running \u{2014} click to review System Extension status and permissions")
             }
         }()
         let color: Color = {

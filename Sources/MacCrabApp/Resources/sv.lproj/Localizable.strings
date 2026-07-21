@@ -145,18 +145,6 @@
 "statusBar.settings" = "Inställningar...";
 "statusBar.quit" = "Avsluta MacCrab";
 
-/* ── Prevention View ── */
-"prevention.title" = "Förebyggande";
-"prevention.enableAll" = "Aktivera alla";
-"prevention.enableAllHint" = "Slår på eller av alla förebyggande mekanismer";
-"prevention.description" = "Aktivt förebyggande blockerar hot innan de orsakar skada. Varje mekanism kan aktiveras eller inaktiveras individuellt.";
-"prevention.threatsBlocked" = "Hot blockerade";
-"prevention.domainsSinkholed" = "Domäner omdirigerade";
-"prevention.ipsBlocked" = "IP:er blockerade";
-"prevention.packagesGated" = "Paket kontrollerade";
-"prevention.recentActivity" = "Senaste förebyggande aktivitet";
-"prevention.mechanisms" = "Förebyggande mekanismer";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "Hotunderrättelser";
 "threatIntel.sectionPicker" = "Avsnitt hotinfo";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "Klicka för att granska under Varningar";
 "overview.allClear" = "Allt lugnt — inga kritiska varningar";
 "overview.noRecentAlerts" = "Inga senaste varningar";
@@ -415,14 +402,14 @@
 "welcome.title" = "Välkommen till MacCrab";
 "welcome.chooseLanguage" = "Välj ditt språk";
 "welcome.whatIs" = "Vad är MacCrab?";
-"welcome.allSet" = "Allt är klart!";
+"welcome.allSet" = "Checklista för installation";
 "welcome.ready" = "MacCrab är redo att skydda din Mac.";
 "welcome.feature.detection" = "Detektering i realtid";
 "welcome.feature.detectionDesc" = "Hundratals detekteringsregler övervakar din Mac efter hot i realtid";
 "welcome.feature.ai" = "AI-säkerhet";
 "welcome.feature.aiDesc" = "Övervakar AI-kodverktyg som Claude, Cursor och Copilot för åtkomst till autentiseringsuppgifter";
-"welcome.feature.prevention" = "Aktivt förebyggande";
-"welcome.feature.preventionDesc" = "Blockerar skadliga domäner, sätter filer i karantän och stoppar attacker mot leveranskedjan";
+"welcome.feature.prevention" = "Automatiserad respons";
+"welcome.feature.preventionDesc" = "Valfria moduler avleder skadliga domäner, blockerar skadliga IP-adresser, låser persistensplatser och kan avsluta processer eller sätta filer i karantän vid larm med hög allvarlighetsgrad — responsen följer på detekteringen";
 "welcome.feature.privacy" = "Privat som standard";
 "welcome.feature.privacyDesc" = "Körs på enheten som standard — inget lämnar din Mac om du inte aktiverar valfri berikning";
 "welcome.setup.engineActive" = "Detekteringsmotorn är aktiv";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "Okänd status";
 "settings.useLocalhost" = "Använd localhost:4321";
 "settings.useOfficial" = "Använd officiell";
+"welcome.almostReady" = "Nästan klart — slutför punkterna nedan för att aktivera skyddet.";
 "welcome.enableProtection" = "Aktivera skydd";
 "welcome.getStarted" = "Kom igång";
+"welcome.mode.title" = "Välj din upplevelse";
+"welcome.mode.basic" = "Grundläggande";
+"welcome.mode.standard" = "Standard";
+"welcome.mode.advanced" = "Avancerad";
+"welcome.mode.basicDesc" = "Det viktigaste — varningar och systemstatus";
+"welcome.mode.standardDesc" = "Lägger till händelser, utredning och förebyggande kontroller";
+"welcome.mode.advancedDesc" = "Alla arbetsytor, inklusive forensik och underrättelser";
+"welcome.mode.changeLater" = "Du kan ändra detta när som helst i Inställningar";
 "welcome.setup.checkAgain" = "Kontrollera igen";
-"welcome.setup.engineInactive" = "Detekteringsmotorn hittades inte \\u{2014} starta daemonen först";
-"welcome.setup.es" = "Endpoint Security: godkänn systemtillägget när Systeminställningar frågar";
-"welcome.setup.fda" = "Bevilja Fullständig skivåtkomst: Systeminställningar \\u{2192} Integritet och säkerhet \\u{2192} Fullständig skivåtkomst \\u{2192} lägg till MacCrab.app";
-"welcome.setup.noRules" = "Inga kompilerade regler hittades \\u{2014} kör make compile-rules";
+"welcome.setup.engineInactive" = "Detekteringsmotorn hittades inte — starta daemonen först";
+"welcome.setup.esActive" = "Systemtillägget är aktivt";
+"welcome.setup.esAwaiting" = "Systemtillägget väntar på godkännande — öppna Systeminställningar → Allmänt → Inloggningsobjekt och tillägg";
+"welcome.setup.esFailed" = "Aktiveringen av systemtillägget misslyckades — klicka på ”Aktivera skydd” för att försöka igen";
+"welcome.setup.esPending" = "Systemtillägg: klicka på ”Aktivera skydd” nedan för att installera";
+"welcome.setup.fda" = "Bevilja Fullständig skivåtkomst: Systeminställningar → Integritet och säkerhet → Fullständig skivåtkomst → lägg till MacCrab.app";
+"welcome.setup.fdaGranted" = "Fullständig skivåtkomst beviljad";
+"welcome.setup.noRules" = "Detekteringsregler installeras automatiskt — starta om MacCrab om detta inte försvinner";
 "workspace.alerts.title" = "Varningar";
 "workspace.detection.title" = "Detektering";
 "workspace.docs.title" = "Dokument";

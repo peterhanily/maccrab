@@ -65,7 +65,6 @@ trace_001.maccrabtrace/
   integrity/
     hash_chain.json                      (required)
     chain_head_signature.json            (required)
-    bundle_sha256.txt                    (informational only)
   schema/
     manifest.schema.json                 (forthcoming)
     graph.schema.json
@@ -209,11 +208,34 @@ The verifier (`BundleVerifier`) is **out of
 scope for the v1.10.0 validator** — `validate` covers structure and
 manifest-claim checks; `verify` covers tamper-evidence.
 
-### 6.3 `bundle_sha256.txt`
+### 6.3 Outer-archive sidecar digest (`<archive>.sha256`)
 
-Plain hex of the outer `.tar.gz` SHA-256, included for convenience
-only. **Not** part of the signed Merkle root. Recompressing the bundle
-changes this value but does not invalidate the signature.
+When `maccrabctl trace export` packages the bundle as `tar.gz`, it
+computes the SHA-256 of the finished archive and writes it **next to**
+the archive (not inside it) as `<archive>.sha256` — e.g.
+`trace_001.maccrabtrace.tar.gz.sha256` — in `shasum -a 256` output
+format:
+
+```
+<64-hex-digest>  trace_001.maccrabtrace.tar.gz
+```
+
+so `shasum -a 256 -c trace_001.maccrabtrace.tar.gz.sha256` verifies it
+directly.
+
+The sidecar is a **transport-integrity convenience only**. It is
+**not** part of the signed Merkle root; recompressing the bundle
+changes it without invalidating the signature. The tamper evidence is
+the in-bundle chain (§6.1 + §6.2), never the sidecar.
+
+**Version note (v1.21.5):** versions before v1.21.5 instead wrote an
+`integrity/bundle_sha256.txt` file *inside* the bundle, documented as
+"plain hex of the outer `.tar.gz` SHA-256". That file could only ever
+contain the literal string `PLACEHOLDER` — a file inside a tar.gz can
+never contain that archive's own hash — and no validator or verifier
+ever read it. v1.21.5 removed it in favor of the sidecar. Readers must
+tolerate its presence in bundles exported by ≤ v1.21.4 (it was never
+part of the Merkle artifact list, which excludes `integrity/`).
 
 ### 6.4 Tamper-evidence: what is guaranteed (and what is not)
 

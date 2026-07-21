@@ -145,18 +145,6 @@
 "statusBar.settings" = "Instellingen...";
 "statusBar.quit" = "MacCrab stoppen";
 
-/* ── Prevention View ── */
-"prevention.title" = "Preventie";
-"prevention.enableAll" = "Alles inschakelen";
-"prevention.enableAllHint" = "Schakelt alle preventiemechanismen in of uit";
-"prevention.description" = "Actieve preventie blokkeert bedreigingen voordat ze schade aanrichten. Elk mechanisme kan afzonderlijk worden in- of uitgeschakeld.";
-"prevention.threatsBlocked" = "Bedreigingen geblokkeerd";
-"prevention.domainsSinkholed" = "Domeinen omgeleid";
-"prevention.ipsBlocked" = "IP's geblokkeerd";
-"prevention.packagesGated" = "Pakketten gecontroleerd";
-"prevention.recentActivity" = "Recente preventieactiviteit";
-"prevention.mechanisms" = "Preventiemechanismen";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "Dreigingsinformatie";
 "threatIntel.sectionPicker" = "Sectie dreigingsinfo";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "Klik om te bekijken in Waarschuwingen";
 "overview.allClear" = "Alles veilig — geen kritieke waarschuwingen";
 "overview.noRecentAlerts" = "Geen recente waarschuwingen";
@@ -415,14 +402,14 @@
 "welcome.title" = "Welkom bij MacCrab";
 "welcome.chooseLanguage" = "Kies je taal";
 "welcome.whatIs" = "Wat is MacCrab?";
-"welcome.allSet" = "Je bent er klaar voor!";
+"welcome.allSet" = "Configuratiechecklist";
 "welcome.ready" = "MacCrab is klaar om je Mac te beschermen.";
 "welcome.feature.detection" = "Realtime detectie";
 "welcome.feature.detectionDesc" = "Honderden detectieregels bewaken je Mac in realtime op bedreigingen";
 "welcome.feature.ai" = "AI-veiligheid";
 "welcome.feature.aiDesc" = "Bewaakt AI-codeertools zoals Claude, Cursor en Copilot op toegang tot referenties";
-"welcome.feature.prevention" = "Actieve preventie";
-"welcome.feature.preventionDesc" = "Blokkeert kwaadaardige domeinen, isoleert bestanden en houdt aanvallen via de toeleveringsketen tegen";
+"welcome.feature.prevention" = "Geautomatiseerde reactie";
+"welcome.feature.preventionDesc" = "Optionele modules leiden kwaadaardige domeinen om, blokkeren schadelijke IP-adressen, vergrendelen persistentielocaties en kunnen bij meldingen met hoge ernst processen beëindigen of bestanden in quarantaine plaatsen — de reactie volgt op de detectie";
 "welcome.feature.privacy" = "Privé door ontwerp";
 "welcome.feature.privacyDesc" = "Draait standaard op het apparaat — niets verlaat je Mac tenzij je de optionele verrijking inschakelt";
 "welcome.setup.engineActive" = "Detectie-engine actief";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "Status onbekend";
 "settings.useLocalhost" = "Gebruik localhost:4321";
 "settings.useOfficial" = "Gebruik officiële catalogus";
+"welcome.almostReady" = "Bijna klaar — voltooi de onderstaande punten om de bescherming te activeren.";
 "welcome.enableProtection" = "Bescherming inschakelen";
 "welcome.getStarted" = "Aan de slag";
+"welcome.mode.title" = "Kies je ervaring";
+"welcome.mode.basic" = "Basis";
+"welcome.mode.standard" = "Standaard";
+"welcome.mode.advanced" = "Geavanceerd";
+"welcome.mode.basicDesc" = "De essentie — meldingen en systeemstatus";
+"welcome.mode.standardDesc" = "Voegt gebeurtenissen, onderzoek en preventie-instellingen toe";
+"welcome.mode.advancedDesc" = "Alle werkruimten, inclusief forensisch onderzoek en intelligence";
+"welcome.mode.changeLater" = "Je kunt dit altijd wijzigen in Instellingen";
 "welcome.setup.checkAgain" = "Controleer opnieuw";
-"welcome.setup.engineInactive" = "Detectie-engine niet gedetecteerd \\u{2014} start eerst de daemon";
-"welcome.setup.es" = "Endpoint Security: keur de systeemextensie goed wanneer Systeeminstellingen daarom vraagt";
-"welcome.setup.fda" = "Verleen volledige schijftoegang: Systeeminstellingen \\u{2192} Privacy en beveiliging \\u{2192} Volledige schijftoegang \\u{2192} voeg MacCrab.app toe";
-"welcome.setup.noRules" = "Geen gecompileerde regels gevonden \\u{2014} voer make compile-rules uit";
+"welcome.setup.engineInactive" = "Detectie-engine niet gedetecteerd — start eerst de daemon";
+"welcome.setup.esActive" = "Systeemextensie actief";
+"welcome.setup.esAwaiting" = "Systeemextensie wacht op goedkeuring — open Systeeminstellingen → Algemeen → Inlogonderdelen en extensies";
+"welcome.setup.esFailed" = "Activeren van systeemextensie mislukt — klik op 'Bescherming inschakelen' om het opnieuw te proberen";
+"welcome.setup.esPending" = "Systeemextensie: klik hieronder op 'Bescherming inschakelen' om te installeren";
+"welcome.setup.fda" = "Verleen volledige schijftoegang: Systeeminstellingen → Privacy en beveiliging → Volledige schijftoegang → voeg MacCrab.app toe";
+"welcome.setup.fdaGranted" = "Volledige schijftoegang verleend";
+"welcome.setup.noRules" = "Detectieregels worden automatisch geïnstalleerd — herstart MacCrab als dit niet verdwijnt";
 "workspace.alerts.title" = "Waarschuwingen";
 "workspace.detection.title" = "Detectie";
 "workspace.docs.title" = "Documentatie";

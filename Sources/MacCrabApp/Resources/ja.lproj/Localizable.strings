@@ -145,18 +145,6 @@
 "statusBar.settings" = "設定...";
 "statusBar.quit" = "MacCrabを終了";
 
-/* ── Prevention View ── */
-"prevention.title" = "予防";
-"prevention.enableAll" = "すべて有効";
-"prevention.enableAllHint" = "すべての予防メカニズムのオンオフを切り替えます";
-"prevention.description" = "アクティブな予防は、脅威が被害を与える前にブロックします。各メカニズムは個別に有効化できます。";
-"prevention.threatsBlocked" = "ブロックした脅威";
-"prevention.domainsSinkholed" = "シンクホール済みドメイン";
-"prevention.ipsBlocked" = "ブロック済みIP";
-"prevention.packagesGated" = "制御済みパッケージ";
-"prevention.recentActivity" = "最近の予防活動";
-"prevention.mechanisms" = "予防メカニズム";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "脅威インテリジェンス";
 "threatIntel.sectionPicker" = "脅威情報セクション";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "クリックしてアラートで確認";
 "overview.allClear" = "すべて正常 — 重大アラートなし";
 "overview.noRecentAlerts" = "最近のアラートはありません";
@@ -415,14 +402,14 @@
 "welcome.title" = "MacCrabへようこそ";
 "welcome.chooseLanguage" = "言語を選択";
 "welcome.whatIs" = "MacCrabとは？";
-"welcome.allSet" = "準備完了！";
+"welcome.allSet" = "セットアップチェックリスト";
 "welcome.ready" = "MacCrabがあなたのMacを保護する準備ができました。";
 "welcome.feature.detection" = "リアルタイム検出";
 "welcome.feature.detectionDesc" = "数百件の検出ルールがリアルタイムでMacの脅威を監視します";
 "welcome.feature.ai" = "AI安全性";
 "welcome.feature.aiDesc" = "Claude、Cursor、CopilotなどのAIコーディングツールの認証情報アクセスを監視します";
-"welcome.feature.prevention" = "アクティブな予防";
-"welcome.feature.preventionDesc" = "悪意のあるドメインをブロックし、ファイルを隔離し、サプライチェーン攻撃を制御します";
+"welcome.feature.prevention" = "自動対応";
+"welcome.feature.preventionDesc" = "オプションのモジュールが悪意のあるドメインをシンクホール化し、不正なIPをブロックし、永続化場所をロックし、重大度の高いアラート時にはプロセスの終了やファイルの隔離を実行できます — 対応は検出の後に行われます";
 "welcome.feature.privacy" = "デフォルトでプライベート";
 "welcome.feature.privacyDesc" = "デフォルトではデバイス上で動作 — 任意のエンリッチメントを有効にしない限り、Mac の外にデータが出ることはありません";
 "welcome.setup.engineActive" = "検出エンジンは稼働中";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "状態不明";
 "settings.useLocalhost" = "localhost:4321を使用";
 "settings.useOfficial" = "公式を使用";
+"welcome.almostReady" = "あと少しです — 以下の項目を完了すると保護が有効になります。";
 "welcome.enableProtection" = "保護を有効にする";
 "welcome.getStarted" = "はじめる";
+"welcome.mode.title" = "表示モードを選択";
+"welcome.mode.basic" = "基本";
+"welcome.mode.standard" = "標準";
+"welcome.mode.advanced" = "上級";
+"welcome.mode.basicDesc" = "基本のみ — アラートとシステム状態";
+"welcome.mode.standardDesc" = "イベント、調査、予防のコントロールを追加";
+"welcome.mode.advancedDesc" = "フォレンジックやインテリジェンスを含むすべてのワークスペース";
+"welcome.mode.changeLater" = "設定でいつでも変更できます";
 "welcome.setup.checkAgain" = "再確認";
 "welcome.setup.engineInactive" = "検出エンジンが検出されません — 先にデーモンを起動してください";
-"welcome.setup.es" = "Endpoint Security: システム設定のプロンプトが表示されたらシステム機能拡張を承認してください";
+"welcome.setup.esActive" = "システム機能拡張は有効です";
+"welcome.setup.esAwaiting" = "システム機能拡張は承認待ちです — システム設定 → 一般 → ログイン項目と機能拡張 を開いてください";
+"welcome.setup.esFailed" = "システム機能拡張の有効化に失敗しました — 「保護を有効にする」をクリックして再試行してください";
+"welcome.setup.esPending" = "システム機能拡張: 下の「保護を有効にする」をクリックしてインストールしてください";
 "welcome.setup.fda" = "フルディスクアクセスを許可: システム設定 → プライバシーとセキュリティ → フルディスクアクセス → MacCrab.appを追加";
-"welcome.setup.noRules" = "コンパイル済みルールが見つかりません — make compile-rules を実行してください";
+"welcome.setup.fdaGranted" = "フルディスクアクセスが許可されています";
+"welcome.setup.noRules" = "検出ルールは自動的にインストールされます — 解消しない場合はMacCrabを再起動してください";
 "workspace.alerts.title" = "アラート";
 "workspace.detection.title" = "検出";
 "workspace.docs.title" = "ドキュメント";

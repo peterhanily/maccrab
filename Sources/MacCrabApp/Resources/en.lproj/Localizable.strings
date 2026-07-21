@@ -270,18 +270,6 @@
 "tabs.threatIntel" = "Threat Intel";
 "tabs.integrations" = "Integrations";
 
-/* ── Prevention View ── */
-"prevention.title" = "Prevention";
-"prevention.enableAll" = "Enable All";
-"prevention.enableAllHint" = "Toggles all prevention mechanisms on or off";
-"prevention.description" = "Active prevention blocks threats before they cause damage. Each mechanism can be individually enabled or disabled.";
-"prevention.threatsBlocked" = "Threats Blocked";
-"prevention.domainsSinkholed" = "Domains Sinkholed";
-"prevention.ipsBlocked" = "IPs Blocked";
-"prevention.packagesGated" = "Packages Gated";
-"prevention.recentActivity" = "Recent Prevention Activity";
-"prevention.mechanisms" = "Prevention Mechanisms";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "Threat Intelligence";
 "threatIntel.sectionPicker" = "Threat intel section";
@@ -405,7 +393,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab detection engine…";
-"overview.startDaemon" = "Start the detection engine: sudo maccrabd";
 "overview.reviewAlerts" = "Click to review in Alerts";
 "overview.allClear" = "All clear — no critical alerts";
 "overview.noRecentAlerts" = "No recent alerts";
@@ -421,14 +408,14 @@
 "welcome.title" = "Welcome to MacCrab";
 "welcome.chooseLanguage" = "Choose your language";
 "welcome.whatIs" = "What is MacCrab?";
-"welcome.allSet" = "You’re All Set!";
+"welcome.allSet" = "Setup Checklist";
 "welcome.ready" = "MacCrab is ready to protect your Mac.";
 "welcome.feature.detection" = "Real-Time Detection";
 "welcome.feature.detectionDesc" = "Hundreds of detection rules monitor your Mac for threats in real time";
 "welcome.feature.ai" = "AI Safety";
 "welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
-"welcome.feature.prevention" = "Active Prevention";
-"welcome.feature.preventionDesc" = "Blocks malicious domains, quarantines files, and gates supply chain attacks";
+"welcome.feature.prevention" = "Automated Response";
+"welcome.feature.preventionDesc" = "Optional modules sinkhole malicious domains, block bad IPs, lock persistence locations, and can kill or quarantine on high-severity alerts — response follows detection";
 "welcome.feature.privacy" = "Private by default";
 "welcome.feature.privacyDesc" = "Runs on-device by default — nothing leaves your Mac unless you turn on optional enrichment";
 "welcome.setup.engineActive" = "Detection engine active";
@@ -695,13 +682,26 @@
 "settings.sysextStateUnknown" = "Status unknown";
 "settings.useLocalhost" = "Use localhost:4321";
 "settings.useOfficial" = "Use official";
+"welcome.almostReady" = "Almost there — finish the items below to activate protection.";
 "welcome.enableProtection" = "Enable Protection";
 "welcome.getStarted" = "Get Started";
+"welcome.mode.title" = "Choose your experience";
+"welcome.mode.basic" = "Basic";
+"welcome.mode.standard" = "Standard";
+"welcome.mode.advanced" = "Advanced";
+"welcome.mode.basicDesc" = "The essentials — alerts and system status";
+"welcome.mode.standardDesc" = "Adds events, investigation, and prevention controls";
+"welcome.mode.advancedDesc" = "Every workspace, including forensics and intelligence";
+"welcome.mode.changeLater" = "You can change this anytime in Settings";
 "welcome.setup.checkAgain" = "Check Again";
-"welcome.setup.engineInactive" = "Detection engine not detected \u{2014} start the daemon first";
-"welcome.setup.es" = "Endpoint Security: approve the System Extension when prompted by System Settings";
-"welcome.setup.fda" = "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app";
-"welcome.setup.noRules" = "No compiled rules found \u{2014} run make compile-rules";
+"welcome.setup.engineInactive" = "Detection engine not detected — start the daemon first";
+"welcome.setup.esActive" = "System Extension active";
+"welcome.setup.esAwaiting" = "System Extension awaiting approval — open System Settings → General → Login Items & Extensions";
+"welcome.setup.esFailed" = "System Extension activation failed — click Enable Protection to retry";
+"welcome.setup.esPending" = "System Extension: click Enable Protection below to install";
+"welcome.setup.fda" = "Grant Full Disk Access: System Settings → Privacy & Security → Full Disk Access → add MacCrab.app";
+"welcome.setup.fdaGranted" = "Full Disk Access granted";
+"welcome.setup.noRules" = "Detection rules will install automatically — restart MacCrab if this doesn't clear";
 "workspace.alerts.title" = "Alerts";
 "workspace.detection.title" = "Detection";
 "workspace.docs.title" = "Docs";

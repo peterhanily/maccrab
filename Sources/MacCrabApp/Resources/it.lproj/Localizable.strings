@@ -145,18 +145,6 @@
 "statusBar.settings" = "Impostazioni...";
 "statusBar.quit" = "Esci da MacCrab";
 
-/* ── Prevention View ── */
-"prevention.title" = "Prevenzione";
-"prevention.enableAll" = "Attiva Tutto";
-"prevention.enableAllHint" = "Attiva o disattiva tutti i meccanismi di prevenzione";
-"prevention.description" = "La prevenzione attiva blocca le minacce prima che causino danni. Ogni meccanismo può essere attivato o disattivato singolarmente.";
-"prevention.threatsBlocked" = "Minacce Bloccate";
-"prevention.domainsSinkholed" = "Domini Reindirizzati";
-"prevention.ipsBlocked" = "IP Bloccati";
-"prevention.packagesGated" = "Pacchetti Controllati";
-"prevention.recentActivity" = "Attività di Prevenzione Recente";
-"prevention.mechanisms" = "Meccanismi di Prevenzione";
-
 /* ── Threat Intel View ── */
 "threatIntel.title" = "Intelligence sulle Minacce";
 "threatIntel.sectionPicker" = "Sezione intel minacce";
@@ -399,7 +387,6 @@
 
 /* ── Overview Dashboard ── */
 "overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
 "overview.reviewAlerts" = "Clicca per esaminare in Avvisi";
 "overview.allClear" = "Tutto a posto — nessun avviso critico";
 "overview.noRecentAlerts" = "Nessun avviso recente";
@@ -415,14 +402,14 @@
 "welcome.title" = "Ti diamo il benvenuto in MacCrab";
 "welcome.chooseLanguage" = "Scegli la tua lingua";
 "welcome.whatIs" = "Cos'è MacCrab?";
-"welcome.allSet" = "Tutto pronto!";
+"welcome.allSet" = "Elenco di configurazione";
 "welcome.ready" = "MacCrab è pronto a proteggere il tuo Mac.";
 "welcome.feature.detection" = "Rilevamento in Tempo Reale";
 "welcome.feature.detectionDesc" = "Centinaia di regole di rilevamento monitorano il tuo Mac alla ricerca di minacce in tempo reale";
 "welcome.feature.ai" = "Sicurezza IA";
 "welcome.feature.aiDesc" = "Monitora l'accesso alle credenziali da parte di strumenti di coding IA come Claude, Cursor e Copilot";
-"welcome.feature.prevention" = "Prevenzione Attiva";
-"welcome.feature.preventionDesc" = "Blocca domini dannosi, mette i file in quarantena e controlla gli attacchi alla catena di fornitura";
+"welcome.feature.prevention" = "Risposta automatizzata";
+"welcome.feature.preventionDesc" = "Moduli opzionali deviano i domini dannosi, bloccano gli IP dannosi, proteggono le posizioni di persistenza e possono terminare processi o mettere file in quarantena su avvisi di gravità alta — la risposta segue il rilevamento";
 "welcome.feature.privacy" = "Privato per impostazione predefinita";
 "welcome.feature.privacyDesc" = "Funziona sul dispositivo per impostazione predefinita — nulla lascia il tuo Mac a meno che tu non attivi l'arricchimento opzionale";
 "welcome.setup.engineActive" = "Motore di rilevamento attivo";
@@ -671,13 +658,26 @@
 "settings.sysextStateUnknown" = "Stato sconosciuto";
 "settings.useLocalhost" = "Usa localhost:4321";
 "settings.useOfficial" = "Usa ufficiale";
+"welcome.almostReady" = "Ci siamo quasi — completa gli elementi qui sotto per attivare la protezione.";
 "welcome.enableProtection" = "Attiva Protezione";
 "welcome.getStarted" = "Inizia";
+"welcome.mode.title" = "Scegli la tua esperienza";
+"welcome.mode.basic" = "Base";
+"welcome.mode.standard" = "Standard";
+"welcome.mode.advanced" = "Avanzato";
+"welcome.mode.basicDesc" = "L'essenziale — avvisi e stato del sistema";
+"welcome.mode.standardDesc" = "Aggiunge eventi, indagine e controlli di prevenzione";
+"welcome.mode.advancedDesc" = "Tutti gli spazi di lavoro, inclusi forense e intelligence";
+"welcome.mode.changeLater" = "Puoi cambiarlo in qualsiasi momento nelle Impostazioni";
 "welcome.setup.checkAgain" = "Controlla di Nuovo";
 "welcome.setup.engineInactive" = "Motore di rilevamento non trovato — avvia prima il daemon";
-"welcome.setup.es" = "Endpoint Security: approva l'estensione di sistema quando richiesto da Impostazioni di Sistema";
+"welcome.setup.esActive" = "Estensione di sistema attiva";
+"welcome.setup.esAwaiting" = "Estensione di sistema in attesa di approvazione — apri Impostazioni di Sistema → Generali → Elementi login ed estensioni";
+"welcome.setup.esFailed" = "Attivazione dell'estensione di sistema non riuscita — fai clic su “Attiva Protezione” per riprovare";
+"welcome.setup.esPending" = "Estensione di sistema: fai clic su “Attiva Protezione” qui sotto per installarla";
 "welcome.setup.fda" = "Concedi l'Accesso completo al disco: Impostazioni di Sistema → Privacy e sicurezza → Accesso completo al disco → aggiungi MacCrab.app";
-"welcome.setup.noRules" = "Nessuna regola compilata trovata — esegui make compile-rules";
+"welcome.setup.fdaGranted" = "Accesso completo al disco concesso";
+"welcome.setup.noRules" = "Le regole di rilevamento verranno installate automaticamente — riavvia MacCrab se il problema persiste";
 "workspace.alerts.title" = "Avvisi";
 "workspace.detection.title" = "Rilevamento";
 "workspace.docs.title" = "Documentazione";

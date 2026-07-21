@@ -5,8 +5,11 @@
 // views (rule browser, AI analysis, threat intel, ES health) without
 // deleting them — they're one toggle away in Settings > Appearance.
 //
-// Default is .advanced so upgrades preserve the full current UX. Users
-// can downgrade; new installs can pick a mode from Welcome.
+// The no-stored-value fallback is .advanced so upgrades that predate
+// the picker keep the full current UX. New installs pick a mode in the
+// Welcome wizard (v1.21.5, defaults to Basic there) — the choice is
+// written to UIMode.storageKey on wizard completion, and Settings >
+// Appearance can change it any time.
 
 import Foundation
 

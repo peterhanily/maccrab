@@ -14,6 +14,7 @@
 
 import Testing
 import Foundation
+import MacCrabCore
 
 // CI-robustness (three mutually-reinforcing mitigations; the suite is a
 // black-box harness that spawns a real binary under full-suite load):
@@ -80,10 +81,10 @@ struct MCPProtocolHarnessTests {
     /// in the serialized suite are fast (binary + store warm in the page cache),
     /// so a retry of the cold first call almost always succeeds. A genuinely
     /// broken server returns empty on every attempt → the test still fails.
-    func drive(_ requestLines: [String]) -> [[String: Any]] {
+    func drive(_ requestLines: [String], home: URL = MCPProtocolHarnessTests.hermeticHome) -> [[String: Any]] {
         var objs: [[String: Any]] = []
         for _ in 0..<3 {
-            objs = driveOnce(requestLines)
+            objs = driveOnce(requestLines, home: home)
             if !objs.isEmpty { break }
         }
         if objs.isEmpty {
@@ -96,12 +97,20 @@ struct MCPProtocolHarnessTests {
     /// misbehaving (or fatally starved) server can't hang the suite. Returns
     /// [] on any failure — the caller (`drive`) decides whether to retry or
     /// record an issue, so a transient first-attempt failure isn't a test fail.
-    private func driveOnce(_ requestLines: [String]) -> [[String: Any]] {
+    private func driveOnce(_ requestLines: [String], home: URL) -> [[String: Any]] {
         guard let bin = Self.binaryURL() else { return [] }
         let proc = Process()
         proc.executableURL = bin
         var env = ProcessInfo.processInfo.environment
-        env["HOME"] = Self.hermeticHome.path
+        env["HOME"] = home.path
+        // v1.21.5 (Phase 2d): HOME alone never actually isolated the spawned
+        // server's store — FileManager.urls(for: .applicationSupportDirectory)
+        // resolves the home via getpwuid(3), not $HOME, so on a dev box with a
+        // live system store resolveDataDir kept picking /Library/Application
+        // Support/MacCrab. Pass the explicit override the server now honors so
+        // the hermetic-home design holds everywhere.
+        env["MACCRAB_DATA_DIR"] = home
+            .appendingPathComponent("Library/Application Support/MacCrab").path
         proc.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         proc.standardInput = inPipe
@@ -227,20 +236,56 @@ struct MCPProtocolHarnessTests {
     }
 
     @Test("SEC-1: agent-session output is slash-unescaped + never leaks the raw username")
-    func sessionOutputSanitized() {
+    func sessionOutputSanitized() async throws {
+        // v1.21.5: seed the hermetic store with a session whose executable +
+        // working directory live under the REAL /Users/<user>/ home. Against
+        // the shared (empty) hermetic HOME these assertions were vacuous —
+        // nothing in the output could contain a home path, so a sanitizer
+        // regression passed undetected. Now the seeded path WOULD leak on
+        // regression; the "/Users/[USER]/" positive check below proves the
+        // fixture actually flowed through each tool's output.
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-sec1-\(Foundation.ProcessInfo.processInfo.globallyUniqueString)",
+                                    isDirectory: true)
+        let dataDirURL = home.appendingPathComponent("Library/Application Support/MacCrab", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let sessionId = "11111111-2222-4333-8444-555555555555"
+        let homePath = "/Users/\(NSUserName())"
+        let eventStore = try EventStore(directory: dataDirURL.path)
+        try await eventStore.insert(event: Event(
+            timestamp: Date(),
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: MacCrabCore.ProcessInfo(
+                pid: 4242, ppid: 100, rpid: 4242,
+                name: "node", executable: "\(homePath)/project/node_modules/.bin/tool",
+                commandLine: "tool build", args: ["tool", "build"],
+                workingDirectory: "\(homePath)/project",
+                userId: 501, userName: NSUserName(), groupId: 20,
+                startTime: Date()
+            ),
+            enrichments: ["ai_tool": "claude_code", "ai_tool_session_id": sessionId]
+        ))
+
         let objs = drive([
             #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_agent_session","arguments":{"session_id":"00000000-0000-0000-0000-000000000000"}}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_agent_session","arguments":{"session_id":"\#(sessionId)"}}}"#,
             #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_agent_sessions","arguments":{}}}"#,
-        ])
+        ], home: home)
         for id in [2, 3] {
             let text = resultText(objs, id)
+            // Non-vacuousness: the seeded home path reached this tool's output
+            // and came out redacted (timeline path / project_dir).
+            #expect(text.contains("/Users/[USER]/"), "id \(id): seeded fixture did not flow through — sanitizer check is vacuous: \(text.prefix(300))")
             // jsonStringify must unescape '/' so the sanitizer's /Users/<name>/
             // regex can match (the escaped '\/' form defeated it — SEC-1).
             #expect(!text.contains(#"\/"#), "id \(id): output still has escaped slashes — sanitizer can't redact paths")
             // The agent must never see the raw operator username; any /Users/
             // path must be redacted to /Users/[USER]/.
-            #expect(!text.contains("/Users/\(NSUserName())/"), "id \(id): raw home path leaked to the agent")
+            #expect(!text.contains("\(homePath)/"), "id \(id): raw home path leaked to the agent")
         }
     }
 
@@ -386,5 +431,58 @@ struct MCPProtocolHarnessTests {
         // unknown session — they return an empty list / empty timeline.
         #expect((byId(objs, 3)?["result"] as? [String: Any])?["isError"] as? Bool != true)
         #expect((byId(objs, 4)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+    }
+
+    // v1.21.5 (Phase 2d): get_intent_posterior now reads the DAEMON's
+    // `maccrab.intent.bayesian-posterior` alerts out of the alerts DB
+    // instead of a process-local engine that never received evidence.
+    // Two contracts: an unmatched query is an honest non-error not-found
+    // naming the rule id, and a recorded posterior alert round-trips.
+
+    @Test("get_intent_posterior: unmatched tree key is an honest non-error not-found")
+    func intentPosteriorNotFound() {
+        // The key can't be a substring of any real tree key, so this holds
+        // on both an empty CI store and a live dev-box system store.
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_intent_posterior","arguments":{"tree_key":"zzz-no-such-tree-key-zzz"}}}"#,
+        ])
+        #expect((byId(objs, 2)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+        let text = resultText(objs, 2)
+        #expect(text.contains("No daemon-recorded posterior"), "not-found text missing: \(text)")
+        #expect(text.contains("maccrab.intent.bayesian-posterior"),
+                "not-found text must name the alert rule id the daemon records posteriors under")
+    }
+
+    @Test("get_intent_posterior: a seeded daemon posterior alert round-trips")
+    func intentPosteriorRoundTrip() async throws {
+        // Seed a store shaped exactly like the daemon's emission (EventLoop
+        // "Intent posterior crossed threshold") in a dedicated hermetic HOME.
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-posterior-\(ProcessInfo.processInfo.globallyUniqueString)",
+                                    isDirectory: true)
+        let dataDir = home.appendingPathComponent("Library/Application Support/MacCrab", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let alertStore = try AlertStore(directory: dataDir.path)
+        try await alertStore.insert(alert: Alert(
+            ruleId: "maccrab.intent.bayesian-posterior",
+            ruleTitle: "Intent posterior crossed threshold (exfiltration)",
+            severity: .medium,
+            eventId: UUID().uuidString,
+            processPath: "/usr/local/bin/node",
+            processName: "node",
+            description: "Bayesian belief network reports p(exfiltration)=0.91 for process tree /usr/local/bin/node@4242 after 5 observations (credentialRead, nonRegistryEgress, obfuscatedContent)"
+        ))
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_intent_posterior","arguments":{"tree_key":"node@4242"}}}"#,
+        ], home: home)
+        #expect((byId(objs, 2)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+        let text = resultText(objs, 2)
+        #expect(text.contains("p(exfiltration)=0.91"), "posterior payload missing: \(text)")
+        #expect(text.contains("/usr/local/bin/node@4242"), "tree key missing: \(text)")
+        #expect(text.contains("Intent posterior crossed threshold"), "rule title missing: \(text)")
     }
 }

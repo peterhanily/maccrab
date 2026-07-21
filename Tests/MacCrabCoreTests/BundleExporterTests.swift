@@ -142,6 +142,12 @@ struct BundleExporterTests {
         // Validate the freshly-written bundle.
         let outcome = BundleValidator.validate(at: bundleRoot)
         #expect(outcome.exitCode == 0, "Validator rejected exporter output: \(outcome.kind) \(outcome.messages)")
+
+        // v1.21.5: the in-bundle bundle_sha256.txt PLACEHOLDER is gone —
+        // the outer-archive digest is a post-packaging sidecar now.
+        #expect(!FileManager.default.fileExists(
+            atPath: bundleRoot.appendingPathComponent("integrity/bundle_sha256.txt").path
+        ), "integrity/bundle_sha256.txt must not be written (removed in v1.21.5)")
         await store.close()
     }
 
