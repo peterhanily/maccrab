@@ -1109,7 +1109,7 @@ RELEASE_EOF
     rm -rf "$STAGING_DIR"
 
     echo "To create a GitHub release:"
-    echo "  gh release create v$VERSION '$DMG_PATH' --title 'MacCrab v$VERSION' --notes-file RELEASE_NOTES.md"
+    echo "  gh release create v$VERSION '$DMG_PATH' --title 'MacCrab v$VERSION' --notes-file RELEASE_NOTES/v$VERSION.md"
 }
 
 # ─── Stage handoff helper ────────────────────────────────────────────

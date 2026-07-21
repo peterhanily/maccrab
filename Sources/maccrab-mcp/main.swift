@@ -3497,6 +3497,20 @@ private func jsonStringify(_ obj: Any) -> String {
 
 // MARK: - Main Loop (stdio JSON-RPC)
 
+/// v1.21.5: reference box for the runloop-spin pattern below. The main
+/// loop mutates locals from inside a detached Task and reads them back
+/// after a semaphore wait. The mutation always happens-before
+/// sem.signal() and the read always happens-after sem.wait(), so there
+/// is no race — but the Swift 6 language mode rejects mutable-var
+/// capture in concurrently-executing closures outright. Boxing the
+/// value in a final class keeps the exact same sequencing while
+/// satisfying Swift 6 (@unchecked Sendable is sound because the
+/// semaphore provides the happens-before ordering).
+private final class SemaphoreSequencedBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
 let decoder = JSONDecoder()
 
 // Observability: log the invoking parent process at startup. This is NOT a
@@ -3550,16 +3564,16 @@ while let line = readLine(strippingNewline: true) {
         // forensics bootstrap + registry read are async, so spin the
         // runloop like tools/call does.
         let listSem = DispatchSemaphore(value: 0)
-        var allTools = tools
+        let allTools = SemaphoreSequencedBox(tools)
         DispatchQueue.global().async {
             Task {
                 try? await ForensicsMCPBootstrapper.shared.ensure()
-                allTools.append(contentsOf: await pluginMCPTools())
+                allTools.value.append(contentsOf: await pluginMCPTools())
                 listSem.signal()
             }
         }
         listSem.wait()
-        sendResponse(id: request.id, result: ["tools": allTools])
+        sendResponse(id: request.id, result: ["tools": allTools.value])
     case "ping":
         sendResponse(id: request.id, result: ["status": "ok"])
     case "tools/call":
@@ -3581,7 +3595,7 @@ while let line = readLine(strippingNewline: true) {
 
         // Use a semaphore on a background queue (not main) to avoid deadlock
         let sem = DispatchSemaphore(value: 0)
-        var result: Any = ["content": [["type": "text", "text": "Internal error"]]]
+        let result = SemaphoreSequencedBox<Any>(["content": [["type": "text", "text": "Internal error"]]])
         // Whether this tool's output is forensic evidence (exempt from
         // sanitization, below). True for the forensics.* meta-tools AND
         // for dynamically-registered per-plugin tools (macho_analyze_path,
@@ -3596,19 +3610,21 @@ while let line = readLine(strippingNewline: true) {
         // must not be scrubbed). forensics_enrich is the exception — it returns
         // reputation/telemetry key-values, NOT evidence — so it stays sanitized
         // like a normal tool.
-        var isForensicTool = (toolName.hasPrefix("forensics_") && toolName != "forensics_enrich")   // normalized above
+        let isForensicTool = SemaphoreSequencedBox(
+            (toolName.hasPrefix("forensics_") && toolName != "forensics_enrich")   // normalized above
             || toolName == "export_session_bundle"
             || toolName == "verify_session_bundle"
+        )
         DispatchQueue.global().async {
             Task {
-                result = await handleToolCall(name: toolName, args: args)
-                if !isForensicTool { isForensicTool = await pluginForMCPTool(toolName) != nil }
+                result.value = await handleToolCall(name: toolName, args: args)
+                if !isForensicTool.value { isForensicTool.value = await pluginForMCPTool(toolName) != nil }
                 sem.signal()
             }
         }
         sem.wait()
         // Wave-3 P5: record the call on the durable per-call rail.
-        recordToolCall(toolName, result: result)
+        recordToolCall(toolName, result: result.value)
         // Sanitize before sending to the MCP client (typically an AI
         // agent like Claude Code). Without this, raw /Users/<name>/...
         // paths, private IPs, hostnames, and any leaked API keys flow
@@ -3626,8 +3642,8 @@ while let line = readLine(strippingNewline: true) {
         // interpolate a raw $HOME/username (e.g. "case not found at /Users/x/…").
         // So forensic SUCCESS results stay exempt; forensic ERROR results go
         // through the sanitizer like everything else.
-        let isErrorResult = ((result as? [String: Any])?["isError"] as? Bool) ?? false
-        let response = (isForensicTool && !isErrorResult) ? result : sanitizeContent(result)
+        let isErrorResult = ((result.value as? [String: Any])?["isError"] as? Bool) ?? false
+        let response = (isForensicTool.value && !isErrorResult) ? result.value : sanitizeContent(result.value)
         sendResponse(id: reqId, result: response)
     default:
         sendError(id: request.id, code: -32601, message: "Method not found: \(request.method)")

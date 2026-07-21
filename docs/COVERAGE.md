@@ -722,7 +722,11 @@ All technique IDs referenced anywhere in the rule corpus:
 - **Rule** column: filename + the rule's declared title.
 - **Status** column: `experimental` (still tuning), `stable`
   (production-ready by alpha standards), `deprecated`
-  (will be removed; do not enable).
+  (will be removed; do not enable). Promotion from
+  `experimental` to `stable` follows the quantitative bar in
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md) ("Rule Promotion
+  Criteria") — checkable with `scripts/check-promotion.sh
+  <rule-id>`.
 - **Severity**: critical / high / medium / low /
   informational. Drives notification routing + dashboard
   ordering. See `docs/MODULES.md` for the rule engine's

@@ -33,12 +33,14 @@ packages:
     # The sysext updates transparently via OSSystemExtensionRequest(.replace)
     # whenever the host app updates, so it doesn't need Sparkle linked in.
     url: https://github.com/sparkle-project/Sparkle
-    # Pinned exact to match Package.swift's `.exact("2.9.1")`. xcodegen
+    # Pinned exact to match Package.swift's `.exact("2.9.2")`. xcodegen
     # is only used to generate the Xcode project for IDE work; the
     # actual release build uses SPM directly, so today the two paths
     # would resolve to the same SHA either way. Keeping the pin
     # exact here means a future xcodebuild-based path can't drift.
-    exactVersion: 2.9.1
+    # (v1.21.5: bumped 2.9.1 → 2.9.2 — the two pins HAD drifted, which
+    # made xcodebuild fail package resolution against the local package.)
+    exactVersion: 2.9.2
 
 targets:
   # ─── Main app (dashboard + sysext activator) ──────────────────────
@@ -125,6 +127,12 @@ targets:
           python3 "${SRCROOT}/../Compiler/compile_rules.py" \
             --input-dir "${SRCROOT}/../Rules" \
             --output-dir "${SRCROOT}/../.build/compiled_rules" 2>/dev/null || true
+    # v1.21.5: explicit scheme so `xcodebuild test -scheme MacCrabApp
+    # -only-testing:MacCrabAppUITests` (UITests/README.md) works without
+    # relying on Xcode's scheme autocreation.
+    scheme:
+      testTargets:
+        - MacCrabAppUITests
 
   # ─── Endpoint Security system extension (the daemon) ───────────────
   MacCrabAgent:
@@ -184,3 +192,28 @@ targets:
         # System extensions use a bare Mach-O layout under
         # com.maccrab.agent.systemextension/Contents/MacOS/<id>
         EXECUTABLE_NAME: com.maccrab.agent
+
+  # ─── XCUITest bundle (v1.21.5 — see ../UITests/README.md) ──────────
+  # Drives the real dashboard WindowGroup against a seeded fixture DB.
+  # Needs a GUI login session to RUN, so it is not part of the fast
+  # `swift test` lane; run on-device via:
+  #   xcodebuild test -scheme MacCrabApp -destination 'platform=macOS' \
+  #     -only-testing:MacCrabAppUITests
+  MacCrabAppUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: ../UITests/MacCrabAppUITests
+    dependencies:
+      - target: MacCrabApp
+      # The SPM package (keyed MacCrabCore in this file) — tests seed
+      # fixture DBs via AlertStore/EventStore.
+      - package: MacCrabCore
+        product: MacCrabCore
+    settings:
+      base:
+        # Ad-hoc signing; the UITest runner needs no Developer ID /
+        # ES entitlement.
+        CODE_SIGN_IDENTITY: "-"
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"

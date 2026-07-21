@@ -45,10 +45,24 @@ public actor ArtifactStore {
         self.path = path
         self.encryptionState = encryptionState
 
+        // v1.21.5: the locked open + key + migrate window lives in a
+        // synchronous static helper because NSLock.lock()/unlock()
+        // are unavailable from async contexts in the Swift 6
+        // language mode. The window has no suspension points, so the
+        // serialization is byte-for-byte the same; keeping it in a
+        // sync function also makes it impossible to later introduce
+        // an `await` while the gate is held.
+        self.db = try Self.openKeyedAndMigrated(path: path, dek: dek)
+    }
+
+    /// Synchronous open + PRAGMA key + migrate window, held under
+    /// the process-wide `initLock`. On failure the handle is closed
+    /// here (still inside the gate) before the error propagates.
+    private static func openKeyedAndMigrated(path: String, dek: Data?) throws -> OpaquePointer {
         // Acquire the process-wide init lock and hold it through
         // the entire open + key + migrate window.
-        Self.initLock.lock()
-        defer { Self.initLock.unlock() }
+        initLock.lock()
+        defer { initLock.unlock() }
 
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(
@@ -62,30 +76,35 @@ public actor ArtifactStore {
             if let h = handle { sqlite3_close(h) }
             throw ArtifactStoreError.openFailed(message: msg, code: rc)
         }
-        self.db = h
 
-        // Apply DEK FIRST. SQLCipher's `PRAGMA key` must precede
-        // any actual file read; otherwise the encrypted header
-        // looks like a corrupt SQLite file and subsequent PRAGMAs
-        // fail.
-        if let dek = dek {
-            try Self.applyDEK(handle: h, dek: dek)
-        }
-
-        // Then the operational PRAGMAs.
-        for pragma in SchemaV1.openPragmas {
-            let rcP = sqlite3_exec(h, pragma, nil, nil, nil)
-            // PRAGMAs are advisory at this stage. If
-            // journal_mode=WAL is rejected we still proceed.
-            if rcP != SQLITE_OK {
-                // Log via OSLog in a follow-up commit; for now,
-                // silent. Error path is exercised by tests.
-                _ = rcP
+        do {
+            // Apply DEK FIRST. SQLCipher's `PRAGMA key` must precede
+            // any actual file read; otherwise the encrypted header
+            // looks like a corrupt SQLite file and subsequent PRAGMAs
+            // fail.
+            if let dek = dek {
+                try applyDEK(handle: h, dek: dek)
             }
-        }
 
-        // Schema migration.
-        try Self.migrate(handle: h)
+            // Then the operational PRAGMAs.
+            for pragma in SchemaV1.openPragmas {
+                let rcP = sqlite3_exec(h, pragma, nil, nil, nil)
+                // PRAGMAs are advisory at this stage. If
+                // journal_mode=WAL is rejected we still proceed.
+                if rcP != SQLITE_OK {
+                    // Log via OSLog in a follow-up commit; for now,
+                    // silent. Error path is exercised by tests.
+                    _ = rcP
+                }
+            }
+
+            // Schema migration.
+            try migrate(handle: h)
+        } catch {
+            sqlite3_close(h)
+            throw error
+        }
+        return h
     }
 
     deinit {

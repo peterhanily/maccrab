@@ -84,12 +84,17 @@ struct LoggingConsentManagerTests {
 
     @Test("Sink receives a log line per decide call")
     func sinkReceivesLog() async throws {
-        var lines: [String] = []
-        let mgr = LoggingConsentManager(sink: { lines.append($0) })
+        // v1.21.5: capture through a reference box — mutating a captured
+        // var inside the @Sendable sink is an error in the Swift 6
+        // language mode. The sink fires inside decide(), before the await
+        // returns, so the reads below are sequenced after all writes.
+        final class Lines: @unchecked Sendable { var value: [String] = [] }
+        let lines = Lines()
+        let mgr = LoggingConsentManager(sink: { lines.value.append($0) })
         let req = makeRequest(mode: .interactive)
         _ = await mgr.decide(req)
-        #expect(lines.count >= 1)
-        #expect(lines.first?.contains("mode=interactive") == true)
+        #expect(lines.value.count >= 1)
+        #expect(lines.value.first?.contains("mode=interactive") == true)
     }
 }
 

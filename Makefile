@@ -112,6 +112,8 @@ test-corpus:
 	fi; \
 	exit $$rc
 
+# Also see scripts/check-promotion.sh <rule-id|--all> — advisory checker for
+# the experimental→stable promotion bar (CONTRIBUTING.md "Rule Promotion Criteria").
 lint-rules:
 	./scripts/rule-lint.sh
 
@@ -122,6 +124,12 @@ check-counts:
 
 test-stress:
 	./scripts/stress-test.sh 60
+
+# v1.21.5: burst load benchmark — storms the engine with process spawns +
+# /tmp file writes, then diffs the daemon's own drop gauges. Fails if the
+# PRIORITY event stream (exec/network/tcc) dropped anything.
+test-burst:
+	./scripts/burst-bench.sh
 
 # Diagnostic — print event volume + composition from the running sysext's
 # events.db. Used to validate that EventInsertFilter is dropping what we

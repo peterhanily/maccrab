@@ -366,6 +366,9 @@ private struct V2SidebarItem: View {
                            ? String(localized: "sidebar.ax.workspaceHint",
                                     defaultValue: "Command \(workspace.keyboardIndex)")
                            : "")
+        // v1.21.5 (UI-test harness): stable XCUITest id per workspace row —
+        // AlertsFlowUITest navigates via app.buttons["sidebar.item.alerts"].
+        .v2AXID("sidebar.item.\(workspace.rawValue)")
     }
 
     // Mac-style accent on the active row: brand-tinted bg + brand

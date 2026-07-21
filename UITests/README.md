@@ -6,39 +6,42 @@ End-to-end UI tests that drive the real dashboard `WindowGroup` against a
 This directory is **not** part of `Package.swift` — SPM cannot host a UITest
 bundle, so `swift build` / `swift test` ignore it. The tests run through the
 XcodeGen-generated `.xcodeproj` (see below) via `xcodebuild`, which needs a real
-GUI login session (so this is a separate, non-blocking CI job, not the fast
-`swift test` lane).
+GUI login session. This stays a **non-blocking** lane (manual /
+`workflow_dispatch` if it ever gets a CI job — none exists today, and adding a
+blocking GUI job is explicitly a future option, not current state).
 
-## The seams (already in the app, v1.21.4)
+## The seams (already in the app)
 
 - **Fixture DB** — `AppState.dataDir` honors `MACCRAB_DATA_DIR` when the app is
   launched with `-ui-testing`. Point it at a temp dir seeded via
-  `AlertStore(directory:)` / `EventStore(directory:)` from `MacCrabCore`.
+  `AlertStore(directory:)` / `EventStore(directory:)` from `MacCrabCore`
+  (both are actors — seed from an `async` setUp).
 - **Window auto-show** — `-ui-testing` calls `showDashboard()` at launch so
   XCUITest attaches to the `WindowGroup` without automating the menu-bar item.
 - **Accessibility identifiers** — shared components take an optional `axId`
-  (see `V2AXIdentifier.swift`); `V2ActionButton` already forwards it. Add `axId`
-  at the surfaces a test needs to target (sidebar rows, alert rows, palette).
+  (see `V2AXIdentifier.swift`); `V2ActionButton` forwards it. Wired so far
+  (v1.21.5 — exactly what `AlertsFlowUITest` targets):
+  - `sidebar.item.<workspace.rawValue>` — every `V2SidebarItem` row
+  - `alert.row.<alert id>` — Alerts Open-table title cell
+  - `alert.suppress.<alert id>` — the inspector's Suppress `V2ActionButton`
 
-## Wiring the target (XcodeGen)
+  Everything else in the dashboard is still unidentified; add `axId`s at the
+  surfaces a new test needs to target.
 
-Add to `Xcode/project.yml`:
+## Target wiring — DONE (v1.21.5)
 
-```yaml
-  MacCrabAppUITests:
-    type: bundle.ui-testing
-    platform: macOS
-    sources: [../UITests/MacCrabAppUITests]
-    dependencies:
-      - target: MacCrabApp
-      - package: MacCrab            # so tests can seed via AlertStore/EventStore
-    settings:
-      CODE_SIGN_IDENTITY: "-"       # ad-hoc; no Developer ID / ES entitlement needed
-```
+`Xcode/project.yml` now defines the `MacCrabAppUITests` target
+(`bundle.ui-testing`, ad-hoc signed, depends on `MacCrabApp` + the
+`MacCrabCore` package product — note the package is keyed `MacCrabCore` in
+that file, not `MacCrab` as an earlier draft of this README said), and the
+`MacCrabApp` target declares an explicit scheme with `MacCrabAppUITests` as a
+test target, so the command below resolves without relying on Xcode's scheme
+autocreation.
 
-Then `cd Xcode && xcodegen`, and run:
+The `.xcodeproj` is gitignored — regenerate it on-device, then run:
 
 ```bash
+cd Xcode && xcodegen
 xcodebuild test -scheme MacCrabApp -destination 'platform=macOS' \
   -only-testing:MacCrabAppUITests
 ```
@@ -46,12 +49,17 @@ xcodebuild test -scheme MacCrabApp -destination 'platform=macOS' \
 ## What's covered
 
 `AlertsFlowUITest.swift` — the canonical flow: launch → open the Alerts
-workspace → assert a seeded CRITICAL alert renders → click Suppress → assert it
-disappears → run a free accessibility audit. It's the template; extend per
-workspace as `axId`s are added.
+workspace → assert a seeded CRITICAL alert renders → select the row → click
+Suppress in the inspector → assert it leaves the Open list → run a free
+accessibility audit. It's the template; extend per workspace as `axId`s are
+added.
 
 ## Honest limitations
 
-- Needs a real GUI session (WindowServer) — can't share the `swift test` lane.
+- Needs a real GUI session (WindowServer) — can't share the `swift test` lane,
+  and it has **not** been executed headless; running it is an on-device step.
+- The suppress round-trip is optimistic-UI: with no daemon consuming the inbox
+  IPC, the row disappearing proves the UI flow, not daemon-side persistence.
 - Menu-bar-extra automation is flaky; the harness sidesteps it via the WindowGroup.
-- First-time XcodeGen UITest-bundle + signing plumbing is the main friction.
+- Building the app via `xcodebuild` needs the Developer ID signing identity
+  present (the UITest bundle itself is ad-hoc signed).

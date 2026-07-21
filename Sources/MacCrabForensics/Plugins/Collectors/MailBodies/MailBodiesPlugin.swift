@@ -59,7 +59,13 @@ public struct MailBodiesPlugin: Collector {
         var rejected = 0
         let now = Date()
         var processed = 0
-        for case let url as URL in enumerator {
+        // v1.21.5: NSEnumerator's Sequence conformance (makeIterator) is
+        // unavailable from async contexts in the Swift 6 language mode;
+        // drive nextObject() directly — same lazy walk (the 2000-file cap
+        // below still bounds it) and same skip-on-non-URL behavior as the
+        // previous `for case let url as URL in enumerator`.
+        while let element = enumerator.nextObject() {
+            guard let url = element as? URL else { continue }
             guard url.pathExtension == "emlx" else { continue }
             processed += 1
             if processed > 2000 { break } // cap

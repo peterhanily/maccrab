@@ -1108,6 +1108,10 @@ struct V2AlertsWorkspace: View {
                          sortKey: { .text($0.title) }) { a in
                 VStack(alignment: .leading, spacing: 1) {
                     V2TableCellText(a.title, primary: true, lineLimit: 1)
+                        // v1.21.5 (UI-test harness): per-row XCUITest id on the
+                        // title cell — AlertsFlowUITest targets
+                        // app.staticTexts["alert.row.<alert id>"].
+                        .v2AXID("alert.row.\(a.id)")
                     V2TableCellText(a.ruleId, primary: false, mono: true, lineLimit: 1)
                 }
             },
@@ -1472,7 +1476,10 @@ struct V2AlertsWorkspace: View {
                                        disabled: alert.suppressed,
                                        tooltip: alert.suppressed
                                             ? "Already suppressed"
-                                            : "Mark this alert as suppressed in the alert store") {
+                                            : "Mark this alert as suppressed in the alert store",
+                                       // v1.21.5 (UI-test harness): AlertsFlowUITest
+                                       // clicks app.buttons["alert.suppress.<alert id>"].
+                                       axId: "alert.suppress.\(alert.id)") {
                             Task { await suppress(alert) }
                         }
                         .frame(maxWidth: .infinity)

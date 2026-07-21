@@ -392,7 +392,12 @@ struct BundleExporterTests {
             includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) {
-            for case let url as URL in enumerator {
+            // v1.21.5: NSEnumerator's Sequence conformance (makeIterator)
+            // is unavailable from async contexts in the Swift 6 language
+            // mode; drive nextObject() directly. Same traversal, same
+            // skip-on-non-URL behavior as `for case let url as URL`.
+            while let element = enumerator.nextObject() {
+                guard let url = element as? URL else { continue }
                 let res = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
                 if res.isRegularFile == true, let size = res.fileSize {
                     total += Int64(size)

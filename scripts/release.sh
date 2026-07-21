@@ -208,9 +208,26 @@ ARTIFACTS=""
 [ -f ".build/MacCrab-v$VERSION.dmg" ] && ARTIFACTS=".build/MacCrab-v$VERSION.dmg"
 
 if command -v gh &>/dev/null && [ -n "$ARTIFACTS" ]; then
-    gh release create "v$VERSION" $ARTIFACTS \
-        --title "MacCrab v$VERSION" \
-        --generate-notes
+    # v1.21.5: publish the curated RELEASE_NOTES/v<X>.md (the file Step 0's
+    # prerelease-check already requires for GA releases) instead of GitHub's
+    # --generate-notes commit list. Pre-fix, every release shipped with bare
+    # auto-generated notes while the polished file only reached Sparkle users
+    # via the appcast — the v1.21.4 GA had to be repaired post-hoc with
+    # `gh release edit --notes-file`.
+    NOTES_FILE="RELEASE_NOTES/v$VERSION.md"
+    if [ -f "$NOTES_FILE" ]; then
+        gh release create "v$VERSION" $ARTIFACTS \
+            --title "MacCrab v$VERSION" \
+            --notes-file "$NOTES_FILE"
+        echo "  ✓ Release notes: $NOTES_FILE"
+    else
+        echo "  ! WARNING: $NOTES_FILE not found — falling back to GitHub auto-generated notes." >&2
+        echo "    Write the curated notes, then repair with:" >&2
+        echo "      gh release edit v$VERSION --notes-file $NOTES_FILE" >&2
+        gh release create "v$VERSION" $ARTIFACTS \
+            --title "MacCrab v$VERSION" \
+            --generate-notes
+    fi
     echo ""
     echo "  ✓ GitHub release created: https://github.com/peterhanily/maccrab/releases/tag/v$VERSION"
 else

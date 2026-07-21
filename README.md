@@ -692,6 +692,7 @@ make test-fp           # False positive tests against benign system activity
 make test-detection    # Detection tests -- triggers all categories safely
 make test-integration  # Integration tests (daemon + CLI + rules)
 make test-stress       # 60-second stress test for event throughput
+make test-burst        # Burst benchmark -- fails on priority-stream event drops
 make lint-rules        # Lint all YAML rules for format, UUID uniqueness, tags
 ```
 

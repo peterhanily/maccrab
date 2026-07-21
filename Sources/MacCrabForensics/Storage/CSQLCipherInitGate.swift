@@ -25,16 +25,16 @@ public enum CSQLCipherInitGate {
 
     /// Hold the gate while `body` executes (open + PRAGMA key +
     /// initial PRAGMAs + first prepare).
+    ///
+    /// v1.21.5: the async `withLock` variant was removed — it had no
+    /// callers (LiveDBSnapshot uses this sync overload) and it held
+    /// the non-reentrant NSLock across `await body()`, which Swift 6
+    /// rejects (a suspension can resume on another thread, and
+    /// NSLock must unlock on the locking thread). If an async caller
+    /// ever needs the gate, serialize via an actor instead.
     public static func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
         return try body()
-    }
-
-    /// Async variant — same lock, but the body is `async`.
-    public static func withLock<T>(_ body: () async throws -> T) async rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try await body()
     }
 }

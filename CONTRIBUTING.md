@@ -41,7 +41,7 @@ Before submitting, verify that your rule meets all of the following criteria:
 
 - [ ] **Title**: Clear, concise, and descriptive (e.g., "Shell Spawned by Browser Process", not "Bad Process Detection")
 - [ ] **ID**: Unique UUID v4 (`python3 -c "import uuid; print(uuid.uuid4())"`)
-- [ ] **Status**: Set to `experimental` for new rules (maintainers will promote to `stable` after review)
+- [ ] **Status**: Set to `experimental` for new rules (maintainers promote to `stable` per the [Rule Promotion Criteria](#rule-promotion-criteria-experimental--stable) below)
 - [ ] **Description**: Explains what is detected and why it is suspicious or malicious
 - [ ] **Author**: Your name or handle, or `MacCrab Community` if you prefer anonymity
 - [ ] **Date**: Creation date in `YYYY/MM/DD` format
@@ -63,6 +63,20 @@ For temporal sequence rules (`type: sequence`), also verify:
 - [ ] **Steps**: Each step has a unique `id`, valid logsource, and working detection logic
 - [ ] **Trigger**: Trigger condition correctly references step IDs
 - [ ] **Ordered**: The `ordered` flag accurately reflects whether step order matters
+
+### Rule Promotion Criteria (experimental → stable)
+
+New rules land as `status: experimental` and ship **disabled by default** — since v1.21.4 the daemon defaults to the `stable` rule profile. Maintainers promote a rule to `stable` when it meets **all** of the following bar. The bar is deliberately quantitative so promotion is checkable rather than a judgment call; run `scripts/check-promotion.sh <rule-id>` to evaluate a rule against it (advisory — it reads the local benchmark and telemetry data described below).
+
+1. **False-positive soak.** The rule has run enabled on the reference machine for **at least 14 days** (28 recommended — the default window of `scripts/fp-rate-benchmark.sh`) at **≤ 0.5 alerts/day** in that benchmark's per-rule output. Rationale: the machine-wide release gate is < 30 HIGH/CRITICAL alerts/day (`scripts/measure-fp-baseline.sh`), and ~480 rules share that budget — a single rule sustaining more than ~0.5/day on a benign machine is an outsized noise contributor. A rule absent from the benchmark JSON fired zero times in the window, which passes this criterion (provided the rule was actually enabled for the window, e.g. under `rule_profile: "all"`).
+
+2. **Demonstrated true positive.** The rule has a working trigger: a fixture in `scripts/detection-test.sh` (or `scripts/campaign-test.sh`), or a rule test under `Tests/` that feeds a synthetic event through the engine and asserts the rule fires. "It should match" is not evidence; a red-team fixture or unit test is.
+
+3. **Eval latency within budget.** The rule is not flagged by the engine's > 50 ms eval-budget guard: it does not appear in `rule_telemetry.json`'s `autoDisabledRuleIds`, and its sampled p95 execution time is under 50 ms. A rule the daemon has logged as `Slow rule:` or runtime-auto-disabled cannot be promoted until the predicate is fixed.
+
+4. **Quality checklist still holds.** The checklist above (filters, documented false-positive scenarios, references, correct field names) is re-verified at promotion time, not just at submission.
+
+Sequence rules (`Rules/sequences/`) and graph rules (`Rules/graph/`) follow the **same bar** for criteria 1, 2, and 4 — since v1.21.5 they are profile-gated exactly like single-event rules (experimental sequence/graph rules do not run under the default profile). Criterion 3 is the exception: the `> 50 ms` eval-budget guard, `rule_telemetry.json`, and runtime auto-disable are single-event-engine machinery only, so `scripts/check-promotion.sh` reports eval-latency **UNKNOWN** (overall **INCOMPLETE**) for sequence/graph rules. Assess their evaluation cost by other means — a sequence's specificity comes from its multi-step structure, and the 7 graph rules are curated by hand — until per-rule exec-time profiling is wired into `SequenceEngine`/`GraphRuleEvaluator`.
 
 ---
 
