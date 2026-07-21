@@ -3,6 +3,7 @@
   "title": "Unsigned binary from a download path created persistence",
   "severity": "high",
   "type": "graph",
+  "status": "stable",
   "nodes": {
     "proc": {
       "type": "process",

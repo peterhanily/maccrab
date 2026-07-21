@@ -3,6 +3,7 @@
   "title": "AI-associated shell wrote to a login item",
   "severity": "high",
   "type": "graph",
+  "status": "stable",
   "nodes": {
     "agent": { "type": "ai_agent" },
     "shell": {

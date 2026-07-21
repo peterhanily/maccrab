@@ -53,7 +53,7 @@ Optional features that make outbound calls (only when you enable them):
 | Ollama backend | Same as above, but to a local process | N/A — never leaves the machine |
 | Webhook output (`MACCRAB_WEBHOOK_URL`) | Alert JSON payloads to your configured URL | URL policy rejects RFC1918 unless opt-in, blocks cloud metadata IPs unconditionally |
 | Syslog output (`MACCRAB_SYSLOG_HOST`) | Alert RFC 5424 syslog messages to your configured host | None (your infrastructure) |
-| Fleet telemetry (`MACCRAB_FLEET_URL`) | Alert summaries and IOC sightings to your fleet server | Username + private IP redaction; opt-in per-host |
+| Fleet telemetry (`MACCRAB_FLEET_URL`) | Alert summaries and IOC sightings to your fleet server (outbound-only; use `https://` — plain `http://` is accepted only for loopback hosts) | Username + private IP redaction; opt-in per-host |
 | Third-party forensic plugins (rave marketplace) | Only if a plugin you install declares network egress **and** you consent | Runs sandboxed; reads only its declared files (personal-comms served as snapshots, never live); the consent sheet flags any reads-personal-data + has-network combo |
 
 See [PRIVACY.md](PRIVACY.md) for the full inventory.

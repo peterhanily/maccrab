@@ -1,6 +1,7 @@
 title: Ransomware Kill Chain — Recovery Inhibition Then Data Destruction
 id: e1f2a3b4-0016-4000-b000-000000000016
-status: experimental
+# v1.21.5: promoted to stable — ran enabled on every install v1.19→v1.21.4 (sequences bypassed the rule profile until v1.21.5) within the measured FP release gate; must-fire kill-chain completion class.
+status: stable
 description: >
     Detects a ransomware-style attack sequence: shell execution or suspicious
     process spawning, followed by disabling backup/recovery mechanisms

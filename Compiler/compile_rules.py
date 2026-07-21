@@ -1408,6 +1408,18 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
     if level not in valid_levels:
         level = "high"
 
+    # v1.21.5: emit Sigma `status` with the SAME normalization as single-event
+    # rules (missing → "experimental", stripped/lowercased) so SequenceEngine
+    # can apply the F-04 rule_profile gate to sequences too — previously they
+    # bypassed the profile entirely and the experimental tier ran on default
+    # "stable" installs. `deprecated` emits enabled=false for display surfaces;
+    # the engine additionally SKIPS deprecated rules at load under every
+    # profile (SequenceEngine force-enables whatever it loads, so the flag
+    # alone would not keep a deprecated rule from firing under "all") —
+    # mirroring single-event semantics where deprecated never fires.
+    status = (rule_data.get("status") or "experimental").strip().lower()
+    enabled = status != "deprecated"
+
     window = _parse_window(rule_data.get("window", "60s"))
     correlation_raw = rule_data.get("correlation", "none")
     correlation = _CORRELATION_MAP.get(correlation_raw, "none")
@@ -1487,7 +1499,8 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
         "ordered": ordered,
         "steps": compiled_steps,
         "trigger": trigger,
-        "enabled": True,
+        "enabled": enabled,
+        "status": status,
         # v1.18: carry the must-fire flag so a completed sequence with
         # `suppressible: false` survives the NoiseFilter trust gates. Default
         # True (suppressible) to match single-event rules; the 9 kill-chain

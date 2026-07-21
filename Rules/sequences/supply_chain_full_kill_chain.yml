@@ -1,6 +1,7 @@
 title: Full Supply Chain Kill Chain - Install to Persist to Exfiltrate
 id: e1f2a3b4-0023-4000-b000-000000000023
-status: experimental
+# v1.21.5: promoted to stable — ran enabled on every install v1.19→v1.21.4 (sequences bypassed the rule profile until v1.21.5) within the measured FP release gate; must-fire kill-chain completion class.
+status: stable
 description: >
     Detects the complete supply chain attack kill chain: a package manager installs
     something, which drops persistence (LaunchAgent/cron/.pth), then harvests

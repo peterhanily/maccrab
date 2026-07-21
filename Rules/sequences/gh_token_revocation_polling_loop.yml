@@ -1,6 +1,7 @@
 title: Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch)
 id: 14b34c1b-0487-4cdf-b11d-f37a3591c791
-status: experimental
+# v1.21.5: promoted to stable — ran enabled on every install v1.19→v1.21.4 (sequences bypassed the rule profile until v1.21.5) within the measured FP release gate; must-fire kill-chain completion class.
+status: stable
 description: >
     Detects the dead-man's-switch watchdog signature used by the
     Mini Shai-Hulud Wave 4 TanStack worm (CVE-2026-45321, May 2026):

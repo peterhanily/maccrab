@@ -188,18 +188,53 @@ struct BundledThreatIntelTests {
 
 // MARK: - Fleet Client Tests
 
-@Suite("Fleet Client")
+// .serialized: these tests mutate the process-global environment via
+// setenv/unsetenv, which would race if they ran in parallel.
+@Suite("Fleet Client", .serialized)
 struct FleetClientTests {
     @Test("Returns nil when MACCRAB_FLEET_URL is not set")
     func nilWithoutURL() async {
         // Ensure the env var is not set in this process
-        // (CI and local test environments should not have it set)
-        if ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] != nil {
-            // If the var happens to be set, just skip the nil assertion
-            return
-        }
+        unsetenv("MACCRAB_FLEET_URL")
         let client = FleetClient()
         #expect(client == nil)
+    }
+
+    // v1.21.5: transport enforcement — https to any host, plaintext http
+    // only to loopback (dev collector).
+    @Test("Init accepts https URL to any host")
+    func httpsAccepted() {
+        setenv("MACCRAB_FLEET_URL", "https://fleet.example.com:8443", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        #expect(FleetClient() != nil)
+    }
+
+    @Test("Init rejects plaintext http to non-loopback host")
+    func httpRemoteRejected() {
+        setenv("MACCRAB_FLEET_URL", "http://fleet.example.com:8443", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        #expect(FleetClient() == nil)
+    }
+
+    @Test("Init accepts plaintext http to 127.0.0.1")
+    func httpLoopbackIPAccepted() {
+        setenv("MACCRAB_FLEET_URL", "http://127.0.0.1:8443", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        #expect(FleetClient() != nil)
+    }
+
+    @Test("Init accepts plaintext http to localhost")
+    func httpLocalhostAccepted() {
+        setenv("MACCRAB_FLEET_URL", "http://localhost:8443", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        #expect(FleetClient() != nil)
+    }
+
+    @Test("Init rejects loopback-prefixed DNS name (127.0.0.1.evil.com)")
+    func httpLoopbackPrefixRejected() {
+        setenv("MACCRAB_FLEET_URL", "http://127.0.0.1.evil.com:8443", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        #expect(FleetClient() == nil)
     }
 
     @Test("FleetAlertSummary roundtrips through JSON")
@@ -242,28 +277,4 @@ struct FleetClientTests {
         #expect(decoded.version == "1.0.0")
     }
 
-    @Test("FleetAggregation decodes empty response")
-    func aggregationDecodes() throws {
-        let json = """
-        {"iocs":[],"hotProcesses":[],"fleetSize":0,"timestamp":"2026-04-08T12:00:00Z"}
-        """
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let agg = try decoder.decode(FleetAggregation.self, from: Data(json.utf8))
-        #expect(agg.iocs.isEmpty)
-        #expect(agg.hotProcesses.isEmpty)
-        #expect(agg.fleetSize == 0)
-    }
-
-    @Test("FleetCampaign decodes snake_case keys correctly")
-    func campaignDecodesSnakeCase() throws {
-        let json = """
-        {"rule_id":"r1","rule_title":"Test Campaign","severity":"high","alert_count":5,"host_count":3,"first_seen":1000000.0,"last_seen":1001000.0}
-        """
-        let campaign = try JSONDecoder().decode(FleetCampaign.self, from: Data(json.utf8))
-        #expect(campaign.ruleId == "r1")
-        #expect(campaign.ruleTitle == "Test Campaign")
-        #expect(campaign.alertCount == 5)
-        #expect(campaign.hostCount == 3)
-    }
 }

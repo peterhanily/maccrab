@@ -87,8 +87,16 @@ extension MacCrabCtl {
             // matches ground truth — mirrors build-release.sh's rule count.
             let ruleCount = files?.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.count ?? 0
             let seqDir = compiledDir + "/sequences"
-            let seqFiles = try? FileManager.default.contentsOfDirectory(atPath: seqDir)
-            let seqCount = seqFiles?.filter { $0.hasSuffix(".json") }.count ?? 0
+            // v1.21.5: sequence rules are profile-gated at LOAD (skipped, not
+            // present-but-disabled), so the shipped file count read as if every
+            // sequence runs. Decode each compiled rule's `status` + the
+            // configured rule_profile and report effective coverage.
+            let profile = ruleProfileFromConfig(supportDir: supportDir)
+            let seq = sequenceRuleCounts(seqDir: seqDir, ruleProfile: profile)
+            let seqDisabled = seq.shipped - seq.active
+            let seqLabel = seqDisabled > 0
+                ? "\(seq.active) active / \(seq.shipped) shipped sequence rule(s) (\(seqDisabled) disabled by rule profile)"
+                : "\(seq.active) sequence rule(s)"
             // v1.21.4 (F3): prefer the daemon's live active/loaded counts from
             // the heartbeat so we report EFFECTIVE coverage. The on-disk file
             // count counts every rule PRESENT; under the F-04 stable rule
@@ -98,13 +106,13 @@ extension MacCrabCtl {
             // build that doesn't publish the keys.
             if daemonRunning, let hb = ruleCoverageFromHeartbeat(supportDir: supportDir), hb.loaded > 0 {
                 if hb.active < hb.loaded {
-                    print("Rules:           \(hb.active) active / \(hb.loaded) loaded standard, \(seqCount) sequence rule(s)")
+                    print("Rules:           \(hb.active) active / \(hb.loaded) loaded standard, \(seqLabel)")
                     print("                 \(hb.loaded - hb.active) disabled by rule profile — set rule_profile: all to enable")
                 } else {
-                    print("Rules:           \(hb.active) standard, \(seqCount) sequence rule(s) loaded")
+                    print("Rules:           \(hb.active) standard, \(seqLabel)")
                 }
             } else {
-                print("Rules:           \(ruleCount) standard, \(seqCount) sequence rule(s) loaded")
+                print("Rules:           \(ruleCount) standard, \(seqLabel)")
             }
         } else {
             print("Rules:           No compiled rules found")
@@ -228,6 +236,44 @@ extension MacCrabCtl {
             if process.terminationStatus == 0 { return true }
         }
         return false
+    }
+
+    /// v1.21.5: read `rule_profile` from daemon_config.json (default "stable"
+    /// — the daemon's own default, and what an unknown value falls back to).
+    /// Direct JSONSerialization read, mirroring ConfigCommands' `get` path.
+    /// A root-owned unreadable config also yields "stable" — same as the
+    /// daemon default, so the common case stays honest.
+    static func ruleProfileFromConfig(supportDir: String) -> String {
+        let path = supportDir + "/daemon_config.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let profile = json["rule_profile"] as? String else {
+            return "stable"
+        }
+        return profile
+    }
+
+    /// v1.21.5: effective sequence coverage — decode each compiled sequence
+    /// rule's `status` and apply the same semantics as SequenceEngine.loadRules:
+    /// deprecated never loads under any profile; a missing status key is
+    /// grandfathered "stable"; profile "all" loads every non-deprecated rule,
+    /// anything else (incl. unknown values) loads only "stable".
+    static func sequenceRuleCounts(seqDir: String, ruleProfile: String) -> (active: Int, shipped: Int) {
+        struct Stub: Decodable { let status: String? }
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: seqDir))?
+            .filter { $0.hasSuffix(".json") } ?? []
+        let loadAll = ruleProfile.lowercased() == "all"
+        var active = 0
+        for file in files {
+            var status = "stable" // unreadable/undecodable ≈ missing key: grandfathered
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: seqDir + "/" + file)),
+               let stub = try? JSONDecoder().decode(Stub.self, from: data) {
+                status = (stub.status ?? "stable").lowercased()
+            }
+            if status == "deprecated" { continue }
+            if loadAll || status == "stable" { active += 1 }
+        }
+        return (active, files.count)
     }
 
     /// v1.21.4 (F3): read the daemon's live single-event rule coverage from the

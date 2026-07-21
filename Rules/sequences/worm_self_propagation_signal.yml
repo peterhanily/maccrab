@@ -1,6 +1,7 @@
 title: Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern)
 id: e1f2a3b4-0040-4000-b000-000000000040
-status: experimental
+# v1.21.5: promoted to stable — ran enabled on every install v1.19→v1.21.4 (sequences bypassed the rule profile until v1.21.5) within the measured FP release gate; must-fire kill-chain completion class.
+status: stable
 description: >
     Detects the three-step kill chain unique to Shai-Hulud-class npm /
     PyPI worms: a package-manager descendant reads a developer

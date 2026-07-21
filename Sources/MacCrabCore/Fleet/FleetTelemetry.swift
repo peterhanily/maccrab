@@ -72,65 +72,6 @@ public struct FleetBehaviorScore: Codable, Sendable {
     }
 }
 
-/// Aggregated fleet data pulled from the collector.
-public struct FleetAggregation: Codable, Sendable {
-    /// IOCs seen across the fleet (with sighting counts).
-    public let iocs: [FleetIOCAggregated]
-    /// Processes with high behavioral scores fleet-wide.
-    public let hotProcesses: [FleetHotProcess]
-    /// Number of active fleet members.
-    public let fleetSize: Int
-    /// Timestamp of this aggregation.
-    public let timestamp: Date
-}
-
-public struct FleetIOCAggregated: Codable, Sendable {
-    public let type: String
-    public let value: String
-    public let sightingCount: Int
-    public let hostCount: Int
-    public let firstSeen: Date
-    public let lastSeen: Date
-}
-
-public struct FleetHotProcess: Codable, Sendable {
-    public let processPath: String
-    public let avgScore: Double
-    public let hostCount: Int
-}
-
-/// A cross-endpoint campaign: same rule firing on 3+ hosts.
-public struct FleetCampaign: Codable, Sendable {
-    public let ruleId: String
-    public let ruleTitle: String
-    public let severity: String
-    public let alertCount: Int
-    public let hostCount: Int
-    public let processes: String?
-    public let techniques: String?
-    public let firstSeen: Double
-    public let lastSeen: Double
-
-    private enum CodingKeys: String, CodingKey {
-        case ruleId = "rule_id"
-        case ruleTitle = "rule_title"
-        case severity
-        case alertCount = "alert_count"
-        case hostCount = "host_count"
-        case processes
-        case techniques
-        case firstSeen = "first_seen"
-        case lastSeen = "last_seen"
-    }
-}
-
-/// Response wrapper for /api/fleet-campaigns.
-public struct FleetCampaignResponse: Codable, Sendable {
-    public let campaigns: [FleetCampaign]
-    public let windowSeconds: Int?
-
-    private enum CodingKeys: String, CodingKey {
-        case campaigns
-        case windowSeconds = "window_seconds"
-    }
-}
+// v1.21.5: the pull models (FleetAggregation, FleetIOCAggregated,
+// FleetHotProcess, FleetCampaign, FleetCampaignResponse) were removed —
+// fleet is outbound-only; nothing the collector returns is consumed.

@@ -20,7 +20,13 @@ public enum GraphRuleLoader {
     /// a `GraphRule`. Files that fail to decode are skipped with a
     /// log message — one bad rule should not silence the rest of the
     /// graph-rule pipeline.
-    public static func loadRules(from directory: URL) -> [GraphRule] {
+    ///
+    /// v1.21.5: `enabledStatuses` applies the F-04 rule_profile gate to graph
+    /// rules (nil = no filtering, the legacy default). A rule with NO status
+    /// key is grandfathered as "stable" — the 7 shipped graph rules are all
+    /// curated stable-tier and predate the key, so a stale compiled dir must
+    /// not silently drop them.
+    public static func loadRules(from directory: URL, enabledStatuses: Set<String>? = nil) -> [GraphRule] {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil,
@@ -33,6 +39,18 @@ public enum GraphRuleLoader {
             do {
                 let data = try Data(contentsOf: url)
                 let rule = try JSONDecoder().decode(GraphRule.self, from: data)
+                // v1.21.5: deprecated = retired detection; must not run under
+                // ANY profile — including nil ("all"). GraphRule has no
+                // enabled flag, so skipping here is the only gate. Mirrors
+                // single-event semantics (deprecated stays disabled even
+                // under rule_profile "all").
+                if (rule.status ?? "stable").lowercased() == "deprecated" {
+                    continue
+                }
+                if let allowed = enabledStatuses,
+                   !allowed.contains((rule.status ?? "stable").lowercased()) {
+                    continue
+                }
                 rules.append(rule)
             } catch {
                 logger.warning("graph rule \(url.lastPathComponent, privacy: .public) failed to decode: \(error.localizedDescription, privacy: .public)")
@@ -43,8 +61,8 @@ public enum GraphRuleLoader {
 
     /// Load directly from the project's source tree
     /// `Rules/graph/` directory. Useful for tests and dev workflows.
-    public static func loadFromProjectSource(projectRoot: URL) -> [GraphRule] {
+    public static func loadFromProjectSource(projectRoot: URL, enabledStatuses: Set<String>? = nil) -> [GraphRule] {
         let dir = projectRoot.appendingPathComponent("Rules/graph", isDirectory: true)
-        return loadRules(from: dir)
+        return loadRules(from: dir, enabledStatuses: enabledStatuses)
     }
 }

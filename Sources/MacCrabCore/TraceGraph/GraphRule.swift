@@ -26,6 +26,12 @@ public struct GraphRule: Codable, Sendable, Equatable {
     public let constraints: Constraints?
     public let attack: [String]?
 
+    /// v1.21.5: Sigma-style status tier so graph rules participate in the F-04
+    /// rule_profile gate. All shipped graph rules are curated `stable`
+    /// precision rules; a file without the key (pre-v1.21.5) is grandfathered
+    /// as stable by `GraphRuleLoader`, so nothing silently drops.
+    public let status: String?
+
     public init(
         id: String,
         title: String,
@@ -35,7 +41,8 @@ public struct GraphRule: Codable, Sendable, Equatable {
         edges: [EdgeSpec],
         scope: Scope? = nil,
         constraints: Constraints? = nil,
-        attack: [String]? = nil
+        attack: [String]? = nil,
+        status: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -46,6 +53,7 @@ public struct GraphRule: Codable, Sendable, Equatable {
         self.scope = scope
         self.constraints = constraints
         self.attack = attack
+        self.status = status
     }
 
     // MARK: - NodeSpec

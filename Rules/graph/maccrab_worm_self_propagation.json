@@ -3,6 +3,7 @@
   "title": "Worm self-propagation: package-manager descendant read credential then phoned home",
   "severity": "critical",
   "type": "graph",
+  "status": "stable",
   "nodes": {
     "proc": {
       "type": "process",

@@ -1,5 +1,6 @@
 import Foundation
 import MacCrabCore
+import os.log
 
 /// Daemon configuration loaded from `daemon_config.json` in the support directory.
 /// All values have sensible defaults — the config file is optional.
@@ -399,6 +400,31 @@ struct DaemonConfig: Codable {
             applyUserOverrides(into: &config)
         }
         return config
+    }
+
+    /// F-04: map the operator's `rule_profile` to the Sigma-status set the
+    /// engines enable — nil means "all" (every non-deprecated rule).
+    ///
+    /// corr-detection #273: validate the value against the known set. A typo
+    /// ("stabel", "full", …) previously fell through to "stable" SILENTLY — an
+    /// operator who set rule_profile: all with a typo ran with ~352 rules
+    /// disabled and no signal. Warn loudly and keep the safe default (stable)
+    /// on an unrecognized value.
+    ///
+    /// v1.21.5: extracted from DaemonSetup so the boot path and the SIGHUP
+    /// reload path (SignalHandlers) share one mapping — the profile now gates
+    /// sequence + graph rules too, not just single-event rules.
+    static func enabledRuleStatuses(forProfile rawProfile: String) -> Set<String>? {
+        switch rawProfile.lowercased() {
+        case "all":
+            return nil
+        case "stable":
+            return ["stable"]
+        default:
+            logger.warning("Unknown rule_profile '\(rawProfile)' — expected 'stable' or 'all'. Falling back to 'stable'.")
+            print("Warning: unknown rule_profile '\(rawProfile)' — expected 'stable' or 'all'. Using 'stable'.")
+            return ["stable"]
+        }
     }
 
     /// Decode `daemon_config.json` data, handling two long-standing

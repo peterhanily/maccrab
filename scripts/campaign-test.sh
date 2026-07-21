@@ -33,6 +33,9 @@ DAEMON_PID=""
 TEST_DIR="/tmp/maccrab_campaign_$$"
 CLEANUP_FILES=()
 CLEANUP_PIDS=()
+DAEMON_CONFIG="$HOME/Library/Application Support/MacCrab/daemon_config.json"
+DAEMON_CONFIG_BAK=""
+DAEMON_CONFIG_CREATED=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -67,6 +70,14 @@ cleanup() {
     for p in "${CLEANUP_PIDS[@]}"; do
         kill "$p" 2>/dev/null || true
     done
+    # v1.21.5: restore the operator's daemon_config.json (--daemon mode forced
+    # rule_profile "all") — BEFORE TEST_DIR is removed, since the backup lives
+    # inside it.
+    if [ -n "$DAEMON_CONFIG_BAK" ] && [ -f "$DAEMON_CONFIG_BAK" ]; then
+        cp -f "$DAEMON_CONFIG_BAK" "$DAEMON_CONFIG" 2>/dev/null || true
+    elif [ "$DAEMON_CONFIG_CREATED" = "1" ]; then
+        rm -f "$DAEMON_CONFIG" 2>/dev/null || true
+    fi
     rm -rf "$TEST_DIR" 2>/dev/null || true
     if [ -n "$DAEMON_PID" ]; then
         kill "$DAEMON_PID" 2>/dev/null || true
@@ -118,6 +129,34 @@ if $MANAGE_DAEMON; then
     mkdir -p "$HOME/Library/Application Support/MacCrab/compiled_rules/sequences"
     cp -f .build/debug/compiled_rules/*.json "$HOME/Library/Application Support/MacCrab/compiled_rules/" 2>/dev/null || true
     cp -f .build/debug/compiled_rules/sequences/*.json "$HOME/Library/Application Support/MacCrab/compiled_rules/sequences/" 2>/dev/null || true
+    # v1.21.5: red-team sims deliberately exercise the FULL detection corpus.
+    # The daemon defaults to rule_profile "stable" (F-04), which now also
+    # gates sequence + graph rules — the multi-tactic experimental detections
+    # these waves rely on for campaign aggregation would never fire under it.
+    # Force "all" for the daemon WE start: merge into daemon_config.json
+    # (preserving the operator's other keys) and restore on exit (see cleanup).
+    # Not done for an already-running daemon — it read its config at start.
+    if [ -f "$DAEMON_CONFIG" ]; then
+        DAEMON_CONFIG_BAK="$TEST_DIR/daemon_config.json.orig"
+        cp -f "$DAEMON_CONFIG" "$DAEMON_CONFIG_BAK"
+    else
+        DAEMON_CONFIG_CREATED=1
+    fi
+    python3 - "$DAEMON_CONFIG" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+    except Exception:
+        cfg = {}
+cfg["rule_profile"] = "all"
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+PY
     .build/debug/maccrabd &
     DAEMON_PID=$!
     sleep 4
@@ -125,6 +164,26 @@ if $MANAGE_DAEMON; then
 else
     if pgrep -x maccrabd > /dev/null 2>&1; then
         ok "Using running daemon ($(pgrep -x maccrabd))"
+        # v1.21.5: sequence + graph rules are gated by rule_profile (default
+        # "stable") — an already-running daemon on the stable profile silently
+        # under-detects the experimental-tier detections these waves rely on.
+        # Warn loudly; NEVER mutate the operator's config in this path.
+        if ! python3 - "$DAEMON_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if str(cfg.get("rule_profile", "")).lower() == "all" else 1)
+PY
+        then
+            echo -e "${RED}⚠  WARNING: $DAEMON_CONFIG does not set rule_profile \"all\".${NC}" >&2
+            echo -e "${RED}   Under the default stable profile most sequence/graph detections this${NC}" >&2
+            echo -e "${RED}   simulation exercises will NOT fire — results will silently under-detect.${NC}" >&2
+            echo -e "${RED}   Recommended: re-run with --daemon, or set \"rule_profile\": \"all\" in${NC}" >&2
+            echo -e "${RED}   that config and reload the running daemon (pkill -HUP maccrabd).${NC}" >&2
+        fi
     else
         echo -e "${YELLOW}⚠  No daemon running. Start one first or use --daemon flag.${NC}"
         echo -e "${YELLOW}   Run: .build/debug/maccrabd  (or: sudo make run-root)${NC}"

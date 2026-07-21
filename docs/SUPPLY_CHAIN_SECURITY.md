@@ -107,82 +107,75 @@ Given these constraints, the playbook below is designed for **honest incident re
 - You receive a report of clients auto-updating to an unexpected version.
 - Telemetry / logs show an appcast entry was published with a valid signature but no corresponding GitHub release.
 
+**The constraint that shapes everything below:** Sparkle verifies every update against the `SUPublicEDKey` embedded in the **installed** app's Info.plist. Two consequences:
+
+1. **A recovery release signed with a NEW key cannot be delivered over Sparkle.** Every existing client checks its signature against the OLD embedded public key and silently rejects it — no error the user sees, the update simply never installs.
+2. **An OLD-key-signed "bridge" release is unsafe post-compromise.** The attacker holds the same old key and can sign a competing malicious bridge — and publish it first if they also hold appcast access. Signatures alone cannot decide that race in your favor.
+
+So on key compromise the Sparkle channel is dead, and recovery is manual reinstall. This matches `RELEASE_PROCESS.md` → Rollback ("There is no over-the-air kill switch... auto-update channel is dead until users reinstall"). The playbook below kills the channel fast, then rebuilds trust through the channels the attacker does not control.
+
 **Actions — execute in order:**
 
-#### Phase 1: Immediate containment (within 1 hour)
+#### Phase 1: Kill the update channel (within 1 hour)
 
-1. **Assume the key is compromised.** Do not wait for absolute confirmation. Begin a new Sparkle key generation immediately.
+1. **Assume the key is compromised.** Do not wait for absolute confirmation.
 
-2. **Issue a public security advisory** via GitHub (`peterhanily/maccrab/security/advisories`) and email `maccrab@peterhanily.com`:
-   - "Sparkle EdDSA key may have been compromised. Do not auto-update for the next 48 hours. A patched release with new signing keys is in progress."
-   - Do NOT name the specific leaked key or provide the public key — that would help attackers forge signatures against old clients.
+2. **Tombstone the appcast.** `appcast.xml` lives in the site repo (`peterhanily/maccrab-site`) and is served at `https://maccrab.com/appcast.xml` by Cloudflare Pages, which auto-deploys within ~60 seconds of a commit (see `RELEASE_PROCESS.md` step 6). Replace it with an empty channel — a valid appcast/RSS skeleton with zero `<item>` entries — via the GitHub Web UI or a direct push. Polling clients then see "no update available" instead of whatever the attacker signs.
+   - If the key leaked because the build Mac was compromised, assume `SITE_REPO_TOKEN` leaked with it: revoke that PAT first, then tombstone.
+   - If you have lost control of the site repo itself, escalate to GitHub support to freeze it and to Cloudflare to unpublish the Pages deployment.
 
-3. **Notify Homebrew:** If the key is in the wild and someone publishes a malicious Homebrew formula, you want Homebrew awareness early. File an issue on homebrew/homebrew-casks or contact `security@brew.sh` with the advisory.
+3. **Issue a public security advisory** via GitHub (`peterhanily/maccrab/security/advisories`) and email `maccrab@peterhanily.com`:
+   - "The Sparkle update-signing key is compromised. Disable auto-update and do not accept any update offered by the in-app updater. A recovery release with new signing keys is in progress; installing it will require a manual reinstall."
+   - Naming the compromised public key is fine — it ships in every app bundle and is printed in §2.1 above, and an Ed25519 public key cannot be used to forge signatures. Keep details of *how* the compromise happened vague only while the facts are still unclear — that is comms discipline, not key secrecy.
 
-4. **Revoke the Developer ID certificate** (optional but recommended if you believe it's also compromised):
+4. **Notify Homebrew:** If the key is in the wild and someone publishes a malicious Homebrew formula, you want Homebrew awareness early. File an issue on homebrew/homebrew-casks or contact `security@brew.sh` with the advisory.
+
+5. **Revoke the Developer ID certificate** (optional but recommended if you believe it's also compromised):
    - Log into `appleid.apple.com`, navigate to Developer Certificates, and revoke the `Developer ID Application` cert for team `79S425CW99`.
    - This stops new notarizations under the team ID but does NOT invalidate already-stapled tickets.
-   - If you revoke the cert, you cannot publish a bridge release under the old cert — you must generate a new Developer ID certificate as well (requires Apple dev account; may take 24 hours).
+   - If you revoke the cert, you cannot sign the recovery release until a new Developer ID certificate is issued (requires Apple dev account; may take 24 hours).
 
-#### Phase 2: Build a new release (within 24 hours)
+#### Phase 2: Build the recovery release (within 24 hours)
 
-1. **Generate a new Sparkle EdDSA key pair** on the build Mac:
+1. **Generate a new Sparkle EdDSA key pair** — on a machine you still trust. If the build Mac is the suspected leak point, re-image it (or use a different Mac) first, or the new key starts life as exposed as the old one:
    ```bash
    ~/Tools/bin/generate_keys       # generates new private key, stored in Keychain
    ~/Tools/bin/generate_keys -p    # prints the NEW public key (base64)
    ```
 
-2. **Optionally, generate a new Developer ID certificate** (if you revoked the old one). This requires manual intervention at `appleid.apple.com` and may take 24 hours. If you do NOT revoke the old cert, you can ship the Sparkle-key-only fix below.
+2. **Generate a new Developer ID certificate if you revoked the old one.** This requires manual intervention at `appleid.apple.com` and may take 24 hours. If you did NOT revoke the old cert, you can ship the Sparkle-key-only fix below.
 
-3. **Cut a "recovery" release:**
-   - Version: e.g., `v1.19.4-security` or `v1.19.4+spark-rotate` (whatever version number comes next).
+3. **Cut the recovery release:**
+   - Version: whatever version number comes next (e.g. `v1.21.5`).
    - Update `Xcode/project.yml` with the NEW `SUPublicEDKey`.
    - Build, sign, and notarize the DMG as usual.
-   - **Do NOT publish the appcast entry yet** — see Phase 3.
+   - `scripts/generate-appcast-entry.sh` still serves as the pairing gate — it confirms the NEW Keychain key pairs with the NEW embedded public key — but its output only matters for *future* clients (Phase 3, step 4).
 
-4. **Confirm key pairing** before publishing:
-   ```bash
-   ./scripts/generate-appcast-entry.sh --dmg .build/MacCrab-v<version>.dmg --version <version>
-   ```
-   This will verify that the NEW private key in the Keychain pairs with the NEW public key you embedded in the bundle. It will abort if they don't match (catch-all gate).
+#### Phase 3: Distribute manually — Sparkle cannot deliver this release
 
-#### Phase 3: Force-gate the new release (immediately after build)
+1. **Publish through the channels existing clients can still reach:**
+   - GitHub release with the DMG attached.
+   - Homebrew cask bump (`brew reinstall --cask peterhanily/maccrab/maccrab` picks it up).
+   - Download link plus advisory banner on maccrab.com.
 
-Sparkle supports `minimumAutoupdateVersion` and `minimumSystemVersion` XML attributes in appcast items. We use these to **mandate** the update:
+2. **Update the advisory with manual-reinstall instructions** and the out-of-band verification steps from `docs/TRUST.md` (SHA256, `codesign -dvv`, `spctl`, stapler). Users must verify out-of-band precisely because the in-app trust chain is what broke.
 
-1. In `scripts/generate-appcast-entry.sh` (or by hand-editing the `<item>` snippet), set:
-   ```xml
-   <sparkle:minimumAutoupdateVersion>0.0.0</sparkle:minimumAutoupdateVersion>
-   ```
-   This forces Sparkle to treat the new release as mandatory, even if an older version is already installed. Clients cannot skip it.
+3. **Do not attempt Sparkle delivery.** To repeat the two reasons: existing clients pin the OLD public key in their installed Info.plist and silently reject any NEW-key signature; and signing the recovery entry with the OLD key to get past that pin is exactly the race the attacker — holding the same old key — can win. (Nor can an appcast attribute force the install: `sparkle:minimumAutoupdateVersion` only gates which installed versions treat an update as a *major* upgrade, so `0.0.0` is a no-op, not a mandate.)
 
-   (Confirm that Sparkle 2.9.1 supports this attribute by checking `https://sparkle-project.org/documentation/`. As of June 2026, it does.)
-
-2. Publish the appcast entry:
-   ```bash
-   scripts/publish-appcast-entry.sh --item /tmp/recovery-item.xml --version <version>
-   ```
-
-3. Verify the appcast went live:
-   ```bash
-   curl -s https://maccrab.com/appcast.xml | grep '<sparkle:version>'
-   ```
+4. **Restore the appcast for the future, not the past.** Once the recovery release is live on GitHub + Homebrew, replace the tombstone appcast with a fresh channel containing only NEW-key-signed entries. Reinstalled clients (which embed the new public key) resume normal auto-update; stranded old clients see entries they cannot verify and safely refuse them until they reinstall.
 
 #### Phase 4: Notify users and monitor
 
 1. **Post a detailed incident report** on the GitHub repo and `maccrab@peterhanily.com`:
-   - Timeline: when the compromise was detected, when the fix was released.
+   - Timeline: when the compromise was detected, when the channel was tombstoned, when the recovery release shipped.
    - Impact: how many installed clients were at risk; what changes they should make.
-   - Remediation: confirm that the recovery release signed with the new key is live, and Sparkle will auto-update clients within 24 hours.
+   - Remediation: state plainly that auto-update cannot deliver the fix and a manual reinstall is required.
 
-2. **Monitor Sparkle downloads and client reports:**
-   - Check GitHub release download stats to estimate how many clients are updating.
-   - Watch for new issues/emails reporting auto-update failures or signature mismatches.
+2. **Monitor migration:**
+   - Check GitHub release download stats and cask installs to estimate how many clients have reinstalled.
+   - Watch for new issues/emails reporting signature mismatches or confusion about the dead update channel.
 
-3. **Confirm the fix is working:**
-   - On a test Mac running the old version, wait for the auto-update to fire (or force a check via MacCrab's update UI).
-   - Verify that the update accepts the new appcast signature and installs the recovery build.
-   - Verify that the recovery build's Info.plist contains the NEW `SUPublicEDKey` and that Sparkle recognizes it.
+3. **Expect a long tail.** Clients that never see the advisory stay on the old version with a dead (tombstoned) channel indefinitely. That is the safe failure mode — stranded is better than updated-by-the-attacker.
 
 #### Phase 5: Long-term cleanup (within 2 weeks)
 
@@ -199,6 +192,19 @@ Sparkle supports `minimumAutoupdateVersion` and `minimumSystemVersion` XML attri
    - Consider re-imaging the machine if the compromise origin is unclear.
 
 4. **Establish a schedule** for future key rotation (see Section 5, Tier 2).
+
+### Proactive rotation, or key loss WITH the old key still under your control
+
+The dual-key bridge release — embed the NEW public key in the app, sign its appcast entry with the OLD private key — is the one mechanism that migrates existing clients to a new key **over Sparkle**: old clients verify the entry with their embedded old public key, accept the update, and from then on trust the new key.
+
+**It applies ONLY while the old private key is exclusively yours:** scheduled annual rotation (§5 Tier 2), or losing the build Mac while the offline key backup is intact. **Never use it post-compromise** — the attacker holds the same old key and can sign a competing malicious bridge, and clients have no way to tell yours from theirs.
+
+Mechanics:
+
+1. Generate the new key pair; put the NEW `SUPublicEDKey` in `Xcode/project.yml`; build, sign, and notarize as usual.
+2. Sign the bridge appcast entry with the OLD key. The pairing gate in `scripts/generate-appcast-entry.sh` will abort here — it requires the Keychain signing key to pair with the shipped public key, and a bridge entry intentionally violates that (old signature over a new-key bundle). Hand-sign the DMG with the old key (`sign_update` against the old key) and assemble the `<item>` manually.
+3. Verify on a test client running the previous release: the update must be offered, verify, and install; the installed app's Info.plist must carry the NEW `SUPublicEDKey`.
+4. Publish, wait for the tail to migrate (30-60 days), then delete the old key.
 
 ### Scenario: Appcast corruption (SITE_REPO_TOKEN leaked, but Sparkle key safe)
 
@@ -232,9 +238,11 @@ If only the Cloudflare/GitHub appcast access is compromised (e.g., the PAT was l
   - Fails loudly and halts the release if any key doesn't match.
   - (This test already exists; confirm it runs on every release.)
 
-- [x] **Runbook:** The Sparkle EdDSA key rotation procedure is documented in full
-  in an operator-only runbook (kept outside this public repo): pre-flight
-  checklist, dual-key bridge-release steps, and rollback.
+- [ ] **Runbook:** Write the operator-only Sparkle key rotation runbook (kept
+  outside this public repo) — it does not exist yet. It must cover: pre-flight
+  pairing checks, the dual-key bridge-release steps (§4, "Proactive rotation"),
+  hand-signing the bridge appcast entry past the `generate-appcast-entry.sh`
+  pairing gate, and rollback if the bridge fails on a test client.
 
 - [ ] **Verify the appcast signature verification code in Sparkle:**
   - Confirm that `sign_update --verify <dmg> <signature>` returns 0 if the signature is valid against the DMG.
@@ -252,7 +260,8 @@ If only the Cloudflare/GitHub appcast access is compromised (e.g., the PAT was l
 - [ ] **Annual key rotation ceremony:**
   - Once per year (e.g., January), execute the Sparkle key rotation runbook:
     1. Generate a new key pair.
-    2. Cut a bridge release with the new key embedded, old key signed.
+    2. Cut a bridge release with the new key embedded, old key signed
+       (procedure: §4, "Proactive rotation").
     3. Verify on a test client.
     4. Publish the bridge release.
     5. Delete the old key after the tail migrates (30-60 days later).
@@ -358,10 +367,19 @@ If the sole operator becomes unavailable (incapacitation, departure, loss of bui
 
 1. **Sparkle auto-update channel is dead.** Existing clients will check the appcast but no new entries will be signed (the key is inaccessible).
 
-2. **Recovery path:**
-   - A new maintainer must generate a new Sparkle key pair (destroying the old key's recovery chain).
-   - Cut a recovery release with the new key, published at a NEW feed URL (because existing clients won't trust the new key in the old appcast).
-   - Use GitHub releases as the distribution mechanism until appcast publishing is restored.
+2. **Recovery path** — same mechanics as §4, Phase 3 (Sparkle cannot
+   deliver a NEW-key release to existing clients):
+   - A new maintainer generates a new Sparkle key pair (the old key's
+     recovery chain is gone, so no bridge release is possible).
+   - Distribute the recovery release manually — GitHub release +
+     Homebrew cask bump + advisory (§4 Phase 3, steps 1–2). Users must
+     reinstall by hand.
+   - Tombstone, then restore, the **same** appcast feed with only
+     NEW-key-signed entries (§4 Phase 3, step 4). Reinstalled clients
+     (which embed the new public key) resume auto-update; stranded old
+     clients safely refuse entries they cannot verify until they
+     reinstall. Do not stand up a new feed URL — existing clients poll
+     the URL embedded in the installed app, so a new URL reaches nobody.
    - Publish a migration advisory so users update manually.
 
 3. **Mitigation (today):**

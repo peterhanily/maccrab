@@ -43,8 +43,27 @@ enum SignalHandlers {
                     }
                     let reloadedPushedIDs = await state.ruleEngine.pushedRuleIDs
                     await state.responseEngine.setDetectionOnlyRuleIDs(reloadedPushedIDs)
-                    let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir))
-                    print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
+                    // v1.21.5: sequence + graph rules honor the F-04 rule
+                    // profile on reload too. RuleEngine re-applies its stored
+                    // profile internally, but SequenceEngine/GraphRuleLoader
+                    // take the statuses per call — without this a SIGHUP
+                    // silently re-enabled the experimental sequence corpus.
+                    // Re-derived from a fresh config load (state doesn't keep
+                    // the config; the same load also feeds the storage/
+                    // enrichment reloads below).
+                    let freshConfig = DaemonConfig.load(from: state.supportDir)
+                    let ruleStatuses = DaemonConfig.enabledRuleStatuses(forProfile: freshConfig.ruleProfile)
+                    let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir), enabledStatuses: ruleStatuses)
+                    // v1.21.5 (audit): the fresh profile governs ONLY the
+                    // sequence/graph reload — RuleEngine.reloadRules re-applies
+                    // its boot-stored profile internally (pre-existing,
+                    // accepted). Say so instead of implying the fresh profile
+                    // covered the single-event reload too, and warn loudly when
+                    // the two diverge.
+                    print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules (rule_profile \(freshConfig.ruleProfile) governs the sequence/graph reload)")
+                    if freshConfig.ruleProfile != state.bootRuleProfile {
+                        print("[SIGHUP] WARNING: rule_profile changed '\(state.bootRuleProfile)' → '\(freshConfig.ruleProfile)' since boot — single-event rules keep the boot profile until the daemon restarts")
+                    }
 
                     // v1.12.0 RC3 (Int-HSig1): also reload graph rules so
                     // an operator can edit Rules/graph/*.json and have
@@ -52,10 +71,10 @@ enum SignalHandlers {
                     // evaluator holds its rules immutably, so swap in a
                     // freshly-constructed instance.
                     let graphRulesDir = URL(fileURLWithPath: state.supportDir + "/compiled_rules/graph")
-                    var graphRules = GraphRuleLoader.loadRules(from: graphRulesDir)
+                    var graphRules = GraphRuleLoader.loadRules(from: graphRulesDir, enabledStatuses: ruleStatuses)
                     if graphRules.isEmpty {
                         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                        graphRules = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd)
+                        graphRules = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd, enabledStatuses: ruleStatuses)
                     }
                     // v1.12.0 RC4 fix (Sec-R4-N3): always swap the
                     // evaluator, even when the new ruleset is empty.
@@ -124,7 +143,7 @@ enum SignalHandlers {
                     await state.notifier.setEnabled(notifConfig.enabled)
                     print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue)")
 
-                    let freshConfig = DaemonConfig.load(from: state.supportDir)
+                    // (freshConfig loaded above, alongside the rule-profile derivation.)
                     let old = state.storage
                     var newStorage = freshConfig.storage
                     newStorage.eventsHotTierMinutes  = max(15, newStorage.eventsHotTierMinutes)

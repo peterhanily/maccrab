@@ -45,7 +45,9 @@ residual risk remains.
   disabled unless the operator opts into a broader profile. See
   [`COVERAGE.md`](COVERAGE.md).
 - Sequence rules correlate multi-step kill chains within bounded
-  windows (longest is `ransomware_kill_chain.yml` at 10 minutes).
+  windows (longest is `ransomware_kill_chain.yml` at 10 minutes;
+  11 of 41 enabled under the default stable profile — see
+  [`COVERAGE.md`](COVERAGE.md)).
 - Behavioral scoring + baseline anomaly detection flags novel process
   lineages and suspicious behavioral aggregates.
 - AI Guard subsystem watches for prompt-injection abuse and AI tool

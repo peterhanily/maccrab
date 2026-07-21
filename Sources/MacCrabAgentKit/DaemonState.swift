@@ -326,6 +326,14 @@ final class DaemonState {
     var threatIntelEnabled: Bool = false
     var certTransparencyEnabled: Bool = false
 
+    /// v1.21.5: the `rule_profile` the daemon booted with. On SIGHUP,
+    /// RuleEngine.reloadRules re-applies its BOOT-stored statuses internally,
+    /// while the sequence/graph reload re-derives from a fresh config load —
+    /// so the SIGHUP handler compares the fresh profile against this to warn
+    /// honestly when the two rule families diverge until restart. Set by
+    /// DaemonSetup post-construction (mirroring `traceRegistry`).
+    var bootRuleProfile: String = "stable"
+
     // v1.12.0 post-audit (M-Cfg1): intent posterior thresholds from
     // daemon_config.json. EventLoop reads these instead of hardcoded
     // 0.85 / 3 so an operator can tune false-positive aggressiveness.

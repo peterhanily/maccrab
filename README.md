@@ -569,7 +569,7 @@ breakdown. To regenerate this section after editing rules: `make readme-coverage
 | **macOS notifications** | Native `UserNotifications` alerts for high and critical severity |
 | **Webhook** | JSON POST to a configurable URL for integration with Slack, Teams, PagerDuty |
 | **Syslog** | RFC 5424 structured data over UDP/TCP for forwarding to any syslog receiver |
-| **Fleet telemetry** | Optional enrollment with a fleet server for centralized multi-host visibility |
+| **Fleet telemetry** | Optional enrollment with a fleet server for centralized multi-host visibility (self-hosted prototype; outbound-only) |
 
 ---
 

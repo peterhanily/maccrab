@@ -28,7 +28,7 @@ core for load-bearing decisions.
 | Endpoint Security collector | **stable** | Native ES client for exec/fork/exit/file/network/signal events. |
 | Alert + campaign storage | **stable** | Per-tier SQLite stores with retention + size-cap discipline. |
 | Alert deduplicator | **stable** | Single-sink chokepoint for alert insertion. Per-rule dismissal feedback. |
-| Sequence engine | experimental | 41 multi-step sequence rules with bounded windows. |
+| Sequence engine | experimental | 41 multi-step sequence rules with bounded windows (11 of 41 enabled under the default stable profile — see [COVERAGE.md](COVERAGE.md)). |
 | Campaign detector | experimental | Kill chain, alert storm, AI compromise, lateral movement clustering. |
 | Behavioral scoring | experimental | 70+ weighted indicators with feedback-adjusted weights. |
 | Baseline anomaly | experimental | Welford z-score + 2nd-order Markov process tree anomaly. |
@@ -87,7 +87,7 @@ detections for load-bearing decisions.
 | SFTP output | experimental | SFTP alert log shipping. |
 | OpenTelemetry (OTLP) output | **stable** | OTLP HTTP/JSON span export. Promoted to stable in v1.9.0 alongside the receiver. |
 | Agent Traces (OTLP receiver + lineage) | **stable** | Loopback OTLP receiver + W3C TRACEPARENT correlation between AI-agent activity and kernel events. AES-GCM at rest, wire-boundary sanitiser. New in v1.9.0. |
-| Fleet telemetry | opt-in | Optional per-host telemetry to a self-hosted fleet collector. |
+| Fleet telemetry | opt-in | Optional per-host telemetry to a self-hosted fleet collector (prototype; outbound-only). |
 
 ## Prevention / response
 

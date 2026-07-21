@@ -277,3 +277,42 @@ struct DaemonConfigOverridesTests {
         #expect(cfg.behaviorAlertThreshold == 10.0)  // default
     }
 }
+
+// v1.21.5: the rule_profile → enabled-statuses mapping is shared by the boot
+// path (DaemonSetup) and the SIGHUP reload (SignalHandlers), and gates all
+// three rule families. Pin the mapping — including the corr-detection #273
+// typo fallback ("stabel" must warn + degrade to the safe stable set, never
+// silently widen to "all").
+@Suite("DaemonConfig.enabledRuleStatuses (F-04 profile mapping, v1.21.5)")
+struct DaemonConfigEnabledRuleStatusesTests {
+
+    @Test("\"all\" maps to nil (every non-deprecated rule)")
+    func allMapsToNil() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "all") == nil)
+    }
+
+    @Test("\"ALL\" is case-insensitive")
+    func allUppercase() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "ALL") == nil)
+    }
+
+    @Test("\"stable\" maps to the stable-only set")
+    func stable() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "stable") == ["stable"])
+    }
+
+    @Test("\"Stable\" is case-insensitive")
+    func stableMixedCase() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "Stable") == ["stable"])
+    }
+
+    @Test("typo \"stabel\" falls back to the safe stable set")
+    func typoFallsBackToStable() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "stabel") == ["stable"])
+    }
+
+    @Test("empty string falls back to the safe stable set")
+    func emptyFallsBackToStable() {
+        #expect(DaemonConfig.enabledRuleStatuses(forProfile: "") == ["stable"])
+    }
+}

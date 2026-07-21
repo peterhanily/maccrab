@@ -194,6 +194,13 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
     /// defaulted suppressible and were silently gate-dropped on platform binaries.
     public let suppressible: Bool?
 
+    /// v1.21.5: Sigma `status` carried from the YAML (stable / experimental /
+    /// deprecated) so `loadRules(enabledStatuses:)` can apply the F-04
+    /// rule_profile gate to sequences. Optional + decode-safe: compilers before
+    /// v1.21.5 didn't emit the key for sequences, so a stale compiled dir
+    /// decodes to nil — the loader grandfathers nil as "stable".
+    public let status: String?
+
     public init(
         id: String,
         title: String,
@@ -206,7 +213,8 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
         steps: [SequenceStep],
         trigger: TriggerCondition,
         enabled: Bool = true,
-        suppressible: Bool? = nil
+        suppressible: Bool? = nil,
+        status: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -220,6 +228,7 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
         self.trigger = trigger
         self.enabled = enabled
         self.suppressible = suppressible
+        self.status = status
     }
 }
 
@@ -435,9 +444,15 @@ public actor SequenceEngine {
     /// to parse are logged and skipped.
     ///
     /// - Parameter directory: URL to the directory containing rule files.
+    /// - Parameter enabledStatuses: v1.21.5 (F-04 parity): when non-nil, only
+    ///   rules whose Sigma `status` is in the set are loaded — sequences
+    ///   previously bypassed the rule_profile gate entirely, so the 36
+    ///   experimental sequence rules ran on default "stable" installs. nil
+    ///   (the default) = no filtering, which keeps direct callers and the
+    ///   test suite on the legacy behavior.
     /// - Returns: The number of rules successfully loaded.
     @discardableResult
-    public func loadRules(from directory: URL) throws -> Int {
+    public func loadRules(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
@@ -462,6 +477,25 @@ public actor SequenceEngine {
             do {
                 let data = try Data(contentsOf: file)
                 var rule = try decoder.decode(SequenceRule.self, from: data)
+                // v1.21.5: deprecated = retired detection; must not run under
+                // ANY profile — including nil ("all"). Skipped BEFORE the
+                // profile filter because the `rule.enabled = true` below would
+                // otherwise stomp the compiled enabled=false and revive it.
+                // Mirrors single-event semantics (deprecated stays disabled
+                // even under rule_profile "all").
+                if (rule.status ?? "stable").lowercased() == "deprecated" {
+                    continue
+                }
+                // v1.21.5 stable-profile gate: skip rules outside the active
+                // profile. A rule with NO status key is treated as "stable" —
+                // compilers before v1.21.5 didn't emit status for sequences,
+                // so a stale compiled_rules dir would otherwise lose ALL 41
+                // sequences (including the 5 stable ones) until the operator
+                // recompiles. Grandfathering nil keeps them running.
+                if let allowed = enabledStatuses,
+                   !allowed.contains((rule.status ?? "stable").lowercased()) {
+                    continue
+                }
                 rule.enabled = true
 
                 // Validate rule structure before accepting it.

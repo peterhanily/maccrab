@@ -31,6 +31,8 @@ TOTAL=0
 TEST_DIR="/tmp/maccrab_detection_test_$$"
 CLEANUP_FILES=()
 CLEANUP_PIDS=()
+DAEMON_CONFIG="$HOME/Library/Application Support/MacCrab/daemon_config.json"
+DAEMON_CONFIG_BAK=""
 
 pass()  { TOTAL=$((TOTAL+1)); PASS=$((PASS+1)); echo -e "  ${GREEN}✔ PASS${NC} $*"; }
 fail()  { TOTAL=$((TOTAL+1)); FAIL=$((FAIL+1)); echo -e "  ${RED}✘ FAIL${NC} $*"; }
@@ -46,6 +48,14 @@ cleanup() {
     for p in "${CLEANUP_PIDS[@]}"; do
         kill "$p" 2>/dev/null || true
     done
+    # v1.21.5: restore the operator's daemon_config.json (we forced
+    # rule_profile "all" for this run) — BEFORE TEST_DIR is removed,
+    # since the backup lives inside it.
+    if [ -n "$DAEMON_CONFIG_BAK" ] && [ -f "$DAEMON_CONFIG_BAK" ]; then
+        cp -f "$DAEMON_CONFIG_BAK" "$DAEMON_CONFIG" 2>/dev/null || true
+    elif [ "${DAEMON_CONFIG_CREATED:-0}" = "1" ]; then
+        rm -f "$DAEMON_CONFIG" 2>/dev/null || true
+    fi
     rm -rf "$TEST_DIR" 2>/dev/null || true
     pkill -x maccrabd 2>/dev/null || true
     sleep 1
@@ -74,6 +84,35 @@ cp -f .build/debug/compiled_rules/sequences/*.json "$HOME/Library/Application Su
 
 info "Clearing old data..."
 rm -rf "$HOME/Library/Application Support/MacCrab/events.db"* 2>/dev/null || true
+
+# v1.21.5: red-team sims deliberately exercise the FULL detection corpus.
+# The daemon defaults to rule_profile "stable" (F-04), which now also gates
+# sequence + graph rules — the experimental-tier detections this suite
+# triggers would never fire under it. Force "all" for this run: merge into
+# daemon_config.json (preserving the operator's other keys) and restore the
+# original on exit (see cleanup).
+info "Setting rule_profile=all for the simulation..."
+if [ -f "$DAEMON_CONFIG" ]; then
+    DAEMON_CONFIG_BAK="$TEST_DIR/daemon_config.json.orig"
+    cp -f "$DAEMON_CONFIG" "$DAEMON_CONFIG_BAK"
+else
+    DAEMON_CONFIG_CREATED=1
+fi
+python3 - "$DAEMON_CONFIG" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+    except Exception:
+        cfg = {}
+cfg["rule_profile"] = "all"
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+PY
 
 info "Starting daemon..."
 .build/debug/maccrabd &

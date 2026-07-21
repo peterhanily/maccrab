@@ -410,6 +410,60 @@ struct GraphRuleEvaluatorTests {
         #expect(matches.first?.bindings["p"] == unsigned.id)
     }
 
+    // MARK: - Status profile (v1.21.5)
+
+    @Test("All shipped graph rules declare status: stable and survive the [stable] profile")
+    func shippedGraphRulesAreStableTier() {
+        let all = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL())
+        #expect(!all.isEmpty)
+        for rule in all {
+            #expect(rule.status == "stable", "graph rules are curated stable-tier — \(rule.id) declares \(rule.status ?? "nil")")
+        }
+        // Gating by the default profile must therefore change nothing.
+        let gated = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL(), enabledStatuses: ["stable"])
+        #expect(gated.count == all.count, "the [stable] profile must not drop any shipped graph rule")
+    }
+
+    @Test("GraphRule with no status key decodes to nil and is grandfathered as stable by the loader")
+    func missingStatusGrandfatheredAsStable() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graph-profile-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Pre-v1.21.5 rule file: no "status" key at all.
+        let noStatus = """
+        {"id": "no_status", "title": "T", "severity": "low", "type": "graph",
+         "nodes": {"p": {"type": "process"}}, "edges": []}
+        """
+        // Hypothetical experimental-tier graph rule.
+        let experimental = """
+        {"id": "experimental_rule", "title": "T", "severity": "low", "type": "graph",
+         "status": "experimental",
+         "nodes": {"p": {"type": "process"}}, "edges": []}
+        """
+        // v1.21.5 audit: deprecated = retired detection — must not load under
+        // ANY profile, including nil ("all"). GraphRule has no enabled flag,
+        // so the loader's unconditional skip is the only gate.
+        let deprecated = """
+        {"id": "deprecated_rule", "title": "T", "severity": "low", "type": "graph",
+         "status": "deprecated",
+         "nodes": {"p": {"type": "process"}}, "edges": []}
+        """
+        try Data(noStatus.utf8).write(to: dir.appendingPathComponent("no_status.json"))
+        try Data(experimental.utf8).write(to: dir.appendingPathComponent("experimental.json"))
+        try Data(deprecated.utf8).write(to: dir.appendingPathComponent("deprecated.json"))
+
+        let unfiltered = GraphRuleLoader.loadRules(from: dir)
+        #expect(unfiltered.map(\.id) == ["experimental_rule", "no_status"],
+                "nil profile loads every NON-DEPRECATED rule; deprecated must never load")
+        #expect(unfiltered.first { $0.id == "no_status" }?.status == nil)
+
+        let stableOnly = GraphRuleLoader.loadRules(from: dir, enabledStatuses: ["stable"])
+        #expect(stableOnly.map(\.id) == ["no_status"],
+                "a rule without a status key must be grandfathered as stable; experimental + deprecated must be gated out")
+    }
+
     // MARK: - Helpers
 
     /// Walk up from this test file's location to find the project root

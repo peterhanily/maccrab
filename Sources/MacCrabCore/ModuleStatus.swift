@@ -206,9 +206,11 @@ public struct ModuleStatus: Sendable {
         .init(id: "llm-orchestration", name: "LLM orchestration",
               category: "ai", maturity: .experimental,
               summary: "5 backend providers (Ollama, Claude, OpenAI, Mistral, Gemini). Advisory only."),
+        // v1.21.5: aligned with MODULES.md — fleet is a prototype and
+        // strictly outbound (no fleet-sourced data flows back to endpoints).
         .init(id: "fleet-client", name: "Fleet telemetry",
               category: "output", maturity: .optIn,
-              summary: "Optional per-host telemetry to a self-hosted fleet collector."),
+              summary: "Optional per-host telemetry to a self-hosted fleet collector (prototype; outbound-only)."),
         .init(id: "deception", name: "Honeyfile deception",
               category: "prevention", maturity: .optIn,
               summary: "Plants canary credential files. Requires MACCRAB_DECEPTION=1."),

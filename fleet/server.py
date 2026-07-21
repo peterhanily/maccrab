@@ -2,14 +2,21 @@
 """
 MacCrab Fleet Collector Server
 
-Receives telemetry from MacCrab instances, aggregates IOC sightings,
-and provides fleet-wide threat intelligence back to endpoints.
+PROTOTYPE — NOT production-grade. One shared bearer key, self-reported
+pseudonymous hostIds (no per-device identity), no tenant isolation, no
+RBAC. Binds loopback by default; put TLS (reverse proxy) in front for
+anything non-local. See fleet/README.md for the security model.
+As of MacCrab v1.21.5, endpoints are outbound-only: they push telemetry
+here but never consume anything this server returns.
+
+Receives telemetry from MacCrab instances and aggregates IOC sightings
+for operator visibility.
 
 Usage:
     pip install fastapi uvicorn
     python server.py [--port 8443] [--db fleet.db]
 
-    Or: uvicorn server:app --host 0.0.0.0 --port 8443
+    Or: uvicorn server:app --host 127.0.0.1 --port 8443
 """
 
 import argparse
@@ -309,7 +316,10 @@ async def get_fleet_campaigns(authorization: Optional[str] = Header(None)):
 
 
 @app.get("/api/dashboard")
-async def dashboard():
+async def dashboard(authorization: Optional[str] = Header(None)):
+    # v1.21.5: was the only unauthenticated data endpoint — fleet size,
+    # alert counts, and top rules leaked to any caller.
+    verify_auth(authorization)
     cutoff = time.time() - 86400
 
     with get_db() as db:
@@ -348,14 +358,17 @@ async def index():
     <p>API Endpoints:</p>
     <ul>
         <li><code>POST /api/telemetry</code> — Push telemetry from MacCrab instances</li>
-        <li><code>GET /api/iocs</code> — Pull aggregated IOC intelligence</li>
+        <li><code>GET /api/iocs</code> — Aggregated IOC sightings (operator view; not consumed by endpoints)</li>
+        <li><code>GET /api/fleet-campaigns</code> — Cross-host campaign summary (operator view; not consumed by endpoints)</li>
         <li><code>GET /api/incidents</code> — Fleet-wide incident summary</li>
         <li><code>GET /api/dashboard</code> — Fleet overview stats</li>
     </ul>
     <p>Configure MacCrab instances with:</p>
-    <pre>export MACCRAB_FLEET_URL=http://this-server:8443
+    <pre>export MACCRAB_FLEET_URL=https://this-server:8443
 export MACCRAB_FLEET_KEY=your-api-key
 make dev</pre>
+    <p>Terminate TLS in a reverse proxy (nginx/Caddy) in front of this
+    server — endpoints refuse plaintext http to non-loopback hosts.</p>
     </body></html>
     """
 
@@ -379,7 +392,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="MacCrab Fleet Collector")
     parser.add_argument("--port", type=int, default=8443)
-    parser.add_argument("--host", default="0.0.0.0")
+    # v1.21.5: default loopback — binding 0.0.0.0 must be an explicit choice.
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--db", default="fleet.db")
     args = parser.parse_args()
 

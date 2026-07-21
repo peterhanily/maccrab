@@ -13,6 +13,7 @@
 # Or via make:
 #   make coverage-doc
 
+import json
 import os
 import re
 import sys
@@ -69,6 +70,7 @@ def parse_rule(path):
         "id": grab("id"),
         "status": grab("status") or "experimental",
         "level": grab("level") or "medium",
+        "type": grab("type"),
         "description": grab("description", multiline=True),
         "tags": tags,
         "techniques": techniques,
@@ -139,6 +141,35 @@ def main():
     print(f'`"rule_profile": "all"` in `daemon_config.json` to enable every')
     print(f"non-deprecated rule (the pre-1.21.4 behavior). Per-rule operator")
     print(f"overlays (user_rules) are unaffected by this setting.")
+    print()
+    # v1.21.5 (audit): compute the sequence/graph tier split instead of
+    # hardcoding it — the hardcoded "5 of the 41" went stale the moment a
+    # sequence was promoted.
+    seq_rules = [r for rules in by_tactic.values() for r in rules
+                 if r["type"] == "sequence"]
+    seq_total = len(seq_rules)
+    seq_stable = sum(1 for r in seq_rules if r["status"] == "stable")
+    graph_total = 0
+    graph_stable = 0
+    for gpath in sorted((RULES_DIR / "graph").glob("*.json")):
+        try:
+            g = json.loads(gpath.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        graph_total += 1
+        if g.get("status") == "stable":
+            graph_stable += 1
+
+    print(f"Since **v1.21.5** the profile also gates **sequence rules** —")
+    print(f"previously they bypassed it entirely, so the experimental sequence")
+    print(f"tier ran on default installs. {seq_stable} of the {seq_total} sequence rules are")
+    print(f"`status: stable` and ship enabled by default. **Graph rules**")
+    print(f"(`Rules/graph/*.json`) are curated stable-tier precision rules —")
+    print(f"{graph_stable} of {graph_total} declare `status: stable` and ship enabled under the")
+    print(f"default profile. Unlike single-event rules (which load disabled")
+    print(f"when outside the active profile), sequence and graph rules outside")
+    print(f"the active profile are NOT loaded at all — `rule_profile: \"all\"`")
+    print(f"is the only way to activate experimental sequences.")
     print()
 
     print(f"## Caveat")

@@ -1,16 +1,20 @@
 // FleetClient.swift
 // MacCrabCore
 //
-// Pushes telemetry to and pulls aggregations from the fleet collector.
+// Pushes telemetry to the fleet collector.
 // Configured via MACCRAB_FLEET_URL environment variable.
+// v1.21.5: outbound-only — the pull machinery (IOC aggregations, fleet
+// campaigns) was removed. The prototype collector authenticates every
+// caller with one shared bearer key and trusts self-reported hostIds,
+// so anything it returns is trivially poisonable and must never flow
+// back into endpoint state.
 
 import Foundation
 import os.log
 
-/// Bidirectional fleet telemetry client.
+/// Outbound-only fleet telemetry client.
 ///
 /// Push: batches local alerts and IOC sightings, sends to collector every 60s.
-/// Pull: fetches fleet-wide IOC aggregations every 5 minutes.
 public actor FleetClient {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "fleet")
@@ -31,9 +35,6 @@ public actor FleetClient {
     /// Push interval (default: 60 seconds).
     private let pushInterval: TimeInterval
 
-    /// Pull interval (default: 5 minutes).
-    private let pullInterval: TimeInterval
-
     /// Whether the client is active.
     private var isRunning = false
 
@@ -43,29 +44,33 @@ public actor FleetClient {
     /// Maximum backoff interval (5 minutes).
     private let maxBackoffInterval: TimeInterval = 300
 
-    /// Last pulled aggregation.
-    private var lastAggregation: FleetAggregation?
-
-    /// Callback for processing pulled fleet data.
-    public typealias FleetDataHandler = @Sendable (FleetAggregation) async -> Void
-    private var dataHandler: FleetDataHandler?
-
     // MARK: - Initialization
 
-    public init?(
-        pushInterval: TimeInterval = 60,
-        pullInterval: TimeInterval = 300
-    ) {
+    public init?(pushInterval: TimeInterval = 60) {
         // Read config from environment
         guard let urlString = Foundation.ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"],
               let url = URL(string: urlString) else {
             return nil
         }
 
+        // v1.21.5: enforce transport security. Pushes carry a bearer key
+        // plus alert summaries, so accept https to any host, or plaintext
+        // http only to a loopback host (dev collector). Mirrors
+        // OllamaBackend.isPlaintextRemote: LoopbackEndpoint parses the
+        // host as an IP literal, so `127.0.0.1.evil.com` is remote.
+        let scheme = url.scheme?.lowercased()
+        let isLoopbackHTTP = scheme == "http" && LoopbackEndpoint.isLoopback(host: url.host ?? "")
+        guard scheme == "https" || isLoopbackHTTP else {
+            // Instance stored properties aren't initialized yet in a
+            // failable init, so use a local logger.
+            Logger(subsystem: "com.maccrab", category: "fleet")
+                .warning("Refusing MACCRAB_FLEET_URL (scheme \(scheme ?? "?", privacy: .public), host \(url.host ?? "?", privacy: .public)): only https://, or http:// to a loopback host, is accepted. Fleet client disabled.")
+            return nil
+        }
+
         self.collectorURL = url
         self.apiKey = Foundation.ProcessInfo.processInfo.environment["MACCRAB_FLEET_KEY"] ?? ""
         self.pushInterval = pushInterval
-        self.pullInterval = pullInterval
 
         // Generate pseudonymous host ID
         let hostname = Foundation.ProcessInfo.processInfo.hostName
@@ -75,9 +80,8 @@ public actor FleetClient {
 
     // MARK: - Public API
 
-    /// Start the fleet client with a handler for pulled fleet data.
-    public func start(handler: @escaping FleetDataHandler) {
-        self.dataHandler = handler
+    /// Start the fleet client (push-only).
+    public func start() {
         self.isRunning = true
 
         // Push task with exponential backoff on failure
@@ -90,16 +94,7 @@ public actor FleetClient {
             }
         }
 
-        // Pull task
-        Task {
-            while isRunning {
-                try? await Task.sleep(nanoseconds: UInt64(pullInterval * 1_000_000_000))
-                guard isRunning else { break }
-                await pull()
-            }
-        }
-
-        logger.info("Fleet client started: \(self.collectorURL.absoluteString)")
+        logger.info("Fleet client started (outbound-only): \(self.collectorURL.absoluteString)")
     }
 
     public func stop() {
@@ -117,11 +112,6 @@ public actor FleetClient {
     public func bufferIOC(_ sighting: FleetIOCSighting) {
         pendingIOCs.append(sighting)
         if pendingIOCs.count > 500 { pendingIOCs.removeFirst(250) }
-    }
-
-    /// Get last pulled aggregation.
-    public func getAggregation() -> FleetAggregation? {
-        lastAggregation
     }
 
     // MARK: - Push
@@ -179,56 +169,6 @@ public actor FleetClient {
         let capped = min(exponential, maxBackoffInterval)
         let jitter = capped * Double.random(in: 0...0.25)
         return capped + jitter
-    }
-
-    // MARK: - Pull
-
-    private func pull() async {
-        let url = collectorURL.appendingPathComponent("/api/iocs")
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        request.timeoutInterval = 15
-
-        do {
-            let (data, response) = try await SecureURLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
-
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let aggregation = try decoder.decode(FleetAggregation.self, from: data)
-            lastAggregation = aggregation
-
-            logger.info("Fleet pull: \(aggregation.iocs.count) IOCs, \(aggregation.hotProcesses.count) hot processes, fleet size: \(aggregation.fleetSize)")
-
-            await dataHandler?(aggregation)
-        } catch {
-            // Silent failure for pull — collector may be unreachable
-        }
-    }
-
-    // MARK: - Fleet Campaign Pull
-
-    /// Check for cross-endpoint campaigns (same rule on 3+ hosts).
-    public func pullFleetCampaigns() async -> [FleetCampaign] {
-        let url = collectorURL.appendingPathComponent("/api/fleet-campaigns")
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        request.timeoutInterval = 15
-
-        do {
-            let (data, response) = try await SecureURLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
-            let result = try JSONDecoder().decode(FleetCampaignResponse.self, from: data)
-            return result.campaigns
-        } catch {
-            return []
-        }
     }
 
     // MARK: - Utilities

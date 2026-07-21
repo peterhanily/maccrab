@@ -752,6 +752,17 @@ enum DaemonSetup {
             causalStoreOuter = nil
         }
 
+        // F-04: the daemon defaults to the "stable" rule profile — only the
+        // curated stable tier ships enabled; "all" (daemon_config.json
+        // rule_profile) restores every non-deprecated rule. Operator per-rule
+        // overlays (user_rules, loaded below) are unaffected by the profile.
+        // v1.21.5: resolved ONCE here, above the graph evaluator, because the
+        // profile now gates all three rule families (single-event, sequence,
+        // graph) — sequence + graph rules previously bypassed it entirely.
+        // The mapping + corr-detection #273 unknown-value validation live in
+        // DaemonConfig.enabledRuleStatuses (shared with the SIGHUP reload path).
+        let ruleStatuses = DaemonConfig.enabledRuleStatuses(forProfile: config.ruleProfile)
+
         // v1.12.0 — load graph rules from `<support-dir>/compiled_rules/graph`
         // (release builds) or `Rules/graph` (dev builds). Each rule is a
         // JSON file describing a multi-entity pattern that fires only
@@ -761,21 +772,24 @@ enum DaemonSetup {
         // so every materialized trace gets one pass of graph rules.
         // Skipped when causalStoreOuter is nil — without traces there's
         // nothing to evaluate against.
+        // v1.21.5: gated by the rule profile. All 7 shipped graph rules are
+        // curated `status: stable`, so default behavior is unchanged; a rule
+        // file without the key is grandfathered as stable by the loader.
         let graphEvaluator: GraphRuleEvaluator?
         if causalStoreOuter != nil {
             let compiledGraphDir = URL(fileURLWithPath: supportDir + "/compiled_rules/graph")
-            var loaded = GraphRuleLoader.loadRules(from: compiledGraphDir)
+            var loaded = GraphRuleLoader.loadRules(from: compiledGraphDir, enabledStatuses: ruleStatuses)
             if loaded.isEmpty {
                 // Dev fallback: pick up rules straight from the source tree.
                 let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                loaded = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd)
+                loaded = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd, enabledStatuses: ruleStatuses)
             }
             if loaded.isEmpty {
                 logger.info("TraceGraph rule evaluator: no graph rules found — multi-entity detection disabled this run")
                 graphEvaluator = nil
             } else {
                 graphEvaluator = GraphRuleEvaluator(rules: loaded)
-                logger.info("TraceGraph rule evaluator: loaded \(loaded.count) graph rules")
+                logger.info("TraceGraph rule evaluator: loaded \(loaded.count) graph rules (rule_profile: \(config.ruleProfile))")
             }
         } else {
             graphEvaluator = nil
@@ -1250,21 +1264,19 @@ enum DaemonSetup {
         let topologyAnomalyDetector = TopologyAnomalyDetector()
 
         // Fleet telemetry (optional -- configure via MACCRAB_FLEET_URL env var)
+        // v1.21.5: fleet is outbound-only. Fleet-sourced IOCs must never
+        // enter local threat intel — the prototype collector trusts
+        // self-reported hostIds behind one shared bearer key, so a single
+        // keyholder could feed poisoned "fleet-wide" IOCs to every endpoint.
         let fleetClient = FleetClient()
         if let fleet = fleetClient {
-            await fleet.start { aggregation in
-                // Feed fleet IOCs into local threat intel
-                for ioc in aggregation.iocs where ioc.hostCount >= 2 {
-                    if ioc.type == "ip" {
-                        await threatIntel.addCustomIOCs(ips: [ioc.value])
-                    } else if ioc.type == "domain" {
-                        await threatIntel.addCustomIOCs(domains: [ioc.value])
-                    } else if ioc.type == "hash" {
-                        await threatIntel.addCustomIOCs(hashes: [ioc.value])
-                    }
-                }
-            }
+            await fleet.start()
             print("Fleet client active")
+        } else if ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] != nil {
+            // v1.21.5: surface the transport refusal on stdout too — the
+            // os.log warning inside FleetClient.init is easy to miss, and an
+            // operator who set the env var deserves a loud answer at boot.
+            print("Warning: MACCRAB_FLEET_URL refused: use https://, or http:// to a loopback host — fleet telemetry disabled")
         }
 
         // === LLM REASONING BACKEND (optional) ===
@@ -1565,28 +1577,9 @@ enum DaemonSetup {
         }
         let rulesURL = URL(fileURLWithPath: effectiveRulesDir)
         do {
-            // F-04: the daemon defaults to the "stable" rule profile — only the
-            // curated stable tier ships enabled; "all" (daemon_config.json
-            // rule_profile) restores every non-deprecated rule. Operator per-rule
-            // overlays (user_rules, loaded below) are unaffected by the profile.
-            //
-            // corr-detection #273: validate the value against the known set. A
-            // typo ("stabel", "full", …) previously fell through to "stable"
-            // SILENTLY — an operator who set rule_profile: all with a typo ran
-            // with ~352 rules disabled and no signal. Warn loudly and keep the
-            // safe default (stable) on an unrecognized value.
-            let profile = config.ruleProfile.lowercased()
-            let ruleStatuses: Set<String>?
-            switch profile {
-            case "all":
-                ruleStatuses = nil
-            case "stable":
-                ruleStatuses = ["stable"]
-            default:
-                logger.warning("Unknown rule_profile '\(config.ruleProfile)' — expected 'stable' or 'all'. Falling back to 'stable'.")
-                print("Warning: unknown rule_profile '\(config.ruleProfile)' — expected 'stable' or 'all'. Using 'stable'.")
-                ruleStatuses = ["stable"]
-            }
+            // F-04 stable-profile gate — `ruleStatuses` is resolved once above
+            // the graph evaluator (v1.21.5), including the corr-detection #273
+            // unknown-value validation, via DaemonConfig.enabledRuleStatuses.
             let count = try await ruleEngine.loadRules(from: rulesURL, enabledStatuses: ruleStatuses)
             logger.info("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")
             print("Loaded \(count) single-event detection rules (rule_profile: \(config.ruleProfile))")
@@ -1642,13 +1635,16 @@ enum DaemonSetup {
         let bootPushedIDs = await ruleEngine.pushedRuleIDs
         await responseEngine.setDetectionOnlyRuleIDs(bootPushedIDs)
 
-        // Load sequence rules (use same effective dir as single-event rules)
+        // Load sequence rules (use same effective dir as single-event rules).
+        // v1.21.5: pass the F-04 profile — sequence rules previously bypassed
+        // rule_profile entirely, so the 36 experimental sequences ran on
+        // default "stable" installs.
         let sequenceRulesDir = effectiveRulesDir + "/sequences"
         try? FileManager.default.createDirectory(atPath: sequenceRulesDir, withIntermediateDirectories: true)
         do {
-            let seqCount = try await sequenceEngine.loadRules(from: URL(fileURLWithPath: sequenceRulesDir))
-            logger.info("Loaded \(seqCount) sequence detection rules")
-            print("Loaded \(seqCount) sequence detection rules")
+            let seqCount = try await sequenceEngine.loadRules(from: URL(fileURLWithPath: sequenceRulesDir), enabledStatuses: ruleStatuses)
+            logger.info("Loaded \(seqCount) sequence detection rules (rule_profile: \(config.ruleProfile))")
+            print("Loaded \(seqCount) sequence detection rules (rule_profile: \(config.ruleProfile))")
         } catch {
             logger.info("No sequence rules loaded (this is fine for initial setup)")
         }
@@ -1921,6 +1917,11 @@ enum DaemonSetup {
         // requireConfirmation skip path emits a synthetic informational
         // alert visible to the operator. Pre-fix the gate logged silently.
         await state.responseEngine.setAlertSinkForPending(state.alertSink)
+
+        // v1.21.5: remember the boot-time rule_profile so the SIGHUP handler
+        // can warn when a config edit changed it — RuleEngine keeps applying
+        // the boot profile on reload, only sequence/graph pick up the fresh one.
+        state.bootRuleProfile = config.ruleProfile
 
         // Apply v1.8.0 per-tier storage budgets. DaemonTimers reads each
         // knob live so a SIGHUP-driven config reload is honored on the

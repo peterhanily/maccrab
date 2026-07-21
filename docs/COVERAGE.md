@@ -11,8 +11,8 @@ ATT&CK technique tags from each rule's `tags:` block.
 | Metric | Count |
 |---|---|
 | Rules total | **479** |
-| Status: stable | 92 |
-| Status: experimental | 374 |
+| Status: stable | 98 |
+| Status: experimental | 368 |
 | Status: deprecated | 10 |
 | Severity: critical | 19 |
 | Severity: high | 111 |
@@ -32,6 +32,17 @@ default, keeping the daily false-positive budget honest. Set
 `"rule_profile": "all"` in `daemon_config.json` to enable every
 non-deprecated rule (the pre-1.21.4 behavior). Per-rule operator
 overlays (user_rules) are unaffected by this setting.
+
+Since **v1.21.5** the profile also gates **sequence rules** —
+previously they bypassed it entirely, so the experimental sequence
+tier ran on default installs. 11 of the 41 sequence rules are
+`status: stable` and ship enabled by default. **Graph rules**
+(`Rules/graph/*.json`) are curated stable-tier precision rules —
+7 of 7 declare `status: stable` and ship enabled under the
+default profile. Unlike single-event rules (which load disabled
+when outside the active profile), sequence and graph rules outside
+the active profile are NOT loaded at all — `rule_profile: "all"`
+is the only way to activate experimental sequences.
 
 ## Caveat
 
@@ -587,31 +598,31 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `download_persist_c2.yml`<br/>Download to Persistence to C2 Attack Chain | experimental | high | T1071.001 T1543.001 |
 | `download_then_cryptominer.yml`<br/>File Download Followed by Cryptominer Execution | experimental | high | T1105 T1496 |
 | `dropper_execution_cleanup.yml`<br/>Dropper Execution with Self-Cleanup | experimental | medium | T1070.004 |
-| `gh_token_revocation_polling_loop.yml`<br/>Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch) | experimental | high | T1071.001 T1195.001 T1485 |
+| `gh_token_revocation_polling_loop.yml`<br/>Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch) | stable | high | T1071.001 T1195.001 T1485 |
 | `installer_pkg_persistence.yml`<br/>Installer Package Drops Persistence | experimental | medium | T1543.001 |
 | `keylogger_install_and_persist.yml`<br/>CGEvent Tap Installed Then Persistence Written | experimental | high | T1056.001 T1547.011 |
 | `lateral_ssh_persist.yml`<br/>SSH Connection Followed by Persistence on Remote Host Indicators | experimental | medium | T1021.004 |
 | `llm_api_key_harvest_exfil.yml`<br/>LLM Tool Config Scan Followed by Credential Exfiltration | experimental | high | T1041 T1195.001 T1552.001 |
 | `notarized_dropper_pattern.yml`<br/>Notarized Binary Drops and Executes Unnotarized Payload | experimental | medium | T1105 T1553.001 |
-| `npm_module_require_then_bulk_credential_read.yml`<br/>node Process Reads Multiple Credential Files Shortly After /node_modules/ Spawn (node-ipc / require-time) | experimental | high | T1059.007 T1195.001 T1552 T1555 |
+| `npm_module_require_then_bulk_credential_read.yml`<br/>node Process Reads Multiple Credential Files Shortly After /node_modules/ Spawn (node-ipc / require-time) | stable | high | T1059.007 T1195.001 T1552 T1555 |
 | `npm_postinstall_to_rat.yml`<br/>npm Postinstall Drops and Executes RAT (Axios-style) | stable | high | T1059.004 T1195.001 |
 | `osascript_download_execute.yml`<br/>AppleScript Downloads and Executes Payload | experimental | high | T1059.002 T1105 |
-| `package_typosquat_full_chain.yml`<br/>Typosquatted Package Install Calls Home and Drops Persistence | experimental | high | T1195.001 |
+| `package_typosquat_full_chain.yml`<br/>Typosquatted Package Install Calls Home and Drops Persistence | stable | high | T1195.001 |
 | `phishing_attachment_exec.yml`<br/>Phishing Attachment Opens Then Spawns Shell or Downloader | experimental | high | T1059 T1566.001 |
 | `pip_install_to_credential_harvest.yml`<br/>pip Install Triggers Credential Harvesting (LiteLLM-style) | stable | high | T1195.001 T1552.001 |
 | `privesc_to_persistence.yml`<br/>Privilege Escalation Followed by Persistence Installation | experimental | medium | T1543.004 T1548.003 |
 | `quarantine_remove_execute.yml`<br/>Quarantine Removal Followed by Execution | stable | medium | T1553.001 |
-| `ransomware_kill_chain.yml`<br/>Ransomware Kill Chain — Recovery Inhibition Then Data Destruction | experimental | critical | T1485 T1486 T1490 |
+| `ransomware_kill_chain.yml`<br/>Ransomware Kill Chain — Recovery Inhibition Then Data Destruction | stable | critical | T1485 T1486 T1490 |
 | `reverse_shell_chain.yml`<br/>Shell Spawn to Reverse Shell Connection | stable | medium | T1059.004 |
 | `rosetta_download_execute_c2.yml`<br/>Rosetta 2 Download-Execute-C2 Chain | experimental | high | — |
 | `screenshot_then_exfil.yml`<br/>Screen Capture Followed by Data Upload | experimental | medium | T1041 T1113 |
 | `ssh_lateral_tool_transfer.yml`<br/>SSH Session Transfers Tool Then Executes It | experimental | medium | T1021.004 T1105 |
-| `supply_chain_full_kill_chain.yml`<br/>Full Supply Chain Kill Chain - Install to Persist to Exfiltrate | experimental | high | T1195.001 T1543.001 T1552.001 |
+| `supply_chain_full_kill_chain.yml`<br/>Full Supply Chain Kill Chain - Install to Persist to Exfiltrate | stable | high | T1195.001 T1543.001 T1552.001 |
 | `tcc_grant_then_abuse.yml`<br/>TCC Permission Grant Followed by Sensitive Access (Same Lineage) | experimental | medium | T1562.001 |
 | `tempest_prep_chain.yml`<br/>TEMPEST Preparation Chain — SDR Connect then Outbound Data Transfer | experimental | low | T1048 T1125 |
 | `usb_drop_then_exec.yml`<br/>File Dropped from Removable Media Then Executed | experimental | medium | T1059 T1091 |
 | `vscode_extension_to_credential_theft.yml`<br/>VS Code Extension Steals Credentials and Establishes C2 (GlassWorm-style) | experimental | high | T1195.001 T1552.001 |
-| `worm_self_propagation_signal.yml`<br/>Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern) | experimental | high | T1098 T1195.001 T1555 T1567 |
+| `worm_self_propagation_signal.yml`<br/>Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern) | stable | high | T1098 T1195.001 T1555 T1567 |
 | `xcode_supply_chain.yml`<br/>Xcode Build Spawns Unexpected Network Connection | experimental | low | T1195.001 |
 
 ## Full MITRE ATT&CK technique list

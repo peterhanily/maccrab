@@ -321,7 +321,8 @@ public final class V2LiveDataProvider: V2DataProvider {
         let composite = await Task.detached(priority: .userInitiated) {
             V2LiveDataProvider.loadCompositeRules(
                 sequencesDir: rulesPath + "/sequences",
-                graphDir: rulesPath + "/graph")
+                graphDir: rulesPath + "/graph",
+                ruleProfile: V2LiveDataProvider.ruleProfile(configDir: dir))
         }.value
         let merged = mapped + composite + builtins
         rulesCache = merged
@@ -382,14 +383,34 @@ public final class V2LiveDataProvider: V2DataProvider {
         return out
     }
 
+    /// v1.21.5: `rule_profile` from daemon_config.json (default "stable" — the
+    /// daemon's own default, and what an unknown value falls back to). Used to
+    /// render composite (sequence/graph) rows with their EFFECTIVE enabled
+    /// state — the engines skip out-of-profile rules at load, so the compiled
+    /// `enabled` flag alone overstates what actually runs.
+    nonisolated static func ruleProfile(configDir: String) -> String {
+        let path = configDir + "/daemon_config.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let profile = json["rule_profile"] as? String else {
+            return "stable"
+        }
+        return profile
+    }
+
     /// v1.18: read the compiled sequence + graph rules into full Rules-list
     /// rows (id / title / severity / MITRE / enabled / description), so the
     /// dashboard's Rules view lists the multi-step ("time sequence") and
     /// multi-entity detections alongside single-event YAML rules and the
     /// built-in detections. Read-only display; the engine loads the same
     /// files. Missing dirs / malformed files are skipped silently.
+    /// v1.21.5: rows carry the Sigma `status`, and `isEnabled` reflects the
+    /// rule_profile gate — SequenceEngine/GraphRuleLoader SKIP out-of-profile
+    /// (and all deprecated) rules at load, matching the semantics here:
+    /// missing status is grandfathered "stable"; profile "all" enables every
+    /// non-deprecated rule; anything else enables only "stable".
     nonisolated static func loadCompositeRules(
-        sequencesDir: String, graphDir: String
+        sequencesDir: String, graphDir: String, ruleProfile: String = "stable"
     ) -> [V2MockRule] {
         struct Stub: Decodable {
             let id: String
@@ -398,6 +419,7 @@ public final class V2LiveDataProvider: V2DataProvider {
             let tags: [String]?
             let description: String?
             let enabled: Bool?
+            let status: String?
         }
         let fm = FileManager.default
         let dec = JSONDecoder()
@@ -414,17 +436,24 @@ public final class V2LiveDataProvider: V2DataProvider {
                 let mitre = (stub.tags ?? [])
                     .filter { $0.hasPrefix("attack.t") }
                     .map { String($0.dropFirst("attack.".count)).uppercased() }
+                // v1.21.5: effective enabled state — mirrors the engines'
+                // load-time gate (deprecated never runs; out-of-profile
+                // sequences/graph rules are not loaded at all).
+                let status = (stub.status ?? "stable").lowercased()
+                let inProfile = status != "deprecated"
+                    && (ruleProfile.lowercased() == "all" || status == "stable")
                 out.append(V2MockRule(
                     id: stub.id,
                     title: stub.title,
                     category: category,
                     severity: severityFromString(stub.level ?? "medium"),
                     mitre: mitre,
-                    isEnabled: stub.enabled ?? true,
+                    isEnabled: (stub.enabled ?? true) && inProfile,
                     lastFired: nil,
                     firesLastWeek: 0,
                     isCustom: false,
-                    description: stub.description ?? ""
+                    description: stub.description ?? "",
+                    status: stub.status
                 ))
             }
         }
