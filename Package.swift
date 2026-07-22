@@ -18,6 +18,11 @@ let package = Package(
         .library(name: "MacCrabForensics", targets: ["MacCrabForensics"]),
         // Plugin-author SDK — the broker read client for Tier-B forensic plugins.
         .library(name: "MacCrabPluginKit", targets: ["MacCrabPluginKit"]),
+        // v1.21.5: expose the shared daemon bootstrap as a product so the
+        // Xcode `MacCrabAgent` sysext target can `import MacCrabAgentKit`.
+        // Under `swift build` this module is reached as a target dependency;
+        // xcodebuild's SPM integration requires it to be a named product.
+        .library(name: "MacCrabAgentKit", targets: ["MacCrabAgentKit"]),
         .executable(name: "maccrabd", targets: ["maccrabd"]),
         .executable(name: "maccrabctl", targets: ["maccrabctl"]),
         .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),

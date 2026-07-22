@@ -52,6 +52,10 @@ targets:
     dependencies:
       - package: MacCrabCore
         product: MacCrabCore
+      # v1.21.5: MacCrabApp imports MacCrabForensics (33 files) and, via it,
+      # CSQLCipher — declare the product so xcodebuild resolves the module.
+      - package: MacCrabCore
+        product: MacCrabForensics
       - package: Sparkle
         product: Sparkle
       # Embed + sign the system extension inside the app bundle so
@@ -141,16 +145,16 @@ targets:
     sources:
       # Sysext-specific entry point + XPC listener lives here.
       - path: ../Sources/MacCrabAgent
-      # Reuse the daemon bootstrap (DaemonSetup, DaemonState, EventLoop,
-      # MonitorTasks, DaemonTimers, SignalHandlers, StartupBanner,
-      # Globals, DaemonBootstrap) — but skip the SPM executable's
-      # own main.swift since this target has its own.
-      - path: ../Sources/maccrabd
-        excludes:
-          - main.swift
     dependencies:
       - package: MacCrabCore
         product: MacCrabCore
+      # v1.21.5: the daemon bootstrap (DaemonSetup, DaemonState, EventLoop,
+      # MonitorTasks, DaemonTimers, SignalHandlers, StartupBanner, Globals,
+      # DaemonBootstrap) now lives in MacCrabAgentKit — Sources/maccrabd is
+      # just its own main.swift. Depend on the module instead of recompiling
+      # a now-empty source stanza (which broke xcodebuild resolution).
+      - package: MacCrabCore
+        product: MacCrabAgentKit
     info:
       path: Resources/MacCrabAgent-Info.plist
       properties:
@@ -217,3 +221,12 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "13.0"
+        # NOTE (v1.21.5): running this XCUITest is blocked by a TEST_TARGET_NAME
+        # collision — the SPM package exposes an `.executable` product named
+        # MacCrabApp (bare Mach-O) alongside the xcodegen app target, so the
+        # runner resolves the host to the bare binary and can't read its bundle
+        # id. TEST_HOST is NOT the fix (UI tests use XCTRUNNER and reject it).
+        # Proper fix (P3 / UI lane): rename the app target away from the SPM
+        # product name, or launch via XCUIApplication(bundleIdentifier:) with
+        # the app built as an explicit pre-action. Deferred — the target graph
+        # itself now builds clean in both configs.
