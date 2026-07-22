@@ -10,6 +10,21 @@ import HarnessCore
 let EXIT_OK: Int32 = 0
 let EXIT_USAGE: Int32 = 2
 
+/// Runs the async offline-replay lane from the synchronous CLI entry point.
+func blockingReplay(corpus: TechniqueCorpus) -> Result<DetectionScore, Error> {
+    let sem = DispatchSemaphore(value: 0)
+    var out: Result<DetectionScore, Error>!
+    Task {
+        do { out = .success(try await OfflineReplayLane().run(corpus: corpus)) }
+        catch { out = .failure(error) }
+        sem.signal()
+    }
+    sem.wait()
+    return out
+}
+
+func fmtOpt(_ d: Double?) -> String { d.map { String(format: "%.3f", $0) } ?? "—" }
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 func printUsage() {
@@ -90,14 +105,53 @@ func runSubcommand(_ args: [String]) -> Int32 {
         os: ProcessInfo.processInfo.operatingSystemVersionString
     )
 
+    // P1: run the offline-replay lane when requested (via --lane offline_replay
+    // or --technique). Today one technique (T1059.004 reverse shell) is wired;
+    // the corpus registry grows in later phases.
+    let techniques = values(for: "--technique", in: args)
+    var verdicts: [VerdictRecord] = []
+    if lanes.contains(.offlineReplay) || !techniques.isEmpty {
+        let corpus = Corpora.reverseShell
+        switch blockingReplay(corpus: corpus) {
+        case .success(let score):
+            let result = PrecisionOracle().decide(
+                observed: score, expected: .init(technique: corpus.technique), thresholds: .default)
+            verdicts.append(VerdictRecord(
+                featureId: corpus.targetRuleName,
+                lane: .offlineReplay,
+                triggerRef: TriggerRef(source: "offline-corpus", testGuid: corpus.technique, cmdSha256: nil),
+                expectedRuleId: corpus.targetRuleId,
+                expectedMinSeverity: "critical",
+                observedFired: (score.tp ?? 0) > 0,
+                observedAlertId: nil,
+                verdict: result.verdict,
+                oracle: "PrecisionOracle@v1",
+                measured: score,
+                requiresRoot: false,
+                evidenceRef: nil,
+                timestamp: ""
+            ))
+            print("""
+            \(corpus.technique) \(corpus.targetRuleName): \(result.verdict.rawValue.uppercased()) \
+            (precision \(fmtOpt(score.precision)), held-out recall \(fmtOpt(score.heldOutRecall)), \
+            obfuscation \(fmtOpt(score.obfuscationCoverage)); tp=\(score.tp ?? 0) fp=\(score.fp ?? 0) fn=\(score.fn ?? 0))
+            """)
+        case .failure(let err):
+            FileHandle.standardError.write(Data("error: offline lane failed: \(err)\n".utf8))
+            return EXIT_USAGE
+        }
+    }
+
+    func tally(_ v: Verdict) -> Int { verdicts.filter { $0.verdict == v }.count }
     let report = AssessmentReport(
         schemaVersion: currentAssessmentSchemaVersion,
         maccrabVersion: gitValue(["describe", "--tags", "--always"]) ?? "unknown",
         commit: gitValue(["rev-parse", "--short", "HEAD"]) ?? "unknown",
         hostProfile: hostProfile,
-        lanesRun: lanes,
-        featureVerdicts: [],
-        summary: Summary(pass: 0, fail: 0, skip: 0, inconclusive: 0),
+        lanesRun: lanes.isEmpty && !verdicts.isEmpty ? [.offlineReplay] : lanes,
+        featureVerdicts: verdicts,
+        summary: Summary(pass: tally(.pass), fail: tally(.fail),
+                         skip: tally(.skip), inconclusive: tally(.inconclusive)),
         regressions: [],
         evidenceBundleRef: nil,
         signature: nil
@@ -113,7 +167,8 @@ func runSubcommand(_ args: [String]) -> Int32 {
         )
         let outPath = (outDir as NSString).appendingPathComponent("assessment.json")
         try data.write(to: URL(fileURLWithPath: outPath))
-        print("wrote empty assessment report → \(outPath)")
+        let label = verdicts.isEmpty ? "empty assessment report" : "assessment report (\(verdicts.count) verdict(s))"
+        print("wrote \(label) → \(outPath)")
         return EXIT_OK
     } catch {
         FileHandle.standardError.write(Data("error: \(error)\n".utf8))

@@ -25,6 +25,9 @@ public enum Lane: String, Codable, Sendable {
 /// optional so a lane that cannot measure an axis simply omits it.
 public struct DetectionScore: Codable, Sendable {
     public var precision: Double?
+    /// Recall on the VISIBLE (training-representative) positive variants.
+    public var recall: Double?
+    /// Recall on the HELD-OUT novel variants — the anti-memorization axis.
     public var heldOutRecall: Double?
     public var obfuscationCoverage: Double?
     public var fpPerDay: Double?
@@ -37,6 +40,7 @@ public struct DetectionScore: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case precision
+        case recall
         case heldOutRecall = "held_out_recall"
         case obfuscationCoverage = "obfuscation_coverage"
         case fpPerDay = "fp_per_day"
@@ -50,6 +54,7 @@ public struct DetectionScore: Codable, Sendable {
 
     public init(
         precision: Double? = nil,
+        recall: Double? = nil,
         heldOutRecall: Double? = nil,
         obfuscationCoverage: Double? = nil,
         fpPerDay: Double? = nil,
@@ -61,6 +66,7 @@ public struct DetectionScore: Codable, Sendable {
         metadataComplete: Bool? = nil
     ) {
         self.precision = precision
+        self.recall = recall
         self.heldOutRecall = heldOutRecall
         self.obfuscationCoverage = obfuscationCoverage
         self.fpPerDay = fpPerDay
