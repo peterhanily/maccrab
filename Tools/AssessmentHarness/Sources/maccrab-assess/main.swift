@@ -181,6 +181,41 @@ func stub(_ name: String) -> Int32 {
     return EXIT_OK
 }
 
+/// P4: `diff <baseline.json> [--against <run.json>]` — regression gate.
+/// Exit 0 = no regression; 1 = regression(s) found; 2 = usage/IO error.
+func diffSubcommand(_ args: [String]) -> Int32 {
+    let positionals = args.filter { !$0.hasPrefix("--") }
+    guard let baselinePath = positionals.first else {
+        FileHandle.standardError.write(Data("error: diff needs <baseline.json>\n".utf8))
+        return EXIT_USAGE
+    }
+    let againstPath = values(for: "--against", in: args).last ?? positionals.dropFirst().first
+    guard let againstPath else {
+        FileHandle.standardError.write(Data("error: diff needs --against <run.json> (or a second path)\n".utf8))
+        return EXIT_USAGE
+    }
+    let decoder = JSONDecoder()
+    do {
+        let baseline = try decoder.decode(AssessmentReport.self,
+            from: Data(contentsOf: URL(fileURLWithPath: baselinePath)))
+        let current = try decoder.decode(AssessmentReport.self,
+            from: Data(contentsOf: URL(fileURLWithPath: againstPath)))
+        let result = RegressionOracle().diff(baseline: baseline, current: current)
+        if result.regressed {
+            print("REGRESSION — \(result.regressions.count) axis/axes regressed vs baseline:")
+            for r in result.regressions {
+                print("  \(r.ruleId) · \(r.axis): \(fmtOpt(r.was)) → \(fmtOpt(r.now))")
+            }
+            return 1
+        }
+        print("no regression vs baseline (\(current.featureVerdicts.count) feature(s) compared)")
+        return EXIT_OK
+    } catch {
+        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+        return EXIT_USAGE
+    }
+}
+
 // Dispatch.
 guard let subcommand = arguments.first else {
     printUsage()
@@ -198,7 +233,7 @@ case "run":
 case "report":
     exit(stub("report"))
 case "diff":
-    exit(stub("diff"))
+    exit(diffSubcommand(rest))
 case "verify":
     exit(stub("verify"))
 default:
