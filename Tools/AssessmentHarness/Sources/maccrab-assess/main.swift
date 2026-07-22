@@ -142,6 +142,19 @@ func runSubcommand(_ args: [String]) -> Int32 {
         }
     }
 
+    // P5: the live-trigger lane, gated hard by the disposable-host guard. On any
+    // normal machine this refuses (safe by design); it runs only on a sacrificial
+    // ES-entitled runner.
+    if lanes.contains(.liveTrigger) {
+        switch LiveTriggerLane().run(manifest: LiveTriggerLane.starterManifest) {
+        case .refused(let reason):
+            print("live_trigger: REFUSED — \(reason)")
+        case .ran(let liveVerdicts):
+            verdicts.append(contentsOf: liveVerdicts)
+            print("live_trigger: ran \(liveVerdicts.count) trigger(s) on a disposable host")
+        }
+    }
+
     func tally(_ v: Verdict) -> Int { verdicts.filter { $0.verdict == v }.count }
     let report = AssessmentReport(
         schemaVersion: currentAssessmentSchemaVersion,
