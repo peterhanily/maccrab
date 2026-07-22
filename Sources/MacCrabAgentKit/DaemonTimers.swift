@@ -3356,6 +3356,15 @@ func measureDatabaseFootprintMB(dbPath: String) -> Int {
     return Int(total / 1_000_000)
 }
 
+/// The `-wal` sidecar size alone, in MB. Used by the size-cap sweep to tell a
+/// reclaimable free-page overage (fix with VACUUM) apart from a reader-pinned
+/// WAL (which VACUUM cannot fix — see the sweep's back-off below).
+func measureWalMB(dbPath: String) -> Int {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal"),
+          let b = attrs[.size] as? UInt64 else { return 0 }
+    return Int(b / 1_000_000)
+}
+
 // MARK: - Adaptive rollup sweep (v1.8.0)
 
 /// Three-layer storage discipline: pre-insert filter (Layer 1) → adaptive
@@ -3557,7 +3566,27 @@ func runAdaptiveRollupSweep(
         // reclaimed pages above and the WAL is checkpointed below, so the cap
         // still trends down; the full rebuild waits for AC / nominal thermal.
         let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
-        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
+
+        // v1.21.5 (RCA — pinned-WAL back-off): a full VACUUM only helps when its
+        // pre/post checkpoint can drain the WAL. When another process holds a
+        // read transaction on events.db (e.g. the SwiftUI dashboard's read-only
+        // EventStore), checkpoint(TRUNCATE) can't shrink the WAL, so the
+        // footprint stays over cap no matter how many times we rebuild the file —
+        // and the hourly sweep otherwise burns a pinned CPU core rewriting a
+        // ~500 MB DB every tick with no convergence (observed: WAL grown to
+        // 512 MB, engine at 100% CPU). Probe drainability first: attempt a
+        // TRUNCATE checkpoint and see whether the WAL actually shrinks. If it
+        // stays large, the overage is a reader-pinned WAL that VACUUM cannot fix
+        // — skip the expensive rebuild and back off until the reader releases.
+        await eventStore.walCheckpointTruncate()
+        let walAfterMB = measureWalMB(dbPath: dbPath)
+        // A healthy TRUNCATE zeroes the sidecar; >64 MB (the journal_size_limit)
+        // after an explicit TRUNCATE means a reader is pinning it.
+        let walPinned = walAfterMB > 64
+
+        if walPinned {
+            logger.warning("Tier-rollup: events.db-wal pinned at \(walAfterMB) MB — a reader is holding a read transaction on events.db (typically the dashboard's read-only connection). A full VACUUM cannot reclaim a reader-pinned WAL, so it is SKIPPED this sweep to avoid churning a CPU core; the WAL drains and the size cap resumes once the reader releases.")
+        } else if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
             do {
                 // B-03: dedicated connection, off the actor — see the phase-2b
                 // caller. Keeps the multi-minute rewrite off the ingestion path.
