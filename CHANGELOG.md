@@ -3,6 +3,17 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5-rc.2] — 2026-07-23
+
+Performance-robustness release candidate over rc.1.
+
+### Fixed
+- **Engine CPU under a large database (two-layer WAL fix).** When the dashboard held a read-only `events.db` connection that went idle, its WAL read-mark pinned the engine's write-ahead log so checkpoints couldn't drain it; the WAL grew unbounded (observed 512 MB), inflating the storage footprint past its cap and driving the size-cap sweep into a perpetual VACUUM at ~100% CPU. The sweep now detects a reader-pinned WAL and backs off instead of churning, and the dashboard recycles its cached read-only connection on a bounded age so the pin can't persist. Reduces storage-writer event drops under sustained write load.
+
+### Internal
+- Repaired the (SPM-first) Xcode project's target graph so it resolves under `xcodebuild` (enables the UI-test lane); no shipping-product change.
+- Added a shared, full-schema heartbeat DTO in the core library (foundation for agent-consumable engine-health introspection).
+
 ## [1.21.5-rc.1] — 2026-07-21
 
 Correctness and honesty release.
