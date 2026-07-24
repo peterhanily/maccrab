@@ -3,6 +3,17 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5-rc.5] — 2026-07-24
+
+Convergence over rc.4. A second adversarial pass over the rc.4 corrections found two more issues introduced by those corrections; this RC resolves them.
+
+### Fixed
+- **Reverse-shell coverage restored.** The rc.4 false-positive fix (requiring `/bin/sh` in the named-pipe branch) had inadvertently dropped `/bin/bash` and `/bin/zsh` backpipes. Netcat is now anchored to a pipe instead, which excludes the benign backup one-liner while restoring `sh`/`bash`/`zsh` coverage.
+- **Sensor-degraded evasion closed.** The sustained-loss branch required consecutive elevated intervals, which an attacker could evade by alternating loud/quiet intervals. It now counts elevated intervals within a sliding window, catching alternating suppression while still ignoring a lone transient burst.
+
+### Internal
+- The plaintext-in-encrypted-column advisory is now surfaced in the engine heartbeat (an advisory gauge, not an alert), restoring operator visibility of a possible substitution after it was decoupled from the CRITICAL alert.
+
 ## [1.21.5-rc.4] — 2026-07-24
 
 Self-audit remediation over rc.3. A 6-agent adversarial review of the rc.3 remediation caught six real regressions/false-positives introduced by the rc.3 fixes; this RC corrects them.
