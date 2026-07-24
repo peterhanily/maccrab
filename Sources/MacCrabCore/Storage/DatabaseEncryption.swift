@@ -70,6 +70,19 @@ public final class DatabaseEncryption: Sendable {
     /// to raise a (rate-limited) tamper alert.
     public var authenticatedDecryptFailures: Int { tamperCounter.get() }
 
+    /// Count of UNENCRYPTED values seen in an encryption-enabled column (#19).
+    /// This is a LOWER-confidence signal than an AES-GCM auth failure: a plaintext
+    /// value there is EITHER a ciphertext→plaintext substitution OR a legitimate
+    /// legacy row written while `MACCRAB_ENCRYPT_DB=0` before encryption was later
+    /// enabled. Because the two are indistinguishable from the value alone, this
+    /// is tracked + logged separately and does NOT drive the CRITICAL self-defense
+    /// tamper alert (which stays AES-GCM-only, unambiguous) — the rc.3-verify FP
+    /// fix. Exposed for an advisory surface / migration tooling.
+    private let substitutionCounter = LockedCounter()
+
+    /// Unencrypted values seen in an encryption-enabled column since start.
+    public var plaintextInEncryptedColumnCount: Int { substitutionCounter.get() }
+
     /// v1 prefix — legacy AES-CBC + PKCS7. Decrypt-only going forward.
     private static let encryptedPrefixV1 = "ENC:"
     /// v2 prefix — AES-GCM via CryptoKit. Authenticated. v1.8.1+.
@@ -152,13 +165,15 @@ public final class DatabaseEncryption: Sendable {
         if encrypted.hasPrefix(Self.encryptedPrefixV1) {
             return decryptV1(encrypted)
         }
-        // #19: no encryption prefix in an encryption-enabled column is tamper
-        // (plaintext substitution), not a benign passthrough. Count it so the
-        // self-defense tamper alert fires; still return the value so the analyst
-        // sees the substituted content (now flagged) rather than a silent trust.
+        // #19: no encryption prefix in an encryption-enabled column is either a
+        // plaintext substitution OR a legacy row from before encryption was
+        // enabled (MACCRAB_ENCRYPT_DB toggled on over an existing DB). Ambiguous,
+        // so record it on the DISTINCT, lower-confidence counter and log at notice
+        // — do NOT touch the AES-GCM tamper counter that drives the CRITICAL alert
+        // (rc.3-verify: firing CRITICAL here false-alarmed on legit legacy rows).
         if expectingEncrypted {
-            let count = tamperCounter.increment()
-            logger.fault("DB tamper detected: unencrypted value in an encryption-enabled column (ciphertext substitution/downgrade) (tamper_count=\(count, privacy: .public))")
+            let count = substitutionCounter.increment()
+            logger.notice("DB advisory: unencrypted value in an encryption-enabled column — possible ciphertext substitution OR a pre-encryption legacy row (substitution_count=\(count, privacy: .public))")
         }
         return encrypted
     }

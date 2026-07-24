@@ -566,9 +566,19 @@ public actor SequenceEngine {
 
         // Evict partial-match state for rules that no longer exist, so an in-flight
         // partial for a removed/deprecated sequence cannot complete post-reload.
+        // Mirror setEnabled's accounting EXACTLY: decrement totalPartialCount and
+        // purge evictionQueue + pendingLaterSteps for each evicted rule. (Audit
+        // rc.3-verify: a bare removeValue left totalPartialCount inflated — sweep-
+        // Expired can't reconcile a rule whose dict entry is already gone — which
+        // over time pushes totalPartialCount past the cap and evicts LIVE partials
+        // from surviving rules, silently dropping real sequence detections.)
         let liveIds = Set(rules.keys)
         for ruleId in Array(partialMatches.keys) where !liveIds.contains(ruleId) {
-            partialMatches.removeValue(forKey: ruleId)
+            if let removed = partialMatches.removeValue(forKey: ruleId) {
+                totalPartialCount -= removed.count
+                evictionQueue.removeAll { $0.ruleId == ruleId }
+            }
+            pendingLaterSteps.removeValue(forKey: ruleId)
         }
         return loaded
     }

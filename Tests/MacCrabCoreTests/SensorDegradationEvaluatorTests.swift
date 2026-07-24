@@ -197,50 +197,64 @@ struct SensorDegradationEvaluatorTests {
 
     // MARK: - #12 sustained drop-fraction branch (the gradual-ramp evasion)
 
-    @Test("#12: high drop FRACTION with NO spike fires (the gradual-ramp evasion the spike gate missed)")
-    func sustainedLossWithoutSpikeFires() {
-        let b = warmedBaseline()   // fileEwma ≈ 1000
-        // file 2500 is >= the 2000 floor but < baseline×3 (3000) → NOT a spike, so
-        // the original conjunction is inert. But 700 dropped of 3700 offered = 19%
-        // loss → the sustained-loss branch must fire.
-        let r = Eval.evaluate(
+    /// One elevated-loss tick (no spike): file 2500 (≥ 2000 floor, < baseline×3
+    /// so no spike), 700 dropped of 3700 offered ≈ 19% ≥ the 15% bound.
+    private func lossTick(_ b: Eval.Baseline) -> Eval.Result {
+        Eval.evaluate(
             input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
                          kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
             baseline: b)
-        guard case let .degraded(severity, benign) = r.outcome else {
-            Issue.record("expected .degraded from the sustained drop-fraction branch (no spike)"); return
+    }
+
+    @Test("#12: SUSTAINED drop fraction (≥2 ticks) with NO spike fires (the gradual-ramp evasion)")
+    func sustainedLossWithoutSpikeFires() {
+        var b = warmedBaseline()   // fileEwma ≈ 1000
+        let t1 = lossTick(b); b = t1.newBaseline
+        #expect(t1.outcome == .noAlert, "a single elevated tick must NOT fire (could be a transient burst)")
+        let t2 = lossTick(b)
+        guard case let .degraded(severity, benign) = t2.outcome else {
+            Issue.record("expected .degraded once the loss has PERSISTED two ticks"); return
         }
         #expect(severity == .high)
         #expect(!benign)
     }
 
-    @Test("#12: sustained loss fires exactly once, then re-arms when the drop fraction subsides")
+    @Test("#12: a SINGLE transient drop burst on a quiet host does NOT fire (rc.3-verify FP fix)")
+    func singleTransientBurstNoFire() {
+        let b = warmedBaseline()
+        // file 100 + process 50 + 1900 kernel drops = offered 2050 (clears the
+        // floor via the drops alone), fraction 93% — but it is ONE tick, so the
+        // sustained branch must stay silent (a Spotlight/build/wake burst).
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 100, processEventsThisTick: 50,
+                         kernelDropDelta: 1_900, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(r.outcome == .noAlert, "one transient burst is not sustained loss — no evasion alert")
+    }
+
+    @Test("#12: sustained loss fires exactly once, then re-arms when the loss subsides")
     func sustainedLossLatchesThenReArms() {
         var b = warmedBaseline()
         var fireCount = 0
-        // 6 ticks of chronic loss, no spike → fires once (latch).
+        // 6 ticks of chronic loss, no spike → fires once (on the 2nd tick; latch).
         for _ in 0..<6 {
-            let r = Eval.evaluate(
-                input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
-                             kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
-                baseline: b)
-            b = r.newBaseline
+            let r = lossTick(b); b = r.newBaseline
             if case .degraded = r.outcome { fireCount += 1 }
         }
         #expect(fireCount == 1)
-        // Drops stop → re-arm.
+        // Drops stop → re-arm + reset the consecutive-tick counter.
         let calm = Eval.evaluate(
             input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 500,
                          kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
             baseline: b)
         b = calm.newBaseline
         #expect(!b.sustainedLossActive)
-        // Fresh loss episode → fires again.
-        let again = Eval.evaluate(
-            input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
-                         kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
-            baseline: b)
-        #expect({ if case .degraded = again.outcome { return true } else { return false } }())
+        #expect(b.sustainedLossTicks == 0)
+        // Fresh loss episode → fires again after it re-persists two ticks.
+        let f1 = lossTick(b); b = f1.newBaseline
+        #expect(f1.outcome == .noAlert)
+        let f2 = lossTick(b)
+        #expect({ if case .degraded = f2.outcome { return true } else { return false } }())
     }
 
     @Test("#12: a low drop fraction (below the bound) with no spike does NOT fire")

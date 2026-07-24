@@ -175,10 +175,14 @@ if tests_dir.is_dir():
         # or a comment mention in a .sh script fails all three and is not counted.
         if "SequenceEngine" not in txt or ".evaluate(" not in txt or "ruleId" not in txt:
             continue
-        # Credit every rule-id-shaped token in such a file (whether it appears in a
-        # `ruleId == "<id>"` literal or is threaded through a fire() helper).
-        for m in _UUID_RE.finditer(txt):
-            fire_tested_ids.add(m.group(0).lower())
+        # Strip //-comments so a bare rule-id dropped in a comment inside an
+        # otherwise-qualifying test file cannot game the gate (rc.3-verify), and
+        # credit a UUID only when it appears inside a DOUBLE-QUOTED string — i.e. an
+        # actual `ruleId == "<id>"` assertion or a `fires("<id>", …)` call, not
+        # free-floating text.
+        code = "\n".join(re.sub(r'//.*$', '', line) for line in txt.splitlines())
+        for m in re.finditer(r'"(' + _UUID_RE.pattern + r')"', code):
+            fire_tested_ids.add(m.group(1).lower())
 
 # ── Evaluate ─────────────────────────────────────────────────────────────────
 def evaluate(rule):

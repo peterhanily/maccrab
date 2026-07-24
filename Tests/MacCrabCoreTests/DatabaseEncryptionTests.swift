@@ -49,33 +49,37 @@ struct DatabaseEncryptionTests {
 
     // MARK: - #19 ciphertext-substitution tamper detection
 
-    @Test("#19: plaintext in an encryption-enabled column (expectingEncrypted) is counted as tamper")
-    func substitutionInEncryptedColumnIsTamper() async throws {
+    @Test("#19: plaintext in an encryption-enabled column is a distinct advisory, NOT a CRITICAL tamper")
+    func substitutionInEncryptedColumnIsAdvisory() async throws {
         let enc = DatabaseEncryption(enabled: true)
-        let before = enc.authenticatedDecryptFailures
-        // An attacker swapped an ENC2: ciphertext for the cleartext they want shown.
+        let beforeSub = enc.plaintextInEncryptedColumnCount
+        let beforeTamper = enc.authenticatedDecryptFailures
+        // A plaintext value where a ciphertext was expected (substitution OR a
+        // legacy pre-encryption row — indistinguishable).
         let substituted = "{\"attacker\":\"chosen plaintext\"}"
         let out = enc.decrypt(substituted, expectingEncrypted: true)
-        #expect(out == substituted, "the value is still returned (analyst sees the substituted content)…")
-        #expect(enc.authenticatedDecryptFailures == before + 1, "…but it is now COUNTED as tamper")
+        #expect(out == substituted, "the value is still returned (analyst sees the content)…")
+        #expect(enc.plaintextInEncryptedColumnCount == beforeSub + 1, "…counted on the distinct advisory counter")
+        #expect(enc.authenticatedDecryptFailures == beforeTamper,
+                "must NOT touch the AES-GCM tamper counter — a legacy plaintext row would else false-CRITICAL")
     }
 
     @Test("#19: plaintext in a column NOT marked expectingEncrypted is a benign passthrough")
-    func plaintextWithoutExpectationIsNotTamper() async throws {
+    func plaintextWithoutExpectationIsNotFlagged() async throws {
         let enc = DatabaseEncryption(enabled: true)
-        let before = enc.authenticatedDecryptFailures
+        let before = enc.plaintextInEncryptedColumnCount
         let out = enc.decrypt("legitimately never-encrypted value", expectingEncrypted: false)
         #expect(out == "legitimately never-encrypted value")
-        #expect(enc.authenticatedDecryptFailures == before, "no expectation → no tamper count")
+        #expect(enc.plaintextInEncryptedColumnCount == before, "no expectation → no advisory count")
     }
 
-    @Test("#19: a valid ciphertext still round-trips under expectingEncrypted with no tamper count")
+    @Test("#19: a valid ciphertext still round-trips under expectingEncrypted with no counts touched")
     func validCipherUnderExpectationIsClean() async throws {
         let enc = DatabaseEncryption(enabled: true)
-        let before = enc.authenticatedDecryptFailures
         let cipher = enc.encrypt("real secret")
         #expect(enc.decrypt(cipher, expectingEncrypted: true) == "real secret")
-        #expect(enc.authenticatedDecryptFailures == before, "an authentic ciphertext is not tamper")
+        #expect(enc.plaintextInEncryptedColumnCount == 0)
+        #expect(enc.authenticatedDecryptFailures == 0, "an authentic ciphertext is not tamper")
     }
 
     @Test("Non-encrypted input passes through decrypt unchanged")

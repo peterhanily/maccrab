@@ -48,6 +48,12 @@ actor BatchedEventWriter {
     private let hardCap: Int
 
     private var buffer: [Event] = []
+    /// Count of low-value (file) rows currently in `buffer`, maintained
+    /// incrementally so the #24 cap-shedding can decide in O(1) whether there is
+    /// anything cheaper than the incoming high-value event to evict — without an
+    /// O(n) `firstIndex` scan on every high-value event during a high-value flood
+    /// (rc.3-verify perf fix).
+    private var lowValueCount = 0
     private var draining = false
     private var flushLoop: Task<Void, Never>?
     /// Storage-write drops since start (writer-queue overflow). A `LockedCounter`
@@ -100,13 +106,15 @@ actor BatchedEventWriter {
     func enqueue(_ event: Event) {
         if buffer.count >= hardCap {
             // #24: at the cap, don't blindly shed a high-value event to a file
-            // flood. If the incoming event is high-value, evict the OLDEST
-            // low-value (file) row to make room; only drop the incoming when the
-            // buffer holds nothing cheaper to shed. A pure file flood still drops
-            // in O(1) (the incoming is a file → the else branch).
-            if Self.isHighValue(event),
+            // flood. If the incoming event is high-value AND a cheaper file row
+            // exists (lowValueCount > 0 — the O(1) guard so a high-value flood
+            // doesn't pay an O(n) scan per event), evict the OLDEST file row to
+            // make room; otherwise drop the incoming. A pure file flood still
+            // drops in O(1) (the incoming is a file → the else branch).
+            if Self.isHighValue(event), lowValueCount > 0,
                let idx = buffer.firstIndex(where: { !Self.isHighValue($0) }) {
                 buffer.remove(at: idx)
+                lowValueCount -= 1
                 drops.increment()   // the evicted file row is the storage-write drop
             } else {
                 drops.increment()   // nothing cheaper to shed — drop the incoming
@@ -114,6 +122,7 @@ actor BatchedEventWriter {
             }
         }
         buffer.append(event)
+        if !Self.isHighValue(event) { lowValueCount += 1 }
         if buffer.count >= flushThreshold && !draining {
             draining = true
             Task { await self.drain() }
@@ -136,6 +145,7 @@ actor BatchedEventWriter {
         while !buffer.isEmpty {
             let batch = buffer
             buffer.removeAll(keepingCapacity: true)
+            lowValueCount = 0   // buffer emptied; enqueues during the await re-accrue it
             do {
                 try await store.insert(events: batch)
             } catch let e as EventStoreError where isTransient(e) {
@@ -149,6 +159,7 @@ actor BatchedEventWriter {
                 // the external audit's get_events-returns-0 under WAL contention.
                 if buffer.count + batch.count <= hardCap {
                     buffer.insert(contentsOf: batch, at: 0)
+                    lowValueCount += batch.reduce(0) { $0 + (Self.isHighValue($1) ? 0 : 1) }
                     retries.add(batch.count)
                     return
                 }

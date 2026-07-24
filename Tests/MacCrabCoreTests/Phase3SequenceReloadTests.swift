@@ -75,6 +75,47 @@ struct SequenceEngineReloadTests {
         #expect(ids.contains("SEQ-EXP"), "loadRules is additive; the stale experimental sequence survives")
     }
 
+    @Test("reloadRules evicting a rule with IN-FLIGHT partials keeps the partial count exact")
+    func reloadEvictsPartialsWithExactAccounting() async throws {
+        // rc.3-verify regression: reloadRules must decrement totalPartialCount for
+        // evicted rules (like setEnabled), not just drop the dict entry — else the
+        // counter inflates and later evicts LIVE partials from surviving rules.
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("seqacct-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dirAll = tmp.appendingPathComponent("all")
+        let dirStable = tmp.appendingPathComponent("stable")
+        try writeRules([rule(id: "SEQ-EXP", status: "experimental"),
+                        rule(id: "SEQ-STABLE", status: "stable")], to: dirAll)
+        try writeRules([rule(id: "SEQ-STABLE", status: "stable")], to: dirStable)
+
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        _ = try await engine.loadRules(from: dirAll, enabledStatuses: ["experimental", "stable"])
+        // Seed in-flight partials for BOTH rules by driving each rule's first step
+        // (a /tmp/ process_creation event) — no second step, so they stay partial.
+        for pid in Int32(1)...Int32(5) {
+            let ev = Event(eventCategory: .process, eventType: .start, eventAction: "exec",
+                           process: MacCrabCore.ProcessInfo(
+                            pid: pid, ppid: 1, rpid: 1, name: "x", executable: "/tmp/x\(pid)",
+                            commandLine: "/tmp/x\(pid)", args: [], workingDirectory: "/tmp",
+                            userId: 501, userName: "t", groupId: 20, startTime: Date(),
+                            codeSignature: nil, ancestors: [], architecture: "arm64", isPlatformBinary: false))
+            _ = await engine.evaluate(ev)
+        }
+        // Both rules share the same step-1 predicate (/tmp/ exec), so each of the
+        // 5 events seeds one partial per rule → 10 total, 5 per rule.
+        let seeded = await engine.activePartialMatchCount
+        #expect(seeded == 10, "precondition: 5 events × 2 rules = 10 in-flight partials, got \(seeded)")
+
+        // Reload to the stable-only set → SEQ-EXP and its 5 partials are evicted.
+        _ = try await engine.reloadRules(from: dirStable, enabledStatuses: ["stable"])
+        let after = await engine.activePartialMatchCount
+        // With correct accounting only SEQ-STABLE's 5 partials remain. The bug left
+        // totalPartialCount at 10 (dict had 5 but the counter wasn't decremented),
+        // so `after == seeded` was the regression; it must now be seeded/2.
+        #expect(after == 5, "evicted rule's partials must be de-counted, not phantomed (got \(after))")
+        #expect(after < seeded)
+    }
+
     @Test("reloadRules retains last-known-good when the incoming dir yields zero rules")
     func reloadEmptyKeepsLastKnownGood() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("seqlkg-\(UUID().uuidString)")

@@ -62,6 +62,12 @@ enum SensorDegradationEvaluator {
     /// Volume floor for the sustained-loss branch — need meaningful traffic for a
     /// fraction to be trustworthy (guards the idle-box / startup FP).
     static let minOfferedForLossFraction = 2000.0
+    /// The drop fraction must stay elevated for at least this many CONSECUTIVE
+    /// ticks before the sustained-loss branch fires. Since `offered` includes the
+    /// drops themselves, a single big transient burst can clear the volume floor
+    /// on its own; requiring persistence separates a benign momentary burst from
+    /// an attacker holding telemetry suppressed (rc.3-verify FP fix).
+    static let sustainedLossMinTicks = 2
 
     /// Rolling baseline carried tick-to-tick. `degradedActive` is the latch
     /// that makes a sustained flood fire exactly once (rising-edge only).
@@ -74,6 +80,12 @@ enum SensorDegradationEvaluator {
         /// so a chronic-loss episode also fires exactly once and re-arms only when
         /// the drop fraction subsides (independent of the spike latch).
         var sustainedLossActive: Bool = false
+        /// #12 (rc.3-verify FP fix): consecutive ticks the drop fraction has been
+        /// elevated. The branch fires only once this reaches `sustainedLossMinTicks`
+        /// so a SINGLE transient drop burst (a Spotlight reindex, a build, wake-
+        /// from-sleep) on an otherwise-quiet host doesn't get mis-attributed to a
+        /// telemetry-drop EVASION — only a loss that PERSISTS does.
+        var sustainedLossTicks: Int = 0
     }
 
     /// Per-tick inputs, all derived from the D1/D4 monotonic counters' deltas.
@@ -163,8 +175,12 @@ enum SensorDegradationEvaluator {
         let dropped = Double(input.kernelDropDelta) + Double(input.collectorDropDelta)
         let offered = input.fileEventsThisTick + input.processEventsThisTick + dropped
         let dropFraction = offered > 0 ? dropped / offered : 0
-        let sustainedLoss = offered >= minOfferedForLossFraction
+        let lossElevated = offered >= minOfferedForLossFraction
             && dropFraction >= sustainedDropFraction
+        // Count consecutive elevated-loss ticks; the branch only trips once the
+        // loss has PERSISTED, so a lone transient burst can't false-fire.
+        b.sustainedLossTicks = lossElevated ? b.sustainedLossTicks + 1 : 0
+        let sustainedLoss = b.sustainedLossTicks >= sustainedLossMinTicks
 
         var outcome: Outcome = .noAlert
         if conjunction && !b.degradedActive {
@@ -179,10 +195,10 @@ enum SensorDegradationEvaluator {
             b.sustainedLossActive = true
         }
         // Re-arm the spike latch when the file-rate spike subsides (not merely
-        // when drops pause), and the loss latch when the drop fraction subsides,
-        // so each episode stays latched at exactly one fire.
+        // when drops pause), and the loss latch when the loss is no longer
+        // elevated, so each episode stays latched at exactly one fire.
         if !spike { b.degradedActive = false }
-        if !sustainedLoss { b.sustainedLossActive = false }
+        if !lossElevated { b.sustainedLossActive = false }
 
         // Don't learn from anomalies: freeze the baseline while spiking so a
         // flood can't poison it (which would blind the next episode).
@@ -1641,12 +1657,12 @@ enum DaemonTimers {
             if tamperAlertState.shouldAlert(current: dbTamperFailures) {
                 let tamperAlert = Alert(
                     ruleId: "maccrab.self-defense.db-tamper",
-                    ruleTitle: "Database Tamper Detected: encrypted-column integrity failure",
+                    ruleTitle: "Database Tamper Detected: AES-GCM authentication failure",
                     severity: .critical,
                     eventId: UUID().uuidString,
                     processPath: nil,
                     processName: "maccrabd",
-                    description: "An encryption-enabled database column failed its integrity check (tamper_count=\(dbTamperFailures)): either an AES-GCM authentication failure (a modified ciphertext/tag) or an unencrypted value where a ciphertext was expected (a plaintext substitution/downgrade). Both indicate an encrypted event/trace field was altered at rest. Note this is best-effort at-rest integrity, not a full MAC over the database — investigate for unauthorized access to the MacCrab databases.",
+                    description: "An encrypted database column failed AES-GCM authentication (tamper_count=\(dbTamperFailures)) — the stored ciphertext or authentication tag of an encrypted event/trace field was modified at rest. AES-GCM is authenticated, so this is unambiguous tamper, not a benign decode miss. (A plaintext value in an encryption-enabled column — a possible substitution but also a legacy pre-encryption row — is tracked separately as a lower-confidence advisory, not here.) This is best-effort at-rest integrity, not a full MAC over the database — investigate for unauthorized access to the MacCrab databases.",
                     mitreTactics: "attack.defense_evasion",
                     mitreTechniques: "attack.t1565.001",
                     suppressed: false
