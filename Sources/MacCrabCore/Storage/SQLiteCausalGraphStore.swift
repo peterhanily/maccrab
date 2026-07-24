@@ -1998,7 +1998,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
               let source = Self.columnText(stmt, 7) else {
             throw CausalGraphStoreError.decodeFailed("trace_entities: required column null")
         }
-        let attributesJson = encryption?.decrypt(attributesJsonRaw) ?? attributesJsonRaw
+        let attributesJson = encryption?.decrypt(attributesJsonRaw, expectingEncrypted: true) ?? attributesJsonRaw
         return TraceEntity(
             id: id,
             entityType: entityType,
@@ -2023,7 +2023,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
               let eventIdsJson = Self.columnText(stmt, 9) else {
             throw CausalGraphStoreError.decodeFailed("trace_edges: required column null")
         }
-        let evidenceJson = encryption?.decrypt(evidenceJsonRaw) ?? evidenceJsonRaw
+        let evidenceJson = encryption?.decrypt(evidenceJsonRaw, expectingEncrypted: true) ?? evidenceJsonRaw
         return TraceEdge(
             id: id,
             sourceEntityId: sourceId,

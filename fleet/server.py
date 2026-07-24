@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import hmac
 import json
 import os
 import sqlite3
@@ -56,18 +57,66 @@ if not API_KEY and not ALLOW_ANONYMOUS:
 
 app = FastAPI(title="MacCrab Fleet Collector", version="0.4.0")
 
-# Request size limit middleware
-from starlette.middleware.base import BaseHTTPMiddleware
+# Request size limit middleware.
+# audit #18: the old Content-Length-only check was bypassable with chunked
+# transfer-encoding (no Content-Length → check skipped → unbounded buffering).
+# This ASGI middleware ALSO counts the streamed body bytes and rejects once the
+# cumulative size crosses the cap — bounding resident memory to MAX_SIZE
+# regardless of how the body is framed.
 from starlette.responses import Response
 
-class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+class MaxBodySizeMiddleware:
     MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
-    async def dispatch(self, request, call_next):
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > self.MAX_SIZE:
-            return Response("Request too large", status_code=413)
-        return await call_next(request)
+    def __init__(self, app):
+        self.app = app
+
+    async def _too_large(self, scope, receive, send):
+        await Response("Request too large", status_code=413)(scope, receive, send)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # Fast path: an honest oversized Content-Length is rejected before any body.
+        headers = dict(scope.get("headers") or [])
+        cl = headers.get(b"content-length")
+        if cl is not None:
+            try:
+                if int(cl) > self.MAX_SIZE:
+                    await self._too_large(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+        # Buffer up to the cap; the moment the STREAMED total exceeds it (chunked /
+        # no Content-Length included), reject and stop reading — no unbounded buffer.
+        body = bytearray()
+        got_disconnect = False
+        while True:
+            message = await receive()
+            mtype = message["type"]
+            if mtype == "http.disconnect":
+                got_disconnect = True
+                break
+            if mtype != "http.request":
+                continue
+            body.extend(message.get("body", b""))
+            if len(body) > self.MAX_SIZE:
+                await self._too_large(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+        # Replay the (bounded) buffered body to the downstream app.
+        replayed = False
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            if got_disconnect:
+                return {"type": "http.disconnect"}
+            return await receive()
+        await self.app(scope, replay_receive, send)
 
 app.add_middleware(MaxBodySizeMiddleware)
 
@@ -148,7 +197,9 @@ def verify_auth(authorization: Optional[str]):
         return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing API key")
-    if authorization[7:] != API_KEY:
+    # audit #18: constant-time compare so a network attacker can't recover the
+    # key byte-by-byte from response-timing differences.
+    if not hmac.compare_digest(authorization[7:], API_KEY):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 

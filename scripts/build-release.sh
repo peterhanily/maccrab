@@ -1023,6 +1023,29 @@ stage_publish() {
     if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then
         echo "  Signing and notarizing DMG..."
         "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
+
+        # audit #17: notarize.sh prints "Notarization skipped" and exits 0 when the
+        # notary credentials (NOTARIZE_KEYCHAIN_PROFILE / APPLE_ID+TEAM_ID+PASSWORD)
+        # are unset or expired — so a signed-but-UN-notarized DMG could sail through
+        # to git push / gh release and hit Gatekeeper rejection on every download.
+        # HARD-GATE it: the shipped DMG must be stapled AND spctl-accepted, unless
+        # ALLOW_UNNOTARIZED=1 is explicitly set (the RC path — RCs are Developer-ID
+        # signed but intentionally NOT notarized, installed via right-click→Open).
+        if [ "${ALLOW_UNNOTARIZED:-0}" = "1" ]; then
+            echo "  ⚠️  ALLOW_UNNOTARIZED=1 — skipping the notarization gate (RC / dev build)."
+        else
+            echo "  Verifying notarization (stapler + spctl)..."
+            if ! xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
+                echo "ERROR: $DMG_PATH is NOT stapled — notarization did not complete (credentials unset/expired?)." >&2
+                echo "       Set the notary credentials and re-run, or ALLOW_UNNOTARIZED=1 for an intentional RC. Aborting." >&2
+                exit 1
+            fi
+            if ! spctl --assess -t open --context context:primary-signature "$DMG_PATH" >/dev/null 2>&1; then
+                echo "ERROR: spctl rejected $DMG_PATH — Gatekeeper would block it on first launch. Aborting." >&2
+                exit 1
+            fi
+            echo "  ✓ DMG is stapled and spctl-accepted."
+        fi
     else
         echo "  Skipping code signing (set DEVELOPER_ID for Developer ID signing)"
     fi

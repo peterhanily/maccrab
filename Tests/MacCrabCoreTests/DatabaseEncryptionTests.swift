@@ -47,6 +47,37 @@ struct DatabaseEncryptionTests {
         #expect(enc.decrypt("ENC2:Zm9vYmFy") == "ENC2:Zm9vYmFy")
     }
 
+    // MARK: - #19 ciphertext-substitution tamper detection
+
+    @Test("#19: plaintext in an encryption-enabled column (expectingEncrypted) is counted as tamper")
+    func substitutionInEncryptedColumnIsTamper() async throws {
+        let enc = DatabaseEncryption(enabled: true)
+        let before = enc.authenticatedDecryptFailures
+        // An attacker swapped an ENC2: ciphertext for the cleartext they want shown.
+        let substituted = "{\"attacker\":\"chosen plaintext\"}"
+        let out = enc.decrypt(substituted, expectingEncrypted: true)
+        #expect(out == substituted, "the value is still returned (analyst sees the substituted content)…")
+        #expect(enc.authenticatedDecryptFailures == before + 1, "…but it is now COUNTED as tamper")
+    }
+
+    @Test("#19: plaintext in a column NOT marked expectingEncrypted is a benign passthrough")
+    func plaintextWithoutExpectationIsNotTamper() async throws {
+        let enc = DatabaseEncryption(enabled: true)
+        let before = enc.authenticatedDecryptFailures
+        let out = enc.decrypt("legitimately never-encrypted value", expectingEncrypted: false)
+        #expect(out == "legitimately never-encrypted value")
+        #expect(enc.authenticatedDecryptFailures == before, "no expectation → no tamper count")
+    }
+
+    @Test("#19: a valid ciphertext still round-trips under expectingEncrypted with no tamper count")
+    func validCipherUnderExpectationIsClean() async throws {
+        let enc = DatabaseEncryption(enabled: true)
+        let before = enc.authenticatedDecryptFailures
+        let cipher = enc.encrypt("real secret")
+        #expect(enc.decrypt(cipher, expectingEncrypted: true) == "real secret")
+        #expect(enc.authenticatedDecryptFailures == before, "an authentic ciphertext is not tamper")
+    }
+
     @Test("Non-encrypted input passes through decrypt unchanged")
     func decryptPassthrough() async throws {
         let enc = DatabaseEncryption(enabled: true)

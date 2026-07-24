@@ -1641,12 +1641,12 @@ enum DaemonTimers {
             if tamperAlertState.shouldAlert(current: dbTamperFailures) {
                 let tamperAlert = Alert(
                     ruleId: "maccrab.self-defense.db-tamper",
-                    ruleTitle: "Database Tamper Detected: AES-GCM authentication failure",
+                    ruleTitle: "Database Tamper Detected: encrypted-column integrity failure",
                     severity: .critical,
                     eventId: UUID().uuidString,
                     processPath: nil,
                     processName: "maccrabd",
-                    description: "An encrypted database column failed AES-GCM authentication (tamper_count=\(dbTamperFailures)) — the stored ciphertext or authentication tag of an encrypted event/trace field was modified at rest. AES-GCM is authenticated, so this is tamper, not a benign decode miss. Investigate for unauthorized access to the MacCrab databases.",
+                    description: "An encryption-enabled database column failed its integrity check (tamper_count=\(dbTamperFailures)): either an AES-GCM authentication failure (a modified ciphertext/tag) or an unencrypted value where a ciphertext was expected (a plaintext substitution/downgrade). Both indicate an encrypted event/trace field was altered at rest. Note this is best-effort at-rest integrity, not a full MAC over the database — investigate for unauthorized access to the MacCrab databases.",
                     mitreTactics: "attack.defense_evasion",
                     mitreTechniques: "attack.t1565.001",
                     suppressed: false

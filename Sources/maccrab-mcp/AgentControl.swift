@@ -27,8 +27,13 @@
 //
 //   Every mutation goes through the privileged inbox IPC (uid + symlink/
 //   hardlink gated, audit-logged by the daemon) — the same path the dashboard
-//   uses. Nothing here writes engine state directly. Response actions are
-//   untouched: they still never auto-execute.
+//   uses. Response actions are untouched: they still never auto-execute.
+//
+//   EXCEPTION (audit #15): `set_response_action` does NOT write through the
+//   inbox — it writes the user-home `actions.json` directly, and the root engine
+//   honors that file ONLY when its owner is an admin (ResponseEngine.isAdminUID).
+//   A non-admin write therefore succeeds on disk but never arms; the tool now
+//   says so explicitly. The reload is still queued through the inbox.
 
 import Foundation
 import MacCrabCore

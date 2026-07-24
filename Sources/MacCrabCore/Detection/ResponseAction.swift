@@ -238,6 +238,15 @@ public actor ResponseEngine {
     /// DaemonTimers.isAdminUID; a user-home actions.json is only honored when
     /// its owner is an admin (the bar the control-plane inbox enforces).
     /// Replicated here because MacCrabCore cannot import MacCrabAgentKit.
+    /// True when the CURRENT effective user is an admin — the bar a user-home
+    /// `actions.json` must clear to be honored by the root engine. Exposed so the
+    /// MCP `set_response_action` tool can tell the operator honestly whether a
+    /// save will actually arm (#19-adjacent audit #15: a non-admin save succeeds
+    /// on disk but the engine never loads it).
+    public nonisolated static func currentUserIsAdmin() -> Bool {
+        isAdminUID(geteuid())
+    }
+
     nonisolated private static func isAdminUID(_ uid: UInt32) -> Bool {
         guard let pw = getpwuid(uid) else { return false }
         let name = String(cString: pw.pointee.pw_name)

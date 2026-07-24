@@ -407,7 +407,7 @@ public actor TraceStore {
             // v1.9 Phase-2.2: decrypt-on-read. decrypt() is a passthrough
             // for legacy plaintext rows (no ENC: prefix), so backfill is
             // automatic — pre-encryption rows still readable.
-            let attrs: String? = storedAttrs.map { encryption?.decrypt($0) ?? $0 }
+            let attrs: String? = storedAttrs.map { encryption?.decrypt($0, expectingEncrypted: true) ?? $0 }
             out.append(SpanRecord(
                 traceId: traceIdStr, spanId: spanIdStr,
                 parentSpanId: parentSpan,

@@ -128,9 +128,27 @@ fi
 # 1. Pairing: generate_keys -p prints the PUBLIC key for the Keychain private
 #    key. It must equal the public key shipped in the app.
 GENKEYS="$SPARKLE_BIN/generate_keys"
-if [[ -x "$GENKEYS" ]]; then
+# audit #16: generate_keys is MANDATORY for the pairing check — sign_update
+# --verify (step 2) only proves the signature verifies with the SAME keychain
+# key, NOT that that key pairs with the SHIPPED SUPublicEDKey. If generate_keys
+# is missing we cannot prove the pairing, so HARD-FAIL rather than silently skip
+# and risk publishing an update that bricks auto-update for every installed user.
+# (An explicit ALLOW_UNPAIRED_SPARKLE=1 dev override exists for local dry-runs.)
+if [[ ! -x "$GENKEYS" ]]; then
+    if [[ "${ALLOW_UNPAIRED_SPARKLE:-0}" == "1" ]]; then
+        echo "WARNING: generate_keys not found at $GENKEYS — SKIPPING the Sparkle key-pairing check (ALLOW_UNPAIRED_SPARKLE=1)." >&2
+    else
+        echo "ERROR: generate_keys not found at $GENKEYS — cannot verify the Keychain key pairs with the shipped SUPublicEDKey." >&2
+        echo "       Install Sparkle's tools (or point SPARKLE_BIN at them). Set ALLOW_UNPAIRED_SPARKLE=1 only for a local dry-run. Aborting." >&2
+        exit 1
+    fi
+else
     ACTUAL_PUB=$("$GENKEYS" -p 2>/dev/null | tr -d '[:space:]')
-    if [[ -n "$ACTUAL_PUB" && "$ACTUAL_PUB" != "$EXPECTED_PUB" ]]; then
+    if [[ -z "$ACTUAL_PUB" ]]; then
+        echo "ERROR: generate_keys -p returned no public key — cannot verify pairing with the shipped SUPublicEDKey. Aborting." >&2
+        exit 1
+    fi
+    if [[ "$ACTUAL_PUB" != "$EXPECTED_PUB" ]]; then
         echo "ERROR: the Keychain Sparkle private key does NOT pair with the shipped SUPublicEDKey." >&2
         echo "       shipped (project.yml): ${EXPECTED_PUB:0:12}…   keychain: ${ACTUAL_PUB:0:12}…" >&2
         echo "       Publishing would brick auto-update for every installed user. Aborting." >&2

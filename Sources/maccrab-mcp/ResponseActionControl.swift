@@ -17,6 +17,7 @@
 // engine, which re-reads actions.json. We never write engine state directly.
 
 import Foundation
+import MacCrabCore   // ResponseEngine.currentUserIsAdmin() for the #15 arming caveat
 
 // MARK: - JSON model (mirrors the dashboard's ActionEntry / ActionConfig)
 
@@ -234,12 +235,21 @@ func handleSetResponseAction(_ args: [String: Any]) -> Any {
     if let err = mcpSaveActionsConfig(config) { return toolError(err) }
     auditLog("set_response_action", details: "rule=\(ruleId ?? "(default)") action=\(action) confirm=\(requireConfirmation ?? false) ppid=\(getppid())")
 
+    // #15: set_response_action writes the user-home actions.json DIRECTLY (not
+    // through the privileged inbox like other mutations), and the root engine
+    // loads a user-home actions.json only when its owner is an admin (see
+    // ResponseEngine.findUserHomeActionsPath). So a non-admin save succeeds on
+    // disk but never arms — tell the operator honestly instead of a bare success.
+    let armingNote = ResponseEngine.currentUserIsAdmin()
+        ? ""
+        : " NOTE: your account is not an admin, so the root engine will NOT load this actions.json — the setting is SAVED but NOT ARMED. Re-apply it from an admin account, or via the dashboard (Settings → Prevention), which routes through the privileged inbox."
+
     // Reload via the inbox reload-rules verb (uid-501 can't HUP the root sysext).
     if let err = dropInboxRequest(verb: "reload-rules", payload: ["requestedAt": isoFormatter.string(from: Date()), "source": "mcp-set-response-action"]) {
-        return ["content": [["type": "text", "text": "Saved \(action) on \(ruleId ?? "default actions"), but could not queue a reload: \(err). The engine will pick it up on its next start / SIGHUP."]]]
+        return ["content": [["type": "text", "text": "Saved \(action) on \(ruleId ?? "default actions"), but could not queue a reload: \(err). The engine will pick it up on its next start / SIGHUP.\(armingNote)"]]]
     }
     let confirmNote = (requireConfirmation ?? false)
         ? " Operator confirmation is REQUIRED — it will not auto-execute."
         : (mcpResponseConfirmByDefault.contains(action) ? " Confirmation was explicitly disabled — this auto-executes." : "")
-    return ["content": [["type": "text", "text": "Set \(action) (min=\(minSeverity)) on \(ruleId.map { "rule \($0)" } ?? "default actions").\(confirmNote) Queued a rule reload; the engine applies it within ~5 s."]]]
+    return ["content": [["type": "text", "text": "Set \(action) (min=\(minSeverity)) on \(ruleId.map { "rule \($0)" } ?? "default actions").\(confirmNote) Queued a rule reload; the engine applies it within ~5 s.\(armingNote)"]]]
 }

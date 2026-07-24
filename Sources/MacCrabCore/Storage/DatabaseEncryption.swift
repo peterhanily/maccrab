@@ -136,13 +136,29 @@ public final class DatabaseEncryption: Sendable {
     /// on prefix: ENC2: -> AES-GCM (current), ENC: -> AES-CBC (legacy).
     /// Returns the original string if decryption fails or the value was
     /// not encrypted.
-    public func decrypt(_ encrypted: String) -> String {
+    /// - Parameter expectingEncrypted: pass `true` from a column that is ALWAYS
+    ///   written encrypted when encryption is enabled. A value there with no
+    ///   encryption prefix is not a benign never-encrypted value — a real write
+    ///   always emits an ENC2: blob — so bare plaintext is a ciphertext→plaintext
+    ///   SUBSTITUTION (#19). Without this signal `decrypt` cannot tell the two
+    ///   apart and would return the attacker's plaintext as trusted, never
+    ///   touching the tamper counter. (AES-GCM already catches ciphertext/tag
+    ///   MODIFICATION; this closes the substitution/downgrade gap.)
+    public func decrypt(_ encrypted: String, expectingEncrypted: Bool = false) -> String {
         guard isEnabled else { return encrypted }
         if encrypted.hasPrefix(Self.encryptedPrefixV2) {
             return decryptV2(encrypted)
         }
         if encrypted.hasPrefix(Self.encryptedPrefixV1) {
             return decryptV1(encrypted)
+        }
+        // #19: no encryption prefix in an encryption-enabled column is tamper
+        // (plaintext substitution), not a benign passthrough. Count it so the
+        // self-defense tamper alert fires; still return the value so the analyst
+        // sees the substituted content (now flagged) rather than a silent trust.
+        if expectingEncrypted {
+            let count = tamperCounter.increment()
+            logger.fault("DB tamper detected: unencrypted value in an encryption-enabled column (ciphertext substitution/downgrade) (tamper_count=\(count, privacy: .public))")
         }
         return encrypted
     }
