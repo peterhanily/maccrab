@@ -50,6 +50,18 @@ enum SensorDegradationEvaluator {
     /// from tripping the collapse branch on ordinary noise. The kernel-drop
     /// branch is unaffected.
     static let minProcessBaselineForCollapse = 50.0
+    /// #12 (mother-of-all-audits): the spike gate above only fires when the file
+    /// rate exceeds baseline × 3, so an attacker who ramps activity GRADUALLY —
+    /// or simply operates on an already-busy host — can bleed millions of dropped
+    /// events while the rate never spikes, and the meta-alert (the T1562.001
+    /// telemetry-drop-evasion detector) never trips. This spike-INDEPENDENT branch
+    /// fires when the per-tick drop FRACTION (dropped / offered) stays at or above
+    /// this bound: a sensor losing this share of events is degraded regardless of
+    /// whether the absolute rate spiked.
+    static let sustainedDropFraction = 0.15
+    /// Volume floor for the sustained-loss branch — need meaningful traffic for a
+    /// fraction to be trustworthy (guards the idle-box / startup FP).
+    static let minOfferedForLossFraction = 2000.0
 
     /// Rolling baseline carried tick-to-tick. `degradedActive` is the latch
     /// that makes a sustained flood fire exactly once (rising-edge only).
@@ -58,6 +70,10 @@ enum SensorDegradationEvaluator {
         var processEventEwma: Double = 0
         var seeded: Bool = false
         var degradedActive: Bool = false
+        /// #12: separate rising-edge latch for the sustained drop-fraction branch,
+        /// so a chronic-loss episode also fires exactly once and re-arms only when
+        /// the drop fraction subsides (independent of the spike latch).
+        var sustainedLossActive: Bool = false
     }
 
     /// Per-tick inputs, all derived from the D1/D4 monotonic counters' deltas.
@@ -138,16 +154,35 @@ enum SensorDegradationEvaluator {
         let conjunction = spike
             && (input.kernelDropDelta > 0 || input.collectorDropDelta > 0 || processCollapse)
 
+        // #12: spike-independent sustained-loss signal. `offered` = events the
+        // sensor SHOULD have processed this tick = processed (file + exec) + lost
+        // (kernel + collector drops). A high loss fraction over a meaningful
+        // volume means the sensor is degraded even if the absolute rate never
+        // crossed the spike multiplier (the gradual-ramp / already-busy-host
+        // evasion). Requires the volume floor so an idle box can't trip it.
+        let dropped = Double(input.kernelDropDelta) + Double(input.collectorDropDelta)
+        let offered = input.fileEventsThisTick + input.processEventsThisTick + dropped
+        let dropFraction = offered > 0 ? dropped / offered : 0
+        let sustainedLoss = offered >= minOfferedForLossFraction
+            && dropFraction >= sustainedDropFraction
+
         var outcome: Outcome = .noAlert
         if conjunction && !b.degradedActive {
             // Rising edge — fire once. Benign signer downgrades HIGH → LOW.
             let severity: Severity = input.benignHighIOSigner ? .low : .high
             outcome = .degraded(severity: severity, benignAttribution: input.benignHighIOSigner)
             b.degradedActive = true
+        } else if sustainedLoss && !b.sustainedLossActive {
+            // #12: chronic loss without a spike — the evasion the spike gate misses.
+            let severity: Severity = input.benignHighIOSigner ? .low : .high
+            outcome = .degraded(severity: severity, benignAttribution: input.benignHighIOSigner)
+            b.sustainedLossActive = true
         }
-        // Re-arm only when the file-rate spike subsides (not merely when drops
-        // pause), so a sustained flood stays latched at exactly one fire.
+        // Re-arm the spike latch when the file-rate spike subsides (not merely
+        // when drops pause), and the loss latch when the drop fraction subsides,
+        // so each episode stays latched at exactly one fire.
         if !spike { b.degradedActive = false }
+        if !sustainedLoss { b.sustainedLossActive = false }
 
         // Don't learn from anomalies: freeze the baseline while spiking so a
         // flood can't poison it (which would blind the next episode).

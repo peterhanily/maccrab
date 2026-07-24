@@ -23,6 +23,12 @@ public enum EventStoreError: Error, LocalizedError {
     /// so the daemon's insert path can degrade gracefully instead of
     /// silently dropping events under storage exhaustion.
     case diskFull(String)
+    /// v1.21.5-rc.3 (#13): SQLITE_BUSY / SQLITE_LOCKED — a TRANSIENT lock
+    /// contention (typically a reader/writer contending the WAL beyond the 5s
+    /// busy_timeout). Distinct from `stepFailed` so a batched writer can RETRY
+    /// instead of dropping the batch (retrying a transient lock succeeds once the
+    /// contention clears; retrying a permanent failure does not).
+    case busy(String)
 
     public var errorDescription: String? {
         switch self {
@@ -30,6 +36,7 @@ public enum EventStoreError: Error, LocalizedError {
         case .prepareFailed(let msg):       return "Prepare failed: \(msg)"
         case .stepFailed(let msg):          return "Step failed: \(msg)"
         case .diskFull(let msg):            return "Disk full: \(msg)"
+        case .busy(let msg):                return "Database busy (transient): \(msg)"
         case .encodingFailed(let msg):      return "Encoding failed: \(msg)"
         case .decodingFailed(let msg):      return "Decoding failed: \(msg)"
         }
@@ -1000,6 +1007,11 @@ public actor EventStore {
             // the same semantic.
             if rc == SQLITE_FULL || (rc & 0xFF) == SQLITE_FULL || rc == 0x0D0A {
                 throw EventStoreError.diskFull(msg)
+            }
+            // #13: transient lock contention (past the 5s busy_timeout) — the
+            // batched writer retries rather than dropping the batch.
+            if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
+                throw EventStoreError.busy(msg)
             }
             // C-04: a mid-run corruption code triggers a bounded, rate-limited
             // close→quarantine→reopen so ingestion recovers instead of failing
@@ -2738,6 +2750,11 @@ public actor EventStore {
         if rc != SQLITE_OK {
             let msg = errmsg.flatMap { String(cString: $0) } ?? "unknown error"
             sqlite3_free(errmsg)
+            // #13: BEGIN/COMMIT can return SQLITE_BUSY/LOCKED under WAL contention
+            // (past busy_timeout) — transient, retryable. Surface it distinctly.
+            if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
+                throw EventStoreError.busy(msg)
+            }
             throw EventStoreError.stepFailed(msg)
         }
     }

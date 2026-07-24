@@ -153,10 +153,14 @@ struct SensorDegradationEvaluatorTests {
     @Test("sub-floor spike does not count (min file-event floor)")
     func subFloorSpikeIgnored() {
         let b = warmedBaseline()
-        // 1500 < minFileEventsForSpike (2000), so no spike even with drops.
+        // 1500 < minFileEventsForSpike (2000) → no spike. Drops here are a LOW
+        // fraction (200 of ~1710 = 12% < the 15% sustained bound), so the #12
+        // sustained-loss branch is also inert — isolating the spike-floor guard.
+        // (A sub-floor rate with a HIGH drop fraction now DOES fire via sustained
+        // loss — see sustainedLossWithoutSpikeFires.)
         let r = Eval.evaluate(
             input: Input(fileEventsThisTick: 1_500, processEventsThisTick: 10,
-                         kernelDropDelta: 100, collectorDropDelta: 5000, benignHighIOSigner: false),
+                         kernelDropDelta: 100, collectorDropDelta: 100, benignHighIOSigner: false),
             baseline: b
         )
         #expect(r.outcome == .noAlert)
@@ -189,6 +193,76 @@ struct SensorDegradationEvaluatorTests {
                          kernelDropDelta: 100, collectorDropDelta: 0, benignHighIOSigner: false),
             baseline: b)
         #expect({ if case .degraded = r.outcome { return true } else { return false } }())
+    }
+
+    // MARK: - #12 sustained drop-fraction branch (the gradual-ramp evasion)
+
+    @Test("#12: high drop FRACTION with NO spike fires (the gradual-ramp evasion the spike gate missed)")
+    func sustainedLossWithoutSpikeFires() {
+        let b = warmedBaseline()   // fileEwma ≈ 1000
+        // file 2500 is >= the 2000 floor but < baseline×3 (3000) → NOT a spike, so
+        // the original conjunction is inert. But 700 dropped of 3700 offered = 19%
+        // loss → the sustained-loss branch must fire.
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
+                         kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        guard case let .degraded(severity, benign) = r.outcome else {
+            Issue.record("expected .degraded from the sustained drop-fraction branch (no spike)"); return
+        }
+        #expect(severity == .high)
+        #expect(!benign)
+    }
+
+    @Test("#12: sustained loss fires exactly once, then re-arms when the drop fraction subsides")
+    func sustainedLossLatchesThenReArms() {
+        var b = warmedBaseline()
+        var fireCount = 0
+        // 6 ticks of chronic loss, no spike → fires once (latch).
+        for _ in 0..<6 {
+            let r = Eval.evaluate(
+                input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
+                             kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
+                baseline: b)
+            b = r.newBaseline
+            if case .degraded = r.outcome { fireCount += 1 }
+        }
+        #expect(fireCount == 1)
+        // Drops stop → re-arm.
+        let calm = Eval.evaluate(
+            input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 500,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        b = calm.newBaseline
+        #expect(!b.sustainedLossActive)
+        // Fresh loss episode → fires again.
+        let again = Eval.evaluate(
+            input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
+                         kernelDropDelta: 700, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect({ if case .degraded = again.outcome { return true } else { return false } }())
+    }
+
+    @Test("#12: a low drop fraction (below the bound) with no spike does NOT fire")
+    func lowDropFractionNoSpikeNoFire() {
+        let b = warmedBaseline()
+        // 100 dropped of ~3100 offered = 3% < 15% bound, and no spike.
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 2_500, processEventsThisTick: 500,
+                         kernelDropDelta: 100, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(r.outcome == .noAlert)
+    }
+
+    @Test("#12: idle box below the volume floor does not trip the fraction branch")
+    func idleBoxBelowVolumeFloorNoFire() {
+        let b = warmedBaseline()
+        // 1000 dropped but only ~1150 offered (< 2000 floor) → fraction untrusted.
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 100, processEventsThisTick: 50,
+                         kernelDropDelta: 1_000, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: b)
+        #expect(r.outcome == .noAlert)
     }
 
     @Test("baseline is frozen during a spike (a flood cannot poison it)")
