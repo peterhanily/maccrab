@@ -41,9 +41,9 @@ steps:
                   - '/cargo'
                   - '/yarn'
                   - '/pnpm'
-          CommandLine|contains:
-              - 'install'
-              - 'add'
+              CommandLine|contains:
+                  - 'install'
+                  - 'add'
           condition: selection
 
     - id: network_callhome

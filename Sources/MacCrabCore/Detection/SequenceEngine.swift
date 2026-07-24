@@ -531,6 +531,48 @@ public actor SequenceEngine {
         return loaded
     }
 
+    /// Full-replace reload (SIGHUP / live profile change). `loadRules` is
+    /// ADDITIVE — it merges into the live set and never evicts — so a sequence
+    /// that becomes `deprecated`, falls outside a tightened `rule_profile`, or is
+    /// deleted from the compiled dir would keep firing from its previously-loaded
+    /// copy until a full daemon restart (mother-of-all-audits #6: the v1.21.5
+    /// deprecated-skip + profile gate in loadRules gate LOADING but cannot EVICT).
+    /// This clears the rule set + dispatch index first, mirroring
+    /// `RuleEngine.reloadRules` and the graph-evaluator swap so all three tiers
+    /// agree on reload semantics. Last-known-good: if the incoming directory
+    /// yields zero rules (corrupt/empty compiled dir), the previous set is
+    /// retained rather than wiping sequence detection.
+    public func reloadRules(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
+        let prevRules = rules
+        let prevIndex = ruleIndex
+        rules.removeAll()
+        ruleIndex.removeAll()
+
+        let loaded: Int
+        do {
+            loaded = try loadRules(from: directory, enabledStatuses: enabledStatuses)
+        } catch {
+            rules = prevRules
+            ruleIndex = prevIndex
+            throw error
+        }
+
+        if loaded == 0 && !prevRules.isEmpty {
+            rules = prevRules
+            ruleIndex = prevIndex
+            logger.warning("Sequence reload from \(directory.path) produced 0 rules; retaining \(prevRules.count) last-known-good rule(s)")
+            return prevRules.count
+        }
+
+        // Evict partial-match state for rules that no longer exist, so an in-flight
+        // partial for a removed/deprecated sequence cannot complete post-reload.
+        let liveIds = Set(rules.keys)
+        for ruleId in Array(partialMatches.keys) where !liveIds.contains(ruleId) {
+            partialMatches.removeValue(forKey: ruleId)
+        }
+        return loaded
+    }
+
     /// Add a single rule programmatically (useful for tests).
     public func addRule(_ rule: SequenceRule) throws {
         try validateRule(rule)

@@ -1319,11 +1319,37 @@ final class AppState: ObservableObject {
     func stopPolling() {
         pollTimer?.cancel()
         pollTimer = nil
+        // v1.21.5-rc.3 (WAL-pin idle fix, mother-of-all-audits #4): release the
+        // cached read-only events.db connection when polling stops. The getter-
+        // driven recycle (see `cachedEventStoreOpenedAt`) only fires while the
+        // dashboard is ACTIVELY querying; when the window is backgrounded the
+        // timer is cancelled here but that connection — and its WAL read-mark —
+        // would otherwise stay open, pinning the sysext's WAL so checkpoint can't
+        // truncate it. That idle-but-open reader is the exact 512 MB-WAL scenario
+        // the rc.2 fix targeted and the getter path missed. Dropping the reference
+        // runs EventStore.deinit → sqlite3_close, releasing the mark; the getter
+        // transparently reopens on next use.
+        cachedEventStore = nil
+        cachedEventStoreOpenedAt = nil
         // NOTE: the ClickFix clipboard bridge is deliberately NOT stopped here.
         // It's process-lifetime (started once at launch by the AppDelegate), so
         // ClickFix keeps watching the clipboard whenever the menubar app is
         // alive — not only while the dashboard window is foregrounded.
     }
+
+    #if DEBUG
+    /// Test-only: whether a read-only events.db connection is currently cached
+    /// (and thus holding a WAL read-mark). Used by the WAL-pin idle-release test.
+    var hasCachedEventStoreForTesting: Bool { cachedEventStore != nil }
+
+    /// Test-only: install a cached events.db connection to stand in for the one
+    /// the getter opens, so the idle-release path can be verified deterministically
+    /// without the getter's live directory probing.
+    func primeCachedEventStoreForTesting(_ store: EventStore) {
+        cachedEventStore = store
+        cachedEventStoreOpenedAt = Date()
+    }
+    #endif
 
     /// Get or create cached alert store.
     /// v1.9 hot-fix: probe both system + user paths and pick whichever

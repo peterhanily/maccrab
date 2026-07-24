@@ -3542,7 +3542,24 @@ func runAdaptiveRollupSweep(
     // needs at least 1.3× headroom), or both. On skip we still run a
     // wal_checkpoint(TRUNCATE) so any drained pages migrate from the
     // WAL into the main file — a cheap partial cleanup.
-    if totalPruned > 0 {
+    //
+    // v1.21.5-rc.3 (#21, broadening the rc.2 pinned-WAL back-off): probe WAL
+    // drainability ONCE up front. Every write-amplifying maintenance op below —
+    // incremental_vacuum, the full VACUUM, AND the FTS merge — can only reclaim
+    // space if the WAL can be checkpoint-truncated. Under a reader pin (typically
+    // the dashboard's read-only events.db connection) it cannot, so running them
+    // reclaims nothing and only grows the pinned sidecar further — the exact CPU/
+    // WAL churn we are trying to avoid. rc.2 skipped only the full VACUUM; skip
+    // all three under a pin and defer to a sweep where the reader has released
+    // (the prune above already bounded the working set).
+    await eventStore.walCheckpointTruncate()
+    let walPinnedMB = measureWalMB(dbPath: dbPath)
+    let walPinned = walPinnedMB > 64
+    if walPinned {
+        logger.warning("Tier-rollup: events.db-wal pinned at \(walPinnedMB) MB — a reader holds a read transaction on events.db (typically the dashboard's read-only connection). incremental_vacuum / full VACUUM / FTS-merge are SKIPPED this sweep (they cannot reclaim a reader-pinned WAL and would only grow it); they resume once the reader releases.")
+    }
+
+    if totalPruned > 0 && !walPinned {
         let dbSizeBeforePrune = measureDatabaseFootprintMB(dbPath: dbPath)
         let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
         let dbSizeAfterIncremental = measureDatabaseFootprintMB(dbPath: dbPath)
@@ -3567,26 +3584,11 @@ func runAdaptiveRollupSweep(
         // still trends down; the full rebuild waits for AC / nominal thermal.
         let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
 
-        // v1.21.5 (RCA — pinned-WAL back-off): a full VACUUM only helps when its
-        // pre/post checkpoint can drain the WAL. When another process holds a
-        // read transaction on events.db (e.g. the SwiftUI dashboard's read-only
-        // EventStore), checkpoint(TRUNCATE) can't shrink the WAL, so the
-        // footprint stays over cap no matter how many times we rebuild the file —
-        // and the hourly sweep otherwise burns a pinned CPU core rewriting a
-        // ~500 MB DB every tick with no convergence (observed: WAL grown to
-        // 512 MB, engine at 100% CPU). Probe drainability first: attempt a
-        // TRUNCATE checkpoint and see whether the WAL actually shrinks. If it
-        // stays large, the overage is a reader-pinned WAL that VACUUM cannot fix
-        // — skip the expensive rebuild and back off until the reader releases.
-        await eventStore.walCheckpointTruncate()
-        let walAfterMB = measureWalMB(dbPath: dbPath)
-        // A healthy TRUNCATE zeroes the sidecar; >64 MB (the journal_size_limit)
-        // after an explicit TRUNCATE means a reader is pinning it.
-        let walPinned = walAfterMB > 64
-
-        if walPinned {
-            logger.warning("Tier-rollup: events.db-wal pinned at \(walAfterMB) MB — a reader is holding a read transaction on events.db (typically the dashboard's read-only connection). A full VACUUM cannot reclaim a reader-pinned WAL, so it is SKIPPED this sweep to avoid churning a CPU core; the WAL drains and the size cap resumes once the reader releases.")
-        } else if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
+        // The full VACUUM only helps when its pre/post checkpoint can drain the
+        // WAL; the up-front `walPinned` probe already gated this whole block on
+        // that (a reader-pinned WAL is skipped entirely), so here we only choose
+        // between the full rebuild and a cheap checkpoint.
+        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
             do {
                 // B-03: dedicated connection, off the actor — see the phase-2b
                 // caller. Keeps the multi-minute rewrite off the ingestion path.
@@ -3611,7 +3613,11 @@ func runAdaptiveRollupSweep(
     // budget so the actor stays responsive; a no-op when there is nothing to
     // merge. DETECTION-SAFE: events_fts feeds only search()/hunt, never the
     // detection engine — this changes hunt latency, never any detection result.
-    await eventStore.mergeFTS()
+    // #21: skipped under a reader pin — its merge frames can't be checkpointed
+    // out of a pinned WAL and would only grow it; deferred to an unpinned sweep.
+    if !walPinned {
+        await eventStore.mergeFTS()
+    }
 
     // v1.21.4 perf (#23): reclaim the events.db-wal sidecar. Raising
     // `eventWalAutocheckpointPages` to 16 MB lets the WAL settle at a ~16 MB

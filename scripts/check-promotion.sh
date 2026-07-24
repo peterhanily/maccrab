@@ -155,6 +155,31 @@ for f in fixture_files:
     except OSError:
         pass
 
+# ── Genuine fire-test index (mother-of-all-audits #10) ───────────────────────
+# The old tp-trigger passed if the rule id/stem/title appeared ANYWHERE in
+# Tests/ or the red-team scripts — a comment mention or a compile-only test was
+# enough, so a sequence could carry `status: stable` with ZERO proof it actually
+# fires. A genuine fire-test is a Swift test that (a) drives the SequenceEngine
+# and (b) asserts on THIS rule's id via a `ruleId` comparison. Collect the set of
+# rule ids that have such a test.
+_UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+fire_tested_ids = set()
+if tests_dir.is_dir():
+    for p in tests_dir.rglob("*.swift"):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Must be an engine-driven fire-test file: it drives the SequenceEngine,
+        # actually evaluates events, and asserts on `ruleId`. A compile-only test
+        # or a comment mention in a .sh script fails all three and is not counted.
+        if "SequenceEngine" not in txt or ".evaluate(" not in txt or "ruleId" not in txt:
+            continue
+        # Credit every rule-id-shaped token in such a file (whether it appears in a
+        # `ruleId == "<id>"` literal or is threaded through a fire() helper).
+        for m in _UUID_RE.finditer(txt):
+            fire_tested_ids.add(m.group(0).lower())
+
 # ── Evaluate ─────────────────────────────────────────────────────────────────
 def evaluate(rule):
     results = []  # (verdict, label, detail)
@@ -180,17 +205,32 @@ def evaluate(rule):
                    f"0 alerts in the {days}d window (verify the rule was enabled for it)"
             results.append(("PASS", "fp-soak", note))
 
-    # 2. TP trigger
-    needles = [rule["id"].lower(), rule["stem"].lower()]
-    if rule["title"]:
-        needles.append(rule["title"].lower())
-    if any(n and n in fixture_text for n in needles):
-        results.append(("PASS", "tp-trigger",
-                        "referenced in detection-test.sh / campaign-test.sh / Tests/"))
+    # 2. TP trigger. A genuine, engine-driven fire-test (asserts on this rule's
+    # id through SequenceEngine) is required for sequence rules — a mere mention
+    # in a comment / red-team script no longer credits the gate (#10). Single-
+    # event rules (no sequence engine) still fall back to the fixture-reference
+    # heuristic, since their TP path is a red-team fixture, not the SequenceEngine.
+    is_sequence = "sequences/" in str(rule["path"]).replace("\\", "/")
+    if is_sequence:
+        if rule["id"].lower() in fire_tested_ids:
+            results.append(("PASS", "tp-trigger",
+                            "genuine SequenceEngine fire-test asserts on this rule id"))
+        else:
+            results.append(("FAIL", "tp-trigger",
+                            "no engine-driven fire-test asserts `ruleId == \""
+                            f"{rule['id']}\"` — a comment/script mention does not count; "
+                            "add a Tests/ SequenceEngine fire-test (see KillChainFireTests.swift)"))
     else:
-        results.append(("FAIL", "tp-trigger",
-                        "no fixture or test references the rule id, filename, or title — "
-                        "add a detection-test.sh fixture or a Tests/ rule test"))
+        needles = [rule["id"].lower(), rule["stem"].lower()]
+        if rule["title"]:
+            needles.append(rule["title"].lower())
+        if any(n and n in fixture_text for n in needles):
+            results.append(("PASS", "tp-trigger",
+                            "referenced in detection-test.sh / campaign-test.sh / Tests/"))
+        else:
+            results.append(("FAIL", "tp-trigger",
+                            "no fixture or test references the rule id, filename, or title — "
+                            "add a detection-test.sh fixture or a Tests/ rule test"))
 
     # 3. Eval latency
     if telem is None:

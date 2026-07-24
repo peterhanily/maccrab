@@ -53,7 +53,11 @@ enum SignalHandlers {
                     // enrichment reloads below).
                     let freshConfig = DaemonConfig.load(from: state.supportDir)
                     let ruleStatuses = DaemonConfig.enabledRuleStatuses(forProfile: freshConfig.ruleProfile)
-                    let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir), enabledStatuses: ruleStatuses)
+                    // reloadRules (not loadRules): full-replace so a sequence now
+                    // deprecated / outside the tightened profile / deleted actually
+                    // STOPS firing. loadRules is additive and would keep the stale
+                    // enabled copy alive until restart (mother-of-all-audits #6).
+                    let seqCount = try await state.sequenceEngine.reloadRules(from: URL(fileURLWithPath: state.sequenceRulesDir), enabledStatuses: ruleStatuses)
                     // v1.21.5 (audit): the fresh profile governs ONLY the
                     // sequence/graph reload — RuleEngine.reloadRules re-applies
                     // its boot-stored profile internally (pre-existing,
