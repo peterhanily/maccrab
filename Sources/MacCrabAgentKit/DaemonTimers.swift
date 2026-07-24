@@ -62,12 +62,16 @@ enum SensorDegradationEvaluator {
     /// Volume floor for the sustained-loss branch — need meaningful traffic for a
     /// fraction to be trustworthy (guards the idle-box / startup FP).
     static let minOfferedForLossFraction = 2000.0
-    /// The drop fraction must stay elevated for at least this many CONSECUTIVE
-    /// ticks before the sustained-loss branch fires. Since `offered` includes the
-    /// drops themselves, a single big transient burst can clear the volume floor
-    /// on its own; requiring persistence separates a benign momentary burst from
-    /// an attacker holding telemetry suppressed (rc.3-verify FP fix).
+    /// At least this many of the last `sustainedLossWindow` ticks must have an
+    /// elevated drop fraction before the sustained-loss branch fires. Since
+    /// `offered` includes the drops themselves, a single big transient burst can
+    /// clear the volume floor on its own; requiring several elevated ticks WITHIN
+    /// A WINDOW (not strictly consecutive) separates a benign momentary burst from
+    /// an attacker holding — or duty-cycling — telemetry suppression.
     static let sustainedLossMinTicks = 2
+    /// Sliding-window size (ticks) for the elevated-loss shift register. 4 × 30 s
+    /// ≈ 2 min. Must be ≤ 8 (UInt8 mask).
+    static let sustainedLossWindow: UInt8 = 4
 
     /// Rolling baseline carried tick-to-tick. `degradedActive` is the latch
     /// that makes a sustained flood fire exactly once (rising-edge only).
@@ -80,12 +84,15 @@ enum SensorDegradationEvaluator {
         /// so a chronic-loss episode also fires exactly once and re-arms only when
         /// the drop fraction subsides (independent of the spike latch).
         var sustainedLossActive: Bool = false
-        /// #12 (rc.3-verify FP fix): consecutive ticks the drop fraction has been
-        /// elevated. The branch fires only once this reaches `sustainedLossMinTicks`
-        /// so a SINGLE transient drop burst (a Spotlight reindex, a build, wake-
-        /// from-sleep) on an otherwise-quiet host doesn't get mis-attributed to a
-        /// telemetry-drop EVASION — only a loss that PERSISTS does.
-        var sustainedLossTicks: Int = 0
+        /// #12: shift-register of the last `sustainedLossWindow` ticks — bit 0 is
+        /// the most recent tick, set when the drop fraction was elevated. The
+        /// branch fires only when at least `sustainedLossMinTicks` of the recent
+        /// window were elevated, so (a) a SINGLE transient burst (Spotlight, a
+        /// build, wake-from-sleep) doesn't fire (rc.3-verify FP fix) AND (b) an
+        /// attacker duty-cycling suppression (one loud tick / one quiet tick) can't
+        /// evade by keeping a *consecutive* counter from ever advancing — the
+        /// windowed count still accumulates (rc.4-verify evasion fix).
+        var recentElevatedMask: UInt8 = 0
     }
 
     /// Per-tick inputs, all derived from the D1/D4 monotonic counters' deltas.
@@ -177,10 +184,14 @@ enum SensorDegradationEvaluator {
         let dropFraction = offered > 0 ? dropped / offered : 0
         let lossElevated = offered >= minOfferedForLossFraction
             && dropFraction >= sustainedDropFraction
-        // Count consecutive elevated-loss ticks; the branch only trips once the
-        // loss has PERSISTED, so a lone transient burst can't false-fire.
-        b.sustainedLossTicks = lossElevated ? b.sustainedLossTicks + 1 : 0
-        let sustainedLoss = b.sustainedLossTicks >= sustainedLossMinTicks
+        // Slide the elevated-loss window: shift in this tick's bit, keep the low
+        // `sustainedLossWindow` bits. Fire when at least `sustainedLossMinTicks`
+        // of the window were elevated — persistent OR duty-cycled loss both
+        // accumulate, a lone transient burst does not.
+        let windowMask: UInt8 = (1 << sustainedLossWindow) &- 1
+        b.recentElevatedMask = ((b.recentElevatedMask << 1) | (lossElevated ? 1 : 0)) & windowMask
+        let windowedElevated = Int(b.recentElevatedMask.nonzeroBitCount)
+        let sustainedLoss = windowedElevated >= sustainedLossMinTicks
 
         var outcome: Outcome = .noAlert
         if conjunction && !b.degradedActive {
@@ -195,10 +206,10 @@ enum SensorDegradationEvaluator {
             b.sustainedLossActive = true
         }
         // Re-arm the spike latch when the file-rate spike subsides (not merely
-        // when drops pause), and the loss latch when the loss is no longer
-        // elevated, so each episode stays latched at exactly one fire.
+        // when drops pause), and the loss latch when the windowed loss drops back
+        // below the threshold, so each episode stays latched at exactly one fire.
         if !spike { b.degradedActive = false }
-        if !lossElevated { b.sustainedLossActive = false }
+        if !sustainedLoss { b.sustainedLossActive = false }
 
         // Don't learn from anomalies: freeze the baseline while spiking so a
         // flood can't poison it (which would blind the next episode).
@@ -1715,6 +1726,12 @@ enum DaemonTimers {
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
                 "db_tamper_decrypt_failures": dbTamperFailures,
+                // #19 (rc.4-verify): the lower-confidence substitution advisory —
+                // plaintext where a ciphertext was expected (a possible substitution
+                // OR a legacy pre-encryption row). Surfaced so the true-positive
+                // path stays operator-visible after being decoupled from the
+                // CRITICAL AES-GCM tamper alert, without re-introducing that FP.
+                "db_plaintext_in_encrypted_column_total": state.dbEncryption.plaintextInEncryptedColumnCount,
                 "rules_active": rulesActive,
                 // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
                 // detection-input drops folded into `events_dropped`; surfaced

@@ -232,7 +232,26 @@ struct SensorDegradationEvaluatorTests {
         #expect(r.outcome == .noAlert, "one transient burst is not sustained loss — no evasion alert")
     }
 
-    @Test("#12: sustained loss fires exactly once, then re-arms when the loss subsides")
+    @Test("#12: a DUTY-CYCLED loss (loud/quiet alternating) still fires — no consecutive-reset evasion")
+    func dutyCycledLossStillFires() {
+        var b = warmedBaseline()
+        func quietTick(_ base: Eval.Baseline) -> Eval.Result {
+            Eval.evaluate(input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 500,
+                                       kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+                          baseline: base)
+        }
+        // elevated → quiet → elevated: two elevated ticks within the 4-tick window
+        // even though they are NOT consecutive → must fire on the second elevated.
+        let e1 = lossTick(b); b = e1.newBaseline
+        #expect(e1.outcome == .noAlert)
+        let q = quietTick(b); b = q.newBaseline
+        #expect(q.outcome == .noAlert)
+        let e2 = lossTick(b)
+        #expect({ if case .degraded = e2.outcome { return true } else { return false } }(),
+                "alternating loud/quiet must still accumulate to the windowed threshold")
+    }
+
+    @Test("#12: sustained loss fires exactly once, then re-arms once the window clears")
     func sustainedLossLatchesThenReArms() {
         var b = warmedBaseline()
         var fireCount = 0
@@ -242,15 +261,16 @@ struct SensorDegradationEvaluatorTests {
             if case .degraded = r.outcome { fireCount += 1 }
         }
         #expect(fireCount == 1)
-        // Drops stop → re-arm + reset the consecutive-tick counter.
-        let calm = Eval.evaluate(
-            input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 500,
-                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
-            baseline: b)
-        b = calm.newBaseline
+        // Enough quiet ticks to clear the sliding window → re-arm.
+        for _ in 0..<4 {
+            b = Eval.evaluate(
+                input: Input(fileEventsThisTick: 1_000, processEventsThisTick: 500,
+                             kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+                baseline: b).newBaseline
+        }
         #expect(!b.sustainedLossActive)
-        #expect(b.sustainedLossTicks == 0)
-        // Fresh loss episode → fires again after it re-persists two ticks.
+        #expect(b.recentElevatedMask == 0)
+        // Fresh loss episode → fires again after it re-accumulates in the window.
         let f1 = lossTick(b); b = f1.newBaseline
         #expect(f1.outcome == .noAlert)
         let f2 = lossTick(b)

