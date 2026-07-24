@@ -1,21 +1,21 @@
 {
-  "version": "1.21.5-rc.2",
-  "release_date": "2026-07-23T12:18:55Z",
+  "version": "1.21.5-rc.3",
+  "release_date": "2026-07-24T10:39:24Z",
   "toolchain": "Xcode 26.4.1 Build version 17E202",
   "rules": 486,
   "rules_single": 438,
   "rules_sequence": 41,
   "rules_graph": 7,
   "builtins": 46,
-  "tests": 3279,
-  "test_suites": 572,
+  "tests": 3311,
+  "test_suites": 577,
   "dmg": {
-    "filename": "MacCrab-v1.21.5-rc.2.dmg",
-    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.21.5-rc.2/MacCrab-v1.21.5-rc.2.dmg",
-    "sha256": "2b88e38e7592acf3a97a75fb3493b39dda0f1115d1d0d64c15edc556e33d2a6c",
-    "size_bytes": 93973206
+    "filename": "MacCrab-v1.21.5-rc.3.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.21.5-rc.3/MacCrab-v1.21.5-rc.3.dmg",
+    "sha256": "ea9a44b5b694dfa1675cb46e19e8f6ca6c56142a6a58d5d39778d14489417d91",
+    "size_bytes": 94014142
   },
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.21.5-rc.2",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.21.5-rc.3",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0"
 }

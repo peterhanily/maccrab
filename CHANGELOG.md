@@ -3,6 +3,25 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5-rc.3] — 2026-07-24
+
+Audit-remediation release candidate over rc.2 — 30 findings from a multi-agent adversarial audit, across detection quality, self-defense, storage resilience, and release safety.
+
+### Fixed
+- **Credential-theft detection for compromised app helpers.** A trusted browser or Electron helper (VS Code, Cursor, Slack, …) reading a *foreign* credential store — `~/.ssh`, a keychain, a crypto wallet, another browser's profile — is now surfaced instead of being suppressed as helper noise. A browser reading its *own* profile stays quiet, so there is no new false-positive noise.
+- **Reverse-shell rule de-brittled.** The flagship rule now covers `/dev/tcp`/`/dev/udp` in any spacing/redirect/variable-split form, `zsh ztcp`, netcat/ncat `-e`/`-c` (including flags before the option), the mkfifo+nc pipe, socket/subprocess Python shells regardless of import order, `pty.spawn`, PHP `fsockopen`, perl, socat, gawk `/inet/tcp`, ruby, and node `child_process` — and no longer false-positives on a benign `socket`+`subprocess`+`/bin/echo` one-liner.
+- **Sequence rules can be turned off at runtime.** A SIGHUP reload now evicts a sequence that became deprecated, fell outside the active rule profile, or was deleted — previously it kept firing until a full restart.
+- **Idle WAL pin fully released.** The dashboard now drops its read-only `events.db` connection when backgrounded (not only while actively polling), and the engine's size-cap sweep skips *all* write-amplifying maintenance under a reader-pinned WAL — completing the rc.2 CPU fix for the backgrounded-dashboard case.
+- **Telemetry-drop evasion closed.** The self-defense sensor-degraded alert now also fires on sustained, non-spiking event loss (a gradual ramp or an already-busy host), not only on a rate spike.
+- **Storage-write resilience.** Under transient database contention the batched writer now retries instead of dropping the batch; at its hard cap it sheds a low-value file-flood row rather than a rare exec/network row.
+- **Database tamper-detection hardened.** A plaintext value substituted into an encryption-enabled column is now counted as tamper (previously returned as trusted); the tamper alert wording reflects both modification and substitution.
+- **Rule fix:** a stable supply-chain sequence no longer matches every package-manager invocation (a YAML indentation bug had dropped its install/add constraint).
+
+### Internal
+- Genuine true-positive fire-tests for all 11 stable kill-chain sequences, and the promotion checker now requires one (a comment mention no longer counts).
+- The detection assessment framework now drives the exact command line the sensor emits and reports an honest held-out generalization score.
+- `set_response_action` tells a non-admin operator when a setting is saved but not armed; release scripts hard-gate Sparkle key-pairing and DMG notarization; the fleet prototype enforces a streamed-body size cap and constant-time key comparison.
+
 ## [1.21.5-rc.2] — 2026-07-23
 
 Performance-robustness release candidate over rc.1.
