@@ -224,8 +224,27 @@ public enum NoiseFilter {
         // Gate 3 — trusted browser / Electron helper. Chromium apps
         // spawn large helper trees that fire individual Sigma rules
         // in isolation. Single bundle-prefix short-circuit.
+        //
+        // EXCEPTION — credential theft (mirrors the Gate-8 carve-out). A
+        // trusted browser/Electron helper (VS Code, Cursor, Slack, …) reading a
+        // FOREIGN credential store — ~/.ssh, a keychain, a crypto wallet, or
+        // ANOTHER browser's profile — is the AMOS/Banshee signed-stealer pattern
+        // and must NOT be hidden here. Refined by the path-aware own-profile
+        // check so a browser reading its OWN Login Data / Cookies (expected
+        // first-party behaviour) STAYS suppressed and does not re-noise: only a
+        // credential-theft read that is NOT an own-profile access survives.
+        // When the match has no file (a keychain/memory-read process event), we
+        // cannot prove it is own-profile, so it survives (fail-open on theft).
         if isTrustedBrowserHelper(path: event.process.executable) {
-            matches.removeAll { !Self.isMustFire($0, trustedSubject: trustedSubject) }
+            let readingOwnProfile: Bool = {
+                guard let filePath = event.file?.path else { return false }
+                return Self.isBrowserReadingOwnProfile(
+                    processPath: event.process.executable, filePath: filePath)
+            }()
+            matches.removeAll {
+                !Self.isMustFire($0, trustedSubject: trustedSubject)
+                    && !(isCredentialTheftMatch($0) && !readingOwnProfile)
+            }
             if matches.isEmpty { return }
         }
 
