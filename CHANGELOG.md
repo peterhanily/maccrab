@@ -3,6 +3,19 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5-rc.4] — 2026-07-24
+
+Self-audit remediation over rc.3. A 6-agent adversarial review of the rc.3 remediation caught six real regressions/false-positives introduced by the rc.3 fixes; this RC corrects them.
+
+### Fixed
+- **Reverse-shell false positive.** The named-pipe (mkfifo/nc) rule branch matched a benign backup one-liner (`mkfifo … rsync …` under bash) because `nc ` is a substring of `rsync ` and `sh` of `bash`. It now requires an explicit `/bin/sh`; also added the `mknod` backpipe variant it was missing.
+- **Sequence-reload partial-match accounting.** The rc.3 SIGHUP eviction dropped an evicted rule's in-flight partial matches without decrementing the partial-match counter, which could — over many reloads — evict live partials from surviving rules and silently miss real sequence detections. The counter is now kept exact.
+- **Sensor-degraded false positive.** The new sustained-loss branch could fire on a single transient event-drop burst (a Spotlight reindex, a build, wake-from-sleep) on an otherwise-quiet host. It now requires the loss to persist across consecutive intervals before alerting.
+- **DB tamper-alert false positive.** A legitimate pre-encryption plaintext row (encryption toggled on over an existing database) was counted as tamper and could raise the CRITICAL self-defense alert. Plaintext in an encryption-enabled column is now a separate lower-confidence advisory; the CRITICAL alert stays scoped to unambiguous AES-GCM authentication failures.
+
+### Internal
+- Storage-writer cap-shedding is O(1) again under a high-value event flood; the promotion checker can no longer be satisfied by a rule id in a comment.
+
 ## [1.21.5-rc.3] — 2026-07-24
 
 Audit-remediation release candidate over rc.2 — 30 findings from a multi-agent adversarial audit, across detection quality, self-defense, storage resilience, and release safety.
