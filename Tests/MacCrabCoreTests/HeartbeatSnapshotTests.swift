@@ -141,6 +141,32 @@ struct HeartbeatSnapshotTests {
         #expect(h.sysextHasFDA == nil)
     }
 
+    @Test("build_channel decodes, and is never defaulted to release")
+    func buildChannel() throws {
+        #expect(try decode("""
+        { "schema_version": 5, "build_channel": "dev" }
+        """).buildChannel == "dev")
+
+        #expect(try decode("""
+        { "schema_version": 5, "build_channel": "release" }
+        """).buildChannel == "release")
+
+        // An engine too old to carry the Info.plist marker reports "unknown".
+        #expect(try decode("""
+        { "schema_version": 5, "build_channel": "unknown" }
+        """).buildChannel == "unknown")
+
+        // A heartbeat predating the field decodes as nil. Neither this nor
+        // "unknown" may be read as "release": a consumer deciding whether a
+        // host's measurements count as production evidence has to be able to
+        // tell a shipped build apart from an undetermined one.
+        let old = try decode("""
+        { "schema_version": 5, "events_processed": 1 }
+        """)
+        #expect(old.buildChannel == nil)
+        #expect(old.buildChannel != "release")
+    }
+
     @Test("ageSeconds / isStale use the injected clock and fail safe")
     func staleness() throws {
         let h = try decode(Self.fullJSON)   // written_at_unix = 1700000000.5

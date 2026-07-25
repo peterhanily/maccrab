@@ -34,6 +34,16 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// (`Date().timeIntervalSince1970`) by the daemon — decoded as `Double`.
     public let writtenAtUnix: Double?
     public let uptimeSeconds: Int?
+    /// Build channel of the RUNNING engine: `"release"`, `"dev"`, or
+    /// `"unknown"` when the executing bundle predates the marker. `nil` when
+    /// the heartbeat itself predates this field.
+    ///
+    /// Deliberately never defaulted to `"release"` at either end. A consumer
+    /// deciding whether a host's measurements count as production evidence
+    /// must be able to tell "this is a shipped build" apart from "I could not
+    /// determine what this is" — collapsing those is how a dev candidate's
+    /// numbers get quoted as if they came from the shipped product.
+    public let buildChannel: String?
 
     // MARK: Throughput counters
     public let alertsEmitted: Int?
@@ -98,6 +108,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case schemaVersion = "schema_version"
         case writtenAtUnix = "written_at_unix"
         case uptimeSeconds = "uptime_seconds"
+        case buildChannel = "build_channel"
         case alertsEmitted = "alerts_emitted"
         case eventsProcessed = "events_processed"
         case eventsDropped = "events_dropped"

@@ -49,6 +49,26 @@ check "Compile rules (YAML → JSON)" python3 Compiler/compile_rules.py --input-
 check "Rule lint (filter coverage)" ./scripts/rule-lint.sh
 
 echo ""
+echo -e "${BOLD}Required gates (mirrors .github/workflows/ci.yml)${NC}"
+# These are REQUIRED jobs on GitHub. Under the private-remote dev branch they
+# do not run there (macOS minutes bill 10x against a private repo's allowance),
+# so this script is the gate. Keep the invocations byte-identical to ci.yml.
+check "Broker fd fuzz (ASan/UBSan)" ./scripts/test-broker-fuzz.sh
+check "Architectural audit (deterministic)" \
+    env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
+
+echo ""
+echo -e "${BOLD}Assessment harness (non-shipping sub-package)${NC}"
+# Tools/AssessmentHarness is deliberately invisible to the root package, so
+# `swift build` and `swift test` above never touch it. Before this block it was
+# referenced by nothing in .github/workflows, this script, or the Makefile —
+# the component that grades the detection engine was itself ungated, and could
+# have stopped compiling without anyone noticing.
+check "Harness builds" swift build --package-path Tools/AssessmentHarness
+check "Harness tests" swift test --package-path Tools/AssessmentHarness
+check "Harness stays out of the shipped build" ./Tools/AssessmentHarness/scripts/check-harness-isolation.sh
+
+echo ""
 echo -e "${BOLD}Code Quality${NC}"
 check "No force unwraps in Sources" bash -c '! grep -rn "\.first!" Sources/ --include="*.swift" | grep -v ".build/" | grep -v "// OK:"'
 check "No TODO/FIXME in Sources" bash -c 'count=$(grep -rn "TODO\|FIXME" Sources/ --include="*.swift" | grep -v ".build/" | wc -l); [ "$count" -lt 10 ]'

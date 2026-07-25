@@ -105,6 +105,29 @@ VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
 if [ -z "${BUILD_NUMBER:-}" ]; then
     export BUILD_NUMBER="${VERSION}.$(date +%s)"
 fi
+
+# Build channel. `release` is the default and reproduces the historical
+# behaviour exactly; `dev` marks a candidate built for the assurance lab.
+#
+# Two things hang off this:
+#   1. The channel is stamped into BOTH Info.plists, so the artifact is
+#      self-describing. Anything downstream that must not confuse a dev
+#      candidate with a shipped build (the lab's candidate-identity check,
+#      an FP corpus deciding whether a host's data counts) reads one key
+#      instead of inferring from a version string.
+#   2. Sparkle automatic update checks are DISABLED on `dev`. A dev
+#      candidate carries the production SUFeedURL, so with checks left on
+#      it would quietly update itself to the current public release
+#      mid-experiment — and the resulting identity mismatch would surface
+#      as a product failure that is really a build-lane defect.
+CHANNEL="${MACCRAB_BUILD_CHANNEL:-release}"
+case "$CHANNEL" in
+    release|dev) ;;
+    *) echo "ERROR: MACCRAB_BUILD_CHANNEL must be 'release' or 'dev' (got '$CHANNEL')" >&2; exit 1 ;;
+esac
+export MACCRAB_BUILD_CHANNEL="$CHANNEL"
+if [ "$CHANNEL" = "dev" ]; then SU_AUTOCHECK="false"; else SU_AUTOCHECK="true"; fi
+
 BUILD_DIR="$PROJECT_DIR/.build/release"
 
 # Staging dir + EXIT-trap policy depend on the run mode.
@@ -184,6 +207,8 @@ VERSION="$VERSION"
 BUILD_NUMBER="$BUILD_NUMBER"
 SU_EDKEY="$SU_EDKEY"
 SU_FEEDURL="$SU_FEEDURL"
+CHANNEL="$CHANNEL"
+SU_AUTOCHECK="$SU_AUTOCHECK"
 STAGE_ENV_EOF
 
     # ─── Compile for both architectures ──────────────────────────────
@@ -564,9 +589,12 @@ PLIST
          them here; rotate the key in project.yml only. -->
     <key>SUFeedURL</key><string>${SU_FEEDURL}</string>
     <key>SUPublicEDKey</key><string>${SU_EDKEY}</string>
-    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUEnableAutomaticChecks</key><${SU_AUTOCHECK}/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>SUAutomaticallyUpdate</key><false/>
+    <!-- Build channel: "release" or "dev". Read this, never infer the
+         channel from the version string. -->
+    <key>MacCrabBuildChannel</key><string>${CHANNEL}</string>
     <!-- maccrab:// deep-link scheme (APPCORE-01). Routes `open maccrab://...`
          and in-app bookmarks to MacCrab.app via the scene .onOpenURL →
          V2DashboardState.goto(url:) pipeline. -->
@@ -604,6 +632,7 @@ PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleExecutable</key><string>${AGENT_ID}</string>
     <key>CFBundlePackageType</key><string>SYSX</string>
+    <key>MacCrabBuildChannel</key><string>${CHANNEL}</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSSystemExtensionUsageDescription</key><string>MacCrab's endpoint security extension watches kernel events (process, file, network) to detect threats.</string>
     <!--
@@ -1157,6 +1186,17 @@ load_stage_env() {
     # if the env file predates this field set.
     if [ -z "${SU_EDKEY:-}" ] || [ -z "${SU_FEEDURL:-}" ]; then
         load_sparkle_config
+    fi
+    # Same guard for the build channel. A stage-env written before this
+    # field existed would leave CHANNEL/SU_AUTOCHECK empty, and assemble
+    # interpolates SU_AUTOCHECK directly into a plist element — an empty
+    # value there yields malformed XML rather than a loud failure. Default
+    # to the historical behaviour.
+    if [ -z "${CHANNEL:-}" ]; then
+        CHANNEL="release"
+    fi
+    if [ -z "${SU_AUTOCHECK:-}" ]; then
+        if [ "$CHANNEL" = "dev" ]; then SU_AUTOCHECK="false"; else SU_AUTOCHECK="true"; fi
     fi
 }
 

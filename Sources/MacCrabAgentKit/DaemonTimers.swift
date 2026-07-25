@@ -1725,6 +1725,14 @@ enum DaemonTimers {
                 "eslogger_dropped_total": esloggerDroppedTotal,
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
+                // Build channel of the RUNNING engine, read from this bundle's
+                // Info.plist. The on-disk key says what was installed; this says
+                // what is executing — the two diverge exactly when something
+                // swapped the build underneath a measurement run, which is the
+                // case worth catching. Absent key → "unknown", never "release":
+                // a build too old to carry the marker must not be reported as a
+                // shipped build.
+                "build_channel": (Bundle.main.object(forInfoDictionaryKey: "MacCrabBuildChannel") as? String) ?? "unknown",
                 "db_tamper_decrypt_failures": dbTamperFailures,
                 // #19 (rc.4-verify): the lower-confidence substitution advisory —
                 // plaintext where a ciphertext was expected (a possible substitution
