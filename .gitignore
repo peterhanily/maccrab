@@ -108,6 +108,22 @@ maccrab-release-env*
 # It records a local, host-specific run result — never committed.
 .maccrab-corpus-attest
 
+# Measurement output. Both of these default to a path INSIDE the repo, so an
+# operator running either from the project root drops host-specific results
+# into the working tree without meaning to:
+#   scripts/fp-rate-benchmark.sh  → ./fp_benchmark_<date>.json  (cwd)
+#   maccrab-assess run            → ./assessment-run/           (--out default)
+# The contents are measurements of a particular machine over a particular
+# window — per-rule alert counts, coarse host metadata, engine state. They are
+# evidence, not source, and they belong wherever the evidence is kept.
+fp_benchmark_*.json
+assessment-run/
+diagnosis.json
+# Soak-window state, if ever pointed at the repo instead of ~/Library.
+soak/
+soak-marker.json
+samples.jsonl
+
 # -----------------------------------------------------------------------------
 # Generic secret file patterns
 # -----------------------------------------------------------------------------

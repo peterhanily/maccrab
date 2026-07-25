@@ -57,6 +57,13 @@ check "Broker fd fuzz (ASan/UBSan)" ./scripts/test-broker-fuzz.sh
 check "Architectural audit (deterministic)" \
     env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
 
+# Publication gate. `main` is public and dev squash-merges into it, so
+# anything on dev is on a path to publication. Scans ADDED lines only —
+# the repo legitimately contains ~100 credential-shaped strings (honeyfile
+# canaries, sanitizer test fixtures) and a whole-tree scan reports all of
+# them every run until someone switches it off.
+check "No secrets or host paths in the diff" ./scripts/check-secrets.sh
+
 echo ""
 echo -e "${BOLD}Assessment harness (non-shipping sub-package)${NC}"
 # Tools/AssessmentHarness is deliberately invisible to the root package, so
