@@ -83,6 +83,25 @@ struct EventStoreFTSMergeTests {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// Count the blocks backing the events_fts index (rows in the internal
+    /// `events_fts_data` shadow table). A heavily-fragmented / delete-marked index
+    /// has many; a fully-optimized one has a handful.
+    private static func readFtsBlockCount(at path: String) -> Int {
+        var db: OpaquePointer?
+        defer { if let d = db { sqlite3_close(d) } }
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return -1 }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM events_fts_data", -1, &stmt, nil) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else { return -1 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    private static func fileSizeMB(at path: String) -> Double {
+        let bytes = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+        return Double(bytes) / 1_048_576
+    }
+
     // MARK: - Tests
 
     @Test("automerge is deferred to 16 in the FTS5 %_config shadow table")
@@ -155,6 +174,76 @@ struct EventStoreFTSMergeTests {
         let postNames = Set(postHits.map { $0.process.name })
         #expect(postNames == preNames)
         #expect(postHits.count == preHits.count)
+    }
+
+    @Test("optimizeFTS() compacts a fragmented/delete-marked index, reclaims space, keeps search correct")
+    func optimizeCompactsAndReclaims() async throws {
+        let path = Self.tempPath()
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: path + "-wal")
+            try? FileManager.default.removeItem(atPath: path + "-shm")
+        }
+        let store = try EventStore(path: path)
+
+        // Churn: insert batches with distinctive tokens, then prune them all —
+        // each cycle leaves FTS segments + delete markers behind, the exact
+        // fragmentation that accumulated to ~104K blocks / 400 MB on-device.
+        for cycle in 0..<12 {
+            for i in 0..<40 {
+                try await store.insert(event: Self.makeEvent(
+                    name: "churn\(cycle)_\(i)", path: "/tmp/churn\(cycle)_\(i)",
+                    commandLine: "churn cyclehaystack\(cycle) rowneedle\(i)"))
+            }
+            // Prune everything inserted so far (all events are ~now).
+            _ = try await store.prune(olderThan: Date().addingTimeInterval(3600))
+        }
+        // A keeper that must survive optimize + still be searchable.
+        try await store.insert(event: Self.makeEvent(
+            name: "keeper", path: "/usr/bin/keeper", commandLine: "keeper survivingtoken"))
+        await store.walCheckpointTruncate()
+
+        let blocksBefore = Self.readFtsBlockCount(at: path)
+        let sizeBefore = Self.fileSizeMB(at: path)
+        #expect(blocksBefore > 3, "churn should have left multiple FTS segments (got \(blocksBefore))")
+
+        // Optimize + reclaim, mirroring the size-cap sweep.
+        #expect(await store.optimizeFTS())
+        _ = try await store.incrementalVacuum(maxPages: 200_000)
+        await store.walCheckpointTruncate()
+
+        // The proof: whatever the starting fragmentation, optimize compacts the
+        // index to a handful of segments (on-device it collapsed 103,766 → 3).
+        let blocksAfter = Self.readFtsBlockCount(at: path)
+        let sizeAfter = Self.fileSizeMB(at: path)
+        #expect(blocksAfter <= blocksBefore, "optimize must not grow the index (\(blocksBefore) → \(blocksAfter))")
+        #expect(blocksAfter <= 5, "optimize collapses to a handful of segments (got \(blocksAfter))")
+        #expect(sizeAfter <= sizeBefore, "reclaimed space: \(sizeBefore) MB → \(sizeAfter) MB")
+
+        // Correctness: the keeper is still found; the pruned churn tokens are gone.
+        let keep = try await store.search(text: "survivingtoken", limit: 10)
+        #expect(keep.count == 1 && keep.first?.process.name == "keeper")
+        let gone = try await store.search(text: "cyclehaystack0", limit: 10)
+        #expect(gone.isEmpty, "pruned content must not resurface after optimize")
+    }
+
+    @Test("optimizeFTS() on a read-only store is a no-op returning false")
+    func optimizeNoOpOnReadOnlyStore() async throws {
+        let path = Self.tempPath()
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: path + "-wal")
+            try? FileManager.default.removeItem(atPath: path + "-shm")
+        }
+        do {
+            let rw = try EventStore(path: path)
+            try await rw.insert(event: Self.makeEvent(
+                name: "curl", path: "/usr/bin/curl", commandLine: "curl https://evil.example/x"))
+            await rw.walCheckpoint()
+        }
+        let ro = try EventStore(path: path, forceReadOnly: true)
+        #expect(await ro.optimizeFTS() == false)
+        #expect(try await ro.search(text: "evil.example", limit: 10).count == 1)
     }
 
     @Test("mergeFTS() on a read-only store is a no-op returning false")

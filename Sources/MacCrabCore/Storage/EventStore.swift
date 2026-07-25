@@ -2612,6 +2612,28 @@ public actor EventStore {
         return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
     }
 
+    /// Full FTS5 `optimize` — merges EVERY events_fts segment into one and drops
+    /// the delete markers left behind by pruned events. Unlike the bounded
+    /// `mergeFTS` (`'merge', N`), which does a fixed slice of work per call and
+    /// falls behind on a churned DB, `optimize` runs to completion in one pass.
+    /// On a badly-fragmented index (measured on-device: ~104K segments / 400 MB
+    /// backing an events table that had been pruned to near-empty) it frees the
+    /// index's pages to the freelist so a subsequent incremental_vacuum / VACUUM
+    /// can return them to the OS — the events_fts index was otherwise a permanent
+    /// floor that kept the DB over its size cap (and its mmap inflated RSS). Cost
+    /// scales with how out-of-date the index is: a near-no-op when already compact,
+    /// a few seconds when heavily fragmented. Run OFF the hot path (the background
+    /// size-cap sweep), gated on the DB being over target.
+    ///
+    /// DETECTION-SAFE: `events_fts` is read ONLY by `search()`/hunt, never by the
+    /// detection engine; optimize changes only the index's physical layout, never
+    /// which rows a MATCH returns. No-op on a read-only store.
+    @discardableResult
+    public func optimizeFTS() async -> Bool {
+        guard let db = db, !isReadOnly else { return false }
+        return sqlite3_exec(db, "INSERT INTO events_fts(events_fts) VALUES('optimize')", nil, nil, nil) == SQLITE_OK
+    }
+
     // MARK: - Reentrancy guard for size-cap enforcement
     //
     // The hourly size-cap timer, a user-invoked "Prune now", and a

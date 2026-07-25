@@ -3627,7 +3627,30 @@ func runAdaptiveRollupSweep(
         logger.warning("Tier-rollup: events.db-wal pinned at \(walPinnedMB) MB — a reader holds a read transaction on events.db (typically the dashboard's read-only connection). incremental_vacuum / full VACUUM / FTS-merge are SKIPPED this sweep (they cannot reclaim a reader-pinned WAL and would only grow it); they resume once the reader releases.")
     }
 
-    if totalPruned > 0 && !walPinned {
+    // Power/thermal gate for the heavy maintenance below (also gates the FTS
+    // optimize). A whole-file rewrite / full index compaction is non-urgent.
+    let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
+
+    // rc.3+ perf (on-device): the reclaim must also run when the DB is over cap
+    // WITHOUT any event prune. The events_fts index accumulates delete-marker
+    // segments faster than the bounded incremental merge compacts them, so on a
+    // churned DB it can dwarf the live events (measured: 400 MB FTS / ~104K
+    // segments backing a near-empty events table → 500 MB total, permanently over
+    // the 420 MB cap and inflating RSS via the mmap). The old `totalPruned > 0`
+    // gate never reclaimed that — nothing was being pruned. Compact the FTS with a
+    // full `optimize` (frees its pages to the freelist), then let the
+    // incremental_vacuum / VACUUM below return them to the OS.
+    let footprintBeforeReclaimMB = measureDatabaseFootprintMB(dbPath: dbPath)
+    let overCap = footprintBeforeReclaimMB > targetSizeMB
+    if overCap && !walPinned && !underPowerPressure {
+        let ftsStart = measureDatabaseFootprintMB(dbPath: dbPath)
+        if await eventStore.optimizeFTS() {
+            _ = await eventStore.walCheckpoint()   // move optimize's freed pages out of the WAL
+            logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) MB footprint over \(targetSizeMB) MB target) — pages freed for reclamation")
+        }
+    }
+
+    if (totalPruned > 0 || overCap) && !walPinned {
         let dbSizeBeforePrune = measureDatabaseFootprintMB(dbPath: dbPath)
         let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
         let dbSizeAfterIncremental = measureDatabaseFootprintMB(dbPath: dbPath)
@@ -3650,7 +3673,7 @@ func runAdaptiveRollupSweep(
         // battery or while thermally throttled — incremental_vacuum already
         // reclaimed pages above and the WAL is checkpointed below, so the cap
         // still trends down; the full rebuild waits for AC / nominal thermal.
-        let underPowerPressure = PowerGate.pollIntervalMultiplier > 1.0
+        // (`underPowerPressure` is computed once above, before the FTS optimize.)
 
         // The full VACUUM only helps when its pre/post checkpoint can drain the
         // WAL; the up-front `walPinned` probe already gated this whole block on
