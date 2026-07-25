@@ -9,6 +9,7 @@ Performance, detection-quality, and reliability release over 1.21.4.
 
 ### Performance
 - **Much lower engine CPU on a large database.** When the dashboard held an idle read-only connection to `events.db`, its write-ahead log could no longer be checkpointed, growing unbounded and driving the storage size-cap sweep into a continuous, CPU-pinning rewrite. The engine now detects a reader-pinned WAL and backs off instead of churning, and the dashboard releases its cached connection when idle or backgrounded — so steady-state CPU on a busy host drops from a pinned core to near-idle.
+- **The event database shrinks back to its size cap, and engine memory use is lower.** The full-text search index used for threat hunting could grow far out of proportion to the events it covered and was never fully compacted, leaving the database stuck well above its size cap (and inflating engine memory, since the index is memory-mapped). The size-cap sweep now fully optimizes and reclaims that index, returning the database to its cap and freeing the memory.
 
 ### Detection
 - **Credential theft by a compromised app helper is now surfaced.** A trusted browser or Electron helper (VS Code, Cursor, Slack, …) reading a *foreign* credential store — `~/.ssh`, a keychain, a crypto wallet, another browser's profile — is reported instead of being suppressed as helper noise. A browser reading its *own* profile stays quiet, so there is no added false-positive noise.
