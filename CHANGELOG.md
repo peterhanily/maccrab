@@ -3,6 +3,26 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.5] — 2026-07-25
+
+Performance, detection-quality, and reliability release over 1.21.4.
+
+### Performance
+- **Much lower engine CPU on a large database.** When the dashboard held an idle read-only connection to `events.db`, its write-ahead log could no longer be checkpointed, growing unbounded and driving the storage size-cap sweep into a continuous, CPU-pinning rewrite. The engine now detects a reader-pinned WAL and backs off instead of churning, and the dashboard releases its cached connection when idle or backgrounded — so steady-state CPU on a busy host drops from a pinned core to near-idle.
+
+### Detection
+- **Credential theft by a compromised app helper is now surfaced.** A trusted browser or Electron helper (VS Code, Cursor, Slack, …) reading a *foreign* credential store — `~/.ssh`, a keychain, a crypto wallet, another browser's profile — is reported instead of being suppressed as helper noise. A browser reading its *own* profile stays quiet, so there is no added false-positive noise.
+- **Hardened reverse-shell detection.** The reverse-shell rule now covers a wide range of representations — `/dev/tcp`/`/dev/udp` in any spacing or variable-split form, `zsh` `ztcp`, netcat/ncat with flags, mkfifo/mknod backpipes, socket/subprocess Python shells regardless of import order, `pty.spawn`, PHP, perl, socat, gawk, ruby, and node — without false-positiving on benign command lines.
+- **Runtime sequence-rule control.** A configuration reload now takes effect for multi-step sequence rules — a rule that is deprecated, moved outside the active profile, or removed stops firing without a restart.
+- **Telemetry-drop-evasion detection.** The self-defense monitor now flags sustained event-loss that an attacker could use to blind the sensor gradually, not only sudden spikes — while ignoring brief benign bursts.
+
+### Reliability
+- **Storage-write resilience.** Under transient database contention the event writer retries rather than dropping a batch, and under a write flood it preserves rare, high-value process/network records over routine file-write records.
+- **Database tamper-detection hardening.** At-rest integrity checks now also account for a value substituted for its ciphertext, surfaced at a confidence level appropriate to the ambiguity so legitimate configurations don't false-alarm.
+
+### Also since 1.21.4
+- Rule-profile gating for sequence and graph rules; a Welcome setup checklist that verifies Full Disk Access and System Extension approval; evidence-bundle exports write a verifiable outer-archive SHA-256 sidecar; documented experimental→stable rule-promotion criteria and a burst-load benchmark.
+
 ## [1.21.5-rc.5] — 2026-07-24
 
 Convergence over rc.4. A second adversarial pass over the rc.4 corrections found two more issues introduced by those corrections; this RC resolves them.
