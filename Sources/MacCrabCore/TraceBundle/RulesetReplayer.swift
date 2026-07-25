@@ -16,10 +16,17 @@
 //   ruleset version, so different rulesets produce different result
 //   hashes. Used by the v1.10.0 CLI's `trace replay` default path.
 //
-// The full integration with v1.9 RuleEngine — running rules against
-// `events.jsonl` and producing a fresh alert list — is a separate
-// follow-up. The plumbing here is stable; substituting a real
-// replayer is a one-line change in the CLI.
+// NEITHER OF THE TWO ABOVE RUNS A RULE. Both ignore `events` entirely and
+// return `matchedRules` verbatim, so a replay driven by them can only ever
+// agree with the recording it was handed — it cannot tell you whether
+// today's ruleset still detects what yesterday's did. Keep that in mind
+// before reading a green replay as evidence about detection.
+//
+// The real integration now ships as `RuleEngineReplayer` (see
+// RuleEngineReplayer.swift): it decodes each `events.jsonl` line into an
+// `Event` and drives the actual RuleEngine, producing a fresh alert list.
+// Prefer it for anything that is meant to measure detection. The two
+// implementations here remain useful only as determinism fixtures.
 
 import Foundation
 import CryptoKit
