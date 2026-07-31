@@ -388,9 +388,26 @@ public actor AgentLineageService {
 
     private func evictIfNecessary() {
         guard sessions.count >= maxSessions else { return }
-        if let oldest = sessions.values.sorted(by: { $0.lastActivity < $1.lastActivity }).first {
-            sessions[oldest.aiPid] = nil
-            logger.info("Evicted inactive AI session \(oldest.aiPid) to stay under max-sessions cap")
+        // AI-09: evict EMPTY sessions first. Pure-LRU eviction discarded the
+        // sessions that actually held timelines — a session with no recorded
+        // events has a `lastActivity` frozen at its creation time, so under any
+        // churn of short-lived agent roots the zero-event ghosts looked "most
+        // recent" only briefly and then crowded out the long-running session
+        // the user is trying to inspect. An eventless session carries no
+        // information by definition, so it is always the correct victim.
+        // Defence in depth for the fork fix in EventLoop, which removes the
+        // dominant ghost SOURCE; this makes the cap fail gracefully regardless.
+        let victim = sessions.values
+            .sorted { lhs, rhs in
+                let lhsEmpty = lhs.events.snapshotOrdered().isEmpty
+                let rhsEmpty = rhs.events.snapshotOrdered().isEmpty
+                if lhsEmpty != rhsEmpty { return lhsEmpty }
+                return lhs.lastActivity < rhs.lastActivity
+            }
+            .first
+        if let victim {
+            sessions[victim.aiPid] = nil
+            logger.info("Evicted inactive AI session \(victim.aiPid) to stay under max-sessions cap")
         }
     }
 }

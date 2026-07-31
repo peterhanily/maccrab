@@ -306,8 +306,14 @@ public actor MCPBaselineService {
                 try? FileManager.default.removeItem(atPath: path)
                 try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
             }
+            // 0o640, not 0o644 — same class as the AgentLineageService Sec-H1
+            // fix. This snapshot is a per-MCP-server behavioural profile (which
+            // AI tooling this operator runs, and how it behaves), and at 0o644
+            // any local unprivileged process could read it. The dashboard
+            // (V2LiveDataProvider) reads it as an admin-group uid-501 process,
+            // which 0o640 root:admin still permits.
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o640],
                 ofItemAtPath: path
             )
         } catch {

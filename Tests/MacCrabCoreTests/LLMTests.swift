@@ -763,7 +763,15 @@ struct LLMConfigTests {
         let config = LLMConfig()
         #expect(config.provider == .ollama)
         #expect(config.ollamaURL == "http://localhost:11434")
-        #expect(config.enabled == true)
+        // v1.21.6: OFF by default. Previously `true`, which combined with the
+        // default localhost:11434 URL meant any machine merely running Ollama on
+        // the standard port emitted LLM commentary — 16% of the alert corpus —
+        // without the operator ever opening Settings. Existing installs are
+        // migrated at the load site (DaemonSetup treats the presence of a
+        // dashboard-written llm_config.json as opt-in), so this default only
+        // governs a fresh install with no configuration anywhere.
+        #expect(config.enabled == false,
+                "a fresh install must not use an LLM the operator never configured")
         #expect(config.sanitizeForCloud == true)
     }
 
@@ -786,28 +794,6 @@ struct LLMConfigTests {
         #expect(config.provider == .claude)
         #expect(config.enabled == true)
         #expect(config.claudeAPIKey == nil)
-    }
-    @Test("agenticInvestigationEnabled defaults OFF on a partial config")
-    func agenticFlagDefaultsOff() throws {
-        // A partial config that doesn't mention the flag must leave it
-        // false — the apply-behind-flag safety guarantee. Guards against
-        // the Codable partial-config trap (missing key must not break
-        // decode nor silently flip the gate on).
-        let json = #"{"provider":"claude","enabled":true}"#
-        let data = json.data(using: .utf8)!
-        let config = try JSONDecoder().decode(LLMConfig.self, from: data)
-        #expect(config.agenticInvestigationEnabled == false)
-    }
-
-    @Test("agenticInvestigationEnabled decodes true when explicitly set")
-    func agenticFlagDecodesTrue() throws {
-        let json = #"{"provider":"ollama","agentic_investigation_enabled":true}"#
-        // Note: this raw key is camelCase via the synthesized CodingKey;
-        // exercise the camelCase form the decoder actually expects.
-        let camel = #"{"provider":"ollama","agenticInvestigationEnabled":true}"#
-        let config = try JSONDecoder().decode(LLMConfig.self, from: camel.data(using: .utf8)!)
-        #expect(config.agenticInvestigationEnabled == true)
-        _ = json
     }
 
     @Test("Provider enum round-trips")

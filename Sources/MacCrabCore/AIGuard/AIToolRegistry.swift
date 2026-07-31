@@ -76,7 +76,10 @@ public struct AIToolRegistry: Sendable {
         // Codex (OpenAI)
         (.codex, [
             "Codex.app/Contents/",
-            "/codex app-server",
+            // AI-12: `/codex app-server` deleted — it contains a space and is a
+            // COMMAND-LINE fragment, not a path fragment. It is matched against
+            // `executablePath` only, so it could never fire; it was dead weight
+            // that made the Codex coverage look broader than it is.
             "codex-cli",
         ]),
         // OpenClaw
@@ -213,11 +216,12 @@ public struct AIToolRegistry: Sendable {
     /// Check if an executable path belongs to a known AI coding tool.
     public func isAITool(executablePath: String) -> AIToolType? {
         let path = executablePath.lowercased()
+        let basename = (path as NSString).lastPathComponent
 
         // Check builtin patterns
         for (toolType, patterns) in Self.builtinPatterns {
             for pattern in patterns {
-                if path.contains(pattern.lowercased()) {
+                if Self.matches(path: path, basename: basename, pattern: pattern.lowercased()) {
                     return toolType
                 }
             }
@@ -226,13 +230,37 @@ public struct AIToolRegistry: Sendable {
         // Check custom patterns
         for (toolType, patterns) in customPatterns {
             for pattern in patterns {
-                if path.contains(pattern.lowercased()) {
+                if Self.matches(path: path, basename: basename, pattern: pattern.lowercased()) {
                     return toolType
                 }
             }
         }
 
         return nil
+    }
+
+    /// Match one lowercased pattern against a lowercased executable path.
+    ///
+    /// AI-12: a bare `/<name>` pattern (leading slash, no interior slash) names
+    /// an EXECUTABLE, not a path fragment — but matched with plain `contains` it
+    /// also hit any path component that merely STARTS with that name. `/aider`
+    /// matched `/Users/x/projects/aider-clone/bin/python` and `/openclaw`
+    /// matched `/opt/openclaw-sandbox/node`, promoting an unrelated binary to an
+    /// AI-tool ROOT — which then attributes its entire process subtree to an
+    /// agent that isn't there, and hands 32 ai_safety rules, the credential
+    /// fence and the project boundary a fabricated agent to reason about.
+    ///
+    /// For that shape require a COMPONENT-anchored match: either the basename
+    /// equals the name, or the name appears as a whole `/name/` directory
+    /// component (so Homebrew Cellar / npm-global layouts still resolve). Every
+    /// other pattern keeps the substring semantics it was written with — those
+    /// carry their own boundaries (`.app/`, a trailing `/`, or an interior `-`).
+    private static func matches(path: String, basename: String, pattern: String) -> Bool {
+        if pattern.hasPrefix("/"), !pattern.dropFirst().contains("/") {
+            let name = String(pattern.dropFirst())
+            return basename == name || path.contains("/\\(name)/")
+        }
+        return path.contains(pattern)
     }
 
     /// Check if a process is a child of an AI tool by examining its ancestors.

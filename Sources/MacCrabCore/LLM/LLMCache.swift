@@ -30,7 +30,17 @@ public actor LLMCache {
         var lastAccessedSeq: UInt64
     }
 
-    public init(maxEntries: Int = 100, ttlSeconds: TimeInterval = 3600) {
+    // AI-14: the default TTL was 3600 — EXACTLY the period of the hourly timer
+    // that drives the highest-volume repeat prompt in the system (the
+    // security-score analysis at DaemonTimers.swift:527). An entry therefore
+    // expired at the precise moment the next identical call arrived, so that
+    // prompt could never hit: runtime showed 369 calls producing 369 DISTINCT
+    // responses on an essentially unchanged input (same grade, same failing
+    // factor for months), i.e. zero cache benefit and 369 near-duplicate
+    // informational alerts. Any TTL at or below an emitter's period is
+    // structurally useless; 6 h clears the 1 h emitter with margin without
+    // committing the whole cache to day-long staleness.
+    public init(maxEntries: Int = 100, ttlSeconds: TimeInterval = 21_600) {
         self.maxEntries = maxEntries
         self.ttl = ttlSeconds
     }

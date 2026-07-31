@@ -16,6 +16,11 @@ public struct LLMHealth: Sendable {
     public let lastSuccessAtUnix: Double?
     public let consecutiveFailures: Int
     public let circuitOpen: Bool
+    /// AI-06/AI-08: the single "is this backend genuinely usable right now"
+    /// answer — see `LLMService.isUsable()`. The heartbeat's `healthy` field
+    /// and the `maccrab.llm.*` emission gate BOTH read this one value, so the
+    /// gauge and the behaviour can never disagree.
+    public let usable: Bool
 }
 
 public actor LLMService {
@@ -33,6 +38,20 @@ public actor LLMService {
     /// — circuit breaker, cache — without 5s stalls per call.
     private let minInterval: TimeInterval
     private var lastCallTime: Date = .distantPast
+
+    /// AI-14 admission control. There was NO bound on how many callers could be
+    /// in the slow path at once: a burst of N behaviour-threshold crossings
+    /// queued N suspended tasks, each pinning its captured enrichedEvent and
+    /// indicator array, draining at one per `minInterval` — so the last alert
+    /// arrived minutes stale and memory grew with the burst, all to produce
+    /// advisory prose. Cache hits are served BEFORE this gate (they cost
+    /// nothing), so only genuine backend calls are counted. Over the cap we drop
+    /// the NEWEST request and say so in the log rather than growing the queue:
+    /// LLM output is advisory, the alert itself is stored regardless, and a
+    /// silent unbounded backlog is the worse failure.
+    private var pendingBackendCalls: Int = 0
+    private let maxPendingBackendCalls: Int = 4
+    private var droppedForAdmission: Int = 0
 
     /// Circuit breaker: disable after consecutive failures.
     private var consecutiveFailures: Int = 0
@@ -88,6 +107,16 @@ public actor LLMService {
         // usernames/paths/IPs to the attacker host — hence the strict
         // loopback parse rather than a substring match.
         let isLocalProvider = config.provider == .ollama
+            // v1.21.5 (audit S-02): loopback is necessary but NOT sufficient for
+            // the sanitizer bypass. Any local process can run a listener on
+            // 127.0.0.1, and the ENGINE's LLM endpoint is settable over the
+            // privileged inbox by any console-admin uid — so a uid-501 attacker
+            // could point the root engine at its own port and, because the URL
+            // parses as loopback, receive every prompt unsanitized.
+            // `trustLocalEndpoint` carries the provenance: false when the
+            // endpoint arrived over that control plane, in which case prompts are
+            // sanitized even though the host is genuinely loopback.
+            && config.trustLocalEndpoint
             && LoopbackEndpoint.isLoopback(urlString: config.ollamaURL)
         return !isLocalProvider && config.sanitizeForCloud
     }
@@ -99,6 +128,32 @@ public actor LLMService {
         lastSuccessAt = Date()
     }
 
+    /// AI-06/AI-08: the single honest "is this LLM genuinely usable right now"
+    /// predicate. Three conditions, all required:
+    ///
+    ///  - the backend has actually answered at least once (`lastSuccessAt`).
+    ///    "Configured" is not evidence: every cloud backend's `isAvailable()`
+    ///    is only `!apiKey.isEmpty`, and the ENGINE skips the probe entirely
+    ///    (DaemonSetup: "availability checked lazily"), so a non-empty key
+    ///    pointed at a dead port looks configured and answers nothing;
+    ///  - no failure streak. `consecutiveFailures` returns to 0 only on a
+    ///    success, so any non-zero value means the last thing we know is a
+    ///    failure;
+    ///  - the circuit is not open.
+    ///
+    /// The failure-streak term is what fixes the AI-08 lie. `circuitOpenUntil`
+    /// expires on the CLOCK alone — no success required — while
+    /// `consecutiveFailures` stays at 3, so a backend that succeeded once at
+    /// boot and then died reported `healthy: true, circuit_open: false,
+    /// consecutive_failures: 3` for the rest of the daemon's life.
+    ///
+    /// Deliberately NOT time-boxed: an idle-but-working local Ollama that has
+    /// not been asked anything for hours is healthy, not stale, and must keep
+    /// both its "healthy" gauge and its commentary.
+    public func isUsable() -> Bool {
+        lastSuccessAt != nil && consecutiveFailures == 0 && Date() >= circuitOpenUntil
+    }
+
     /// v1.18: current LLM health for the heartbeat. Pure read of internal
     /// state; safe to call from the heartbeat timer.
     public func healthSnapshot() -> LLMHealth {
@@ -107,7 +162,8 @@ public actor LLMService {
             model: modelLabel,
             lastSuccessAtUnix: lastSuccessAt?.timeIntervalSince1970,
             consecutiveFailures: consecutiveFailures,
-            circuitOpen: Date() < circuitOpenUntil
+            circuitOpen: Date() < circuitOpenUntil,
+            usable: isUsable()
         )
     }
 
@@ -116,15 +172,22 @@ public actor LLMService {
     /// disabled, when the chosen provider needs an API key that is
     /// empty, or when the backend reports itself unavailable.
     ///
-    /// Used by both the daemon (DaemonSetup) and the app (AppState) so
-    /// the construction path stays identical on both sides of the
-    /// privilege boundary. The dashboard side is the v1.6.10 home for
-    /// the LLM-orchestration trio (TriageService, LLMConsensusService,
-    /// AgenticInvestigator) — making outbound HTTPS at root privilege
-    /// is unnecessary trust surface, so those callers use the user-side
-    /// service instead.
+    /// Used by both the daemon (DaemonSetup) and the app (SettingsView's
+    /// "Test connection") so the construction path stays identical on both
+    /// sides of the privilege boundary. The v1.6.10 LLM-orchestration trio
+    /// that used to live on the app side (TriageService, LLMConsensusService,
+    /// AgenticInvestigator) was deleted in v1.21.6 — all three had zero call
+    /// sites. Keeping outbound HTTPS off the ES-entitlement root process is
+    /// still the rule for anything added back here.
     public static func makeFromConfig(_ config: LLMConfig) async -> LLMService? {
         guard config.enabled else { return nil }
+        // AI-08: every failure path below used to `return nil` silently, so a
+        // user-side config of `provider: openai` with an EMPTY key produced a
+        // dead LLM stack with no signal anywhere — and the only health gauge in
+        // the product is the DAEMON's LLMService, which happily reported its own
+        // Ollama as healthy. The owner had no way to learn their Settings choice
+        // had produced nothing. Log the concrete reason on each path.
+        let setupLog = Logger(subsystem: "com.maccrab.llm", category: "service")
         let backend: any LLMBackend
         switch config.provider {
         case .ollama:
@@ -134,16 +197,28 @@ public actor LLMService {
                 apiKey: config.ollamaAPIKey
             )
         case .claude:
-            guard let key = config.claudeAPIKey, !key.isEmpty else { return nil }
+            guard let key = config.claudeAPIKey, !key.isEmpty else {
+                setupLog.error("LLM disabled: provider=claude but no API key configured")
+                return nil
+            }
             backend = ClaudeBackend(apiKey: key, model: config.claudeModel)
         case .openai:
-            guard let key = config.openaiAPIKey, !key.isEmpty else { return nil }
+            guard let key = config.openaiAPIKey, !key.isEmpty else {
+                setupLog.error("LLM disabled: provider=openai but no API key configured (url=\(config.openaiURL, privacy: .public))")
+                return nil
+            }
             backend = OpenAIBackend(baseURL: config.openaiURL, apiKey: key, model: config.openaiModel)
         case .mistral:
-            guard let key = config.mistralAPIKey, !key.isEmpty else { return nil }
+            guard let key = config.mistralAPIKey, !key.isEmpty else {
+                setupLog.error("LLM disabled: provider=mistral but no API key configured")
+                return nil
+            }
             backend = MistralBackend(apiKey: key, model: config.mistralModel)
         case .gemini:
-            guard let key = config.geminiAPIKey, !key.isEmpty else { return nil }
+            guard let key = config.geminiAPIKey, !key.isEmpty else {
+                setupLog.error("LLM disabled: provider=gemini but no API key configured")
+                return nil
+            }
             backend = GeminiBackend(apiKey: key, model: config.geminiModel)
         }
         let service = LLMService(backend: backend, config: config)
@@ -161,6 +236,16 @@ public actor LLMService {
             let first = await group.next() ?? .some(false)
             group.cancelAll()
             return first ?? false  // nil means timeout — treat as unavailable
+        }
+        if !available {
+            // AI-08: the second silent death. The user-side config on the
+            // reporting host pointed at `http://127.0.0.1:52429/v1` — an
+            // EPHEMERAL port from a long-gone proxy — so this probe failed and
+            // the whole user-side LLM stack (MCP intent classification,
+            // `maccrabctl hunt`, dashboard triage, agentic investigation)
+            // silently went dark while the heartbeat still reported the
+            // daemon's Ollama healthy. Name the endpoint that failed.
+            setupLog.error("LLM disabled: provider=\(config.provider.rawValue, privacy: .public) configured but backend did not answer the availability probe within 3s")
         }
         return available ? service : nil
     }
@@ -224,6 +309,18 @@ public actor LLMService {
             }
         }
 
+        // AI-14: bounded admission, placed AFTER the cache lookup so a cached
+        // answer is never dropped, and BEFORE the rate-limit sleep so the cap
+        // bounds exactly the set of callers that would otherwise pile up at one
+        // per minInterval.
+        guard pendingBackendCalls < maxPendingBackendCalls else {
+            droppedForAdmission += 1
+            logger.warning("LLM admission control: \(self.maxPendingBackendCalls) backend calls already in flight — dropping this request (dropped so far: \(self.droppedForAdmission)). The alert itself is unaffected; only the advisory analysis is skipped.")
+            return nil
+        }
+        pendingBackendCalls += 1
+        defer { pendingBackendCalls -= 1 }
+
         // Rate limiting
         let elapsed = Date().timeIntervalSince(lastCallTime)
         if elapsed < minInterval {
@@ -275,6 +372,39 @@ public actor LLMService {
         )
     }
 
+    /// AI-06: the entry point an emitter must use for LLM prose that becomes a
+    /// `maccrab.llm.*` alert. Identical to `query()` except that it returns nil
+    /// unless `isUsable()` holds AFTER the call — commentary is published only
+    /// when AI analysis is genuinely set up and working.
+    ///
+    /// Why AFTER and not before: `isUsable()` requires evidence of a real
+    /// exchange, and on a freshly-booted daemon that evidence can only come
+    /// from the first call. Gating BEFORE would mean the first call never
+    /// happens, `lastSuccessAt` is never set, and commentary would be dead
+    /// forever on a perfectly good local Ollama.
+    ///
+    /// What this actually excludes: a cache hit (6 h TTL) served after the
+    /// backend has died. `query()` returns the stored prose without touching
+    /// the backend and without updating the failure/success state, so a dead
+    /// LLM could otherwise keep publishing fresh-looking alerts.
+    public func commentary(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int = 2048,
+        temperature: Double = 0.2,
+        useCache: Bool = true
+    ) async -> LLMEnhancement? {
+        guard let result = await query(
+            systemPrompt: systemPrompt, userPrompt: userPrompt,
+            maxTokens: maxTokens, temperature: temperature, useCache: useCache
+        ) else { return nil }
+        guard isUsable() else {
+            logger.info("Suppressing LLM commentary: backend not currently usable (failures: \(self.consecutiveFailures))")
+            return nil
+        }
+        return result
+    }
+
     /// Send a prompt using extended thinking when the backend supports it.
     /// Applies the same circuit breaker, rate limiting, and sanitization as
     /// `query()`, but calls `backend.completeWithExtendedThinking()` instead
@@ -315,6 +445,16 @@ public actor LLMService {
             logger.warning("LLM strict mode: refusing cloud call (extended thinking) — sanitized prompt still has residual high-entropy content")
             return nil
         }
+
+        // AI-14: extended thinking shares the same bound. These calls run 30–90s
+        // each, so an unbounded pile-up here is strictly worse than on query().
+        guard pendingBackendCalls < maxPendingBackendCalls else {
+            droppedForAdmission += 1
+            logger.warning("LLM admission control: \(self.maxPendingBackendCalls) backend calls already in flight — dropping this extended-thinking request (dropped so far: \(self.droppedForAdmission)).")
+            return nil
+        }
+        pendingBackendCalls += 1
+        defer { pendingBackendCalls -= 1 }
 
         let elapsed = Date().timeIntervalSince(lastCallTime)
         if elapsed < minInterval {

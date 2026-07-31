@@ -87,7 +87,13 @@ public struct CredentialFence: Sendable {
         SensitivePath("/.ssh/id_ecdsa", type: .sshKey, kind: .pathFragment),
         SensitivePath("/.ssh/id_dsa", type: .sshKey, kind: .pathFragment),
         SensitivePath("/.ssh/config", type: .sshKey, kind: .pathFragment),
-        SensitivePath("/.ssh/known_hosts", type: .sshKey, kind: .pathFragment),
+        // AI-07: `~/.ssh/known_hosts` removed. It holds HASHED remote host
+        // PUBLIC keys — it is not key material and reading it leaks no secret,
+        // yet it is touched by every git/ssh operation and was a steady
+        // contributor to this rule's ~60-70% live FP rate. `~/.ssh/config`
+        // is kept: it is also not key material, but it enumerates internal
+        // hosts, IdentityFile locations and ProxyCommand, which is genuine
+        // recon value for an agent that has no business reading it.
 
         // GPG
         SensitivePath("/.gnupg/private-keys", type: .gpgKey, kind: .pathFragment),
@@ -95,7 +101,11 @@ public struct CredentialFence: Sendable {
 
         // AWS — anchored to the ~/.aws/ dir so a project `config` file is safe.
         SensitivePath("/.aws/credentials", type: .awsCredential, kind: .pathFragment),
-        SensitivePath("/.aws/config", type: .awsCredential, kind: .pathFragment),
+        // AI-07: `~/.aws/config` removed — it holds region / profile / role-arn
+        // and SSO start URLs, not access keys. The keys live in the
+        // `~/.aws/credentials` entry above, which is retained. Every `aws` CLI
+        // invocation reads config, so matching it produced steady FPs while
+        // adding no credential-theft signal the credentials entry doesn't give.
 
         // GitHub
         SensitivePath("/.config/gh/hosts.yml", type: .githubToken, kind: .pathFragment),
@@ -155,7 +165,71 @@ public struct CredentialFence: Sendable {
         "/library/application support/maccrab/",
         "/.maccrab/",
         "/decoys/",            // honey-prompt bait dir
+        // AI-07: MacCrab's OWN test fixtures were tripping MacCrab's own fence.
+        // TierBBrokeredTCCTests builds fake homes at `NSTemporaryDirectory() +
+        // "tcc-home-<uuid>"` containing credentials.bak / id_rsa.old /
+        // hosts.yml.bak / .netrc.backup, and `swiftpm-testing-helper` reading
+        // them produced 194 live `ai-guard.credential-access` alerts — i.e.
+        // every `swift test` run generated AI-credential-theft alerts about
+        // MacCrab. Anchored under the per-user temp dir component (`/T/` in
+        // NSTemporaryDirectory, lowercased to `/t/` before this is matched) so
+        // a directory merely NAMED `tcc-home-` elsewhere on disk can't be used
+        // to hide credential reads from the fence.
+        "/t/tcc-home-",
     ]
+
+    /// Credential stores that a given binary legitimately OWNS, keyed on the
+    /// ACCESSING binary's basename (lowercased) → the slash-bounded path
+    /// fragments it owns. Fragments are matched against the lowercased path.
+    ///
+    /// AI-07: the fence had no notion of ownership at all, so on a developer
+    /// Mac the flagship AI-Guard detection was majority noise — of 777 live
+    /// alerts, `gh` reading its OWN `~/.config/gh/hosts.yml` was 218, and
+    /// Chrome + its helpers reading their OWN cookie store / login keychain
+    /// was ~98. A tool reading the store it owns is the tool working. A tool
+    /// reading SOMEONE ELSE'S store (gh touching ~/.aws, node touching ~/.ssh)
+    /// still alerts — that cross-store read is the signal this fence exists to
+    /// give, and it is untouched by this table.
+    ///
+    /// Known limitation, deliberately accepted for now: this keys on basename,
+    /// not on signing identity, so a binary that renames itself `gh` can read
+    /// `~/.config/gh/` unflagged. That is a narrow win (one store, and only the
+    /// store matching the assumed name) against a large, sustained noise cost.
+    /// Upgrading the key to the accessor's Team ID / signing identifier is the
+    /// right follow-up and needs the caller to pass the code signature.
+    private static let credentialOwners: [String: [String]] = [
+        "gh":               ["/.config/gh/"],
+        "git":              ["/.ssh/", ".netrc"],
+        "git-credential-osxkeychain": ["/library/keychains/", ".netrc"],
+        "ssh":              ["/.ssh/"],
+        "ssh-add":          ["/.ssh/"],
+        "ssh-keygen":       ["/.ssh/"],
+        "scp":              ["/.ssh/"],
+        "sftp":             ["/.ssh/"],
+        "aws":              ["/.aws/"],
+        "docker":           ["/.docker/"],
+        "kubectl":          ["/.kube/"],
+        "gcloud":           ["/gcloud/"],
+        "az":               ["/.azure/"],
+        "npm":              [".npmrc"],
+        "pnpm":             [".npmrc"],
+        "yarn":             [".npmrc"],
+        "twine":            [".pypirc"],
+        "cargo":            ["/.cargo/"],
+        "google chrome":        ["/google/chrome/", "/library/keychains/"],
+        "google chrome helper": ["/google/chrome/", "/library/keychains/"],
+        "chrome-headless-shell": ["/google/chrome/", "/chrome-headless-shell/"],
+        "firefox":          ["/firefox/profiles/"],
+        "safari":           ["/safari/"],
+        "brave browser":    ["/bravesoftware/", "/library/keychains/"],
+    ]
+
+    /// True when `binary` (a lowercased basename) is the legitimate owner of
+    /// the credential store at `path` (already lowercased).
+    private static func isOwnCredentialStore(binary: String, path: String) -> Bool {
+        guard let owned = credentialOwners[binary] else { return false }
+        return owned.contains { path.contains($0) }
+    }
 
     /// Custom additional paths (user-configurable).
     private let customPaths: [SensitivePath]
@@ -235,8 +309,21 @@ public struct CredentialFence: Sendable {
     /// login.keychain-db, browser logins) are never "own", so cross-credential
     /// reads still alert, and the Sigma cred-theft rules (NoiseFilter Gate-8)
     /// are unaffected by this advisory path entirely.
-    public func checkAccessDetailed(filePath: String, aiToolName: String, aiToolType: AIToolType? = nil) -> (type: CredentialType, description: String)? {
+    public func checkAccessDetailed(filePath: String, aiToolName: String, aiToolType: AIToolType? = nil,
+                                    accessingBinary: String? = nil) -> (type: CredentialType, description: String)? {
         guard let credType = checkAccess(filePath: filePath) else { return nil }
+
+        // AI-07: a NON-AI tool reading the credential store it owns is that
+        // tool working, not credential theft — the same principle the
+        // `isOwnedByTool` check below already applies to AI tools. Runtime:
+        // `gh` → ~/.config/gh/hosts.yml was 218 of this rule's 777 alerts.
+        // `accessingBinary` is a basename and is defaulted, so callers that
+        // don't know the accessor keep the previous (stricter) behaviour.
+        if let accessingBinary,
+           Self.isOwnCredentialStore(binary: accessingBinary.lowercased(),
+                                     path: filePath.lowercased()) {
+            return nil
+        }
 
         // v1.19.0 (D1 FP tuning): AI tool reading a credential file inside its
         // OWN store (e.g. Claude → ~/.claude/.credentials.json) is benign.

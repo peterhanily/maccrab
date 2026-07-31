@@ -53,23 +53,33 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     /// (best-effort). Only meaningful with a cloud provider + sanitizeForCloud.
     public var strictSanitize: Bool = false
 
-    /// Enable/disable the LLM subsystem entirely.
-    public var enabled: Bool = true
+    /// v1.21.5 (audit S-02): whether the configured Ollama endpoint may be
+    /// treated as trusted-local (i.e. may bypass the sanitizer). A loopback URL
+    /// alone is NOT evidence that data stays on the host — any local process can
+    /// run a listener on 127.0.0.1 — so this flag records WHERE the endpoint came
+    /// from. True for the compiled default and for operator channels uid 501
+    /// cannot write (root-owned daemon_config.json, the daemon's launch env);
+    /// false when the endpoint arrived over the privileged-inbox control plane,
+    /// which post-compromise code running as the console user can drive.
+    /// Deliberately NOT in `CodingKeys`: it must never round-trip through
+    /// llm_config.json, or an attacker who can write that file could simply
+    /// re-assert trust — the same reason the API keys are excluded.
+    public var trustLocalEndpoint: Bool = true
 
-    /// Off-by-default gate for the multi-round AgenticInvestigator loop.
-    /// When false (the default) campaign investigation uses only the
-    /// existing single-shot investigation summary. When true, the
-    /// dashboard will auto-run the bounded agentic loop (multiple LLM
-    /// round-trips per campaign) — operator opt-in because it multiplies
-    /// LLM cost/latency. Advisory-only regardless of this flag.
+    /// Enable/disable the LLM subsystem entirely.
     ///
-    /// SCOPE (v1.18): this is an APP-SIDE flag only. It is read solely by the
-    /// dashboard (AppState → AgenticInvestigator); the System Extension does
-    /// NOT construct an AgenticInvestigator and ignores this key even though
-    /// the v1.17.4 inbox bridge now carries it to the root config. Engine-side
-    /// autonomous (multi-round) investigation is intentionally not built —
-    /// the engine runs single-shot advisory summaries only.
-    public var agenticInvestigationEnabled: Bool = false
+    /// Default is OFF. It used to be `true`, which combined with the default
+    /// `ollamaURL` of localhost:11434 meant any machine that merely happened to
+    /// be running Ollama on the standard port got LLM commentary — 16% of the
+    /// alert corpus — without the operator ever opening Settings. "Ollama is
+    /// running" is a coincidence, not consent: the engine runs as root, and
+    /// feeding its process telemetry to a model the user started for unrelated
+    /// work is a surprise, however local that model is.
+    ///
+    /// Migration is handled at the load site, not here: DaemonSetup treats the
+    /// EXISTENCE of a dashboard-written llm_config.json as opt-in, so anyone who
+    /// already configured a backend keeps working. Only fresh installs are quiet.
+    public var enabled: Bool = false
 
     public init() {}
 
@@ -77,7 +87,7 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     private enum CodingKeys: String, CodingKey {
         case provider, ollamaURL, ollamaModel, claudeModel
         case openaiURL, openaiModel, mistralModel, geminiModel
-        case sanitizeForCloud, strictSanitize, enabled, agenticInvestigationEnabled
+        case sanitizeForCloud, strictSanitize, enabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,7 +103,6 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
         sanitizeForCloud = try c.decodeIfPresent(Bool.self, forKey: .sanitizeForCloud) ?? true
         strictSanitize = try c.decodeIfPresent(Bool.self, forKey: .strictSanitize) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        agenticInvestigationEnabled = try c.decodeIfPresent(Bool.self, forKey: .agenticInvestigationEnabled) ?? false
     }
 
     // MARK: - Safe string descriptions

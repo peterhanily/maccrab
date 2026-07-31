@@ -184,11 +184,27 @@ public enum LLMSanitizer {
     /// Word-boundary anchored so "danielle" doesn't get half-redacted by
     /// a "dan" account, and so substrings inside larger identifiers are
     /// left alone.
+    ///
+    /// The lookarounds used to be `[\w.]`. `\w` includes `_`, and `.` was
+    /// listed explicitly — so ANY adjacent period or underscore BLOCKED the
+    /// redaction entirely. That is the common case, not an edge case: the
+    /// account name shipped verbatim in `<user>.log`, `<user>.tar.gz`,
+    /// `com.<user>.agent`, `<user>_backup`, and in any prose sentence that
+    /// simply ended on the name. Narrowed to `[A-Za-z0-9]` so `.` and `_`
+    /// count as separators, which also correctly redacts inside reverse-DNS
+    /// identifiers. This matters beyond LLM prompts: FleetTelemetry runs
+    /// process paths and IOC context through this same sanitizer before
+    /// egress to a fleet collector. The "danielle" vs "dan" prefix guard is
+    /// unaffected — the blocking character there is a letter, still in the
+    /// class. Tradeoff accepted: an account name that happens to be a `_`- or
+    /// `.`-delimited component of an unrelated identifier now redacts too.
+    /// Over-redaction costs a little prompt readability; under-redaction
+    /// leaks the operator's real account name to a third party.
     private static let usernameRegexes: [NSRegularExpression] = {
         liveUsernames.compactMap { name in
             let escaped = NSRegularExpression.escapedPattern(for: name)
             return try? NSRegularExpression(
-                pattern: #"(?<![\w.])"# + escaped + #"(?![\w.])"#,
+                pattern: #"(?<![A-Za-z0-9])"# + escaped + #"(?![A-Za-z0-9])"#,
                 options: [.caseInsensitive]
             )
         }
