@@ -110,7 +110,26 @@ final class AlertNotifier: NSObject {
         guard let store = openStoreIfNeeded() else { return }
 
         let since = cursor ?? Date.distantPast
-        guard let raw = try? await store.alerts(since: since, limit: 200) else { return }
+        // `AlertStore.alerts(since:limit:)` is `ORDER BY timestamp DESC LIMIT n`
+        // — it returns the NEWEST n. With a fixed limit of 200 and a cursor that
+        // then advances to the newest alert seen, any burst larger than 200
+        // between ticks silently skipped the OLDEST alerts of the burst: the
+        // window returned rows 1..200 counting back from newest, the cursor
+        // jumped past everything older, and those alerts were never notified.
+        // That is precisely an alert storm — the moment the operator most needs
+        // the channel — and it discards the earliest, usually most causally
+        // interesting, alerts of the burst. Widen the window until it is no
+        // longer saturated so the cursor can never step over a gap. Bounded so a
+        // pathological storm cannot pull an unbounded result set into the GUI.
+        var fetchLimit = 200
+        var raw: [Alert]
+        guard let first = try? await store.alerts(since: since, limit: fetchLimit) else { return }
+        raw = first
+        while raw.count == fetchLimit && fetchLimit < 5_000 {
+            fetchLimit = min(fetchLimit * 4, 5_000)
+            guard let wider = try? await store.alerts(since: since, limit: fetchLimit) else { break }
+            raw = wider
+        }
         // Strictly newer than the cursor + not suppressed, oldest first.
         let fresh = raw
             .filter { !$0.suppressed && (cursor == nil || $0.timestamp > cursor!) }

@@ -1,10 +1,12 @@
 # Module Status
 
 MacCrab's feature surface is large for an alpha tool. This page makes
-the maturity of each subsystem explicit. The catalog below is generated
-from `Sources/MacCrabCore/ModuleStatus.swift` — when you change a
-subsystem's maturity in code, update this doc with `make modules-doc`
-(or hand-sync — there are only a few dozen entries).
+the maturity of each subsystem explicit. The catalog below mirrors
+`Sources/MacCrabCore/ModuleStatus.swift` **by hand** — there is no generator
+(`make modules-doc` was promised here but never existed, which is how the OTLP
+row below sat at "stable" for two releases after the code demoted it). When you
+change a subsystem's maturity in code, edit the matching row here in the same
+commit; `maccrabctl modules` prints the code's view if you need to diff them.
 
 Three classifications:
 
@@ -53,7 +55,7 @@ core for load-bearing decisions.
 | Clipboard monitor | experimental | Clipboard content + injection-pattern detection. |
 | MCP server monitor | experimental | MCP server config inventory across AI tools. |
 | Ultrasonic / DolphinAttack | opt-in | Audio-injection detection. Requires microphone permission. |
-| TEMPEST / Van Eck | opt-in | SDR device + display anomaly detection. Research-grade. |
+| SDR Device / Display Hotplug | opt-in | Flags known SDR USB devices and rapid display hotplug. No electromagnetic analysis. |
 
 ## AI Guard (cluster — all experimental)
 
@@ -85,7 +87,7 @@ detections for load-bearing decisions.
 | S3 / S3-compatible output | **stable** | S3 / MinIO / R2 / Wasabi archive. |
 | Wazuh API output | experimental | Wazuh manager API forwarding. |
 | SFTP output | experimental | SFTP alert log shipping. |
-| OpenTelemetry (OTLP) output | **stable** | OTLP HTTP/JSON span export. Promoted to stable in v1.9.0 alongside the receiver. |
+| OpenTelemetry (OTLP) output | experimental | OTLP HTTP/JSON span export. **Demoted from stable in v1.11.0:** the `OTLPOutput` actor exists but `DaemonSetup.buildOutput(spec:)` does not accept `{"type": "otlp"}` entries, so a configured OTLP output is silently never constructed. The receiver half (Agent Traces, next row) is unaffected and remains stable. |
 | Agent Traces (OTLP receiver + lineage) | **stable** | Loopback OTLP receiver + W3C TRACEPARENT correlation between AI-agent activity and kernel events. AES-GCM at rest, wire-boundary sanitiser. New in v1.9.0. |
 | Fleet telemetry | opt-in | Optional per-host telemetry to a self-hosted fleet collector (prototype; outbound-only). |
 
@@ -101,7 +103,7 @@ validators on each path.
 | DNS sinkhole | experimental | Block DNS resolution for known-bad domains via `/etc/hosts` overlay. |
 | Network blocker | experimental | Per-process or per-domain network blocking. |
 | Persistence guard | experimental | Blocks LaunchAgent / LaunchDaemon writes by suspicious processes. |
-| Honeyfile deception | opt-in | Plants canary credential files. Requires `MACCRAB_DECEPTION=1`. |
+| Honeyfile deception | opt-in | Plants canary credential files. Enable with `"deception_enabled": true` in `daemon_config.json` (`MACCRAB_DECEPTION=1` also works for a dev daemon). |
 
 ## Why module status matters
 

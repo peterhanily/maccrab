@@ -118,13 +118,26 @@ struct SettingsView: View {
     @State private var llmAPIKey: String = ""
     private let secrets = SecretsStore()
 
-    @State private var selectedLanguage: String = {
-        let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
-        return current
-    }()
-    @State private var initialLanguage: String = {
-        UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
-    }()
+    // AppleLanguages entries are region-tagged ("en-IE", "zh-Hant-TW"), and on
+    // an install where the first-run wizard never ran the key is unset in the
+    // app domain so the read falls through to NSGlobalDomain and returns the
+    // system's tagged identifier. Neither form matches a row in
+    // `availableLanguages` below, so the picker rendered with nothing selected
+    // and `languageChanged` compared against a value the list can't produce.
+    // Normalise through the bundle's own matcher (ShippedLocale, declared in
+    // WelcomeView.swift), which only ever returns one of the 14 shipped
+    // identifiers — and, unlike truncating to the language code, keeps
+    // zh-Hant distinct from zh-Hans.
+    @State private var selectedLanguage: String = SettingsView.currentLanguage()
+    @State private var initialLanguage: String = SettingsView.currentLanguage()
+
+    private static func currentLanguage() -> String {
+        let stored = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first
+        // Falls back to `stored` (old behaviour) when the bundle carries no
+        // localizations — i.e. under `swift run`, where the .lproj are in
+        // Bundle.module rather than Bundle.main.
+        return ShippedLocale.resolve(preferring: stored) ?? stored ?? "en"
+    }
 
     private var languageChanged: Bool { selectedLanguage != initialLanguage }
 
@@ -1458,8 +1471,11 @@ struct SettingsView: View {
             // v1.10.2 (audit security HIGH): write atomically THEN tighten
             // perms so the API key copy never lands at 0o644 (umask
             // default). Keychain is the primary store; this file copy
-            // exists for the legacy AppState.ensureLLMService read path
-            // that still consumes JSON, and previously left every Claude
+            // is what maccrabctl / maccrab-mcp read when they resolve the
+            // USER data dir (dev and non-root installs) — the app's own
+            // reader, AppState.ensureLLMService, was deleted in v1.21.6 as
+            // unreachable code, so this is no longer written for us. It
+            // previously left every Claude
             // / OpenAI / Mistral / Gemini key world-readable in
             // ~/Library/Application Support/MacCrab/llm_config.json.
             try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic)
@@ -1499,11 +1515,6 @@ struct SettingsView: View {
         // Update AppState so UI reflects immediately
         appState.llmStatus.isConfigured = llmEnabled
         appState.llmStatus.provider = llmProvider
-
-        // Drop the user-side LLM stack so the next triage call rebuilds
-        // from this freshly-written config rather than waiting for the
-        // 30 s re-check window.
-        appState.invalidateLLMConfigCache()
     }
 
     /// v1.6.14 / v1.8.0: write the per-tier storage block to

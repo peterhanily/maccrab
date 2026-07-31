@@ -339,6 +339,11 @@ extension MacCrabCtl {
         includeHostname: Bool
     ) async {
         guard let store = await openStore() else { exit(0) }
+        // Set only once we know the bundle root is one WE created (see below),
+        // and cleared again once the export completes; the catch block names it
+        // so the operator can tell our debris from a directory that was already
+        // there.
+        var partialBundle: URL?
         do {
             guard let loaded = try await store.loadTrace(id: traceId) else {
                 print("Trace not found: \(traceId)")
@@ -378,15 +383,71 @@ extension MacCrabCtl {
             // TrustSubstrate from production storage. If unavailable
             // (no signing key generated yet), fall back to the
             // UNSIGNED placeholder so the bundle still exports.
-            let signingDir = URL(fileURLWithPath: maccrabDataDir() + "/keys/")
+            //
+            // The keys dir MUST be writable by the INVOKING uid.
+            // `maccrabDataDir()` resolves to the ROOT support dir on a release
+            // install (that is where tracegraph.db lives), and
+            // /Library/Application Support/MacCrab/keys is `drwx------ root` —
+            // so `activeMode()` → `selectMode()` → `saveKeyMode()` EPERM'd and
+            // aborted the whole export with "You don't have permission to save
+            // the file .tmp-…-trust-substrate.json". That made `trace export`
+            // fail deterministically for the ordinary user on the shipped
+            // configuration, and since export is the FIRST command of the
+            // seven-command bundle pipeline it took validate / inspect / verify
+            // / replay / to-prov / to-otel down with it.
+            //
+            // The CLI can never sign with the root daemon's key anyway (0700,
+            // unreadable at uid 501), so fall back to the user-domain keys dir —
+            // the same filesystem-mode P256 identity the CLI already uses for
+            // plugin install receipts (see maccrabUserWritableDataDir). Running
+            // as root still uses the system dir.
+            let systemSigningDir = maccrabDataDir() + "/keys/"
+            let signingDir = FileManager.default.isWritableFile(atPath: systemSigningDir)
+                ? URL(fileURLWithPath: systemSigningDir)
+                : URL(fileURLWithPath: maccrabUserWritableDataDir() + "/keys/")
             let storage = FilesystemTrustSubstrateStorage(baseDirectory: signingDir)
             let trustSubstrate = TrustSubstrate(storage: storage)
-            let mode = (try? await trustSubstrate.activeMode()) ?? .filesystemDegraded
-            print("Signing with TrustSubstrate (\(mode.rawValue))")
+            // FF-07: PROBE the signer instead of assuming it works. On a release
+            // install `/Library/Application Support/MacCrab/keys/` is root-owned
+            // and both `trust-substrate.json` and `trace-signing.key` are 0o600,
+            // so for uid 501 every signing call fails DEEP INSIDE the exporter:
+            // `activeMode()` finds no readable mode record, re-selects one, and
+            // `saveKeyMode` -> `writeState` -> `ensureBaseDirectory` blows up with
+            // a raw Cocoa "You don't have permission to save the file
+            // '.tmp-…-trust-substrate.json' in the folder 'keys'". The whole
+            // export aborted and NO bundle was produced — `trace export` was 100%
+            // broken for the normal user. Note the pre-existing `try?` on
+            // `activeMode()` hid this: it printed "Signing with TrustSubstrate
+            // (filesystem_degraded)" and then died several frames later.
+            //
+            // A one-shot probe signature answers "can this process sign?" up
+            // front. The SE key ACL is `.privateKeyUsage` only (no user-presence
+            // flag), so the probe never prompts. On failure we fall back to the
+            // exporter's DOCUMENTED unsigned placeholder path rather than losing
+            // the export, and say so loudly.
+            var signer: TrustSubstrate? = trustSubstrate
+            do {
+                _ = try await trustSubstrate.sign(Data("maccrabctl-export-probe".utf8))
+                let mode = (try? await trustSubstrate.activeMode()) ?? .filesystemDegraded
+                print("Signing with TrustSubstrate (\(mode.rawValue))")
+            } catch {
+                signer = nil
+                print("WARNING: the trust-substrate signing key under \(signingDir.path) is not usable by this user — \(error.localizedDescription)")
+                print("WARNING: exporting UNSIGNED. Re-run as root (`sudo maccrabctl trace export …`) or export from MacCrab.app for a signed bundle.")
+            }
 
             let target = outputDir
                 ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                     .appendingPathComponent("\(traceId).maccrabtrace")
+            // A mid-export failure (commonly: signing can't write the
+            // root-owned keys/ dir as a normal user) left the half-written
+            // bundle on disk — every artifact dir present but no signed
+            // manifest/Merkle root, so `trace verify` rejects it and the debris
+            // is indistinguishable from a tampered bundle. Only clean up what
+            // WE created: BundleExporter.export throws .directoryAlreadyExists
+            // rather than writing into an existing directory, so anything that
+            // pre-existed at `target` is the operator's and must be left alone.
+            if !FileManager.default.fileExists(atPath: target.path) { partialBundle = target }
 
             let inputs = BundleExporter.Inputs(
                 trace: loaded.trace,
@@ -406,10 +467,16 @@ extension MacCrabCtl {
             // record is the external OS-managed witness of the signed head.
             let exporter = BundleExporter(
                 redactor: BundleRedactor.systemDefault(),
-                trustSubstrate: trustSubstrate,
+                // FF-07: `signer`, not `trustSubstrate` — nil when the probe above
+                // proved this uid cannot reach the key, which selects the
+                // exporter's UNSIGNED placeholder path instead of throwing.
+                trustSubstrate: signer,
                 unifiedLogAnchor: SystemUnifiedLogAnchor()
             )
             try await exporter.export(inputs: inputs, to: target, options: options)
+            // The bundle is complete and has its chain head from here on, so a
+            // later failure (tar, sidecar) must NOT report it as a partial.
+            partialBundle = nil
             print("Bundle written: \(target.path)")
 
             // Tar.gz packaging via /usr/bin/tar.
@@ -442,6 +509,18 @@ extension MacCrabCtl {
             }
         } catch {
             print("Export failed: \(error.localizedDescription)")
+            // The exporter writes artifacts incrementally, so an abort partway
+            // through leaves a directory that LOOKS like a bundle but has no
+            // signed chain head. Name it explicitly rather than letting the
+            // operator find it later and mistake it for a usable export.
+            // (Named, not deleted: the debris is often the only evidence of why
+            // the export died, and `trace validate` rejects it anyway. Gated on
+            // `partialBundle`, so a directory that pre-existed this run is never
+            // pointed at — and the default `<cwd>/<id>.maccrabtrace` target is
+            // covered even when `--out` was not passed.)
+            if let partial = partialBundle, FileManager.default.fileExists(atPath: partial.path) {
+                print("  A PARTIAL, UNSIGNED bundle may remain at \(partial.path) — do not distribute it; `trace validate` will reject it.")
+            }
             exit(1)
         }
         await store.close()
@@ -547,13 +626,60 @@ extension MacCrabCtl {
 
     // MARK: - trace replay
 
-    static func traceReplay(bundlePath: String, expectedNormalizationVersion: String) async {
+    /// `rulesDirectory` (CLI `--rules <dir>`): when supplied, replay drives the
+    /// REAL `RuleEngine` over the bundle's events via `RuleEngineReplayer`, so
+    /// the alert list is a FRESH result produced by the ruleset under test.
+    ///
+    /// When omitted, the default echo replayer ignores `events` entirely and
+    /// re-emits `matched_rules.json` verbatim, stamping a fixed ruleset hash.
+    /// That is a determinism proof and nothing more — it cannot tell you whether
+    /// today's ruleset still detects what yesterday's did, because it never runs
+    /// a rule. `RuleEngineReplayer` shipped with ZERO production call sites, so
+    /// until now no shipped replay path evaluated anything; the banner below
+    /// names which mode ran, so a green replay is not misread as evidence about
+    /// detection.
+    static func traceReplay(
+        bundlePath: String,
+        expectedNormalizationVersion: String,
+        rulesDirectory: String? = nil
+    ) async {
         let url = URL(fileURLWithPath: bundlePath)
+        // FF-11: `trace replay` takes a BUNDLE PATH, not a trace id. Without this
+        // guard a trace id fell straight through to `extractIfArchive`, which
+        // shells out to /usr/bin/tar; tar printed its own
+        // "…: m: No such file or directory" to stderr, returned non-zero, and the
+        // helper answered `nil` — leaving the engine to report
+        // `result=schema_invalid` against a path that never existed. That blames
+        // the bundle for what is a usage error. Reuses exit 9 (the existing
+        // "replay could not run" code) rather than inventing a new one, so the
+        // documented 0/1/6/11 result-code contract is untouched.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            print("No such bundle: \(bundlePath)")
+            print("Usage: maccrabctl trace replay <bundle-path>   — a .maccrabtrace directory or .tar.gz archive, NOT a trace id.")
+            exit(9)
+        }
         let directory = try? extractIfArchive(url)
         let target = directory ?? url
         defer { cleanupExtracted(directory) }
 
-        let engine = ReplayEngine()
+        // SU-01: drive the REAL rule engine when the caller names a ruleset.
+        // Falls back to the echo replayer (determinism-only) otherwise, and says
+        // which one ran so the two can never be confused.
+        let engine: ReplayEngine
+        if let rulesDirectory {
+            do {
+                engine = ReplayEngine(replayer: try RuleEngineReplayer(
+                    rulesDirectory: URL(fileURLWithPath: rulesDirectory)))
+                print("[replay] mode=rule-engine rules=\(rulesDirectory)")
+            } catch {
+                print("[replay] cannot load ruleset at \(rulesDirectory): \(error)")
+                exit(9)
+            }
+        } else {
+            engine = ReplayEngine()
+            print("[replay] mode=echo — determinism only; NO rule was evaluated. "
+                  + "Pass --rules <compiled-rules-dir> to replay against a real ruleset.")
+        }
         var options = ReplayEngine.ReplayOptions()
         options.expectedNormalizationVersion = expectedNormalizationVersion
         do {
@@ -563,7 +689,16 @@ extension MacCrabCtl {
             print("  bundle_id:       \(result.bundleId)")
             print("  replay_engine:   \(result.replayEngineVersion)")
             print("  ruleset_sha256:  \(result.rulesetSha256)")
-            print("  result_sha256:   \(result.resultSha256)")
+            // FF-11: only a COMPLETED replay has a meaningful result hash. On a
+            // schema_invalid / incompatible / fail-closed run nothing was
+            // evaluated, yet the engine still fills `resultSha256` — printing it
+            // invited a caller keying on that field to treat a parse failure as a
+            // computed result.
+            if result.result == .ok {
+                print("  result_sha256:   \(result.resultSha256)")
+            } else {
+                print("  result_sha256:   (not computed — replay did not complete)")
+            }
             if !result.alerts.isEmpty {
                 print("  alerts (\(result.alerts.count)):")
                 for alert in result.alerts {
@@ -596,14 +731,20 @@ extension MacCrabCtl {
 
     // MARK: - trace replay --compare-rules
 
-    /// v1.11.1: run the replay twice with two different ruleset
-    /// identifiers and diff the resulting alert sets. Until a real
-    /// RuleEngine-backed `RulesetReplayer` lands (the echo replayer
-    /// always replays `matched_rules.json` verbatim), the diff is
-    /// alert-empty + the only observable change is `result_sha256`.
-    /// Once the v1.11.x ruleset replayer ships, the diff becomes
-    /// load-bearing for "did rule X change behaviour between v1 and
-    /// v2 of the corpus?".
+    /// Run the replay twice against two DIFFERENT compiled-rules directories
+    /// and diff the resulting alert sets — "did rule X change behaviour between
+    /// corpus v1 and v2?".
+    ///
+    /// `rulesetA` / `rulesetB` are compiled-rules DIRECTORY PATHS (the
+    /// `compile_rules.py` output the daemon loads), NOT version labels. They
+    /// used to be labels handed to `BundleEmbeddedRulesetReplayer`, which never
+    /// evaluates a rule — it re-emits `matched_rules.json` verbatim and hashes
+    /// the label STRING. So the alert diff was structurally always empty while
+    /// the label-derived `result_sha256` always differed, and the command exited
+    /// 20 ("diverged") for ANY two distinct labels: a CI gate wired to it failed
+    /// unconditionally and told you nothing about detection either way.
+    /// `RuleEngineReplayer` actually loads and runs each ruleset, which is what
+    /// makes this diff load-bearing.
     static func traceReplayCompare(
         bundlePath: String,
         rulesetA: String,
@@ -618,12 +759,20 @@ extension MacCrabCtl {
         var options = ReplayEngine.ReplayOptions()
         options.expectedNormalizationVersion = expectedNormalizationVersion
 
-        let engineA = ReplayEngine(replayer: BundleEmbeddedRulesetReplayer(
-            rulesetVersion: rulesetA, normalizationVersion: expectedNormalizationVersion
-        ))
-        let engineB = ReplayEngine(replayer: BundleEmbeddedRulesetReplayer(
-            rulesetVersion: rulesetB, normalizationVersion: expectedNormalizationVersion
-        ))
+        let engineA: ReplayEngine
+        let engineB: ReplayEngine
+        do {
+            engineA = ReplayEngine(replayer: try RuleEngineReplayer(
+                rulesDirectory: URL(fileURLWithPath: rulesetA)
+            ))
+            engineB = ReplayEngine(replayer: try RuleEngineReplayer(
+                rulesDirectory: URL(fileURLWithPath: rulesetB)
+            ))
+        } catch {
+            print("Compare replay failed: \(error)")
+            print("  --compare-rules takes two compiled-rules DIRECTORIES (compile_rules.py output), not version labels.")
+            exit(9)
+        }
 
         let resultA: ReplayResult
         let resultB: ReplayResult
@@ -635,9 +784,28 @@ extension MacCrabCtl {
             exit(9)
         }
 
-        // Build alert id sets keyed by "<ruleId>@<ruleVersion>". Diff
-        // is symmetric: in A not in B, in B not in A, common count.
-        func key(_ alert: ReplayedAlert) -> String { "\(alert.ruleId)@\(alert.ruleVersion)" }
+        // FF-11: a bundle that failed to parse (or is normalization-incompatible)
+        // yields two EMPTY alert sets, which the diff below reported as
+        // "verdict: identical" and exited 0 — a false green about two rulesets
+        // that never evaluated anything. Refuse before comparing, and exit with
+        // the replay's own documented code (1 schema / 6 normalization /
+        // 11 fail-closed) rather than a compare verdict.
+        for (label, r) in [("A", resultA), ("B", resultB)] where r.result != .ok {
+            print("[replay-compare] ruleset \(label) did not complete: result=\(r.result.rawValue) exit=\(r.exitCode)")
+            print("  No comparison is possible — nothing was evaluated on that side.")
+            exit(r.exitCode)
+        }
+
+        // Build alert id sets keyed by ruleId ALONE. Diff is symmetric: in A
+        // not in B, in B not in A, common count.
+        //
+        // Deliberately NOT "<ruleId>@<ruleVersion>": `RuleEngineReplayer`
+        // derives each alert's `ruleVersion` from the ruleset DIGEST
+        // ("ruleset-<sha prefix>"), which differs between A and B by
+        // construction whenever the two rulesets differ at all. Keying on it
+        // would put every rule in both `onlyA` and `onlyB` and report
+        // `common: 0` for every comparison — the diff would be pure noise.
+        func key(_ alert: ReplayedAlert) -> String { alert.ruleId }
         let setA = Set(resultA.alerts.map(key))
         let setB = Set(resultB.alerts.map(key))
         let onlyA = setA.subtracting(setB).sorted()
@@ -659,7 +827,12 @@ extension MacCrabCtl {
 
         // Exit non-zero when there's a divergence so this is usable
         // from CI / regression scripts.
-        if onlyA.isEmpty && onlyB.isEmpty && resultA.resultSha256 == resultB.resultSha256 {
+        // Verdict is the ALERT diff only. `result_sha256` deliberately excluded:
+        // `rulesetSha256` is an input to that digest, so two different rulesets
+        // can never produce equal result digests — including it here is what
+        // made this command exit 20 unconditionally. Both digests are still
+        // printed above as evidence of which rulesets ran.
+        if onlyA.isEmpty && onlyB.isEmpty {
             print("  verdict:         identical")
             exit(0)
         } else {
@@ -951,6 +1124,62 @@ extension MacCrabCtl {
             print("Batch replay failed: \(error.localizedDescription)")
             exit(9)
         }
+    }
+
+    // MARK: - trace reattribute (operator verdict on machine attribution)
+
+    /// Record an operator verdict on an event's machine agent-attribution.
+    ///
+    /// `AttributionOverrideStore` shipped complete — its own database, table,
+    /// two indexes, upsert and stats roll-up — and so did the app-side writer
+    /// `AppState.recordAttributionOverride`, but NOTHING called either. The
+    /// result was that the "Accuracy among rated" figure in the dashboard's
+    /// Agent Traces tab (AgentTracesView.swift:272) and in `maccrabctl status`
+    /// (StatusCommand.swift:172) could only ever render `—`, and the
+    /// `wrongTool` / `noAgent` verdicts were unreachable — so AI-attribution
+    /// quality had no feedback loop at all.
+    ///
+    /// This closes the loop from the CLI. It writes to the SAME user-writable
+    /// `attribution_overrides.db` the dashboard opens, so both surfaces reflect
+    /// a verdict immediately.
+    ///
+    /// The user-domain dir is DELIBERATE: the CLI runs as uid 501 and the root
+    /// support dir is not writable by it, so writing there would silently
+    /// no-op — exactly the failure `maccrabUserWritableDataDir()` exists to
+    /// prevent. Mirrors `AppState.overrideStore()`.
+    static func traceReattribute(eventId: String, verdictRaw: String, note: String?) async {
+        guard let verdict = AttributionOverride.Verdict(rawValue: verdictRaw) else {
+            let valid = AttributionOverride.Verdict.allCases.map(\.rawValue).joined(separator: " | ")
+            print("Unknown verdict '\(verdictRaw)'. Valid verdicts: \(valid)")
+            exit(1)
+        }
+        let dir = maccrabUserWritableDataDir()
+        let store: AttributionOverrideStore
+        do {
+            store = try AttributionOverrideStore(directory: dir)
+        } catch {
+            print("Cannot open attribution_overrides.db under \(dir): \(error)")
+            exit(9)
+        }
+        let now = Date()
+        do {
+            // machineConfidence is nil: the CLI has no accessor for the event's
+            // machine confidence, and the field is a display-time snapshot that
+            // does not participate in the accuracy roll-up.
+            try await store.record(AttributionOverride(
+                eventId: eventId,
+                machineConfidence: nil,
+                verdict: verdict,
+                userNote: note,
+                createdAt: now,
+                updatedAt: now
+            ))
+        } catch {
+            print("Failed to record verdict: \(error)")
+            exit(9)
+        }
+        print("Recorded verdict '\(verdict.rawValue)' for event \(eventId)")
+        print("(Reflected in `maccrabctl status` → Agent Traces accuracy and the dashboard's Agent Traces tab.)")
     }
 
     // MARK: - trace to-prov / to-otel

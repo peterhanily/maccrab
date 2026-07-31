@@ -58,9 +58,22 @@ CURRENT_B64=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sy
 CURRENT_SHA=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
 CURRENT_XML=$(echo "$CURRENT_B64" | base64 -d)
 
-# Refuse to double-publish the same version.
-if echo "$CURRENT_XML" | grep -qE "<sparkle:version>${VERSION}</sparkle:version>"; then
-    echo "ERROR: appcast already contains <sparkle:version>${VERSION}</sparkle:version>. Refusing to publish twice." >&2
+# Refuse to double-publish the SAME BUILD.
+#
+# The identity Sparkle actually compares is <sparkle:version> (CFBundleVersion),
+# which now carries the per-commit build number (e.g. 1.21.5.1018), not the
+# marketing version. Keying this check on --version (marketing) would, after that
+# change, (a) stop matching real duplicates and (b) — as it did before — hard-
+# refuse a legitimate RE-SPIN of the same marketing version, which is exactly the
+# case where installed users need a new appcast entry or auto-update silently
+# dies for them. Read the identity out of the item being published instead: an
+# identical rebuild is still refused, a genuine re-spin publishes.
+BUILD_ID=$(grep -oE '<sparkle:version>[^<]+</sparkle:version>' "$ITEM" | \
+           sed -E 's#<sparkle:version>([^<]+)</sparkle:version>#\1#' | head -1 || true)
+BUILD_ID="${BUILD_ID:-$VERSION}"
+if echo "$CURRENT_XML" | grep -qF "<sparkle:version>${BUILD_ID}</sparkle:version>"; then
+    echo "ERROR: appcast already contains <sparkle:version>${BUILD_ID}</sparkle:version>. Refusing to publish the identical build twice." >&2
+    echo "       (A re-spin produces a different build id — rebuild, then republish.)" >&2
     exit 3
 fi
 

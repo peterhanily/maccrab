@@ -295,13 +295,20 @@ private func sessionVerify(args: [String]) async throws {
         modeOverride: .filesystemDegraded
     )
     let v = try await AgentSessionBundle.verify(at: URL(fileURLWithPath: path), trustSubstrate: ts)
-    let verdict = (v.merkleOk && v.signed && v.signatureOk) ? "verified"
+    // A valid signature from a FOREIGN signer is not tamper. Pre-fix a bundle
+    // exported on another Mac printed "TAMPERED / invalid" and exited 1,
+    // because verify() could only ever check this install's own key.
+    let verdict = (v.merkleOk && v.signed && v.signatureOk)
+        ? (v.signerIsLocalInstall
+            ? "verified"
+            : "verified (FOREIGN signer — signature is valid but the key is not anchored to this install)")
         : (v.merkleOk && !v.signed) ? "unsigned (content hash-rooted only — forgeable)"
         : "TAMPERED / invalid"
     print("Bundle: \(path)")
     print("  merkle_ok:    \(v.merkleOk)")
     print("  signed:       \(v.signed)")
     print("  signature_ok: \(v.signatureOk)")
+    print("  signer:       \(v.signerFingerprint.isEmpty ? "<none recorded>" : v.signerFingerprint)\(v.signerIsLocalInstall ? " (this install)" : "")")
     print("  verdict:      \(verdict)")
     // The exit code must be trustworthy for gating: return 0 ONLY for a
     // genuinely signed-and-verified (authenticated) bundle. An UNSIGNED

@@ -32,7 +32,12 @@ extension MacCrabCtl {
                 // Severity prefix provides a text fallback for screen readers and
                 // copy-paste contexts where emoji may be rendered as descriptions
                 // (e.g., "Heavy Red Circle") or stripped entirely.
-                print("\(alert.severity.coloredLabel) \(time) \(alert.ruleTitle)")
+                // This command passes no `suppressed:` filter, so AlertStore's
+                // `suppressed: Bool? = nil` default lets suppressed rows through
+                // unmarked — they read as live detections, and the operator's own
+                // allowlist becomes invisible in the place they check counts.
+                let suppressedMark = alert.suppressed ? " [SUPPRESSED]" : ""
+                print("\(alert.severity.coloredLabel) \(time) \(alert.ruleTitle)\(suppressedMark)")
                 print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
                 if let techniques = alert.mitreTechniques, !techniques.isEmpty {
                     print("   MITRE: \(techniques)")
@@ -81,9 +86,33 @@ extension MacCrabCtl {
         }
     }
 
+    /// True when suppressions.json holds the v2 document SuppressionManager
+    /// writes (`{"version": 2, "entries": [...]}`). The v1 commands below
+    /// encode a flat `[ruleId: [path]]` dict over the SAME file, so a v1 write
+    /// onto a v2 document destroys the entire TTL/audit allowlist.
+    static func suppressionStoreIsV2(_ path: String) -> Bool {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return json["version"] as? Int == 2 || json["entries"] is [Any]
+    }
+
     static func suppressRule(ruleId: String, processPath: String) async {
         let configDir = maccrabDataDir()
         let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
+
+        // The daemon rewrites this file into v2 shape on first load, so on any
+        // running install this is the NORMAL state, not an edge case. Pre-fix
+        // the v1 decode below failed, printed "will be OVERWRITTEN", and then
+        // did exactly that — replacing every TTL/audit entry with a single
+        // permanent, reasonless row. Refuse instead of destroying.
+        if suppressionStoreIsV2(suppressFile) {
+            print("✗ \(suppressFile) is a v2 allowlist (TTL + audit).")
+            print("  Writing a v1 suppression here would DESTROY every v2 entry.")
+            print("  Use: maccrabctl allow add --rule \(ruleId) --path \(processPath) [--ttl 7d] [--reason TEXT]")
+            exit(1)
+        }
 
         // Load existing suppressions. File absence is expected on first use.
         // Parse failure is not — surface it so the user knows the file is corrupt.
@@ -175,7 +204,15 @@ extension MacCrabCtl {
         do {
             suppressions = try JSONDecoder().decode([String: [String]].self, from: data)
         } catch {
-            print("ERROR: \(suppressFile) exists but could not be parsed: \(error)")
+            // The daemon rewrites the store in v2 shape on first load, so this
+            // v1 decode fails on every running install — the readout printed a
+            // raw DecodingError where the operator's real allowlist lives.
+            if suppressionStoreIsV2(suppressFile) {
+                print("This store is in v2 (TTL + audit) format.")
+                print("Run 'maccrabctl allow list' to read it.")
+            } else {
+                print("ERROR: \(suppressFile) exists but could not be parsed: \(error)")
+            }
             return
         }
 

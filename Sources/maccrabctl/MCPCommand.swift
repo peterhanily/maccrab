@@ -13,6 +13,7 @@ extension MacCrabCtl {
     static func listMCPServers(suspiciousOnly: Bool) {
         let configPaths: [(tool: String, path: String)] = [
             ("claude",   ("~/.claude/claude_desktop_config.json" as NSString).expandingTildeInPath),
+            ("claude",   ("~/Library/Application Support/Claude/claude_desktop_config.json" as NSString).expandingTildeInPath),
             ("claude",   ("~/.claude.json" as NSString).expandingTildeInPath),
             ("cursor",   ("~/.cursor/mcp.json" as NSString).expandingTildeInPath),
             ("continue", ("~/.continue/config.json" as NSString).expandingTildeInPath),
@@ -32,10 +33,24 @@ extension MacCrabCtl {
         for (tool, path) in configPaths {
             guard fm.fileExists(atPath: path) else { continue }
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let mcpServers = json["mcpServers"] as? [String: Any],
-                  !mcpServers.isEmpty
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
+            // Claude Code scopes servers per project under
+            // `projects["<cwd>"].mcpServers`. Reading only the top level reported
+            // zero on a host that demonstrably has a server configured — on this
+            // machine top-level `mcpServers` is null while the real entry lives
+            // under `projects`. Mirrors the same fix in MCPMonitor.parseConfig.
+            var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
+            if tool == "claude", let projects = json["projects"] as? [String: Any] {
+                for (_, projectValue) in projects {
+                    guard let project = projectValue as? [String: Any],
+                          let servers = project["mcpServers"] as? [String: Any] else { continue }
+                    for (name, cfg) in servers where mcpServers[name] == nil {
+                        mcpServers[name] = cfg
+                    }
+                }
+            }
+            guard !mcpServers.isEmpty else { continue }
 
             let servers = mcpServers.compactMap { (name, value) -> MCPServerInfo? in
                 guard let config = value as? [String: Any] else { return nil }
@@ -78,7 +93,15 @@ extension MacCrabCtl {
 
         if !foundAny {
             print("\nNo MCP server configurations found.")
-            print("Checked: Claude Code, Cursor, Continue.dev, VS Code, Windsurf")
+            print("Checked: Claude Code, Cursor, Continue.dev, VS Code, Windsurf (user-scope config files)")
+            // A bare "none found" reads as a verified-clean result rather than
+            // "I only looked in one of several places" — which is worse than
+            // absent for the MCP-poisoning threat this command exists to
+            // surface. Name the scope we do NOT cover: project-scoped
+            // .mcp.json files live in individual repositories and are loaded
+            // when a client runs in that directory; enumerating them would
+            // mean a whole-disk walk, which this command does not do.
+            print("NOT checked: project-scoped .mcp.json files inside individual repositories — this is a user-scope inventory, not a whole-disk scan.")
             return
         }
 

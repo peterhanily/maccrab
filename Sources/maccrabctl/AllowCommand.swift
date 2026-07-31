@@ -97,6 +97,24 @@ extension MacCrabCtl {
         await mgr.load()
         _ = await mgr.add(suppression)
 
+        // The store lives under root-owned /Library on a release install, so a
+        // uid-501 write fails. It used to fail SILENTLY — this printed success
+        // while nothing persisted, so an operator believed their false positives
+        // were allowlisted and the engine never saw an entry.
+        if let err = await mgr.lastPersistError {
+            let path = await mgr.storePath
+            FileHandle.standardError.write(Data("""
+            ✘ Suppression NOT saved — the allowlist could not be written.
+                path:   \(path)
+                reason: \(err)
+                The suppression store is root-owned on a release install. Re-run with
+                sudo, or add the allowlist entry from the dashboard, which routes the
+                change through the privileged daemon.
+
+            """.utf8))
+            exit(1)
+        }
+
         print("✓ Added suppression \(suppression.id)")
         print("    scope:   \(scope.summary)")
         print("    reason:  \(reason)")

@@ -16,6 +16,7 @@
 #
 # Requirements (operator runs in their shell, NOT this script):
 #   export CLAUDE_CODE_ENABLE_TELEMETRY=1
+#   export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # REQUIRED — no spans without it
 #   export OTEL_TRACES_EXPORTER=otlp
 #   export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 #   export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -69,6 +70,7 @@ cat <<INSTRUCTIONS
   In another shell, run:
 
     export CLAUDE_CODE_ENABLE_TELEMETRY=1
+    export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
     export OTEL_TRACES_EXPORTER=otlp
     export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
     export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -134,6 +136,8 @@ else
     echo
     echo "✗ No new spans were ingested in the ${WAIT_SECONDS}s window."
     echo "  Check: receiver actually started? operator env exported correctly?"
-    echo "         CLAUDE_CODE_ENABLE_TELEMETRY=1 set in the shell that ran claude?"
+    echo "         CLAUDE_CODE_ENABLE_TELEMETRY=1 AND
+         CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 set in the shell that ran claude?
+         (tracing is off by default — the beta flag is what emits spans)"
     exit 1
 fi

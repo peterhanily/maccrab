@@ -14,9 +14,11 @@ Without it, MacCrab silently drops file events for TCC-protected paths
 this now — if it's showing, click *Open Settings* and grant access.
 
 Other possibilities: the System Extension isn't activated (check *Overview
-→ Protection active*), no rules are compiled (under the default **stable**
-rule tier, `maccrabctl rules list | wc -l` should be ~87 — the enabled set,
-not the full 486-rule corpus; a count of 0 means nothing compiled), or
+→ Protection active*), no rules are compiled (run `maccrabctl status`: it
+prints `Rules: <active> active / <loaded> loaded standard`, which on a stock
+install reads 87 active of 438 compiled under the default **stable** profile.
+Do *not* use `rules list | wc -l` — that enumerates every compiled rule
+regardless of profile, plus four header lines), or
 you're inside the 60-second startup warm-up window that suppresses
 non-critical alerts.
 

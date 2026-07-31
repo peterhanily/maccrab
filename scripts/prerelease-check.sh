@@ -576,12 +576,28 @@ if [[ ! -f "$ATTEST_FILE" ]]; then
     err "$ATTEST_FILE missing — run \`make test-corpus\` on this Mac (macOS 26) for the release build first"
 else
     ATTEST_VER=$(grep -oE 'version=[^[:space:]]+' "$ATTEST_FILE" 2>/dev/null | head -1 | sed -E 's/^version=//')
+    # The marker used to bind ONLY to the version string, so it stayed "valid"
+    # across any number of commits to the containment code: v1.21.5 GA shipped
+    # attesting commit 88fdaf5 while the released tree was 16 commits later,
+    # including changes that had never been run against the corpus. The commit=
+    # field existed but nothing read it. Bind to the containment sources instead —
+    # `make test-corpus` records a digest over TierB + the broker / sandbox-host
+    # trampoline / probe targets, and we recompute it here. This detects
+    # STALENESS, not forgery (the marker is still a local, gitignored file); CI
+    # is the eventual home once a macOS runner exists.
+    # KEEP THIS PATH LIST IN SYNC WITH THE ONE IN Makefile's test-corpus TARGET.
+    CUR_DIGEST=$(find Sources/MacCrabForensics/TierB Sources/CTierBBroker Sources/maccrab-tierb-sandbox-host Sources/maccrab-tierb-corpus-probe Sources/maccrab-tierb-corpus-probe-swift Sources/maccrab-tierb-example -type f 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}' || true)
+    ATTEST_DIGEST=$(grep -oE 'digest=[a-f0-9]{64}' "$ATTEST_FILE" 2>/dev/null | head -1 | sed -E 's/^digest=//')
     if [[ -z "$ATTEST_VER" ]]; then
         err "$ATTEST_FILE has no version= field — re-run \`make test-corpus\` on this Mac (macOS 26)"
     elif [[ "$ATTEST_VER" != "$VERSION_SEMVER" ]]; then
         err "$ATTEST_FILE attests \"$ATTEST_VER\" but this release is \"$VERSION_SEMVER\" — re-run \`make test-corpus\` on this Mac (macOS 26)"
+    elif [[ -z "$ATTEST_DIGEST" ]]; then
+        err "$ATTEST_FILE has no digest= field (written by a pre-digest \`make test-corpus\`) — re-run \`make test-corpus\` on this Mac (macOS 26)"
+    elif [[ "$ATTEST_DIGEST" != "$CUR_DIGEST" ]]; then
+        err "$ATTEST_FILE attests containment digest ${ATTEST_DIGEST:0:16}... but the Tier-B containment sources now hash to ${CUR_DIGEST:0:16}... — the sandbox / broker / trampoline code changed since the corpus run, so the only containment proof does not describe this build; re-run \`make test-corpus\` on this Mac (macOS 26)"
     else
-        ok "$ATTEST_FILE → containment corpus attested for $VERSION_SEMVER"
+        ok "$ATTEST_FILE → containment corpus attested for $VERSION_SEMVER (digest ${CUR_DIGEST:0:16}...)"
     fi
 fi
 

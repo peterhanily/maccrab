@@ -19,6 +19,14 @@ public struct V2SystemWorkspace: View {
     /// the release-install "root-protected, not readable here" case
     /// instead of mislabelling it "Not generated".
     @State private var trustStatus: V2TrustSubstrateInfo.Status = .notGenerated
+    /// PAR-09: last lines of the engine's `dashboard_audit.log`. Loaded off the
+    /// main thread in the workspace `.task`, same pattern as `trustStatus`.
+    @State private var auditLines: [String] = []
+    /// Set when there is nothing to list AND we know why. "No changes recorded"
+    /// and "present but this account can't read it" must never collapse into the
+    /// same empty panel — an unreadable log rendered as empty reads as "nothing
+    /// was changed", which is the opposite of what we know.
+    @State private var auditStatus: String?
     /// Owned so its delegate survives the async OS activation callback while
     /// this workspace is on screen (the "Reactivate System Extension" repair
     /// action). Independent of the app's primary manager — sysextd dedups.
@@ -32,7 +40,9 @@ public struct V2SystemWorkspace: View {
                 tabs: V2Workspace.system.tabs,
                 selected: Binding(
                     get: { state.selectedTabs[.system] ?? .systemHealth },
-                    set: { if let v = $0 { state.selectedTabs[.system] = v } }
+                    // See V2AlertsWorkspace: selectTab routes through goto so
+                    // the switch lands in history / recents / persistence.
+                    set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
             tabBody
@@ -60,6 +70,27 @@ public struct V2SystemWorkspace: View {
                 V2TrustSubstrateInfo.status(dataDir: dir)
             }.value
             await MainActor.run { self.trustStatus = ts }
+
+            // PAR-09: tail the privileged-mutation audit log off-main, the same
+            // way the trust-substrate read above stays off the main thread.
+            let auditPath = dir + "/dashboard_audit.log"
+            let audit = await Task.detached(priority: .utility) { () -> ([String], String?) in
+                guard FileManager.default.fileExists(atPath: auditPath) else {
+                    return ([], String(localized: "system.auditNone",
+                                       defaultValue: "No privileged changes have been recorded yet."))
+                }
+                guard let text = try? String(contentsOfFile: auditPath, encoding: .utf8) else {
+                    return ([], String(localized: "system.auditUnreadable",
+                                       defaultValue: "The audit log exists but this account can't read it (the engine writes it root-owned, admin-readable). Run: sudo maccrabctl audit"))
+                }
+                let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+                guard !lines.isEmpty else {
+                    return ([], String(localized: "system.auditEmpty",
+                                       defaultValue: "The audit log is present but empty."))
+                }
+                return (Array(lines.suffix(25)), nil)
+            }.value
+            await MainActor.run { self.auditLines = audit.0; self.auditStatus = audit.1 }
 
             let p = await state.provider.permissions()
             await MainActor.run { self.permissions = p }
@@ -89,6 +120,7 @@ public struct V2SystemWorkspace: View {
                 healthSummaryRow
                 collectorsTable
                 trustSubstrateCard
+                auditTrailCard
             }
             .padding(16)
         }
@@ -500,6 +532,38 @@ public struct V2SystemWorkspace: View {
         let eventCount: Int
         /// nil when the collector has never ticked. Renders as "—".
         let lastTick: Date?
+    }
+
+    /// PAR-09: `dashboard_audit.log` — the record of every privileged mutation
+    /// the engine applied — was readable only through the MCP `get_audit_log`
+    /// tool and `maccrabctl audit`. The GUI, which is the surface most operators
+    /// actually use, had no view of it: the agent could read the log of what the
+    /// agent changed, and the human could not. That inverts the trust
+    /// relationship the agent-capability tiers exist to establish. Read-only.
+    private var auditTrailCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: "system.auditSection", defaultValue: "Privileged-change audit trail"))
+                .font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+            Text(String(localized: "system.auditDesc", defaultValue: "Every suppression, config change, rule toggle and prune the engine applied from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit"))
+                .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
+            if let auditStatus {
+                Text(auditStatus)
+                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(auditLines.enumerated()), id: \.offset) { entry in
+                        Text(entry.element)
+                            .font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
+                            .lineLimit(1).truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .v2Panel()
     }
 
     private var trustSubstrateCard: some View {

@@ -50,7 +50,9 @@ public struct V2IntelligenceWorkspace: View {
                 tabs: V2Workspace.intelligence.tabs,
                 selected: Binding(
                     get: { state.selectedTabs[.intelligence] ?? .intelligenceThreatIntel },
-                    set: { if let v = $0 { state.selectedTabs[.intelligence] = v } }
+                    // See V2AlertsWorkspace: selectTab routes through goto so
+                    // the switch lands in history / recents / persistence.
+                    set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
             tabBody
@@ -218,9 +220,11 @@ public struct V2IntelligenceWorkspace: View {
             Text("Searching IOC matches for")
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
+            // WCAG 1.4.3: `brand` as body text is 3.90:1 light / 3.65:1 on a
+            // panel. This is the echoed IOC query — see V2Theme.brandText.
             Text(query)
                 .font(V2Theme.mono())
-                .foregroundStyle(V2Theme.brand)
+                .foregroundStyle(V2Theme.brandText)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
@@ -1568,6 +1572,9 @@ public struct V2FeedConfigSheet: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
+                // WCAG 4.1.2: icon-only with no label and no tooltip. Escape
+                // already works, but VoiceOver had no name for the control.
+                .accessibilityLabel(String(localized: "ax.close", defaultValue: "Close"))
             }
 
             if enrichThreatIntel {

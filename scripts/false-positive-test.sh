@@ -173,8 +173,27 @@ ALL_ALERTS=$(sqlite3 "$USER_DB" \
 ALERT_COUNT=$(echo "$ALL_ALERTS" | grep -c '|' 2>/dev/null || true)
 info "Total alerts generated: $ALERT_COUNT"
 
+# Sensor-liveness gate. Every check below is a search over $ALL_ALERTS, so with
+# an empty alert set they ALL pass by observing nothing: "no named system
+# process false positives", "clean idle — no alerts generated". This harness
+# spawns a NON-ROOT maccrabd, which has no Endpoint Security — no exec events,
+# so no process rule ever evaluates and the green sheet is meaningless. Require
+# positive proof the engine saw process activity in THIS run (last 120s, so
+# rows left over from an earlier root run cannot fake liveness) and exit 2
+# ("not measured") rather than printing a pass sheet.
+PROC_EVENTS=$(sqlite3 "$USER_DB" \
+    "SELECT COUNT(*) FROM events WHERE event_category='process' AND timestamp > (strftime('%s','now') - 120);" 2>/dev/null || echo "0")
+info "Process events observed in this run: $PROC_EVENTS"
+if [ "${PROC_EVENTS:-0}" -eq 0 ]; then
+    echo -e "\n${YELLOW}SKIP — the sensor was blind, so this run proves nothing.${NC}"
+    echo "  No process-category events were recorded. Without Endpoint Security"
+    echo "  (non-root mode) the exec path never fires and every FP check below"
+    echo "  would pass vacuously. Re-run as root:  sudo ./scripts/false-positive-test.sh"
+    exit 2
+fi
+
 if [ "$ALERT_COUNT" -eq 0 ]; then
-    info "No alerts generated during stabilization (good — or daemon has limited sources)"
+    info "No alerts generated during stabilization (sensor live: $PROC_EVENTS process events)"
 fi
 
 # Check each known system process against alerts

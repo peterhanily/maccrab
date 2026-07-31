@@ -169,13 +169,20 @@ struct PluginCatalogFetcher {
         // For maccrabctl this comes from the MacCrab.app's
         // Resources/ when shipped via DMG, OR from candidate
         // dev paths when running via `swift run`.
-        let candidates: [String] = [
+        var candidates: [String] = [
             "/Applications/MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/catalog.pub",
             "/Applications/MacCrab.app/Contents/Resources/rave-keys/catalog.pub",
-            // SPM dev — Sources/MacCrabApp/Resources/rave-keys/catalog.pub
-            FileManager.default.currentDirectoryPath + "/Sources/MacCrabApp/Resources/rave-keys/catalog.pub",
-            FileManager.default.currentDirectoryPath + "/Sources/MacCrabApp/Resources/MacCrab_MacCrabApp.bundle/catalog.pub",
         ]
+        // SPM dev paths are DEBUG-only: in a release build a cwd-relative trust
+        // root lets anyone who can write the directory the operator runs
+        // maccrabctl from become the catalog signing authority.
+        #if DEBUG
+        candidates.append(
+            FileManager.default.currentDirectoryPath + "/Sources/MacCrabApp/Resources/rave-keys/catalog.pub")
+        candidates.append(
+            FileManager.default.currentDirectoryPath
+                + "/Sources/MacCrabApp/Resources/MacCrab_MacCrabApp.bundle/catalog.pub")
+        #endif
         for path in candidates where FileManager.default.fileExists(atPath: path) {
             return try loadFromFile(path: path)
         }

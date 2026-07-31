@@ -13,11 +13,24 @@ extension MacCrabCtl {
         print("══════════════════════════════════════════")
 
         // ── 1. Markov chain model stats ────────────────────────────────────
-        let analyzer = ProcessTreeAnalyzer()
+        // FF-06: the no-argument initializer defaults `modelPath` to
+        // `.userDomainMask` Application Support (~/Library/…/MacCrab), while the
+        // daemon writes the model under the resolved support dir — DaemonSetup
+        // passes `supportDir + "/process_tree_model.json"` explicitly, which on a
+        // release install is /Library/…/MacCrab. tree-score was the ONLY
+        // maccrabctl reader not going through `maccrabDataDir()`, so it loaded a
+        // file that does not exist and reported "Mode: learning / Transitions: 0"
+        // for a model trained on millions of transitions — the exact inverse of
+        // the truth. The swallowed `load()` error left no hint.
+        let modelPath = maccrabDataDir() + "/process_tree_model.json"
+        let analyzer = ProcessTreeAnalyzer(modelPath: modelPath)
         do {
             try await analyzer.load()
         } catch {
-            // No model persisted yet — that's fine, show zero stats
+            // Never swallow this: `load()` RETURNS (does not throw) when no model
+            // file exists, so anything arriving here is a real read/decode
+            // failure and must not be reported to the user as "still learning".
+            print("  ⚠️  could not load \(modelPath): \(error)")
         }
 
         let modelStats = await analyzer.stats()

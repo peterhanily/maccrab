@@ -38,9 +38,16 @@ extension MacCrabCtl {
         }
     }
 
-    /// Mirror of MCP `scan_text`: prompt-injection scan via Forensicate.ai
-    /// (`PromptInjectionScanner`). Reason strings are routed through
-    /// `LLMSanitizer.sanitize` exactly as the MCP handler does.
+    /// Mirror of MCP `scan_text`: prompt-injection scan.
+    ///
+    /// v1.21.6: backed by the native `ClipboardInjectionDetector` (24 weighted
+    /// patterns across instruction-override, jailbreak, prompt-extraction,
+    /// role-manipulation, tool-poisoning, structural-injection and exfiltration,
+    /// plus an invisible-unicode check) instead of shelling out to a `forensicate`
+    /// CLI. That CLI was never installable — the advertised `pip install
+    /// forensicate-ai` 404s on PyPI — so this command could only ever print an
+    /// install hint. It now actually scans. Pattern strings are still routed
+    /// through `LLMSanitizer.sanitize` in case one echoes scanned input.
     static func scanText(_ text: String) async {
         guard !text.isEmpty else {
             usageError("Usage: maccrabctl scan-text <text>   (or pipe text on stdin)")
@@ -49,41 +56,18 @@ extension MacCrabCtl {
             print("Error: text too long (max 10000 characters)"); exit(1)
         }
 
-        let scanner = PromptInjectionScanner()
-        guard await scanner.isAvailable else {
-            // Same install hint the MCP tool prints when the ruleset is absent.
-            print("Prompt injection scanner not available. Install forensicate to enable this tool:")
-            print("  pip install forensicate-ai")
-            exit(1)
-        }
-
-        guard let result = await scanner.scan(text) else {
-            print("Scan returned no result (possible timeout or parse error)."); exit(1)
-        }
+        let result = await ClipboardInjectionDetector().scan(text)
 
         print("Prompt Injection Scan")
         print("═══════════════════════════════════")
-        print("Safe:       \(!result.isPositive)")
-        print("Confidence: \(result.confidence)%")
+        print("Safe:       \(result == nil)")
+        print("Confidence: \(result?.confidence ?? 0)%")
 
-        if result.isPositive {
+        if let result {
             print("⚠️  INJECTION DETECTED")
-            if !result.reasons.isEmpty {
-                print("Reasons:")
-                // Forensicate's reason strings can echo portions of the
-                // scanned text. Route through LLMSanitizer so paths /
-                // credential shapes / private IPs never leak to stdout.
-                for r in result.reasons { print("  - \(LLMSanitizer.sanitize(r))") }
-            }
-            if !result.matchedRules.isEmpty {
-                print("Matched Rules:")
-                for rule in result.matchedRules.prefix(10) {
-                    print("  [\(rule.severity.uppercased())] \(rule.ruleName)")
-                }
-            }
-            if !result.compoundThreats.isEmpty {
-                print("Compound Threats: \(result.compoundThreats.joined(separator: ", "))")
-            }
+            print("Severity:   \(String(describing: result.severity).uppercased())")
+            print("Patterns:")
+            for p in result.patterns.prefix(10) { print("  - \(LLMSanitizer.sanitize(p))") }
             // Non-zero exit so the scan is scriptable in a CI / pre-flight gate.
             exit(2)
         } else {

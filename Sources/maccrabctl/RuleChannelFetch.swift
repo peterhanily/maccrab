@@ -34,7 +34,20 @@ enum RuleChannelError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .noRulesPublicKey:
-            return "No rule-channel public key configured. Set MACCRAB_RAVE_RULES_PUB_PATH or rebuild with a bundled rules.pub."
+            // Be honest: on a release build there is NO action the operator can
+            // take. The signing keypair has never been generated, so no build
+            // ships a rules.pub, and the env override is DEBUG-only. The previous
+            // text offered two remedies that are both impossible for a user, which
+            // turned a fail-closed refusal into a dead end.
+            return """
+                The signed rule-update channel is not provisioned in this build — no \
+                rule-channel public key ships with MacCrab, so `rules update` cannot \
+                verify a manifest and refuses to install one (fail-closed, by design).
+
+                This is a product gap, not a misconfiguration: there is nothing to fix \
+                locally. Detection rules ship with the app; update MacCrab itself to \
+                get new ones. Track the channel's status in docs/RULE_CHANNEL.md.
+                """
         case .rulesPublicKeyInvalid(let r): return "Rule-channel public key invalid: \(r)"
         case .httpFetchFailed(let url, let s): return "HTTP fetch failed: \(url.absoluteString) → HTTP \(s)"
         case .signatureVerifyFailed(let url): return "Ed25519 signature verification failed for \(url.absoluteString)"
@@ -83,10 +96,26 @@ struct RuleChannelFetcher {
             return try loadFromFile(path: path)
         }
         #endif
-        let candidates = [
+        // The cwd-relative candidate is DEBUG-only, same as the env override
+        // above: in a release build it makes anyone who can write a directory the
+        // operator later runs `maccrabctl rules update` from (a cloned repo,
+        // ~/Downloads, an agent workspace) the signing authority for the entire
+        // detection-rule channel.
+        // Probe the SPM RESOURCE BUNDLE first — that is where `swift build`
+        // actually places Sources/MacCrabApp/Resources/**, and it is where the
+        // sibling catalog.pub really lands (verified in the shipped app:
+        // Contents/Resources/MacCrab_MacCrabApp.bundle/catalog.pub). The
+        // rave-keys/ path below has never existed in a built bundle, so the
+        // rule channel could not have found a key even if one had been generated.
+        // Mirrors PluginCatalogFetch.loadCatalogPublicKey's ordering.
+        var candidates = [
+            "/Applications/MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub",
             "/Applications/MacCrab.app/Contents/Resources/rave-keys/rules.pub",
-            FileManager.default.currentDirectoryPath + "/Sources/MacCrabApp/Resources/rave-keys/rules.pub",
         ]
+        #if DEBUG
+        candidates.append(
+            FileManager.default.currentDirectoryPath + "/Sources/MacCrabApp/Resources/rave-keys/rules.pub")
+        #endif
         for path in candidates where FileManager.default.fileExists(atPath: path) {
             return try loadFromFile(path: path)
         }

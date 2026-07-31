@@ -14,7 +14,7 @@ All data is collected and stored **locally** in `~/Library/Application Support/M
 | DNS queries | Detect DGA, tunneling | SQLite `events.db` |
 | TCC permission changes | Detect privacy violations | SQLite `events.db` |
 | Detection alerts | Security findings | SQLite `events.db` |
-| Behavioral baselines | Anomaly detection | In-memory only |
+| Behavioral baselines | Anomaly detection | JSON files in the support dir — `baseline.json`, `process_tree_model.json`, `mcp_baselines.json` |
 
 ## What Leaves Your Machine
 
@@ -32,14 +32,31 @@ turn it off:
 |---|---|---|---|---|---|
 | **abuse.ch** (URLhaus / MalwareBazaar / Feodo) | IOC feed refresh, every ~4h | **Off** | Nothing about your machine — **download only** | Nothing (GET of public IOC lists) | Settings → Network enrichment, or `threatIntelEnabled` |
 | **osv.dev** | CVE lookup, hourly when enabled | **Off** | Your installed-software inventory (anonymous) | Your installed software list | `vulnScanEnabled` |
-| **npm / PyPI / Homebrew / crates** registries | Package-freshness check, on install | **Off** | The package name being installed | The package **name** you install | `packageFreshnessEnabled` |
+| **npm / PyPI / Homebrew / crates** registries | Package-freshness check, on install — **and on demand** via the MCP tools `analyze_package_metadata` / `verify_package_attestation` | **Off** | The package name (and, for attestation, the version) being looked up | The package **name** you install or ask about | `packageFreshnessEnabled` for the automatic check. The two MCP tools are a separate path and require the `config` agent capability, which a human must turn on in Settings → Agent Control (off by default) |
 | **crt.sh** | Certificate-Transparency lookup, on an observed destination domain | **Off** | The domain being looked up | The **domain** you connect to | `certTransparencyEnabled` |
 | **maccrab.com** (Sparkle appcast) | Update check (standard auto-update) | **On** | Nothing but the request itself; the update is EdDSA-signed | Your IP address only | Disable auto-update |
 
-Toggle the four enrichment feeds in **Settings → Network enrichment**, by
-`maccrabctl config set`, or by hand in `daemon_config.json` (keys
-`threat_intel_enabled`, `vuln_scan_enabled`, `package_freshness_enabled`,
-`cert_transparency_enabled`). Changes are honored live on `SIGHUP` — disabling a
+Toggle the four enrichment feeds in **Settings → Network enrichment**. That
+writes `~/Library/Application Support/MacCrab/user_overrides.json` — a file in
+your own home, **no `sudo`** — and asks the running engine to re-read it. Because
+it is an ordinary JSON file you own, it is also the hand-edit path if you prefer
+a text editor; the keys there are `threatIntelEnabled`, `vulnScanEnabled`,
+`packageFreshnessEnabled`, `certTransparencyEnabled` (the `threat_intel_enabled`
+snake_case spellings are accepted too). One caveat worth stating because it is
+otherwise silent: the engine only honours an overrides file in the home directory
+of an account in the **admin** group, so that a standard user on a shared Mac
+cannot weaken the operator's configuration. On a managed Mac, ask an admin — or
+use the root file below.
+
+The engine's own `daemon_config.json` (keys `threat_intel_enabled`,
+`vuln_scan_enabled`, `package_freshness_enabled`, `cert_transparency_enabled`)
+works as well, but on a release install it is root-owned `0600`, so editing it
+requires `sudo`. `maccrabctl config set` does **not** accept any of these four
+keys: its allowlist covers detection thresholds and poll intervals only, and
+`maccrabctl config get` will tell you when the root file exists but your account
+cannot read it rather than reporting "defaults".
+
+Changes are honored live on `SIGHUP` — disabling a
 feed stops its egress without a restart. Local detection (rules, sequences,
 campaigns, bundled IOCs) is unaffected by these toggles and never makes a network
 request.
@@ -144,10 +161,22 @@ MISP) are configured, they additionally:
 
 ### Fleet Telemetry (opt-in)
 
-When enrolled in fleet management:
+When enrolled in fleet management, each push carries exactly the fields of the
+`FleetTelemetry` payload — nothing more, nothing less:
 
-- **Sent:** Machine ID, event counts, alert summaries, security score
-- **Not sent:** Process names, command lines, user data, file paths
+- **Sent:** a pseudonymous host ID (SHA-256 of hostname + hardware UUID); the
+  timestamp; the MacCrab version; per-alert `{rule ID, rule title, severity,
+  process path, MITRE techniques}`; IOC sightings `{type, the matched value —
+  including domains, IPs and hashes — plus a short context string}`; and top
+  behavioral scores `{process path, score, indicators}`.
+- **Not sent:** command lines, file contents, raw event bodies, event counts,
+  security score.
+- **Process paths and matched IOC values do leave your machine.** Paths and
+  context strings are scrubbed by the same best-effort sanitizer used for cloud
+  LLM calls (usernames, hostnames, private IPs) — heuristics, not a guaranteed
+  no-leak boundary, so treat a fleet collector as a system that will eventually
+  see some path fragments. The IOC value itself is deliberately **not**
+  redacted: sharing it is the entire point of the feature.
 
 ### Third-Party Forensic Plugins (opt-in)
 
@@ -182,7 +211,7 @@ the defaults below):
 | Alerts | 365 days | `storage.alerts_retention_days` |
 | Campaigns | 365 days | `storage.campaigns_retention_days` |
 | Causal traces / TraceGraph | 90 days | `storage.traces_retention_days` / `storage.tracegraph_retention_days` |
-| Behavioral baselines | In-memory (lost on restart) | No |
+| Behavioral baselines | Persisted to disk and rebuilt continuously — **no retention limit and no size cap** | No |
 | Threat intel cache | 24 hours | No |
 
 (The legacy top-level `retention_days` / `max_database_size_mb` keys from v1.7
@@ -190,20 +219,44 @@ still decode and are folded onto the `storage{}` block at load.)
 
 ## Data Encryption
 
-- **At rest:** Optional AES-256 field-level encryption for the SQLite database. Enable with `MACCRAB_ENCRYPTION_DB=1`. Encryption key is stored in the macOS Keychain.
+- **At rest:** AES-GCM **column** encryption, **on by default**, with the key in
+  the macOS Keychain. The scope is narrow and worth stating plainly: it covers
+  only specific JSON columns in `traces.db` / `tracegraph.db` (TraceStore /
+  SQLiteCausalGraphStore). **`events.db` (including `alert_evidence`),
+  `alerts.db` and `campaigns.db` are stored in plaintext** — whole-database
+  encryption is scheduled, not shipped. `MACCRAB_ENCRYPT_DB=0` disables the
+  column encryption (an escape hatch for tests and bisects). There is no
+  `MACCRAB_ENCRYPTION_DB` variable — an earlier version of this document named
+  one, and setting it did nothing at all.
+- **What actually protects the plaintext stores:** file permissions, not
+  cryptography. The support directory is root-owned and the databases are
+  `0640 root:admin`, so the boundary is same-machine admin-or-root. If you do
+  not run FileVault, turn it on — and exclude
+  `/Library/Application Support/MacCrab/` from your backup set, because the
+  event store holds sanitized argv, every file path touched, every network
+  destination, working directories and usernames for the whole retention
+  window. MacCrab does **not** set a backup-exclusion flag for you.
 - **In transit:** All HTTPS connections use TLS 1.2+ minimum. Optional SPKI certificate pinning for LLM providers.
 
 ## Deleting Your Data
 
-```bash
-# Delete all events and alerts
-maccrabctl clear-data
+There is no `maccrabctl` delete verb. On a release install every store is
+root-owned under `/Library/Application Support/MacCrab/`, so deletion is a
+manual `rm` (or a full uninstall). Quit MacCrab.app first so the engine is not
+re-writing the databases as you remove them.
 
-# Full uninstall (removes all data and binaries)
+```bash
+# Delete all local data — events, alerts, campaigns, causal graph, traces,
+# reports and forensic cases. This is the whole support directory.
+sudo rm -rf "/Library/Application Support/MacCrab/"   # system data (release install)
+rm -rf "$HOME/Library/Application Support/MacCrab/"   # dev / non-root data
+rm -f  "$HOME/Library/Preferences/com.maccrab.app.plist"  # app preferences
+
+# Full uninstall (removes binaries; asks before deleting data)
 sudo ./scripts/uninstall.sh
 
 # Or via Homebrew
-brew uninstall maccrab
+brew uninstall --cask maccrab
 ```
 
 The uninstall script will ask before deleting data and preserves it if you decline.

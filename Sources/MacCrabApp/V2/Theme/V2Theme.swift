@@ -77,9 +77,17 @@ public enum V2Theme {
     // (kept below) fail WCAG AA as text/icons on the light cream canvas
     // (#FBF9F8) — measured 1.4–3.0:1. The `light:` variants are darkened so
     // each clears AA 4.5:1 on that canvas (computed: critical 6.3, high 5.3,
-    // medium 5.3, low 5.5, healthy 5.4, ai 6.3, data 5.0). Used as chip text,
-    // dot fill, and accent throughout — making them adaptive fixes the chip
-    // contrast (V2StatusChip) at the same time.
+    // medium 5.3, low 5.5, healthy 5.4, ai 6.3, data 5.0).
+    //
+    // CORRECTION: the previous version of this comment went on to claim that
+    // "making them adaptive fixes the chip contrast (V2StatusChip) at the same
+    // time". It does not, and believing it is how the chip bug survived.
+    // These figures are for the accent as PLAIN text on the bare canvas.
+    // V2StatusChip draws its text in the same hue as its own 13% wash, so the
+    // effective background is not the canvas — re-measured over that composite
+    // on `panelBackground`, 9 of the 18 kind x mode combinations land at
+    // 3.28–4.42:1, i.e. under AA. Chip text therefore uses the dedicated
+    // *ChipText variants below, NOT these accents.
     public static var critical: Color   { dyn(dark: srgb(0.96, 0.39, 0.27), light: srgb(0.72, 0.10, 0.05)) }
     public static var high: Color       { dyn(dark: srgb(0.99, 0.62, 0.30), light: srgb(0.66, 0.30, 0.02)) }
     public static var medium: Color     { dyn(dark: srgb(0.98, 0.78, 0.39), light: srgb(0.55, 0.37, 0.00)) }
@@ -88,6 +96,30 @@ public enum V2Theme {
     public static var warning: Color    { dyn(dark: srgb(0.96, 0.65, 0.27), light: srgb(0.66, 0.30, 0.02)) }
     public static var aiAccent: Color   { dyn(dark: srgb(0.55, 0.36, 0.92), light: srgb(0.46, 0.24, 0.74)) }
     public static var dataAccent: Color { dyn(dark: srgb(0.20, 0.55, 0.92), light: srgb(0.10, 0.42, 0.74)) }
+
+    // MARK: - Chip text (WCAG 1.4.3)
+    //
+    // V2StatusChip renders its label in `kind.color` on a 13% wash of that
+    // SAME colour, so the text/background pair is near-isoluminant no matter
+    // how the base hue is tuned against the canvas. Measured over the wash on
+    // `panelBackground`: light high 4.20, medium 4.22, low 4.36, healthy 4.27,
+    // warning 4.20, data 4.05; dark critical 4.42, ai 3.28, data 4.04 — all
+    // under AA 4.5:1, and `V2Theme.chip()` is .caption semibold (10pt on
+    // macOS), far below the 18pt / 14pt-bold large-text exemption.
+    //
+    // Each variant below is its base hue blended 30% toward the mode's text
+    // extreme (black in light, white in dark). That lifts the worst case to
+    // 5.34:1 (aiAccent, dark) while leaving the wash, the border, and the
+    // overall chip silhouette byte-identical — a pure text-colour fix.
+    public static var criticalChipText: Color { dyn(dark: srgb(0.97, 0.57, 0.49), light: srgb(0.50, 0.07, 0.04)) }
+    public static var highChipText: Color     { dyn(dark: srgb(0.99, 0.73, 0.51), light: srgb(0.46, 0.21, 0.01)) }
+    public static var mediumChipText: Color   { dyn(dark: srgb(0.99, 0.85, 0.57), light: srgb(0.39, 0.26, 0.00)) }
+    public static var lowChipText: Color      { dyn(dark: srgb(0.69, 0.76, 0.85), light: srgb(0.22, 0.28, 0.38)) }
+    public static var healthyChipText: Color  { dyn(dark: srgb(0.45, 0.80, 0.58), light: srgb(0.07, 0.32, 0.17)) }
+    public static var warningChipText: Color  { dyn(dark: srgb(0.97, 0.76, 0.49), light: srgb(0.46, 0.21, 0.01)) }
+    public static var aiChipText: Color       { dyn(dark: srgb(0.69, 0.55, 0.94), light: srgb(0.32, 0.17, 0.52)) }
+    public static var dataChipText: Color     { dyn(dark: srgb(0.44, 0.69, 0.94), light: srgb(0.07, 0.29, 0.52)) }
+    public static var neutralChipText: Color  { dyn(dark: srgb(0.85, 0.82, 0.82), light: srgb(0.18, 0.14, 0.14)) }
 
     /// Highest-emphasis text — white in dark, near-black in light.
     public static var primaryText: Color {
@@ -124,6 +156,22 @@ public enum V2Theme {
     /// `accentDim` (0xC13E20 dark = 5.28:1) passes. Used by V2ActionButton.primary.
     public static var brandDim: Color { MacCrabTheme.accentDim }
 
+    /// Brand tint for TEXT. `brand` as a foreground measures 5.91:1 in dark
+    /// but only 3.90:1 on `canvasBackground` / 3.65:1 on `panelBackground` in
+    /// light — under WCAG AA 4.5:1 for body copy. That is the text telling the
+    /// user why their list is filtered (the echoed search string, the time
+    /// window), i.e. exactly the copy someone squints at when the alert count
+    /// drops unexpectedly. This swaps in the dim variant for light only
+    /// (6.83:1) and keeps `brand` in dark (5.91:1).
+    ///
+    /// Keep using `brand` itself for fills, strokes, selection bars, and small
+    /// glyphs: those are graphical objects under 1.4.11, whose bar is 3:1, and
+    /// 3.90:1 already clears it. Hex values mirror MacCrabTheme.accentDim
+    /// (light, 0xA03010) and MacCrabTheme.accent (dark, 0xFF5E3A); they are
+    /// restated as sRGB because Color(light:dark:) is fileprivate to
+    /// MacCrabTheme.swift.
+    public static var brandText: Color { dyn(dark: srgb(1.000, 0.369, 0.227), light: srgb(0.627, 0.188, 0.063)) }
+
     // MARK: - Interaction overlays (theme-aware)
 
     /// Subtle background fill for hover states — adapts so it shows
@@ -149,6 +197,14 @@ public enum V2Theme {
     public static let tabStripHeight: CGFloat = 30
     public static let workspaceHeaderHeight: CGFloat = 40
     public static let footerHeight: CGFloat = 28
+
+    /// WCAG 2.2 SC 2.5.8 Target Size (Minimum), AA: a pointer target is at
+    /// least 24x24. Several icon buttons shipped at 22x22 (and the toast
+    /// dismiss at 20x20), which matters most for the Detection table's
+    /// enable/disable dot — a stray click there silently turns a detection
+    /// rule off. Defined once so the floor is greppable rather than a literal
+    /// repeated across a dozen call sites.
+    public static let minHitTarget: CGFloat = 24
 
     // MARK: - Typography
     //

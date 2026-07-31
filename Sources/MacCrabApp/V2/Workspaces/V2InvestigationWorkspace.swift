@@ -14,6 +14,12 @@ struct V2InvestigationWorkspace: View {
     // F2: engine LLM health, refreshed off-main by reload() rather than read
     // synchronously in the view body on every re-evaluation.
     @State private var engineHeartbeat: V2HeartbeatSnapshot?
+    /// False until the first `reload()` completes. `engineHeartbeat` is nil at
+    /// first render, so the graph's B7 branch computed daemonReporting == false
+    /// and flashed the orange "Daemon not reporting — traces unavailable" panel
+    /// on EVERY cold mount of a perfectly healthy machine. Mirrors the `loaded`
+    /// sentinel V2AlertsWorkspace already uses for the same reason.
+    @State private var loaded = false
     @State private var traceMembersCache: [String: [V2TraceMember]] = [:]
     /// Real causal edges per trace id, loaded alongside members. When a
     /// trace has edges the graph draws source→target relations; when empty
@@ -131,7 +137,12 @@ struct V2InvestigationWorkspace: View {
         // F2: heartbeat() reads the file off-main; cache the result so the
         // AI Analysis tab doesn't read+parse it synchronously per body eval.
         let hb = await state.provider.heartbeat()
-        await MainActor.run { self.engineHeartbeat = hb }
+        await MainActor.run {
+            self.engineHeartbeat = hb
+            // Set LAST: the graph's daemon-liveness verdict is only meaningful
+            // once the heartbeat it depends on has actually been fetched.
+            self.loaded = true
+        }
     }
 
     /// Export the current trace as a .maccrabtrace bundle. Shells
@@ -259,7 +270,9 @@ struct V2InvestigationWorkspace: View {
                 tabs: V2Workspace.investigation.tabs,
                 selected: Binding(
                     get: { state.selectedTabs[.investigation] ?? .investigationTraceGraph },
-                    set: { if let v = $0 { state.selectedTabs[.investigation] = v } }
+                    // See V2AlertsWorkspace: selectTab routes through goto so
+                    // the switch lands in history / recents / persistence.
+                    set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
             tabBody
@@ -1021,14 +1034,19 @@ struct V2InvestigationWorkspace: View {
     /// Zoom in / out / reset cluster.
     @ViewBuilder
     private var zoomControls: some View {
-        HStack(spacing: 2) {
+        // WCAG 2.5.8: two 22x22 targets 2pt apart failed both the 24x24
+        // minimum AND the Spacing exception (a 24pt circle centred on each
+        // bounding box intersected its neighbour). Frames go to 24 below and
+        // the gap to 4, so the exception holds even under text scaling.
+        HStack(spacing: 4) {
             Button {
                 graphZoom = max(zoomMin, graphZoom - 0.2)
                 pinchBaseline = graphZoom
             } label: {
                 Image(systemName: "minus.magnifyingglass")
                     .scaledSystem(11, weight: .semibold)
-                    .frame(width: 22, height: 22)
+                    // WCAG 2.5.8: was 22x22, below the 24x24 minimum.
+                    .frame(width: V2Theme.minHitTarget, height: V2Theme.minHitTarget)
                     .foregroundStyle(V2Theme.mutedText)
                     .background(V2Theme.panelBackground)
             }
@@ -1055,7 +1073,8 @@ struct V2InvestigationWorkspace: View {
             } label: {
                 Image(systemName: "plus.magnifyingglass")
                     .scaledSystem(11, weight: .semibold)
-                    .frame(width: 22, height: 22)
+                    // WCAG 2.5.8: was 22x22, below the 24x24 minimum.
+                    .frame(width: V2Theme.minHitTarget, height: V2Theme.minHitTarget)
                     .foregroundStyle(V2Theme.mutedText)
                     .background(V2Theme.panelBackground)
             }
@@ -1876,6 +1895,13 @@ struct V2InvestigationWorkspace: View {
                         traceEdgesCache[trace.id] = edges
                     }
                 }
+        } else if !loaded {
+            // Three states, not two: until the first reload() resolves we know
+            // NOTHING about the daemon, so render loading rather than letting
+            // the nil heartbeat below masquerade as "daemon not reporting".
+            // Repeated false alarms are how an operator learns to ignore the
+            // real one — and the real one uses this same panel.
+            V2LoadingState(title: String(localized: "investigation.loadingTraces", defaultValue: "Loading traces…"))
         } else {
             // B7: an empty trace list can mean two very different things —
             // a healthy-but-quiet machine (nothing worth anchoring yet), or
@@ -2460,7 +2486,26 @@ private struct DraggableMemberNode: View {
             .animation(nil, value: dragTranslation)
             .help("\(m.displayName)\n\(m.entityType) · first seen \(V2TimeFormat.relative(m.firstSeen))\(m.isAnchor ? " · anchor" : "")")
             .accessibilityLabel("\(m.isAnchor ? "Anchor: " : "")\(m.displayName), \(m.entityType)")
-            .accessibilityHint("Click to show details. Right-click for actions. Drag to reposition.")
+            // WCAG 2.1.1 / 4.1.2: the node is a plain View carrying an
+            // `.onTapGesture`, so VoiceOver announced it as static text and
+            // VO-Space did nothing — while the hint told the user to "Click",
+            // with no non-pointer equivalent offered. A VoiceOver user could
+            // hear "Anchor: launchd, process" and then had no way to open the
+            // detail card at all, which made the Investigation workspace
+            // announce-only for them.
+            //
+            // Deliberately NOT wrapped in a `Button`: this view also carries a
+            // DragGesture(minimumDistance: 3) and a `.contextMenu`, and a
+            // Button's own press gesture competes with both. The button trait
+            // plus an explicit default action gets VoiceOver activation with
+            // no change to pointer behaviour. The named action duplicates it
+            // so it also shows up in the VoiceOver actions rotor.
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onTap() }
+            .accessibilityAction(named: Text(String(localized: "ax.trace.node.showDetails",
+                                                    defaultValue: "Show details"))) { onTap() }
+            .accessibilityHint(String(localized: "ax.trace.node.hint",
+                                      defaultValue: "Shows this entity's details. Right-click for more actions; drag to reposition."))
     }
 }
 
@@ -2545,16 +2590,33 @@ private struct EdgeOverlay: View {
                         && V2InvestigationWorkspace.agentEdgeIsInferred(
                             confidence: edge.confidence,
                             assertionThreshold: assertionThreshold)
+                    // A11y (WCAG 1.4.11): these lines ARE the causal structure —
+                    // which process spawned which, which wrote the persistence
+                    // file — so they are graphical objects needed to understand
+                    // the content and must clear 3:1 against the canvas.
+                    // Measured, the previous idle alphas rendered every
+                    // unhovered edge at 1.28–2.15:1 (0.22 inferred / 0.3
+                    // otherwise): the graph was legible only under the pointer,
+                    // which also made it mouse-only. Idle now floors at 0.8 —
+                    // worst hue is aiAccent-dark at 3.09:1 — and hover goes to
+                    // full, with the hover emphasis moved onto lineWidth.
+                    // "Inferred" keeps its dash pattern + "suggested" label as
+                    // the honesty signal; encoding it by near-invisibility was
+                    // itself an inaccessible encoding.
+                    //
+                    // Divisor is 0.4, not 0.5: 0.4 is the workspace's zoomMin,
+                    // and this Canvas sits inside .scaleEffect(graphZoom), so
+                    // dividing by the ACTUAL floor is what keeps the stroke at
+                    // its nominal device-space width. Clamping at 0.5 let the
+                    // line shrink to 0.8pt at maximum zoom-out.
                     var stroke = StrokeStyle(
-                        lineWidth: (touchesHover ? 1.5 : 1) / max(zoom, 0.5),
+                        lineWidth: (touchesHover ? 2 : 1.25) / max(zoom, 0.4),
                         lineCap: .round
                     )
                     if style.dashed || inferredAgent {
-                        stroke.dash = [4 / max(zoom, 0.5), 3 / max(zoom, 0.5)]
+                        stroke.dash = [4 / max(zoom, 0.4), 3 / max(zoom, 0.4)]
                     }
-                    let opacity: Double = inferredAgent
-                        ? (touchesHover ? 0.5 : 0.22)   // muted: not asserted
-                        : (touchesHover ? 0.8 : 0.3)
+                    let opacity: Double = touchesHover ? 1.0 : 0.8
                     ctx.stroke(
                         path,
                         with: .color(style.color.opacity(opacity)),
@@ -2567,7 +2629,18 @@ private struct EdgeOverlay: View {
                         ctx.draw(
                             Text(verbatim: "suggested")
                                 .font(.system(size: 8 / max(zoom, 0.5)))
-                                .foregroundColor(style.color.opacity(touchesHover ? 0.75 : 0.4)),
+                                // A11y: this 8pt label at alpha 0.4 measured
+                                // ~1.5:1 against the canvas — unreadable, and
+                                // it is the ONLY thing that says an agent edge
+                                // is inferred rather than observed. Full
+                                // opacity; the dashed stroke already carries
+                                // the "not asserted" signal without hiding it.
+                                // Residual: aiAccent-dark is 4.14:1 here, short
+                                // of AA 4.5:1 for text this small — that is the
+                                // same aiAccent-dark weakness A11Y-02 works
+                                // around for chips and needs the accent itself
+                                // re-tuned to close properly.
+                                .foregroundColor(style.color),
                             at: mid
                         )
                     }

@@ -151,8 +151,13 @@ struct ArtifactTimelineView: View {
     }
 
     private func timeOnly(_ d: Date) -> String {
+        // Skeleton, not a literal pattern: "HH:mm:ss" forced a 24-hour clock on
+        // every locale including en_US, whose system preference is 12-hour.
+        // `j` is the locale's own hour cycle. (The en_US_POSIX formatters
+        // elsewhere in the app are deliberately NOT changed — those back
+        // filenames and parsed day keys, and must stay fixed-format.)
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
+        f.setLocalizedDateFormatFromTemplate("jmmss")
         return f.string(from: d)
     }
 

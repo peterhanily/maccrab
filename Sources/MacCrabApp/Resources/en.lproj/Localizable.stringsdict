@@ -4,16 +4,43 @@
   English uses 1 (one) vs everything else (other), but the dict is
   here so Russian / Polish / Arabic / Welsh / etc. translators can
   add `few` / `many` / `two` / `zero` variants without touching
-  Swift code. Every count-bearing string in MacCrabApp should resolve
-  through one of these keys via String.localizedStringWithFormat.
+  Swift code.
 
-  Adding a new pluralised key:
+  STATE (audited): this file is INERT. All 8 keys below have zero call
+  sites, `String.localizedStringWithFormat` appears nowhere in the tree,
+  and en is the only locale that ships a .stringsdict at all. Nothing here
+  reaches a user today. Do not read the entries below as a description of
+  how counts are currently rendered — they are not.
+
+  Two things must be fixed BEFORE any of these keys is wired to a call
+  site, or wiring it makes the UI worse than it is now:
+
+    A. ARITY COLLISION. Five of these keys also exist as ordinary rows in
+       Localizable.strings in all 14 locales, with a DIFFERENT number of
+       format specifiers — e.g. `overview.critical.count` is `%#@count@`
+       here (1 argument) but "%lld %@ %@ investigation" in en.strings
+       (3 arguments), and likewise in de/ru/…; `overview.high.count` is 1
+       here and 2 there. A .stringsdict entry SHADOWS the .strings row for
+       the same table+key, so English would resolve the 1-arg plural form
+       while all 13 other locales resolve the many-arg .strings form. Any
+       caller is wrong in one direction or the other. Reconcile the two
+       tables first.
+
+    B. NO PER-LOCALE .stringsdict. Only en.lproj has one. Repointing a
+       live counter at a key that is absent from a locale's .strings (e.g.
+       generic.rule.count) makes that locale fall through to THIS file and
+       render English — a visible regression for a user who sees a
+       translated string today. Ship the 13 locale .stringsdict files in
+       the same change, not after it.
+
+  Adding a new pluralised key, once A and B are resolved:
     1. Add the entry below (English `one` + `other` baseline).
     2. Translators add per-locale CLDR categories for their bundle.
-    3. Source uses
-         String.localizedStringWithFormat(
-             NSLocalizedString("alerts.suppressedCount", comment: ""), count)
-       to render with the right form.
+    3. Source uses String(localized:defaultValue:) as normal —
+       `String(localized: "generic.rule.count", defaultValue: "\(n) rules")`.
+       The lookup consults the .stringsdict in the same table, so there is
+       no need to drop back to NSLocalizedString +
+       String.localizedStringWithFormat as this comment used to prescribe.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

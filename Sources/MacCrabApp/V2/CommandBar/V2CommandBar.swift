@@ -7,20 +7,42 @@ import SwiftUI
 public struct V2CommandBar: View {
 
     @ObservedObject var state: V2DashboardState
-    @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "dark"
+    // Tri-state, matching V2DashboardShell. Pre-fix this was a two-state flip
+    // with no way back to the OS appearance once touched — and it defaulted to
+    // "dark", which is what forced a dark window on Light-mode users.
+    @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "system"
 
     public init(state: V2DashboardState) {
         self.state = state
     }
 
     private var schemeIcon: String {
-        colorSchemeRaw == "light" ? "moon.fill" : "sun.max.fill"
+        switch colorSchemeRaw {
+        case "light": return "sun.max.fill"
+        case "dark":  return "moon.fill"
+        default:      return "circle.lefthalf.filled"
+        }
     }
+    private var schemeName: String {
+        switch colorSchemeRaw {
+        case "light": return String(localized: "ax.appearance.light", defaultValue: "Light")
+        case "dark":  return String(localized: "ax.appearance.dark", defaultValue: "Dark")
+        default:      return String(localized: "ax.appearance.system", defaultValue: "System")
+        }
+    }
+    // IconButton pipes `tooltip` into BOTH .help and .accessibilityLabel, so
+    // naming the current state here is what gives VoiceOver the value — the
+    // old text ("Switch to dark theme") announced the destination, never the
+    // state, which is unusable on a control that now has three positions.
     private var schemeTooltip: String {
-        colorSchemeRaw == "light" ? "Switch to dark theme" : "Switch to light theme"
+        String(localized: "ax.appearance.tooltip", defaultValue: "Appearance: \(schemeName) — click to change")
     }
     private func toggleScheme() {
-        colorSchemeRaw = (colorSchemeRaw == "light") ? "dark" : "light"
+        switch colorSchemeRaw {
+        case "system": colorSchemeRaw = "light"
+        case "light":  colorSchemeRaw = "dark"
+        default:       colorSchemeRaw = "system"
+        }
     }
 
     public var body: some View {

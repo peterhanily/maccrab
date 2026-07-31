@@ -374,6 +374,25 @@ struct MacCrabCtl {
             // PARITY-02: supply-chain package intelligence (CLI parity with the
             // MCP package tools: typosquat / content / metadata / attestation / intent).
             await dispatchPackage(args: Array(args.dropFirst(2)))
+        case "agent-spans":
+            var spanSearch: String?
+            var spanLimit = 100
+            var spanTrace: String?
+            var sIdx = 2
+            while sIdx < args.count {
+                switch args[sIdx] {
+                case "--search" where sIdx + 1 < args.count:
+                    spanSearch = args[sIdx + 1]; sIdx += 2
+                case "--trace" where sIdx + 1 < args.count:
+                    spanTrace = args[sIdx + 1]; sIdx += 2
+                case "--limit" where sIdx + 1 < args.count:
+                    spanLimit = Int(args[sIdx + 1]) ?? 100; sIdx += 2
+                default:
+                    sIdx += 1
+                }
+            }
+            await agentSpans(search: spanSearch, limit: spanLimit, traceId: spanTrace)
+
         case "ai-alerts":
             var hours: Double = 24
             var limit = 20
@@ -394,6 +413,10 @@ struct MacCrabCtl {
         case "config":
             // PARITY-05: daemon-config get/set against the safe-key allow-list.
             dispatchConfig(args: Array(args.dropFirst(2)))
+        case "audit":
+            // Human-side mirror of the MCP `get_audit_log` tool: the record of
+            // what an agent changed must not be readable only by the agent.
+            dispatchAudit(args: Array(args.dropFirst(2)))
         case "session":
             // PARITY-06: AI-agent session timeline + signed bundle export/verify
             // (headless parity with the MCP agent-session tools).
@@ -442,6 +465,20 @@ struct MacCrabCtl {
         case "from-process-key":
             guard let key = rest.first else { print("Usage: maccrabctl trace from-process-key <process-key>"); exit(1) }
             await traceFromProcessKey(key)
+        case "reattribute":
+            // The only writer for AttributionOverrideStore. Without it the
+            // "Accuracy among rated" stat in `status` and in the dashboard's
+            // Agent Traces tab is permanently blank, because nothing in the
+            // product could record an operator verdict.
+            guard rest.count >= 2 else {
+                print("Usage: maccrabctl trace reattribute <event-id> <confirmed|wrong_tool|no_agent|unknown> [--note <text>]")
+                exit(1)
+            }
+            var overrideNote: String?
+            if let idx = rest.firstIndex(of: "--note"), idx + 1 < rest.count {
+                overrideNote = rest[idx + 1]
+            }
+            await traceReattribute(eventId: rest[0], verdictRaw: rest[1], note: overrideNote)
         case "export":
             guard let id = rest.first else {
                 print("Usage: maccrabctl trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]")
@@ -471,20 +508,25 @@ struct MacCrabCtl {
             await traceVerify(bundlePath: path, checkUnifiedLog: checkUnifiedLog)
         case "replay":
             guard let path = rest.first else {
-                print("Usage: maccrabctl trace replay <bundle> [--normalization <version>] [--compare-rules <a> <b>]"); exit(1)
+                print("Usage: maccrabctl trace replay <bundle> [--normalization <version>] [--rules <compiled-rules-dir>] [--compare-rules <dir-a> <dir-b>]"); exit(1)
             }
             var normVersion = "1"
             if let idx = rest.firstIndex(of: "--normalization"), idx + 1 < rest.count {
                 normVersion = rest[idx + 1]
             }
-            // v1.11.1 (audit backlog): --compare-rules <a> <b> runs
-            // the replay twice (once with each ruleset identifier) and
-            // diffs the resulting alert sets. The diff is meaningful
-            // once a non-echo RulesetReplayer is wired (v1.11.x);
-            // until then BundleEmbeddedRulesetReplayer is identity on
-            // matched_rules so the alert diff is empty + only the
-            // result_sha256 changes. Useful as the v1.11.x landing
-            // hook so the CLI surface is stable.
+            var rulesDir: String?
+            if let idx = rest.firstIndex(of: "--rules"), idx + 1 < rest.count {
+                rulesDir = rest[idx + 1]
+            }
+            // --compare-rules <dir-a> <dir-b> runs the replay twice, once
+            // against each COMPILED-RULES DIRECTORY, and diffs the resulting
+            // alert sets. These are paths, not version labels: the previous
+            // label form fed BundleEmbeddedRulesetReplayer, which re-emits
+            // matched_rules.json verbatim and hashes the label text — so the
+            // alert diff was always empty and the exit code was always 20 for
+            // any two distinct labels. Both legs now run the real RuleEngine
+            // (RuleEngineReplayer), which is what makes the diff answer "did
+            // rule X change behaviour between corpus v1 and v2?".
             if let cmpIdx = rest.firstIndex(of: "--compare-rules"),
                cmpIdx + 2 < rest.count {
                 let a = rest[cmpIdx + 1]
@@ -494,7 +536,9 @@ struct MacCrabCtl {
                                           rulesetB: b,
                                           expectedNormalizationVersion: normVersion)
             } else {
-                await traceReplay(bundlePath: path, expectedNormalizationVersion: normVersion)
+                await traceReplay(bundlePath: path,
+                                  expectedNormalizationVersion: normVersion,
+                                  rulesDirectory: rulesDir)
             }
         #if DEBUG
         // DEBUG-only: `trace demo` seeds fabricated "[DEMO]" traces into the live
@@ -580,16 +624,35 @@ struct MacCrabCtl {
           trace from-agent <name> [--window 20m]   Find traces involving an agent
           trace from-process <pid> [--window 20m]  Find traces involving a pid
           trace from-process-key <key>             Find traces involving a processKey
+          trace reattribute <event-id> <verdict> [--note <text>]
+                                                   Record an operator verdict on a machine
+                                                   attribution. verdict is one of:
+                                                   confirmed | wrong_tool | no_agent | unknown.
+                                                   Feeds the "accuracy among rated" stat in
+                                                   `maccrabctl status` and the dashboard.
 
         Bundle pipeline (.maccrabtrace files):
           trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]
-                                                   Export trace as a .maccrabtrace bundle
+                                                   Export trace as a .maccrabtrace bundle.
+                                                   Daemon-signed only when run as root: the
+                                                   signing key in <supportDir>/keys/ is
+                                                   root-owned 0700. Otherwise it signs with a
+                                                   user-domain key, or exports UNSIGNED (which
+                                                   `trace verify` rejects) and warns.
           trace validate <bundle>                  Structural conformance check (exits 0,1,5,7,9,10)
           trace inspect <bundle>                   Print manifest + stats
           trace verify <bundle> [--check-unified-log]
-                                                   Tamper-evidence check (exits 0,2,3,4)
-          trace replay <bundle> [--normalization <version>] [--compare-rules <a> <b>]
-                                                   Deterministic replay (exits 0,1,6,11)
+                                                   Tamper-evidence check (exits 0,2,3,4 — plus
+                                                   validate's structural codes; it runs first)
+          trace replay <bundle> [--normalization <version>] [--rules <compiled-rules-dir>]
+                                                   Deterministic replay (exits 0,1,6,11).
+                                                   Without --rules NO rule is evaluated: the
+                                                   bundle's recorded matches are echoed back,
+                                                   which proves determinism only.
+          trace replay <bundle> --compare-rules <dir-a> <dir-b>
+                                                   Run the ruleset in each compiled-rules
+                                                   DIRECTORY over the bundle and diff the
+                                                   alerts (exit 20 on divergence).
           trace replay-batch <dir> [--report <html>] [--normalization <version>]
                                                    Replay every bundle in a directory; emit HTML report.
           trace to-prov <bundle>                   Print prov/prov.jsonld

@@ -90,7 +90,7 @@ Once running, MacCrab gives you:
 - **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
 - **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 6 other AI tools for credential access, project boundary escapes, and prompt injection
 - **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
-- **Out-of-band rule updates** -- new detection rules can ship from a signed, anti-rollback channel without an app update or restart (`maccrabctl rules update`); pushed rules are detection-only and can never override a built-in rule
+- **Out-of-band rule updates** *(built, not yet provisioned)* -- the signed, anti-rollback channel is implemented end-to-end (`maccrabctl rules update`; pushed rules are detection-only and can never override a built-in rule), but **no rule-channel signing key ships yet**, so the command fails closed on every current build. Detection rules ship with the app until the channel is provisioned — see [`docs/RULE_CHANNEL.md`](docs/RULE_CHANNEL.md)
 - **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
 
 ---
@@ -210,7 +210,7 @@ maccrabctl report --hours 48            # Incident report
 maccrabctl suppress <rule-id> <path>    # Suppress false positive
 maccrabctl cdhash 1234                  # CDHash lookup
 maccrabctl tree-score 20                # Behavioral scoring
-maccrabctl mcp list                     # MCP server inventory
+maccrabctl mcp list                     # MCP server inventory (user-scope configs)
 maccrabctl extensions --suspicious      # Browser extension scan
 ```
 
@@ -220,19 +220,30 @@ maccrabctl extensions --suspicious      # Browser extension scan
 
 MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) server (`maccrab-mcp`) that lets AI coding tools query your security data directly from the editor.
 
-**Setup** — copy `.mcp.json` from the repo root to your project, or add the entry manually:
+**Setup — installed build (Homebrew / DMG).** `maccrab-mcp` ships inside
+`MacCrab.app` and is symlinked onto your `$PATH` by the cask and the installer,
+so there is nothing to build. Register it with Claude Code:
+
+```bash
+claude mcp add maccrab -- "$(which maccrab-mcp)"
+```
+
+For Claude Desktop, add the same command to
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "maccrab": { "command": "/path/to/.build/debug/maccrab-mcp" }
+    "maccrab": { "command": "/usr/local/bin/maccrab-mcp" }
   }
 }
 ```
 
-Build the MCP binary with `swift build --target maccrab-mcp`.
+**Setup — source checkout.** Build the binary with
+`swift build --target maccrab-mcp`, then copy `.mcp.json` from the repo root
+into your project; it points at the local `.build/debug/maccrab-mcp`.
 
-**Available tools (~90 built-in, plus `forensics_*` plugin tools that register dynamically when forensic plugins are installed):** run `maccrabctl mcp list` or call the `agent_capabilities` tool for the live inventory in your build. A representative slice:
+**Available tools — 62 built-in** (including the 20 always-present `forensics_*` case/plugin meta-tools) **plus per-plugin tools contributed by installed forensic plugins** (31 on a default install: `launchd_*`, `tcc_*`, `safari_*`, `mail_*`, `imessage_*`, `*_analyze_path`, …) **— 93 total here.** Neither `maccrabctl mcp list` (which inventories MCP *server configs*, not tools) nor `agent_capabilities` (which reports control-plane capability tiers) prints a tool list; ask your MCP client for its tool inventory. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
@@ -342,14 +353,20 @@ See the Monitors and Collectors table below for the full list including USB, cli
 | FSEventsCollector | File system events (non-root fallback) | Real-time |
 | EDRMonitor | EDR/RMM/insider threat/remote access tool scanning | 120s |
 | USBMonitor | USB device connect/disconnect | 10s |
-| ClipboardMonitor | Clipboard content + injection detection | 2s |
+| ClipboardMonitor | Clipboard content + injection detection | 3s |
 | UltrasonicMonitor | DolphinAttack/NUIT audio injection | Configurable |
 | RootkitDetector | Dual-API process cross-reference | 120s |
-| EventTapMonitor | Keylogger detection | Real-time |
+| EventTapMonitor | Keylogger detection | 30s |
 | SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
-| BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
-| MCPMonitor | MCP server configs across AI tools | Startup |
+| BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup, then 120s |
+| MCPMonitor | MCP server configs across AI tools | Startup, then 60s |
+| GitSecurityMonitor | Git credential-helper abuse, SSH-agent hijack, malicious git hooks | Real-time |
 | SDRDeviceMonitor | SDR USB devices + rapid display hotplug (no electromagnetic analysis) | 60s |
+
+Poll intervals are the defaults from `DaemonConfig.swift`; most are tunable in
+`daemon_config.json`. All of them are stretched under battery or thermal
+pressure by `PowerGate.adjustedInterval`, so observed latency can exceed the
+figure above on an unplugged or hot machine.
 
 </details>
 
@@ -379,7 +396,7 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | **AI process tracker** | Identifies and tracks AI tool processes and their child process trees |
 | **Credential fence** | Alerts when AI tool children access any of 29 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
 | **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
-| **Prompt injection scanner** | Scans for injection patterns in files read by AI tools using forensicate.ai analysis |
+| **Prompt injection scanner** | Native structural scan of files AI tools read — invisible/zero-width unicode, bidi overrides (Trojan Source), and Unicode tag-character smuggling. No external dependency. |
 | **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
 32 dedicated AI safety detection rules in `Rules/ai_safety/`. Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
@@ -399,7 +416,7 @@ This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/a
 2. **Loopback OTLP receiver** — MacCrab listens on `127.0.0.1:4318` (the OTel-canonical OTLP/HTTP port) for spans emitted by the AI tool's instrumentation. Loopback only — never routable from off-host. Off by default; enable from **Settings → Agent Traces** in the dashboard, or set `receiverEnabled: true` in `<supportDir>/agent_traces_config.json`.
 3. **Span sanitisation** — incoming OTLP spans pass through `OTLPAttributeSanitizer` before storage: prompt text, file paths, command output, and any value matching a credential / API-key shape gets redacted. Span IDs + structural attributes survive so correlation still works.
 4. **Causal graph storage** — spans + bound kernel events land in `tracegraph.db` (SQLite, AES-GCM column-level encryption, `0o660`). Each materialized trace appends one entry to an **append-only continuity hash chain** in the DB (`verifyHashChain()` flags a mutated, deleted, reordered, or inserted ledger row), and each exported bundle gets a **daemon-signed Merkle root** over its members. This is tamper-**evident**: it is forgery-resistant against a non-root attacker and verifiable by a party holding an out-of-band pinned key — local root can rewrite and re-sign and is out of scope (see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and [`docs/maccrabtrace.v1.spec.md` §6.4](docs/maccrabtrace.v1.spec.md)). An optional macOS unified-log record of each signed chain head acts as an independent witness (wired; its cross-run read-back is pending on-device verification).
-5. **Investigation surface** — the dashboard's Investigation → TraceGraph workspace renders the trace as a hub-and-spoke graph (anchor in centre, members on a ring); each member shows what kernel side-effect ran under that span. The `maccrabctl trace export` CLI emits a signed `.maccrabtrace` bundle that `verify_bundle` (MCP) or `maccrabctl trace verify` can re-check offline.
+5. **Investigation surface** — the dashboard's Investigation → TraceGraph workspace renders the trace as a hub-and-spoke graph (anchor in centre, members on a ring); each member shows what kernel side-effect ran under that span. The `maccrabctl trace export` CLI emits a signed `.maccrabtrace` bundle that `verify_bundle` (MCP) or `maccrabctl trace verify` can re-check offline. Signing reads key material from `<supportDir>/keys/`, which is root-owned (`drwx------`) on a release install: run the export under `sudo`, or export from MacCrab.app, for a **daemon-signed** bundle. Without root the CLI falls back to a user-domain signing key under `~/Library/Application Support/MacCrab/keys/` — the bundle still exports and self-verifies, but it is not signed by the daemon identity a relying party would have pinned; if that key is unusable too the export carries the honest `UNSIGNED` placeholder, which `maccrabctl trace verify` rejects.
 
 **Five MCP tools** (`get_traces`, `get_trace_detail`, `hunt_trace`, `verify_bundle`, `trace_from_event`) let an AI assistant pivot from any single event back to its containing trace and the agent turn that produced it.
 
@@ -638,8 +655,9 @@ Recent milestones:
 - **v1.21.0** — customizable masonry Overview with new Protection Coverage, Top
   Firing Rules, and companion-crab widgets; Forensics CLI ↔ MCP parity; honest
   engine-health reporting on the dashboard.
-- **v1.20** — customizable Overview dashboard, a signed out-of-band rule channel
-  (`maccrabctl rules update`), and the live [Rave plugin store](https://rave.maccrab.com).
+- **v1.20** — customizable Overview dashboard, the signed out-of-band rule channel
+  (`maccrabctl rules update` — implemented, not yet provisioned with a signing key),
+  and the live [Rave plugin store](https://rave.maccrab.com).
 - **v1.12** — supply-chain detection wave (Shai-Hulud worm class), a Bayesian
   intent posterior, and a ~1000× faster daemon cold start.
 - **v1.10** — workspace dashboard, visual TraceGraph, Agent Traces (intent ↔
@@ -679,7 +697,7 @@ make watch            Live stream alerts
 make build            Build debug binaries
 make release          Build release binaries
 make compile-rules    Compile YAML rules to JSON
-make clear-data       Delete local events/alerts
+make clear-data       Delete all local data (events, alerts, campaigns, traces)
 make new-rule         Create rule from template
 make bundle-app       Package the SwiftUI app into .app bundle
 

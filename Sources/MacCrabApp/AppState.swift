@@ -598,154 +598,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Lazily construct (or rebuild on config drift) the user-side LLM
-    /// stack: `LLMService` + `TriageService`. The config lives in
-    /// `~/Library/Application Support/MacCrab/llm_config.json` and is
-    /// owned by `SettingsView.syncLLMConfig`. We re-check at most once
-    /// per `llmConfigCheckInterval` to avoid re-decoding the file on
-    /// every triage call.
-    ///
-    /// Returns nil when LLM is disabled, when the chosen provider has
-    /// no API key, or when the backend reports unavailable. Callers
-    /// should surface "LLM not configured" UI when nil.
-    private func ensureLLMService() async -> LLMService? {
-        if let svc = llmService,
-           Date().timeIntervalSince(lastLLMConfigCheckedAt) < llmConfigCheckInterval {
-            return svc
-        }
-        lastLLMConfigCheckedAt = Date()
-
-        let configPath = NSHomeDirectory() + "/Library/Application Support/MacCrab/llm_config.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            llmService = nil
-            triageService = nil
-            return nil
-        }
-
-        var cfg = LLMConfig()
-        if let v = json["enabled"] as? Bool { cfg.enabled = v }
-        if let v = json["provider"] as? String, let p = LLMProvider(rawValue: v) { cfg.provider = p }
-        if let v = json["ollama_url"] as? String { cfg.ollamaURL = v }
-        if let v = json["ollama_model"] as? String { cfg.ollamaModel = v }
-        if let v = json["ollama_api_key"] as? String { cfg.ollamaAPIKey = v }
-        if let v = json["claude_api_key"] as? String { cfg.claudeAPIKey = v }
-        if let v = json["claude_model"] as? String { cfg.claudeModel = v }
-        if let v = json["openai_url"] as? String { cfg.openaiURL = v }
-        if let v = json["openai_api_key"] as? String { cfg.openaiAPIKey = v }
-        if let v = json["openai_model"] as? String { cfg.openaiModel = v }
-        if let v = json["mistral_api_key"] as? String { cfg.mistralAPIKey = v }
-        if let v = json["mistral_model"] as? String { cfg.mistralModel = v }
-        if let v = json["gemini_api_key"] as? String { cfg.geminiAPIKey = v }
-        if let v = json["gemini_model"] as? String { cfg.geminiModel = v }
-        // Off-by-default operator opt-in for the multi-round agentic
-        // campaign investigator (multiplies LLM cost/latency).
-        if let v = json["agentic_investigation_enabled"] as? Bool { cfg.agenticInvestigationEnabled = v }
-
-        let svc = await LLMService.makeFromConfig(cfg)
-        llmService = svc
-        triageService = svc.map { TriageService(llm: $0) }
-        // Build the agentic investigator only when both a backend is
-        // available AND the operator opted in. Stays nil otherwise so
-        // `investigateCampaign` cleanly no-ops.
-        agenticInvestigator = (svc != nil && cfg.agenticInvestigationEnabled)
-            ? svc.map { AgenticInvestigator(llm: $0) }
-            : nil
-        return svc
-    }
-
-    /// Operator-initiated multi-round agentic investigation of a
-    /// detected campaign. Gated behind `agentic_investigation_enabled`
-    /// (default OFF) — no-ops with a cleared placeholder when the flag
-    /// is unset, no backend is configured, or the loop yields no report.
-    /// Result lands in `campaignInvestigations[campaign.id]` for the
-    /// campaign-detail UI. Advisory only; the report's recommendations
-    /// are never auto-executed.
-    func investigateCampaign(_ campaign: CampaignDetector.Campaign) async {
-        // Mark "investigating"
-        campaignInvestigations[campaign.id] = .some(nil)
-
-        guard await ensureLLMService() != nil, let investigator = agenticInvestigator else {
-            campaignInvestigations[campaign.id] = .none
-            return
-        }
-
-        // Wire describe_rule against the dashboard's already-loaded rule
-        // set. The other two fetchers keep their safe no-op defaults —
-        // the dashboard holds no live event-store actor to query.
-        let loadedRules = rules
-        let fetchers = InvestigationContextFetchers(
-            describeRule: { ruleId in
-                loadedRules.first { $0.id == ruleId }?.title
-            }
-        )
-
-        let report = await investigator.investigate(campaign: campaign, fetchers: fetchers)
-        campaignInvestigations[campaign.id] = .some(report)
-    }
-
-    /// Ask the user-side TriageService for a disposition recommendation
-    /// on the alert under the cursor in `AlertDetailView`. Result lands
-    /// in `triageRecommendations[alertId]` so the view can re-render
-    /// with the verdict + rationale next to the alert.
-    ///
-    /// Marks the entry as `nil` (placeholder) before the LLM call
-    /// returns so the UI can show "Triage in progress" without races.
-    func triageAlert(_ alert: AlertViewModel) async {
-        // Mark "thinking"
-        triageRecommendations[alert.id] = .some(nil)
-
-        guard await ensureLLMService() != nil, let triage = triageService else {
-            triageRecommendations[alert.id] = .none
-            return
-        }
-
-        // Hydrate a minimal `Alert` from the view model — we only need
-        // the fields TriageService.buildPrompt reads. The app-side
-        // `Severity` mirror and the core enum share rawValue strings,
-        // so convert via that. Default to `.medium` if a future
-        // value lands in one but not the other.
-        let coreSeverity = MacCrabCore.Severity(rawValue: alert.severity.rawValue) ?? .medium
-        let coreAlert = Alert(
-            id: alert.id,
-            timestamp: alert.timestamp,
-            ruleId: alert.ruleId,
-            ruleTitle: alert.ruleTitle,
-            severity: coreSeverity,
-            eventId: alert.eventId,
-            processPath: alert.processPath.isEmpty ? nil : alert.processPath,
-            processName: alert.processName.isEmpty ? nil : alert.processName,
-            description: alert.description.isEmpty ? nil : alert.description,
-            mitreTactics: nil,
-            mitreTechniques: alert.mitreTechniques.isEmpty ? nil : alert.mitreTechniques,
-            suppressed: alert.suppressed
-        )
-
-        // Cluster size approximation: count alerts in `dashboardAlerts`
-        // that share rule + process. Cheap O(n) over the visible set.
-        let similarCount = dashboardAlerts.filter {
-            $0.ruleId == alert.ruleId && $0.processName == alert.processName
-        }.count
-
-        let recommendation = await triage.recommend(
-            for: coreAlert,
-            similarCount: similarCount,
-            dailyTotal: dashboardAlerts.count
-        )
-        triageRecommendations[alert.id] = .some(recommendation)
-    }
-
-    /// Drop any cached LLM stack so the next triage call rebuilds from
-    /// the latest `llm_config.json`. Called by SettingsView whenever
-    /// the user changes provider, model, or API key — guarantees the
-    /// next triage uses the new config without waiting for the 30 s
-    /// re-check window.
-    func invalidateLLMConfigCache() {
-        llmService = nil
-        triageService = nil
-        lastLLMConfigCheckedAt = .distantPast
-    }
-
     /// Full Disk Access state.
     ///
     /// macOS treats `com.maccrab.app` (this process) and `com.maccrab.agent`
@@ -847,35 +699,6 @@ final class AppState: ObservableObject {
     /// (v1.7.1). Keyed by ruleId for O(1) lookup when rendering rows.
     @Published var ruleTelemetry: [String: RuleEngine.RuleStats] = [:]
     @Published var ruleTelemetryLastRefresh: Date?
-
-    // MARK: - LLM-orchestration services (v1.6.10 "move out of sysext")
-    //
-    // Three services that previously lived as orphan vars in DaemonState
-    // (declared, never wired) — outbound HTTPS with vendor API keys does
-    // not belong at ES-entitlement root privilege. Now hosted on the
-    // user-side AppState alongside the LLM config that the dashboard
-    // already owns. Constructed lazily from `llm_config.json` on first
-    // use; reset whenever Settings rewrites the config.
-
-    private var llmService: LLMService?
-    private var triageService: TriageService?
-    /// Built lazily by `ensureLLMService` ONLY when the operator has
-    /// opted in via `agentic_investigation_enabled` in llm_config.json.
-    /// nil otherwise — `investigateCampaign` no-ops when nil.
-    private var agenticInvestigator: AgenticInvestigator?
-    private var lastLLMConfigCheckedAt: Date = .distantPast
-    private let llmConfigCheckInterval: TimeInterval = 30  // seconds
-
-    /// In-flight / completed InvestigationReport per campaign, keyed by
-    /// campaign ID, surfaced inline in the campaign-detail UI. `nil`
-    /// value = "still investigating" placeholder; entry absent = "not
-    /// yet requested".
-    @Published var campaignInvestigations: [String: InvestigationReport?] = [:]
-
-    /// In-flight TriageRecommendation per alert, surfaced inline in
-    /// `AlertDetailView`. Keyed by alert ID. `nil` value = "still
-    /// thinking" placeholder; entry absent = "not yet requested".
-    @Published var triageRecommendations: [String: TriageRecommendation?] = [:]
 
     /// Security posture score (0-100) and letter grade.
     /// Computed by SecurityScorer on first load and refreshed every 5 minutes.
@@ -1068,10 +891,24 @@ final class AppState: ObservableObject {
         let userReadable = fm.isReadableFile(atPath: userDB)
         let systemReadable = fm.isReadableFile(atPath: systemDB)
 
-        // If both are readable, prefer whichever was modified more recently.
+        // If both are readable, prefer whichever was written to more recently.
+        // v1.21.6 (audit DL-08): "more recently" must fold in the `-wal`
+        // sidecar. In WAL mode the main `.db` mtime only advances at CHECKPOINT
+        // (field-observed four-week lag between campaigns.db and its -wal), so
+        // the bare-mtime comparison this used to do picked whichever store
+        // checkpointed last, not whichever is live. Patched here as well as in
+        // maccrabctl and maccrab-mcp so the dashboard, the CLI and every MCP
+        // tool cannot resolve to different stores.
+        func lastWrite(_ path: String) -> Date? {
+            let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
+            guard let main else { return wal }
+            guard let wal else { return main }
+            return max(main, wal)
+        }
         if userReadable && systemReadable {
-            let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
-            let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+            let userMod = lastWrite(userDB)
+            let sysMod = lastWrite(systemDB)
             if let s = sysMod, let u = userMod, s >= u {
                 logger.info("dataDir=system (system DB newer than user DB)")
                 return systemDir
@@ -1198,11 +1035,18 @@ final class AppState: ObservableObject {
         defaultDir: String
     ) -> String {
         let candidates = Array(Set(rawCandidates))
+        // v1.21.6 (audit DL-08): rank on LAST WRITE (db or -wal), not the main
+        // file's mtime. This picker chooses the per-store directory for
+        // alerts.db and events.db independently, so a WAL-blind comparison could
+        // even split the two across different data dirs — alerts read from one
+        // store while events read from another.
         return candidates
             .map { (dir: String) -> (String, Date) in
-                let mtime = (try? FileManager.default
-                    .attributesOfItem(atPath: dir + "/" + fileName))?[.modificationDate] as? Date
-                return (dir, mtime ?? .distantPast)
+                let fm = FileManager.default
+                let path = dir + "/" + fileName
+                let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
+                return (dir, max(main ?? .distantPast, wal ?? .distantPast))
             }
             .max(by: { $0.1 < $1.1 })?.0
             ?? defaultDir
@@ -1247,6 +1091,12 @@ final class AppState: ObservableObject {
     /// clipboard payloads whenever the LSUIElement menubar app is running.
     func startClipboardBridge() {
         guard clipboardTimer == nil else { return }
+        // v1.21.5 (audit S-09): clear undrained clipboard records left by an
+        // earlier run before we start writing new ones — see
+        // purgeUserInboxClipboardRecords for why they accumulate on release
+        // installs. Runs once per launch; the guard above makes repeat calls a
+        // no-op, and the directory is tiny so this is not a launch cost.
+        Self.purgeUserInboxClipboardRecords()
         lastClipboardChangeCount = NSPasteboard.general.changeCount
         clipboardTimer = Timer.publish(every: 3.0, on: .main, in: .common)
             .autoconnect()
@@ -1276,12 +1126,59 @@ final class AppState: ObservableObject {
             "source": "MacCrabApp"
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        // v1.21.5 (audit S-09): a ClickFix record is RAW CLIPBOARD TEXT — the data
+        // class that carries password-manager output, tokens and one-time codes. A
+        // plain `data.write` inherits the process umask, which left these files
+        // group-readable; group `staff` is the primary group of EVERY local user
+        // account, so any local user could read the console user's captured
+        // clipboard. Create 0600 explicitly via a dot-prefixed temp + rename (the
+        // dropCtlInboxRequest pattern), which also guarantees the daemon's poller
+        // never sees a partially written file. Both destinations are kept: the ROOT
+        // sysext drains /Library, while the non-root DEV daemon's supportDir is
+        // ~/Library — see purgeUserInboxClipboardRecords for how the undrained
+        // user-domain copies are now cleaned up.
         let inboxDir = "/Library/Application Support/MacCrab/inbox"
         let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
         for dir in [inboxDir, userInboxDir] {
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let path = "\(dir)/record-clipboard-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
-            try? data.write(to: URL(fileURLWithPath: path))
+            _ = Self.writeClickFixPayload(data, toInbox: dir)
+        }
+    }
+
+    /// Drop one `record-clipboard-*.json` into `dir`, created 0600 and made
+    /// visible to the inbox poller only by `rename` — never a partially written
+    /// file. `nonisolated static` so it is unit-testable against a temp dir
+    /// (mirrors `writePruneAlertsRequest`). False when the directory is
+    /// unreachable or either step fails.
+    nonisolated static func writeClickFixPayload(_ data: Data, toInbox dir: String) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        let token = "\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8))"
+        let finalPath = "\(dir)/record-clipboard-\(token).json"
+        let tmpPath = "\(dir)/.record-clipboard-\(token).tmp"
+        guard fm.createFile(atPath: tmpPath, contents: data,
+                            attributes: [.posixPermissions: 0o600]) else { return false }
+        let ok = tmpPath.withCString { src in finalPath.withCString { dst in rename(src, dst) == 0 } }
+        if !ok { try? fm.removeItem(atPath: tmpPath) }
+        return ok
+    }
+
+    /// Remove every `record-clipboard-*` entry from the USER-domain inbox.
+    /// v1.21.5 (audit S-09): the ROOT sysext drains only its own supportDir inbox
+    /// (DaemonTimers uses `state.supportDir + "/inbox"`), so on a release install
+    /// the user-domain copies are never consumed and captured clipboard payloads
+    /// accumulate forever — 9-day-old files were observed on the audit host, at
+    /// the old group-readable umask mode. Only the non-root DEV daemon
+    /// (supportDir = ~/Library/...) consumes this directory, and it drains within
+    /// one 5 s tick, so anything still present at app launch is undrained residue
+    /// by definition and safe to delete.
+    nonisolated static func purgeUserInboxClipboardRecords() {
+        let dir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
+        for name in names where name.hasPrefix("record-clipboard-") {
+            try? fm.removeItem(atPath: dir + "/" + name)
         }
     }
 
@@ -2004,9 +1901,14 @@ final class AppState: ObservableObject {
             // AIAnalysisView/SettingsView write llm_config.json to user-home;
             // read from the same place, not dataDir (which may flip to the
             // system dir after a sysext upgrade — see uiStateDir comment).
+            // Same v1.21.6 migration as the loader above: the file's presence is
+            // the opt-in, so a missing `enabled` key means enabled. Reading it as
+            // a required binding made this status tile report "not configured"
+            // for anyone whose file predates the key — while the loader happily
+            // ran the backend.
             if let data = readUIState("llm_config.json"),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let enabled = json["enabled"] as? Bool, enabled,
+               json["enabled"] as? Bool ?? true,
                let provider = json["provider"] as? String {
                 detectedLLMProvider = provider
                 llmConfigured = true

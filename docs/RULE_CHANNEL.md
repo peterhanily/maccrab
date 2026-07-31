@@ -49,12 +49,36 @@ Manifest fields:
 
 ## The trust key
 
+> **STATUS: not provisioned.** The rule-channel keypair has never been generated,
+> so **no shipped build contains a `rules.pub`** and `maccrabctl rules update` /
+> `rules check-updates` fail closed on every install. Everything below describes
+> the implemented design; the channel becomes usable once a keyholder runs the
+> generation ceremony and the public half is committed. Until then, detection
+> rules ship with the app.
+
 The manifest is verified against a **separate `rules.pub`** key — **not** the
 app-signing key and **not** the plugin-catalog key. It is a 32-byte Curve25519
-public key bundled into the app at
-`…/MacCrab.app/Contents/Resources/rave-keys/rules.pub` (in a dev checkout,
-`Sources/MacCrabApp/Resources/rave-keys/rules.pub`; a debug build may point at a
-throwaway key via `MACCRAB_RAVE_RULES_PUB_PATH`).
+public key bundled into the app.
+
+Note the packaging path: SPM emits `Sources/MacCrabApp/Resources/**` into the
+resource bundle, so the key lands at
+`…/MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub` — the same
+place the sibling `catalog.pub` actually ships. The loader also probes the legacy
+`…/Contents/Resources/rave-keys/rules.pub`, but **no built bundle has ever
+contained that directory**, so a key placed only there would not be found. A debug
+build may point at a throwaway key via `MACCRAB_RAVE_RULES_PUB_PATH` (DEBUG-only).
+
+### To provision the channel
+
+Generate the keypair on the offline keyholder machine, commit only the public
+half, and confirm it lands in the resource bundle:
+
+```bash
+scripts/build-rules-manifest.sh keygen ./rules.key ./rules.pub   # rules.key NEVER leaves that machine
+cp rules.pub Sources/MacCrabApp/Resources/rave-keys/rules.pub
+# after a release build:
+ls MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub
+```
 
 A separate key **bounds the blast radius**: a leaked rules key can only push
 detection-only, additive rules (see containment below). It cannot sign an app,

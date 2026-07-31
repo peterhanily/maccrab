@@ -69,10 +69,13 @@ ls -la ~/Library/Application\ Support/com.apple.TCC/TCC.db
 
 ### Other causes for silent detection
 
-- **No rules loaded.** Check `maccrabctl rules list | wc -l` — should be
-  non-zero (roughly ~87 under the default stable rule profile, up to ~486
-  with the full profile enabled). If zero, run `make compile-rules` and
-  look for errors.
+- **No rules loaded.** Check `maccrabctl status` — the `Rules:` line reports
+  `<active> active / <loaded> loaded standard`, roughly 87 active of 438
+  compiled under the default stable rule profile (set `rule_profile: all` in
+  `daemon_config.json` to activate the rest). `rules list | wc -l` is *not*
+  this number: it counts every compiled rule plus four header lines,
+  irrespective of profile. If the active count is zero, run
+  `make compile-rules` and look for errors.
 - **Warm-up window.** Non-critical alerts are suppressed in the first 60
   seconds of daemon start, to avoid floods during replay of backlogged
   events. Critical matches always survive.

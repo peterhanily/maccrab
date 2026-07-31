@@ -35,7 +35,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing ~80 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics_*` plugin tools — incl. `forensics_run_analyzer` / `forensics_enrich` and `list_response_actions` / `set_response_action`; underscore-named since v1.19.1 for strict-MCP-client compatibility, with the legacy `forensics.*` dotted names still accepted as aliases)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 62 built-in tools plus per-plugin tools contributed by installed forensic plugins (31 on a default install → 93 total) for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools; the `forensics_*` case/plugin meta-tools are **built-in and always present** — incl. `forensics_run_analyzer` / `forensics_enrich` and `list_response_actions` / `set_response_action`; the *conditionally* present tools are the per-plugin ones, `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path`. Underscore-named since v1.19.1 for strict-MCP-client compatibility, with the legacy `forensics.*` dotted names still accepted as aliases)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -106,13 +106,13 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 | FSEventsCollector | File system events (non-root fallback) | Real-time |
 | EDRMonitor | EDR/RMM/insider threat/remote access tool scanning | 120s |
 | USBMonitor | USB device connect/disconnect | 10s |
-| ClipboardMonitor | Clipboard content + injection detection | 2s |
+| ClipboardMonitor | Clipboard content + injection detection | 3s |
 | UltrasonicMonitor | DolphinAttack/NUIT audio injection | Configurable |
 | RootkitDetector | Dual-API process cross-reference | 120s |
-| EventTapMonitor | Keylogger detection | Real-time |
+| EventTapMonitor | Keylogger detection | 30s |
 | SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
-| BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
-| MCPMonitor | MCP server configs across AI tools | Startup |
+| BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup, then 120s |
+| MCPMonitor | MCP server configs across AI tools | Startup, then 60s |
 | GitSecurityMonitor | Git credential-helper abuse, SSH-agent hijack, malicious git hooks | Real-time |
 | SDRDeviceMonitor | SDR USB devices + rapid display hotplug (no electromagnetic analysis) | 60s |
 
@@ -187,7 +187,7 @@ All LLM features degrade gracefully when no backend is configured. Cloud APIs ge
 
 **Safety**: Circuit breaker (3 failures → 5min cooldown), rate limiting (5s min interval), response size cap (50KB), SQL mutation prevention, prompt injection mitigation.
 
-**Files:** `Sources/MacCrabCore/LLM/` (16 files — backend protocol, 5 providers, service orchestrator, consensus + triage services, investigators, cache, sanitizer, prompts, shared types)
+**Files:** `Sources/MacCrabCore/LLM/` (13 files — backend protocol, 5 providers, service orchestrator, alert investigator + its structured schema, cache, sanitizer, prompts, shared types). v1.21.6 deleted `TriageService`, `AgenticInvestigator` and `LLMConsensusService` — ~890 lines with zero call sites in the app, CLI, MCP server or engine.
 
 ## MCP Server (AI Agent Integration)
 
@@ -195,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (~80 live in this build; varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the `forensics_*` plugin tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
+**Tools exposed (62 built-in + 31 per-plugin = 93 in this build; the per-plugin half varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the built-in `forensics_*` meta-tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . These are statically declared and always present; the plugin-contributed tools are the `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` family. Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
 
 | Tool | Purpose |
 |------|---------|
@@ -247,7 +247,7 @@ Key UX features:
 - Dark mode support (system-aware)
 - "What To Do" actionable guidance on alerts and campaigns
 - Campaign dismiss/restore workflow
-- 14 language localizations (~60-70% complete)
+- 14 language localizations, but thinner than the tables suggest: en.lproj defines 699 keys, while 557 of the 1005 keys the UI actually references have no table row at all and fall through to the call-site `defaultValue:` in every locale. Real coverage of visible strings is ~43%, not the 94-98% per-locale figure prerelease-check.sh reports (that percentage is computed over the 699-row table, 251 rows of which are dead). Gated by `LocalizationCoverageTests.missingEnKeyBudget`; see TRANSLATION.md
 - WCAG AA contrast compliance (documented in code)
 
 ## Daemon Configuration

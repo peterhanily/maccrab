@@ -17,6 +17,12 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     public let mode: V2DataSourceMode = .live
     public private(set) var lastErrorDescription: String? = nil
+    /// Surface-specific read-failure slot for the alerts store — see the
+    /// protocol doc. Set on a throwing read, CLEARED on the next successful
+    /// one, so a one-off SQLITE_BUSY mid-VACUUM can't permanently withhold the
+    /// Alerts "no open alerts" state (which would just be a different false
+    /// alarm).
+    public private(set) var alertsReadError: String? = nil
     public let dataDir: String?
 
     private let alertStore: AlertStore?
@@ -151,11 +157,22 @@ public final class V2LiveDataProvider: V2DataProvider {
                 since: since,
                 severity: nil, suppressed: nil, limit: limit
             )
-            return await Task.detached(priority: .userInitiated) {
+            let mapped = await Task.detached(priority: .userInitiated) {
                 raw.map(V2LiveDataProvider.toV2Alert)
             }.value
+            // A successful read retires the previous failure, so the Alerts
+            // error panel disappears on the next 5 s tick once the store is
+            // readable again.
+            alertsReadError = nil
+            return mapped
         } catch {
             lastErrorDescription = "alerts read: \(error)"
+            // UX-02: `return []` here is indistinguishable from a quiet
+            // machine, and the Alerts workspace rendered exactly that as the
+            // green "you're clear" empty state. Record the failure on its own
+            // slot so the workspace can render an error instead of an
+            // all-clear on a security product.
+            alertsReadError = "alerts read: \(error)"
             return []
         }
     }
@@ -256,7 +273,15 @@ public final class V2LiveDataProvider: V2DataProvider {
 
         let rulesURL = URL(fileURLWithPath: rulesPath)
         let engine = RuleEngine()
-        do { _ = try await engine.loadRules(from: rulesURL) }
+        // v1.21.6: apply the rule_profile gate to SINGLE-EVENT rules too. v1.21.5
+        // added it to loadCompositeRules but not here, so Detection › Rules showed
+        // ~428 rows as "Enabled" while the engine evaluates 87 — every out-of-
+        // profile rule was presented as an active detection with a working-looking
+        // toggle. Mirrors the daemon: profile "all" loads everything, anything
+        // else loads only "stable".
+        let profile = V2LiveDataProvider.ruleProfile(configDir: dir).lowercased()
+        let statuses: Set<String>? = (profile == "all") ? nil : ["stable"]
+        do { _ = try await engine.loadRules(from: rulesURL, enabledStatuses: statuses) }
         catch {
             lastErrorDescription = "rules read: \(error)"
             return []
@@ -389,6 +414,18 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// state — the engines skip out-of-profile rules at load, so the compiled
     /// `enabled` flag alone overstates what actually runs.
     nonisolated static func ruleProfile(configDir: String) -> String {
+        // Prefer the heartbeat: on a release install daemon_config.json is
+        // root-0600, so this uid-501 process can never read it and always fell
+        // back to "stable". That is right by accident on a default install and
+        // WRONG for any operator who set rule_profile: all — the dashboard would
+        // hide the rules the engine is actually running. heartbeat_rich.json is
+        // 0644 and carries the daemon's own effective profile.
+        let heartbeat = configDir + "/heartbeat_rich.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: heartbeat)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let profile = json["rule_profile"] as? String, !profile.isEmpty {
+            return profile
+        }
         let path = configDir + "/daemon_config.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -26,6 +26,13 @@ struct V2PreventionWorkspace: View {
     /// divergence (e.g. the threat-intel refresh re-enabling sinkhole/blocker)
     /// strands the switch showing a state the engine never reached (pre-GA review).
     @State private var pendingToggleSentAt: [String: Date] = [:]
+    /// Module key awaiting a DISABLE confirmation. Turning a prevention module
+    /// off stops live enforcement (hosts-file sinkholing, PF IP blocking, or the
+    /// LaunchAgent immutable-flag lock) with no undo and a ~30 s fire-and-forget
+    /// apply window — yet it used to fire straight off the switch, while
+    /// deleting one alert and resetting the Overview layout both confirmed.
+    /// Enabling stays one-click; only the disable direction is gated.
+    @State private var pendingDisableKey: String? = nil
 
     init(state: V2DashboardState) { self.state = state }
 
@@ -89,11 +96,26 @@ struct V2PreventionWorkspace: View {
         Binding(
             get: { pendingToggles[key] ?? enabled },
             set: { newValue in
-                pendingToggles[key] = newValue
-                pendingToggleSentAt[key] = Date()
-                pushPrevention(module: key, enabled: newValue)
+                // Disabling removes live enforcement — route it through the
+                // confirmation dialog instead of applying it on the click.
+                // The binding's `get` still reports the old value while the
+                // dialog is up, so the switch snaps back if the user cancels.
+                guard newValue else {
+                    pendingDisableKey = key
+                    return
+                }
+                applyToggle(module: key, enabled: true)
             }
         )
+    }
+
+    /// Record the optimistic value and drop the inbox request. Split out of
+    /// `toggleBinding` so the confirmed-disable path performs exactly the same
+    /// steps the (unconfirmed) enable path does.
+    private func applyToggle(module key: String, enabled: Bool) {
+        pendingToggles[key] = enabled
+        pendingToggleSentAt[key] = Date()
+        pushPrevention(module: key, enabled: enabled)
     }
 
     private func pushPrevention(module key: String, enabled: Bool) {
@@ -203,6 +225,50 @@ struct V2PreventionWorkspace: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .v2Panel()
+        // Confirm the DISABLE direction only (see pendingDisableKey). Named
+        // per module so the dialog states exactly what stops being enforced.
+        .confirmationDialog(
+            disableConfirmTitle(pendingDisableKey),
+            isPresented: Binding(get: { pendingDisableKey != nil },
+                                 set: { if !$0 { pendingDisableKey = nil } }),
+            presenting: pendingDisableKey
+        ) { key in
+            Button(role: .destructive) {
+                pendingDisableKey = nil
+                applyToggle(module: key, enabled: false)
+            } label: { Text(String(localized: "prevention.confirmDisableButton", defaultValue: "Turn off")) }
+            Button(role: .cancel) { pendingDisableKey = nil } label: {
+                Text(String(localized: "common.cancel", defaultValue: "Cancel"))
+            }
+        } message: { key in
+            Text(disableConfirmMessage(key))
+        }
+    }
+
+    private func disableConfirmTitle(_ key: String?) -> String {
+        switch key {
+        case "sinkhole":
+            return String(localized: "prevention.confirmDisable.sinkhole.title", defaultValue: "Stop sinkholing malicious domains?")
+        case "network_blocker":
+            return String(localized: "prevention.confirmDisable.networkBlocker.title", defaultValue: "Stop blocking malicious IPs?")
+        case "persistence_guard":
+            return String(localized: "prevention.confirmDisable.persistenceGuard.title", defaultValue: "Unlock the LaunchAgent directories?")
+        default:
+            return String(localized: "prevention.confirmDisable.title", defaultValue: "Turn off this prevention module?")
+        }
+    }
+
+    private func disableConfirmMessage(_ key: String) -> String {
+        switch key {
+        case "sinkhole":
+            return String(localized: "prevention.confirmDisable.sinkhole.body", defaultValue: "Known-malicious domains will resolve normally until you turn DNS Sinkhole back on.")
+        case "network_blocker":
+            return String(localized: "prevention.confirmDisable.networkBlocker.body", defaultValue: "Known-malicious IPs will no longer be PF-blocked until you turn Network Blocker back on.")
+        case "persistence_guard":
+            return String(localized: "prevention.confirmDisable.persistenceGuard.body", defaultValue: "LaunchAgent / LaunchDaemon directories lose the system-immutable flag, so anything can install persistence until you turn Persistence Guard back on.")
+        default:
+            return String(localized: "prevention.confirmDisable.body", defaultValue: "Live enforcement stops until you turn this module back on.")
+        }
     }
 
     @ViewBuilder

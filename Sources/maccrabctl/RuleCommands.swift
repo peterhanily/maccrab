@@ -21,7 +21,40 @@ extension MacCrabCtl {
         // (438) instead of inflating to 439 / showing a phantom "unknown" level.
         let jsonFiles = files.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.sorted()
 
+        // v1.21.6 (audit DET-12): a listing of title + level cannot distinguish
+        // "silent because nothing attacked me" from "silent because it never
+        // ran" — which is exactly the distinction that decides whether an EDR is
+        // trustworthy. Two facts the daemon already publishes close it:
+        //
+        //   * the effective rule_profile — the compiled `enabled` flag is only
+        //     the YAML-level switch, so all 338 experimental rules ship
+        //     enabled:true on disk and were listed as if they run, when the
+        //     default "stable" profile never loads them;
+        //   * rule_telemetry.json — evaluationCount / fireCount per rule, i.e.
+        //     which loaded rules were actually evaluated and how often they hit.
+        //
+        // Prefer the heartbeat's published profile: daemon_config.json is 0600
+        // root-owned, so reading it as the CLI's uid silently yields the
+        // "stable" default and would mislabel an `all`-profile install.
+        // Both inputs are optional — absent data annotates nothing rather than
+        // guessing.
+        var heartbeatProfile: String?
+        if let hbData = try? Data(contentsOf: URL(fileURLWithPath: supportDir + "/heartbeat_rich.json")),
+           let hb = try? JSONSerialization.jsonObject(with: hbData) as? [String: Any] {
+            heartbeatProfile = hb["rule_profile"] as? String
+        }
+        let profileEnablesAll =
+            (heartbeatProfile ?? ruleProfileFromConfig(supportDir: supportDir)).lowercased() == "all"
+        var telemetryByID: [String: RuleEngine.RuleStats] = [:]
+        if let snapshot = RuleEngine.readTelemetrySnapshot(at: supportDir + "/rule_telemetry.json") {
+            for stat in snapshot.stats { telemetryByID[stat.ruleId] = stat }
+        }
+
         print("Detection Rules (\(jsonFiles.count) total)")
+        if !telemetryByID.isEmpty {
+            print(ANSIColor.wrap(
+                "State tags cover the daemon's CURRENT boot only (rule_telemetry.json).", .gray))
+        }
         print("══════════════════════════════════════════════════════════════")
         print("\("Level".padding(toLength: 8, withPad: " ", startingAt: 0)) \("Title".padding(toLength: 50, withPad: " ", startingAt: 0)) Tags")
         print(String(repeating: "─", count: 80))
@@ -49,8 +82,30 @@ extension MacCrabCtl {
             var line = "\(levelStr.padding(toLength: 8, withPad: " ", startingAt: 0)) \(String(title.prefix(48)).padding(toLength: 50, withPad: " ", startingAt: 0)) \(String(tags.prefix(30)))"
             // Visually flag deprecated detections — retained (id/title/
             // suppressions stay valid) but disabled and non-firing.
-            if (json["status"] as? String)?.lowercased() == "deprecated" {
+            let ruleStatus = (json["status"] as? String)?.lowercased() ?? "experimental"
+            let ruleId = json["id"] as? String ?? ""
+            if ruleStatus == "deprecated" {
                 line += "  " + ANSIColor.wrap("[DEPRECATED]", .orange)
+            } else if !(profileEnablesAll || ruleStatus == "stable") {
+                // v1.21.6 (audit DET-12): NOT LOADED under the active profile.
+                // Previously indistinguishable from a running rule.
+                line += "  " + ANSIColor.wrap("[OFF: rule_profile]", .gray)
+            } else if let stats = telemetryByID[ruleId] {
+                line += stats.fireCount > 0
+                    ? "  " + ANSIColor.wrap("[matched \(stats.fireCount)x]", .yellow)
+                    : "  " + ANSIColor.wrap(
+                        "[quiet: \(stats.evaluationCount) evals, 0 matches]", .gray)
+            } else if telemetryByID.isEmpty {
+                // No telemetry snapshot at all (daemon not running, or it has
+                // not written one yet). Say nothing — mislabelling every rule
+                // dark would be worse than saying nothing.
+            } else {
+                // Loaded, the daemon HAS written telemetry for other rules, and
+                // this one has no entry: it was never evaluated once. That means
+                // its logsource has no live producer — the state that made the
+                // tcc_event rules (DET-06) look identical to healthy quiet rules
+                // from the operator's side.
+                line += "  " + ANSIColor.wrap("[DARK: never evaluated]", .red)
             }
             print(line)
         }

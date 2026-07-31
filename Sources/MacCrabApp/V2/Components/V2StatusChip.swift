@@ -27,6 +27,32 @@ public enum V2ChipKind: Sendable, Equatable {
         case .custom(let c):   return c
         }
     }
+
+    /// Text/glyph colour for V2StatusChip. NOT the same as `color`.
+    ///
+    /// The chip paints its label in the kind's hue on a 13% wash of that same
+    /// hue, so foreground and background move together and the pair stays
+    /// near-isoluminant however the base accent is tuned. Measured over the
+    /// wash on `panelBackground`, 9 of the 18 kind x mode combinations sat at
+    /// 3.28–4.42:1 — under WCAG AA 4.5:1 for the chip's 10pt semibold font.
+    /// These variants (base hue blended 30% toward the mode's text extreme)
+    /// lift the worst case to 5.34:1 without touching the wash or border.
+    var chipTextColor: Color {
+        switch self {
+        case .critical, .down:        return V2Theme.criticalChipText
+        case .high:                   return V2Theme.highChipText
+        case .medium:                 return V2Theme.mediumChipText
+        case .low:                    return V2Theme.lowChipText
+        case .healthy:                return V2Theme.healthyChipText
+        case .warning, .degraded:     return V2Theme.warningChipText
+        case .info, .data:            return V2Theme.dataChipText
+        case .neutral:                return V2Theme.neutralChipText
+        case .ai:                     return V2Theme.aiChipText
+        // Caller-supplied: no derived variant exists, so this one is on the
+        // call site. Only used by ad-hoc chips, none of which are severity.
+        case .custom(let c):          return c
+        }
+    }
 }
 
 public struct V2StatusChip: View {
@@ -49,7 +75,13 @@ public struct V2StatusChip: View {
             Text(label.localizedUppercase)
                 .font(V2Theme.chip())
         }
-        .foregroundStyle(kind.color)
+        // WCAG 1.4.3: was `kind.color`, which is also the colour of the 13%
+        // wash two lines below — foreground and background moved together, so
+        // 9 of 18 kind x mode combinations measured 3.28–4.42:1 on a panel.
+        // `chipTextColor` is the same hue pushed 30% toward the mode's text
+        // extreme; worst case is now 5.34:1. The wash and border deliberately
+        // stay on `kind.color` so the chip looks unchanged.
+        .foregroundStyle(kind.chipTextColor)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background(kind.color.opacity(0.13))
@@ -70,21 +102,31 @@ public struct V2StatusChip: View {
 
 extension V2ChipKind {
     /// Spoken-form severity name for VoiceOver. v1.12.0 RC28.
+    ///
+    /// i18n (2026-07): these were bare English literals while the app ships 14
+    /// localizations, and V2StatusChip splices this straight onto an already
+    /// localized `label` — so a French VoiceOver user heard "High severity:
+    /// Élevé", a half-translated line that breaks shared vocabulary with a
+    /// sighted colleague reading the same row. This is the highest-frequency
+    /// accessibility string in the product (every alert, trace, KPI and rule
+    /// row carries a chip), so it goes first. The 13 untranslated catalogs
+    /// fall back to `defaultValue`, which is correct behaviour and makes the
+    /// gap visible to translators instead of silent.
     var accessibilityName: String {
         switch self {
-        case .critical:   return "Critical"
-        case .high:       return "High severity"
-        case .medium:     return "Medium severity"
-        case .low:        return "Low severity"
-        case .healthy:    return "Healthy"
-        case .warning:    return "Warning"
-        case .degraded:   return "Degraded"
-        case .down:       return "Down"
-        case .info:       return "Informational"
-        case .neutral:    return "Neutral"
-        case .ai:         return "AI"
-        case .data:       return "Data"
-        case .custom:     return "Custom"
+        case .critical:   return String(localized: "ax.chip.critical", defaultValue: "Critical")
+        case .high:       return String(localized: "ax.chip.high", defaultValue: "High severity")
+        case .medium:     return String(localized: "ax.chip.medium", defaultValue: "Medium severity")
+        case .low:        return String(localized: "ax.chip.low", defaultValue: "Low severity")
+        case .healthy:    return String(localized: "ax.chip.healthy", defaultValue: "Healthy")
+        case .warning:    return String(localized: "ax.chip.warning", defaultValue: "Warning")
+        case .degraded:   return String(localized: "ax.chip.degraded", defaultValue: "Degraded")
+        case .down:       return String(localized: "ax.chip.down", defaultValue: "Down")
+        case .info:       return String(localized: "ax.chip.info", defaultValue: "Informational")
+        case .neutral:    return String(localized: "ax.chip.neutral", defaultValue: "Neutral")
+        case .ai:         return String(localized: "ax.chip.ai", defaultValue: "AI")
+        case .data:       return String(localized: "ax.chip.data", defaultValue: "Data")
+        case .custom:     return String(localized: "ax.chip.custom", defaultValue: "Custom")
         }
     }
 

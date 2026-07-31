@@ -77,7 +77,12 @@ struct V2AlertsWorkspace: View {
                 tabs: V2Workspace.alerts.tabs,
                 selected: Binding(
                     get: { state.selectedTabs[.alerts] ?? .alertsOpen },
-                    set: { if let v = $0 { state.selectedTabs[.alerts] = v } }
+                    // Route through selectTab → goto so the tab switch is
+                    // pushed onto history, recorded as a recent, and persisted.
+                    // Writing selectedTabs directly bypassed all three, which is
+                    // why ⌘[ from a tab jumped to a different workspace and tab
+                    // selection didn't survive quit.
+                    set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
             tabBody
@@ -844,7 +849,27 @@ struct V2AlertsWorkspace: View {
                 }
                 severityCards
                 searchBarMemoized(visible: visible)
-                if daemonReporting && loaded && !hasOpenAlerts {
+                if let readError = state.provider.alertsReadError {
+                    // UX-02: a store read that threw returns [] exactly like a
+                    // quiet machine, and the B6 heartbeat gate can't see it
+                    // (heartbeat_rich.json is written independently of
+                    // alerts.db). Pre-fix that rendered the green
+                    // "you're clear" panel over a failed read. The flag
+                    // self-clears on the next successful read, so a transient
+                    // busy-DB failure resolves itself on the next tick.
+                    V2ErrorState(
+                        title: String(localized: "alerts.readFailedTitle", defaultValue: "Couldn't read alerts"),
+                        body: String(localized: "alerts.readFailedBody", defaultValue: "The on-disk alert store could not be read (\(readError)), so this list is NOT an all-clear."),
+                        retry: {
+                            Task {
+                                await state.reconnectLiveDataIfStale()
+                                await reload()
+                            }
+                        }
+                    )
+                    .frame(minHeight: 280)
+                    .v2Panel()
+                } else if daemonReporting && loaded && !hasOpenAlerts {
                     V2EmptyState(
                         title: String(localized: "alerts.emptyOpenTitle", defaultValue: "No open alerts"),
                         body: String(localized: "alerts.emptyOpenBody", defaultValue: "MacCrab hasn't raised any un-suppressed alerts in the selected time range, and the engine is reporting live — you're clear."),
@@ -928,9 +953,12 @@ struct V2AlertsWorkspace: View {
             Text("Filtered to the tapped window")
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
+            // WCAG 1.4.3: `brand` as body text is 3.90:1 light / 3.65:1 on a
+            // panel. This is the time window the alert list is pinned to —
+            // see V2Theme.brandText.
             Text("\(tf.string(from: window.start)) – \(tf.string(from: window.end))")
                 .font(V2Theme.mono())
-                .foregroundStyle(V2Theme.brand)
+                .foregroundStyle(V2Theme.brandText)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
@@ -1031,6 +1059,8 @@ struct V2AlertsWorkspace: View {
                             .foregroundStyle(V2Theme.tertiaryText)
                     }
                     .buttonStyle(.plain)
+                    // WCAG 4.1.2: icon-only with no label and no tooltip.
+                    .accessibilityLabel(String(localized: "ax.clearSearch", defaultValue: "Clear search"))
                 }
             }
             .padding(.horizontal, 10)

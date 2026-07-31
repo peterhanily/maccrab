@@ -8,10 +8,22 @@ extension MacCrabCtl {
     static func listCampaigns(limit: Int) async {
         do {
             let store = try AlertStore(directory: maccrabDataDir())
-            let allRecent = try await store.alerts(since: Date.distantPast, limit: 500)
-            let campaigns = allRecent
-                .filter { $0.ruleId.hasPrefix("maccrab.campaign.") }
-                .prefix(max(0, limit))   // negative arg (e.g. `campaigns -1`) must not trap prefix(_:)
+            // FF-04: this used to fetch the newest 500 alerts and filter the
+            // campaign rows out IN PROCESS — i.e. the row cap was applied BEFORE
+            // the filter. On a busy host the most recent 500 alerts contain no
+            // campaign row at all, so the CLI printed "No campaigns recorded"
+            // (and the empty-state text below then helpfully explained the
+            // >=3-tactic threshold) while hundreds of campaigns, including
+            // critical coordinated_attack ones, sat in the table.
+            // `campaigns(before:pageSize:)` pushes `rule_id LIKE
+            // 'maccrab.campaign.%'` into SQL so the cap applies AFTER the
+            // filter. The MCP `get_campaigns` path already uses it; only the CLI
+            // was left on the legacy pattern.
+            // pageSize is clamped to 1...1000 by the store, and max(1, limit)
+            // keeps a negative arg (e.g. `campaigns -1`) from underflowing it.
+            let campaigns = try await store.campaigns(
+                before: nil, pageSize: max(1, limit)
+            ).items
 
             if campaigns.isEmpty {
                 print("No campaigns recorded.")

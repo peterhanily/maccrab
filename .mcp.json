@@ -1,5 +1,5 @@
 {
-  "_comment": "This file is for CLAUDE CODE developers working on this repo, pointing at the local dev build. For END USERS who installed via Homebrew, register maccrab-mcp from your $PATH — copy the `mcpServers` block into ~/.claude/settings.json or ~/.config/Claude/claude_desktop_config.json and replace the `command` value with the absolute path printed by `which maccrab-mcp` (typically /opt/homebrew/bin/maccrab-mcp on Apple Silicon, /usr/local/bin/maccrab-mcp on Intel).",
+  "_comment": "This file is for CLAUDE CODE developers working on this repo, pointing at the local dev build. For END USERS who installed via Homebrew or the DMG: the simplest registration is `claude mcp add maccrab -- \"$(which maccrab-mcp)\"`. To edit config by hand, Claude Code reads ~/.claude.json (NOT ~/.claude/settings.json) and Claude Desktop on macOS reads ~/Library/Application Support/Claude/claude_desktop_config.json (NOT ~/.config/Claude/...); set `command` to the absolute path printed by `which maccrab-mcp` (typically /opt/homebrew/bin/maccrab-mcp on Apple Silicon, /usr/local/bin/maccrab-mcp on Intel).",
   "mcpServers": {
     "maccrab": {
       "command": ".build/debug/maccrab-mcp",

@@ -18,6 +18,32 @@ extension MacCrabCtl {
             print("                 Dev:     sudo maccrabd  (or: make run-root)")
         }
 
+        // ── Kernel sensor ─────────────────────────────────────────────────
+        // Without this the CLI/MCP surfaces were strictly less informative than
+        // the dashboard: a total loss of the ES client left "Daemon: Running ✓"
+        // as the only status line while no kernel event was being collected at
+        // all. es_mode is the live result of the ES → eslogger → kdebug →
+        // nothing fallback chain; the two degradation flags already existed in
+        // the heartbeat but no CLI surface read them.
+        if daemonRunning, let sensor = sensorHealthFromHeartbeat(supportDir: supportDir) {
+            let native = sensor.mode == "native client"
+            let healthy = native && !sensor.splitDegraded && !sensor.sensorDegraded
+            print("Kernel Sensor:   \(sensor.mode) \(healthy ? "✓" : "⚠")")
+            if !native {
+                print("                 ⚠  Not using the native Endpoint Security client — kernel coverage is degraded or absent")
+                print("                    Check the ES entitlement and Full Disk Access, and whether another EDR holds the ES client slots")
+            }
+            if sensor.splitDegraded {
+                print("                 ⚠  ES file/exec client split degraded — a file-write flood can starve exec events")
+            }
+            if sensor.sensorDegraded {
+                print("                 ⚠  Sensor degraded: \(sensor.degradedDetail)")
+            }
+            if sensor.backpressureDropped > 0 {
+                print("                 ⚠  \(sensor.backpressureDropped) ES message(s) dropped at the worker in-flight cap since boot")
+            }
+        }
+
         // ── Database ──────────────────────────────────────────────────────
         if FileManager.default.fileExists(atPath: dbPath) {
             let attrs = try? FileManager.default.attributesOfItem(atPath: dbPath)
@@ -56,8 +82,11 @@ extension MacCrabCtl {
             let alertCount = (try? await alertStore.count()) ?? 0
 
             // Campaign count: alerts whose rule_id starts with "maccrab.campaign."
+            // FF-04: counted SQL-side. Deriving it from the newest-500 sample
+            // below reported "0 campaign(s)" on any host whose most recent 500
+            // alerts hold no campaign row, while hundreds sat in the table.
             let recentAlerts = (try? await alertStore.alerts(since: Date.distantPast, limit: 500)) ?? []
-            let campaignCount = recentAlerts.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }.count
+            let campaignCount = (try? await alertStore.campaignCount()) ?? 0
 
             // Unsuppressed critical/high in last 24h
             let cutoff = Date().addingTimeInterval(-86400)
@@ -192,11 +221,20 @@ extension MacCrabCtl {
 
         // ── Suppressions ──────────────────────────────────────────────────
         let suppressFile = (supportDir as NSString).appendingPathComponent("suppressions.json")
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)),
+        let suppressData = try? Data(contentsOf: URL(fileURLWithPath: suppressFile))
+        if let data = suppressData,
            let suppressions = try? JSONDecoder().decode([String: [String]].self, from: data),
            !suppressions.isEmpty {
             let totalPaths = suppressions.values.reduce(0) { $0 + $1.count }
             print("Suppressions:    \(suppressions.count) rule(s), \(totalPaths) path(s)")
+        } else if let data = suppressData,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let entries = json["entries"] as? [[String: Any]] {
+            // v2 store (SuppressionManager's `{"version": 2, "entries": [...]}`).
+            // The daemon rewrites the file into this shape on first load, so the
+            // v1 decode above fails on every running install and status reported
+            // "None configured" while the allowlist was in force.
+            print("Suppressions:    \(entries.count) allowlist entry(ies) — see 'maccrabctl allow list'")
         } else {
             print("Suppressions:    None configured")
         }
@@ -238,12 +276,24 @@ extension MacCrabCtl {
         return false
     }
 
-    /// v1.21.5: read `rule_profile` from daemon_config.json (default "stable"
-    /// — the daemon's own default, and what an unknown value falls back to).
-    /// Direct JSONSerialization read, mirroring ConfigCommands' `get` path.
-    /// A root-owned unreadable config also yields "stable" — same as the
-    /// daemon default, so the common case stays honest.
+    /// v1.21.5: the effective `rule_profile`, used to compute sequence-rule
+    /// coverage. Prefer the heartbeat: on a release install daemon_config.json
+    /// is root-0600, so this uid-501 process can NEVER read it and always fell
+    /// back to "stable". That is right by accident on a default install and
+    /// wrong for any operator who followed this command's own hint and set
+    /// `rule_profile: all` — the sequence count would keep reporting the stable
+    /// subset while the heartbeat-derived single-event count jumped. The daemon
+    /// publishes its own effective profile into the 0644 heartbeat_rich.json
+    /// (DaemonTimers), which is exactly what V2LiveDataProvider.ruleProfile
+    /// already reads; keep the config read as a dev fallback for a non-root
+    /// `swift run maccrabd` install where the config IS readable.
     static func ruleProfileFromConfig(supportDir: String) -> String {
+        let heartbeat = supportDir + "/heartbeat_rich.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: heartbeat)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let profile = json["rule_profile"] as? String, !profile.isEmpty {
+            return profile
+        }
         let path = supportDir + "/daemon_config.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -290,5 +340,28 @@ extension MacCrabCtl {
             return nil
         }
         return (active, loaded)
+    }
+
+    /// Kernel-sensor health from the rich heartbeat: which event source the
+    /// boot-time fallback chain settled on, plus the degradation flags the
+    /// daemon already tracked but no CLI surface read. Returns nil when the
+    /// heartbeat is missing or predates the `es_mode` key (older daemon), in
+    /// which case the caller prints nothing rather than a misleading red.
+    static func sensorHealthFromHeartbeat(supportDir: String)
+        -> (mode: String, splitDegraded: Bool, sensorDegraded: Bool,
+            degradedDetail: String, backpressureDropped: UInt64)? {
+        let path = supportDir + "/heartbeat_rich.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let mode = json["es_mode"] as? String else {
+            return nil
+        }
+        return (
+            mode,
+            (json["es_client_split_degraded"] as? Bool) ?? false,
+            (json["es_sensor_degraded"] as? Bool) ?? false,
+            (json["es_sensor_degraded_detail"] as? String) ?? "",
+            (json["es_copy_backpressure_dropped_total"] as? NSNumber)?.uint64Value ?? 0
+        )
     }
 }

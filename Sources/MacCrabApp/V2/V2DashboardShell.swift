@@ -10,14 +10,28 @@ struct V2DashboardShell: View {
     @ObservedObject var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "dark"
+    // A11y: tri-state, defaulting to "system". Pre-fix this stored only
+    // "light"/"dark" and defaulted to "dark", and `resolvedColorScheme` could
+    // never return nil — the SwiftUI way of saying "follow the OS" — so
+    // `.preferredColorScheme` unconditionally overrode
+    // NSApp.effectiveAppearance. A user who runs macOS in Light, commonly
+    // because dark mode halos with astigmatism, got a dark window on every
+    // fresh install with no "System" option anywhere; the only escape was an
+    // icon toggle in the top bar discoverable by tooltip alone. Returning nil
+    // also lets the OS's increased-contrast appearances through, which the
+    // hard override was suppressing.
+    @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "system"
 
     init(appState: AppState) {
         self.appState = appState
     }
 
-    private var resolvedColorScheme: ColorScheme {
-        colorSchemeRaw == "light" ? .light : .dark
+    private var resolvedColorScheme: ColorScheme? {
+        switch colorSchemeRaw {
+        case "light": return .light
+        case "dark":  return .dark
+        default:      return nil   // follow the system appearance
+        }
     }
 
     var body: some View {

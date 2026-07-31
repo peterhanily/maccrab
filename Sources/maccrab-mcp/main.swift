@@ -14,7 +14,7 @@
 //   get_alert_detail   — Full alert detail: description, LLM investigation, D3FEND, ancestry
 //   suppress_campaign  — Suppress a campaign and all its contributing alerts
 //   get_ai_alerts      — AI Guard alert stream (credential fence, boundary, injection, MCP)
-//   scan_text          — Prompt injection scan via Forensicate.ai (self-protection for AI agents)
+//   scan_text          — Prompt-injection marker scan, native/no dependency (self-protection for AI agents)
 //
 // Usage:
 //   Register in Claude Code settings:
@@ -142,11 +142,24 @@ func resolveDataDir() -> String {
     let userDB = userDir + "/events.db"
     let systemDB = systemDir + "/events.db"
 
+    // v1.21.6 (audit DL-08): compare LAST WRITE, not the main file's mtime. In
+    // WAL mode the `.db` mtime only advances at CHECKPOINT, so this comparison
+    // could resolve an AI agent's whole MCP session against a frozen dev store
+    // while the dashboard read the live one — the worst shape of wrong, because
+    // every tool answers confidently from a snapshot. Folding in the `-wal`
+    // mtime makes the choice track writes. Kept in lockstep with
+    // maccrabctl/Helpers.swift and AppState so all resolvers agree.
+    func lastWrite(_ path: String) -> Date? {
+        let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
+        guard let main else { return wal }
+        guard let wal else { return main }
+        return max(main, wal)
+    }
+
     if fm.isReadableFile(atPath: systemDB) {
-        let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
-        let userMod = fm.fileExists(atPath: userDB)
-            ? (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
-            : nil
+        let sysMod = lastWrite(systemDB)
+        let userMod = fm.fileExists(atPath: userDB) ? lastWrite(userDB) : nil
         if let s = sysMod, userMod == nil || s >= userMod! { return systemDir }
     }
     if fm.fileExists(atPath: userDB) { return userDir }
@@ -392,7 +405,11 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "get_alert_detail",
-        "description": "Get full detail for a single alert by ID: complete description (no truncation), LLM investigation verdict and suggested actions, MITRE D3FEND mitigations, parent process ancestry, and remediation hints. Use after get_alerts to deep-dive a specific alert.",
+        // Ancestry was never emitted — the handler prints no lineage and its
+        // closing line pointed at a get_events search that cannot match (see
+        // handleGetAlertDetail). Claim only what is returned, and name the
+        // pivot that does resolve ancestry.
+        "description": "Get full detail for a single alert by ID: complete description (no truncation), LLM investigation verdict and suggested actions, MITRE D3FEND mitigations, and the rule's remediation hint when it carries one. Process ancestry is NOT included here — pivot with trace_from_event using the event id this tool prints. Use after get_alerts to deep-dive a specific alert.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -426,7 +443,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "scan_text",
-        "description": "Scan text for prompt injection attacks using MacCrab's built-in Forensicate.ai scanner (87+ rules). An AI agent can call this before processing untrusted input — e.g. file contents, web pages, user-supplied prompts — to check for jailbreaks, DAN personas, encoded payloads, and multi-vector attacks. Returns verdict, confidence score, and matched rule names.",
+        "description": "Scan text for prompt-injection markers using MacCrab's built-in native scanner. An AI agent can call this before processing untrusted input — file contents, web pages, user-supplied prompts. COVERAGE, STATED PLAINLY: 25 literal case-insensitive substring signatures across 7 categories (instruction-override, jailbreak, prompt-extraction, role-manipulation, tool-poisoning, structural-injection, exfiltration) plus an invisible-unicode check. It is substring matching, NOT obfuscation-resistant — base64, homoglyph, and split-token payloads pass — and text shorter than 10 characters is always reported safe. Returns a verdict, a confidence score, and the matched category names. Treat a clean result as 'no known literal marker found', not as proof the input is safe.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -450,7 +467,11 @@ let tools: [[String: Any]] = [
     // ─── v1.10 TraceGraph tools ────────────────────────────────────
     [
         "name": "get_traces",
-        "description": "List recent causal traces from the v1.10 TraceGraph engine. Each trace is a materialized provenance graph anchored on a critical event (loader spawn, honeyfile read, etc.) with its full process / file / network ancestry. Returns id, title, anchor verdict, severity, status, node + edge counts, and timestamps. Pair with get_trace_detail to drill into one.",
+        // There is no "anchor verdict" field on Trace (id / title /
+        // anchorEventId / severity / confidence / status / timestamps only), so
+        // the description named something the model cannot supply. Report what
+        // the handler now actually returns.
+        "description": "List recent causal traces from the v1.10 TraceGraph engine. Each trace is a materialized provenance graph anchored on a critical event (loader spawn, honeyfile read, etc.) with its full process / file / network ancestry. Returns id, title, severity, status, confidence, the anchor EVENT ID, distinct entity + edge counts, and created/updated timestamps. Pair with get_trace_detail to drill into one.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -472,7 +493,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "hunt_trace",
-        "description": "Substring search across trace titles and anchor verdicts. Returns matching traces with a one-line summary. Useful for an agent investigating a known process or path — pass `query: \"loader\"` or `query: \".aws/credentials\"`.",
+        "description": "Substring search over TraceGraph trace TITLES only (tracegraph.db — causal provenance materialised from kernel events). Titles are a small fixed vocabulary such as \"Credential file access\" or \"Persistence mechanism created\", so this does NOT match file paths or process names — pass `query: \"credential\"`, not `query: \".aws/credentials\"`. For AI-agent OTLP spans use `get_agent_spans`; to search event content use `hunt`.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -483,8 +504,24 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "get_agent_spans",
+        "description": "Query AGENT TRACES — OTLP spans exported by AI coding tools (traces.db), showing the prompt -> LLM request -> tool call -> execution chain for an agent session. This is a DIFFERENT store from `get_traces`/`hunt_trace` (tracegraph.db, kernel-derived causal provenance). Pass `search` to match span names, attribute keys, tool names and file paths; `trace_id` to expand one trace. Note `claude_code.tool.blocked_on_user` marks a tool call the human DENIED — visible nowhere else, since a denied call spawns no process.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "search": ["type": "string", "description": "Substring to match against span names, attribute keys and path-shaped values"],
+                "trace_id": ["type": "string", "description": "Expand a single trace by id (from a prior call)"],
+                "limit": ["type": "integer", "description": "Max spans to return (default 100, max 1000)", "default": 100],
+            ],
+        ] as [String: Any],
+    ],
+    [
         "name": "verify_bundle",
-        "description": "Verify a .maccrabtrace bundle file: schema, Merkle root, signature, and replay determinism. Use to confirm a bundle hasn't been tampered with before forwarding it to a SOC or legal hold. Returns per-check pass/fail + the trace id + signing key fingerprint.",
+        // BundleVerifier does NOT replay — its own header splits validate /
+        // verify (tamper-evidence) from replay, and nothing in the handler
+        // executes a rule. Claiming replay determinism is exactly the claim
+        // that matters for the legal-hold use case this description invokes.
+        "description": "Verify a .maccrabtrace bundle file's TAMPER EVIDENCE: structural schema, artifact Merkle root, and chain-head signature (plus a TOFU key pin by trace id). Replay determinism is NOT checked — use `maccrabctl trace replay` for that. Use to confirm a bundle hasn't been modified since signing before forwarding it to a SOC or legal hold. Returns overall pass/fail, the failing stage, the trace id and the signing key fingerprint.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -1046,6 +1083,8 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetTraceDetail(args)
     case "hunt_trace":
         return await handleHuntTrace(args)
+    case "get_agent_spans":
+        return await handleGetAgentSpans(args)
     case "verify_bundle":
         return await handleVerifyBundle(args)
     case "trace_from_event":
@@ -1411,6 +1450,11 @@ private func resolveMCPLLMService() async -> LLMService? {
     let configPath = dataDir + "/llm_config.json"
     if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        // Same v1.21.6 default-flip migration as DaemonSetup: the file's presence
+        // is the opt-in, since only Settings > AI Backend writes it. Otherwise
+        // `hasConfig` below reads the new `false` default and every existing
+        // user's MCP server drops to heuristic fallback after an upgrade.
+        config.enabled = true
         if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
         if let provider = json["provider"] as? String {
             config.provider = LLMProvider(rawValue: provider) ?? config.provider
@@ -1500,6 +1544,9 @@ func handleAnalyzePackageMetadata(_ args: [String: Any]) async -> Any {
           let registry = PackageMetadataAnalyzer.Registry(rawValue: registryRaw) else {
         return toolError("Error: 'name' and 'registry' (npm|pypi) required")
     }
+    // Egress-gated (.config tier) — record it. This makes an outbound registry
+    // request from the operator's IP, so the fact and the target are auditable.
+    auditLog("analyze_package_metadata", details: "registry=\(registry.rawValue) name=\(name) ppid=\(getppid())")
     let analyzer = PackageMetadataAnalyzer()
     guard let result = await analyzer.analyze(packageName: name, registry: registry) else {
         return toolError("Failed to fetch metadata for \(name) on \(registry.rawValue)")
@@ -1523,6 +1570,9 @@ func handleVerifyPackageAttestation(_ args: [String: Any]) async -> Any {
         return toolError("Error: 'name', 'version', and 'registry' (npm|pypi) required")
     }
     let priorBuilder = args["prior_builder"] as? String
+    // Egress-gated (.config tier) — record it. This makes an outbound registry
+    // request from the operator's IP, so the fact and the target are auditable.
+    auditLog("verify_package_attestation", details: "registry=\(registry.rawValue) name=\(name)@\(version) ppid=\(getppid())")
     let enricher = AttestationEnricher()
     let result = await enricher.verify(packageName: name, version: version, registry: registry, priorBuilder: priorBuilder)
     var lines: [String] = ["Attestation: \(name)@\(version) (\(registry.rawValue))"]
@@ -1821,10 +1871,26 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
         }
 
         var lines: [String] = [header]
+        // Cross-surface parity: `maccrabctl alerts` EXCLUDES maccrab.campaign.*
+        // roll-ups (counting them separately) and INCLUDES suppressed rows;
+        // this tool did the opposite on both counts, so the same question got
+        // different answers and neither difference was visible in the output.
+        // Deliberately NOT changing which rows are returned: post-filtering
+        // would break the keyset cursor's "count == limit implies more pages"
+        // contract and could silently truncate paging. Label instead.
+        let campaignRollups = alerts.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }.count
+        if campaignRollups > 0 {
+            lines.append("(\(campaignRollups) of these are maccrab.campaign.* ROLL-UPs that also summarise other rows listed here — do not count them as separate incidents; use get_campaigns for the campaign view.)")
+        }
+        if !includeSuppressed {
+            lines.append("(Suppressed alerts are HIDDEN by default — pass include_suppressed:true to include them. `maccrabctl alerts` shows them inline, so counts will differ.)")
+        }
         for alert in alerts {
             let time = isoFormatter.string(from: alert.timestamp)
+            let marks = (alert.ruleId.hasPrefix("maccrab.campaign.") ? " [CAMPAIGN ROLL-UP]" : "")
+                + (alert.suppressed ? " [SUPPRESSED]" : "")
             lines.append("")
-            lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
+            lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)\(marks)")
             lines.append("  Time: \(time)")
             lines.append("  ID: \(alert.id)")
             if let proc = alert.processName { lines.append("  Process: \(proc)") }
@@ -2223,7 +2289,14 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
     )
     do {
         let v = try await AgentSessionBundle.verify(at: URL(fileURLWithPath: path), trustSubstrate: ts)
-        let verdict = (v.merkleOk && v.signed && v.signatureOk) ? "verified"
+        // A valid signature from a FOREIGN signer is not tamper. Pre-fix any
+        // bundle exported on another Mac fell through to "TAMPERED / invalid"
+        // because verify() could only ever check this install's own key — a
+        // false tamper accusation on evidence the tool tells users to share.
+        let verdict = (v.merkleOk && v.signed && v.signatureOk)
+            ? (v.signerIsLocalInstall
+                ? "verified"
+                : "verified (FOREIGN signer — signature is valid but the key is not anchored to this install)")
             : (v.merkleOk && !v.signed) ? "unsigned (content hash-rooted only — forgeable)"
             : "TAMPERED / invalid"
         return ["content": [["type": "text", "text": jsonStringify([
@@ -2231,6 +2304,8 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
             "merkle_ok": v.merkleOk,
             "signed": v.signed,
             "signature_ok": v.signatureOk,
+            "signer_fingerprint": v.signerFingerprint,
+            "signer_is_local_install": v.signerIsLocalInstall,
             "verdict": verdict,
         ] as [String: Any])]]]
     } catch {
@@ -2289,7 +2364,24 @@ func handleGetStatus() async -> Any {
     let rulesDir = dataDir + "/compiled_rules"
     let ruleCount = (try? fm.contentsOfDirectory(atPath: rulesDir))?
         .filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.count ?? 0
-    lines.append("Rules Loaded: \(ruleCount)")
+
+    // Report EFFECTIVE coverage, not the on-disk file count. Under the default
+    // `stable` profile these diverge sharply (~438 compiled / ~87 enabled), and
+    // this is the tool every agent posture check starts with — reporting the file
+    // count alone overstated active detection roughly 5x. The heartbeat is the
+    // daemon's own account and is world-readable; fall back to the file count
+    // only when it is missing or stale.
+    let hb = (try? Data(contentsOf: URL(fileURLWithPath: dataDir + "/heartbeat_rich.json")))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    if let hb, let active = hb["rules_active"] as? Int, let loaded = hb["rules_loaded"] as? Int {
+        let profile = (hb["rule_profile"] as? String) ?? "stable"
+        lines.append("Rules: \(active) enabled / \(loaded) compiled (rule_profile: \(profile))")
+        if active < loaded {
+            lines.append("  \(loaded - active) rules are compiled but NOT evaluated under this profile.")
+        }
+    } else {
+        lines.append("Rules Compiled: \(ruleCount)  (enabled count unavailable — daemon heartbeat not readable)")
+    }
 
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
@@ -2439,7 +2531,13 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
         }
 
         lines.append("")
-        lines.append("Use get_events with search='\(alert.eventId)' to see the triggering event and full process ancestry.")
+        // The event id is NOT searchable: events_fts indexes process_name /
+        // process_path / process_commandline / file_path / network_dest_ip /
+        // tcc_service / tcc_client, and EventStore.search's LIKE fallback
+        // covers the same seven columns — `id` appears in neither. So
+        // get_events search='<uuid>' could never match and this line handed the
+        // agent a guaranteed dead end. trace_from_event takes an exact event id.
+        lines.append("Pivot: trace_from_event with event_id='\(alert.eventId)' to reach the containing causal trace, then get_trace_detail for the full process ancestry.")
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
@@ -2535,44 +2633,82 @@ func handleScanText(_ args: [String: Any]) async -> Any {
         return toolError("Error: text too long (max 10000 characters)")
     }
 
-    let scanner = PromptInjectionScanner()
-    guard await scanner.isAvailable else {
-        return toolError("Prompt injection scanner not available. Install forensicate to enable this tool:\n  pip install forensicate-ai")
-    }
-
-    guard let result = await scanner.scan(text) else {
-        return toolError("Scan returned no result (possible timeout or parse error).")
-    }
+    // v1.21.6: native `ClipboardInjectionDetector` instead of shelling out to a
+    // `forensicate` CLI. The advertised `pip install forensicate-ai` 404s on PyPI,
+    // so this tool could only ever return an install hint — an agent calling it
+    // before processing untrusted input got no protection at all.
+    let result = await ClipboardInjectionDetector().scan(text)
 
     var lines: [String] = ["Prompt Injection Scan"]
     lines.append("═══════════════════════════════════")
-    lines.append("Safe:       \(!result.isPositive)")
-    lines.append("Confidence: \(result.confidence)%")
+    lines.append("Safe:       \(result == nil)")
+    lines.append("Confidence: \(result?.confidence ?? 0)%")
 
-    if result.isPositive {
+    if let result {
         lines.append("⚠️  INJECTION DETECTED")
-        if !result.reasons.isEmpty {
-            lines.append("Reasons:")
-            // v1.12.0 RC25 (privacy): Forensicate's reason strings can
-            // echo portions of the scanned text. Route through
-            // LLMSanitizer so paths / credential shapes / private IPs
-            // never round-trip back into the AI agent's context.
-            for r in result.reasons { lines.append("  - \(LLMSanitizer.sanitize(r))") }
-        }
-        if !result.matchedRules.isEmpty {
-            lines.append("Matched Rules:")
-            for rule in result.matchedRules.prefix(10) {
-                lines.append("  [\(rule.severity.uppercased())] \(rule.ruleName)")
-            }
-        }
-        if !result.compoundThreats.isEmpty {
-            lines.append("Compound Threats: \(result.compoundThreats.joined(separator: ", "))")
-        }
+        lines.append("Severity:   \(String(describing: result.severity).uppercased())")
+        lines.append("Patterns:")
+        // Pattern labels are static, but sanitize anyway so nothing derived from
+        // the scanned text can round-trip back into the agent's context.
+        for p in result.patterns.prefix(10) { lines.append("  - \(LLMSanitizer.sanitize(p))") }
     } else {
         lines.append("✓ No injection patterns detected")
     }
 
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+// MARK: - Agent Traces (OTLP spans) handler
+
+/// Reader for `traces.db`. Before v1.21.6 NO MCP tool could see a span — the
+/// store had exactly one consumer in the whole product, the dashboard tab.
+func handleGetAgentSpans(_ args: [String: Any]) async -> Any {
+    let dataDir = resolveDataDir()
+    let path = dataDir + "/traces.db"
+    guard FileManager.default.fileExists(atPath: path) else {
+        return toolError("No agent-trace store at \(path). Agent Traces is opt-in — see docs/AGENT_TRACES.md.")
+    }
+    // encryption: nil deliberately. This handler renders only the structural
+    // columns (never `attributes_json`), so it does not need the decryption key —
+    // and constructing DatabaseEncryption here would reach for the Keychain from a
+    // non-interactive stdio server, which can block indefinitely.
+    let store: TraceStore
+    do { store = try TraceStore(path: path, encryption: nil) }
+    catch { return toolError("Cannot open agent-trace store: \(error.localizedDescription)") }
+
+    let limit = min(max((args["limit"] as? Int) ?? 100, 1), 1000)
+    do {
+        let spans: [SpanRecord]
+        if let traceId = args["trace_id"] as? String, !traceId.isEmpty {
+            spans = try await store.spansForTrace(traceId)
+        } else if let search = args["search"] as? String, !search.isEmpty {
+            spans = try await store.searchSpans(matching: search, limit: limit)
+        } else {
+            let ids = try await store.recentTraceIds(limit: max(1, limit / 4))
+            var acc: [SpanRecord] = []
+            for id in ids { acc.append(contentsOf: try await store.spansForTrace(id)) }
+            spans = acc
+        }
+        let total = try await store.count()
+        guard !spans.isEmpty else {
+            return ["content": [["type": "text", "text": "No matching spans (\(total) in store)."]]]
+        }
+        var lines = ["Agent Traces — \(spans.count) span(s) of \(total) in store"]
+        var lastTrace = ""
+        for sp in spans.sorted(by: { $0.startNs < $1.startNs }) {
+            if sp.traceId != lastTrace {
+                lastTrace = sp.traceId
+                lines.append("")
+                lines.append("trace \(sp.traceId)  tool=\(sp.agentTool?.rawValue ?? "-")")
+            }
+            let ms = max(0, Int((sp.endNs &- sp.startNs) / 1_000_000))
+            let nest = sp.parentSpanId == nil ? "" : "  ↳ "
+            lines.append("  \(nest)\(sp.spanName)  (\(ms)ms)  span=\(sp.spanId)")
+        }
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return toolError("Agent-span query failed: \(error.localizedDescription)")
+    }
 }
 
 // MARK: - v1.10 TraceGraph handlers
@@ -2622,16 +2758,22 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
         }
         var lines = ["\(traces.count) trace(s):"]
         for t in traces {
-            // v1.11.1 (audit perf HIGH): O(1) memberCount via dedicated
-            // SQL query instead of a full loadTrace round-trip per row.
-            // Pre-fix this was an N+1 — 200 traces × 2 SQL queries each
-            // + full member-set deserialization just to read .count.
-            let nodes = (try? await store.memberCount(traceId: t.id)) ?? 0
+            // v1.11.1 (audit perf HIGH): one O(1) SQL query per row instead of
+            // a full loadTrace round-trip. Now counts entities and edges
+            // SEPARATELY: memberCount returned raw trace_membership rows, which
+            // mix entity rows and edge rows, so this printed "Nodes: 3" for a
+            // trace `maccrabctl trace graph` renders as "2 entities, 1 edges".
+            // The edge count is also the number that says whether a trace is a
+            // two-node chain or a real campaign, and it was never reported.
+            let counts = (try? await store.graphCounts(traceId: t.id)) ?? (entities: 0, edges: 0)
             lines.append("")
             lines.append("[\(t.severity.uppercased())] \(t.title)  (id: \(t.id))")
             lines.append("  Status:    \(t.status)")
             lines.append("  Anchor:    \(t.anchorEventId)")
-            lines.append("  Nodes:     \(nodes)")
+            lines.append("  Confidence: \(String(format: "%.2f", t.confidence))")
+            lines.append("  Entities:  \(counts.entities)")
+            lines.append("  Edges:     \(counts.edges)")
+            lines.append("  Created:   \(isoFormatter.string(from: t.createdAt))")
             lines.append("  Updated:   \(isoFormatter.string(from: t.updatedAt))")
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
@@ -2745,31 +2887,80 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
     // agent verifying a bundle via MCP also gets pin-on-first / reject-on-
     // key-change. Pinned by trace_id; first verify of an unseen trace_id is
     // trusted, a later rewrite-and-resign with a swapped key then fails.
-    // The pin store lives next to the trace data this server already reads.
+    //
+    // The store MUST live somewhere this (unprivileged) server can WRITE.
+    // It used to be `dataDir`, which resolveDataDir() points at the root-owned
+    // /Library/Application Support/MacCrab on any normal install; the uid-501
+    // MCP server cannot create files there, TraceKeyPinStore.save swallows the
+    // failure (`catch { return }`), so NO pin was ever recorded and every
+    // verify silently ran unpinned — a rewrite-and-resign with an attacker's
+    // key still reported "✓ Verified". mcpUserDir() is uid-writable and is the
+    // same path TraceKeyPinStore's default resolves to, so maccrabctl and this
+    // server now share ONE anchor set instead of diverging.
     var options = BundleVerifier.Options()
-    let pinStore = TraceKeyPinStore(directory: dataDir)
+    let pinStore = TraceKeyPinStore(directory: mcpUserDir())
     let traceId = (try? Data(contentsOf: bundleDir.appendingPathComponent("manifest.json")))
         .flatMap { try? canonicalJSONDecoder().decode(BundleManifest.self, from: $0) }?
         .traceId
+    var pinApplied = false
     if let traceId, let pinned = pinStore.pinnedFingerprint(forTraceId: traceId) {
         options.pinnedKeyFingerprint = pinned
+        pinApplied = true
     }
     let outcome = await BundleVerifier.verify(at: bundleDir, options: options)
+    // Read the signing-key fingerprint ONCE and use it twice: to seed the TOFU
+    // pin and to report it. It used to be decoded only inside the success
+    // branch and never printed, so the tool could not return the fingerprint
+    // its own description promises — and never surfaced it on failure, which is
+    // precisely when an operator needs to know which key signed the thing.
+    let signingFingerprint = (try? Data(contentsOf: bundleDir.appendingPathComponent("integrity/chain_head_signature.json")))
+        .flatMap { try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: $0) }?
+        .signingKeyFingerprint
     // TOFU: on a clean first verify, record the key we just trusted.
-    if outcome.exitCode == 0, let traceId,
-       let sigData = try? Data(contentsOf: bundleDir.appendingPathComponent("integrity/chain_head_signature.json")),
-       let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: sigData) {
-        pinStore.pinIfAbsent(traceId: traceId, fingerprint: sig.signingKeyFingerprint)
+    if outcome.exitCode == 0, let traceId, let signingFingerprint {
+        pinStore.pinIfAbsent(traceId: traceId, fingerprint: signingFingerprint)
     }
     if let tmpDir { try? FileManager.default.removeItem(at: tmpDir) }
     var lines = ["Bundle verification — exit \(outcome.exitCode)"]
     lines.append("═══════════════════════════════════")
     lines.append("Path:    \(url.lastPathComponent)")
+    lines.append("Trace:   \(traceId ?? "(manifest unreadable)")")
+    // The fingerprint is read out of the bundle, so on an UNPINNED verify it is
+    // whatever the signer — legitimate or not — wrote there. Say so inline; the
+    // Result line below is what states whether it was corroborated against a
+    // previously pinned anchor.
+    lines.append("Signing key: \(signingFingerprint ?? "(unreadable)")\(pinApplied ? "" : " (bundle-claimed, unpinned)")")
     if outcome.exitCode == 0 {
-        lines.append("Result:  ✓ Verified")
+        // Do not print a bare "Verified" for an UNPINNED bundle. With no pin,
+        // BundleVerifier only proved the bundle is self-consistent — it hashes
+        // and signature-checks against the key the BUNDLE ships, which is
+        // exactly what an attacker who rewrote and re-signed it would present.
+        // The caller (an AI agent) has to be able to tell the two apart.
+        if pinApplied {
+            lines.append("Result:  ✓ Verified (signing key matches the pinned anchor for this trace)")
+        } else {
+            lines.append("Result:  ✓ Self-consistent (UNPINNED — signing key not previously anchored; trust-on-first-use)")
+        }
     } else {
         lines.append("Result:  ✗ Failed")
         lines.append("Reason:  \(String(describing: outcome.kind))")
+        // Name the stage that rejected the bundle. BundleVerifier short-circuits
+        // in a fixed order and its exit codes are stage-specific (see the
+        // BundleValidator.Kind comments and BundleVerifier's pipeline header),
+        // so the code maps to a stage — except exit 1, which is returned both by
+        // the structural validator and by integrity-artifact decode failures.
+        let stage: String
+        switch outcome.exitCode {
+        case 2:  stage = "artifact Merkle root — bundle contents changed since signing"
+        case 3:  stage = "chain-head signature or key pin"
+        case 4:  stage = "unified-log anchor"
+        case 5:  stage = "bundle major-version compatibility"
+        case 7:  stage = "redaction policy"
+        case 10: stage = "manifest claim cross-check"
+        case 1:  stage = "structural validation or integrity-artifact decode"
+        default: stage = "internal error — stage not determinable from the exit code"
+        }
+        lines.append("Stage:   \(stage)")
     }
     if !outcome.messages.isEmpty {
         lines.append("")
@@ -2887,7 +3078,17 @@ private func pluginMCPTools() async -> [[String: Any]] {
             }
             out.append([
                 "name": t.name,
-                "description": "\(t.description) [plugin \(m.id); commits \(t.exposesPrivacyClass.rawValue)-class artifacts into the case — read them with forensics_search_artifacts]",
+                // Every mcpTool a plugin declares dispatches to the SAME
+                // collector run with the SAME manifest-declared inputs —
+                // handlePluginMCPTool never branches on the tool name, and the
+                // schema above is built from m.inputs (plugin-level), not from
+                // the tool. So names like launchd_by_path / tcc_grants_for_service
+                // read as server-side selectors that do not exist (LaunchdLite
+                // declares only includeSystemBaseline; ArchiveWalker declares no
+                // inputs at all and hard-codes ~/Downloads). State that where the
+                // agent actually reads it, so an unapplied filter is never
+                // relayed as a filter that ran.
+                "description": "\(t.description) NOTE: the tool NAME describes the view you want, not a server-side filter. This runs plugin \(m.id)'s full collection using only the inputs in this schema, commits every \(t.exposesPrivacyClass.rawValue)-class artifact into the case, and returns a receipt (counts, not rows). Apply the selector yourself with forensics_search_artifacts / forensics_timeline.",
                 "inputSchema": [
                     "type": "object",
                     "properties": props,

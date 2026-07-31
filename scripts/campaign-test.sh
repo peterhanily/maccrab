@@ -64,10 +64,12 @@ wave()    { echo -e "\n${BOLD}${CYAN}══════════════�
 
 cleanup() {
     echo -e "\n${BLUE}Cleaning up test artifacts...${NC}"
-    for f in "${CLEANUP_FILES[@]}"; do
+    # Same bash-3.2 hazard as detection-test.sh: "${EMPTY[@]}" is an unbound
+    # variable under `set -u` and kills cleanup() before the config restore.
+    for f in ${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}; do
         rm -rf "$f" 2>/dev/null || true
     done
-    for p in "${CLEANUP_PIDS[@]}"; do
+    for p in ${CLEANUP_PIDS[@]+"${CLEANUP_PIDS[@]}"}; do
         kill "$p" 2>/dev/null || true
     done
     # v1.21.5: restore the operator's daemon_config.json (--daemon mode forced

@@ -364,6 +364,8 @@ struct V2ForensicsPastScansView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                // WCAG 4.1.2: icon-only with no label and no tooltip.
+                .accessibilityLabel(String(localized: "ax.clearFilter", defaultValue: "Clear filter"))
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)

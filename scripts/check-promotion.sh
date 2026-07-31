@@ -205,9 +205,38 @@ def evaluate(rule):
             results.append(("FAIL", "fp-soak",
                             f"{per_day}/day over {days}d exceeds the {MAX_PER_DAY}/day budget"))
         else:
-            note = f"{per_day}/day over {days}d" if entry else \
-                   f"0 alerts in the {days}d window (verify the rule was enabled for it)"
-            results.append(("PASS", "fp-soak", note))
+            # v1.21.6 (audit DET-07): zero ALERTS is not zero MATCHES. The
+            # benchmark reads alerts.db, which is POST-NoiseFilter/dedup, so a
+            # rule the filter drops 100% of the time and a genuinely quiet rule
+            # were both scored PASS — the gate could not tell them apart, in the
+            # one direction that matters for the 338 rules waiting on it. Cross-
+            # check rule_telemetry.json, which counts PRE-filter matches.
+            stats = telem_by_id.get(rule["id"]) if telem is not None else None
+            if entry:
+                results.append(("PASS", "fp-soak", f"{per_day}/day over {days}d"))
+            elif telem is None:
+                results.append(("UNKNOWN", "fp-soak",
+                                f"0 alerts in the {days}d window, but no rule_telemetry.json "
+                                "to confirm the rule was ever evaluated"))
+            elif stats is None:
+                # No telemetry entry at all = the engine never evaluated it once
+                # (dark logsource with no live collector, or it was not enabled
+                # for the window). "0 alerts/day" is vacuous, not a pass.
+                results.append(("FAIL", "fp-soak",
+                                f"0 alerts in the {days}d window because the rule was NEVER "
+                                "EVALUATED (no rule_telemetry.json entry) — enable it and "
+                                "confirm its logsource has a live collector"))
+            elif stats.get("fireCount", 0) > 0:
+                # Matched, but nothing reached alerts.db: everything it produced
+                # was absorbed downstream, so its FP rate was never measured.
+                results.append(("FAIL", "fp-soak",
+                                f"matched {stats['fireCount']}x (telemetry fireCount) but produced "
+                                f"0 alerts in the {days}d window — every match was suppressed "
+                                "downstream, so the FP rate is unmeasured, not zero"))
+            else:
+                results.append(("PASS", "fp-soak",
+                                f"0 alerts in the {days}d window; telemetry confirms "
+                                f"{stats.get('evaluationCount', 0)} evaluations, 0 matches"))
 
     # 2. TP trigger. A genuine, engine-driven fire-test (asserts on this rule's
     # id through SequenceEngine) is required for sequence rules — a mere mention

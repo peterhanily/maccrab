@@ -38,6 +38,14 @@ public final class V2DashboardState: ObservableObject {
     /// KitRunner through the existing consent gate) and resets it to nil.
     @Published public var pendingForensicsRunPluginID: String? = nil
 
+    /// True once the launch-time `connectLiveData()` probe has FINISHED.
+    /// `provider` starts on the offline provider and the probe runs from the
+    /// shell's `.task` (after first render), opening four SQLite stores — so
+    /// for ~50-300 ms every "no daemon data" surface would otherwise show a
+    /// false alarm on a perfectly healthy machine. Workspaces gate that copy
+    /// on this flag.
+    @Published public private(set) var didProbeLiveData: Bool = false
+
     /// Current data source. In a release build this starts as the honest
     /// empty/offline provider (V2OfflineDataProvider) and flips to live once
     /// `connectLiveData()` succeeds; a DEBUG/dev build starts on the mock
@@ -200,7 +208,12 @@ public final class V2DashboardState: ObservableObject {
     /// flips `provider` to a `V2LiveDataProvider`. Idempotent — safe
     /// to call repeatedly (e.g. after the user installs the daemon).
     public func connectLiveData() async {
-        if let live = await V2LiveDataProvider() {
+        let probed = await V2LiveDataProvider()
+        // Record that the probe ran BEFORE acting on its result, so any surface
+        // gated on didProbeLiveData flips exactly once, in the same main-actor
+        // step that swaps the provider.
+        didProbeLiveData = true
+        if let live = probed {
             self.provider = live
             let dir = live.dataDir.map { " (\($0))" } ?? ""
             showToast(V2Toast(

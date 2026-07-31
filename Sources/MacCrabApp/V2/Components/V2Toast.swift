@@ -30,11 +30,17 @@ public struct V2Toast: Identifiable, Equatable, Sendable {
     /// the common informational toast.
     public let action: V2ToastAction?
 
-    public init(kind: Kind, title: String, detail: String? = nil, displayFor: TimeInterval = 3.0, action: V2ToastAction? = nil) {
+    /// `displayFor` defaults per KIND rather than to a flat 3 s: the toast
+    /// surface is single-slot with no history, so an error's 3-second life is
+    /// the ONLY copy of a failure reason ("Export failed", "Couldn't delete",
+    /// "Couldn't unsuppress"). Errors and warnings get 10 s; success/info keep
+    /// 3 s. Explicit values (the deliberate `displayFor: 6` sites in
+    /// V2AlertsWorkspace) still win.
+    public init(kind: Kind, title: String, detail: String? = nil, displayFor: TimeInterval? = nil, action: V2ToastAction? = nil) {
         self.kind = kind
         self.title = title
         self.detail = detail
-        self.displayFor = displayFor
+        self.displayFor = displayFor ?? ((kind == .error || kind == .warning) ? 10.0 : 3.0)
         self.action = action
     }
 
@@ -114,7 +120,11 @@ public struct V2ToastView: View {
                 Image(systemName: "xmark")
                     .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(V2Theme.mutedText)
-                    .frame(width: 20, height: 20)
+                    // WCAG 2.5.8: was 20x20, the smallest target in the app —
+                    // and it has to be hit inside the toast's auto-dismiss
+                    // window, so a mis-hit is unrecoverable rather than just
+                    // annoying.
+                    .frame(width: V2Theme.minHitTarget, height: V2Theme.minHitTarget)
                     .background(V2Theme.panelBackground)
                     .clipShape(Circle())
             }

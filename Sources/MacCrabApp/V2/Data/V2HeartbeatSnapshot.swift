@@ -131,6 +131,13 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if healthy { return "\(who) — healthy" }
             if circuitOpen { return "\(who) — circuit open (repeated failures)" }
             if lastSuccessUnix == nil { return "\(who) — enabled, but no successful call yet" }
+            // AI-08: the reachable-but-failing state — the branch a backend
+            // that died after one good call now lands in. "degraded" alone gave
+            // the operator nothing to act on; name the failure streak, since
+            // this is the only place the LLM's real state is shown in the UI.
+            if consecutiveFailures > 0 {
+                return "\(who) — last \(consecutiveFailures) call(s) failed; AI analysis is paused until one succeeds"
+            }
             return "\(who) — degraded"
         }
     }

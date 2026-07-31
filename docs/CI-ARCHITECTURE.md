@@ -1,170 +1,107 @@
 # CI Architecture
 
-How MacCrab's continuous integration and release build pipeline is
-structured, why it is split the way it is, and what each piece is
-trusted (or not trusted) to do.
+**MacCrab runs its CI locally. There are no GitHub Actions workflows.**
 
-Companion doc: `RELEASE_PROCESS.md` (the end-to-end signing/notarize
-pipeline). Key/token rotation is handled by the release operator following
-internal runbooks kept outside this public repo.
+The gate is `scripts/ci-local.sh`, invoked automatically by the version-controlled
+`.githooks/pre-push` hook. Activate it once per clone:
+
+```bash
+make hooks      # sets core.hooksPath=.githooks — a fresh clone has NO gate until this runs
+make ci         # run the gate by hand
+make ci-clean   # same, from a wiped .build (what a tag push runs automatically)
+```
+
+## Why local, not GitHub Actions
+
+Three independent reasons, any one of which is sufficient:
+
+1. **The repository is public.** A self-hosted runner would let anyone opening a
+   pull request from a fork execute code on the trusted build Mac — the machine
+   holding the Developer ID identity, the Sparkle EdDSA key and the rule-channel
+   private key. GitHub documents this as a hazard; for a security product it is
+   disqualifying.
+2. **Hosted runners cannot satisfy the toolchain pin.** Releases build on the
+   pinned Xcode major, which the hosted macOS images do not ship. The retired
+   `ci.yml` failed on exactly this from 2026-07-18 — an infrastructure mismatch,
+   never a code defect, but it left the required check red across two GA releases.
+3. **The self-hosted half never ran at all.** `reproducible-build.yml` was
+   cancelled at its 24-hour queue timeout on 10 of 10 tag runs, waiting for a
+   runner that was never registered.
 
 ## Design principle: signing stays on the trusted Mac
 
-MacCrab is a security tool. Its two catastrophic-if-leaked secrets —
-the **Sparkle EdDSA private key** (auto-update trust, no rotation path)
-and the **Developer ID Application certificate** (code-signing trust) —
-plus the Apple **notary credentials** live ONLY in the build Mac's login
-Keychain and never leave it (`RELEASE_PROCESS.md` "Inventory of
-secrets"). The decision for the v1.18/v1.19 pipeline is **self-hosted /
-hybrid CI**: those secrets stay on the trusted Mac; everything that does
-NOT need them runs on disposable GitHub-hosted runners.
+Unchanged, and now unconditional. Signing, notarisation, Sparkle appcast signing
+and rule-manifest signing happen only on the machine holding those identities.
+Nothing in the build or release path executes third-party-supplied code.
 
-Consequence: **no GitHub-hosted runner ever signs, notarizes, or
-publishes a release.** A hosted runner that held the Developer ID cert or
-the Sparkle key would widen the blast radius to "anyone who can compromise
-a hosted runner or a tagged third-party action." So we don't.
+## What the gate covers
 
-## The two halves
+`scripts/ci-local.sh` — 13 checks, ~150s warm:
 
-```
-                         ┌──────────────────────────────────────────┐
-   PR / push             │  GitHub-hosted runners (untrusted, fresh) │
-   ─────────────────────▶│  .github/workflows/ci.yml                 │
-                         │    build-and-test  (REQUIRED)             │
-                         │    rules           (REQUIRED)             │
-                         │    audit           (ADVISORY)             │
-                         └──────────────────────────────────────────┘
+| Group | Checks |
+|---|---|
+| Build | `swift build`, `swift build --build-tests` |
+| Tests | full `swift test` suite |
+| Rules | YAML→JSON compile, rule lint (filter coverage) |
+| Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, secret/host-path diff scan |
+| Assessment harness | builds, tests, and stays out of the shipped build |
+| Code quality | no force unwraps in `Sources`, no TODO/FIXME in `Sources` |
 
-                         ┌──────────────────────────────────────────┐
-   tag v* / dispatch     │  Self-hosted runner = the trusted Mac     │
-   ─────────────────────▶│  .github/workflows/reproducible-build.yml │
-                         │    unsigned-build  (ADVISORY)             │
-                         │      → build-release.sh unsigned-build    │
-                         │      → SLSA v1 provenance (Build L2)       │
-                         └──────────────────────────────────────────┘
-                                          │
-                                          │ operator runs LOCALLY (never in CI):
-                                          ▼
-                         build-release.sh sign  →  publish   (or release.sh)
-                         codesign + notarize + appcast + cask + tag
-```
+This is a **superset** of what the retired hosted workflow gated: the secret scan,
+the harness-isolation check and the code-quality passes had no GitHub equivalent.
 
-### Half 1 — application CI (GitHub-hosted) — `ci.yml`
+## The tradeoff, stated plainly
 
-Proves the source compiles and is green on a clean machine. Runs on
-`push`/`pull_request` to `main` and `v*` branches, and on demand.
+Hosted CI ran on a **clean image**. Local CI runs on a machine that already has
+the toolchain, a warm `.build` and resolved dependencies, so it cannot see
+environment drift the way a fresh runner could. This project has been bitten by
+that class before — a poisoned `/tmp` cache, Xcode integer-literal arithmetic
+inside `#expect`, and `runner` colliding with a sanitizer reserved word.
 
-| Job | Criticality | What it does |
+The mitigation is `--clean`, which wipes `.build` and re-resolves first.
+`.githooks/pre-push` applies it automatically to any **tag** push, so every
+release is gated on a from-scratch build even though ordinary pushes are not.
+A deliberate trade: fast feedback on commits, strict verification where it counts.
+
+## Provenance: no SLSA attestation is produced
+
+Earlier revisions of this document claimed SLSA Build Level 2 provenance. **That
+claim was never true in practice** — the workflow that would have produced it
+never completed a single run, so no release from v1.19.3 through v1.21.5 carries
+a signed in-toto/Sigstore statement. The workflow and the claim have both been
+removed rather than left standing as unbacked assurance.
+
+What MacCrab *does* provide for artifact integrity:
+
+- **Notarised, Developer-ID-signed** app, system extension and CLI binaries
+- **`release.json`** publishing the DMG SHA-256, cross-checked against the
+  Homebrew cask and formula
+- **Ed25519-signed rule manifests** with anti-rollback serials, verified against
+  a public key pinned in the app bundle
+- **Signed plugin catalogue + revocation list** for the Rave store
+
+Re-introducing provenance would require a build host that is *not* the signing
+host. That is a change in topology, not a workflow file.
+
+`pre-release-audit.sh` **PASS J** detects orphan GitHub Actions secrets (stored
+but referenced by no workflow). With no workflows present it has nothing to scan
+and stays clean; if Actions are ever reintroduced, it resumes meaning.
+
+## Trust map
+
+| Asset | Location | Leaves the trusted Mac? |
 |---|---|---|
-| `build-and-test` | **REQUIRED** | `swift package resolve` + `swift build` + `swift build --build-tests` + `swift test`. Selects Xcode 26.x first (PASS-K pin). |
-| `rules` | **REQUIRED** | `compile_rules.py` with 0-skips enforced + `rule-lint.sh`. |
-| `audit` | ADVISORY | `pre-release-audit.sh` (architectural invariants + PASS-L Xcode-27 source-compat guards). `continue-on-error: true`. |
-
-Why `audit` is advisory, not required: it bundles release-time gates
-(e.g. PASS-L Xcode-27 hazards, some `// bounded:` allowlist warnings)
-that are meaningful at release but should not block an in-progress PR.
-It still runs on every PR so regressions are visible in the checks UI.
-
-**Toolchain pin reconciliation (PASS-K / PASS-L).** Releases are pinned
-to **Xcode 26.x** until the macOS 27 design-QA gate passes (the 27 SDK
-ignores `UIDesignRequiresCompatibility` and carries the TN3211 `@State`
-and Swift Charts hazards). `ci.yml`'s `build-and-test` selects Xcode 26.x
-explicitly and **fails loud if no Xcode 26 is present** on the runner —
-it will not silently build on 27. `pre-release-audit.sh` PASS-K enforces
-the same pin at release time; PASS-L statically guards the two Xcode-27
-source patterns so the eventual SDK bump can't ship either regression.
-
-### Half 2 — reproducible build + provenance (self-hosted) — `reproducible-build.yml`
-
-Runs on `tag v*` and on demand, on a self-hosted runner = the trusted
-build Mac (labels `[self-hosted, macOS, maccrab-release]`).
-
-| Job | Criticality | What it does |
-|---|---|---|
-| `unsigned-build` | ADVISORY | Verifies the Xcode 26.x pin, `swift package resolve`, then `build-release.sh unsigned-build` (compile both arches + lipo + compile rules + manifest). Uploads the unsigned artifacts and emits a **signed SLSA v1 provenance** attestation over the four compiled binaries. |
-
-It is **advisory** because it is a provenance PRODUCER, not a merge gate:
-a failure means the next release's provenance needs attention, not that
-a PR is bad.
-
-It runs the **`unsigned-build` stage ONLY** of the composable
-`build-release.sh` (S5-T6). The `sign` and `publish` stages — which need
-the Developer ID cert + notary creds — are run by the operator on the
-Mac afterward (or the whole `release.sh` flow is run locally). The same
-script, the same stages, just split by trust boundary.
-
-## SLSA provenance — what level, and the honest caveat
-
-Target: **SLSA Build Level 2** — provenance exists, is authenticated,
-and is produced by a build process distinct from the artifact author.
-`actions/attest-build-provenance` produces a Sigstore-signed in-toto
-SLSA v1 provenance statement, recorded in the public Rekor transparency
-log, bound to the artifact digests.
-
-**Caveat (do not over-claim):** the build runs on a **self-hosted**
-runner, so the "hosted/isolated, ephemeral build service" property that
-SLSA Build **L3** requires is **NOT** claimed. The runner is
-operator-managed. To keep the L2 claim honest, the self-hosted runner is
-hardened:
-
-- dedicated to MacCrab release builds (those labels only; not a shared
-  general-purpose self-hosted pool);
-- the runner work directory is treated as ephemeral (clean checkout each
-  run; `fetch-depth: 0` only for `git describe`);
-- it has no inbound path to the signing secrets during the
-  `unsigned-build` stage (that stage never references a signing identity);
-- the actual signing happens in a SEPARATE, operator-initiated local
-  step, so a CI-runner compromise cannot reach the Developer ID cert or
-  Sparkle key.
-
-The provenance subject is the UNSIGNED artifact. The operator then signs
-those exact binaries locally and records the final signed-DMG sha256 in
-`release.json` (`build-release.sh publish`), which is cross-checked
-against the Cask + GitHub release asset (`release.sh` Step 6c).
-
-## Action pinning (S5-T4)
-
-Every `uses:` in every workflow is pinned to a **full commit SHA** with a
-trailing `# vX.Y.Z` comment for human review:
-
-| Action | Pin | Purpose |
-|---|---|---|
-| `actions/checkout` | `df4cb1c…` (v6.0.3) | source checkout |
-| `actions/setup-python` | `e797f83…` (v6.0.0) | PyYAML for rule compile |
-| `actions/upload-artifact` | `043fb46…` (v7.0.1) | unsigned artifact upload |
-| `actions/attest-build-provenance` | `a2bbfa2…` (v4.1.0) | SLSA provenance |
-
-A moving tag (`@v6`) is a supply-chain hole: the tag owner can repoint it
-to malicious code that then runs with whatever permissions the job has.
-Refresh a pin deliberately — resolve the new release tag to its commit
-SHA, keep the `# vX.Y.Z` comment, and review the diff.
-
-`pre-release-audit.sh` **PASS J** detects orphan GitHub Actions secrets
-(stored but referenced by no workflow). Neither workflow references any
-`secrets.*` (signing is local), so there is no secret to orphan; PASS J
-stays clean.
-
-## Local mirror
-
-`scripts/ci-local.sh` runs the same build / test / rule / quality checks
-locally without GitHub. It predates these workflows and remains the
-fastest pre-push gate. The hosted `ci.yml` is the authoritative,
-clean-machine version of the same checks.
-
-## What lives where (trust map)
-
-| Capability | Location | Reachable by hosted CI? |
-|---|---|---|
-| `swift build` / `swift test` | hosted + self-hosted | yes (no secret) |
-| rule compile / lint | hosted | yes (no secret) |
-| unsigned universal build | self-hosted Mac | runs there, no signing secret |
-| SLSA provenance signing (Sigstore OIDC) | hosted-side of self-hosted job | yes — OIDC, not a long-lived secret |
-| Developer ID code-sign | **local Mac only** | **no** |
-| Apple notarization creds | **local Mac only** | **no** |
-| Sparkle EdDSA private key | **local Mac only** | **no** |
-| `SITE_REPO_TOKEN` (appcast/catalog publish) | local Mac `~/.maccrab-release-env` | **no** |
-| rave catalog Ed25519 private key | **air-gapped, local** | **no** |
+| Developer ID signing identity | trusted Mac keychain | **no** |
+| Apple notarisation credentials | trusted Mac keychain | **no** |
+| Sparkle EdDSA private key | trusted Mac keychain | **no** |
+| Rule-channel private key (`rules.key`) | offline keyholder storage | **no** |
+| Rave catalogue Ed25519 private key | air-gapped, local | **no** |
+| `SITE_REPO_TOKEN` (appcast/catalog publish) | `~/.maccrab-release-env` | **no** |
+| Rule-channel public key (`rules.pub`) | committed; ships in the app bundle | n/a — public by design |
 
 ## Related
 
-- `RELEASE_PROCESS.md` — the full local signing/notarize/publish flow.
+- `scripts/ci-local.sh` — the gate
+- `.githooks/pre-push` — how it is enforced (`make hooks` to activate)
+- `scripts/pre-release-audit.sh` — the deeper pre-release audit, incl. advisory passes
+- `RELEASE_PROCESS.md` — the full local sign / notarise / publish flow

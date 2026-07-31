@@ -284,6 +284,24 @@ let package = Package(
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),
+        // CI-14: maccrabctl (10.2k LOC) and maccrab-mcp (4.3k LOC) are shipped,
+        // user-facing executables that had NO test target — the only MCP coverage
+        // was a black-box harness spawning the binary against an intentionally
+        // empty store, which cannot distinguish a handler querying the wrong
+        // table from a correct one. SPM has supported test targets depending on
+        // executable targets since tools-version 5.5; both executables use
+        // top-level code in main.swift, which is the supported shape. See the
+        // header of CLIExecutableUnitTests.swift for the one caveat this imposes
+        // (globals declared in main.swift are never initialised for the test
+        // runner and must not be touched).
+        .testTarget(
+            name: "MacCrabCLITests",
+            dependencies: [
+                "maccrabctl",
+                "maccrab-mcp",
+                .product(name: "Testing", package: "swift-testing"),
+            ]
+        ),
     ]
 )
 

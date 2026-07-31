@@ -1,0 +1,33 @@
+#!/bin/bash
+# pre-push — MacCrab's CI gate.
+#
+# MacCrab runs its CI LOCALLY, not on GitHub Actions. The repository is public,
+# so a self-hosted runner would let any fork execute code on the trusted build
+# Mac — which also holds the Developer ID signing identity. Hosted runners can't
+# satisfy the release toolchain pin (no Xcode 26 image), which is why the old
+# hosted CI sat red for months on an error that was never about the code.
+#
+# This hook is the gate. It is version-controlled (unlike .git/hooks/) and
+# activated by `make hooks`, so a fresh clone is protected too.
+#
+# Bypass — for a genuine emergency only, and say why in the commit:
+#   git push --no-verify
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$(dirname "$SCRIPT_DIR")"
+
+# A tag push is a RELEASE. Release gets the clean-tree run: no warm .build, no
+# stale resolved dependencies. That is the check which catches environment drift
+# — the class hosted CI used to catch for us.
+CLEAN=""
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/tags/*) CLEAN="--clean" ;;
+    esac
+done
+
+if [ -n "$CLEAN" ]; then
+    echo "Tag push detected — running local CI from a CLEAN tree."
+fi
+exec ./scripts/ci-local.sh $CLEAN

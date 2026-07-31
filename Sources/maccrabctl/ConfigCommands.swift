@@ -204,6 +204,50 @@ private func configSet(args: [String]) {
     print("The engine applies it on its next config reload / restart.")
 }
 
+// MARK: - audit
+
+/// `maccrabctl audit [N]` — tail the privileged-mutation audit trail.
+///
+/// PARITY: the MCP surface has `get_audit_log`, but neither the CLI nor the
+/// dashboard could read it, so the record of what an AGENT changed was legible
+/// only through the agent's own tooling — which inverts the trust relationship
+/// the agent-capability tiers exist to establish. Reads both rails the writers
+/// use: `dashboard_audit.log` (what the root engine APPLIED from its inbox,
+/// written by DaemonTimers.auditLogInbox) and `mcp_mutations.jsonl` (what an
+/// MCP client REQUESTED, written by maccrab-mcp's auditLog into the USER
+/// app-support dir, which is a different directory from the engine's).
+func dispatchAudit(args: [String]) {
+    let limit = args.first.flatMap { Int($0) }.map { max(1, min($0, 1000)) } ?? 50
+
+    func tail(_ path: String, label: String) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            print("\(label): none recorded yet (\(path))")
+            print("")
+            return
+        }
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+            // Present but unreadable. Never print "none" here — that would read
+            // as "nothing was changed", which is the opposite of what we know.
+            print("\(label): present but not readable by this user (\(path)) — retry with sudo.")
+            print("")
+            return
+        }
+        let all = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        let shown = all.suffix(limit)
+        print("\(label) — last \(shown.count) of \(all.count) (\(path)):")
+        print(String(repeating: "─", count: 60))
+        for line in shown { print("  \(line)") }
+        print("")
+    }
+
+    tail(maccrabDataDir() + "/dashboard_audit.log", label: "Applied by the engine")
+    let userDir = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first.map { $0.appendingPathComponent("MacCrab").path }
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    tail(userDir + "/mcp_mutations.jsonl", label: "Requested via MCP")
+}
+
 // MARK: - helpers
 
 private func allowedKeyList() -> String {

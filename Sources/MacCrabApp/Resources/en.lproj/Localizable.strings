@@ -853,3 +853,67 @@
 "overview.storeBrowsePrompt" = "Browse signed forensic plugins from the catalog. Installs run fully sandboxed.";
 "raveStore.thirdPartyCatalog.title" = "Signed third-party catalog";
 "raveStore.thirdPartyCatalog.body" = "No third-party plugins are currently listed. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed.";
+
+
+/* v1.21.6 audit batch — accessibility labels and error-state strings added
+   with the fixes. Keys whose defaultValue carries Swift interpolation are
+   deliberately NOT tabled here: a literal row would replace the format and
+   drop the interpolated value, so those fall through to the call site. */
+"alerts.readFailedTitle" = "Couldn't read alerts";
+"ax.appearance.dark" = "Dark";
+"ax.appearance.light" = "Light";
+"ax.appearance.system" = "System";
+"ax.chip.ai" = "AI";
+"ax.chip.critical" = "Critical";
+"ax.chip.custom" = "Custom";
+"ax.chip.data" = "Data";
+"ax.chip.degraded" = "Degraded";
+"ax.chip.down" = "Down";
+"ax.chip.healthy" = "Healthy";
+"ax.chip.high" = "High severity";
+"ax.chip.info" = "Informational";
+"ax.chip.low" = "Low severity";
+"ax.chip.medium" = "Medium severity";
+"ax.chip.neutral" = "Neutral";
+"ax.chip.warning" = "Warning";
+"ax.clearFilter" = "Clear filter";
+"ax.clearSearch" = "Clear search";
+"ax.close" = "Close";
+"common.cancel" = "Cancel";
+"events.bannerMock" = "Sample / mock data (dev build) — start the daemon, then Reconnect to see live events.";
+"events.bannerOffline" = "No daemon data yet — approve the System Extension in System Settings, then Reconnect to see live events.";
+"investigation.loadingTraces" = "Loading traces…";
+"overview.legendCritical" = "Critical";
+"overview.legendHigh" = "High";
+"overview.legendLow" = "Low";
+"overview.legendMedium" = "Medium";
+"prevention.confirmDisable.body" = "Live enforcement stops until you turn this module back on.";
+"prevention.confirmDisable.networkBlocker.body" = "Known-malicious IPs will no longer be PF-blocked until you turn Network Blocker back on.";
+"prevention.confirmDisable.networkBlocker.title" = "Stop blocking malicious IPs?";
+"prevention.confirmDisable.persistenceGuard.body" = "LaunchAgent / LaunchDaemon directories lose the system-immutable flag, so anything can install persistence until you turn Persistence Guard back on.";
+"prevention.confirmDisable.persistenceGuard.title" = "Unlock the LaunchAgent directories?";
+"prevention.confirmDisable.sinkhole.body" = "Known-malicious domains will resolve normally until you turn DNS Sinkhole back on.";
+"prevention.confirmDisable.sinkhole.title" = "Stop sinkholing malicious domains?";
+"prevention.confirmDisable.title" = "Turn off this prevention module?";
+"prevention.confirmDisableButton" = "Turn off";
+"table.clearFilter" = "Clear filter";
+"table.noRows" = "No rows to show";
+"welcome.setup.preventionHidden" = "Prevention controls live in the Prevention workspace — choose Standard above (or Settings → Appearance) to show it";
+
+/* Interpolated values. Swift's String(localized:defaultValue:) turns the
+   call-site interpolation into a format, so the table row carries the matching
+   specifier — same convention as alerts.suppressedToast / action.kill.message. */
+"alerts.readFailedBody" = "The on-disk alert store could not be read (%@), so this list is NOT an all-clear.";
+"ax.appearance.tooltip" = "Appearance: %@ — click to change";
+"generic.rule.count" = "%lld rules";
+"table.noMatches" = "No rows match “%@”";
+"ax.trace.node.showDetails" = "Show details";
+"ax.trace.node.hint" = "Shows this entity's details. Right-click for more actions; drag to reposition.";
+
+/* System > Health — privileged-change audit trail card (PAR-09). Mirrors
+   `maccrabctl audit`, which was the only surface for this log. */
+"system.auditSection" = "Privileged-change audit trail";
+"system.auditDesc" = "Every suppression, config change, rule toggle and prune the engine applied from its privileged inbox — whether it came from this app, from maccrabctl, or from an AI agent over MCP. Newest last; for the full history run: maccrabctl audit";
+"system.auditNone" = "No privileged changes have been recorded yet.";
+"system.auditEmpty" = "The audit log is present but empty.";
+"system.auditUnreadable" = "The audit log exists but this account can't read it (the engine writes it root-owned, admin-readable). Run: sudo maccrabctl audit";

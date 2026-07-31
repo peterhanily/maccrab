@@ -608,10 +608,10 @@ struct V2OverviewWorkspace: View {
 
     private var histogramLegend: some View {
         HStack(spacing: 14) {
-            legendDot(color: V2Theme.critical, label: String(localized: "overview.legendCritical", defaultValue: "Critical"))
-            legendDot(color: V2Theme.high,     label: String(localized: "overview.legendHigh", defaultValue: "High"))
-            legendDot(color: V2Theme.medium,   label: String(localized: "overview.legendMedium", defaultValue: "Medium"))
-            legendDot(color: V2Theme.low,      label: String(localized: "overview.legendLow", defaultValue: "Low"))
+            legendDot(kind: .critical, label: String(localized: "overview.legendCritical", defaultValue: "Critical"))
+            legendDot(kind: .high,     label: String(localized: "overview.legendHigh", defaultValue: "High"))
+            legendDot(kind: .medium,   label: String(localized: "overview.legendMedium", defaultValue: "Medium"))
+            legendDot(kind: .low,      label: String(localized: "overview.legendLow", defaultValue: "Low"))
             Spacer()
             Text(String(localized: "overview.histogramHint", defaultValue: "Hover for details · click a bar to open Alerts for that window"))
                 .font(V2Theme.meta())
@@ -619,11 +619,21 @@ struct V2OverviewWorkspace: View {
         }
     }
 
-    private func legendDot(color: Color, label: String) -> some View {
+    /// A11y: the legend swatch keys on SHAPE as well as hue. The light
+    /// severity variants were tuned purely for luminance contrast, which
+    /// pushed critical/high/medium to near-isoluminance (L* 39/44/44) —
+    /// under simulated deuteranopia they collapse to dE ~3, i.e. the three
+    /// top tiers are one colour. Reusing `V2ChipKind.shapeSymbol` (octagon /
+    /// triangle / diamond / circle) gives the legend a non-chromatic key.
+    /// The glyph is accessibility-hidden because the adjacent Text already
+    /// names the tier for VoiceOver.
+    private func legendDot(kind: V2ChipKind, label: String) -> some View {
         HStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(color)
-                .frame(width: 9, height: 9)
+            Image(systemName: kind.shapeSymbol)
+                .scaledSystem(9)
+                .foregroundStyle(kind.color)
+                .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
             Text(label).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
         }
     }
@@ -1415,14 +1425,31 @@ fileprivate struct V2AlertHistogram: View {
                         .frame(width: width, height: 2)
                 }
                 VStack(spacing: 0) {
-                    ForEach(stack.indices.reversed(), id: \.self) { i in
-                        let (count, color) = stack[i]
-                        if count > 0 {
-                            let h = chartFrame.height * CGFloat(count) / CGFloat(maxCount)
-                            Rectangle()
-                                .fill(isHover ? color : color.opacity(0.85))
-                                .frame(width: width, height: h)
-                        }
+                    // A11y (colour-blind): adjacent stack segments differ ONLY
+                    // in hue, and the light severity triple sits at L* 39/44/44
+                    // — under simulated deuteranopia critical/high/medium
+                    // collapse to dE ~3, so the high<->medium boundary was
+                    // invisible and the bar read as one solid block. A 1pt
+                    // canvas-coloured rule makes every boundary non-chromatic.
+                    // Filtering to the non-empty segments first is what lets us
+                    // skip the rule on the topmost one (where it would just
+                    // shave a pixel off the bar). Drawn as an overlay, not as
+                    // VStack spacing, so it costs no layout height — spacing
+                    // would push a full-height bar past the chart's top inset.
+                    let drawn: [Int] = stack.indices.reversed().filter { stack[$0].0 > 0 }
+                    ForEach(drawn.indices, id: \.self) { pos in
+                        let (count, color) = stack[drawn[pos]]
+                        let h = chartFrame.height * CGFloat(count) / CGFloat(maxCount)
+                        Rectangle()
+                            .fill(isHover ? color : color.opacity(0.85))
+                            .frame(width: width, height: h)
+                            .overlay(alignment: .top) {
+                                if pos > 0 {
+                                    Rectangle()
+                                        .fill(V2Theme.canvasBackground)
+                                        .frame(height: 1)
+                                }
+                            }
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 3))
@@ -1454,12 +1481,19 @@ fileprivate struct V2AlertHistogram: View {
     // MARK: - X axis
 
     private func xAxis(in canvas: CGSize, chartFrame: CGRect) -> some View {
+        // Skeletons, not literal patterns. A literal "HH:mm" pins every locale
+        // to a 24-hour clock — wrong for en_US, whose system preference is
+        // h:mm a, so this was a visible defect for English users too — and
+        // "MMM d" pins month-before-day, which reads as foreign in de/fr/ru/ja
+        // where the day leads. setLocalizedDateFormatFromTemplate reorders and
+        // re-punctuates the fields per locale; `j` is the locale's own hour
+        // cycle, which is exactly the preference "HH" was overriding.
         let formatter = DateFormatter()
         switch rangeKey {
-        case "1h", "6h":  formatter.dateFormat = "HH:mm"
-        case "24h":       formatter.dateFormat = "HH:mm"
-        case "7d":        formatter.dateFormat = "MMM d"
-        default:          formatter.dateFormat = "HH:mm"
+        case "1h", "6h":  formatter.setLocalizedDateFormatFromTemplate("jmm")
+        case "24h":       formatter.setLocalizedDateFormatFromTemplate("jmm")
+        case "7d":        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        default:          formatter.setLocalizedDateFormatFromTemplate("jmm")
         }
         // Show 5 evenly-spaced labels regardless of bucket count.
         let labelCount = 5
@@ -1489,11 +1523,22 @@ fileprivate struct V2AlertHistogram: View {
         }
     }
 
+    // The unit letters here were hand-rolled English and shipped untranslated
+    // in all 13 other locales — ja/zh/ru have their own abbreviations and
+    // "m"/"h"/"d" carry no meaning there. RelativeDateTimeFormatter supplies
+    // the locale's own abbreviated units and its own past/future convention,
+    // replacing the hardcoded U+2212 sign. Same configuration as the formatter
+    // V2OverviewWorkspace.threatIntelTrend already uses in this file.
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     private static func relative(seconds s: TimeInterval) -> String {
-        if s < 60         { return "−\(Int(s))s" }
-        if s < 3_600      { return "−\(Int(s / 60))m" }
-        if s < 86_400     { return "−\(Int(s / 3_600))h" }
-        return "−\(Int(s / 86_400))d"
+        // `s` is seconds-in-the-PAST (the caller passes -timeIntervalSinceNow),
+        // and the formatter wants a signed interval, so negate it back.
+        relativeFormatter.localizedString(fromTimeInterval: -s)
     }
 
     // MARK: - Hover popover
@@ -1508,10 +1553,14 @@ fileprivate struct V2AlertHistogram: View {
         let halfPopover = popoverWidth / 2
         let popoverX = min(max(barCenterX, chartFrame.minX + halfPopover + 4),
                            chartFrame.maxX - halfPopover - 4)
+        // Same skeleton fix as xAxis(in:chartFrame:): the literal patterns
+        // pinned every locale to a 24-hour clock and to month-before-day
+        // ordering. This is the bucket-range line in the hover popover, so it
+        // must agree with the axis it is annotating.
         let dateFmt = DateFormatter()
-        dateFmt.dateFormat = "HH:mm"
+        dateFmt.setLocalizedDateFormatFromTemplate("jmm")
         let dayFmt = DateFormatter()
-        dayFmt.dateFormat = "MMM d"
+        dayFmt.setLocalizedDateFormatFromTemplate("MMMd")
         let startStr = dateFmt.string(from: bucket.start)
         let endStr = dateFmt.string(from: bucket.end)
         let dayStr = dayFmt.string(from: bucket.start)

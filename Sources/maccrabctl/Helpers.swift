@@ -52,9 +52,25 @@ func maccrabDataDir() -> String {
     let userExists = fm.fileExists(atPath: userDB)
     let systemReadable = fm.isReadableFile(atPath: systemDB)
 
+    // v1.21.6 (audit DL-08): freshness must include the `-wal` sidecar. In WAL
+    // mode a main `.db` file's mtime only advances at CHECKPOINT, so a store
+    // being written to right now can look weeks stale — field-observed on this
+    // host: campaigns.db dated 24 Jun beside campaigns.db-wal dated 22 Jul, a
+    // four-week lag. Comparing bare `.db` mtimes therefore resolved to whichever
+    // store checkpointed most recently rather than whichever is LIVE, so the CLI
+    // could answer from a stale dev store for hours at a time with no
+    // indication. max(db, db-wal) tracks actual writes.
+    func lastWrite(_ path: String) -> Date? {
+        let main = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        let wal = (try? fm.attributesOfItem(atPath: path + "-wal"))?[.modificationDate] as? Date
+        guard let main else { return wal }
+        guard let wal else { return main }
+        return max(main, wal)
+    }
+
     if userExists && systemReadable {
-        let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
-        let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+        let userMod = lastWrite(userDB)
+        let sysMod = lastWrite(systemDB)
         if let s = sysMod, let u = userMod, s >= u {
             return systemDir
         }
@@ -133,8 +149,10 @@ extension MacCrabCtl {
           events stats        Show event statistics
           alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)
           ai-alerts [--hours H] [--limit N]  AI-Guard alerts (credential fence, boundary, injection, MCP)
-          scan-text <text>    Prompt-injection scan (Forensicate.ai); reads stdin if no arg
-                              (requires `pip install forensicate-ai`)
+          scan-text <text>    Prompt-injection scan (native); reads stdin if no arg
+          agent-spans [--search Q] [--trace ID] [--limit N]
+                              Agent Traces (OTLP spans from AI coding tools).
+                              Distinct from `trace` (TraceGraph causal provenance).
           campaigns [N]       Show last N campaigns (default: 10)
           campaigns watch     Live stream campaigns as they are detected
           watch               Live stream alerts as they happen
@@ -165,6 +183,7 @@ extension MacCrabCtl {
         Config:
           config get [<key>]      Show daemon_config.json value(s)
           config set <key> <val>  Queue a daemon_config change (safe tunables only)
+          audit [N]               Tail the privileged-mutation audit trail (default 50)
 
         Triage:
           why <alert_id>          Explain which rule fired, predicates + captured fields
@@ -190,7 +209,7 @@ extension MacCrabCtl {
           cdhash <PID>            Extract CDHash for a process
           cdhash --all            Extract CDHashes for all processes
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
-          mcp list [--suspicious] List MCP server configs across all AI tools
+          mcp list [--suspicious] List user-scope MCP server configs (not project .mcp.json)
           extensions [--suspicious]  Scan browser extensions for dangerous permissions
           vulns [--hours H] [--severity S]  Vulnerability alerts from the CVE scanner
           privacy [--hours H]  Privacy anomaly alerts (bulk egress, trackers, domain spikes)
@@ -299,6 +318,12 @@ extension MacCrabCtl {
         let configPath = supportDir + "/llm_config.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // Same v1.21.6 default-flip migration as DaemonSetup: this file only
+            // exists because someone configured a backend in Settings > AI Backend,
+            // so its presence is the opt-in. Without this, `hasConfig` below reads
+            // the new `false` default and the CLI silently loses LLM analysis for
+            // every existing user whose file predates the explicit `enabled` key.
+            config.enabled = true
             if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
             if let provider = json["provider"] as? String {
                 config.provider = LLMProvider(rawValue: provider) ?? config.provider

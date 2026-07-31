@@ -68,7 +68,7 @@ For temporal sequence rules (`type: sequence`), also verify:
 
 New rules land as `status: experimental` and ship **disabled by default** — since v1.21.4 the daemon defaults to the `stable` rule profile. Maintainers promote a rule to `stable` when it meets **all** of the following bar. The bar is deliberately quantitative so promotion is checkable rather than a judgment call; run `scripts/check-promotion.sh <rule-id>` to evaluate a rule against it (advisory — it reads the local benchmark and telemetry data described below).
 
-1. **False-positive soak.** The rule has run enabled on the reference machine for **at least 14 days** (28 recommended — the default window of `scripts/fp-rate-benchmark.sh`) at **≤ 0.5 alerts/day** in that benchmark's per-rule output. Rationale: the machine-wide release gate is < 30 HIGH/CRITICAL alerts/day (`scripts/measure-fp-baseline.sh`), and ~480 rules share that budget — a single rule sustaining more than ~0.5/day on a benign machine is an outsized noise contributor. A rule absent from the benchmark JSON fired zero times in the window, which passes this criterion (provided the rule was actually enabled for the window, e.g. under `rule_profile: "all"`).
+1. **False-positive soak.** The rule has run enabled on the reference machine for **at least 14 days** (28 recommended — the default window of `scripts/fp-rate-benchmark.sh`) at **≤ 0.5 alerts/day** in that benchmark's per-rule output. Rationale: the machine-wide release gate is < 30 HIGH/CRITICAL alerts/day (`scripts/measure-fp-baseline.sh`), and ~480 rules share that budget — a single rule sustaining more than ~0.5/day on a benign machine is an outsized noise contributor. A rule absent from the benchmark JSON emitted zero *alerts* in the window. Since v1.21.6 that alone no longer passes the criterion: the benchmark reads `alerts.db`, which is **post-NoiseFilter**, so zero alerts is consistent with three very different states. `check-promotion.sh` disambiguates them against `rule_telemetry.json` (pre-filter counters): zero alerts **and** zero telemetry `fireCount` passes (genuinely quiet); zero alerts with `fireCount > 0` **fails** (every match was suppressed downstream, so the rule's false-positive rate was never actually measured); and no telemetry entry at all **fails** (the rule was never evaluated — a dark logsource with no live collector, or it simply was not enabled for the window). Enable the rule for the whole soak, e.g. under `rule_profile: "all"`.
 
 2. **Demonstrated true positive.** The rule has a working trigger: a fixture in `scripts/detection-test.sh` (or `scripts/campaign-test.sh`), or a rule test under `Tests/` that feeds a synthetic event through the engine and asserts the rule fires. "It should match" is not evidence; a red-team fixture or unit test is.
 
@@ -166,12 +166,17 @@ MacCrab follows standard Swift conventions with a few project-specific guideline
 # Run all tests
 swift test
 
-# Run a specific test class
+# Run a specific test suite
 swift test --filter MacCrabCoreTests.RuleEngineTests
 
-# Run a specific test method
-swift test --filter MacCrabCoreTests.RuleEngineTests/testEvaluateContainsModifier
+# Run a specific test function. These are Swift Testing tests, so function
+# names have NO `test` prefix — this one is `func containsModifier()`.
+swift test --filter MacCrabCoreTests.RuleEngineTests/containsModifier
 ```
+
+`--filter` is a regex over test IDs and **exits 0 when it matches nothing**, so
+a typo'd filter looks like a clean green run. Check the reported executed-test
+count before believing a filtered run passed.
 
 ### Test Expectations
 

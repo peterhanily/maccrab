@@ -50,7 +50,11 @@ extension MacCrabCtl {
             print("✗ Honey-prompt deploy failed: \(error.localizedDescription)")
         }
         print("")
-        print("Enable detection for daemon sessions: export MACCRAB_DECEPTION=1")
+        // v1.21.6 (audit DET-02): the env var is unreachable in a System
+        // Extension (sysextd owns the launch environment), so this instruction
+        // could never work on a release install. Lead with the config key.
+        print("Enable detection: add \"deception_enabled\": true to daemon_config.json")
+        print("  (or export MACCRAB_DECEPTION=1 for a dev `swift run maccrabd` session)")
         print("Then restart the daemon so file event enrichment picks up the canaries.")
     }
 

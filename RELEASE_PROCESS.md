@@ -3,8 +3,8 @@
 This document describes the end-to-end signing, notarization, and
 distribution pipeline for MacCrab releases. It is the operator-side
 companion to `docs/TRUST.md` (which covers end-user verification),
-`docs/CI-ARCHITECTURE.md` (which covers the hosted/self-hosted CI split
-and SLSA provenance), and `SECURITY.md` (which covers the
+`docs/CI-ARCHITECTURE.md` (which covers the local CI gate and why there
+are no GitHub Actions workflows), and `SECURITY.md` (which covers the
 vulnerability-disclosure path).
 
 Required reading for anyone who plans to cut a release tag.
@@ -111,11 +111,10 @@ boolean-as-value bugs. 0 skips required.
 > `sign`, `publish` — each callable individually
 > (`scripts/build-release.sh <stage>`). Running it with no argument (or
 > `all`) executes all four in one process, byte-for-byte identical to
-> the prior linear flow, which is what `release.sh` Step 3 does. The
-> self-hosted reproducible-build CI runs the **`unsigned-build` stage
-> only** and emits SLSA provenance; the operator then runs `sign` +
-> `publish` locally (or the whole `release.sh`). See
-> `docs/CI-ARCHITECTURE.md`. Single-stage mode persists the staging
+> the prior linear flow, which is what `release.sh` Step 3 does. Stage
+> separation is still useful for iterating locally — e.g. `unsigned-build`
+> + `assemble` + `sign` to produce a signed app without notarising or
+> publishing. See `docs/CI-ARCHITECTURE.md`. Single-stage mode persists the staging
 > tree at `.build/maccrab-stage` and carries `VERSION` / `BUILD_NUMBER`
 > / Sparkle config across invocations so the stamped Info.plist matches
 > the signed bundle.
@@ -227,27 +226,32 @@ via Sparkle auto-update:
      user re-approval prompt unless the team-id changed (it never
      should).
 
-## Continuous integration (hosted) + provenance (self-hosted)
+## Continuous integration (local)
 
-Two GitHub Actions workflows back the local flow (full detail in
-`docs/CI-ARCHITECTURE.md`):
+MacCrab's CI runs **locally**. There are no GitHub Actions workflows — see
+`docs/CI-ARCHITECTURE.md` for why (public repo + self-hosted runner risk,
+hosted images lacking the pinned Xcode, and a provenance workflow that never
+completed a run).
 
-- **`.github/workflows/ci.yml`** — GitHub-hosted application CI on
-  every push / PR. `build-and-test` (swift build + test) and `rules`
-  (compile + lint) are **required**; `audit` (pre-release-audit incl.
-  PASS-L Xcode-27 guards) is **advisory**. CI selects Xcode 26.x
-  explicitly (PASS-K) and fails loud if absent — it never builds on 27.
-- **`.github/workflows/reproducible-build.yml`** — self-hosted, on
-  `tag v*`. Runs `build-release.sh unsigned-build` ONLY and emits a
-  signed SLSA v1 provenance attestation (Build **L2** target; the
-  self-hosted runner means the L3 hosted-builder property is not
-  claimed). **Signing + notarization never run in CI** — the Developer
-  ID cert, notary creds, and Sparkle key stay on the trusted Mac.
+- **`scripts/ci-local.sh`** — the gate. 13 checks: build, full test suite,
+  rule compile + lint, broker fd fuzz (ASan/UBSan), deterministic
+  architectural audit, secret/host-path diff scan, assessment-harness
+  build/test/isolation, and the code-quality passes.
+- **`.githooks/pre-push`** — runs it automatically. A **tag** push runs it
+  with `--clean` (wiped `.build`, re-resolved dependencies), so every release
+  is gated on a from-scratch build.
+- **`make hooks`** — activates the hook. Required once per clone: git does not
+  track `.git/hooks/`, so a fresh checkout has no gate until this is run.
 
-Every `uses:` is SHA-pinned with a `# vX.Y.Z` comment; refresh
-deliberately. Neither workflow references any `secrets.*` (signing is
-local), so `pre-release-audit.sh` PASS J (orphan-secret detector)
-stays clean.
+**No SLSA provenance is produced.** The workflow that would have emitted it
+never completed a single run, so no release from v1.19.3 onward carries an
+attestation; the claim has been withdrawn rather than left unbacked. Artifact
+integrity rests on notarised Developer-ID signing, the `release.json` SHA-256
+cross-checked against the Homebrew cask and formula, and Ed25519-signed rule
+manifests. Signing and notarisation have always been local-only and remain so.
+
+With no workflows present, `pre-release-audit.sh` PASS J (orphan GitHub
+Actions secret detector) has nothing to scan and stays clean.
 
 ## Verifying the chain end-to-end
 

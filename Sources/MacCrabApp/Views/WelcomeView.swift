@@ -5,10 +5,46 @@
 
 import SwiftUI
 
+/// Maps the user's system language onto one of the 14 identifiers we actually
+/// ship. Both of the obvious approaches are wrong, in opposite directions:
+/// `Locale.current.language.languageCode` drops the script/region subtag, so
+/// "zh-Hant-TW" collapses to "zh"; the `AppleLanguages` entries SettingsView
+/// reads keep too much, so "en-IE" never equals "en". Neither matches a row in
+/// the pickers, which key on the shipped identifiers ("zh-Hans", "zh-Hant",
+/// "pt-BR") — so Chinese and Brazilian users got no preselected row, and the
+/// bare "zh" that was then written back to AppleLanguages resolved to
+/// SIMPLIFIED, silently downgrading a Traditional-Chinese user to a different
+/// written language. Bundle's own matcher keeps the script subtag and can only
+/// return an identifier we ship.
+enum ShippedLocale {
+    /// The localizations present in the running bundle. Empty under a plain
+    /// `swift run` — SPM keeps the .lproj inside Bundle.module and only
+    /// scripts/build-release.sh copies them to Contents/Resources — which is
+    /// why `resolve` returns nil there instead of asserting "en", leaving the
+    /// callers free to keep their old dev-time behaviour.
+    static var available: [String] {
+        Bundle.main.localizations.filter { $0 != "Base" }
+    }
+
+    /// Resolve `preferred` (a possibly region-tagged identifier, or nil to use
+    /// the system's preference order) to a shipped identifier, or nil if the
+    /// bundle carries no localizations at all.
+    static func resolve(preferring preferred: String? = nil) -> String? {
+        let shipped = available
+        guard !shipped.isEmpty else { return nil }
+        return Bundle.preferredLocalizations(
+            from: shipped, forPreferences: preferred.map { [$0] }).first
+    }
+}
+
 struct WelcomeView: View {
     @Binding var isPresented: Bool
     @ObservedObject var sysextManager: SystemExtensionManager
-    @State private var selectedLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
+    // See ShippedLocale above: truncating to the bare ISO-639 code left
+    // zh-Hans / zh-Hant / pt-BR users with no preselected row, and turned a
+    // Traditional-Chinese system into a Simplified-Chinese app at :422.
+    @State private var selectedLanguage: String =
+        ShippedLocale.resolve() ?? Locale.current.language.languageCode?.identifier ?? "en"
     @State private var currentStep = 0
     // v1.21.5: first-run installs pick a dashboard mode here (default
     // Basic). Written to UIMode.storageKey only on wizard completion —
@@ -283,8 +319,16 @@ struct WelcomeView: View {
                 // System Settings flips this row without Check Again.
                 SetupRow(icon: sysextRow.icon, color: sysextRow.color, text: sysextRow.text)
 
+                // UX-04: the wizard defaults to Basic (selectedUIMode = .basic)
+                // and Basic HIDES the Prevention workspace
+                // (V2Workspace.prevention.minimumMode == .standard) — so this row
+                // handed a new user a task and the next screen removed the place
+                // to do it. When Prevention won't be in their sidebar, point at
+                // the mode switch instead of a tab they can't see.
                 SetupRow(icon: "info.circle", color: .blue,
-                    text: String(localized: "welcome.setup.prevention", defaultValue: "Enable prevention in the Prevention tab"))
+                    text: V2Workspace.prevention.isVisible(in: selectedUIMode)
+                        ? String(localized: "welcome.setup.prevention", defaultValue: "Enable prevention in the Prevention tab")
+                        : String(localized: "welcome.setup.preventionHidden", defaultValue: "Prevention controls live in the Prevention workspace — choose Standard above (or Settings → Appearance) to show it"))
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))

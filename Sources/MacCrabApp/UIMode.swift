@@ -14,7 +14,9 @@
 import Foundation
 
 public enum UIMode: String, Codable, Sendable, CaseIterable {
-    /// Minimum surface — Overview, Alerts, Prevention, Permissions, Docs.
+    /// Minimum surface — Overview, Alerts, System, Docs. (Prevention is
+    /// .standard: see V2Workspace.minimumMode, which is the authority. This
+    /// comment previously claimed Prevention + Permissions were in Basic.)
     /// Target audience: single-user home install, "show me if anything is
     /// wrong" posture.
     case basic

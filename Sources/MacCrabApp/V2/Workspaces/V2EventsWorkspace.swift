@@ -22,8 +22,15 @@ struct V2EventsWorkspace: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if state.provider.mode == .mock {
-                mockBanner
+            // Pre-fix this was gated on `.mock`, a mode a RELEASE build can
+            // never reach (V2DashboardState picks V2OfflineDataProvider under
+            // #if !DEBUG), so the fresh-install / sysext-not-yet-approved user
+            // the banner was written for saw nothing — an empty table with
+            // working-looking filters and no explanation. Also gated on
+            // didProbeLiveData so the launch-time probe window can't flash it
+            // at a healthy machine.
+            if state.didProbeLiveData, state.provider.mode != .live {
+                noLiveDataBanner
             }
             // Banner that surfaces the active "Investigate in Events"
             // pre-fill so the user (a) understands why the events list
@@ -67,9 +74,13 @@ struct V2EventsWorkspace: View {
             Text("Filtered to events matching")
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
+            // WCAG 1.4.3: `brand` as body text is 3.90:1 on the light canvas /
+            // 3.65:1 on a panel. This is the literal search string the filter
+            // banner echoes back, so it must be readable. `brandText` swaps in
+            // the dim variant for light only (6.83:1) and is unchanged in dark.
             Text("\"\(filter)\"")
                 .font(V2Theme.mono())
-                .foregroundStyle(V2Theme.brand)
+                .foregroundStyle(V2Theme.brandText)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if let centreLabel {
@@ -111,16 +122,18 @@ struct V2EventsWorkspace: View {
         )
     }
 
-    /// Surface a clear "this is mock data" warning when no daemon is
-    /// detected, mirroring the System workspace's data-source banner.
-    /// Without this banner the v1 EventStream chrome looks identical
-    /// in mock and live mode and users can't tell the difference.
-    private var mockBanner: some View {
+    /// Surface a clear "you are not looking at live data" warning, mode-aware
+    /// the way V2SystemWorkspace.dataSourceCard already is. The offline copy
+    /// drops the `swift run maccrabd` dev jargon the old string carried, per
+    /// the same end-user rewrite V2OverviewWorkspace got in v1.21.5.
+    private var noLiveDataBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(V2Theme.warning)
                 .scaledSystem(12, weight: .semibold)
-            Text("Mock data — no daemon detected. Start the System Extension or `swift run maccrabd` to see live events.")
+            Text(state.provider.mode == .mock
+                 ? String(localized: "events.bannerMock", defaultValue: "Sample / mock data (dev build) — start the daemon, then Reconnect to see live events.")
+                 : String(localized: "events.bannerOffline", defaultValue: "No daemon data yet — approve the System Extension in System Settings, then Reconnect to see live events."))
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
             Spacer()

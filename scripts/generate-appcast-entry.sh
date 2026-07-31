@@ -236,11 +236,21 @@ fi
 # Emit a single Sparkle <item>. HTML notes are embedded as CDATA so
 # tags pass through unescaped. A non-critical release carries
 # <sparkle:phasedRolloutInterval>; --immediate drops that line.
+#
+# <sparkle:version> is CFBundleVersion — the BUILD identity Sparkle compares
+# against the installed bundle — while <sparkle:shortVersionString> is the
+# marketing version. Both used to emit ${VERSION}, but the shipped bundle stamps
+# CFBundleVersion = "${VERSION}.$(git rev-list --count HEAD)" (build-release.sh
+# :568, e.g. 1.21.5.1018). Consequences of the collapse: two builds of the same
+# marketing version were indistinguishable to Sparkle, so a rebuild could never
+# reach installed users, and an installed 1.21.5.1018 already compared as NEWER
+# than an advertised bare "1.21.5". Emit the real build number, falling back to
+# ${VERSION} when this script is invoked standalone without BUILD_NUMBER set.
 cat <<XML
 <item>
   <title>MacCrab ${VERSION}</title>
   <link>https://github.com/peterhanily/maccrab/releases/tag/v${VERSION}</link>
-  <sparkle:version>${VERSION}</sparkle:version>
+  <sparkle:version>${BUILD_NUMBER:-$VERSION}</sparkle:version>
   <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
   <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
   <pubDate>${PUB_DATE}</pubDate>

@@ -40,6 +40,15 @@ public protocol V2DataProvider: AnyObject {
     var mode: V2DataSourceMode { get }
     var lastErrorDescription: String? { get }
 
+    /// Non-nil when the LAST `alerts(since:limit:)` call FAILED. A failed read
+    /// returns `[]` — byte-for-byte the same shape as a quiet machine — so any
+    /// consumer that renders an "all clear" empty state MUST consult this
+    /// first. Deliberately separate from `lastErrorDescription`: that slot is
+    /// shared across every surface and is never cleared by a successful read,
+    /// so gating an empty state on it would strand the panel forever after one
+    /// transient failure. This one is cleared by the next successful read.
+    var alertsReadError: String? { get }
+
     /// Diagnostic — which DB directory (if any) the live provider opened.
     var dataDir: String? { get }
 
@@ -278,4 +287,7 @@ extension V2DataProvider {
     /// Default to empty — only the live provider reads agent sessions
     /// from events.db.
     public func agentSessions(limit: Int) async -> [V2AgentSession] { [] }
+    /// Default nil — mock/offline providers can't fail a store read, so they
+    /// need no override. Only the live provider tracks this.
+    public var alertsReadError: String? { nil }
 }

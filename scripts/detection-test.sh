@@ -42,10 +42,15 @@ info()   { echo -e "  ${BLUE}▸${NC} $*"; }
 
 cleanup() {
     info "Cleaning up test artifacts..."
-    for f in "${CLEANUP_FILES[@]}"; do
+    # bash 3.2 (the /bin/bash on macOS) treats "${EMPTY[@]}" as an UNBOUND
+    # variable under `set -u` and exits immediately — so on the early-exit path
+    # (daemon failed to start), where CLEANUP_FILES is still empty, cleanup()
+    # died on its FIRST line and never reached the daemon_config.json restore
+    # below, permanently leaving the operator's config at rule_profile: all.
+    for f in ${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}; do
         rm -rf "$f" 2>/dev/null || true
     done
-    for p in "${CLEANUP_PIDS[@]}"; do
+    for p in ${CLEANUP_PIDS[@]+"${CLEANUP_PIDS[@]}"}; do
         kill "$p" 2>/dev/null || true
     done
     # v1.21.5: restore the operator's daemon_config.json (we forced

@@ -166,12 +166,29 @@ export MACCRAB_OTLP_RECEIVER=1    # start the loopback OTLP receiver (127.0.0.1:
 
 # Operator's shell, for Claude Code:
 export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # REQUIRED — see note below
 export OTEL_TRACES_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-# Optional: also enable detailed user-prompt tracing
-# export ENABLE_BETA_TRACING_DETAILED=1
+# Optional: also record the user's prompt TEXT in span attributes.
+# Off by default at both layers; leave off unless you need it.
 # export OTEL_LOG_USER_PROMPTS=1
+```
+
+> **`CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` is not optional.** Claude Code ships
+> tracing off by default: metrics and logs flow with
+> `CLAUDE_CODE_ENABLE_TELEMETRY=1` alone, but **spans do not**. Without this flag
+> the receiver binds, reports healthy, and ingests nothing — which is exactly what
+> happened on the author's own machine for months, because this document and
+> `scripts/test-otlp-claude-code.sh` both omitted it. If `maccrabctl agent-spans`
+> reports an empty store while the receiver is listening, check this flag first.
+
+Verify ingestion once a session has run:
+
+```bash
+maccrabctl agent-spans                      # recent traces, nested by span
+maccrabctl agent-spans --search Bash        # search span names / tools / paths
+maccrabctl agent-spans --trace <trace_id>   # expand one trace
 ```
 
 The smoke-test script `scripts/test-otlp-claude-code.sh` automates the

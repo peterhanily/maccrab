@@ -259,17 +259,26 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             headerRow
             Divider().background(V2Theme.panelBorder)
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(displayCache) { item in
-                        Row(
-                            columns: columns,
-                            item: item,
-                            isSelected: selection?.id == item.id,
-                            isChecked: isChecked(item),
-                            showsCheckbox: isMulti,
-                            onSelectRow: { selection = $0 },
-                            onToggleCheck: { toggleCheck($0) }
-                        )
+                // Pre-fix there was no empty branch at all: a table with no rows
+                // rendered its column headers over nothing, so "there is no
+                // data" and "your filter matched nothing" both read as a broken
+                // panel — and filtering to zero results gave no feedback and no
+                // way back. One branch here covers all 11 call sites.
+                if displayCache.isEmpty {
+                    emptyRows
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(displayCache) { item in
+                            Row(
+                                columns: columns,
+                                item: item,
+                                isSelected: selection?.id == item.id,
+                                isChecked: isChecked(item),
+                                showsCheckbox: isMulti,
+                                onSelectRow: { selection = $0 },
+                                onToggleCheck: { toggleCheck($0) }
+                            )
+                        }
                     }
                 }
             }
@@ -280,6 +289,34 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         .onChange(of: filterQuery) { _ in recomputeDisplay() }
         .onChange(of: sortColumnId) { _ in recomputeDisplay() }
         .onChange(of: sortAscending) { _ in recomputeDisplay() }
+    }
+
+    /// Shown in place of rows when nothing is displayed. Distinguishes "there
+    /// is no data" from "your filter excluded everything" — the latter is a
+    /// dead end without a Clear affordance, since the user can't tell it apart
+    /// from an empty table.
+    @ViewBuilder
+    private var emptyRows: some View {
+        let filtered = !filterQuery.trimmingCharacters(in: .whitespaces).isEmpty
+        VStack(spacing: 8) {
+            Image(systemName: filtered ? "line.3.horizontal.decrease.circle" : "tray")
+                .scaledSystem(20, weight: .light)
+                .foregroundStyle(V2Theme.mutedText)
+            Text(filtered
+                 ? String(localized: "table.noMatches", defaultValue: "No rows match “\(filterQuery)”")
+                 : String(localized: "table.noRows", defaultValue: "No rows to show"))
+                .font(V2Theme.body())
+                .foregroundStyle(V2Theme.mutedText)
+                .multilineTextAlignment(.center)
+            if filtered {
+                V2ActionButton(String(localized: "table.clearFilter", defaultValue: "Clear filter"),
+                               style: .secondary, size: .compact) {
+                    filterQuery = ""
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
     }
 
     private func filterField(_ prompt: String) -> some View {
@@ -294,6 +331,10 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(V2Theme.mutedText)
                 }
                 .buttonStyle(.plain)
+                // WCAG 4.1.2: icon-only, with no .help() either, so VoiceOver
+                // announced a bare "button" (or the SF Symbol name). This is
+                // the clear-filter control on EVERY data table in the app.
+                .accessibilityLabel(String(localized: "ax.clearFilter", defaultValue: "Clear filter"))
             }
         }
         .padding(.vertical, 8)

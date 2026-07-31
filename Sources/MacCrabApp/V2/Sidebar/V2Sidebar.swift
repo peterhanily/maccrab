@@ -104,6 +104,16 @@ struct V2Sidebar: View {
 
                 Spacer(minLength: 0)
 
+                // UX-04: Basic shows 4 of 10 workspaces and Standard 8, and the
+                // sidebar drops the rest silently — a user told (by the Welcome
+                // checklist, the docs, or a colleague) to open Prevention or
+                // Detection has no in-app signal that those exist, let alone that
+                // ⌘K reaches them. One row, rendered only when something is
+                // actually hidden.
+                hiddenWorkspacesRow
+                    .padding(.horizontal, collapsed ? 6 : 8)
+                    .padding(.bottom, 6)
+
                 protectionFooter
                     .padding(.horizontal, collapsed ? 6 : 8)
                     .padding(.bottom, 8)
@@ -122,6 +132,50 @@ struct V2Sidebar: View {
             }
         }
         .frame(width: resolvedWidth)
+    }
+
+    // MARK: - Hidden-workspace affordance
+
+    /// Workspaces the current density mode hides. The active workspace is
+    /// always surfaced in the list above (see the `visible` filter), so it is
+    /// never counted as hidden.
+    private var hiddenWorkspaceCount: Int {
+        V2Workspace.allCases.filter {
+            !$0.isVisible(in: currentUIMode) && $0 != state.currentWorkspace
+        }.count
+    }
+
+    @ViewBuilder
+    private var hiddenWorkspacesRow: some View {
+        if hiddenWorkspaceCount > 0 {
+            Button { state.paletteOpen = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "ellipsis.circle")
+                        .scaledSystem(14, weight: .medium)
+                        .foregroundStyle(V2Theme.tertiaryText)
+                        .frame(width: 18, alignment: .center)
+                    if !collapsed {
+                        Text(String(localized: "sidebar.moreWorkspaces",
+                                    defaultValue: "\(hiddenWorkspaceCount) more workspaces"))
+                            .scaledSystem(12)
+                            .foregroundStyle(V2Theme.tertiaryText)
+                        Spacer(minLength: 0)
+                        Text("⌘K")
+                            .scaledSystem(11)
+                            .foregroundStyle(V2Theme.tertiaryText)
+                    }
+                }
+                .padding(.horizontal, collapsed ? 6 : 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(String(localized: "sidebar.moreWorkspacesHelp",
+                         defaultValue: "Open the command palette to reach workspaces hidden by the current display mode"))
+            .accessibilityLabel(String(localized: "sidebar.ax.moreWorkspaces",
+                                       defaultValue: "\(hiddenWorkspaceCount) more workspaces. Opens the command palette."))
+        }
     }
 
     // MARK: - Resize handle

@@ -15,19 +15,36 @@ echo "║     MacCrab Stress Test ($DURATION seconds)       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# Check if daemon is running
-if ! pgrep -x maccrabd > /dev/null; then
-    echo "Starting daemon..."
+# Engine: prefer the live System Extension, then a running dev daemon; only
+# start .build/debug/maccrabd when neither is present.
+#
+# Probing ONLY `maccrabd` meant that on a release install — where
+# `com.maccrab.agent` is the engine and `maccrabd` never runs — this script
+# launched a SECOND, non-root engine alongside the production sysext and then
+# reported RSS / CPU / event numbers for that throwaway process instead of the
+# one actually protecting the host. Same probe as burst-bench.sh.
+if pgrep -x com.maccrab.agent > /dev/null; then
+    DAEMON_PID=$(pgrep -x com.maccrab.agent | head -1)
+    ENGINE_KIND="system extension (com.maccrab.agent)"
+    STARTED_DAEMON=0
+elif pgrep -x maccrabd > /dev/null; then
+    DAEMON_PID=$(pgrep -x maccrabd | head -1)
+    ENGINE_KIND="dev daemon (maccrabd)"
+    STARTED_DAEMON=0
+else
+    if [ ! -x .build/debug/maccrabd ]; then
+        echo "✘ No engine running and .build/debug/maccrabd not built (run 'make build')."
+        exit 2
+    fi
+    echo "Starting dev daemon..."
     .build/debug/maccrabd >> /tmp/maccrab_stress.log 2>&1 &
     DAEMON_PID=$!
     STARTED_DAEMON=1
+    ENGINE_KIND="dev daemon (started by this script)"
     sleep 3
-else
-    DAEMON_PID=$(pgrep -x maccrabd | head -1)
-    STARTED_DAEMON=0
 fi
 
-echo "Daemon PID: $DAEMON_PID"
+echo "Engine: $ENGINE_KIND, PID $DAEMON_PID"
 echo ""
 
 # Baseline measurements
@@ -69,7 +86,11 @@ while [ $ELAPSED -lt $DURATION ]; do
     fi
 
     EVENTS=$(.build/debug/maccrabctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "?")
-    ALERTS=$(.build/debug/maccrabctl alerts 1000 2>/dev/null | grep -c "^[🔴🟡🟠🟢⚪]" 2>/dev/null || echo "?")
+    # The CLI prints "[SEVERITY] …" (Severity.coloredLabel), never a leading
+    # emoji, so the old pattern matched nothing and the Alerts column read 0/?
+    # for the whole run — hiding exactly the alert storm this monitor exists to
+    # catch. (grep -c exits 1 on zero matches, hence `|| true`.)
+    ALERTS=$(.build/debug/maccrabctl alerts 1000 2>/dev/null | grep -cE "^\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]" || true)
     CPU=$(ps -o %cpu= -p $DAEMON_PID 2>/dev/null | tr -d ' ' || echo "?")
 
     printf "%-8s %-10s %-10s %-8s %-6s\n" "${ELAPSED}s" "$RSS" "$EVENTS" "$ALERTS" "$CPU"

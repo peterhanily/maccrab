@@ -8,6 +8,21 @@ RULES_DIR = $(BUILD_DIR)/compiled_rules
 # ─── Quick development cycle ─────────────────────────────────────────
 
 # One command: build + codesign + compile rules + restart daemon
+# Activate the version-controlled git hooks (.githooks/pre-push runs local CI).
+# Required once per clone: git does not track .git/hooks/, so a fresh checkout
+# has NO push gate until this runs. MacCrab's CI is local — see docs/CI-ARCHITECTURE.md.
+hooks:
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/*
+	@echo "git hooks activated (core.hooksPath=.githooks) — pre-push runs scripts/ci-local.sh"
+
+# Run the full local CI gate. `make ci-clean` wipes .build first (release gate).
+ci:
+	@./scripts/ci-local.sh
+
+ci-clean:
+	@./scripts/ci-local.sh --clean
+
 dev:
 	@./scripts/dev.sh
 
@@ -50,10 +65,13 @@ watch:
 # ─── Build ────────────────────────────────────────────────────────────
 
 build:
-	@swift build 2>&1 | tail -1
+	@# pipefail: the recipe's status is otherwise `tail`'s, which is always 0 —
+	@# a compile failure exited green, and `dmg: release` / `install: release`
+	@# happily proceeded to package a build that never linked.
+	@set -o pipefail; swift build 2>&1 | tail -1
 
 release:
-	@swift build -c release 2>&1 | tail -1
+	@set -o pipefail; swift build -c release 2>&1 | tail -1
 
 compile-rules:
 	@python3 Compiler/compile_rules.py \
@@ -70,7 +88,9 @@ compile-rules:
 # ─── Test ─────────────────────────────────────────────────────────────
 
 test:
-	@swift test 2>&1 | grep -E "✔|✘|Test run"
+	@# pipefail: without it the recipe's status is grep's, and grep MATCHES the
+	@# ✘ lines a failing run emits — so `make test` exited 0 on a red suite.
+	@set -o pipefail; swift test 2>&1 | grep -E "✔|✘|Test run"
 
 test-full:
 	./scripts/test.sh
@@ -95,6 +115,9 @@ test-integration:
 # host. MANDATORY pre-release gate for ANY change under Sources/MacCrabForensics/
 # TierB or the trampoline/broker C targets — record the run in the release
 # checklist. (audit #2: the only containment proof must not run nowhere.)
+# The marker records a DIGEST over the containment sources, not just a version
+# string, so it goes stale the moment that code changes. The path list below is
+# MIRRORED in scripts/prerelease-check.sh — change both together.
 test-corpus:
 	@set -o pipefail; \
 	swift build && \
@@ -103,8 +126,9 @@ test-corpus:
 	rc=$$?; \
 	if [ "$$rc" -eq 0 ]; then \
 		ver="$${VERSION:-$$(grep -E '^[[:space:]]*public static let fallback:' Sources/MacCrabCore/MacCrabVersion.swift | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"; \
-		printf 'CORPUS_ATTESTED version=%s commit=%s date=%s\n' \
-			"$$ver" "$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+		dig="$$(find Sources/MacCrabForensics/TierB Sources/CTierBBroker Sources/maccrab-tierb-sandbox-host Sources/maccrab-tierb-corpus-probe Sources/maccrab-tierb-corpus-probe-swift Sources/maccrab-tierb-example -type f 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $$1}')"; \
+		printf 'CORPUS_ATTESTED version=%s commit=%s digest=%s date=%s\n' \
+			"$$ver" "$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$$dig" \
 			"$$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .maccrab-corpus-attest; \
 		echo "✓ containment corpus attested for $$ver → .maccrab-corpus-attest"; \
 	else \
@@ -171,12 +195,25 @@ dmg: release
 # ─── Utilities ────────────────────────────────────────────────────────
 
 # Clear all data (events, alerts) — uses sudo for system DB
+# Only events.db + alerts.jsonl were removed here, so alerts.db, campaigns.db,
+# tracegraph.db and traces.db survived a "clear" — the alert store and the
+# causal-graph store are the two richest records of activity, and both stayed
+# on disk while `make help` / README claimed the data was gone. Cover every
+# store (the `*` picks up the -wal / -shm sidecars).
 clear-data: stop
 	@rm -rf "$(HOME)/Library/Application Support/MacCrab/events.db"* 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/alerts.db"* 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/campaigns.db"* 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/tracegraph.db"* 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/traces.db"* 2>/dev/null || true
 	@rm -rf "$(HOME)/Library/Application Support/MacCrab/alerts.jsonl" 2>/dev/null || true
 	@sudo rm -rf "/Library/Application Support/MacCrab/events.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/alerts.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/campaigns.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/tracegraph.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/traces.db"* 2>/dev/null || true
 	@sudo rm -rf "/Library/Application Support/MacCrab/alerts.jsonl" 2>/dev/null || true
-	@echo "All data cleared"
+	@echo "All data cleared (events, alerts, campaigns, tracegraph, traces)"
 
 # Run daemon as root (full ES support) — needs Terminal for password
 run-root: build compile-rules
@@ -205,7 +242,7 @@ help:
 	@echo "  make test         Run tests (summary only)"
 	@echo "  make test-full    Run full test suite"
 	@echo "  make compile-rules Compile YAML rules to JSON"
-	@echo "  make clear-data   Delete local events/alerts"
+	@echo "  make clear-data   Delete all local data (events/alerts/campaigns/traces)"
 	@echo "  make new-rule     Create rule from template"
 	@echo ""
 	@echo "  make install      Install system-wide (sudo)"

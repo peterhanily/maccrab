@@ -110,7 +110,9 @@ public struct V2DetectionWorkspace: View {
                 tabs: V2Workspace.detection.tabs,
                 selected: Binding(
                     get: { state.selectedTabs[.detection] ?? .detectionRules },
-                    set: { if let v = $0 { state.selectedTabs[.detection] = v } }
+                    // See V2AlertsWorkspace: selectTab routes through goto so
+                    // the switch lands in history / recents / persistence.
+                    set: { if let v = $0 { state.selectTab(v) } }
                 )
             )
             tabBody
@@ -827,7 +829,11 @@ public struct V2DetectionWorkspace: View {
                             Image(systemName: r.isEnabled ? "circle.fill" : "circle")
                                 .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
                                 .scaledSystem(8)
-                                .frame(width: 22, height: 22)
+                                // WCAG 2.5.8: was 22x22. Highest-consequence
+                                // small target in the app — a stray click here
+                                // silently disables a detection rule. The
+                                // column is .fixed(50), so 24 still fits.
+                                .frame(width: V2Theme.minHitTarget, height: V2Theme.minHitTarget)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
