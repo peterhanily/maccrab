@@ -1,6 +1,22 @@
 title: Mach Port task_for_pid Process Injection
 id: d1a2b3c4-1003-4000-a000-000000001003
-status: stable
+# v1.21.6 (audit DET-09): demoted from `stable` — this rule detects the STRING,
+# not the technique. Real injection issues the Mach trap; it does not name the
+# API in argv, so the only processes that can match are ones reading or grepping
+# text about it. The evidence is unambiguous: 145 historical alerts in alerts.db,
+# every one a false positive (gh, /bin/chmod, /bin/cp, /usr/bin/perl,
+# /usr/bin/stat, Claude Code), zero true positives; and since the RC17 filter
+# blocks landed it has been silent — rule_telemetry.json shows 446,748
+# evaluations against 0 matches on the current uptime. It is paying eval cost on
+# every process event for a detection that cannot succeed, and its eight filter
+# blocks are themselves an evasion map. The real signal is ES-native and already
+# implemented: ES_EVENT_TYPE_NOTIFY_GET_TASK_READ / TRACE /
+# REMOTE_THREAD_CREATE are normalised by ESCollector into `process_event`
+# actions, and Rules/defense_evasion/remote_thread_injection.yml,
+# Rules/credential_access/memory_read_of_high_value_process.yml,
+# process_reads_other_process_memory_macos.yml and ptrace_attach_to_process.yml
+# already consume them — they are `experimental` and need the promotion soak.
+status: deprecated
 description: >
     Detects use of task_for_pid() or process_set_exception_ports() which
     grants full control over another process's memory and execution. This

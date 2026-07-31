@@ -349,7 +349,7 @@ public actor SuppressionManager {
             source: suppression.source,
             reason: suppression.reason
         ))
-        saveToDisk()
+        lastPersistError = saveToDisk()
         logger.info("Suppression added id=\(suppression.id) scope=\(suppression.scope.kind)")
         return suppression
     }
@@ -366,7 +366,7 @@ public actor SuppressionManager {
             source: entry.source,
             reason: entry.reason
         ))
-        saveToDisk()
+        lastPersistError = saveToDisk()
         logger.info("Suppression removed id=\(id)")
         return entry
     }
@@ -464,7 +464,16 @@ public actor SuppressionManager {
         entries.values.first(where: { $0.scope == scope && !$0.isExpired(at: now) })
     }
 
-    private func saveToDisk() {
+    /// Persist the store. Returns the failure reason, or nil on success.
+    ///
+    /// Used to swallow every error into os.log and return void, so `add()` handed
+    /// the caller a Suppression that had NOT been written — on a release install
+    /// the store lives under root-owned `/Library/Application Support/MacCrab`, so
+    /// every uid-501 `maccrabctl allow add` reported success and persisted
+    /// nothing. An operator tuning down false positives believed their allowlist
+    /// was in effect while the engine never saw an entry.
+    @discardableResult
+    private func saveToDisk() -> String? {
         let sorted = entries.values.sorted { $0.createdAt < $1.createdAt }
         let file = SuppressionFile(version: 2, entries: sorted)
         let encoder = JSONEncoder()
@@ -476,10 +485,21 @@ public actor SuppressionManager {
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: filePath
             )
+            return nil
         } catch {
             logger.error("saveToDisk failed: \(error.localizedDescription)")
+            return error.localizedDescription
         }
     }
+
+    /// Where this store persists. Surfaced so a caller can tell the operator
+    /// exactly which path a failed write was attempted against.
+    public nonisolated var storePath: String { filePath }
+
+    /// Reason the most recent mutation failed to persist, or nil if it landed.
+    /// Callers that report success to a human MUST check this — `add` returns a
+    /// Suppression whether or not it reached disk.
+    public private(set) var lastPersistError: String?
 
     private func appendAudit(_ entry: SuppressionAuditEntry) {
         let encoder = JSONEncoder()

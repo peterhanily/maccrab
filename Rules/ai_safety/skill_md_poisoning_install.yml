@@ -1,6 +1,17 @@
 title: SKILL.md Poisoning — Install of Untrusted Agent Skill
 id: d1a2b3c4-2030-4000-a000-000000002030
-status: experimental
+# AI-18: promoted experimental -> stable. Verified against ordinary developer
+# activity on a heavily-skilled host: 45 real installed SKILL.md files under
+# ~/.claude/skills and ~/.claude/plugins, ZERO containing any of the six
+# payload markers. The markers are agent-DIRECTIVE markup (<INSTRUCTIONS>,
+# <eval>, <run>, <fetch>, an inline base64 text/html data URI, __import__("os"))
+# which human-readable skill documentation does not carry, and the rule fires
+# only on FileAction 'create' of a file literally named SKILL.md under a skills
+# directory — not on edits, not on reads. FileContent is genuinely populated
+# for these paths (FileContentEnricher.shouldScan agentContentRoots covers
+# /.claude/skills/, /.codex/skills/, /.cursor/skills/), so this is a live rule,
+# not a dead one being promoted for appearances.
+status: stable
 description: >
     Detects writes of `SKILL.md` files into agent skill directories
     (`.claude/skills/`, `~/.claude/skills/`, `.codex/skills/`,

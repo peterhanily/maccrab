@@ -23,9 +23,20 @@ detection:
         CommandLine|contains:
             - ' -l'
             - ' --listen'
-    filter_apple_parent:
-        ParentSignerType: 'apple'
-    condition: selection and selection_listen and not filter_apple_parent
+    # v1.21.6 (audit DET-08): this was `ParentSignerType: 'apple'`. The name reads
+    # as "exclude Apple's own tooling", but /bin/zsh and /bin/bash are Apple-signed
+    # — on the reference host they account for 15,316 of the 16,202 process execs
+    # with an Apple-signed parent. So the filter actually excluded ANY
+    # shell-launched process: `nc -l` typed at a Terminal prompt, run from a
+    # malicious postinstall script, or run inside a reverse-shell session. That is
+    # exactly the case the rule exists to catch. Narrow the exclusion to Apple
+    # DAEMON parents by path, which is what the filter name always meant.
+    filter_apple_daemon_parent:
+        ParentImage|startswith:
+            - '/usr/libexec/'
+            - '/System/'
+            - '/usr/sbin/'
+    condition: selection and selection_listen and not filter_apple_daemon_parent
 falsepositives:
     - Network debugging and troubleshooting
     - Development testing of network services

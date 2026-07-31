@@ -1,6 +1,13 @@
 title: Docker Socket Mounted Into Container
 id: d1a2b3c4-0421-4000-a000-000000000421
-status: experimental
+# v1.21.6 (DET-03): promoted experimental -> stable so the `container` tactic
+# (0 of 12 active) is not dark. Chosen over the other docker_* rules because it
+# keys on the canonical container-escape primitive — mounting the docker socket
+# into a container — via an explicit, non-default flag AND-gated with `run`/
+# `create`. Volume is bounded by docker CLI invocations. FP: docker-in-docker CI
+# and Portainer, which is why it stays `level: medium` and suppressible, so a
+# dind developer can silence it without disabling the tactic.
+status: stable
 description: >
     Detects a container being launched with /var/run/docker.sock mounted as
     a volume. This grants the container full control over the Docker daemon,

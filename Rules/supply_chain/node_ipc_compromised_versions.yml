@@ -1,6 +1,15 @@
 title: Compromised node-ipc Version Observed in node_modules (peacenotwar 9.1.6/9.2.3/12.0.1)
 id: 21a8021e-abb7-4791-8d68-eab80a49edb4
-status: experimental
+# v1.21.6 (DET-03): promoted experimental -> stable so the `supply_chain` tactic
+# (0 of 53 active) is not dark. Chosen as the zero-FP-by-construction member of
+# the tactic: it requires BOTH an exact path suffix
+# (/node_modules/node-ipc/package.json) AND an exact compromised version string
+# in the file content. It cannot match anything else. The behavioural
+# supply-chain rules (npm_token_accessed_by_non_npm,
+# git_credential_accessed_by_non_git, cloud_metadata_imds_query) are the higher
+# -value promotions but each has a measurable FP shape and none has ever been FP
+# -soaked — they wait for the reference machine.
+status: stable
 description: >
     Detects creation or modification of `/node_modules/node-ipc/package.json`
     whose FileContent reports one of the three known-compromised

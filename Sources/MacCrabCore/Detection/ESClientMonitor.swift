@@ -184,13 +184,35 @@ public actor ESClientMonitor {
     }
 
     /// Check if a process is running by name using /usr/bin/pgrep (lightweight).
+    ///
+    /// `try? proc.run()` followed by `waitUntilExit()` / `terminationStatus` is
+    /// not merely lossy — it ABORTS the process. `Process` is NSTask, and
+    /// `-[NSConcreteTask terminationStatus]` raises NSInvalidArgumentException
+    /// ("task not launched") when the spawn failed; an uncaught ObjC exception
+    /// in Swift is SIGABRT, here of the ROOT System Extension. `posix_spawn`
+    /// returns EAGAIN whenever the per-user or system maxproc limit is
+    /// exhausted — reachable by any unprivileged local user — and this poll runs
+    /// 3× every 60 s (5× including the slot estimate), so the window is
+    /// continuous.
+    ///
+    /// Fail SAFE rather than fatal OR alarmist: report "running". A spawn we
+    /// could not perform is no evidence about the target, and the caller turns
+    /// `false` into a CRITICAL "xprotectd DOWN — ES infrastructure compromised"
+    /// alert. Returning `false` here would convert process-table pressure into a
+    /// self-inflicted critical-alert storm.
     private nonisolated static func isProcessRunning(_ name: String) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         proc.arguments = ["-x", name]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        do {
+            try proc.run()
+        } catch {
+            Logger(subsystem: "com.maccrab.detection", category: "es-monitor")
+                .error("pgrep spawn failed while probing \(name, privacy: .public): \(error.localizedDescription, privacy: .public) — reporting it as running (a failed spawn is no evidence either way)")
+            return true
+        }
         proc.waitUntilExit()
         return proc.terminationStatus == 0
     }

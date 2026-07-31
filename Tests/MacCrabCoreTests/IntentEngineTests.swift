@@ -37,15 +37,39 @@ struct IntentClassifierTests {
         #expect(result.provider == "heuristic")
     }
 
-    @Test("Read credentials + publish-endpoint egress → lateralMovement (worm shape)")
+    @Test("Read credentials + PUBLISH-only egress → lateralMovement (worm shape)")
     func lateralMovementWormShape() async {
+        let c = IntentClassifier(llmService: nil)
+        // upload.pypi.org is publish-ONLY by construction: PyPI splits uploads
+        // from installs (pypi.org / files.pythonhosted.org), so a host-only test
+        // genuinely distinguishes the two there.
+        let result = await c.classify(brief(
+            creds: ["~/.pypirc"],
+            egress: ["upload.pypi.org"]
+        ))
+        #expect(result.label == .lateralMovement)
+        #expect(result.reasons.contains(where: { $0.contains("worm self-propagation") }))
+    }
+
+    /// AI-16 regression guard. This case previously scored `lateralMovement` at
+    /// weight 5 — the largest in the function — and so decided the label outright.
+    /// But npm reads `~/.npmrc` on EVERY install and contacts `registry.npmjs.org`
+    /// on every install, so "credential read AND publish host" was a tautology on
+    /// npm: the single most common benign action on a developer Mac was reported
+    /// as worm self-propagation, and it out-scored (and therefore masked) genuine
+    /// exfiltration when both were present. npm does not split publish from
+    /// install by host, so a host-only test cannot tell them apart and must not
+    /// pretend to.
+    @Test("npm install shape (npmrc + registry.npmjs.org) is NOT worm self-propagation")
+    func npmInstallIsNotWormShape() async {
         let c = IntentClassifier(llmService: nil)
         let result = await c.classify(brief(
             creds: ["~/.npmrc"],
             egress: ["registry.npmjs.org"]
         ))
-        #expect(result.label == .lateralMovement)
-        #expect(result.reasons.contains(where: { $0.contains("worm self-propagation") }))
+        #expect(result.label != .lateralMovement,
+                "every npm install reads .npmrc and hits the registry — this must not read as a worm")
+        #expect(!result.reasons.contains(where: { $0.contains("worm self-propagation") }))
     }
 
     @Test("Destructive command spawned → destructive")

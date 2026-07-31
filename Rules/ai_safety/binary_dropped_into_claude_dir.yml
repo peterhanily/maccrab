@@ -1,6 +1,18 @@
 title: Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack)
 id: 690711f9-8a8d-49e4-9124-0710e7d26398
-status: experimental
+# AI-18: promoted experimental -> stable. Four independent AND legs, and the
+# ordinary-developer paths fail at least one of them: `git checkout` / `git
+# stash` restoring a committed .claude/hooks/*.sh descends from the shell, not
+# from a package manager, so selection_lineage misses; a dotfile manager
+# (chezmoi/yadm/stow) likewise; Claude Code installing its own skills is caught
+# by filter_claude_writers, and a node-packaged Claude Code writes with the
+# shell as parent, which again fails selection_lineage. What is left is
+# precisely the SafeDep SessionStart-hijack shape: a PACKAGE MANAGER's
+# descendant dropping an executable script into a Claude workspace directory.
+# The one documented residual (a user deliberately running
+# `npx some-claude-skill-installer`) is a provenance decision the operator
+# should be told about, not one MacCrab should make silently.
+status: stable
 description: >
     Detects creation of an executable-looking file (basename has no
     extension, or has a script / Mach-O extension) under a Claude Code

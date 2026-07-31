@@ -16,7 +16,15 @@ public enum EntropyAnalysis {
         var freq: [Character: Int] = [:]
         for c in string { freq[c, default: 0] += 1 }
         let len = Double(string.count)
-        return -freq.values.reduce(0.0) { sum, count in
+        // Sum in a DETERMINISTIC order. Reducing over `freq.values` directly walks
+        // the dictionary in hash order, and floating-point addition is not
+        // associative — so the same string could yield results differing in the
+        // last bit between two evaluations (observed: 3.373557262275185 vs
+        // 3.3735572622751855, a ~1-in-5 intermittent test failure). That value
+        // feeds a threshold comparison (`highestEntropy > 5.5`) and the dedup
+        // parity contract, so non-determinism here is a detection input that can
+        // flip. Sorting the counts costs nothing at these alphabet sizes.
+        return -freq.values.sorted().reduce(0.0) { sum, count in
             let p = Double(count) / len
             return sum + p * log2(p)
         }

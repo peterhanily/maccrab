@@ -33,4 +33,11 @@ detection:
 falsepositives:
     - Legitimate keychain management scripts
     - Backup tools accessing keychain
+# /usr/bin/security IS an Apple platform binary, so NoiseFilter Gate 7 dropped
+# every match from this rule — silencing the whole keychain-dumping class
+# (T1555.001), the canonical macOS stealer technique (AMOS, Banshee). The rule is
+# precise enough to bypass noise filtering on its own terms: it requires a dumping
+# verb in the command line AND excludes Apple-signed and /System//usr/libexec//usr/sbin
+# parents, so securityd and Apple's own tooling cannot trigger it.
+suppressible: false
 level: medium

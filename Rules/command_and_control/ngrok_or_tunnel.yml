@@ -31,9 +31,17 @@ detection:
         CommandLine|contains:
             - 'cloudflared tunnel'
             - 'cloudflared access'
-    filter_apple_parent:
-        ParentSignerType: 'apple'
-    condition: (selection_binary or selection_ngrok_args or selection_cloudflared_args) and not filter_apple_parent
+    # v1.21.6 (audit DET-08): see netcat_listener.yml — `ParentSignerType: 'apple'`
+    # excluded every shell-launched process (bash/zsh are Apple-signed and are
+    # 94.5% of Apple-signed parents on the reference host), which is how an
+    # operator, a postinstall script, and a reverse-shell session all launch a
+    # tunnel client. Narrow to Apple DAEMON parents by path.
+    filter_apple_daemon_parent:
+        ParentImage|startswith:
+            - '/usr/libexec/'
+            - '/System/'
+            - '/usr/sbin/'
+    condition: (selection_binary or selection_ngrok_args or selection_cloudflared_args) and not filter_apple_daemon_parent
 falsepositives:
     - Developers testing webhooks or sharing local services
     - Legitimate Cloudflare Tunnel deployments

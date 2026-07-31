@@ -1,6 +1,15 @@
 title: System Recovery Inhibited
 id: f0e1d2c3-a003-4000-e000-00000000a003
-status: experimental
+# v1.21.6 (DET-03): promoted experimental -> stable. Snapshot/Time-Machine
+# destruction is the pre-encryption step of every macOS ransomware family, and
+# with `impact` at zero active rules it was undetectable by any live single-event
+# rule. FP surface, stated honestly: `tmutil disable*`, `csrutil disable` (which
+# cannot even run on a booted SIP host) and `diskutil apfs deleteSnapshot` are
+# near-zero-rate admin actions; the residual risk is `selection_spotlight_disable`
+# firing on a developer running `mdutil -a -i off`, a single bounded alert, not a
+# storm — process_creation of tmutil/csrutil/mdutil/diskutil is a handful of
+# events per day at most. Reassess against a reference-machine FP soak.
+status: stable
 description: |
   Detects attempts to prevent system recovery and backup mechanisms.
   Adversaries disable Time Machine, SIP, Spotlight indexing, or delete

@@ -279,12 +279,38 @@ public actor IntentClassifier {
             reasons.append("cross-ecosystem language mismatch (Lightning PyPI pattern)")
         }
 
+        // AI-16: `registry.npmjs.org` and `api.github.com` are the hosts every
+        // INSTALL and every gh/git operation contacts, not publish endpoints.
+        // Worse, `~/.npmrc` is on the credential list and npm reads it on every
+        // single install — so "publish host AND credential read" was not a
+        // signal but a TAUTOLOGY on npm, true for every `npm install` ever run.
+        // At weight 5 (the largest in this function, above destructive's 4 and
+        // exfiltration's 3) it also single-handedly decided the label, so the
+        // most common benign action on a developer Mac was reported as
+        // `lateralMovement` at 0.62 confidence — over the reporting bar for
+        // `llm_classifier_high_risk_intent` — and it out-scored, and therefore
+        // masked, genuine exfiltration when both were present.
+        //
+        // Keep only hosts that are publish-ONLY by construction. PyPI splits
+        // upload.pypi.org (publish) from pypi.org/files.pythonhosted.org
+        // (install), so it survives; npm and the GitHub API do not split by
+        // host, so a host-only test cannot distinguish publish from install
+        // there and must not pretend to.
+        //
+        // The WEIGHT stays at 5. The defect was the host list, not the score:
+        // once only publish-only hosts qualify, the signal is genuine and should
+        // still decide the label — a credential read followed by egress to a
+        // package-publish endpoint IS worm self-propagation, and demoting it to
+        // 3 let `credentialHarvest` mask it. Recovering npm publish-detection needs
+        // an operation-level signal (HTTP method, or `npm publish` in the
+        // lineage) that BehaviorBrief does not currently carry — it holds
+        // basenames only, deliberately.
         let publishHosts = brief.networkEgress.filter {
-            $0.contains("registry.npmjs.org") || $0.contains("upload.pypi.org") || $0.contains("api.github.com")
+            $0.contains("upload.pypi.org")
         }
         if !publishHosts.isEmpty && !credPaths.isEmpty {
             labelScores[.lateralMovement, default: 0] += 5
-            reasons.append("read credentials AND egressed to publish endpoint — worm self-propagation shape")
+            reasons.append("read credentials AND egressed to a package-PUBLISH endpoint — worm self-propagation shape")
         }
 
         let topLabel = labelScores.max(by: { $0.value < $1.value })

@@ -1,14 +1,20 @@
-title: MCP Server with Potential Tool Description Injection
+title: MCP Server Process Launched With Prompt-Injection Text In Its Command Line
 id: d1a2b3c4-3003-4000-a000-000000003003
 status: stable
 description: >
-    Detects MCP server configurations or tool descriptions that contain prompt
-    injection patterns. Malicious MCP servers can embed hidden instructions in
-    tool descriptions that override the AI assistant's behavior when the tool
-    list is loaded. This "tool poisoning" attack can cause the AI to exfiltrate
-    sensitive files, execute arbitrary commands, or bypass safety guardrails
-    without the user's knowledge. The injected text is invisible to the user
-    but processed by the AI model.
+    Detects an MCP server process (node / python / npx spawned by an AI coding
+    tool) whose COMMAND LINE contains prompt-injection text. Scope limit, stated
+    honestly: this rule inspects argv only. The canonical "tool poisoning"
+    attack — hidden instructions embedded in a tool's `description` or
+    `inputSchema` — travels in the JSON-RPC `tools/list` RESPONSE over
+    stdio/HTTP and NEVER appears in argv, so this rule cannot detect it. AI-05
+    closed part of that gap in CODE rather than here: MCPMonitor now reads the
+    LOCAL script a server's `command`/`args` point at and flags tool-poisoning
+    instruction text or invisible Unicode TAG characters inside it, surfaced as
+    an `mcp_server_suspicious` event. Still undetected: remote and compiled
+    servers, and rug pulls where the poisoned description exists only in the
+    `tools/list` response and never on disk. What THIS rule catches is the loud
+    variant: injection text passed to the server process as an argument.
 author: MacCrab Community
 date: 2026/04/04
 references:

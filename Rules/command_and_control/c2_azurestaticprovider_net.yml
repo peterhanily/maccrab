@@ -1,6 +1,11 @@
 title: C2 Connection to sh.azurestaticprovider.net / 37.16.75.69 (Mini Shai-Hulud)
 id: 6b2a0325-1901-48ca-9bbf-c4b45cc0d7ab
-status: experimental
+# v1.21.6 (DET-10): promoted experimental -> stable alongside c2_trackpipe_dev.
+# Second live network_connection consumer, and the one that also exercises the
+# DestinationIp path (37.16.75.69) rather than only DestinationHostname — so the
+# network-logsource tier is proven on both fields the NetworkCollector populates,
+# not just the DNS-resolved one. Pure IOC: zero FP by construction.
+status: stable
 description: >
     Detects a DNS resolution or outbound network connection to the
     literal C2 host `sh.azurestaticprovider.net` (or its parent

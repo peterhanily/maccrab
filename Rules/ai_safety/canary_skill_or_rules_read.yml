@@ -1,6 +1,17 @@
 title: AI-Agent Honey-Prompt File Read
 id: d1a2b3c4-2058-4000-a000-000000002058
-status: experimental
+# AI-18: promoted experimental → stable. Same argument as
+# honeyprompt_canary_package_install: the decoys live ONLY under
+# ~/Library/Application Support/MacCrab/decoys/ — a directory MacCrab creates —
+# and the whole deception tier is opt-in behind MACCRAB_DECEPTION=1
+# (DaemonSetup.swift), so on a default install the path does not exist and this
+# rule cannot fire. The condition already excludes MacCrab's own binaries, the
+# Apple indexers (platform-binary-gated) and the backup/sync clients, and the
+# decoys were deliberately sited under the support dir rather than the user's
+# home precisely so Spotlight / Time Machine / iCloud / an agent's own
+# context-discovery walk cannot self-trip them. A deception asset that ships
+# disabled is worth exactly nothing.
+status: stable
 description: >
     Detects any process reading a MacCrab-deployed honey-prompt
     decoy under the MacCrab support dir

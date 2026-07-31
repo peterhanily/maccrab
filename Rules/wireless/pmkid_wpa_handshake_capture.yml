@@ -1,6 +1,14 @@
 title: WPA Handshake or PMKID Capture Attempt
 id: d1a2b3c4-0507-4000-a000-000000000507
-status: experimental
+# v1.21.6 (DET-03): promoted experimental -> stable so the `wireless` tactic
+# (0 of 8 active) is not dark. Chosen over wifi_deauth_injection and
+# bluetooth_attack_tool because every selection here is Image-ANCHORED
+# (airodump-ng / hcxdumptool / hcxpcapngtool / airport / tshark / tcpdump) — no
+# bare CommandLine substring that a normal command line can trip. The two rules
+# not chosen each carry a real substring FP: `python … sendp` (matches e.g.
+# `manage.py sendparcel`) and `blueutil --paired` (a common scripted utility).
+# FP here is limited to an operator deliberately running wireless audit tools.
+status: stable
 description: >
     Detects tools capturing WPA/WPA2 four-way handshakes or RSN PMKID
     values from wireless networks. Captured handshakes are exported as

@@ -246,6 +246,22 @@ public actor AlertSink {
             suppressedCount += 1
             return false
         }
+        // AI-17: same-evidence collapse. `ruleId:processPath` cannot see that
+        // CredentialFence's `maccrab.ai-guard.credential-access` and the Sigma
+        // `ai_tool_reads_ssh_keys` rule are the SAME finding fired 50 ms apart
+        // on the SAME event, so one SSH-key read reached the operator as three
+        // alerts. Campaign meta-alerts are exempt: their event id names one
+        // CONTRIBUTING event, not the correlation's own evidence, so collapsing
+        // them against a contributing rule alert would drop the campaign.
+        if !settled.ruleId.hasPrefix("maccrab.campaign."),
+           await deduplicator.shouldSuppressSameEvidence(
+               eventId: event.id.uuidString,
+               tactics: settled.mitreTactics,
+               severity: settled.severity
+           ) {
+            suppressedCount += 1
+            return false
+        }
         // v1.19.3 FP recalibration runs AFTER enrichment so the dev-tooling
         // lineage check sees the parent executable lifted from the event.
         let enriched = recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: settled, event: event))
@@ -296,8 +312,12 @@ public actor AlertSink {
 
     /// Insert a batch of alerts produced by the rule-engine path that has
     /// already applied NoiseFilter + per-match dedup. The sink does not
-    /// re-filter; this exists so the engine path uses the same chokepoint
-    /// as direct emissions and the architectural invariant holds.
+    /// re-apply NoiseFilter; this exists so the engine path uses the same
+    /// chokepoint as direct emissions and the architectural invariant holds.
+    /// AI-17 added ONE filter here: the same-evidence collapse, because the
+    /// caller's per-match dedup is per-rule and cannot see that N rules matched
+    /// one event with one tactic. It runs highest-severity-first so the
+    /// strongest match is the one that survives.
     ///
     /// v1.12.6 Wave 2B: optional `event` parameter so the engine path
     /// (which generates N alerts from one Event) can supply the
@@ -315,10 +335,33 @@ public actor AlertSink {
             // All alerts in a batch share one triggering event — encode the
             // snapshot ONCE rather than per alert.
             let snapshot = EventSnapshot.encode([event])
-            toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot)) }
+            let enriched = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot)) }
+            // AI-17: same-evidence collapse for the batch. N rules matching ONE
+            // event with the SAME exact tactic string are N views of one
+            // finding. Sorted highest-severity-first so the strongest survives
+            // and the weaker siblings fold into it — the deduplicator lets a
+            // strictly higher severity through, which unsorted would re-open
+            // the key and emit the weak one AND the strong one.
+            var kept: [Alert] = []
+            for alert in enriched.sorted(by: { $0.severity > $1.severity }) {
+                if !alert.ruleId.hasPrefix("maccrab.campaign."),
+                   await deduplicator.shouldSuppressSameEvidence(
+                       eventId: event.id.uuidString,
+                       tactics: alert.mitreTactics,
+                       severity: alert.severity
+                   ) {
+                    suppressedCount += 1
+                    continue
+                }
+                kept.append(alert)
+            }
+            toInsert = kept
         } else {
             toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: $0)) }
         }
+        // The whole batch can collapse into an already-emitted direct alert on
+        // the same evidence; don't hand an empty array to the store.
+        guard !toInsert.isEmpty else { return }
         try await alertStore.insert(alerts: toInsert)
         insertedCount += toInsert.count
         // Count every alert in the batch exactly once (the rule-match path's

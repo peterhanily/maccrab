@@ -1,7 +1,7 @@
 // FileInjectionScanner.swift
 // MacCrabCore
 //
-// Scans files for hidden prompt injection using forensicate's file analysis.
+// Scans files for hidden prompt injection using native structural analysis.
 // When an AI tool reads or writes a file, this scanner catches prompt injection
 // hidden in documents BEFORE the LLM processes them — invisible unicode,
 // metadata injection, hidden text, bidi overrides, and zero-width binary encoding.
@@ -9,7 +9,7 @@
 import Foundation
 import os.log
 
-/// Scans files for hidden prompt injection using forensicate's file analysis.
+/// Scans files for hidden prompt injection using native structural analysis.
 /// Detects invisible unicode, metadata injection, hidden text, bidi overrides,
 /// and zero-width binary encoding in files that AI tools access.
 public actor FileInjectionScanner {
@@ -34,9 +34,6 @@ public actor FileInjectionScanner {
     private let cacheDuration: TimeInterval = 300  // 5 minutes
     private let maxCacheSize = 500
 
-    /// Whether forensicate is available
-    public let isAvailable: Bool
-
     public struct ScanResult: Sendable {
         public let filePath: String
         public let isInjected: Bool
@@ -45,23 +42,11 @@ public actor FileInjectionScanner {
         public let severity: Severity
     }
 
-    public init() {
-        // Check if forensicate CLI is available
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        proc.arguments = ["forensicate"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        self.isAvailable = proc.terminationStatus == 0
-    }
+    public init() {}
 
     /// Scan a file for hidden prompt injection.
-    /// Returns nil if file shouldn't be scanned (wrong type, too large, cached, forensicate unavailable).
+    /// Returns nil if the file shouldn't be scanned (wrong type, too large, cached).
     public func scanFile(path: String) async -> ScanResult? {
-        guard isAvailable else { return nil }
-
         // Check extension
         let ext = (path as NSString).pathExtension.lowercased()
         guard Self.scannableExtensions.contains(ext) else { return nil }
@@ -81,7 +66,11 @@ public actor FileInjectionScanner {
         // Read file content
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
 
-        // Quick pre-checks before shelling out to forensicate
+        // Native structural checks. These used to sit behind a
+        // `guard isAvailable else { return nil }` that probed for an external
+        // `forensicate` CLI — a package that does not exist on PyPI under any
+        // name — so all three of these correct, self-contained detections were
+        // unreachable on every install. They are now the whole scanner.
         var quickThreats: [String] = []
 
         // Check for invisible unicode (zero-width chars)
@@ -104,12 +93,6 @@ public actor FileInjectionScanner {
             quickThreats.append("tag-chars: Unicode tag characters detected (ASCII smuggling)")
         }
 
-        // Shell out to forensicate for full scan
-        let forensicateResult = await runForensicate(content: content)
-        if let result = forensicateResult {
-            quickThreats.append(contentsOf: result.threats)
-        }
-
         // Update cache
         scanCache[path] = Date()
         if scanCache.count > maxCacheSize {
@@ -119,7 +102,10 @@ public actor FileInjectionScanner {
 
         guard !quickThreats.isEmpty else { return nil }
 
-        let confidence = forensicateResult?.confidence ?? (quickThreats.count > 2 ? 80 : 50)
+        // Confidence scales with how many independent structural signals agree.
+        // Tag chars and bidi overrides have no legitimate use in these file types,
+        // so two or more concurrent signals is a strong result.
+        let confidence = quickThreats.count > 2 ? 80 : (quickThreats.count > 1 ? 65 : 50)
         let severity: Severity = confidence >= 80 ? .critical : confidence >= 50 ? .high : .medium
 
         logger.warning("File injection detected in \(path): \(quickThreats.joined(separator: "; "))")
@@ -133,54 +119,4 @@ public actor FileInjectionScanner {
         )
     }
 
-    private struct ForensicateOutput: Sendable {
-        let confidence: Int
-        let threats: [String]
-    }
-
-    private func runForensicate(content: String) async -> ForensicateOutput? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["forensicate", "--json", "--threshold", "30"]
-
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        proc.standardInput = inputPipe
-        proc.standardOutput = outputPipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            // Write content to stdin (truncate to 50KB for performance)
-            let truncated = String(content.prefix(50_000))
-            inputPipe.fileHandleForWriting.write(truncated.data(using: .utf8) ?? Data())
-            inputPipe.fileHandleForWriting.closeFile()
-
-            // Timeout: kill after 5 seconds
-            let deadline = DispatchTime.now() + 5
-            DispatchQueue.global().asyncAfter(deadline: deadline) {
-                if proc.isRunning { proc.terminate() }
-            }
-
-            proc.waitUntilExit()
-
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            guard let json = try? JSONSerialization.jsonObject(with: outputData) as? [String: Any] else {
-                return nil
-            }
-
-            let confidence = json["confidence"] as? Int ?? 0
-            let matches = json["matches"] as? [[String: Any]] ?? []
-            let threats = matches.compactMap { match -> String? in
-                guard let rule = match["rule"] as? String,
-                      let category = match["category"] as? String else { return nil }
-                return "\(category): \(rule)"
-            }
-
-            guard confidence > 0 else { return nil }
-            return ForensicateOutput(confidence: confidence, threats: threats)
-        } catch {
-            return nil
-        }
-    }
 }

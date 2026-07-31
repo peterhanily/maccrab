@@ -208,6 +208,10 @@ public actor AlertDeduplicator {
     public func reset() {
         let count = entries.count
         entries.removeAll()
+        // AI-17: the same-evidence table is part of this deduplicator's state,
+        // so a reset must clear it too or a stale watermark would keep
+        // collapsing alerts after the operator asked for a clean slate.
+        evidenceEntries.removeAll()
         logger.info("Deduplication state reset (\(count) entries cleared)")
     }
 
@@ -227,8 +231,86 @@ public actor AlertDeduplicator {
             return true
         }
 
+        // AI-17: the same-evidence table expires on a much shorter window; ride
+        // the existing periodic sweep rather than adding a second timer.
+        sweepEvidence(now: now)
+
         if expiredCount > 0 {
             logger.info("Swept \(expiredCount) expired deduplication entries")
+        }
+    }
+
+    // MARK: - Same-Evidence Collapse (AI-17)
+
+    /// Second dimension on THIS table (not a second dedup mechanism): collapse
+    /// alerts that describe ONE finding on ONE piece of evidence.
+    ///
+    /// The primary key is `ruleId:processPath`, so distinct ruleIds never
+    /// collide — and a single SSH-key read on this host produces three rows on
+    /// the SAME event id, ~50 ms apart:
+    ///   `maccrab.ai-guard.credential-access` (CredentialFence, medium),
+    ///   `d1a2b3c4-2006…` (the Sigma ai_tool_reads_ssh_keys rule, low),
+    ///   `maccrab.intent.bayesian-posterior` (high).
+    /// The first two are two implementations of the same detection; the third
+    /// is a genuinely different finding (an accumulated posterior).
+    ///
+    /// So the key is (triggering event id, EXACT ATT&CK tactic string), and the
+    /// scope is kept deliberately narrow so different findings survive:
+    ///   * an empty/nil tactic string NEVER collapses — unclassified alerts
+    ///     (counterfactual, next-technique forecast, intent posterior) carry no
+    ///     tactics and are exempt by construction;
+    ///   * the tactic string must match EXACTLY, so a multi-tactic alert
+    ///     ("attack.execution,attack.defense_evasion") does not fold into a
+    ///     single-tactic one;
+    ///   * a strictly HIGHER severity is always let through and becomes the new
+    ///     watermark — emission order across paths is not severity-ordered, and
+    ///     silently hiding a stronger later finding behind an earlier weak one
+    ///     is exactly the failure this must not introduce.
+    private var evidenceEntries: [String: (severity: Severity, seen: Date)] = [:]
+
+    /// All alerts for one event land within milliseconds on the direct path and
+    /// within a batch tick on the engine path; 120 s is generous headroom and
+    /// short enough that the table stays small.
+    public static let evidenceWindow: TimeInterval = 120
+    private let maxEvidenceEntries = 4_096
+
+    /// Returns `true` when an alert for the same event id + same tactic string
+    /// has already been emitted inside ``evidenceWindow`` at an equal or higher
+    /// severity. Records the alert (or raises the watermark) otherwise.
+    public func shouldSuppressSameEvidence(
+        eventId: String,
+        tactics: String?,
+        severity: Severity
+    ) -> Bool {
+        guard !eventId.isEmpty, let tactics, !tactics.isEmpty else { return false }
+        let key = "\(eventId)|\(tactics)"
+        let now = Date()
+        if let existing = evidenceEntries[key],
+           now.timeIntervalSince(existing.seen) < Self.evidenceWindow {
+            guard severity > existing.severity else {
+                logger.debug("Collapsed same-evidence alert for \(key, privacy: .public)")
+                return true
+            }
+            // Stronger finding on the same evidence — let it through and raise
+            // the watermark so the weaker siblings still collapse.
+            evidenceEntries[key] = (severity, now)
+            return false
+        }
+        evidenceEntries[key] = (severity, now)
+        if evidenceEntries.count > maxEvidenceEntries { sweepEvidence(now: now) }
+        return false
+    }
+
+    /// Drop expired evidence keys; if still over capacity, drop the oldest.
+    private func sweepEvidence(now: Date) {
+        evidenceEntries = evidenceEntries.filter {
+            now.timeIntervalSince($0.value.seen) < Self.evidenceWindow
+        }
+        guard evidenceEntries.count > maxEvidenceEntries else { return }
+        let excess = evidenceEntries.count - maxEvidenceEntries
+        for key in evidenceEntries.sorted(by: { $0.value.seen < $1.value.seen })
+            .prefix(excess).map(\.key) {
+            evidenceEntries.removeValue(forKey: key)
         }
     }
 

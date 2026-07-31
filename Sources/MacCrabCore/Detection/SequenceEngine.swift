@@ -381,6 +381,12 @@ public actor SequenceEngine {
     /// sort that previously collected and sorted ALL partial matches.
     private var evictionQueue: [PartialMatchRef] = []
 
+    /// Cumulative partial matches dropped by the global cap. Read via
+    /// `partialsEvictedTotal` and published in the heartbeat — see that
+    /// accessor for why an unmetered eviction is a detection-integrity problem
+    /// and not just a diagnostics gap.
+    private var evictedPartialCount: Int = 0
+
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "SequenceEngine")
 
     // MARK: - Initialization
@@ -678,6 +684,17 @@ public actor SequenceEngine {
     /// Returns the current number of in-flight partial matches (for diagnostics).
     public var activePartialMatchCount: Int {
         totalPartialCount
+    }
+
+    /// Cumulative count of partial matches evicted by the global cap since
+    /// start. Eviction is oldest-first across a SINGLE global queue shared by
+    /// every rule, so a flood of a cheap step[0] flushes other rules' in-flight
+    /// kill-chain state — and until now the only trace of that was one
+    /// `logger.warning`: no counter, no heartbeat gauge, no alert, so the flush
+    /// primitive was completely unobservable from outside the log. Surfaced as
+    /// `sequence_partials_evicted_total`.
+    public var partialsEvictedTotal: Int {
+        evictedPartialCount
     }
 
     /// Number of ENABLED sequence rules — the count that actually evaluates,
@@ -1526,7 +1543,8 @@ public actor SequenceEngine {
         }
 
         if removed > 0 {
-            logger.warning("Evicted \(removed) oldest partial matches (cap: \(self.maxPartialMatches))")
+            evictedPartialCount += removed
+            logger.warning("Evicted \(removed) oldest partial matches (cap: \(self.maxPartialMatches), cumulative: \(self.evictedPartialCount))")
         }
     }
 

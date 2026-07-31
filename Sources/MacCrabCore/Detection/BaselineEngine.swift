@@ -895,8 +895,15 @@ public actor BaselineEngine {
             throw BaselineEngineError.fileWriteFailed("rename failed: errno \(code)")
         }
 
-        // rw-r--r--: allow non-root MacCrab.app to read baseline data
-        chmod(persistPath, 0o644)
+        // rw-r-----: the baseline is the learned parent→child process-lineage
+        // graph for this machine — a behavioural fingerprint, not public data.
+        // The old comment claimed 0o644 was needed for MacCrab.app, but nothing
+        // outside the daemon reads baseline.json (grep: only a doc comment in
+        // SafeQuarantinePathValidator mentions it), so there is no non-root
+        // reader to break. Under the root sysext this lands in the root user's
+        // own app-support dir anyway; 0o640 matters for the non-root dev daemon
+        // and keeps the whole support dir consistent.
+        chmod(persistPath, 0o640)
 
         lastSaved = Date()
 

@@ -483,8 +483,15 @@ public actor RuleEngine {
                 try? FileManager.default.removeItem(atPath: path)
                 try FileManager.default.moveItem(atPath: tmp, toPath: path)
             }
+            // 0o640, not 0o644. Per-rule fire counts plus the auto-disabled
+            // rule IDs are an evasion-recon surface: they tell a local attacker
+            // which detections are hot on THIS host and, more usefully, which
+            // ones the engine has already muted. Rule CONTENT is world-readable
+            // by design (compiled_rules/ is 0644 for the app's read path), but
+            // the runtime signal does not have to be. The dashboard reads this
+            // as an admin-group uid-501 process (AppState / V2LiveDataProvider).
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o640],
                 ofItemAtPath: path
             )
         } catch {
@@ -1054,6 +1061,37 @@ public actor RuleEngine {
     /// files are present on disk.
     public var enabledRuleCount: Int {
         allRules.values.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
+    }
+
+    /// v1.21.6 (PERF-02): the `event.action` values that ENABLED rules positively
+    /// select on, plus a flag for selectors that cannot be analysed statically
+    /// (`regex` / `exists` on that field).
+    ///
+    /// Feeds `ESCollector.optionalFamiliesDemanded` so the high-rate / zero-yield
+    /// ES families are only subscribed when a rule can actually consume them —
+    /// measured on the field host, MPROTECT+MMAP+GET_TASK_READ were 24-31% of
+    /// every kernel message, one stored event and zero alerts.
+    ///
+    /// NEGATED predicates are excluded on purpose: `not event.action == x` is a
+    /// filter, not a reason to turn a firehose on. Disabled rules are excluded
+    /// for the same reason the F-04 profile disables them — they cannot fire.
+    public func enabledEventActionSelectors() -> (values: Set<String>, hasUnanalyzableSelector: Bool) {
+        var values: Set<String> = []
+        var unanalyzable = false
+        for rule in allRules.values where rule.enabled {
+            for predicate in rule.predicates
+            where !predicate.negate && predicate.field == "event.action" {
+                switch predicate.modifier {
+                case .regex, .exists:
+                    unanalyzable = true
+                default:
+                    for value in predicate.lowercasedValues where !value.isEmpty {
+                        values.insert(value)
+                    }
+                }
+            }
+        }
+        return (values, unanalyzable)
     }
 
     // MARK: - Private Evaluation Logic

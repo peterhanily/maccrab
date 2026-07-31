@@ -1,6 +1,14 @@
 title: C2 Connection to trackpipe.dev (OpenClaw / GhostLoader)
 id: 04ec2e3b-5a8e-4363-a8dd-1cfe0d6d270a
-status: experimental
+# v1.21.6 (DET-10): promoted experimental -> stable. Until now NO stable rule
+# used a network logsource at all — the 88 stable rules were process_creation
+# (53), file_event (30) and tcc_event (4) only — so every active C2 detection
+# matched the attacker's command line and was defeated by `cp ngrok /tmp/updater`.
+# This gives the network_connection dispatch path its first live consumer, and
+# does it with a pure DestinationHostname IOC: no rate, no heuristic, no
+# threshold, so it cannot misbehave on a DNS collector that only started
+# producing reliable input today.
+status: stable
 description: >
     Detects a DNS resolution or outbound network connection to
     `trackpipe.dev` or any subdomain thereof — the documented C2

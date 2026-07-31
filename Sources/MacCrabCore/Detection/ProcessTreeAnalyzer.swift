@@ -661,8 +661,14 @@ public actor ProcessTreeAnalyzer {
         }
         try fm.moveItem(atPath: tempPath, toPath: modelPath)
 
-        // rw-r--r--: allow non-root MacCrab.app to read model data
-        chmod(modelPath, 0o644)
+        // rw-r-----: the 2nd-order Markov model is a durable behavioural
+        // fingerprint of this machine ("2>bash": {"cat":1,"grep":6783,…}) —
+        // which tools the operator runs, in what order, how often. At 0o644 any
+        // local unprivileged process could read it. The old comment claimed
+        // 0o644 was needed for MacCrab.app, but nothing outside the daemon
+        // reads process_tree_model.json (grep: only DaemonSetup constructs the
+        // path), so there is no non-root reader to break.
+        chmod(modelPath, 0o640)
 
         logger.debug(
             "Model saved: \(self.totalTransitions) transitions, \(self.transitionCounts.count) parents"

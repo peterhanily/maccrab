@@ -66,9 +66,15 @@ public actor SecurityToolIntegrations {
                 try? FileManager.default.removeItem(atPath: path)
                 try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
             }
-            // World-readable so the user-side dashboard can pick it up.
+            // Group-readable (0o640 root:admin) so the user-side dashboard can
+            // pick it up — NOT world-readable. This snapshot is the installed
+            // EDR / MDM / remote-access inventory, which is prime attacker
+            // recon: at 0o644 any unprivileged local process could learn
+            // exactly which security product to evade before doing anything
+            // else. The dashboard reads it as an admin-group uid-501 process
+            // (V2LiveDataProvider), the same way it reads the 0o640 databases.
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o640],
                 ofItemAtPath: path
             )
         } catch {

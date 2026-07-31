@@ -741,7 +741,19 @@ public actor SelfDefense {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        try? process.run()
+        // `waitUntilExit()` on a task that never launched raises "task not
+        // launched" (NSInvalidArgumentException) — uncaught, that is SIGABRT of
+        // the root System Extension. `posix_spawn` fails with EAGAIN whenever
+        // the per-user or system maxproc limit is exhausted, which any
+        // unprivileged local user can provoke, so this self-defense poll must
+        // not assume the spawn succeeded. No output ⇒ no impersonator observed,
+        // which is the same conclusion as an empty pgrep result.
+        do {
+            try process.run()
+        } catch {
+            logger.error("Impersonation probe: pgrep spawn failed: \(error.localizedDescription, privacy: .public) — skipping this cycle")
+            return
+        }
         process.waitUntilExit()
 
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""

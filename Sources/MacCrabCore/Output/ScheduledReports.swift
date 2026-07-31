@@ -145,6 +145,20 @@ public actor ScheduledReports {
         )
         let path = outputDir + "/" + filename
         try? content.write(toFile: path, atomically: true, encoding: .utf8)
+        // rw-r-----, matching the rest of the support dir. A delivered
+        // report is the alert corpus in prose — rule titles, process names
+        // and full binary paths for every detection in the window. The
+        // daemon writes these as root into <supportDir>/reports, where an
+        // atomic write under the default umask left them 0o644, i.e.
+        // readable by any local account (verified on the live install:
+        // reports/daily-digest-*.txt were -rw-r--r-- root:admin). Nothing
+        // reads this directory back — the dashboard renders reports from
+        // the DB and the Slack/Teams path below uses the in-memory string —
+        // so the group-read bit exists only to keep an admin-group operator
+        // able to tail it, the same contract as events.db / alerts.db.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o640], ofItemAtPath: path
+        )
         logger.info("Report saved to \(path)")
 
         // Slack/Teams/Discord delivery (send summary, not full report)

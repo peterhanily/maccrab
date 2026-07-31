@@ -1,6 +1,14 @@
 title: Known macOS Ransomware Process Detected
 id: f0e1d2c3-a009-4000-e000-00000000a009
-status: experimental
+# v1.21.6 (DET-03): promoted experimental -> stable. The `impact` tactic shipped
+# with ZERO active single-event rules under the default stable profile, i.e. the
+# ransomware class the README positions as a differentiator had no live
+# single-event detection at all. This is the lowest-FP-risk rule in the tactic:
+# every selection is anchored on a known-malware Image basename/substring, or
+# AND-gated with an EvilQuest-specific command line. Volume is bounded by
+# process_creation of those names (effectively zero on a clean host), so it
+# cannot produce an alert storm.
+status: stable
 description: |
   Detects process names and binary paths associated with known macOS
   ransomware families: EvilQuest/ThiefQuest (2020), KeRanger (2016),

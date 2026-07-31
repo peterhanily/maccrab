@@ -1,6 +1,17 @@
 title: Honey-Prompt Canary Package Install Attempted
 id: d1a2b3c4-2057-4000-a000-000000002057
-status: experimental
+# AI-18: promoted experimental → stable. The volumetric FP-corpus promotion bar
+# is not meaningful for a deception asset. This rule matches ONLY the literal
+# canary package names MacCrab itself plants (maccrab-canary-do-not-install,
+# maccrab-honey-do-not-fetch, maccrab-decoy-skill) — strings that exist on no
+# real registry and in no legitimate manifest — so it is zero-FP by
+# construction, as the description already states. It is also gated twice over:
+# the whole deception tier is opt-in behind MACCRAB_DECEPTION=1
+# (DaemonSetup.swift), so on a default install the bait is never planted and
+# this rule cannot fire at all. Shipping it disabled meant the ONLY operators it
+# could ever cost anything — the ones who deliberately turned deception on —
+# were the ones getting no detection for it.
+status: stable
 description: >
     Detects an attempted install of a MacCrab honey-prompt canary
     package name. HoneyPromptManager (Sources/MacCrabCore/Deception/)

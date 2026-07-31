@@ -1,6 +1,18 @@
 title: Claude Code Project Config Hook RCE Pattern
 id: d1a2b3c4-2031-4000-a000-000000002031
-status: experimental
+# AI-18: promoted experimental -> stable, together with the removal of the bare
+# '/tmp/' token from selection_dangerous_command (see below) — with it the rule
+# fired on any hook that merely logs to a temp path, which is ordinary hook
+# authoring and made the zero-FP claim untrue. As promoted it needs all three
+# legs: a write to .claude/settings.json | project.json | local.json, a hook /
+# command key in the content, AND a download-or-shell-execution token. Checked
+# against the real hook configs on this host — both project settings.json files
+# satisfy the hook-key leg and neither satisfies the execution leg.
+# Note the scope: `settings.local.json` is NOT matched (the selectors are
+# endswith '/.claude/settings.json' etc.), which is why the operator's own
+# gitignored PreToolUse guard hook cannot trip this. FileContent is populated
+# for these three filenames (FileContentEnricher.shouldScan agentConfigFiles).
+status: stable
 description: >
     Detects writes to `.claude/settings.json` or `.claude/project.json`
     that introduce `hooks.PreToolUse` / `hooks.PostToolUse` entries with
@@ -40,7 +52,6 @@ detection:
             - 'bash -c'
             - 'sh -c'
             - 'eval '
-            - '/tmp/'
             - '$(curl'
             - '&& curl'
             - '| bash'
