@@ -70,6 +70,31 @@ public actor CollectorRegistry {
         /// `eventDriven` so the health computation tolerates long idle
         /// gaps when no events have been produced.
         let eventDriven: Bool
+        /// Event-driven collectors that see CONTINUOUS traffic on any active
+        /// Mac — unified log, DNS, FSEvents. For these, prolonged silence is
+        /// evidence of death, not idleness, so they lose the never-ticked
+        /// benefit of the doubt after a grace window. Without this, an
+        /// event-driven collector that has never emitted anything reports
+        /// healthy forever: `healthy` was `errorCount == 0` and the only
+        /// mutator of `errorCount` (`recordError`) had no call sites, which is
+        /// how two entirely dead sensors sat green on a shipped install.
+        let expectsContinuousTraffic: Bool
+        /// When `register()` (or lazy-registration) first saw this collector —
+        /// the baseline for the never-ticked grace window.
+        let registeredAt: Date
+        /// v1.21.6 (RES-11): the collector's consumer loop RETURNED — its
+        /// AsyncStream finished outside daemon shutdown. Nothing restarts these
+        /// loops (only 6 of 17 sources go through `driveSource`), so this is a
+        /// terminal state, not idleness.
+        ///
+        /// Deliberately a THIRD signal rather than reusing
+        /// `expectsContinuousTraffic`: 11 of the 13 unsupervised collectors are
+        /// legitimately bursty (USB hotplug, clipboard change, browser-extension
+        /// install, MCP config edit, EDR discovery, rootkit scan, SDR, BTM,
+        /// ultrasonic, event tap, system policy), and marking them
+        /// continuous-traffic to get liveness coverage would ship false reds on
+        /// every quiet machine.
+        var streamEnded: Bool = false
     }
 
     private var entries: [String: InternalEntry] = [:]
@@ -98,14 +123,21 @@ public actor CollectorRegistry {
     /// startup before the collector's event loop runs. Idempotent —
     /// re-registering with the same name just refreshes the
     /// `expectedIntervalSeconds` and clears any pre-existing error.
-    public func register(name: String, expectedIntervalSeconds: Int, eventDriven: Bool = false) {
+    public func register(
+        name: String,
+        expectedIntervalSeconds: Int,
+        eventDriven: Bool = false,
+        expectsContinuousTraffic: Bool = false
+    ) {
         entries[name] = InternalEntry(
             lastTick: nil,
             eventCount: 0,
             errorCount: 0,
             lastError: nil,
             expectedIntervalSeconds: max(1, expectedIntervalSeconds),
-            eventDriven: eventDriven
+            eventDriven: eventDriven,
+            expectsContinuousTraffic: expectsContinuousTraffic,
+            registeredAt: Date()
         )
     }
 
@@ -156,8 +188,30 @@ public actor CollectorRegistry {
             lastTick: Date(), eventCount: 1,
             errorCount: 0, lastError: nil,
             expectedIntervalSeconds: 300,
-            eventDriven: false
+            eventDriven: false,
+            expectsContinuousTraffic: false,
+            registeredAt: Date()
         )
+    }
+
+    /// v1.21.6 (RES-11): a collector's consumer loop returned — its event stream
+    /// finished — while the daemon was still running. Every collector's
+    /// `continuation.finish()` lives only in its `stop()`, so outside shutdown
+    /// this means the source is dead: no event can ever arrive again, and no
+    /// restart is attempted for the 13 collectors that are not routed through
+    /// `DaemonState.driveSource`. Terminal and unconditional — a dead sensor is
+    /// not "idle", regardless of how bursty it normally is.
+    ///
+    /// Callers must not invoke this during shutdown; `MonitorSupervisor.start`
+    /// gates on `!Task.isCancelled` for exactly that reason.
+    public func recordStreamEnded(name: String) {
+        guard var entry = entries[name] else { return }
+        guard !entry.streamEnded else { return }   // idempotent: fault once
+        entry.streamEnded = true
+        entry.errorCount &+= 1
+        entry.lastError = "event stream ended while the daemon was running — this collector is dead and nothing restarts it"
+        entries[name] = entry
+        logger.fault("CollectorRegistry: '\(name, privacy: .public)' event stream ENDED — sensor is dead, no restart is attempted. Coverage from this collector is lost until the engine restarts.")
     }
 
     public func recordError(name: String, message: String) {
@@ -185,15 +239,37 @@ public actor CollectorRegistry {
     public func snapshot(now: Date = Date()) -> [Status] {
         entries.map { (name, entry) in
             let healthy: Bool
-            if let last = entry.lastTick {
+            // A continuous-traffic collector is judged on LIVENESS (did anything
+            // arrive recently), not just on whether an error was recorded — the
+            // silence of a dead sensor is otherwise indistinguishable from health.
+            // Grace window is 10× the expected interval, measured from the last
+            // tick or, if it never ticked, from registration.
+            let silenceBudget = Double(entry.expectedIntervalSeconds) * 10
+            if entry.streamEnded {
+                // v1.21.6 (RES-11): terminal. The stream finished while the daemon
+                // was running, so no future tick is possible and no supervisor
+                // will restart it. Checked FIRST so a collector that ticked
+                // recently and then died cannot report healthy on the strength of
+                // its last tick.
+                healthy = false
+            } else if let last = entry.lastTick {
                 let age = now.timeIntervalSince(last)
-                healthy = entry.eventDriven
-                    ? entry.errorCount == 0
-                    : age < Double(entry.expectedIntervalSeconds) * 5
+                if entry.eventDriven {
+                    healthy = entry.errorCount == 0
+                        && (!entry.expectsContinuousTraffic || age < silenceBudget)
+                } else {
+                    healthy = age < Double(entry.expectedIntervalSeconds) * 5
+                }
+            } else if entry.eventDriven {
+                // No tick yet. A bursty event-driven collector (USB, browser
+                // extensions) may legitimately idle for days, so it keeps the
+                // benefit of the doubt. A continuous-traffic one does not: past
+                // the grace window, never having emitted is a fault.
+                healthy = entry.errorCount == 0
+                    && (!entry.expectsContinuousTraffic
+                        || now.timeIntervalSince(entry.registeredAt) < silenceBudget)
             } else {
-                // No tick yet — event-driven collectors get the benefit
-                // of the doubt; polling ones are pending.
-                healthy = entry.eventDriven
+                healthy = false   // polling collector, no tick yet — pending
             }
             return Status(
                 name: name,

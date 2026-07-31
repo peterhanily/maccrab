@@ -151,6 +151,42 @@ public actor DNSCollector {
         }
     }
 
+    // MARK: - Interface selection
+
+    /// Interfaces worth attaching a DNS capture to, best first.
+    ///
+    /// A BPF fd can only be bound to ONE interface, and `BIOCSETIF` succeeds for
+    /// any interface that merely exists — including one that is up but carries no
+    /// address and therefore no traffic. So selection is by capability, not by
+    /// name: running, non-loopback links that actually hold an IPv4/IPv6 address,
+    /// followed by `lo0` for a local resolver. Ordering prefers `en*` (physical
+    /// uplinks) over `utun*`/`bridge*`/`awdl*` virtual links.
+    static func captureCandidateInterfaces() -> [String] {
+        var addressed: Set<String> = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return ["lo0"] }
+        defer { freeifaddrs(head) }
+
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(ptr.pointee.ifa_flags)
+            guard flags & IFF_UP == IFF_UP,
+                  flags & IFF_RUNNING == IFF_RUNNING,
+                  flags & IFF_LOOPBACK == 0,
+                  let addr = ptr.pointee.ifa_addr else { continue }
+            let family = addr.pointee.sa_family
+            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+            addressed.insert(String(cString: ptr.pointee.ifa_name))
+        }
+
+        // Physical uplinks first, then everything else, then loopback.
+        let ranked = addressed.sorted { a, b in
+            let aPhys = a.hasPrefix("en"), bPhys = b.hasPrefix("en")
+            if aPhys != bPhys { return aPhys }
+            return a < b
+        }
+        return ranked + ["lo0"]
+    }
+
     // MARK: - BPF Capture Loop
 
     private static func captureLoop(
@@ -177,9 +213,18 @@ public actor DNSCollector {
 
         defer { close(bpfFd) }
 
-        // Attach to loopback interface first (for local DNS resolver), then en0
+        // Interface selection is DYNAMIC. It used to be a hardcoded ["en0", "lo0"]
+        // that broke out of the loop on the first BIOCSETIF success — and
+        // BIOCSETIF succeeds on any interface that merely EXISTS. On a Mac whose
+        // uplink is en1 (Wi-Fi, Thunderbolt/USB Ethernet, a second NIC), en0 is
+        // present-but-unaddressed, so the capture attached to a link carrying no
+        // traffic and produced zero DNS events for the life of the install —
+        // silently voiding every domain-based threat-intel comparison, DGA
+        // detection, and the DNS sinkhole. Require an ADDRESSED, running,
+        // non-loopback link; fall back to lo0 for a local resolver.
         var ifr = ifreq()
-        let interfaces = ["en0", "lo0"]
+        let interfaces = Self.captureCandidateInterfaces()
+        logger.info("DNS collector: candidate interfaces \(interfaces.joined(separator: ", "), privacy: .public)")
         var attached = false
 
         for iface in interfaces {

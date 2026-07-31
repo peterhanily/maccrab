@@ -211,9 +211,12 @@ public struct ModuleStatus: Sendable {
         .init(id: "fleet-client", name: "Fleet telemetry",
               category: "output", maturity: .optIn,
               summary: "Optional per-host telemetry to a self-hosted fleet collector (prototype; outbound-only)."),
+        // v1.21.6 (audit DET-02): the old summary named ONLY the env var, which
+        // a System Extension cannot receive — it told the operator to do the one
+        // thing that could never work. Name the config key first.
         .init(id: "deception", name: "Honeyfile deception",
               category: "prevention", maturity: .optIn,
-              summary: "Plants canary credential files. Requires MACCRAB_DECEPTION=1."),
+              summary: "Plants canary credential files. Enable with \"deception_enabled\": true in daemon_config.json (or MACCRAB_DECEPTION=1 for a dev daemon)."),
     ]
 
     /// Filter helper for the About panel.

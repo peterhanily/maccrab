@@ -14,7 +14,7 @@ enum MonitorTasks {
     static func start(state: DaemonState, supervisor: MonitorSupervisor) async {
         // FSEvents file monitor task (non-root fallback)
         if !state.isRoot {
-            await supervisor.start("fsevents") {
+            await supervisor.start("fsevents", collector: "FSEventsCollector", registry: state.collectorRegistry) {
                 for await event in state.fsEventsCollector.events {
                     await state.collectorRegistry.recordTick(name: "FSEventsCollector")
                     // Route FSEvents through the enrichment + detection pipeline
@@ -62,7 +62,7 @@ enum MonitorTasks {
         }
 
         // Event tap monitoring task (keylogger detection)
-        await supervisor.start("event-tap") {
+        await supervisor.start("event-tap", collector: "EventTapMonitor", registry: state.collectorRegistry) {
             for await tapInfo in state.eventTapMonitor.events {
                 await state.collectorRegistry.recordTick(name: "EventTapMonitor")
                 let alert = Alert(
@@ -94,7 +94,7 @@ enum MonitorTasks {
         }
 
         // System policy monitoring task
-        await supervisor.start("system-policy") {
+        await supervisor.start("system-policy", collector: "SystemPolicyMonitor", registry: state.collectorRegistry) {
             for await policyEvent in state.systemPolicyMonitor.events {
                 await state.collectorRegistry.recordTick(name: "SystemPolicyMonitor")
                 let alert = Alert(
@@ -143,7 +143,7 @@ enum MonitorTasks {
         }
 
         // MCP server monitoring task
-        await supervisor.start("mcp") {
+        await supervisor.start("mcp", collector: "MCPMonitor", registry: state.collectorRegistry) {
             for await mcpEvent in state.mcpMonitor.events {
                 await state.collectorRegistry.recordTick(name: "MCPMonitor")
                 let severity: Severity = mcpEvent.eventType == .suspicious ? .critical : .high
@@ -225,7 +225,7 @@ enum MonitorTasks {
         // fire — those are exfil-class and the user needs to see every
         // one. Rate limit cache is in-memory only; resets on restart.
         let usbRateLimiter = USBRateLimiter()
-        await supervisor.start("usb") {
+        await supervisor.start("usb", collector: "USBMonitor", registry: state.collectorRegistry) {
             for await usbEvent in state.usbMonitor.events {
                 await state.collectorRegistry.recordTick(name: "USBMonitor")
                 let severity: Severity
@@ -283,7 +283,7 @@ enum MonitorTasks {
 
         // Clipboard monitoring task
         _ = state.clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
-        await supervisor.start("clipboard") {
+        await supervisor.start("clipboard", collector: "ClipboardMonitor", registry: state.collectorRegistry) {
             for await clipEvent in state.clipboardMonitor.events {
                 await state.collectorRegistry.recordTick(name: "ClipboardMonitor")
                 if clipEvent.containsSensitiveData {
@@ -305,7 +305,7 @@ enum MonitorTasks {
         }
 
         // Browser extension monitoring task
-        await supervisor.start("browser-extensions") {
+        await supervisor.start("browser-extensions", collector: "BrowserExtensionMonitor", registry: state.collectorRegistry) {
             for await extEvent in state.browserExtMonitor.events {
                 await state.collectorRegistry.recordTick(name: "BrowserExtensionMonitor")
                 // Browser extension monitor fires an initial inventory scan
@@ -335,7 +335,7 @@ enum MonitorTasks {
         }
 
         // Ultrasonic attack monitoring task
-        await supervisor.start("ultrasonic") {
+        await supervisor.start("ultrasonic", collector: "UltrasonicMonitor", registry: state.collectorRegistry) {
             for await usEvent in state.ultrasonicMonitor.events {
                 await state.collectorRegistry.recordTick(name: "UltrasonicMonitor")
                 let alert = Alert(
@@ -359,7 +359,7 @@ enum MonitorTasks {
         }
 
         // Rootkit detection task
-        await supervisor.start("rootkit") {
+        await supervisor.start("rootkit", collector: "RootkitDetector", registry: state.collectorRegistry) {
             for await hidden in state.rootkitDetector.events {
                 await state.collectorRegistry.recordTick(name: "RootkitDetector")
                 let alert = Alert(
@@ -383,7 +383,7 @@ enum MonitorTasks {
         }
 
         // SDR device + display-hotplug monitoring task (no electromagnetic analysis)
-        await supervisor.start("sdr_device") {
+        await supervisor.start("sdr_device", collector: "SDRDeviceMonitor", registry: state.collectorRegistry) {
             for await sdrEvent in state.sdrDeviceMonitor.events {
                 await state.collectorRegistry.recordTick(name: "SDRDeviceMonitor")
                 let alert = Alert(
@@ -412,7 +412,7 @@ enum MonitorTasks {
                     let detail = sdrEvent.detail
                     let alertId = alert.id
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: """
                                 You are a physical-security analyst. MacCrab has detected either a \
                                 software-defined-radio (SDR) device connected by USB, or an anomalous \
@@ -447,7 +447,7 @@ enum MonitorTasks {
 
         // BTM / SMAppService reconciliation task (read-only dumpbtm snapshot;
         // ghost-login-item persistence the real-time ES BTM sensor missed).
-        await supervisor.start("btm_snapshot") {
+        await supervisor.start("btm_snapshot", collector: "BTMSnapshotMonitor", registry: state.collectorRegistry) {
             for await btmEvent in state.btmSnapshotMonitor.events {
                 await state.collectorRegistry.recordTick(name: "BTMSnapshotMonitor")
                 let alert = Alert(
@@ -473,7 +473,7 @@ enum MonitorTasks {
         }
 
         // EDR/RMM tool monitoring task
-        await supervisor.start("edr-rmm") {
+        await supervisor.start("edr-rmm", collector: "EDRMonitor", registry: state.collectorRegistry) {
             for await discovery in state.edrMonitor.events {
                 await state.collectorRegistry.recordTick(name: "EDRMonitor")
                 let capList = discovery.capabilities.prefix(4).joined(separator: ", ")
@@ -514,7 +514,7 @@ enum MonitorTasks {
                     let alertId = alert.id
 
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.edrContextSystem,
                             userPrompt: LLMPrompts.edrContextUser(
                                 toolName: toolName, vendor: vendor, category: category,
@@ -544,7 +544,7 @@ enum MonitorTasks {
         }
 
         // DNS event processing task
-        await supervisor.start("dns") {
+        await supervisor.start("dns", collector: "DNSCollector", registry: state.collectorRegistry) {
             for await dnsQuery in state.dnsCollector.events {
                 await state.collectorRegistry.recordTick(name: "DNSCollector")
                 // Record resolution for IP-to-domain correlation

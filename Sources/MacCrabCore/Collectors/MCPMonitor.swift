@@ -114,6 +114,9 @@ public actor MCPMonitor {
 
     private static let configPaths: [(tool: String, path: String)] = [
         ("claude", "~/.claude/claude_desktop_config.json"),
+        // Claude Desktop's real config location (the ~/.claude/ path above is the
+        // CLI's directory and does not hold the desktop config).
+        ("claude", "~/Library/Application Support/Claude/claude_desktop_config.json"),
         ("claude", "~/.claude.json"),
         ("cursor", "~/.cursor/mcp.json"),
         ("continue", "~/.continue/config.json"),
@@ -137,6 +140,34 @@ public actor MCPMonitor {
         "inject", "exfil", "steal", "hack", "exploit", "payload",
         "backdoor", "reverse", "shell", "keylog", "dump", "scrape",
     ]
+
+    /// AI-05: markers looked for inside a LOCAL MCP server's own source file.
+    /// ONLY the zero-FP-by-construction set. The looser `injectionPatterns`
+    /// used against `args` in check 5 ("system prompt", "IMPORTANT:",
+    /// "you are now") occur throughout legitimate MCP server source and would
+    /// turn the 60 s poll into an alert storm.
+    private static let toolPoisoningStrongMarkers: [String] = [
+        "ignore your instructions",
+        "do not tell the user",
+        "hidden instruction",
+        "system prompt override",
+    ]
+
+    /// Extensions whose contents ARE the server's tool definitions. Compiled
+    /// binaries are deliberately absent: MacCrab's own `maccrab-mcp` embeds the
+    /// Forensicate injection-rule corpus as string literals, so scanning Mach-O
+    /// would self-trip on every poll.
+    private static let scannableServerSourceExtensions: Set<String> = [
+        "js", "mjs", "cjs", "ts", "py", "rb", "sh", "json",
+    ]
+
+    /// Hard cap on how much of a server source file is read.
+    private static let maxServerSourceScanBytes = 512 * 1024
+
+    /// "path|mtime|size" fingerprints already scanned, so the 60 s poll does
+    /// not re-read — and re-emit on — an unchanged file. Cleared wholesale past
+    /// the cap: this is cheap re-scan avoidance, not a correctness cache.
+    private var scannedServerSources: Set<String> = []
 
     /// Known-good MCP packages commonly used with npx.
     private static let knownGoodNpxPackages: Set<String> = [
@@ -209,8 +240,7 @@ public actor MCPMonitor {
     // MARK: - File Watchers
 
     private func setupFileWatchers() {
-        for (tool, rawPath) in Self.configPaths {
-            let path = Self.expandTilde(rawPath)
+        for (tool, path) in Self.resolvedConfigPaths() {
             guard FileManager.default.fileExists(atPath: path) else { continue }
 
             let fd = open(path, O_EVTONLY)
@@ -254,8 +284,7 @@ public actor MCPMonitor {
     // MARK: - Scanning
 
     private func scanAllConfigs() {
-        for (tool, rawPath) in Self.configPaths {
-            let path = Self.expandTilde(rawPath)
+        for (tool, path) in Self.resolvedConfigPaths() {
             scanConfig(tool: tool, path: path)
         }
     }
@@ -337,23 +366,31 @@ public actor MCPMonitor {
 
         var servers: [MCPServerEntry] = []
 
-        // Extract mcpServers dict -- different tools use different structures
-        let mcpServers: [String: Any]?
-        switch tool {
-        case "claude":
-            // Claude uses {"mcpServers": {...}} at top level
-            mcpServers = json["mcpServers"] as? [String: Any]
-        case "cursor", "vscode", "windsurf":
-            // These use {"mcpServers": {...}} at top level
-            mcpServers = json["mcpServers"] as? [String: Any]
-        case "continue":
-            // Continue.dev uses {"mcpServers": [...]} or {"models": [...], "mcpServers": [...]}
-            mcpServers = json["mcpServers"] as? [String: Any]
-        default:
-            mcpServers = json["mcpServers"] as? [String: Any]
+        // Every supported tool uses {"mcpServers": {...}} at the top level, so
+        // there is one common extraction. (This replaced a four-arm switch whose
+        // arms were all identical.)
+        var merged = json["mcpServers"] as? [String: Any] ?? [:]
+
+        // Claude Code ALSO scopes servers per project under
+        // `projects["<cwd>"].mcpServers`, and reading only the top level found
+        // nothing: on a host with a server configured, `~/.claude.json`'s
+        // top-level `mcpServers` is literally null while the real entry sits under
+        // `projects`. That is why MCP attribution was 0-for-47,087 and both
+        // MCPAttributor and MCPBehavioralBaseline never executed.
+        if tool == "claude", let projects = json["projects"] as? [String: Any] {
+            for (_, projectValue) in projects {
+                guard let project = projectValue as? [String: Any],
+                      let servers = project["mcpServers"] as? [String: Any] else { continue }
+                // Top-level entries win on a name collision — a globally
+                // configured server is the more authoritative record.
+                for (name, cfg) in servers where merged[name] == nil {
+                    merged[name] = cfg
+                }
+            }
         }
 
-        guard let serversDict = mcpServers else { return [] }
+        guard !merged.isEmpty else { return [] }
+        let serversDict = merged
 
         for (name, value) in serversDict {
             guard let config = value as? [String: Any] else { continue }
@@ -474,6 +511,77 @@ public actor MCPMonitor {
                 break
             }
         }
+
+        // 6. Tool-poisoning markers in a LOCAL server's own source (AI-05).
+        scanServerSourceForToolPoisoning(server: server)
+    }
+
+    /// AI-05: the canonical MCP "tool poisoning" attack hides agent directives
+    /// in a tool's `description` / `inputSchema`. Those travel in the JSON-RPC
+    /// `tools/list` RESPONSE over the client's stdio pipe, which MacCrab never
+    /// sees — so neither check 5 above nor
+    /// `Rules/ai_safety/mcp_server_tool_poisoning.yml` (both argv-only) can
+    /// detect the attack they are named for. For a server whose config points
+    /// at a LOCAL script those descriptions are string literals in a file we
+    /// CAN read, and that is the one place the attack is observable today.
+    /// Remote and compiled servers, and rug pulls that change the manifest
+    /// without changing the file, remain undetected — that needs a broker-
+    /// mediated `tools/list` baseline, which does not exist yet.
+    ///
+    /// Deliberately conservative, because this runs as root against
+    /// user-writable paths on a 60 s poll:
+    ///   * four zero-FP markers only (see `toolPoisoningStrongMarkers`);
+    ///   * text extensions only, so we never scan our own MCP binary;
+    ///   * `SecureFileIO` (O_NOFOLLOW + bounded read) plus the lstat
+    ///     regular-file check, so a symlink / FIFO / device planted at the
+    ///     configured path cannot redirect or block the read;
+    ///   * a (path, mtime, size) fingerprint so an unchanged file is read once
+    ///     rather than on every poll.
+    private func scanServerSourceForToolPoisoning(server: MCPServerEntry) {
+        for path in ([server.command] + server.args) where path.hasPrefix("/") {
+            let ext = (path as NSString).pathExtension.lowercased()
+            guard Self.scannableServerSourceExtensions.contains(ext),
+                  SecureFileIO.isSafeRegularFile(at: path),
+                  let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let size = attrs[.size] as? Int, size > 0,
+                  size <= Self.maxServerSourceScanBytes,
+                  let mtime = attrs[.modificationDate] as? Date else { continue }
+
+            let fingerprint = "\(path)|\(mtime.timeIntervalSince1970)|\(size)"
+            guard !scannedServerSources.contains(fingerprint) else { continue }
+            if scannedServerSources.count >= 512 {
+                scannedServerSources.removeAll(keepingCapacity: true)
+            }
+            scannedServerSources.insert(fingerprint)
+
+            guard let data = try? SecureFileIO.readBytes(
+                at: path, maxBytes: Self.maxServerSourceScanBytes
+            ) else { continue }
+            let text = String(decoding: data, as: UTF8.self)
+
+            let reason: String?
+            if let marker = Self.toolPoisoningStrongMarkers.first(where: {
+                text.range(of: $0, options: .caseInsensitive) != nil
+            }) {
+                reason = "MCP server '\(server.name)' source \(path) contains tool-poisoning instruction text: '\(marker)'"
+            } else if text.unicodeScalars.contains(where: { $0.value >= 0xE0000 && $0.value <= 0xE007F }) {
+                reason = "MCP server '\(server.name)' source \(path) contains invisible Unicode TAG characters (U+E0000-U+E007F), the standard carrier for instructions hidden inside a tool description"
+            } else {
+                reason = nil
+            }
+
+            if let reason {
+                emitEvent(
+                    configFile: server.configFile,
+                    serverName: server.name,
+                    command: server.command,
+                    args: server.args,
+                    eventType: .suspicious,
+                    reason: reason,
+                    tool: server.tool
+                )
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -490,11 +598,45 @@ public actor MCPMonitor {
         "\(configFile)::\(name)"
     }
 
-    private nonisolated static func expandTilde(_ path: String) -> String {
-        if path.hasPrefix("~/") {
-            return NSHomeDirectory() + String(path.dropFirst(1))
+    /// Expand a `~/…` config path to a CONCRETE path per real user home.
+    ///
+    /// FF-10: this used to return a single `NSHomeDirectory() + …` path.
+    /// MCPMonitor is instantiated by DaemonSetup inside the ROOT System
+    /// Extension, where `NSHomeDirectory()` is `/var/root` — a home that holds
+    /// none of these files. So EVERY entry in `configPaths` missed, no watcher
+    /// was ever installed, and `scanAllConfigs` found nothing: MCP tool-poisoning
+    /// detection had zero input on a release install. That is also why the
+    /// `projects[*].mcpServers` walk in `parseConfig` could not help — the file
+    /// it needs was never opened. (The `maccrabctl mcp` subcommand runs as the
+    /// user, which is why the CLI listed servers the daemon could not see.)
+    ///
+    /// Enumerate the real homes under `/Users`, same pattern as
+    /// `ESCollector.realUserHomes()`, and keep the process's own home so the
+    /// non-root dev daemon and unit tests behave exactly as before.
+    private nonisolated static func expandTildeForAllHomes(_ path: String) -> [String] {
+        guard path.hasPrefix("~/") else { return [path] }
+        let suffix = String(path.dropFirst(1))   // keeps the leading "/"
+        let fm = FileManager.default
+        var homes: [String] = []
+        if let users = try? fm.contentsOfDirectory(atPath: "/Users") {
+            for user in users.sorted() where user != "Shared" && !user.hasPrefix(".") {
+                var isDir: ObjCBool = false
+                let home = "/Users/\(user)"
+                guard fm.fileExists(atPath: home, isDirectory: &isDir), isDir.boolValue else { continue }
+                homes.append(home)
+            }
         }
-        return path
+        let own = NSHomeDirectory()
+        if !homes.contains(own) { homes.append(own) }
+        return homes.map { $0 + suffix }
+    }
+
+    /// `configPaths` expanded across every real user home — the concrete list
+    /// both the watcher installer and the scanner iterate.
+    private nonisolated static func resolvedConfigPaths() -> [(tool: String, path: String)] {
+        configPaths.flatMap { entry in
+            expandTildeForAllHomes(entry.path).map { (tool: entry.tool, path: $0) }
+        }
     }
 
     private func emitEvent(

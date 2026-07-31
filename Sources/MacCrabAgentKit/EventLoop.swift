@@ -141,6 +141,14 @@ enum EventLoop {
                 if state.aiRegistry.isAITool(executablePath: event.process.executable) != nil {
                     await state.agentSessionRegistry.end(rootPid: event.process.pid)
                     await state.agentLineageService.endSession(aiPid: event.process.pid)
+                    // `ProjectBoundary.removeBoundary` had NO callers anywhere in
+                    // the tree. That was harmless only because registration
+                    // always failed (empty cwd on the ES path); now that
+                    // boundaries are actually stored, an unevicted map grows for
+                    // the daemon's lifetime and a recycled pid inherits the dead
+                    // session's boundary — turning ordinary writes by an
+                    // unrelated process into boundary violations.
+                    await state.projectBoundary.removeBoundary(aiPid: event.process.pid)
                 }
             }
 
@@ -164,9 +172,32 @@ enum EventLoop {
             // heals). Using `isAITool` twice below is fine;
             // `aiRegistry.isAITool` is nonisolated and O(1).
             let aiProc = enrichedEvent.process
-            if let aiType = state.aiRegistry.isAITool(executablePath: aiProc.executable) {
+            // AI-09: a NOTIFY_FORK event is built from `forkEvent.child`, and a
+            // freshly-forked child still carries its PARENT's image until it
+            // execs — so ES reports the forked pid as `claude` even when it is
+            // about to become /bin/zsh. Minting an agent-lineage session on that
+            // event created one bogus ROOT session per forked tool invocation:
+            // runtime agent_lineage.json held 32 sessions of which 30 were
+            // `events: []` ghosts, and the 32-session LRU cap then evicted the
+            // only two sessions that held real timelines. Skip fork here. This
+            // costs nothing: if the pid really is an AI-tool root, its NEXT
+            // event (exec / file / network) mints the session, and in the
+            // meantime the `else if` branch below attributes it correctly as an
+            // AI CHILD. Gating on `== "exec"` instead would REGRESS — an agent
+            // already running when the daemon starts never emits an exec we see,
+            // so it would never get a session at all.
+            if enrichedEvent.eventAction != "fork",
+               let aiType = state.aiRegistry.isAITool(executablePath: aiProc.executable) {
                 await state.aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
-                await state.projectBoundary.registerBoundary(aiPid: aiProc.pid, projectDir: aiProc.workingDirectory)
+                // The shipping ES path leaves `workingDirectory` empty, so let
+                // the actor read the cwd off the live process. Without this the
+                // registration is always rejected and `checkWrite` fails open
+                // (no boundary registered == allowed) for every AI write.
+                await state.projectBoundary.registerBoundary(
+                    aiPid: aiProc.pid,
+                    projectDir: aiProc.workingDirectory,
+                    resolveLiveCWDIfEmpty: true
+                )
                 // v1.6.7: start a lineage session so subsequent events
                 // (file, network, alert) under this AI tool populate a
                 // chronological timeline.
@@ -191,6 +222,30 @@ enum EventLoop {
                     now: enrichedEvent.timestamp
                 )
                 enrichedEvent.enrichments["ai_tool_session_id"] = sid
+                // AI-13: `AgentEvent.Kind.llmCall` had ZERO producers anywhere
+                // in the codebase — only the case definition and two consumers
+                // in PromptIntentBridge. So `llmCallCount` was permanently 0 and
+                // the `vagueDestructive` guard at PromptIntentBridge.swift:297
+                // (`destructiveBlastRadius >= 3 && llmCallCount <= 2`) read as a
+                // two-signal discriminator but was really one signal, firing on
+                // any wide destructive change regardless of whether an LLM was
+                // involved — precisely the discrimination it was written to add.
+                //
+                // The AGENT ROOT is the process that actually talks to the
+                // model, and this branch is the root's branch (which previously
+                // recorded no timeline data for its own traffic at all), so this
+                // is where the producer belongs. Scoped to that tool's OWN known
+                // provider endpoints so ordinary agent egress isn't miscounted.
+                if let net = enrichedEvent.network,
+                   let host = net.destinationHostname,
+                   AIToolRegistry.isKnownEndpoint(hostname: host, toolType: aiType) {
+                    await state.agentLineageService.record(
+                        aiPid: aiProc.pid,
+                        kind: .llmCall(provider: aiType.rawValue, endpoint: host,
+                                       bytesUp: nil, bytesDown: nil),
+                        timestamp: enrichedEvent.timestamp
+                    )
+                }
             } else if state.aiTracker.hasActiveSessionsHint {
                 // Only pay the isAIChild actor hop when there are
                 // actually AI sessions running that this event could
@@ -454,7 +509,14 @@ enum EventLoop {
                         if let (credType, credDesc) = state.credentialFence.checkAccessDetailed(
                             filePath: filePath,
                             aiToolName: aiType?.displayName ?? "AI tool",
-                            aiToolType: aiType
+                            aiToolType: aiType,
+                            // AI-07: `credFenceSubject` is the accessing binary's
+                            // basename, already computed just above for the
+                            // signing-tool exemption. Pass it so the fence can
+                            // tell "gh read its own token store" (benign, 218 of
+                            // this rule's 777 live alerts) apart from "gh read
+                            // ~/.aws/credentials" (still alerts).
+                            accessingBinary: credFenceSubject
                         ) {
                             let alert = Alert(
                                 ruleId: "maccrab.ai-guard.credential-access",
@@ -535,15 +597,28 @@ enum EventLoop {
                             break
                         }
                     }
-                    // === Prompt Injection Scanning (Forensicate.ai) ===
-                    if await state.injectionScanner.isAvailable {
+                    // === Prompt Injection Scanning (native) ===
+                    // v1.21.6: was gated on `injectionScanner.isAvailable`, which
+                    // probed for an uninstallable `forensicate` CLI — so this alert
+                    // could never fire on any install. Now backed by the native
+                    // ClipboardInjectionDetector and unconditionally live.
+                    do {
                         let textToScan = aiProc.commandLine
                         if !textToScan.isEmpty, textToScan.count > 20 {
-                            if let (indicator, detail) = await state.injectionScanner.scanForSeverity(textToScan) {
+                            if let threat = await state.clipboardInjectionDetector.scan(textToScan) {
+                                let detail = threat.patterns.joined(separator: ", ")
+                                // More than one independent pattern class is the
+                                // multi-vector case. CampaignDetector's
+                                // isCompoundPromptInjection keys on "compound" in
+                                // the title to weight it as two categories, so say
+                                // it — otherwise that weighting stays unreachable.
+                                let isCompound = threat.patterns.count > 1
                                 let alert = Alert(
                                     ruleId: "maccrab.ai-guard.prompt-injection",
-                                    ruleTitle: "🦀 Prompt Injection Detected in AI Tool Command",
-                                    severity: indicator.contains("critical") || indicator.contains("compound") ? .critical : .high,
+                                    ruleTitle: isCompound
+                                        ? "🦀 Compound Prompt Injection Detected in AI Tool Command"
+                                        : "🦀 Prompt Injection Detected in AI Tool Command",
+                                    severity: threat.severity == .critical ? .critical : .high,
                                     eventId: enrichedEvent.id.uuidString,
                                     processPath: aiProc.executable,
                                     processName: aiProc.name,
@@ -558,7 +633,9 @@ enum EventLoop {
                                     }
                                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 await state.behaviorScoring.addIndicator(
-                                    named: indicator, detail: detail,
+                                    named: threat.severity == .critical
+                                        ? "prompt_injection_critical" : "prompt_injection",
+                                    detail: detail,
                                     forProcess: aiProc.pid, path: aiProc.executable
                                 )
                             }
@@ -1144,10 +1221,21 @@ enum EventLoop {
 
             // === App privacy audit: track network connections per process ===
             if let net = enrichedEvent.network {
+                // FF-09: NO collector ever populates `destinationHostname` — the
+                // only writer in the whole codebase is the event re-wrap further
+                // down this same function — so passing it straight through handed
+                // the auditor `domain: nil` on EVERY connection. That made
+                // `trackingContact` structurally unreachable: it counts only
+                // records with a non-nil domain against the 70+ entry
+                // tracking-domain registry, so `maccrabctl privacy` could never
+                // report a finding while reassuring the user "the auditor runs
+                // hourly". Fall back to the DNS reverse-cache domain resolved a
+                // few lines above — the same recovery the AI network sandbox
+                // already does at its `resolvedDomain` site.
                 await state.appPrivacyAuditor.recordConnection(
                     processName: enrichedEvent.process.name,
                     processPath: enrichedEvent.process.executable,
-                    domain: net.destinationHostname,
+                    domain: net.destinationHostname ?? enrichedEvent.enrichments["dns.resolved_domain"],
                     ip: net.destinationIp,
                     port: net.destinationPort
                 )
@@ -1964,7 +2052,7 @@ enum EventLoop {
                     let procName = enrichedEvent.process.name
                     let procPath = enrichedEvent.process.executable
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.sequenceAnalysisSystem,
                             userPrompt: LLMPrompts.sequenceAnalysisUser(
                                 ruleName: matchCopy.ruleName,
@@ -2016,7 +2104,7 @@ enum EventLoop {
                     let userName = enrichedEvent.process.userName
                     let edgeCount = await state.baselineEngine.edgeCount
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.baselineAnomalySystem,
                             userPrompt: LLMPrompts.baselineAnomalyUser(
                                 parentName: parentName, childName: childName,
@@ -2070,12 +2158,24 @@ enum EventLoop {
                         let pid = enrichedEvent.process.pid
                         let score = scoringResult.totalScore
                         let indicators = scoringResult.indicators.map { ($0.name, $0.weight, $0.detail) }
+                        // AI-06: hoist the trust signals out of the event BEFORE
+                        // the detached Task so the prompt can be trust-aware.
+                        // Without these the model had only the process name and
+                        // the indicator list and escalated MacCrab's own false
+                        // positives into "isolate the machine" prose.
+                        let signer = enrichedEvent.process.codeSignature?.signerType.rawValue
+                        let notarized = enrichedEvent.process.codeSignature?.isNotarized
+                        let team = enrichedEvent.process.codeSignature?.teamId
+                        let aiOwned = enrichedEvent.enrichments["ai_tool"] != nil
+                            || enrichedEvent.enrichments["ai_tool_child"] == "true"
                         Task {
-                            if let analysis = await llm.query(
+                            if let analysis = await llm.commentary(
                                 systemPrompt: LLMPrompts.behaviorAnalysisSystem,
                                 userPrompt: LLMPrompts.behaviorAnalysisUser(
                                     processName: procName, processPath: procPath, pid: pid,
-                                    totalScore: score, indicators: indicators
+                                    totalScore: score, indicators: indicators,
+                                    signerType: signer, isNotarized: notarized,
+                                    teamId: team, isAIToolOwned: aiOwned
                                 ),
                                 maxTokens: 512, temperature: 0.2
                             ) {
@@ -2397,7 +2497,11 @@ enum EventLoop {
                                         maxTokens: 1024, temperature: 0.3
                                     )?.response
                                 }
-                                if let text = investigationText {
+                                // AI-06: this site gates at the JOIN of both branches instead of using
+                                // `commentary()`, because the deep path goes through
+                                // `deepAnalyzeCampaign` → `queryWithExtendedThinking`, which
+                                // `commentary()` does not wrap. Same predicate either way.
+                                if let text = investigationText, await llm.isUsable() {
                                     let label = useDeepAnalysis ? "Deep Analysis" : "Investigation Summary"
                                     let summaryAlert = Alert(
                                         ruleId: "maccrab.llm.investigation-summary",
@@ -2417,7 +2521,7 @@ enum EventLoop {
                                 // alerts for human review. Actions are NEVER auto-executed.
                                 if campaignSeverity == .critical || campaignSeverity == .high {
                                     let context = "Campaign: \(campaignType) — \(campaignTitle)\nSeverity: \(campaignSeverity.rawValue)\nAlerts: \(alertSummaries.map { "[\($0.severity)] \($0.title) (\($0.process ?? "?"))" }.joined(separator: "; "))"
-                                    if let rec = await llm.query(
+                                    if let rec = await llm.commentary(
                                         systemPrompt: LLMPrompts.activeDefenseSystem,
                                         userPrompt: LLMPrompts.activeDefenseUser(alertContext: context),
                                         maxTokens: 512, temperature: 0.1
@@ -2517,7 +2621,7 @@ enum EventLoop {
                    !topAlert.ruleId.hasPrefix("maccrab.llm.") {
                     let alertCopy = topAlert
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.alertAnalysisSystem,
                             userPrompt: LLMPrompts.alertAnalysisUser(
                                 ruleTitle: alertCopy.ruleTitle,

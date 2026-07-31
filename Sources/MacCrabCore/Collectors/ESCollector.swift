@@ -141,15 +141,42 @@ public final class ESCollector: @unchecked Sendable {
     // (built in `makeClientContext`, drained in `teardownContext`). The
     // free-exactly-once + bounded-in-flight guarantees are unchanged per worker.
 
-    /// v1.21.4 Phase-3 (Mitigation B): in-flight cap for each per-client
+    /// v1.21.4 Phase-3 (Mitigation B): DEFAULT in-flight cap for each per-client
     /// `ESMessageWorker`. Under a
     /// flood the parse worker can fall behind; rather than let retained messages
     /// pile up without bound (kernel memory held per retained message), the
     /// worker drops the newest arrival past this cap, frees it immediately, and
     /// counts it (`es_copy_backpressure_dropped_total`). 4096 retained messages
-    /// is a burst absorber bounded to tens of MB worst-case — large enough that
-    /// steady state never hits it, small enough to never explode RSS.
-    private static let maxInFlightMessages = 4096
+    /// is a burst absorber bounded to tens of MB worst-case.
+    ///
+    /// v1.21.6 (RES-05 / FF-08) — CORRECTION. This comment used to claim the cap
+    /// was "large enough that steady state never hits it". That is false on an
+    /// ordinary daily driver and has been for the whole shipped life of the
+    /// mitigation. Measured on the author's own host at idle-to-normal load:
+    /// `es_copy_backpressure_dropped_total` 478,519 against 4,052,571 offered
+    /// (11.8%) over 8,075 s uptime, and 2,609,845 against 11,839,098 (22.0%) in a
+    /// longer window — with `es_kernel_dropped_total` at 0, i.e. ALL of it is
+    /// MacCrab's own userspace backpressure. The drop policy discards the NEWEST
+    /// arrival, which is exactly what a burst (and therefore an exploitation
+    /// sequence) produces.
+    ///
+    /// What is and is not done about it here:
+    ///   * The lineage reserve (`lineageCriticalRawValues`) already stops a
+    ///     MPROTECT burst from evicting EXEC on the same worker.
+    ///   * The loss is NOT silent: SensorDegradationEvaluator's `sustainedLoss`
+    ///     branch fires the self-defense meta-alert at a >=15% per-tick drop
+    ///     fraction, and `es_copy_backpressure_dropped_by_type` attributes it.
+    ///   * v1.21.6 makes the cap tunable (`DaemonConfig.esWorkerMaxInFlight`) —
+    ///     this constant is now only the DEFAULT.
+    ///   * The real fix is to reduce what is OFFERED, not to raise the cap: see
+    ///     the PERF-02 demand gate on `memoryProtectionEvents` /
+    ///     `introspectionEvents`, which removes ~24-31% of the message stream
+    ///     that could not produce a detection in the shipped configuration.
+    ///     Sharding the worker per-PID is still open.
+    /// `public` because it is the default for the public `workerMaxInFlight`
+    /// initializer parameter, and Swift requires a default-argument expression
+    /// to be at least as visible as the declaration it defaults.
+    public static let maxInFlightMessages = 4096
 
     /// v1.17.4: subscribe to ES NOTIFY_OPEN (credential-read detection).
     /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
@@ -159,7 +186,23 @@ public final class ESCollector: @unchecked Sendable {
     /// remote_thread_create / cs_invalidated). Kill-switch
     /// (DaemonConfig.subscribeIntrospectionEvents) so an operator can disable
     /// it independently of the OPEN family.
+    ///
+    /// v1.21.6 (PERF-02): the config kill-switch is now ANDed with live rule
+    /// DEMAND at construction (DaemonSetup) — the family is only subscribed when
+    /// some ENABLED rule selects one of `introspectionEventActions`.
     private let subscribeIntrospection: Bool
+
+    /// v1.21.6 (PERF-02): subscribe the W+X memory-protection family
+    /// (mmap/mprotect). No config kill-switch — it is purely demand-driven,
+    /// because no rule in the shipped corpus consumes `mmap_wx`/`mprotect_wx`,
+    /// so a static default would only ever be wrong in the expensive direction.
+    private let subscribeMemoryProtection: Bool
+
+    /// v1.21.6 (RES-05): the per-client `ESMessageWorker` in-flight cap actually
+    /// used, from `DaemonConfig.esWorkerMaxInFlight` (clamped in `init`). Was a
+    /// hardcoded constant with no knob while the field host was losing 11.8-22%
+    /// of the stream at this stage.
+    private let workerMaxInFlight: Int
 
     /// v1.9 Agent Traces master gate. Seeded from `MACCRAB_AGENT_TRACES=1`
     /// at type-load (the dev / standalone-daemon path) to enable
@@ -244,10 +287,23 @@ public final class ESCollector: @unchecked Sendable {
         // at the macOS 13.0 deploy floor (ESTypes.h "available beginning in macOS
         // 13.0" block), so no @available guard is needed.
         ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD,
-        ES_EVENT_TYPE_NOTIFY_MMAP,
-        ES_EVENT_TYPE_NOTIFY_MPROTECT,
         ES_EVENT_TYPE_NOTIFY_SETOWNER,
         ES_EVENT_TYPE_NOTIFY_SETMODE,
+    ]
+
+    /// v1.21.6 (PERF-02) memory-protection family — W+X mmap / mprotect.
+    /// MOVED OUT of the unconditional `subscribedEvents` list because it is the
+    /// worst cost/yield ratio in the whole subscription. Field-measured: 77/s
+    /// MPROTECT + 50/s MMAP (~11.6% of ALL ES messages; 1.03M + 76K over 2.26 h)
+    /// yielded exactly ONE stored `mprotect_wx` row and zero alerts — because NO
+    /// rule in the corpus selects `event.action` `mprotect_wx` or `mmap_wx` at
+    /// all (`grep -rn 'mprotect_wx\|mmap_wx' Rules/` is empty: no single-event,
+    /// no sequence, no graph rule). Every one of those messages was retained,
+    /// dispatched and discarded for nothing. Now gated on live rule DEMAND
+    /// (`optionalFamiliesDemanded`), re-evaluated on SIGHUP.
+    private static let memoryProtectionEvents: [es_event_type_t] = [
+        ES_EVENT_TYPE_NOTIFY_MMAP,
+        ES_EVENT_TYPE_NOTIFY_MPROTECT,
     ]
 
     /// v1.18 introspection family — observe one process acting on ANOTHER
@@ -265,6 +321,55 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
         ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED,
     ]
+
+    // MARK: - Demand gate for the optional families (v1.21.6, PERF-02)
+
+    /// The `event.action` literals the introspection family emits (see the
+    /// GET_TASK_READ / TRACE / REMOTE_THREAD_CREATE / CS_INVALIDATED branches in
+    /// `normalise`). All four of the rules that select these ship
+    /// `status: experimental`, i.e. DISABLED under the default stable profile —
+    /// which is why 1.14M GET_TASK_READ messages (12.7% of the stream) produced
+    /// zero rows and zero alerts on the field host.
+    static let introspectionEventActions: Set<String> = [
+        "get_task_read", "trace", "remote_thread_create", "cs_invalidated",
+    ]
+
+    /// The `event.action` literals the memory-protection family emits. Currently
+    /// consumed by NO rule at all — see `memoryProtectionEvents`.
+    static let memoryProtectionEventActions: Set<String> = ["mmap_wx", "mprotect_wx"]
+
+    /// Decide which optional ES families are worth a kernel subscription, from
+    /// the `event.action` selectors of the ENABLED ruleset
+    /// (`RuleEngine.enabledEventActionSelectors`). Pure, so the truth table is
+    /// unit-testable without a live `es_client_t`.
+    ///
+    /// Deliberately OVER-approximates, twice, because the cost of being wrong is
+    /// asymmetric — a spurious subscription only wastes CPU, a missing one is a
+    /// SILENT detection outage:
+    ///   * `unanalyzable` (a `regex`/`exists` predicate on `event.action`, which
+    ///     cannot be evaluated statically) turns BOTH families on.
+    ///   * a selector counts for a family when it equals, contains, or is
+    ///     contained by one of that family's actions — so `contains` /
+    ///     `startswith` / `endswith` predicates (e.g. `event.action|contains:
+    ///     task_read`) still demand the subscription.
+    /// Empty selector strings are ignored: `"".contains` would otherwise match
+    /// every family and defeat the gate entirely.
+    /// `public`: DaemonSetup and the SIGHUP handler (both in MacCrabAgentKit)
+    /// call this to re-evaluate the PERF-02 demand gate when the rule profile
+    /// changes, so it has to cross the module boundary.
+    public static func optionalFamiliesDemanded(
+        selectors: Set<String>,
+        unanalyzable: Bool
+    ) -> (introspection: Bool, memoryProtection: Bool) {
+        if unanalyzable { return (true, true) }
+        func demanded(_ family: Set<String>) -> Bool {
+            selectors.contains { selector in
+                guard !selector.isEmpty else { return false }
+                return family.contains { $0 == selector || $0.contains(selector) || selector.contains($0) }
+            }
+        }
+        return (demanded(introspectionEventActions), demanded(memoryProtectionEventActions))
+    }
 
     // MARK: - Noisy Path Muting
 
@@ -722,9 +827,18 @@ public final class ESCollector: @unchecked Sendable {
     /// `Event` values on the `events` stream.
     ///
     /// - Throws: `ESCollectorError` if the client cannot be created.
-    public init(subscribeFileOpen: Bool = true, subscribeIntrospection: Bool = true) throws {
+    public init(
+        subscribeFileOpen: Bool = true,
+        subscribeIntrospection: Bool = true,
+        subscribeMemoryProtection: Bool = true,
+        workerMaxInFlight: Int = ESCollector.maxInFlightMessages
+    ) throws {
         self.subscribeFileOpen = subscribeFileOpen
         self.subscribeIntrospection = subscribeIntrospection
+        self.subscribeMemoryProtection = subscribeMemoryProtection
+        // Clamp the operator knob: below ~256 a single burst evicts the lineage
+        // reserve; above 64K the retained-message memory is no longer "tens of MB".
+        self.workerMaxInFlight = max(256, min(65_536, workerMaxInFlight))
         // Build the AsyncStream and capture the continuation so the
         // ES callback can yield events into it.
         //
@@ -800,30 +914,73 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
     ]
 
+    /// v1.21.5 PERF: the subscribed types whose loss is UNRECOVERABLE — process
+    /// lineage. Every other type describes an action BY a process we can still
+    /// resolve later; drop an EXEC/FORK/EXIT and the parent chain that sequence
+    /// rules, campaign detection and TraceGraph are built on has a permanent hole,
+    /// and every downstream event attributed through that chain is mis-parented.
+    ///
+    /// Measured on-device: `es_copy_backpressure_dropped_total` reached 495,830
+    /// against 3.66M messages (11.6%) — all of it MacCrab's own userspace
+    /// backpressure (`es_kernel_dropped_total` was 0). Because the in-flight cap
+    /// was one undifferentiated budget shared per client, a 77/s MPROTECT burst
+    /// could evict the 7/s EXEC stream on the same worker. `ESMessageWorker`
+    /// reserves the top slice of its budget for these types so that inversion
+    /// cannot happen. Keyed by `rawValue` for cheap Set membership on the ES
+    /// callback boundary.
+    static let lineageCriticalRawValues: Set<UInt32> = [
+        ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
+        ES_EVENT_TYPE_NOTIFY_FORK.rawValue,
+        ES_EVENT_TYPE_NOTIFY_EXIT.rawValue,
+    ]
+
     /// The full pre-split subscription list — `subscribedEvents` plus the
-    /// optional OPEN and introspection families. Used verbatim for the degraded
-    /// single client AND as the domain that `fileClientTypes`/`execClientTypes`
-    /// partition. Kept identical to the old `subscribe()` set so the fallback is
-    /// byte-for-byte the pre-split behavior.
-    static func fullSubscription(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
+    /// optional OPEN, introspection and memory-protection families. Used verbatim
+    /// for the degraded single client AND as the domain that
+    /// `fileClientTypes`/`execClientTypes` partition.
+    ///
+    /// v1.21.6 (PERF-02): `subscribeMemoryProtection` defaults to `true` so this
+    /// still reproduces the pre-gate set byte-for-byte for any caller that does
+    /// not opt in to the demand gate.
+    static func fullSubscription(
+        subscribeFileOpen: Bool,
+        subscribeIntrospection: Bool,
+        subscribeMemoryProtection: Bool = true
+    ) -> [es_event_type_t] {
         var types = subscribedEvents
         if subscribeFileOpen { types.append(ES_EVENT_TYPE_NOTIFY_OPEN) }
+        if subscribeMemoryProtection { types.append(contentsOf: memoryProtectionEvents) }
         if subscribeIntrospection { types.append(contentsOf: introspectionEvents) }
         return types
     }
 
     /// FILE client subscription: the members of the full list that are in the
     /// file family. Disjoint from `execClientTypes`; their union is the full set.
-    static func fileClientTypes(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
-        fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+    static func fileClientTypes(
+        subscribeFileOpen: Bool,
+        subscribeIntrospection: Bool,
+        subscribeMemoryProtection: Bool = true
+    ) -> [es_event_type_t] {
+        fullSubscription(subscribeFileOpen: subscribeFileOpen,
+                         subscribeIntrospection: subscribeIntrospection,
+                         subscribeMemoryProtection: subscribeMemoryProtection)
             .filter { fileFamilyRawValues.contains($0.rawValue) }
     }
 
     /// EXEC/PROCESS client subscription: everything in the full list NOT in the
-    /// file family — process lineage (EXEC/FORK/EXIT), the introspection family,
-    /// and the low-volume SIGNAL/KEXTLOAD/BTM/MMAP/MPROTECT/SETOWNER/SETMODE set.
-    static func execClientTypes(subscribeFileOpen: Bool, subscribeIntrospection: Bool) -> [es_event_type_t] {
-        fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+    /// file family — process lineage (EXEC/FORK/EXIT), the (demand-gated)
+    /// introspection and memory-protection families, and the low-volume
+    /// SIGNAL/KEXTLOAD/BTM/SETOWNER/SETMODE set. Both demand-gated families land
+    /// here (neither is in `fileFamilyRawValues`), which is why
+    /// `applyOptionalSubscriptions` only has to touch the EXEC-carrying context.
+    static func execClientTypes(
+        subscribeFileOpen: Bool,
+        subscribeIntrospection: Bool,
+        subscribeMemoryProtection: Bool = true
+    ) -> [es_event_type_t] {
+        fullSubscription(subscribeFileOpen: subscribeFileOpen,
+                         subscribeIntrospection: subscribeIntrospection,
+                         subscribeMemoryProtection: subscribeMemoryProtection)
             .filter { !fileFamilyRawValues.contains($0.rawValue) }
     }
 
@@ -908,7 +1065,7 @@ public final class ESCollector: @unchecked Sendable {
             continuation: continuation!,
             traceContinuation: traceBindingContinuation!,
             logger: logger,
-            maxInFlight: Self.maxInFlightMessages
+            maxInFlight: workerMaxInFlight
         )
     }
 
@@ -959,18 +1116,29 @@ public final class ESCollector: @unchecked Sendable {
             // ~seconds a probe is in flight — near-free otherwise. Reads the
             // live message synchronously within the callback (valid here), so no
             // retain is needed for it. Only the EXEC context has a canary.
+            var canaryNonces: [String] = []
             if let canary = canary,
                evType == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue,
                canary.isArmed {
                 let args = argsFromExecMessage(message)
-                canary.noteExecIfCanary(commandLine: args.joined(separator: " "))
+                canaryNonces = canary.noteExecIfCanary(commandLine: args.joined(separator: " "))
             }
             // D4 handler-entry timestamp — the worker measures end-to-end latency
             // (arrival → normalise-done, including queue wait) against it.
             let startNanos = DispatchTime.now().uptimeNanoseconds
             es_retain_message(message)
             let box = ESPendingMessage(message: message, startNanos: startNanos, eventType: evType)
-            worker.submit(UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()))
+            // The sighting above proves KERNEL DELIVERY only. If the worker then
+            // refuses this exact message at its in-flight cap, the probe can
+            // never reach events.db — and the two-point verdict would blame the
+            // store/eviction stage for a loss that happened here, at the ingest
+            // hand-off. Record the third point against the message we just lost.
+            let accepted = worker.submit(
+                UnsafeRawPointer(Unmanaged.passRetained(box).toOpaque()),
+                lineageCritical: ESCollector.lineageCriticalRawValues.contains(evType),
+                eventType: evType
+            )
+            if !accepted, let canary = canary { canary.noteDroppedAtHandoff(canaryNonces) }
         }
         if result == ES_NEW_CLIENT_RESULT_SUCCESS {
             context.client = newClient
@@ -1002,8 +1170,12 @@ public final class ESCollector: @unchecked Sendable {
     /// the events. Failure of the FIRST client is fatal (same as the pre-split
     /// single-client failure — there is nothing to fall back to).
     private func createClients() throws {
-        let fileTypes = Self.fileClientTypes(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
-        let execTypes = Self.execClientTypes(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+        let fileTypes = Self.fileClientTypes(subscribeFileOpen: subscribeFileOpen,
+                                             subscribeIntrospection: subscribeIntrospection,
+                                             subscribeMemoryProtection: subscribeMemoryProtection)
+        let execTypes = Self.execClientTypes(subscribeFileOpen: subscribeFileOpen,
+                                             subscribeIntrospection: subscribeIntrospection,
+                                             subscribeMemoryProtection: subscribeMemoryProtection)
 
         // The exec/process context carries the D3 canary — its EXEC events feed
         // the recognizer. The file context never sees EXEC, so it gets no canary.
@@ -1036,7 +1208,9 @@ public final class ESCollector: @unchecked Sendable {
         teardownContext(fileCtx)
         teardownContext(execCtx)
 
-        let allTypes = Self.fullSubscription(subscribeFileOpen: subscribeFileOpen, subscribeIntrospection: subscribeIntrospection)
+        let allTypes = Self.fullSubscription(subscribeFileOpen: subscribeFileOpen,
+                                             subscribeIntrospection: subscribeIntrospection,
+                                             subscribeMemoryProtection: subscribeMemoryProtection)
         let unifiedCtx = makeContext(label: "unified", types: allTypes, canary: canaryRegistry)
         let unifiedResult = openClient(for: unifiedCtx)
         guard unifiedResult == ES_NEW_CLIENT_RESULT_SUCCESS else {
@@ -1063,6 +1237,59 @@ public final class ESCollector: @unchecked Sendable {
                 throw ESCollectorError.subscriptionFailed
             }
         }
+    }
+
+    /// v1.21.6 (PERF-02): re-point the two DEMAND-GATED subscription families at
+    /// the live ruleset without restarting the engine. Called from the SIGHUP
+    /// handler after `reloadRules`, so promoting an introspection rule — or
+    /// setting `rule_profile: "all"` — takes effect on reload instead of leaving
+    /// an ENABLED rule that can never fire.
+    ///
+    /// `es_subscribe` is ADDITIVE and `es_unsubscribe` removes, so both calls are
+    /// idempotent; no per-family state is tracked here, which keeps the promise
+    /// made on `contexts` (write-once, only ever drained) intact and avoids a new
+    /// lock on a class the heartbeat reads concurrently. ES client calls are safe
+    /// from any thread.
+    ///
+    /// Applied only to the context carrying NOTIFY_EXEC — the exec client in
+    /// split mode, the unified client when degraded — because both gated families
+    /// are partitioned there (neither is in `fileFamilyRawValues`).
+    ///
+    /// KNOWN GAP, stated rather than hidden: the 5 s `user_rules/.reload_tick`
+    /// watcher in DaemonSetup reloads rules but cannot reach the collector, so a
+    /// dashboard rule-enable needs a `pkill -HUP com.maccrab.agent` before ES
+    /// actually delivers those events. The log lines below are how an operator
+    /// sees which families are live.
+    public func applyOptionalSubscriptions(introspection: Bool, memoryProtection: Bool) {
+        var toAdd: [es_event_type_t] = []
+        var toRemove: [es_event_type_t] = []
+        if introspection { toAdd += Self.introspectionEvents } else { toRemove += Self.introspectionEvents }
+        if memoryProtection { toAdd += Self.memoryProtectionEvents } else { toRemove += Self.memoryProtectionEvents }
+
+        for context in contexts {
+            guard let client = context.client,
+                  context.subscribedTypes.contains(where: { $0.rawValue == ES_EVENT_TYPE_NOTIFY_EXEC.rawValue })
+            else { continue }
+            if !toAdd.isEmpty {
+                let rc = toAdd.withUnsafeBufferPointer { buf -> es_return_t in
+                    es_subscribe(client, buf.baseAddress!, UInt32(buf.count))
+                }
+                if rc != ES_RETURN_SUCCESS {
+                    // LOUD, not fail-closed: the engine keeps running, but the
+                    // detections that need this family are dark until restart.
+                    logger.error("ESCollector: es_subscribe for demand-gated families FAILED on \(context.label) (rc=\(rc.rawValue)) — rules selecting those event actions cannot fire until the engine restarts")
+                }
+            }
+            if !toRemove.isEmpty {
+                let rc = toRemove.withUnsafeBufferPointer { buf -> es_return_t in
+                    es_unsubscribe(client, buf.baseAddress!, UInt32(buf.count))
+                }
+                if rc != ES_RETURN_SUCCESS {
+                    logger.warning("ESCollector: es_unsubscribe for demand-gated families FAILED on \(context.label) (rc=\(rc.rawValue)) — an unconsumed firehose keeps costing CPU")
+                }
+            }
+        }
+        logger.notice("ESCollector demand-gated subscriptions now: introspection=\(introspection), memory_protection=\(memoryProtection)")
     }
 
     /// Mute noisy paths to reduce kernel-to-userspace traffic. v1.21.4 Phase-4:
@@ -1291,6 +1518,16 @@ public final class ESCollector: @unchecked Sendable {
         contexts.reduce(UInt64(0)) { $0 &+ $1.worker.backpressureDropped() }
     }
 
+    /// v1.21.6 (audit DET-05): the copy-stage drops broken out per ES event type,
+    /// merged across both split clients — the counterpart to
+    /// `esKernelDroppedByType()`. Surfaced as `es_copy_backpressure_dropped_by_type`.
+    /// Without it a sustained 22%+ drop rate is a single opaque number, and there
+    /// is no way to know whether the budget is being spent on the WRITE/CLOSE/OPEN
+    /// firehose or on the exec events every rule tier depends on.
+    public func esCopyBackpressureDroppedByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.worker.backpressureDroppedByEventType() })
+    }
+
     /// v1.21.4 Phase-4 (Mitigation C): true iff the file/exec client split could
     /// NOT be established (the second `es_new_client` failed) and the collector
     /// fell back to a single client subscribing ALL types (the pre-split
@@ -1309,6 +1546,13 @@ public final class ESCollector: @unchecked Sendable {
     /// Whether a probe `nonce` was observed at the ES callback boundary. `false`
     /// after the settle delay ⇒ the kernel/ingest stage dropped the probe.
     public func canarySeenAtCallback(_ nonce: String) -> Bool { canaryRegistry.seenAtCallback(nonce) }
+
+    /// Whether a probe `nonce` reached the callback but was then refused at the
+    /// callback→worker hand-off (the exec context's `ESMessageWorker` was at its
+    /// in-flight cap). `true` means the loss happened in the ingest hand-off,
+    /// NOT in the store/eviction path — the distinction the D3 verdict exists to
+    /// make, and the one it got wrong for every hand-off drop.
+    public func canaryDroppedAtHandoff(_ nonce: String) -> Bool { canaryRegistry.droppedAtHandoff(nonce) }
 
     /// Retire a probe `nonce` (found or not). Called from the timer's `defer` so
     /// the registry never accumulates stale nonces.
@@ -1541,6 +1785,29 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ, ES_EVENT_TYPE_NOTIFY_TRACE,
              ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE, ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
             if msg.process.pointee.is_platform_binary { return nil }
+        default:
+            break
+        }
+
+        // v1.21.5 memory-protection hot-path guard: same discipline as the OPEN,
+        // introspection and write-family guards above. Measured on-device,
+        // NOTIFY_MPROTECT (77/s) + NOTIFY_MMAP (50/s) are ~11.6% of all ES
+        // messages, and the W+X tests in their parse branches below discard
+        // essentially all of them — 1.03M MPROTECT + 76K MMAP messages over
+        // 2.26 h yielded ONE stored `mprotect_wx` row. Pre-fix every one of those
+        // discarded messages still paid for the heap-allocating
+        // processFromESProcess build first, because the guard sat BELOW it.
+        // Hoisting it here is a pure bitmask test on a value already in the
+        // message. The predicate is byte-for-byte the one in the branches below
+        // (`isWritable && isExecutable`), so nothing that is emitted today stops
+        // being emitted — only the cost of the discarded majority changes.
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_MMAP:
+            let prot = msg.event.mmap.protection
+            guard (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0 else { return nil }
+        case ES_EVENT_TYPE_NOTIFY_MPROTECT:
+            let prot = msg.event.mprotect.protection
+            guard (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0 else { return nil }
         default:
             break
         }
@@ -2079,6 +2346,12 @@ public final class ESCanaryRegistry: @unchecked Sendable {
     private var live: Set<String> = []
     /// Nonces observed at the ES callback boundary this cycle.
     private var seen: Set<String> = []
+    /// Nonces that WERE seen at the callback but whose retained message the
+    /// per-client `ESMessageWorker` then refused at its in-flight cap. Third
+    /// observation point: without it the two-point verdict reads "seen at the
+    /// callback but absent from events.db" as a store/eviction gap, so every
+    /// probe lost at the callback→worker hand-off is blamed on retention.
+    private var droppedAtHandoffNonces: Set<String> = []
 
     public init() {}
 
@@ -2087,19 +2360,28 @@ public final class ESCanaryRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         live.insert(nonce)
         seen.remove(nonce)
+        droppedAtHandoffNonces.remove(nonce)
     }
 
-    /// Retire a nonce (clears both live + seen state for it).
+    /// Retire a nonce (clears live + seen + hand-off-drop state for it).
     public func disarm(_ nonce: String) {
         lock.lock(); defer { lock.unlock() }
         live.remove(nonce)
         seen.remove(nonce)
+        droppedAtHandoffNonces.remove(nonce)
     }
 
     /// Whether `nonce` was seen at the callback boundary.
     public func seenAtCallback(_ nonce: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return seen.contains(nonce)
+    }
+
+    /// Whether the message carrying `nonce` was dropped at the callback→worker
+    /// hand-off (the worker was already at `maxInFlightMessages`).
+    public func droppedAtHandoff(_ nonce: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return droppedAtHandoffNonces.contains(nonce)
     }
 
     /// Cheap armed-gate for the ES callback boundary: `true` iff any nonce is
@@ -2112,10 +2394,29 @@ public final class ESCanaryRegistry: @unchecked Sendable {
 
     /// Hot path: called for every EXEC. Latches any LIVE nonce present in the
     /// exec's command line. Near-free when no probe is armed.
-    public func noteExecIfCanary(commandLine: String) {
+    ///
+    /// Returns the matched nonces so the callback can tell the registry when
+    /// the SAME message is then refused at the worker hand-off. The no-match
+    /// path returns the empty-array singleton — no allocation on the hot path.
+    @discardableResult
+    public func noteExecIfCanary(commandLine: String) -> [String] {
         lock.lock(); defer { lock.unlock() }
-        guard !live.isEmpty else { return }
-        for nonce in live where commandLine.contains(nonce) { seen.insert(nonce) }
+        guard !live.isEmpty else { return [] }
+        var matched: [String] = []
+        for nonce in live where commandLine.contains(nonce) {
+            seen.insert(nonce)
+            matched.append(nonce)
+        }
+        return matched
+    }
+
+    /// Record that the retained message carrying these probe nonces was freed
+    /// at the callback→worker hand-off instead of processed. Called from the ES
+    /// callback immediately after a `submit` that returned `false`.
+    public func noteDroppedAtHandoff(_ nonces: [String]) {
+        guard !nonces.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        for nonce in nonces where live.contains(nonce) { droppedAtHandoffNonces.insert(nonce) }
     }
 }
 
@@ -2244,10 +2545,24 @@ public final class ESMessageWorker: @unchecked Sendable {
     private let process: (Handle) -> Void
     private let free: (Handle) -> Void
 
+    /// v1.21.5 PERF: slots held back at the TOP of the in-flight budget for
+    /// lineage-critical types (EXEC/FORK/EXIT). Pre-fix the cap was a single
+    /// undifferentiated budget, so under backpressure the drop policy was
+    /// "newest arrival loses" regardless of value — and on the exec client the
+    /// high-rate low-yield types (MPROTECT 77/s, GET_TASK_READ 139/s) vastly
+    /// outnumber EXEC (7/s), so the events that anchor process lineage were the
+    /// most likely to be lost. Non-critical arrivals are now refused this many
+    /// slots early, leaving the tail of the budget for the events nothing
+    /// downstream can reconstruct.
+    private let lineageReserve: Int
+
     private let lock = NSLock()
     private var inFlight = 0
     private var shuttingDown = false
     private var backpressureDroppedCount: UInt64 = 0
+    /// v1.21.6 (audit DET-05): per-event-type breakdown of the same drops.
+    /// Guarded by the same `lock` as the aggregate.
+    private var backpressureDroppedByTypeCount: [UInt32: UInt64] = [:]
 
     /// - Parameters:
     ///   - maxInFlight: in-flight cap (clamped to ≥1).
@@ -2258,7 +2573,13 @@ public final class ESMessageWorker: @unchecked Sendable {
                 label: String = "com.maccrab.es.message-worker",
                 process: @escaping (Handle) -> Void,
                 free: @escaping (Handle) -> Void) {
-        self.maxInFlight = Swift.max(1, maxInFlight)
+        let cap = Swift.max(1, maxInFlight)
+        self.maxInFlight = cap
+        // A quarter of the budget is held for lineage-critical types (see
+        // `lineageReserve`). Floored at 1 so even a tiny test cap reserves a slot,
+        // and capped below `maxInFlight` so non-critical traffic is never refused
+        // outright — it just loses the race for the last slots.
+        self.lineageReserve = Swift.max(1, Swift.min(cap - 1, cap / 4))
         self.queue = DispatchQueue(label: label, qos: .userInitiated)
         self.process = process
         self.free = free
@@ -2268,18 +2589,49 @@ public final class ESMessageWorker: @unchecked Sendable {
     /// the worker is at capacity or shutting down, free it inline. On EVERY
     /// return path the handle is freed exactly once (see the type doc). Never
     /// blocks the caller (the ES callback thread).
-    public func submit(_ handle: Handle) {
+    ///
+    /// Returns whether the handle was ACCEPTED for processing. `false` means it
+    /// was freed inline (over-bound drop or shutdown drain) and will never reach
+    /// the pipeline — the coverage canary needs this to attribute a lost probe
+    /// to the ingest hand-off rather than to the store/eviction stage.
+    /// `@discardableResult` so the existing statement-position callers (and the
+    /// worker's own tests) are unchanged.
+    @discardableResult
+    /// `eventType` is the raw ES event type, carried only so a backpressure
+    /// drop can be attributed per-type in the heartbeat. Defaults to 0 so the
+    /// worker's own unit tests (opaque handles, no ES type) and any non-ES user
+    /// of this worker still compile unchanged.
+    public func submit(_ handle: Handle, lineageCritical: Bool = true, eventType: UInt32 = 0) -> Bool {
         lock.lock()
         if shuttingDown {
             lock.unlock()
             free(handle)                       // drain path — free once
-            return
+            return false
         }
-        if inFlight >= maxInFlight {
+        // v1.21.5 PERF: priority-aware admission. Lineage-critical messages may
+        // use the whole budget; everything else is refused `lineageReserve` slots
+        // early, so a low-yield flood can never consume the last slots and evict
+        // EXEC/FORK/EXIT. This can only make non-critical drops MORE likely and
+        // critical drops LESS likely — it never admits a message the old policy
+        // would have refused. Defaulting to `true` keeps every existing caller
+        // (and the worker's unit tests) on the previous full-budget behaviour.
+        let admissionCap = lineageCritical ? maxInFlight : maxInFlight - lineageReserve
+        if inFlight >= admissionCap {
             backpressureDroppedCount &+= 1
+            // v1.21.6 (audit DET-05): the WRITE side of the per-type attribution.
+            // The field, `backpressureDroppedByEventType()`, the collector-level
+            // `esCopyBackpressureDroppedByType()` merge and the heartbeat key
+            // `es_copy_backpressure_dropped_by_type` were all already in place,
+            // but nothing ever incremented the map — so the heartbeat published
+            // `{}`, which reads identically to "no drops" while the aggregate
+            // counter showed millions. Same lock, one dictionary bump, on a path
+            // that is already discarding the message. `eventType` defaults to 0
+            // so the worker's own unit tests (opaque handles, no ES type) and any
+            // non-ES user of this worker still compile.
+            backpressureDroppedByTypeCount[eventType, default: 0] &+= 1
             lock.unlock()
             free(handle)                       // over-bound drop — free once + counted
-            return
+            return false
         }
         inFlight += 1
         // Enqueue UNDER the lock so (inFlight += 1, enqueue) is atomic w.r.t.
@@ -2294,6 +2646,7 @@ public final class ESMessageWorker: @unchecked Sendable {
             self.lock.unlock()
         }
         lock.unlock()
+        return true
     }
 
     /// Stop accepting new work and block until every in-flight handle has been
@@ -2316,6 +2669,14 @@ public final class ESMessageWorker: @unchecked Sendable {
     public func backpressureDropped() -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         return backpressureDroppedCount
+    }
+
+    /// v1.21.6 (audit DET-05): the same drops, attributed per ES event type, so
+    /// the heartbeat can answer "which detections is the backpressure actually
+    /// costing us". Sums to `backpressureDropped()`.
+    public func backpressureDroppedByEventType() -> [UInt32: UInt64] {
+        lock.lock(); defer { lock.unlock() }
+        return backpressureDroppedByTypeCount
     }
 
     /// Current in-flight count (submitted-but-not-yet-completed). Observability

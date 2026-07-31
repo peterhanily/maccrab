@@ -76,7 +76,6 @@ final class DaemonState {
     let aiTracker: AIProcessTracker
     let credentialFence: CredentialFence
     let projectBoundary: ProjectBoundary
-    let injectionScanner: PromptInjectionScanner
     let aiNetworkSandbox: AINetworkSandbox
     let fileInjectionScanner: FileInjectionScanner
 
@@ -416,7 +415,6 @@ final class DaemonState {
         aiTracker: AIProcessTracker,
         credentialFence: CredentialFence,
         projectBoundary: ProjectBoundary,
-        injectionScanner: PromptInjectionScanner,
         aiNetworkSandbox: AINetworkSandbox,
         fileInjectionScanner: FileInjectionScanner,
         mcpAttributor: MCPAttributor,
@@ -502,7 +500,10 @@ final class DaemonState {
         // are intentionally NOT config-surfaced (no daemon_config.json key),
         // unlike the priority/file stream caps below (DaemonSetup wires those
         // from DaemonConfig.storage). See BatchedEventWriter.init's note.
-        self.eventWriter = BatchedEventWriter(store: eventStore)
+        // volumePath wires the disk admission check to the store volume: below the
+        // free-space floor the writer pauses persistence and says so, instead of
+        // writing until the boot volume is 100% full.
+        self.eventWriter = BatchedEventWriter(store: eventStore, volumePath: supportDir)
         self.alertStore = alertStore
         // Build AlertSink from the already-stored alertStore + deduplicator so
         // we don't need a new initializer parameter. Construction is cheap
@@ -550,7 +551,6 @@ final class DaemonState {
         self.aiTracker = aiTracker
         self.credentialFence = credentialFence
         self.projectBoundary = projectBoundary
-        self.injectionScanner = injectionScanner
         self.aiNetworkSandbox = aiNetworkSandbox
         self.fileInjectionScanner = fileInjectionScanner
         self.mcpAttributor = mcpAttributor

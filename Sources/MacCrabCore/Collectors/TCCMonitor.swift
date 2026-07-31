@@ -99,10 +99,43 @@ public actor TCCMonitor {
     private static let systemDBPath =
         "/Library/Application Support/com.apple.TCC/TCC.db"
 
-    /// Path to the current user's TCC database.
-    private static var userDBPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/Library/Application Support/com.apple.TCC/TCC.db"
+    /// Paths to every real user's TCC database, paired with the `source` label
+    /// their entries carry.
+    ///
+    /// v1.21.6 (audit DET-06): this was a single path built from
+    /// `homeDirectoryForCurrentUser`. Inside the root System Extension that
+    /// resolves to `/var/root`, which has no TCC.db — so on every release install
+    /// the USER database was never opened. Verified on the field host: the
+    /// daemon's own `tcc_snapshot.json` held 21 entries, ALL `source: "system"`,
+    /// zero `user`. The per-user services (kTCCServiceMicrophone, Camera,
+    /// Contacts, Calendar, Photos, AppleEvents) live only in the user DB, so any
+    /// rule keyed on one of them was structurally incapable of firing —
+    /// `Rules/collection/microphone_access_unsigned.yml` is `status: stable` and
+    /// counts toward advertised coverage while being unable to match.
+    ///
+    /// Enumerate real homes under /Users (same approach as
+    /// `DaemonConfig.applyUserOverrides` and `ESCollector.realUserHomes`) and
+    /// label each `user:<name>` so `identityKey` stays distinct on a multi-user
+    /// Mac. The non-root dev daemon's own home is kept as a fallback so
+    /// `swift run maccrabd` behaves exactly as before.
+    private static func userDBPaths() -> [(path: String, source: String)] {
+        let fm = FileManager.default
+        var seen: Set<String> = []
+        var result: [(path: String, source: String)] = []
+        let names = ((try? fm.contentsOfDirectory(atPath: "/Users")) ?? [])
+            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
+            .sorted()
+        for name in names {
+            let path = "/Users/\(name)/Library/Application Support/com.apple.TCC/TCC.db"
+            guard fm.fileExists(atPath: path), seen.insert(path).inserted else { continue }
+            result.append((path, "user:\(name)"))
+        }
+        let ownPath = fm.homeDirectoryForCurrentUser.path
+            + "/Library/Application Support/com.apple.TCC/TCC.db"
+        if fm.fileExists(atPath: ownPath), seen.insert(ownPath).inserted {
+            result.append((ownPath, "user"))
+        }
+        return result
     }
 
     // MARK: - Properties
@@ -186,7 +219,12 @@ public actor TCCMonitor {
 
         // Install file watchers
         installWatcher(path: Self.systemDBPath, label: "system")
-        installWatcher(path: Self.userDBPath, label: "user")
+        // v1.21.6 (audit DET-06): watch EVERY real user's TCC.db, not the
+        // current process's home — as root that was /var/root and no user-DB
+        // watcher was ever installed.
+        for entry in Self.userDBPaths() {
+            installWatcher(path: entry.path, label: entry.source)
+        }
     }
 
     // MARK: - Cross-process snapshot (sysext → app, v1.7.1)
@@ -268,8 +306,19 @@ public actor TCCMonitor {
                 try? FileManager.default.removeItem(atPath: path)
                 try FileManager.default.moveItem(atPath: tmp, toPath: path)
             }
+            // v1.21.5 (audit S-07): 0640, NOT 0644. This file is a verbatim copy of
+            // the TCC grant map read from behind SIP/FDA — which client holds
+            // Accessibility, Screen Recording, PostEvent, EndpointSecurityClient,
+            // Full Disk Access. At 0644 MacCrab unilaterally downgraded an
+            // OS-enforced confidentiality boundary: any local process, any uid, no
+            // FDA and no admin, could enumerate the machine's highest-value
+            // injection targets purely because we mirrored TCC.db to disk. 0640 in
+            // the root:admin support dir matches alerts.db / events.db / traces.db,
+            // which the dashboard already reads over that same group — so the
+            // Permissions panel is unaffected for any user who can open the
+            // dashboard at all.
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o640],
                 ofItemAtPath: path
             )
         } catch {
@@ -539,7 +588,7 @@ public actor TCCMonitor {
     private func readAllEntries() -> [String: TCCEntry] {
         var entries: [String: TCCEntry] = [:]
 
-        for (path, source) in [(Self.systemDBPath, "system"), (Self.userDBPath, "user")] {
+        for (path, source) in [(path: Self.systemDBPath, source: "system")] + Self.userDBPaths() {
             let dbEntries = readDatabase(path: path, source: source)
             for entry in dbEntries {
                 entries[entry.identityKey] = entry

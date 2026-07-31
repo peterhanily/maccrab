@@ -35,10 +35,28 @@ public actor MonitorSupervisor {
     /// `Task` is cancelled (by `shutdown()` or another `start` with the
     /// same name), any `for await` loop inside it exits at the next
     /// iteration boundary.
-    public func start(_ name: String, _ work: @escaping @Sendable () async -> Void) {
+    /// v1.21.6 (RES-11): `collector` + `registry` are optional liveness wiring.
+    /// When both are supplied and the body RETURNS without the task having been
+    /// cancelled, the monitor's `for await` loop ended — i.e. the collector's
+    /// AsyncStream finished — and the collector is recorded dead in the registry.
+    /// This is the only signal that distinguishes "quiet" from "gone" for the 13
+    /// collectors that are not routed through `DaemonState.driveSource`; it costs
+    /// nothing while they are alive because the body never returns.
+    ///
+    /// The `!Task.isCancelled` gate is load-bearing: `shutdown()` cancels every
+    /// task, which is a normal loop exit and must not be reported as a fault.
+    public func start(
+        _ name: String,
+        collector: String? = nil,
+        registry: CollectorRegistry? = nil,
+        _ work: @escaping @Sendable () async -> Void
+    ) {
         tasks[name]?.cancel()
         tasks[name] = Task {
             await work()
+            if !Task.isCancelled, let collector, let registry {
+                await registry.recordStreamEnded(name: collector)
+            }
         }
     }
 

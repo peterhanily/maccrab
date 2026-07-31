@@ -20,7 +20,7 @@ enum StartupBanner {
         let seqRuleCount = await state.sequenceEngine.ruleCount
         let bannerTreeStats = await state.processTreeAnalyzer.stats()
         let esHealth = await state.esHealthMonitor.currentStatus()
-        let scannerStatus = await state.injectionScanner.isAvailable ? "active" : "unavailable (pip install forensicate)"
+        let scannerStatus = "active (native)"
 
         // v1.9.0 fix: read version via MacCrabVersion (Info.plist when
         // present, build-time fallback otherwise) and compute padding

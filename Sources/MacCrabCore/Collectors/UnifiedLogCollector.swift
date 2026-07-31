@@ -110,7 +110,12 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         // Configure the subprocess
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: logPath)
-        proc.arguments = ["stream", "--predicate", predicate, "--style", "json"]
+        // `--style ndjson` (NOT `json`): the line-oriented parser below needs one
+        // complete JSON object per line. `--style json` pretty-prints a single
+        // array — every key lands on its own line — so no line ever parses and the
+        // collector emitted zero events (measured: 0/312 lines vs 10/11 for ndjson,
+        // the one failure being the tool's "Filtering the log data using …" preamble).
+        proc.arguments = ["stream", "--predicate", predicate, "--style", "ndjson"]
 
         let pipe = Pipe()
         proc.standardOutput = pipe

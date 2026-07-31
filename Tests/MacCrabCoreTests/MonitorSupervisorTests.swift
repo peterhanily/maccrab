@@ -112,18 +112,30 @@ struct MonitorSupervisorTests {
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
 
-        let shutdownStart = Date()
-        await sup.shutdown(deadline: 0.5)  // deliberately tight
-        let elapsed = Date().timeIntervalSince(shutdownStart)
-
         // The guarantee under test is BOUNDEDNESS: the stubborn task loops
         // forever, so without the deadline shutdown would HANG indefinitely.
-        // Returning at all is the proof. The exact "0.5s + jitter" can't be
-        // asserted under full-suite parallel CPU saturation (scheduler latency
-        // alone pushed this to ~2.08s). 5.0 distinguishes "deadline forced a
-        // bounded return" from "hung on the never-cancelling task" without
-        // flaking on load.
-        #expect(elapsed < 5.0, "shutdown took \(elapsed)s — the 0.5s deadline should have forced a bounded return, not a hang")
+        // Returning at all is the proof. An ABSOLUTE wall-clock bound is not a
+        // fair way to check that — under a saturated runner this recorded
+        // 190.55s against a 5.0s bound and went red with nothing wrong. Race
+        // the shutdown against a watchdog instead: both arms suffer the SAME
+        // scheduler starvation, so the comparison holds at any load, while a
+        // genuine hang still loses the race deterministically.
+        let returnedBeforeWatchdog = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await sup.shutdown(deadline: 0.5)  // deliberately tight
+                return true
+            }
+            group.addTask {
+                // 60× the deadline. Only a hang can lose to this.
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        #expect(returnedBeforeWatchdog,
+                "shutdown did not return within 30s — the 0.5s deadline should have forced a bounded return, not a hang")
     }
 
     @Test("shutdown() is a no-op when there are no tasks")

@@ -309,6 +309,53 @@ struct SensorDegradationEvaluatorTests {
             baseline: b)
         #expect(r.newBaseline.fileEventEwma == before)   // unchanged while spiking
     }
+
+    // MARK: - Firing reason (v1.21.6)
+
+    @Test("spike branch reports .spikeWithLoss")
+    func spikeBranchReportsReason() {
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 50_000, processEventsThisTick: 10,
+                         kernelDropDelta: 5000, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: warmedBaseline())
+        #expect(r.reason == .spikeWithLoss)
+    }
+
+    /// The bug this guards: the alert description asserted BOTH a file spike and
+    /// an exec-channel collapse unconditionally. On the sustained-loss branch it
+    /// therefore reported exec throughput as having "fallen" when it had RISEN,
+    /// and told the operator an attacker was suppressing telemetry when the real
+    /// condition was the sensor shedding load.
+    @Test("sustained-loss branch reports .sustainedLoss, NOT .spikeWithLoss")
+    func sustainedLossBranchReportsReason() throws {
+        var b = warmedBaseline()
+        var last: Eval.Result?
+        for _ in 0..<3 {
+            last = Eval.evaluate(
+                input: Input(fileEventsThisTick: 1200, processEventsThisTick: 15_000,
+                             kernelDropDelta: 0, collectorDropDelta: 4000,
+                             benignHighIOSigner: false),
+                baseline: b)
+            b = last!.newBaseline
+        }
+        let r = try #require(last)
+        if case .degraded = r.outcome {
+            #expect(r.reason == .sustainedLoss,
+                    "a no-spike chronic-loss fire must not claim a spike + collapse")
+            #expect(r.processRate > r.processBaseline,
+                    "this fixture has exec throughput RISING — the old template called it a fall")
+        }
+    }
+
+    @Test("a non-firing tick carries no reason")
+    func quietTickHasNoReason() {
+        let r = Eval.evaluate(
+            input: Input(fileEventsThisTick: 1000, processEventsThisTick: 500,
+                         kernelDropDelta: 0, collectorDropDelta: 0, benignHighIOSigner: false),
+            baseline: warmedBaseline())
+        #expect(r.reason == nil)
+    }
+
 }
 
 @Suite("D2 SensorDegradationState box (cumulative → delta)")
