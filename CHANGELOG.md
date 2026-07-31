@@ -3,6 +3,37 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.1] — 2026-07-31
+
+Remediation release over 1.21.5, covering every critical, high and medium finding from a full-product audit.
+
+### Sensors
+- **Three sensors that were silently producing nothing now work.** The system-log collector parsed no output at all, so eighteen subsystems — Gatekeeper, XProtect, sudo, securityd, sandboxd, Bluetooth, Wi-Fi and more — contributed no events on any install. DNS capture bound to a fixed network interface and captured nothing on any Mac whose traffic takes a different one, voiding all domain-based threat intelligence.
+- **Collector health is honest.** A collector could report itself healthy forever regardless of whether it had ever produced an event, including the two that were dead above. A sensor that has produced nothing since it started now degrades instead.
+
+### Performance and storage
+- **A single idle reader can no longer exhaust the disk.** The causal-graph database could grow from 5 MB to 6.7 GB in under ten minutes with one reader attached. The size-cap sweep was also measuring that inflated size and deleting real evidence to compensate — up to 100,000 rows while actual data was half the cap.
+- **The storage sweeps converge.** The events size cap could never be met, so the recovery watchdog re-fired every few minutes indefinitely, writing hundreds of gigabytes a day. Effective retention for file events had collapsed to about 30 seconds against a configured 30 minutes.
+
+### Security and privacy
+- **Encrypted forensic cases open again.** Case encryption keys were written to the keychain with one set of attributes and looked up with another, so no encrypted case could ever be reopened. Existing affected cases are addressed separately.
+- **Detection-rule signature verification no longer trusts the working directory.** The shipping CLI resolved its rule-signing trust root from a relative path, so anyone able to write a directory you ran it from could become the signing authority. The intended signed key is now shipped in the app bundle.
+- **The agent-trace receiver is loopback-only and the privileged control plane is bounded.** Alert-history pruning can no longer be asked to delete everything, and the control-plane inbox now has drain and rate limits.
+
+### AI features
+- **AI analysis is off until you turn it on.** It was on by default, so any Mac that happened to be running a local model server on the standard port received AI commentary — about a sixth of all alerts — without the user ever visiting Settings. If you have already configured a backend, nothing changes.
+- **Unreachable AI code removed.** About 1,500 lines of AI orchestration that nothing called, in the engine and the dashboard alike, are gone.
+
+### Detection
+- **Keychain credential theft is reported again.** Every rule covering credential dumping through `/usr/bin/security` was being fully suppressed by the noise filter — the technique used by the most common macOS infostealers.
+- **Fewer confident false accusations.** The intent scorer asserted certainty on ordinary activity, including against Apple's own malware-removal tool, and labelled routine package installs as worm propagation.
+- **Wider active coverage,** including the privacy-permission and network rule sources, which were evaluating nothing.
+
+### Interface, documentation and accessibility
+- **The privileged-change audit trail is visible in the dashboard** (System › Health) — previously only an AI agent over MCP could read it.
+- **Documentation corrected where it described things that do not exist,** including a data-deletion command, an at-rest encryption switch, and two ways to disable network access that do not work without administrator rights. The way that does work is now documented.
+- **Contrast, keyboard and VoiceOver fixes** across the severity palette, status chips and the trace graph, plus larger hit targets.
+
 ## [1.21.5] — 2026-07-25
 
 Performance, detection-quality, and reliability release over 1.21.4.
