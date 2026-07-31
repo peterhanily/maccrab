@@ -870,6 +870,25 @@ public actor AlertStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// FF-04: SQL-side count of campaign rows (`rule_id LIKE
+    /// 'maccrab.campaign.%'`, the same predicate as `campaigns(before:)`).
+    ///
+    /// `maccrabctl status` derived this by fetching the newest 500 alerts and
+    /// filtering in-process, so it printed "0 campaign(s)" whenever the most
+    /// recent 500 alerts happened to hold no campaign row — on a busy host that
+    /// is the normal case, and it reinforced the same false empty state the
+    /// `campaigns` subcommand was giving. A count must never be derived from a
+    /// capped sample.
+    public func campaignCount() throws -> Int {
+        let sql = "SELECT COUNT(*) FROM alerts WHERE rule_id LIKE 'maccrab.campaign.%'"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed("Failed to count campaign alerts")
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     /// v1.18: read-only count of UNSUPPRESSED alerts for a campaign — the
     /// pre-flight for the MCP `suppress_campaign` fan-out confirmation. Uses
     /// the IDENTICAL predicate as `suppress(campaignId:)` so the count and

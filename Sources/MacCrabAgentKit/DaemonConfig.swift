@@ -24,6 +24,18 @@ struct DaemonConfig: Codable {
     var browserExtensionPollInterval: TimeInterval = 120
     var ultrasonicPollInterval: TimeInterval = 60
     var ultrasonicEnabled: Bool = false  // Opt-in: requires microphone access
+    /// Deception tier (honeyfiles + honey-prompts). OFF by default.
+    ///
+    /// v1.21.6 (audit DET-02): the tier used to be gated SOLELY on the
+    /// `MACCRAB_DECEPTION=1` process environment variable. A System Extension is
+    /// launched by `sysextd`, not by a shell, so there is no supported way for an
+    /// operator to put that variable in its environment — meaning the deception
+    /// tier was permanently inert on every DMG / Homebrew install, and with it
+    /// `Rules/persistence/honeyfile_accessed.yml`, the one `suppressible: false`
+    /// rule in the corpus whose false-positive rate is near-zero by construction.
+    /// Mirrors `ultrasonicEnabled`: config key OR env var, so the dev env-var
+    /// workflow keeps working. JSON key: `deception_enabled`.
+    var deceptionEnabled: Bool = false
     var rootkitPollInterval: TimeInterval = 120
     var eventTapPollInterval: TimeInterval = 30
     var systemPolicyPollInterval: TimeInterval = 300
@@ -44,6 +56,16 @@ struct DaemonConfig: Codable {
     /// actors in ESCollector. Kill-switch: set `subscribe_introspection_events:
     /// false` in daemon_config.json to disable the family independently.
     var subscribeIntrospectionEvents: Bool = true
+
+    /// v1.21.6 (RES-05): per-client `ESMessageWorker` in-flight message cap —
+    /// the stage that was silently discarding 11.8-22% of the kernel stream on a
+    /// normal developer host with a hardcoded, unreachable constant. Raising it
+    /// trades RSS (kernel memory is held per retained message) for coverage on a
+    /// host that genuinely offers more than the parse worker can absorb; it is
+    /// NOT the first thing to reach for — reduce what is ingested first (see the
+    /// PERF-02 demand gate). Clamped to [256, 65536] in `ESCollector.init`.
+    /// JSON key: `es_worker_max_inflight`.
+    var esWorkerMaxInFlight: Int = ESCollector.maxInFlightMessages
 
     // MARK: - UEBA (User Entity Behaviour Analytics) — v1.21.4
     /// OFF by default. When enabled, the daemon feeds process-exec events
@@ -205,6 +227,25 @@ struct DaemonConfig: Codable {
         /// makes the target `0.8 × 420 = 336 MB` sit above the ~300 MB floor so
         /// the sweep converges instead of churning. Working set still bounded by
         /// `eventsHotTierMinutes`.
+        ///
+        /// v1.21.6 (PERF-03) — that convergence claim DOES NOT HOLD under
+        /// ordinary developer activity, and the cap is not a fix for the write
+        /// volume underneath it. Field-sampled every 9 s on the author's host:
+        /// 325.9 → 423.6 → 519.7 → 567.6 MB, then 291.6 MB (276 MB reclaimed in
+        /// under 9 s), and the same cycle again 4 minutes later — a peak footprint
+        /// of 587 MB with WAL, i.e. 140% of this cap, plus a multi-hundred-MB file
+        /// rewrite every few minutes. Sustained ~1.59 MB/s of DB writes
+        /// (~137 GB/day) at ~7,214 on-disk bytes per event.
+        ///
+        /// Raising the number again would only move the thrash point. The bytes
+        /// per event are the problem: raw_json re-serializes ~20 fields that
+        /// already have typed columns, and every ephemeral row also pays for the
+        /// FTS5 index. Fixing that means changing the raw_json write AND the
+        /// `queryEvents` read path that decodes it, so it is deliberately NOT done
+        /// in this batch; the PERF-02 ingest gate lands first and the cap should
+        /// then be re-derived from a measured steady state, not guessed again.
+        /// Until that happens this cap is breached, not honoured — see the
+        /// early-fire watchdog's back-off in DaemonTimers for the containment.
         var eventsMaxSizeMB: Int = 420
 
         /// Cadence (in minutes) for the events.db size-cap enforcer.
@@ -471,6 +512,10 @@ struct DaemonConfig: Codable {
             "browser_extension_poll_interval": "browserExtensionPollInterval",
             "ultrasonic_poll_interval": "ultrasonicPollInterval",
             "ultrasonic_enabled": "ultrasonicEnabled",
+            // v1.21.6 (audit DET-02): without this entry the key would decode as
+            // the default and the config gate would be a silent no-op — exactly
+            // the `rule_profile` bug recorded below.
+            "deception_enabled": "deceptionEnabled",
             "rootkit_poll_interval": "rootkitPollInterval",
             "event_tap_poll_interval": "eventTapPollInterval",
             "system_policy_poll_interval": "systemPolicyPollInterval",
@@ -483,6 +528,10 @@ struct DaemonConfig: Codable {
             "rule_profile": "ruleProfile",
             "subscribe_file_open_events": "subscribeFileOpenEvents",
             "subscribe_introspection_events": "subscribeIntrospectionEvents",
+            // v1.21.6 (RES-05): without this entry the snake key decodes as the
+            // default and the knob is a silent no-op — the exact `rule_profile`
+            // and `deception_enabled` bug recorded above.
+            "es_worker_max_inflight": "esWorkerMaxInFlight",
             "ueba_enabled": "uebaEnabled",
             "suppress_selftest_noise": "suppressSelftestNoise",
             // v1.19.1 opt-in network-enrichment flags
@@ -605,6 +654,12 @@ struct DaemonConfig: Codable {
         // overrides file get folded the same way.
         migrateLegacyStorageKeys(in: &obj)
 
+        // DL-07: snapshot the pre-merge config so the summary at the end of this
+        // function can name exactly what the overrides file shadows, and with
+        // which numbers. Precedence is deliberately NOT changed — the file still
+        // wins; it just stops winning silently.
+        let before = config
+
         // Merge the storage{} block into the running config. Each key is
         // optional — only the ones the user actually set get applied.
         if let storage = obj["storage"] as? [String: Any] {
@@ -645,6 +700,55 @@ struct DaemonConfig: Codable {
         if let v = (obj["vulnScanEnabled"] ?? obj["vuln_scan_enabled"]) as? Bool { config.vulnScanEnabled = v }
         if let v = (obj["packageFreshnessEnabled"] ?? obj["package_freshness_enabled"]) as? Bool { config.packageFreshnessEnabled = v }
         if let v = (obj["certTransparencyEnabled"] ?? obj["cert_transparency_enabled"]) as? Bool { config.certTransparencyEnabled = v }
+
+        // DL-07: this merge used to be completely silent. A user_overrides.json
+        // that Settings wrote months ago keeps pinning its values across every
+        // upgrade, so when v1.21.4 raised the shipped eventsMaxSizeMB 350 → 420
+        // (itself the fix for a size-cap target that sat BELOW the file's real
+        // floor and made the hourly sweep prune+VACUUM on every tick), a host
+        // carrying an older override of 300 silently kept the broken number and
+        // nothing anywhere said so — the remediation shipped and was inert.
+        // Name every value this file shadows, with both numbers, so config
+        // shadowing is visible in the log instead of only in behaviour.
+        let storageKnobs: [(String, KeyPath<StorageConfig, Int>)] = [
+            ("eventsHotTierMinutes", \.eventsHotTierMinutes),
+            ("processEventsFloorMinutes", \.processEventsFloorMinutes),
+            ("eventsMaxSizeMB", \.eventsMaxSizeMB),
+            ("eventsSizeCapIntervalMinutes", \.eventsSizeCapIntervalMinutes),
+            ("aggregateDays", \.aggregateDays),
+            ("alertsRetentionDays", \.alertsRetentionDays),
+            ("alertsMaxSizeMB", \.alertsMaxSizeMB),
+            ("evidenceMaxSizeMB", \.evidenceMaxSizeMB),
+            ("campaignsRetentionDays", \.campaignsRetentionDays),
+            ("campaignsMaxSizeMB", \.campaignsMaxSizeMB),
+            ("tracegraphRetentionDays", \.tracegraphRetentionDays),
+            ("tracegraphMaxSizeMB", \.tracegraphMaxSizeMB),
+            ("tracesRetentionDays", \.tracesRetentionDays),
+            ("tracesMaxSizeMB", \.tracesMaxSizeMB),
+            ("mergedPriorityStreamCap", \.mergedPriorityStreamCap),
+            ("mergedFileStreamCap", \.mergedFileStreamCap),
+            ("reportsRetentionDays", \.reportsRetentionDays),
+            ("autoGeneratedRulesMax", \.autoGeneratedRulesMax),
+        ]
+        var shadowed: [String] = []
+        for (name, kp) in storageKnobs
+        where before.storage[keyPath: kp] != config.storage[keyPath: kp] {
+            shadowed.append("storage.\(name) \(before.storage[keyPath: kp]) → \(config.storage[keyPath: kp])")
+        }
+        let enrichmentFlags: [(String, KeyPath<DaemonConfig, Bool>)] = [
+            ("threatIntelEnabled", \.threatIntelEnabled),
+            ("vulnScanEnabled", \.vulnScanEnabled),
+            ("packageFreshnessEnabled", \.packageFreshnessEnabled),
+            ("certTransparencyEnabled", \.certTransparencyEnabled),
+        ]
+        for (name, kp) in enrichmentFlags where before[keyPath: kp] != config[keyPath: kp] {
+            shadowed.append("\(name) \(before[keyPath: kp]) → \(config[keyPath: kp])")
+        }
+        guard !shadowed.isEmpty else { return }
+        let summary = "user_overrides.json (\(pick.path)) shadows compiled defaults: "
+            + shadowed.joined(separator: ", ")
+        logger.notice("\(summary, privacy: .public)")
+        print("[config] \(summary)")
     }
 
     /// Fold v1.7-shape storage keys onto the v1.8 `storage{}` block.

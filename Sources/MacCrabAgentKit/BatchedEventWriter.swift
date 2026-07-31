@@ -28,6 +28,7 @@
 
 import Foundation
 import MacCrabCore
+import os.log
 
 /// The single events.db capability the batched writer needs. A protocol (rather
 /// than the concrete `EventStore`) so tests can inject a fake that throws
@@ -46,6 +47,21 @@ actor BatchedEventWriter {
     /// Hard ceiling on the in-memory buffer; past it, `enqueue` drops the
     /// incoming event (O(1)) rather than growing the resident set unbounded.
     private let hardCap: Int
+    /// Volume to probe for free space before writing, or nil to disable the
+    /// admission check (tests, and any consumer with no on-disk store).
+    private let volumePath: String?
+    /// Free-space reserve the writer refuses to consume. The engine previously
+    /// had NO free-space check on any write path — `statvfs` appeared only in
+    /// VACUUM preflights — so the root daemon would write until the volume was
+    /// 100% full, taking the whole machine with it. Disk-full was handled only
+    /// reactively, in `drain`'s permanent-error arm, i.e. after the damage.
+    private let freeSpaceFloorMB: Int
+    /// Cached admission probe. `statvfs` is a syscall and `drain` loops per
+    /// batch, so re-probe at most every 15s.
+    private var lastFreeProbe: (at: ContinuousClock.Instant, freeMB: Int)?
+    /// True once the floor has been breached, so the fault logs once per episode
+    /// instead of once per batch.
+    private var admissionBlocked = false
 
     private var buffer: [Event] = []
     /// Count of low-value (file) rows currently in `buffer`, maintained
@@ -93,7 +109,15 @@ actor BatchedEventWriter {
     ///   floors only and do NOT silently clamp one to the other (clamping hid
     ///   the overflow branch and papered over misconfig). The defaults already
     ///   satisfy 1000 <= 250_000.
-    init(store: any EventBatchInserting, flushThreshold: Int = 1000, hardCap: Int = 250_000) {
+    init(
+        store: any EventBatchInserting,
+        flushThreshold: Int = 1000,
+        hardCap: Int = 250_000,
+        volumePath: String? = nil,
+        freeSpaceFloorMB: Int = 1024
+    ) {
+        self.volumePath = volumePath
+        self.freeSpaceFloorMB = max(0, freeSpaceFloorMB)
         self.store = store
         self.flushThreshold = max(1, flushThreshold)
         self.hardCap = max(1, hardCap)
@@ -140,9 +164,49 @@ actor BatchedEventWriter {
     /// Reentrancy-safe: each pass snapshots + clears the buffer BEFORE the
     /// `await`, so concurrent `enqueue`s append to a fresh buffer and a second
     /// drain sees it empty and stops. `defer` clears `draining` even on throw.
+    /// Admission control: may we consume more disk right now?
+    ///
+    /// Returns the free-space reading when the floor is breached, nil when the
+    /// write is allowed. A failed probe (`freeDiskMB` returns 0) ALLOWS the write
+    /// — refusing all telemetry because a `statvfs` call glitched would be a
+    /// worse failure than the pressure this guards against.
+    private func admissionBlockedFreeMB() -> Int? {
+        guard let volumePath, freeSpaceFloorMB > 0 else { return nil }
+        let now = ContinuousClock.now
+        let freeMB: Int
+        if let cached = lastFreeProbe, cached.at.duration(to: now) < .seconds(15) {
+            freeMB = cached.freeMB
+        } else {
+            freeMB = freeDiskMB(forPath: volumePath)
+            lastFreeProbe = (at: now, freeMB: freeMB)
+        }
+        guard freeMB > 0, freeMB < freeSpaceFloorMB else { return nil }
+        return freeMB
+    }
+
     private func drain() async {
         defer { draining = false }
         while !buffer.isEmpty {
+            // Disk admission check BEFORE the write, not after SQLite fails. Shed
+            // the batch and stop the pass; the periodic flush loop retries, so
+            // ingestion resumes by itself once the retention sweeps free space.
+            if let freeMB = admissionBlockedFreeMB() {
+                let shed = buffer.count
+                buffer.removeAll(keepingCapacity: true)
+                lowValueCount = 0
+                drops.add(shed)
+                if !admissionBlocked {
+                    admissionBlocked = true
+                    Logger(subsystem: "com.maccrab.agentkit", category: "storage")
+                        .fault("Storage admission BLOCKED: only \(freeMB, privacy: .public) MB free on the store volume (floor \(self.freeSpaceFloorMB, privacy: .public) MB). Event persistence is PAUSED and \(shed, privacy: .public) buffered events were shed to protect the volume. Detection continues in memory; the forensic record has a gap until space is reclaimed.")
+                }
+                return
+            }
+            if admissionBlocked {
+                admissionBlocked = false
+                Logger(subsystem: "com.maccrab.agentkit", category: "storage")
+                    .notice("Storage admission restored — free space back above the floor; event persistence resumed.")
+            }
             let batch = buffer
             buffer.removeAll(keepingCapacity: true)
             lowValueCount = 0   // buffer emptied; enqueues during the await re-accrue it

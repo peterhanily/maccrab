@@ -1113,6 +1113,26 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// Distinct entity and edge counts for a trace — the graph SIZE, as opposed
+    /// to `memberCount`'s raw `trace_membership` ROW count. A membership row
+    /// carries exactly one of `entity_id` / `edge_id` (schema CHECK), so the row
+    /// count mixes the two: MCP `get_traces` reported "Nodes: 3" for a trace
+    /// `maccrabctl trace graph` renders as "2 entities, 1 edges". COUNT(DISTINCT)
+    /// skips NULLs, so each column counts only its own kind, matching the Set
+    /// build in TraceCommands.traceGraph.
+    public func graphCounts(traceId: String) async throws -> (entities: Int, edges: Int) {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let sql = "SELECT COUNT(DISTINCT entity_id), COUNT(DISTINCT edge_id) FROM trace_membership WHERE trace_id = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, traceId, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return (0, 0) }
+        return (Int(sqlite3_column_int64(stmt, 0)), Int(sqlite3_column_int64(stmt, 1)))
+    }
+
     /// v1.11.1 (audit perf HIGH): "which trace contains this entity"
     /// in O(1) instead of O(traces × members). Used by MCP
     /// `trace_from_event` which previously listed 200 traces and
@@ -1728,12 +1748,28 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// once already mode 2.
     public func vacuum() async throws {
         guard let db = db else { return }
+        // Checkpoint PASSIVE before / TRUNCATE after — the same WAL discipline
+        // EventStore.performDedicatedVacuum uses, and the reason it exists.
+        // tracegraph.db is in WAL mode, so VACUUM writes its ENTIRE rebuild to
+        // tracegraph.db-wal. Without the trailing checkpoint the caller's
+        // measureDatabaseFootprintMB (db + -wal + -shm, DaemonTimers.swift:3491)
+        // reads the rebuild stacked ON TOP of the main file it has not replaced
+        // yet, and reports the VACUUM as having GROWN the store (field: 138 MB
+        // -> 268 MB). The cap can then never read as satisfied, so the next
+        // hourly tick prunes the oldest traces plus up to 250K graph
+        // edges/entities again — a self-perpetuating loop that permanently
+        // destroys causal history (the substrate behind get_traces /
+        // get_trace_detail / the Investigation workspace) to chase a
+        // measurement artefact. The leading PASSIVE checkpoint additionally
+        // lets VACUUM rebuild from a drained main DB.
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
             throw CausalGraphStoreError.stepFailed("VACUUM failed: \(msg)")
         }
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
     }
 
     /// PASSIVE→RESTART checkpoint chain. Drains the WAL so on-disk

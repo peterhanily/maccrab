@@ -139,7 +139,10 @@ struct EventStoreSchemaV6Tests {
         #expect(sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
         guard let db else { return }
 
-        #expect(Self.userVersion(of: db) == 6)
+        // v1.21.5: migration v7 (prune_redundant_event_indexes) is the new head
+        // of the events.db chain, so a fresh install lands at 7, not 6. The v6
+        // column/index assertions below are unchanged — v7 is index-only.
+        #expect(Self.userVersion(of: db) == 7)
         for col in [
             "user_id", "user_name", "group_id", "working_directory",
             "responsible_pid", "architecture", "is_platform_binary",
@@ -225,7 +228,7 @@ struct EventStoreSchemaV6Tests {
         defer { if let d = verifyDB { sqlite3_close(d) } }
         sqlite3_open_v2(path, &verifyDB, SQLITE_OPEN_READONLY, nil)
         guard let v = verifyDB else { return }
-        #expect(Self.userVersion(of: v) == 6)
+        #expect(Self.userVersion(of: v) == 7)   // v1.21.5: v7 index-prune migration is the new head
 
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
@@ -258,7 +261,7 @@ struct EventStoreSchemaV6Tests {
         defer { if let d = db { sqlite3_close(d) } }
         sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil)
         guard let db else { return }
-        #expect(Self.userVersion(of: db) == 6)
+        #expect(Self.userVersion(of: db) == 7)   // v1.21.5: v7 index-prune migration is the new head
     }
 
     // MARK: - Insert column projection

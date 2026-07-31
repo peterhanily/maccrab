@@ -148,11 +148,20 @@ struct GitSecurityMonitorTests {
 
 @Suite("File Injection Scanner")
 struct FileInjectionScannerTests {
-    @Test("Initializes and reports availability")
-    func initCheck() async {
-        let scanner = FileInjectionScanner()
-        // isAvailable depends on forensicate being installed
-        let _ = await scanner.isAvailable
+    /// Was previously `let _ = await scanner.isAvailable` — it asserted nothing and
+    /// existed only to touch a probe for an external CLI that never existed. The
+    /// scanner is now unconditionally active, so assert that instead. Detection
+    /// behaviour is covered in FileInjectionScannerNativeTests.
+    @Test("Scans without requiring any external tool")
+    func scansUnconditionally() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fis-edge-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("s.md").path
+        try "hidden\u{200B}\u{200C}\u{200D}payload".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let result = await FileInjectionScanner().scanFile(path: path)
+        #expect(result?.isInjected == true)
     }
 }
 

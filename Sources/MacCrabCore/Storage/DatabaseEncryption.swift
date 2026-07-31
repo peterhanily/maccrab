@@ -107,8 +107,28 @@ public final class DatabaseEncryption: Sendable {
             self.key = existingKey
         } else {
             let newKey = Self.generateKey()
-            Self.saveKeyToKeychain(newKey)
-            self.key = newKey
+            let saveStatus = Self.saveKeyToKeychain(newKey)
+            if saveStatus == errSecSuccess {
+                self.key = newKey
+            } else if let raced = Self.loadKeyFromKeychain() {
+                // A concurrent writer (the other bundle — the .app and the
+                // sysext share this item) persisted first. Adopt the PERSISTED
+                // key, never our ephemeral one, or the two processes encrypt
+                // the same events.db under two different keys.
+                self.key = raced
+            } else {
+                // The key could not be persisted AND none is readable. Do NOT
+                // failClosed here: this initializer runs in the dashboard, the
+                // sysext, and ~15 unit tests, so terminating on a transient
+                // keychain error (locked at boot, no entitlement in an unsigned
+                // dev/test binary) would take down the whole engine. Continue on
+                // the ephemeral key but be LOUD about it — rows written this
+                // session cannot be decrypted after restart and will read back
+                // as AES-GCM authentication failures, i.e. a false tamper signal.
+                Logger(subsystem: "com.maccrab.storage", category: "encryption")
+                    .fault("DB encryption key could NOT be persisted to the Keychain (OSStatus \(saveStatus, privacy: .public)) — continuing with an EPHEMERAL key; values written this session will not decrypt after restart")
+                self.key = newKey
+            }
         }
         self.isEnabled = true
     }
@@ -286,6 +306,34 @@ public final class DatabaseEncryption: Sendable {
     /// can decrypt the same events.db.
     private static let keychainAccessGroup = "79S425CW99.com.maccrab.shared"
 
+    /// Reject a Keychain payload that is not a well-formed AES-256 key.
+    ///
+    /// `SymmetricKey(data:)` accepts ANY length, but `AES.GCM.seal` then throws
+    /// `incorrectKeySize` — which lands in `encrypt`'s catch, calls
+    /// `failClosed`, and hits the process-terminating `fatalError`. That is on
+    /// the event-ingestion hot path, so a single wrong-length item at this
+    /// (service, account) kills the ROOT System Extension on the first event
+    /// carrying an encrypted column: a deterministic crash loop seconds after
+    /// every launch, until macOS stops relaunching it. The bytes are not ours
+    /// to trust — `generateKey()` only ever emits 32 — and realistic sources of
+    /// a malformed item (partial Migration Assistant / Time Machine restore, a
+    /// truncated item, a hand-rolled `security add-generic-password`) are all
+    /// outside our control.
+    ///
+    /// Returning nil makes the caller fall through to the legacy lookup and
+    /// ultimately to `generateKey()`; `saveKeyToKeychain` deletes before it
+    /// adds, so the malformed item is replaced rather than left to re-trigger.
+    /// Nothing is lost that was not already lost: a key of the wrong length
+    /// cannot decrypt anything we ever wrote.
+    private static func validatedKeyBytes(_ data: Data, source: String) -> Data? {
+        guard data.count == kCCKeySizeAES256 else {
+            Logger(subsystem: "com.maccrab.storage", category: "encryption")
+                .fault("Keychain DB key (\(source, privacy: .public)) is \(data.count, privacy: .public) bytes, expected \(kCCKeySizeAES256, privacy: .public) — ignoring it and generating a fresh key rather than terminating the daemon on the first encrypted write")
+            return nil
+        }
+        return data
+    }
+
     /// Load the encryption key from the macOS Keychain.
     ///
     /// v1.8.1 migration: try with-group first, fall back to without-
@@ -302,8 +350,9 @@ public final class DatabaseEncryption: Sendable {
         ]
         var result: AnyObject?
         if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data {
-            return data
+           let data = result as? Data,
+           let valid = validatedKeyBytes(data, source: "access-group item") {
+            return valid
         }
 
         // v1.8.1 access-group migration: pre-v1.8.1 items have no
@@ -312,45 +361,70 @@ public final class DatabaseEncryption: Sendable {
         query.removeValue(forKey: kSecAttrAccessGroup as String)
         result = nil
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let legacyData = result as? Data else {
+              let legacyRaw = result as? Data,
+              let legacyData = validatedKeyBytes(legacyRaw, source: "legacy no-group item") else {
             return nil
         }
         saveKeyToKeychain(legacyData)
-        // Best-effort delete the legacy without-group entry.
-        var deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-        ]
-        deleteQuery.removeValue(forKey: kSecAttrAccessGroup as String)
-        SecItemDelete(deleteQuery as CFDictionary)
+        // The legacy without-group entry is deliberately LEFT IN PLACE.
+        //
+        // The delete that used to live here queried on (class, service,
+        // account) — the exact tuple `saveKeyToKeychain` had just written — and
+        // on macOS's file-based keychain `kSecAttrAccessGroup` does not
+        // participate in matching, so the delete removed the item that had just
+        // been stored. (The `removeValue(forKey: kSecAttrAccessGroup)` line was
+        // itself a no-op: the key was never added to that dictionary.) The
+        // in-memory key survived the current run, but the next launch found
+        // nothing, fell through to `generateKey()` at init, and persisted a
+        // BRAND-NEW key — permanently orphaning every prior `ENC2:` blob in
+        // events.db / traces.db and re-diverging the root sysext from the
+        // uid-501 app.
+        //
+        // A duplicate key item is harmless (identical bytes, and the with-group
+        // lookup above is tried first). A deleted key is not. Removing the
+        // delete is safe under either reading of how the access group is
+        // matched on this platform; the underlying access-group inertness is a
+        // separate, migration-bearing fix.
         return legacyData
     }
 
     /// Save the encryption key to the macOS Keychain with the shared
     /// access group attached so the sysext (signed by the same team)
-    /// can read it.
-    private static func saveKeyToKeychain(_ key: Data) {
-        let query: [String: Any] = [
+    /// can read it. Returns the OSStatus so the caller can distinguish a
+    /// key that is actually PERSISTED from an in-memory-only one.
+    @discardableResult
+    private static func saveKeyToKeychain(_ key: Data) -> OSStatus {
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount,
             kSecAttrAccessGroup as String: keychainAccessGroup,
+        ]
+        // v1.8.0: ThisDeviceOnly stops iCloud Keychain from syncing
+        // the DB encryption key off-device. Local-only forensic data
+        // should never roam — and `…AfterFirstUnlock` (the previous
+        // value) is iCloud-Keychain-syncable. Matches SecretsStore.swift.
+        // Passed on BOTH update and add so an item written by an older
+        // build with weaker accessibility gets tightened on next write.
+        let attributes: [String: Any] = [
             kSecValueData as String: key,
-            // v1.8.0: ThisDeviceOnly stops iCloud Keychain from syncing
-            // the DB encryption key off-device. Local-only forensic data
-            // should never roam — and `…AfterFirstUnlock` (the previous
-            // value) is iCloud-Keychain-syncable. Matches SecretsStore.swift.
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
-        // Remove old key if it exists (ignore result)
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecAttrAccessGroup as String: keychainAccessGroup,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        SecItemAdd(query as CFDictionary, nil)
+        // Update-first, add-only-when-absent — the pattern SecretsStore.save
+        // already uses correctly. The previous delete-then-add DESTROYED the
+        // stored key BEFORE the add, and the add's OSStatus was discarded, so
+        // any add failure (locked keychain at boot → errSecInteractionNotAllowed,
+        // errSecDuplicateItem from a racing writer, an entitlement error) left
+        // the process running on an in-memory-only key while believing the key
+        // had persisted. Everything written that session then failed AES-GCM
+        // authentication after the next restart — i.e. it surfaced as a FALSE
+        // tamper signal on `authenticatedDecryptFailures`. SecItemUpdate never
+        // leaves the key absent.
+        let updateStatus = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)
+        if updateStatus != errSecItemNotFound { return updateStatus }
+        var addQuery = base
+        addQuery[kSecValueData as String] = key
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(addQuery as CFDictionary, nil)
     }
 }

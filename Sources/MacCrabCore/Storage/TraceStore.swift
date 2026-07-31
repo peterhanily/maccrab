@@ -122,6 +122,22 @@ public actor TraceStore {
             name: "baseline_spans",
             sql: []
         ),
+        // v1.21.6: plaintext SEARCHABLE PROJECTION beside the encrypted blob.
+        // `attributes_json` is AES-GCM encrypted, which is correct — it carries
+        // usernames, absolute project paths, session/org ids and tool inputs —
+        // but it also made every span attribute unqueryable: no FTS, no LIKE,
+        // no way to answer "which agent trace touched ~/.ssh/id_rsa". This
+        // mirrors the pattern tracegraph.db already uses (trace_entities keeps
+        // `display_name` in clear beside an encrypted `attributes_json`):
+        // encrypt the bag, project the searchable substance.
+        Migration(
+            version: 2,
+            name: "spans_search_projection",
+            sql: [
+                "ALTER TABLE spans ADD COLUMN search_text TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_spans_search ON spans(search_text)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -143,7 +159,20 @@ public actor TraceStore {
 
         var db: OpaquePointer?
         var isReadOnly = false
-        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        // Decide read-only from the FILESYSTEM, not from sqlite3_open_v2's return
+        // code. Opening READWRITE succeeds even on a file this process cannot
+        // write — SQLite defers the permission check to the first write — so the
+        // `isReadOnly` flag stayed false for every non-root reader (the uid-501
+        // dashboard and CLI against the root-owned /Library store). That was
+        // latent while no migration wrote at open time; the moment one did, every
+        // non-root open failed with "attempt to write a readonly database".
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path), !fm.isWritableFile(atPath: path) {
+            isReadOnly = true
+        }
+        var flags = isReadOnly
+            ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX)
+            : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX)
         var rc = sqlite3_open_v2(path, &db, flags, nil)
         if rc != SQLITE_OK {
             if let handle = db { sqlite3_close(handle) }
@@ -194,11 +223,13 @@ public actor TraceStore {
                 provider_name TEXT,
                 legacy_gen_ai_system TEXT,
                 attributes_json TEXT,
+                search_text TEXT,
                 PRIMARY KEY (trace_id, span_id)
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id)",
             "CREATE INDEX IF NOT EXISTS idx_spans_start ON spans(start_ns)",
+            "CREATE INDEX IF NOT EXISTS idx_spans_search ON spans(search_text)",
         ]
         for sql in schemaSQLs {
             if sqlite3_exec(handle, sql, nil, nil, nil) != SQLITE_OK {
@@ -218,10 +249,17 @@ public actor TraceStore {
                 start_ns, end_ns,
                 service_name, span_name, agent_tool,
                 provider_name, legacy_gen_ai_system,
-                attributes_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                attributes_json, search_text
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             """
+        // A read-only store cannot insert, and preparing this statement against a
+        // database whose migrations have NOT run (because we cannot write it)
+        // fails on any column the migration would have added — turning a
+        // perfectly good read into a hard open failure.
         var stmt: OpaquePointer?
+        if isReadOnly {
+            return (handle, isReadOnly, nil)
+        }
         if sqlite3_prepare_v2(handle, insertSQL, -1, &stmt, nil) != SQLITE_OK {
             // v1.9 audit Phase-1.6: close the handle before throwing.
             // Pre-fix the handle leaked because no cleanup ran on the
@@ -350,6 +388,12 @@ public actor TraceStore {
             let encoded = encryption?.encrypt(a) ?? a
             sqlite3_bind_text(stmt, 11, encoded, -1, TRANSIENT)
         } else { sqlite3_bind_null(stmt, 11) }
+        // Plaintext projection — see the v2 migration note. Built from the
+        // structural columns plus attribute KEYS and path/identifier-shaped
+        // VALUES, never free-form prompt text.
+        let projection = Self.searchProjection(for: record)
+        if projection.isEmpty { sqlite3_bind_null(stmt, 12) }
+        else { sqlite3_bind_text(stmt, 12, projection, -1, TRANSIENT) }
 
         if sqlite3_step(stmt) != SQLITE_DONE {
             let msg = String(cString: sqlite3_errmsg(db))
@@ -379,6 +423,13 @@ public actor TraceStore {
         let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
         sqlite3_bind_text(stmt, 1, traceId, -1, TRANSIENT)
 
+        return try readSpanRows(stmt)
+    }
+
+    /// Decode SpanRecord rows from a prepared statement selecting the canonical
+    /// 11-column projection. Extracted when `searchSpans` became a second caller
+    /// of an identical loop.
+    private func readSpanRows(_ stmt: OpaquePointer?) throws -> [SpanRecord] {
         var out: [SpanRecord] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let traceIdStr = String(cString: sqlite3_column_text(stmt, 0))
@@ -450,6 +501,169 @@ public actor TraceStore {
     }
 
     /// Total span count (for tests / metrics).
+
+    // MARK: - Searchable projection (v1.21.6)
+
+    /// Build the plaintext `search_text` projection for a span.
+    ///
+    /// PRIVACY CONTRACT — this column is NOT encrypted, so it must never carry
+    /// free-form content. It includes:
+    ///   * the structural columns (span name, service, tool, provider)
+    ///   * attribute KEYS (schema, not data — always safe)
+    ///   * attribute VALUES only when they are path- or identifier-shaped
+    /// It deliberately EXCLUDES anything containing whitespace or exceeding
+    /// `maxValueLength`, which is what prompt text, tool inputs and error
+    /// messages look like. The full values stay in the encrypted blob.
+    nonisolated static func searchProjection(for record: SpanRecord) -> String {
+        var parts: [String] = [record.spanName]
+        if let s = record.serviceName { parts.append(s) }
+        if let t = record.agentTool { parts.append(t.rawValue) }
+        if let p = record.providerName { parts.append(p) }
+
+        if let json = record.attributesJson,
+           let data = json.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in obj.sorted(by: { $0.key < $1.key }) {
+                parts.append(key)
+                guard let str = value as? String else { continue }
+                if isProjectableValue(str) { parts.append(str) }
+            }
+        }
+        // Deduplicate while preserving order; join with spaces for LIKE/FTS.
+        var seen = Set<String>()
+        return parts.filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: " ")
+    }
+
+    /// Longest value admitted into the plaintext projection.
+    nonisolated static let maxProjectedValueLength = 200
+
+    /// A value is projectable when it is a filesystem path or a compact
+    /// identifier — the things an analyst searches for. Whitespace is the
+    /// discriminator that keeps prose out.
+    nonisolated static func isProjectableValue(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= maxProjectedValueLength else { return false }
+        guard !s.contains(where: { $0.isWhitespace || $0.isNewline }) else { return false }
+        return true
+    }
+
+    /// Whether the `search_text` projection column exists in this database.
+    /// False for a store opened read-only before the v2 migration could run.
+    public func hasSearchProjection() -> Bool {
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(spans)", -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 1),
+               String(cString: c) == "search_text" { return true }
+        }
+        return false
+    }
+
+    /// Populate `search_text` for rows that predate the v2 migration.
+    ///
+    /// The migration itself is pure SQL and cannot decrypt `attributes_json`, so
+    /// existing spans land with a NULL projection and would stay invisible to
+    /// search forever. This decrypts each such row, rebuilds the projection and
+    /// writes it back. Idempotent and bounded — it only touches NULL rows.
+    /// Returns the number of rows backfilled.
+    @discardableResult
+    public func backfillSearchProjection(limit: Int = 10_000) throws -> Int {
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        guard !isReadOnly else { return 0 }
+        let selectSQL = """
+            SELECT trace_id, span_id, parent_span_id,
+                   start_ns, end_ns,
+                   service_name, span_name, agent_tool,
+                   provider_name, legacy_gen_ai_system,
+                   attributes_json
+            FROM spans
+            WHERE search_text IS NULL
+            LIMIT ?1
+            """
+        var sel: OpaquePointer?
+        defer { if let s = sel { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, selectSQL, -1, &sel, nil) == SQLITE_OK else {
+            throw TraceStoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        sqlite3_bind_int(sel, 1, Int32(max(1, limit)))
+        let pending = try readSpanRows(sel)
+        guard !pending.isEmpty else { return 0 }
+
+        var upd: OpaquePointer?
+        defer { if let u = upd { sqlite3_finalize(u) } }
+        guard sqlite3_prepare_v2(
+            db, "UPDATE spans SET search_text = ?1 WHERE trace_id = ?2 AND span_id = ?3",
+            -1, &upd, nil) == SQLITE_OK else {
+            throw TraceStoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        var done = 0
+        for rec in pending {
+            sqlite3_reset(upd)
+            sqlite3_clear_bindings(upd)
+            sqlite3_bind_text(upd, 1, Self.searchProjection(for: rec), -1, TRANSIENT)
+            sqlite3_bind_text(upd, 2, rec.traceId, -1, TRANSIENT)
+            sqlite3_bind_text(upd, 3, rec.spanId, -1, TRANSIENT)
+            if sqlite3_step(upd) == SQLITE_DONE { done += 1 }
+        }
+        return done
+    }
+
+    /// Test seam: blank every projection so a backfill can be exercised against
+    /// rows shaped like pre-migration ones.
+    public func clearSearchProjectionForTesting() throws {
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        guard sqlite3_exec(db, "UPDATE spans SET search_text = NULL", nil, nil, nil) == SQLITE_OK else {
+            throw TraceStoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    /// Substring search across the plaintext projection. Case-insensitive.
+    /// Returns matching spans newest-first.
+    public func searchSpans(matching query: String, limit: Int = 100) throws -> [SpanRecord] {
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        // A store opened read-only cannot have run the v2 migration, so the
+        // projection column may not exist. Say so plainly instead of surfacing a
+        // raw "no such column" to the operator.
+        guard hasSearchProjection() else {
+            throw TraceStoreError.queryFailed(
+                "this trace store predates the search projection and could not be migrated "
+                + "(opened read-only). Restart the MacCrab daemon once to backfill it, then retry.")
+        }
+        let sql = """
+            SELECT trace_id, span_id, parent_span_id,
+                   start_ns, end_ns,
+                   service_name, span_name, agent_tool,
+                   provider_name, legacy_gen_ai_system,
+                   attributes_json
+            FROM spans
+            WHERE search_text LIKE ?1 ESCAPE '\\'
+            ORDER BY start_ns DESC
+            LIMIT ?2
+            """
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw TraceStoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        // Escape LIKE wildcards in the user's query so a literal % or _ does not
+        // silently widen the search.
+        let escaped = trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(max(1, min(limit, 1000))))
+        return try readSpanRows(stmt)
+    }
+
     public func count() throws -> Int {
         guard let db else { throw TraceStoreError.queryFailed("db not open") }
         var stmt: OpaquePointer?
@@ -570,12 +784,21 @@ public actor TraceStore {
     /// idempotent once already mode 2.
     public func vacuum() async throws {
         guard let db = db else { return }
+        // Checkpoint PASSIVE before / TRUNCATE after — see the identical fix in
+        // SQLiteCausalGraphStore.vacuum(). traces.db is in WAL mode and its
+        // size-cap caller (DaemonTimers.swift:986) measures with
+        // measureDatabaseFootprintMB (db + -wal + -shm) immediately after this
+        // returns, so an un-checkpointed rebuild is counted on top of the file
+        // it has not replaced yet — the cap reads as still-breached and the
+        // next tick prunes more spans for nothing.
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
             throw TraceStoreError.queryFailed("VACUUM failed: \(msg)")
         }
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
     }
 
     /// PASSIVE→RESTART checkpoint chain — used by the size-cap path

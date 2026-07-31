@@ -129,8 +129,21 @@ enum SensorDegradationEvaluator {
         case degraded(severity: Severity, benignAttribution: Bool)
     }
 
+    /// Which branch fired. The alert description used to assert BOTH a file-rate
+    /// spike AND an exec-channel collapse unconditionally, so a `sustainedLoss`
+    /// fire reported a "fall" in exec throughput that had in fact RISEN — 90 HIGH
+    /// alerts on one host claiming an attacker was suppressing telemetry when the
+    /// real condition was MacCrab's own worker shedding load.
+    enum Reason: Equatable {
+        /// File-rate spike concurrent with kernel/collector drops or an exec collapse.
+        case spikeWithLoss
+        /// Chronic drop fraction over a meaningful volume, with no spike.
+        case sustainedLoss
+    }
+
     struct Result: Equatable {
         var outcome: Outcome
+        var reason: Reason?
         var newBaseline: Baseline
         // Diagnostics for the alert description.
         var fileRate: Double
@@ -194,15 +207,18 @@ enum SensorDegradationEvaluator {
         let sustainedLoss = windowedElevated >= sustainedLossMinTicks
 
         var outcome: Outcome = .noAlert
+        var reason: Reason?
         if conjunction && !b.degradedActive {
             // Rising edge — fire once. Benign signer downgrades HIGH → LOW.
             let severity: Severity = input.benignHighIOSigner ? .low : .high
             outcome = .degraded(severity: severity, benignAttribution: input.benignHighIOSigner)
+            reason = .spikeWithLoss
             b.degradedActive = true
         } else if sustainedLoss && !b.sustainedLossActive {
             // #12: chronic loss without a spike — the evasion the spike gate misses.
             let severity: Severity = input.benignHighIOSigner ? .low : .high
             outcome = .degraded(severity: severity, benignAttribution: input.benignHighIOSigner)
+            reason = .sustainedLoss
             b.sustainedLossActive = true
         }
         // Re-arm the spike latch when the file-rate spike subsides (not merely
@@ -219,12 +235,63 @@ enum SensorDegradationEvaluator {
         }
 
         return Result(
-            outcome: outcome, newBaseline: b,
+            outcome: outcome, reason: reason, newBaseline: b,
             fileRate: input.fileEventsThisTick, fileBaseline: baseline.fileEventEwma,
             processRate: input.processEventsThisTick, processBaseline: baseline.processEventEwma,
             kernelDropDelta: input.kernelDropDelta,
             collectorDropDelta: input.collectorDropDelta
         )
+    }
+}
+
+/// v1.21.6 (audit DL-03): back-off state for the early-fire size-cap watchdog.
+///
+/// The watchdog is a BURST catcher, not a second scheduler: it exists to react
+/// when events.db blows past 1.5x the cap BETWEEN the (hourly by default)
+/// scheduled sweeps. On a host whose irreducible content (alert_evidence + the
+/// events_fts index + schema) already exceeds the 0.8x-cap sweep target it can
+/// never clear the threshold, and the unconditional 60 s cadence turned it into
+/// a permanent full-FTS-optimize + incremental_vacuum loop — field-observed 59
+/// fires/hour for 7 consecutive hours, 1.9M page rewrites (7.3 GiB) in 12 h,
+/// sysext pinned at 151-241% CPU, footprint parked at ~2x cap the whole time.
+/// Doubling the minimum interval after each INEFFECTIVE fire caps that at
+/// ~32 min while leaving the burst response at the original 60 s on a healthy
+/// host (any fire that clears the threshold resets the streak).
+///
+/// LOCAL to `DaemonTimers.start` (captured by the watchdog closure), lock-
+/// guarded because DispatchSourceTimer handlers can overlap. NOT a DaemonState
+/// field — same shape as `SensorDegradationState` below.
+final class SizeCapWatchdogBackoff: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ineffectiveStreak = 0
+    private var nextEligible = Date.distantPast
+
+    /// Base cadence — matches the timer's `repeating:` interval.
+    private static let baseInterval: TimeInterval = 60
+    /// Ceiling: 60 s x 2^5 ~= 32 min, deliberately under the default hourly
+    /// scheduled sweep so the watchdog never becomes the only enforcement.
+    private static let maxDoublings = 5
+
+    /// True when enough back-off has elapsed for another early fire.
+    func mayFire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return Date() >= nextEligible
+    }
+
+    /// Record a fired sweep's outcome. Returns the seconds until the next
+    /// eligible fire (for logging). `stillOver == false` resets the streak.
+    @discardableResult
+    func recordSweep(stillOver: Bool) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard stillOver else {
+            ineffectiveStreak = 0
+            nextEligible = .distantPast
+            return Int(Self.baseInterval)
+        }
+        ineffectiveStreak = min(ineffectiveStreak + 1, Self.maxDoublings)
+        let delay = Self.baseInterval * pow(2.0, Double(ineffectiveStreak))
+        nextEligible = Date().addingTimeInterval(delay)
+        return Int(delay)
     }
 }
 
@@ -341,13 +408,21 @@ enum CoverageCanaryEvaluator {
         /// Seen at the callback but absent from the DB ⇒ the store/eviction
         /// stage lost it (retention sweep evicted the row, or an insert gap).
         case evictionGap
+        /// Seen at the callback, but the retained message was refused at the
+        /// callback→worker hand-off (the per-client `ESMessageWorker` was at its
+        /// in-flight cap). The message existed and we threw it away BEFORE the
+        /// pipeline — a third, distinct stage. Without this case every hand-off
+        /// drop was reported as `.evictionGap`, pointing the operator at the
+        /// storage/retention subsystem for a loss that happened in ingest.
+        case ingestHandoffGap
 
         /// Human-readable stage name for the alert (nil when healthy).
         var stageLabel: String? {
             switch self {
-            case .healthy:     return nil
-            case .kernelGap:   return "kernel/ingest"
-            case .evictionGap: return "store/eviction"
+            case .healthy:           return nil
+            case .kernelGap:         return "kernel/ingest"
+            case .evictionGap:       return "store/eviction"
+            case .ingestHandoffGap:  return "ingest hand-off (worker backpressure)"
             }
         }
     }
@@ -356,9 +431,72 @@ enum CoverageCanaryEvaluator {
     /// reached us, the DB result is moot (and a lone DB hit without a callback
     /// sighting would be a timing artifact of the recognizer window, not real
     /// coverage), so `seenAtCallback == false` is always a kernel gap.
-    static func verdict(seenAtCallback: Bool, foundInDB: Bool) -> Verdict {
+    /// `droppedAtHandoff` is the third point: the probe's retained message was
+    /// freed at the callback→worker hand-off, so it provably could not reach
+    /// events.db and the absence is NOT eviction. Defaulted to `false` so the
+    /// existing two-point call sites and unit tests are source-compatible.
+    static func verdict(seenAtCallback: Bool, foundInDB: Bool,
+                        droppedAtHandoff: Bool = false) -> Verdict {
         guard seenAtCallback else { return .kernelGap }
-        return foundInDB ? .healthy : .evictionGap
+        if foundInDB { return .healthy }
+        return droppedAtHandoff ? .ingestHandoffGap : .evictionGap
+    }
+}
+
+/// Non-convergence latch for the events.db size-cap sweep.
+///
+/// The sweep's target is `0.8 × events_max_size_mb`, but the measured footprint
+/// (`db + -wal + -shm`) has a FLOOR the sweep cannot go below: the schema, the
+/// `alert_evidence` sub-cap, the `events_fts` index, and the WAL sidecar the
+/// footprint measurement itself includes. When the configured cap puts the
+/// target under that floor, the file is over target on every tick forever, so
+/// the full VACUUM (a whole-file rewrite) ran on every sweep indefinitely —
+/// field-measured at ~34 GB dirtied in 2.8 h with 13 consecutive macOS
+/// resource-limit diagnostics. v1.21.4 raised the DEFAULT 350 → 420 for exactly
+/// this reason, but that fixed no existing install: any config written before
+/// that (every upgrader who ever touched `storage{}`) still carries the low cap.
+///
+/// Rather than guess the floor at config-load time (it depends on the live FTS
+/// index and evidence sizes, which the sweep itself changes), detect it
+/// empirically: if N consecutive full VACUUMs leave the footprint above target,
+/// the rebuild is not converging — stop rebuilding, say so loudly, and re-arm
+/// after a back-off so a genuinely transient case still recovers. Prune and
+/// incremental_vacuum keep running either way, so the working set stays bounded.
+enum SizeCapConvergence {
+    private static let lock = NSLock()
+    private static var consecutiveFailures = 0
+    private static var suppressedUntil: Date?
+
+    /// Consecutive non-converging full VACUUMs before the latch trips.
+    static let failureLimit = 3
+    /// How long the full VACUUM stays suppressed once latched.
+    static let backoffSeconds: TimeInterval = 6 * 3600
+
+    /// Whether the sweep may run a full VACUUM this tick.
+    static func shouldFullVacuum(now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let until = suppressedUntil {
+            guard now >= until else { return false }
+            suppressedUntil = nil
+            consecutiveFailures = 0
+        }
+        return true
+    }
+
+    /// Record the outcome of a full VACUUM. Returns `true` exactly on the tick
+    /// the latch trips, so the caller logs the cap-unreachable error ONCE per
+    /// back-off window rather than every sweep.
+    static func record(converged: Bool, now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if converged {
+            consecutiveFailures = 0
+            suppressedUntil = nil
+            return false
+        }
+        consecutiveFailures += 1
+        guard consecutiveFailures >= failureLimit, suppressedUntil == nil else { return false }
+        suppressedUntil = now.addingTimeInterval(backoffSeconds)
+        return true
     }
 }
 
@@ -524,7 +662,7 @@ enum DaemonTimers {
                     let factors = score.factors.map { ($0.name, $0.category, $0.score, $0.maxScore, $0.status, $0.detail) }
                     let recs = score.recommendations
                     Task {
-                        if let analysis = await llm.query(
+                        if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.securityScoreSystem,
                             userPrompt: LLMPrompts.securityScoreUser(
                                 totalScore: totalScore, grade: grade,
@@ -532,7 +670,23 @@ enum DaemonTimers {
                             ),
                             maxTokens: 512, temperature: 0.3
                         ) {
+                            // AI-14: this alert had no explicit id, so every
+                            // hourly emission minted a fresh UUID and appended a
+                            // row — 369 rows on this host with 369 DISTINCT
+                            // descriptions for an essentially unchanged posture
+                            // (same grade, same failing factor for months).
+                            // AlertDeduplicator cannot help: its suppression
+                            // window is 3600s, EXACTLY this timer's period, so
+                            // every emission arrives just as the window lapses.
+                            // A posture-derived id lets alerts.db's INSERT OR
+                            // REPLACE (id is the PRIMARY KEY) collapse an
+                            // unchanged posture onto ONE row that updates in
+                            // place — the same mechanism the vuln scan below
+                            // already uses with id: "vuln-<cveId>". A genuine
+                            // score change still mints a new row, which is the
+                            // signal worth keeping.
                             let scoreAlert = Alert(
+                                id: "llm-security-score-\(grade)-\(totalScore)",
                                 ruleId: "maccrab.llm.security-score",
                                 ruleTitle: "AI Security Recommendations (\(grade) — \(totalScore)/100)",
                                 severity: .informational,
@@ -804,7 +958,22 @@ enum DaemonTimers {
                     let cgPath = state.supportDir + "/tracegraph.db"
                     let capMB = Int(capBytes / (1024 * 1024))
                     let footprintMB = measureDatabaseFootprintMB(dbPath: cgPath)
-                    if footprintMB > capMB {
+                    // Reader-pinned-WAL guard (mirrors the events.db probe in
+                    // runAdaptiveRollupSweep). A reader holding a read transaction —
+                    // the dashboard's read-only connection, an MCP get_traces call, a
+                    // forensic scan, `sqlite3 mode=ro`, or malware — stops the
+                    // TRUNCATE above from reclaiming anything. The pinned WAL then
+                    // inflates the FOOTPRINT past the cap, which triggers the prune
+                    // loop below, whose DELETEs land in the very WAL that cannot be
+                    // truncated. Enforcement becomes the amplifier: measured 5 MB →
+                    // 6.68 GB in 9.5 minutes, an unprivileged disk-exhaustion DoS.
+                    // While pinned, skip enforcement entirely and wait for release.
+                    let cgWalMB = measureWalMB(dbPath: cgPath)
+                    let cgWalPinned = cgWalMB > 64
+                    if cgWalPinned {
+                        logger.warning("TraceGraph sweep: tracegraph.db-wal pinned at \(cgWalMB) MB — a reader holds a read transaction. Size-cap prune, incremental_vacuum and full VACUUM are SKIPPED this tick (they cannot reclaim a reader-pinned WAL and their writes would only grow it); they resume once the reader releases.")
+                    }
+                    if footprintMB > capMB && !cgWalPinned {
                         // Over cap: drop oldest traces AND evict the oldest
                         // unreferenced substrate (the bulk). Keep looping
                         // until under cap or nothing more can be pruned.
@@ -853,6 +1022,23 @@ enum DaemonTimers {
                         if freeMB >= needMB {
                             do {
                                 try await causalStore.vacuum()
+                                // v1.21.6 (audit DL-06): TRUNCATE the WAL before
+                                // measuring. SQLiteCausalGraphStore.vacuum() runs
+                                // a bare `VACUUM` with no checkpoint, and VACUUM
+                                // in WAL mode writes the ENTIRE rebuilt database
+                                // through tracegraph.db-wal — so the instant it
+                                // returns the sidecar holds a full second copy
+                                // and measureDatabaseFootprintMB (db + -wal +
+                                // -shm) reports roughly double. Field log:
+                                // "full VACUUM complete — 138 MB → 268 MB", i.e.
+                                // the most expensive maintenance op in the system
+                                // reporting the opposite of what it achieved, and
+                                // leaving the store at ~2x its intended footprint
+                                // until some unrelated later checkpoint drained
+                                // it — which also re-trips this same gate on the
+                                // next tick. Mirrors the events.db path, which
+                                // already checkpoints before its endMB read.
+                                _ = await causalStore.walCheckpointTruncate()
                                 let finalMB = measureDatabaseFootprintMB(dbPath: cgPath)
                                 logger.notice("TraceGraph size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
                             } catch {
@@ -902,7 +1088,17 @@ enum DaemonTimers {
                     let tsPath = state.supportDir + "/traces.db"
                     let capMB = Int(capBytes / (1024 * 1024))
                     let footprintMB = measureDatabaseFootprintMB(dbPath: tsPath)
-                    if footprintMB > capMB {
+                    // Reader-pinned-WAL guard — same failure mode as the tracegraph
+                    // sweep above: a held read transaction blocks the TRUNCATE, the
+                    // pinned WAL inflates the footprint past the cap, and the prune's
+                    // own DELETEs land in the WAL that cannot be reclaimed. Skip
+                    // enforcement while pinned rather than amplifying it.
+                    let tsWalMB = measureWalMB(dbPath: tsPath)
+                    let tsWalPinned = tsWalMB > 64
+                    if tsWalPinned {
+                        logger.warning("OTLP traces sweep: traces.db-wal pinned at \(tsWalMB) MB — a reader holds a read transaction. Size-cap prune and vacuum are SKIPPED this tick; they resume once the reader releases.")
+                    }
+                    if footprintMB > capMB && !tsWalPinned {
                         // Loop BREAK still keys on LIVE data size, not the file
                         // footprint. traces.db is auto_vacuum=INCREMENTAL, so
                         // DELETEs go to the freelist and the file doesn't shrink
@@ -939,6 +1135,14 @@ enum DaemonTimers {
                         if freeMB >= needMB {
                             do {
                                 try await traceStore.vacuum()
+                                // v1.21.6 (audit DL-06): checkpoint before
+                                // measuring — identical defect to the tracegraph
+                                // path above. VACUUM rewrites the whole database
+                                // through traces.db-wal, so an unchecked
+                                // footprint read right afterwards double-counts
+                                // the rebuild and reports growth for an op that
+                                // shrank the file.
+                                _ = await traceStore.walCheckpointTruncate()
                                 let finalMB = measureDatabaseFootprintMB(dbPath: tsPath)
                                 logger.notice("OTLP traces size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
                             } catch {
@@ -1111,6 +1315,10 @@ enum DaemonTimers {
         // the watchdog cannot stack on top of an in-flight sweep.
         let sizeCapWatchdogTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapWatchdogTimer.schedule(deadline: .now() + 120, repeating: 60)
+        // v1.21.6 (audit DL-03): back-off box captured by the handler below, so
+        // a structurally-over-cap host degrades to a periodic reminder instead
+        // of re-arming a full FTS optimize + vacuum every single minute.
+        let watchdogBackoff = SizeCapWatchdogBackoff()
         sizeCapWatchdogTimer.setEventHandler {
             Task {
                 let capMB = max(100, state.storage.eventsMaxSizeMB)
@@ -1122,7 +1330,20 @@ enum DaemonTimers {
                 // minute. The 0.5× margin gives the scheduled sweep
                 // headroom to do its job.
                 let watchdogThresholdMB = Int(Double(capMB) * 1.5)
-                guard nowMB > watchdogThresholdMB else { return }
+                guard nowMB > watchdogThresholdMB else {
+                    // Under threshold: the previous sweep (or ordinary decay)
+                    // worked — clear any accumulated back-off so the next real
+                    // burst still gets a 60 s response.
+                    watchdogBackoff.recordSweep(stillOver: false)
+                    return
+                }
+                // v1.21.6 (audit DL-03): over threshold is NOT sufficient to
+                // fire. When the last fire failed to clear the threshold this
+                // gate holds us off for 2/4/8/16/32 min, because re-running the
+                // sweep every 60 s on a host whose budget is unreachable buys
+                // nothing and costs a full FTS `optimize` + incremental_vacuum
+                // each time (measured: 1.9M page rewrites / 7.3 GiB in 12 h).
+                guard watchdogBackoff.mayFire() else { return }
                 guard await state.eventStore.beginSizeCapPrune() else {
                     // A scheduled sweep is already running. The
                     // scheduled sweep will bring us back under the cap
@@ -1146,6 +1367,19 @@ enum DaemonTimers {
                     evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB),
                     processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
                 )
+                // v1.21.6 (audit DL-03): did the sweep actually achieve
+                // anything? Feed the answer back into the back-off, and when it
+                // did not, say so ONCE per back-off window at fault level with
+                // the knobs named. Before this the operator got a `warning` that
+                // said 'running sweep now' every minute for hours and never a
+                // single line explaining that the configured budget is not
+                // reachable on this host.
+                let afterMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
+                let stillOver = afterMB > watchdogThresholdMB
+                let backoffSeconds = watchdogBackoff.recordSweep(stillOver: stillOver)
+                if stillOver {
+                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterMB) MB — still over 1.5x cap (\(watchdogThresholdMB) MB). The configured disk budget is NOT reachable on this host: alert_evidence plus the events_fts index alone can exceed it regardless of how few events are retained. Raise storage.eventsMaxSizeMB, and/or lower storage.evidenceMaxSizeMB / storage.eventsHotTierMinutes. Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
+                }
             }
         }
         sizeCapWatchdogTimer.resume()
@@ -1454,6 +1688,35 @@ enum DaemonTimers {
                 // query fails (db locked under contention, etc.).
             }
 
+            // v1.21.6 (PERF-04): honest retention. The configured hot tier is 30
+            // minutes; on the field host `file` was delivering 30 SECONDS because
+            // the Layer-3 row-count fallback evicts the fodder categories to hold
+            // the footprint under cap. Nothing surfaced that, so a whole tactic's
+            // worth of write-time correlation was blind with a green heartbeat.
+            // Publish the actual span, and warn when a category with real volume
+            // has fallen under the 15-minute SequenceEngine rebuild floor.
+            var retainedSpanByCategory: [String: Int] = [:]
+            do {
+                retainedSpanByCategory = try await state.eventStore.retainedSpanSecondsByCategory()
+            } catch {
+                // Same rule as above: never block the heartbeat write.
+            }
+            // Volume floor before calling a short span "starved": a category
+            // holding a handful of rows legitimately spans ~0 seconds, and
+            // flagging that would ship a false red (the mistake this batch is
+            // explicitly avoiding). 1000 retained rows inside 15 minutes is the
+            // signature of a pruned firehose, not of a quiet channel.
+            let sequenceFloorSeconds = 15 * 60
+            let starvedCategories = retainedSpanByCategory
+                .filter { $0.value < sequenceFloorSeconds && (eventTypeCounts[$0.key] ?? 0) >= 1000 }
+                .keys.sorted()
+            if !starvedCategories.isEmpty {
+                let detail = starvedCategories
+                    .map { "\($0)=\(retainedSpanByCategory[$0] ?? 0)s" }
+                    .joined(separator: ", ")
+                logger.warning("Event retention BELOW the 15-minute sequence-rebuild floor: \(detail, privacy: .public). Sequence rules, graph rules, cross-process correlation and `hunt` are blind past that window for those categories — the size-cap sweep is evicting them to hold events.db under storage.eventsMaxSizeMB. Reduce ingest or raise the cap; do not read this as a quiet host.")
+            }
+
             // v1.7.2: collector liveness + drop counter.
             let collectorStatuses = await state.collectorRegistry.snapshot()
             // Fold the merged-stream buffer drops (bufferingNewest cap →
@@ -1527,7 +1790,24 @@ enum DaemonTimers {
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
             let esCopyBackpressureDropped = state.collector?.esCopyBackpressureDropped() ?? 0
+            // v1.21.6 (audit DET-05): per-type attribution for the copy-stage
+            // drops, name-keyed like `es_kernel_dropped_by_type`. On the field
+            // host this stage discards ~22.6% of every delivered ES message, and
+            // the single aggregate counter cannot say which detections pay for it.
+            let esCopyBackpressureDroppedByType: [String: UInt64] =
+                (state.collector?.esCopyBackpressureDroppedByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esClientSplitDegraded = state.collector?.esClientSplitDegraded() ?? false
+
+            // Sequence-engine partial-match state. The 10K cap evicts
+            // oldest-first from ONE global queue shared by all 41 sequence
+            // rules, so flooding any enabled rule's cheap first step flushes
+            // every other rule's in-flight kill-chain state. Publishing both the
+            // cumulative evictions and the current depth makes that visible:
+            // in-flight parked near the cap with evictions climbing is the
+            // signature of the flush, whether accidental or deliberate.
+            let sequencePartialsEvicted = await state.sequenceEngine.partialsEvictedTotal
+            let sequencePartialsInFlight = await state.sequenceEngine.activePartialMatchCount
 
             // v1.21.4 Phase-1 D2: sensor-degraded / possible-evasion meta-alert.
             // Fold the D1/D4 cumulative counters into per-tick deltas and gate on
@@ -1572,8 +1852,24 @@ enum DaemonTimers {
                 let attribution = benignAttribution ? " (benign attribution)" : ""
                 // Plain interpolation (no String(format:) — avoids the CVarArg
                 // %@/%llu pitfalls this codebase has been bitten by).
-                esSensorDegradedDetail =
-                    "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(sensorResult.kernelDropDelta) ES messages were kernel-dropped, \(sensorResult.collectorDropDelta) were dropped at the collector stage (backpressure/stream-yield), and process/exec throughput fell to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
+                // Describe the branch that ACTUALLY fired. The previous single
+                // template asserted a file spike AND an exec-channel collapse
+                // unconditionally, so a sustained-loss fire reported exec
+                // throughput as having "fallen" when it had risen — and told the
+                // operator an attacker was suppressing telemetry when the real
+                // condition was the userspace worker shedding load.
+                let dropped = "\(sensorResult.kernelDropDelta) kernel-dropped, "
+                    + "\(sensorResult.collectorDropDelta) dropped at the collector stage "
+                    + "(backpressure/stream-yield)"
+                switch sensorResult.reason {
+                case .sustainedLoss:
+                    esSensorDegradedDetail =
+                        "ES sensor degraded\(attribution) — sustained event loss without a rate spike: \(dropped) this tick. File rate \(Int(sensorResult.fileRate))/tick (baseline \(Int(sensorResult.fileBaseline))), process/exec \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). A chronic loss fraction can indicate telemetry-drop evasion, but it is equally consistent with the sensor being unable to keep up — check load before concluding evasion."
+                case .spikeWithLoss, .none:
+                    let execVerb = sensorResult.processRate < sensorResult.processBaseline ? "fell" : "rose"
+                    esSensorDegradedDetail =
+                        "ES sensor degraded\(attribution) — file-event rate \(Int(sensorResult.fileRate))/tick spiked above baseline \(Int(sensorResult.fileBaseline)) while \(dropped), and process/exec throughput \(execVerb) to \(Int(sensorResult.processRate))/tick (baseline \(Int(sensorResult.processBaseline))). Possible telemetry-drop evasion; verify what is generating the file storm."
+                }
                 let alert = Alert(
                     ruleId: "maccrab.self-defense.\(ESClientMonitor.ESHealthEvent.EventType.sensorDegraded.rawValue)",
                     ruleTitle: "Sensor Degraded: possible telemetry-drop evasion",
@@ -1597,15 +1893,28 @@ enum DaemonTimers {
             // → not configured for the engine.
             let llmHealthDict: [String: Any]
             if let h = await state.llmService?.healthSnapshot() {
-                llmHealthDict = [
+                // AI-08: `healthy` is now LLMService.isUsable() — the SAME
+                // predicate that gates `maccrab.llm.*` emission, so the gauge
+                // cannot claim healthy while commentary is being withheld. The
+                // old expression (`lastSuccess != nil && !circuitOpen`) reported
+                // healthy for a backend that succeeded once at boot and then
+                // died: the 5-min circuit cooldown expires on the clock with no
+                // success required, leaving `circuit_open: false` sitting next
+                // to `consecutive_failures: 3`.
+                var llmDict: [String: Any] = [
                     "configured": true,
                     "provider": h.provider,
                     "model": h.model,
-                    "last_success_unix": h.lastSuccessAtUnix ?? 0,
                     "consecutive_failures": h.consecutiveFailures,
                     "circuit_open": h.circuitOpen,
-                    "healthy": h.lastSuccessAtUnix != nil && !h.circuitOpen,
+                    "healthy": h.usable,
                 ]
+                // Omit rather than write epoch-0 when the backend has never
+                // answered — the same honesty rule the collector block follows
+                // for `last_tick_unix`. A fabricated 0 reads as "last succeeded
+                // in 1970" to anything that doesn't special-case it.
+                if let last = h.lastSuccessAtUnix { llmDict["last_success_unix"] = last }
+                llmHealthDict = llmDict
             } else {
                 llmHealthDict = ["configured": false]
             }
@@ -1692,6 +2001,12 @@ enum DaemonTimers {
                 "sysext_has_fda": sysextHasFDA,
                 "fda_checked_at_unix": nowUnix,
                 "event_type_counts_1h": eventTypeCounts,
+                // v1.21.6 (PERF-04): the DELIVERED retention window per category,
+                // which is not the configured one. `..._below_sequence_floor` is
+                // the categories whose delivered window is under the 15-minute
+                // SequenceEngine rebuild floor despite holding real volume.
+                "events_retained_span_seconds_by_category": retainedSpanByCategory,
+                "events_retention_below_sequence_floor": starvedCategories,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,
                 // v1.21.4 Phase-0 D1: honest kernel-drop counters (per-client
@@ -1705,7 +2020,23 @@ enum DaemonTimers {
                 "es_processed_by_type": esProcessedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
+                // v1.21.6 (audit DET-05): rich-heartbeat only, like the other
+                // by-type maps. Divide by `es_processed_by_type` per key to get
+                // the per-detection recall loss.
+                "es_copy_backpressure_dropped_by_type": esCopyBackpressureDroppedByType,
                 "es_client_split_degraded": esClientSplitDegraded,
+                // Which kernel event source actually won the boot-time fallback
+                // chain (native ES client → eslogger proxy → kdebug → nothing).
+                // Previously `esMode` was ONLY `print`ed at startup and rendered
+                // in the startup banner — both stdout, which is discarded for a
+                // sysextd-launched System Extension — so the most realistic
+                // total-blindness cases (entitlement revoked by an OS update,
+                // ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS after the user
+                // installs another EDR, FDA withdrawn) all ended with the sysext
+                // alive, liveness true, "Daemon: Running" and zero kernel
+                // telemetry, unreportable from any surface. Anything other than
+                // "native client" is degraded coverage.
+                "es_mode": state.esMode,
                 // v1.21.4 Phase-1 D2: sensor-degraded advisory state for the
                 // ES Health surface + the menu-bar "protection degraded" flag.
                 "es_sensor_degraded": esSensorDegraded,
@@ -1741,6 +2072,16 @@ enum DaemonTimers {
                 // CRITICAL AES-GCM tamper alert, without re-introducing that FP.
                 "db_plaintext_in_encrypted_column_total": state.dbEncryption.plaintextInEncryptedColumnCount,
                 "rules_active": rulesActive,
+                // Published so non-root surfaces can render EFFECTIVE coverage;
+                // daemon_config.json itself is root-0600 and unreadable to them.
+                "rule_profile": state.bootRuleProfile,
+                // Tier-3 (sequence) state-loss gauges. `evicted_total` is
+                // cumulative since boot; a sustained rise means in-flight
+                // multi-step detections are being dropped before they can
+                // complete. `in_flight` parked at the 10K cap is the companion
+                // signal. Both were previously invisible outside one log line.
+                "sequence_partials_evicted_total": sequencePartialsEvicted,
+                "sequence_partials_in_flight": sequencePartialsInFlight,
                 // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
                 // detection-input drops folded into `events_dropped`; surfaced
                 // distinctly so a file-noise flood (file) is not read as a lost
@@ -1920,8 +2261,54 @@ enum DaemonTimers {
                 defer { state.inboxPollerLock.withLock { $0 = false } }
 
                 let fm = FileManager.default
-                guard let files = try? fm.contentsOfDirectory(atPath: inboxDir),
-                      !files.isEmpty else { return }
+                // v1.21.5 (audit S-08): the inbox is mode 1777, so ANY local uid can
+                // drop files into it — isAuthorizedInboxRequest rejects their
+                // REQUESTS, but only after root has already paid for the directory
+                // listing, the lstat and the unlink. Pre-fix this tick took the whole
+                // directory unbounded, ran 17 prefix filters over it, then a per-file
+                // lstat + unlink in each handler, all while holding
+                // `inboxPollerLock` — so a flood of a few hundred thousand files
+                // wedged the privileged control plane indefinitely (every dashboard
+                // suppress / config / prevention action queues behind it) and burned
+                // root CPU. Bound the per-tick window instead. Every file the
+                // handlers touch is unlinked whether authorized or not, so the
+                // backlog still drains; a flood now costs a bounded delay rather than
+                // an unbounded stall. 512 is above any legitimate burst — the largest
+                // is a dashboard bulk-suppress, one file per selected alert.
+                // RESIDUAL (deliberate): a large flood still delays legitimate
+                // requests by up to ceil(N / 512) ticks. The per-uid drop-rate
+                // throttle keyed on requestOwnerUID is the follow-up; it cannot be
+                // done here without paying the very lstat this cap is bounding.
+                let maxInboxDrainPerTick = 512
+                guard let allFiles = try? fm.contentsOfDirectory(atPath: inboxDir),
+                      !allFiles.isEmpty else { return }
+                let files = allFiles.count > maxInboxDrainPerTick
+                    ? Array(allFiles.prefix(maxInboxDrainPerTick))
+                    : allFiles
+                // Sweep entries no handler will EVER consume. Without this the cap
+                // above would itself be a starvation bug: files matching no verb
+                // prefix (or a verb prefix without the .json suffix) were never
+                // unlinked, so they would permanently occupy the head of the capped
+                // window and legitimate requests behind them would never be reached.
+                // Dot-prefixed names are skipped — those are the temp files the
+                // atomic droppers rename FROM (dropCtlInboxRequest's
+                // `.<verb>-<uuid>.tmp`, Foundation's `.atomic` sidecars); deleting
+                // one mid-write would corrupt a legitimate request. removeItem does
+                // not follow symlinks, so a planted link to a root file unlinks the
+                // link, not the target.
+                let knownInboxPrefixes = [
+                    "suppress-alert-", "unsuppress-alert-", "delete-alert-",
+                    "suppress-campaign-", "refresh-intel-", "reload-rules-",
+                    "llm-config-", "flush-request-", "record-clipboard-",
+                    "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
+                    "remove-rule-", "set-agent-capabilities-", "prune-alerts-",
+                    "apply-agent-traces-", "prevention-config-",
+                ]
+                for name in files where !name.hasPrefix(".") {
+                    let claimed = name.hasSuffix(".json")
+                        && knownInboxPrefixes.contains(where: { name.hasPrefix($0) })
+                    if !claimed { try? fm.removeItem(atPath: inboxDir + "/" + name) }
+                }
 
                 // Partition by request type so we drain in a defined order
                 // (mutations first, flush last — flush can take seconds).
@@ -2132,19 +2519,37 @@ enum DaemonTimers {
             attempt += 1
         }
 
+        // Third point: was this probe's retained message refused at the
+        // callback→worker hand-off? Read PER-NONCE, not from a
+        // `es_copy_backpressure_dropped_total` delta — that counter sums BOTH
+        // per-client workers, so on a host whose file worker is saturated it
+        // advances during essentially every probe and would misattribute real
+        // eviction gaps in the opposite direction.
+        let droppedAtHandoff = collector.canaryDroppedAtHandoff(nonce)
         let verdict = CoverageCanaryEvaluator.verdict(
-            seenAtCallback: seenAtCallback, foundInDB: foundInDB
+            seenAtCallback: seenAtCallback, foundInDB: foundInDB,
+            droppedAtHandoff: droppedAtHandoff
         )
         guard verdict != .healthy, let stage = verdict.stageLabel else { return }
 
-        // A kernel/ingest gap is active telemetry loss (possible evasion); an
-        // eviction gap is retention pressure — surface both, weighted accordingly.
-        let severity: Severity = (verdict == .kernelGap) ? .high : .medium
+        // A kernel/ingest gap and a hand-off drop are both ACTIVE telemetry loss
+        // (the event reached us and we lost it before evaluation); an eviction
+        // gap is retention pressure — surface all three, weighted accordingly.
+        let severity: Severity = (verdict == .evictionGap) ? .medium : .high
+        let stageDetail: String
+        switch verdict {
+        case .kernelGap:
+            stageDetail = "never reached the ES callback — the kernel/ingest path dropped it (per-client-queue backpressure; the same blind-spot a file-write flood exploits). "
+        case .ingestHandoffGap:
+            stageDetail = "reached the ES callback, but its retained message was refused at the callback→worker hand-off because the per-client ESMessageWorker was at its in-flight cap (see es_copy_backpressure_dropped_total) — so it never reached the rule engine, the sequence engine, or events.db. "
+        case .evictionGap:
+            stageDetail = "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). "
+        case .healthy:
+            stageDetail = ""
+        }
         let description =
             "Coverage canary lost at the \(stage) stage: a self-generated probe exec "
-            + (verdict == .kernelGap
-               ? "never reached the ES callback — the kernel/ingest path dropped it (per-client-queue backpressure; the same blind-spot a file-write flood exploits). "
-               : "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). ")
+            + stageDetail
             + "MacCrab's own telemetry coverage is degraded; verify what is generating load or storage pressure."
 
         let alert = Alert(
@@ -2786,9 +3191,17 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
+            // v1.21.5 (audit S-05): floor the window at 1 day. `days >= 0` let a
+            // single 40-byte file drop set cutoff == now — i.e. DELETE THE ENTIRE
+            // ALERT HISTORY, the most valuable anti-forensic action in the product,
+            // for free and with no alert. Nothing legitimate ever asks for 0: the
+            // dashboard's retention picker (SettingsView) offers only 7 / 30 / 90 /
+            // 365, and there is no other caller. A genuine "wipe everything"
+            // operation, if we ever want one, needs its own explicit verb with
+            // operator presence — not a silent edge case of the retention window.
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let days = json["olderThanDays"] as? Int, days >= 0 else {
+                  let days = json["olderThanDays"] as? Int, days >= 1 else {
                 auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "malformed")
                 continue
             }
@@ -2801,6 +3214,21 @@ enum DaemonTimers {
             let removed = try await state.alertStore.prune(olderThan: cutoff)
             print("[inbox] prune-alerts olderThanDays=\(days) uid=\(chosenUID) removed=\(removed)")
             auditLogInbox(state: state, prefix: "prune-alerts", id: "\(days)d", uid: chosenUID, result: "removed=\(removed)")
+            // v1.21.5 (audit S-05): bulk alert deletion is evidence destruction —
+            // the highest-value action available to post-compromise code holding
+            // this control plane — and it produced only a rotatable audit line,
+            // while the far less consequential act of nudging a numeric threshold
+            // is both clamped AND alerted. Record it like the other self-defense
+            // events. Emitted AFTER the prune so the alert itself cannot be caught
+            // by its own cutoff (which the `days >= 1` floor already keeps in the
+            // past). Recorded-only, not OS-notified — same as every other
+            // self-protection alert — so an operator's own "Clear Now" click costs
+            // one dashboard-visible row, not a notification.
+            if removed > 0 {
+                await emitSelfProtectionAlert(
+                    state: state, action: "Alert history pruned",
+                    detail: "\(removed) alert(s) older than \(days) day(s) were deleted from the alert store")
+            }
         } catch {
             print("[inbox] prune-alerts olderThanDays=\(days) uid=\(chosenUID) failed: \(error)")
             auditLogInbox(state: state, prefix: "prune-alerts", id: "\(days)d", uid: chosenUID, result: "failed:\(error)")
@@ -2867,12 +3295,16 @@ enum DaemonTimers {
     /// them from the CURRENT threat-intel set (empty when feeds are off — a
     /// harmless empty enforcement section); persistence-guard takes no seed.
     ///
-    /// SCOPING RESIDUALS (honest): this applies LIVE only — it is not persisted
+    /// SCOPING RESIDUALS (honest): this applies LIVE only — it is NOT persisted
     /// across a daemon restart (startup is governed by the boot-time
-    /// `MACCRAB_PREVENTION` gate, see DaemonSetup), and when prevention booted
-    /// ACTIVE the `threatIntel.onUpdate` callback (DaemonSetup) re-enables the
-    /// sinkhole/blocker on the next feed refresh, so a live "disable" of those
-    /// two is transient until that callback becomes toggle-aware.
+    /// `MACCRAB_PREVENTION` gate, see DaemonSetup), so a disable survives only
+    /// until the engine restarts. Persisting it needs a `prevention_config.json`
+    /// read at boot, which changes what the shipped env gate means — still open.
+    ///
+    /// The feed-refresh leak IS fixed: the `threatIntel.onUpdate` callback in
+    /// DaemonSetup now calls `refreshFromFeed(...)`, which honours the operator
+    /// disable latch that `disable()` sets, so a live "disable" of the
+    /// sinkhole/blocker is no longer silently re-armed on the next feed refresh.
     private static func handlePreventionConfigRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
@@ -2923,7 +3355,14 @@ enum DaemonTimers {
         // attributed only to the batch's newest uid). The module actors don't
         // expose their pre-toggle `isEnabled` to this handler, so the recorded
         // transition is `enforcement=off` rather than a literal old→new.
+        // v1.21.5 (audit S-05): also collect the disabled modules so the batch can
+        // raise a self-protection ALERT below. v1.21.4 LOW #15 correctly made each
+        // disable its own greppable audit event, but an audit line is a rotatable
+        // log file — turning off enforcement is a defense-degrading change of the
+        // same class as an ES-subscription disable, which has alerted since v1.18.
+        var disabledModules: [String] = []
         func auditDisable(_ module: String) {
+            disabledModules.append(module)
             auditLogInbox(state: state, prefix: "prevention-disable",
                           id: module, uid: chosen.uid,
                           result: "action=disable module=\(module) enforcement=off")
@@ -2963,6 +3402,17 @@ enum DaemonTimers {
         let summary = applied.joined(separator: " ")
         print("[inbox] prevention-config uid=\(chosen.uid) applied \(summary)")
         auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: chosen.uid, result: summary)
+        // v1.21.5 (audit S-05): one alert per batch, disables only. Turning off
+        // the DNS sinkhole / network blocker / persistence guard is rare and
+        // deliberate for an operator, so this cannot storm; for an attacker it is
+        // the step that clears the way for the next one, and it was previously
+        // silent. Enables are not alerted — restoring enforcement is not a
+        // defense-degrading change.
+        if !disabledModules.isEmpty {
+            await emitSelfProtectionAlert(
+                state: state, action: "Prevention module disabled",
+                detail: "Enforcement was turned off for: \(disabledModules.joined(separator: ", "))")
+        }
     }
 
     /// v1.17: threat-intel refresh over the inbox channel. The
@@ -3069,9 +3519,13 @@ enum DaemonTimers {
         // Whitelist NON-SECRET keys; default-deny non-loopback endpoints.
         let allowRemote = (chosen.payload["allow_remote_endpoint"] as? Bool) ?? false
         let urlKeys: Set<String> = ["ollama_url", "openai_url"]
+        // v1.21.6 (SU-04): `agentic_investigation_enabled` removed from the
+        // allowlist. It gated an app-side AgenticInvestigator that had zero call
+        // sites and has been deleted; the sysext never read the key, so bridging
+        // it to the root config only made a no-op look like a supported control.
         let allowedKeys = ["enabled", "provider", "ollama_url", "ollama_model",
                            "openai_url", "openai_model", "claude_model",
-                           "mistral_model", "gemini_model", "agentic_investigation_enabled"]
+                           "mistral_model", "gemini_model"]
         var sanitized: [String: Any] = [:]
         for key in allowedKeys {
             guard let value = chosen.payload[key] else { continue }
@@ -3095,6 +3549,16 @@ enum DaemonTimers {
             }
             return [:]
         }()
+        // v1.21.5 (audit S-02): note whether this request actually CHANGES the
+        // provider, an endpoint or the master enable (vs. an idempotent rewrite of
+        // the same values), so the self-protection alert below fires on real
+        // reconfiguration only and never on the dashboard re-saving what is
+        // already there. Compared as strings because the payload values are Any
+        // (String for provider/urls, Bool for enabled).
+        let endpointOrProviderChanged = ["provider", "ollama_url", "openai_url", "enabled"].contains { key in
+            guard let updated = sanitized[key] else { return false }
+            return "\(merged[key] ?? "")" != "\(updated)"
+        }
         for (k, v) in sanitized { merged[k] = v }
         if let out = try? JSONSerialization.data(withJSONObject: merged, options: [.sortedKeys, .prettyPrinted]) {
             try? out.write(to: URL(fileURLWithPath: rootPath), options: .atomic)
@@ -3110,6 +3574,22 @@ enum DaemonTimers {
                 await emitSelfProtectionAlert(
                     state: state, action: "Remote LLM endpoint enabled",
                     detail: "A non-loopback LLM endpoint was configured with allow_remote_endpoint=true (engine prompt traffic may leave the host)")
+            } else if endpointOrProviderChanged {
+                // v1.21.5 (audit S-02): a LOOPBACK endpoint is not benign either.
+                // The gate above only speaks about non-loopback URLs, so a drop of
+                // {"enabled":true,"provider":"ollama","ollama_url":"http://127.0.0.1:9999"}
+                // applied silently with nothing but an audit line reading "ok" —
+                // and a loopback Ollama is exactly what LLMService.shouldSanitize
+                // treats as "local, nothing leaves the host", i.e. sanitization
+                // OFF. Post-compromise code owning uid 501 could therefore point
+                // the ROOT engine at its own listener and receive every prompt
+                // verbatim after the next restart (reboot or Sparkle update). The
+                // companion trustLocalEndpoint change now keeps the sanitizer on
+                // for that case; this makes the reconfiguration itself LOUD, which
+                // is the whole point of the self-protection alert.
+                await emitSelfProtectionAlert(
+                    state: state, action: "LLM endpoint or provider changed",
+                    detail: "The engine's LLM provider/endpoint was reconfigured over the privileged inbox — engine analysis prompts (process paths, command lines, user names) will be sent to the newly configured endpoint")
             }
         }
     }
@@ -3407,6 +3887,22 @@ enum DaemonTimers {
             // First-time write (file doesn't exist yet).
             try? data.write(to: url, options: .atomic)
         }
+        // rw-r-----: this is the privileged-mutation trail (which alert or
+        // campaign was suppressed/deleted, by which uid). Created under the
+        // root daemon's default umask it landed 0o644, so every local
+        // account could read which detections the operator has already
+        // silenced — a map of the blind spots. Re-applied on every append
+        // (mutations are rare, so the cost is nil) so an existing 0o644 log
+        // from an older build is tightened in place; rotateAuditLogIfNeeded
+        // uses moveItem, which carries the mode onto the .1/.2/.3 archives.
+        // Readers are `maccrabctl audit`, the MCP get_audit_log tool and the
+        // dashboard's System → Health audit card, all uid-501 admin-group
+        // processes that already read the 0o640 stores. The 0o640 group bit is
+        // load-bearing for the two HUMAN surfaces — tightening this to 0o600
+        // would silently return the audit trail to agent-only readability.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o640], ofItemAtPath: logPath
+        )
     }
 }
 
@@ -3688,12 +4184,27 @@ func runAdaptiveRollupSweep(
         // that (a reader-pinned WAL is skipped entirely), so here we only choose
         // between the full rebuild and a cheap checkpoint.
         if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
-            do {
-                // B-03: dedicated connection, off the actor — see the phase-2b
-                // caller. Keeps the multi-minute rewrite off the ingestion path.
-                try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
-            } catch {
-                logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
+            // Only rebuild while rebuilding is actually converging. When the
+            // configured cap puts `targetSizeMB` below the events.db footprint
+            // floor, this branch is true on EVERY sweep forever and the
+            // whole-file VACUUM becomes perpetual write amplification. See
+            // SizeCapConvergence for the measurement and why a load-time clamp
+            // can't substitute for it.
+            if SizeCapConvergence.shouldFullVacuum() {
+                do {
+                    // B-03: dedicated connection, off the actor — see the phase-2b
+                    // caller. Keeps the multi-minute rewrite off the ingestion path.
+                    try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
+                } catch {
+                    logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
+                }
+                let afterVacuumMB = measureDatabaseFootprintMB(dbPath: dbPath)
+                if SizeCapConvergence.record(converged: afterVacuumMB <= targetSizeMB) {
+                    logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumMB) MB against a \(targetSizeMB) MB target (0.8 × the configured storage.events_max_size_mb). The measured floor (schema + alert_evidence + events_fts + the WAL sidecar) exceeds the target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Raise storage.events_max_size_mb (shipped default 420) or lower storage.evidence_max_size_mb.")
+                }
+            } else {
+                logger.notice("Tier-rollup: full VACUUM suppressed — the size cap was measured unreachable (see the cap-unreachable error). Checkpointing the WAL instead; prune + incremental_vacuum still ran, so the working set stays bounded.")
+                await eventStore.walCheckpoint()
             }
         } else if dbSizeAfterIncremental > targetSizeMB && underPowerPressure {
             logger.notice("Tier-rollup: deferring full VACUUM under power/thermal pressure (poll-multiplier \(PowerGate.pollIntervalMultiplier)); incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB. Checkpointing WAL; full rebuild will run on AC / nominal thermal.")
@@ -3737,8 +4248,11 @@ func runAdaptiveRollupSweep(
 }
 
 /// Free disk space at the volume containing `path`, in megabytes.
-/// Returns 0 on stat failure (caller treats 0 as "not enough headroom").
-private func freeDiskMB(forPath path: String) -> Int {
+/// Returns 0 on stat failure (VACUUM callers treat 0 as "not enough headroom";
+/// BatchedEventWriter's admission check treats 0 as "probe failed, allow the
+/// write" — halting all telemetry on a transient stat glitch would be worse
+/// than the disk pressure it guards against).
+func freeDiskMB(forPath path: String) -> Int {
     var stat = statvfs()
     guard statvfs((path as NSString).utf8String, &stat) == 0 else { return 0 }
     let bytes = UInt64(stat.f_bavail) * UInt64(stat.f_frsize)

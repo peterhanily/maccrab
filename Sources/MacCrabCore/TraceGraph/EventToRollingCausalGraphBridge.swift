@@ -167,9 +167,39 @@ public actor EventToRollingCausalGraphBridge {
 
     private func makeAgentEnrichment(from enrichments: [String: String]) -> RollingCausalGraph.AgentEnrichment? {
         // v1.9 TraceCorrelator emits these enrichment keys.
-        guard let traceId = enrichments[TraceCorrelator.EnrichmentKey.traceId] else { return nil }
-        let confidenceRaw = enrichments[TraceCorrelator.EnrichmentKey.confidence] ?? ""
+        //
+        // AI-02: `agent_trace_id` is stamped ONLY by the traceparent pass —
+        // TraceCorrelator's Pass-2 lineage fallback returns `traceId: nil` — so
+        // requiring it here meant the materializer emitted an `ai_agent` entity
+        // and an `associated_with_agent` edge ONLY on hosts that had configured
+        // the agent's OTLP/TRACEPARENT export. On an ordinary install
+        // `trace_entities` held ZERO `ai_agent` rows, which makes every graph
+        // rule that declares an `ai_agent` node structurally unsatisfiable —
+        // including the v1.21.4 lethal-trifecta rule.
+        //
+        // Fall back to the DURABLE agent-session id (`ai_tool_session_id`,
+        // minted by AgentSessionRegistry and stamped by EventLoop on BOTH the
+        // AI-tool root and every attributed descendant) so the lineage tier is a
+        // first-class agent producer. The synthesised id is namespaced
+        // (`session:`) so it can never collide with a real 32-hex W3C trace id,
+        // and it is pinned to the lineage confidence (0.75 / strong_inferred) —
+        // below the §11.3 assertion threshold, so AIAttributionRenderer still
+        // renders it as inferred rather than as fact.
+        let traceId: String
+        let confidenceRaw: String
+        if let correlated = enrichments[TraceCorrelator.EnrichmentKey.traceId] {
+            traceId = correlated
+            confidenceRaw = enrichments[TraceCorrelator.EnrichmentKey.confidence] ?? ""
+        } else if let sessionId = enrichments["ai_tool_session_id"], !sessionId.isEmpty {
+            traceId = "session:\(sessionId)"
+            confidenceRaw = AttributionEvidence.Confidence.lineage.rawValue
+        } else {
+            return nil
+        }
+        // `agent_tool` is stamped only by TraceCorrelator; on the session
+        // fallback the tool identity lives in `ai_tool` (AIProcessTracker).
         let agentTool = enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+            ?? enrichments["ai_tool"]
         // confidence is a categorical string in v1.9 ("traceparent" / "lineage").
         // Map to the v1.10 numeric scale.
         let (confidence, method): (Double, AttributionMethod) = {

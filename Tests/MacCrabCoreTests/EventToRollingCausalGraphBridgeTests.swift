@@ -383,6 +383,77 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    // AI-02: the causal substrate's ONLY agent producer used to be the W3C
+    // traceparent pass — `makeAgentEnrichment` returned nil unless
+    // `agent_trace_id` was present, and TraceCorrelator's Pass-2 lineage
+    // fallback never sets it. On any host without OTLP export configured,
+    // `trace_entities` therefore held ZERO `ai_agent` rows, which makes every
+    // shipped graph rule declaring an `ai_agent` node structurally
+    // unsatisfiable. The lineage tier is now a first-class producer via the
+    // durable `ai_tool_session_id` (AgentSessionRegistry mints it; EventLoop
+    // stamps it on the AI-tool root AND every attributed descendant, both
+    // before the bridge runs). This test pins BOTH halves of that fallback so a
+    // future refactor cannot silently re-introduce the traceparent precondition.
+    @Test("Lineage-only attribution (ai_tool_session_id, no traceparent) mints an ai_agent node at strong_inferred (AI-02)")
+    func lineageSessionMintsAgentNode() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let rollingGraph = RollingCausalGraph(store: store, materializer: TraceMaterializer(store: store))
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        let event = Event(
+            timestamp: now,
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: processInfo(pid: 777, executable: "/bin/zsh"),
+            enrichments: [
+                "ai_tool": "claude_code",
+                "ai_tool_session_id": "sess-ai02",
+                EventToRollingCausalGraphBridge.processKeyEnrichmentKey: "lineage-process-key",
+            ]
+        )
+        _ = await bridge.process(event)
+
+        // The synthesised id is namespaced `session:` so it can never collide
+        // with a real 32-hex W3C trace id.
+        let agentId = "ai_agent:claude code:session:sess-ai02"
+        #expect(try await store.entity(id: agentId)?.entityType == "ai_agent")
+
+        // strong_inferred: high enough to satisfy the three shipped agent graph
+        // rules that ask for strong_inferred / weak_inferred, and deliberately
+        // BELOW the §11.3 assertion threshold (0.85) so AIAttributionRenderer
+        // still renders lineage attribution as inferred rather than as fact.
+        let edge = try await store.edge(id: EdgeBuilder.edgeId(
+            sourceEntityId: agentId,
+            targetEntityId: "process:lineage-process-key",
+            relation: .associatedWithAgent))
+        #expect(edge?.confidence == 0.75)
+        #expect(edge?.confidenceTier == ConfidenceTier.strongInferred.rawValue)
+
+        // Control: the fallback widens the producer to the LINEAGE tier, not to
+        // "any event an AI tool touched". An `ai_tool` tag with no session id and
+        // no traceparent must still mint no agent edge.
+        let untracked = Event(
+            timestamp: now,
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: processInfo(pid: 778, executable: "/bin/zsh"),
+            enrichments: [
+                "ai_tool": "claude_code",
+                EventToRollingCausalGraphBridge.processKeyEnrichmentKey: "no-session-key",
+            ]
+        )
+        _ = await bridge.process(untracked)
+        #expect(try await store.entity(id: "process:no-session-key") != nil)
+        #expect(try await store.edge(id: EdgeBuilder.edgeId(
+            sourceEntityId: agentId,
+            targetEntityId: "process:no-session-key",
+            relation: .associatedWithAgent)) == nil)
+        await store.close()
+    }
+
     private func SHA256_hex(_ s: String) -> String {
         // Tiny shim so the test doesn't have to import CryptoKit just
         // to recompute the bridge's synthesized key.

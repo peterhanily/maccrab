@@ -315,6 +315,36 @@ public actor EventStore {
                 "CREATE INDEX IF NOT EXISTS idx_events_parent_exe_ts ON events(parent_executable, timestamp)",
             ]
         ),
+        // v1.21.5 PERF: index hygiene on `events`, the highest-insert-rate table
+        // in the product — every index on it is a B-tree write per row.
+        //
+        // Drops two indexes that were strict prefixes of wider ones and so were
+        // pure insert cost with no possible read benefit (see the baseline schema
+        // in `openDatabase` for the prefix argument).
+        //
+        // Adds the index the dashboard's paged Events query actually needs.
+        // `EventStore.events(before:category:severity:)` — re-run every 5 s by the
+        // V2 Events workspace — builds
+        //     WHERE event_category = ? AND severity IN (…) ORDER BY timestamp DESC
+        // and the only composite available led with `timestamp`, so the planner
+        // fell back to idx_events_category. That index has 3 distinct values, so
+        // it visited ~1/3 of the table and temp-sorted those wide rows to return
+        // 100. Leading with the equality column bounds the scan to rows that can
+        // actually match; the residual ORDER BY sort is then over a handful of
+        // rows instead of thousands.
+        //
+        // `DROP INDEX IF EXISTS` is idempotent, which matters here: SchemaMigrator
+        // re-applies EVERY migration on EVERY open (see its v1.7.6 co-resident-
+        // store fix), so a non-idempotent DROP would be a bug. These are safe.
+        Migration(
+            version: 7,
+            name: "prune_redundant_event_indexes",
+            sql: [
+                "DROP INDEX IF EXISTS idx_events_process_path",
+                "DROP INDEX IF EXISTS idx_events_ts_severity",
+                "CREATE INDEX IF NOT EXISTS idx_events_cat_sev_ts ON events(event_category, severity, timestamp)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -415,9 +445,16 @@ public actor EventStore {
             // index keeps it cheap — only AI-correlated rows are indexed.
             "CREATE INDEX IF NOT EXISTS idx_events_ai_session ON events(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_events_category ON events(event_category)",
-            "CREATE INDEX IF NOT EXISTS idx_events_process_path ON events(process_path)",
             "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
-            "CREATE INDEX IF NOT EXISTS idx_events_ts_severity ON events(timestamp, severity)",
+            // v1.21.5 PERF: idx_events_process_path (process_path) and
+            // idx_events_ts_severity (timestamp, severity) are no longer created.
+            // Each is a STRICT PREFIX of a wider index that already exists
+            // (idx_events_process_ts = (process_path, timestamp);
+            // idx_events_ts_sev_cat = (timestamp, severity, event_category)), so
+            // neither could ever be the planner's best choice for any query the
+            // wider index doesn't serve — while both cost a B-tree write on every
+            // insert, at ~220 inserts/s on a developer host. Migration v7 drops
+            // them from existing databases; see `schemaMigrations`.
             "CREATE INDEX IF NOT EXISTS idx_events_ts_category ON events(timestamp, event_category)",
             "CREATE INDEX IF NOT EXISTS idx_events_process_ts ON events(process_path, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_events_ts_sev_cat ON events(timestamp, severity, event_category)",
@@ -1541,6 +1578,33 @@ public actor EventStore {
         return out
     }
 
+    /// v1.21.6 (PERF-04): retained wall-clock span per `event_category`, in
+    /// seconds (MAX(timestamp) - MIN(timestamp) over the rows still on disk).
+    ///
+    /// Exists because the CONFIGURED hot tier and the DELIVERED one had diverged
+    /// by three orders of magnitude with nothing surfacing it: on the field host
+    /// `file` retained 0.5 minutes against a configured 30, while `process`
+    /// retained 17.8 — the Layer-3 row-count fallback evicting the fodder
+    /// categories to keep the footprint under cap. Any sequence rule, graph rule
+    /// or hunt that needs file history beyond ~30 s was silently blind.
+    ///
+    /// Cheap: MIN/MAX + GROUP BY over the covering `idx_events_cat_sev_ts` /
+    /// `idx_events_ts_category` indexes, called at the 30 s heartbeat cadence,
+    /// never on the insert path.
+    public func retainedSpanSecondsByCategory() throws -> [String: Int] {
+        let sql = "SELECT event_category, MIN(timestamp), MAX(timestamp) FROM events GROUP BY event_category"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let cstr = sqlite3_column_text(stmt, 0) else { continue }
+            let category = String(cString: cstr)
+            let span = sqlite3_column_double(stmt, 2) - sqlite3_column_double(stmt, 1)
+            out[category] = Int(max(0, span))
+        }
+        return out
+    }
+
     /// Returns the total number of events in the store.
     public func count() throws -> Int {
         let sql = "SELECT COUNT(*) FROM events"
@@ -1724,22 +1788,105 @@ public actor EventStore {
         // prune(olderThan:)).
         if let protectedCategory, let floorCutoff {
             let floorTs = floorCutoff.timeIntervalSince1970
+            // v1.21.6 (audit DL-04). The eligible set used to be "everything
+            // that is not the protected category", which made the SCARCE,
+            // high-signal channels the FIRST rows evicted while the protected
+            // firehose was spared entirely. Layer 3 asks for at least 10,000
+            // rows (DaemonTimers.runAdaptiveRollupSweep) and network/auth/tcc
+            // together hold only a few hundred, so Phase 1 drained them to ZERO
+            // on every sweep before the valve below touched a single protected
+            // row — the exact inverse of forensic value. Field-observed: this
+            // host's events.db held only `process` and `file` rows, with no
+            // network, authentication or tcc rows on disk at all, so `hunt` and
+            // `get_events` could not answer the outbound-connection / DNS /
+            // permission-grant questions a responder asks first.
+            //
+            // Fix: INSIDE the floor window only the bulk channels are fodder;
+            // network (which also carries DNS), authentication and tcc get the
+            // same freshness guarantee the protected category already gets.
+            // Anything ALREADY older than the floor stays fully eligible
+            // regardless of category, so the cap still converges and the
+            // soft-floor valve in Phase 2 is untouched.
+            //
+            // NOT the auditor's suggested inversion (protect network/dns/tcc,
+            // evict process first): process/exec is the substrate for lineage,
+            // sequence rules and campaign correlation, and the v1.21.4 floor
+            // exists precisely because a file-write flood collapsing it was a
+            // detection outage. Both channels are protected; only `file` and
+            // `registry` are fodder inside the window.
+            //
+            // Kept as ONE interpolated predicate so the FTS delete, the events
+            // delete, and the Layer-3 roll-up can never drift apart. Shape is
+            // unchanged (leading `timestamp` term, no expression in ORDER BY),
+            // so idx_events_ts_category still drives an ordered top-N scan
+            // rather than a full sort of the eligible set.
+            let eligibleWhere = """
+                timestamp < ?2
+                   OR (event_category <> ?1
+                       AND event_category NOT IN ('network', 'authentication', 'tcc'))
+                """
             let deleteEligibleFTS = """
                 DELETE FROM events_fts WHERE rowid IN (
                     SELECT rowid FROM events
-                    WHERE event_category <> ?1 OR timestamp < ?2
+                    WHERE \(eligibleWhere)
                     ORDER BY timestamp ASC LIMIT ?3
                 )
                 """
             let deleteEligibleEvents = """
                 DELETE FROM events WHERE rowid IN (
                     SELECT rowid FROM events
-                    WHERE event_category <> ?1 OR timestamp < ?2
+                    WHERE \(eligibleWhere)
                     ORDER BY timestamp ASC LIMIT ?3
                 )
                 """
+            // v1.21.6 (audit DL-05): roll each batch up BEFORE deleting it.
+            // Layer 3 does nearly all the pruning on a busy host (field log,
+            // one sweep: Layer 2 = 140 rows, Layer 3 = 42,595 rows) and it used
+            // to issue DELETEs with no INSERT at all — only rollUpAndPrune
+            // aggregated. So the advertised `aggregateDays: 90` day-history
+            // silently lost whole days: 500K-1M events/day through mid-July,
+            // then 255,154 on 7/22, 11,798 on 7/25, 658 on 7/26, NOTHING on
+            // 7/27, 156 on 7/28. Nothing warned — event_aggregates still
+            // existed and still answered queries, so the dashboard's long-
+            // horizon trend simply drew a flat line that looked like calm.
+            //
+            // Same upsert as rollUpAndPrune and the SAME `eligibleWhere`
+            // predicate + LIMIT as the DELETEs below, so the rows counted are
+            // exactly the rows removed.
+            let aggregateEligible = """
+                INSERT INTO event_aggregates (day, event_category, process_signer, process_path, count)
+                SELECT
+                    strftime('%Y-%m-%d', timestamp, 'unixepoch') AS d,
+                    event_category,
+                    COALESCE(process_signer, ''),
+                    COALESCE(process_path, ''),
+                    COUNT(*) AS c
+                FROM events WHERE rowid IN (
+                    SELECT rowid FROM events
+                    WHERE \(eligibleWhere)
+                    ORDER BY timestamp ASC LIMIT ?3
+                )
+                GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
+                ON CONFLICT(day, event_category, process_signer, process_path)
+                DO UPDATE SET count = count + excluded.count
+                """
             while remaining > 0 {
                 let thisBatch = min(batchSize, Int32(remaining))
+
+                // Best-effort by construction: the roll-up is trend data, the
+                // DELETE below is the disk-budget guarantee. A failed aggregate
+                // must never abort the prune — that would reintroduce the
+                // unbounded growth Layer 3 exists to stop.
+                if let aggStmt = try? prepare(aggregateEligible) {
+                    bindText(aggStmt, index: 1, value: protectedCategory.rawValue)
+                    sqlite3_bind_double(aggStmt, 2, floorTs)
+                    sqlite3_bind_int(aggStmt, 3, thisBatch)
+                    if sqlite3_step(aggStmt) != SQLITE_DONE {
+                        Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                            .warning("Layer-3 roll-up INSERT failed — batch deleted without an aggregate row")
+                    }
+                    sqlite3_finalize(aggStmt)
+                }
 
                 let ftsStmt = try prepare(deleteEligibleFTS)
                 bindText(ftsStmt, index: 1, value: protectedCategory.rawValue)
@@ -1787,9 +1934,39 @@ public actor EventStore {
                 SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
             )
             """
+        // v1.21.6 (audit DL-05): same roll-up-before-delete as Phase 1. This
+        // loop is BOTH the whole job when no floor is configured AND the
+        // soft-floor valve tail, so leaving it un-aggregated would keep losing
+        // history on exactly the hosts where the valve engages most.
+        let aggregateOldest = """
+            INSERT INTO event_aggregates (day, event_category, process_signer, process_path, count)
+            SELECT
+                strftime('%Y-%m-%d', timestamp, 'unixepoch') AS d,
+                event_category,
+                COALESCE(process_signer, ''),
+                COALESCE(process_path, ''),
+                COUNT(*) AS c
+            FROM events WHERE rowid IN (
+                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+            )
+            GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
+            ON CONFLICT(day, event_category, process_signer, process_path)
+            DO UPDATE SET count = count + excluded.count
+            """
 
         while remaining > 0 {
             let thisBatch = min(batchSize, Int32(remaining))
+
+            // Best-effort (see Phase 1): never let a failed aggregate abort the
+            // prune — convergence of the disk cap outranks trend fidelity.
+            if let aggStmt = try? prepare(aggregateOldest) {
+                sqlite3_bind_int(aggStmt, 1, thisBatch)
+                if sqlite3_step(aggStmt) != SQLITE_DONE {
+                    Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                        .warning("Layer-3 roll-up INSERT failed — batch deleted without an aggregate row")
+                }
+                sqlite3_finalize(aggStmt)
+            }
 
             let ftsStmt = try prepare(deleteFTS)
             sqlite3_bind_int(ftsStmt, 1, thisBatch)
@@ -2532,14 +2709,30 @@ public actor EventStore {
         // host without wedging the maintenance task indefinitely.
         sqlite3_exec(db, "PRAGMA busy_timeout = 15000", nil, nil, nil)
 
+        // Give this connection the SAME per-connection pragmas the actor's
+        // ingestion connection gets. SQLite pragmas are per-CONNECTION, so this
+        // short-lived handle previously ran the entire multi-hundred-MB rewrite
+        // on stock defaults: a 2 MB page cache (vs the actor's 16 MB),
+        // `synchronous = FULL` (vs NORMAL), a 1000-page / 4 MB WAL
+        // auto-checkpoint threshold (vs 4000 / 16 MB) and no
+        // `journal_size_limit` — so VACUUM fsync'd and checkpointed its own
+        // rebuild output ~4x more often than the write path this DB is tuned
+        // for. Routing through the shared helper also stops the two connections
+        // drifting apart again. NOT setting `wal_autocheckpoint = 0`
+        // deliberately: that would let the WAL grow to the full size of the
+        // rebuild, and the only time this runs is after a 1.3x free-disk
+        // pre-flight on a host already short on disk.
+        //
+        // The helper issues `auto_vacuum = INCREMENTAL` first, which preserves
+        // the one-shot legacy mode-0 (NONE) -> INCREMENTAL conversion this
+        // VACUUM performs (see the actor `vacuum()` for the full rationale);
+        // no-op once the file is already mode 2.
+        StoragePragmas.applyEventStorePragmas(to: db)
+
         // Same WAL discipline as the actor `vacuum()`, on this connection:
         // pre-checkpoint so VACUUM rebuilds a drained main DB; post-checkpoint
         // (best-effort TRUNCATE) so the on-disk footprint reflects the rebuild.
         sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
-        // Convert a legacy mode-0 (NONE) file to INCREMENTAL on this rewrite —
-        // see the actor `vacuum()` above for the full rationale. No-op once the
-        // file is already mode 2.
-        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
@@ -2628,9 +2821,45 @@ public actor EventStore {
     /// DETECTION-SAFE: `events_fts` is read ONLY by `search()`/hunt, never by the
     /// detection engine; optimize changes only the index's physical layout, never
     /// which rows a MATCH returns. No-op on a read-only store.
+    /// Timestamp of the last full `optimize` attempt, or nil if none has run
+    /// since this store was opened — so a restart always permits one pass.
+    /// Actor-isolated; deliberately not persisted.
+    private var lastFullFTSOptimizeAt: Date?
+
+    /// Minimum spacing between full FTS `optimize` passes. See optimizeFTS.
+    private static let minFullFTSOptimizeInterval: TimeInterval = 6 * 3600
+
     @discardableResult
     public func optimizeFTS() async -> Bool {
         guard let db = db, !isReadOnly else { return false }
+        // Rate-limit the FULL optimize. It is unbounded by construction (it
+        // merges every segment in a single statement) and it runs on the
+        // ACTOR's ingestion connection, so its entire duration is head-of-line
+        // blocking for `insert(event:)`: while stalled, BatchedEventWriter
+        // cannot drain and backpressure propagates toward the ES client message
+        // queue — the path that ends in kernel-dropped ES messages and real
+        // detection blind spots.
+        //
+        // The caller (the tier-rollup sweep, DaemonTimers) invokes this on
+        // EVERY over-cap sweep, and the sweep cadence is operator-tunable down
+        // to single-digit minutes via `storage.events_size_cap_interval_minutes`
+        // (default 60), so a host sitting over cap on a low cadence pays the
+        // full compaction again and again. One pass per interval is enough to
+        // knock the index off the freelist floor that keeps the DB over cap —
+        // the on-device case this optimize was added for collapsed ~104K
+        // segments to 3 in a single pass — and the BOUNDED `mergeFTS` still
+        // runs every sweep in between, so fragmentation does not accumulate
+        // unchecked while this backs off.
+        let now = Date()
+        if let last = lastFullFTSOptimizeAt,
+           now.timeIntervalSince(last) < Self.minFullFTSOptimizeInterval {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                .debug("optimizeFTS skipped: last full optimize was \(Int(now.timeIntervalSince(last)))s ago (min interval \(Int(Self.minFullFTSOptimizeInterval))s); bounded mergeFTS still runs each sweep")
+            return false
+        }
+        // Stamp BEFORE the exec so a slow or repeatedly-failing optimize cannot
+        // be re-attempted on every subsequent sweep.
+        lastFullFTSOptimizeAt = now
         return sqlite3_exec(db, "INSERT INTO events_fts(events_fts) VALUES('optimize')", nil, nil, nil) == SQLITE_OK
     }
 
