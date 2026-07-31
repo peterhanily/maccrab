@@ -335,12 +335,36 @@ let daemonConfigResponseKeysTyped: [String: String] = [
 ]
 let daemonConfigResponseKeys = Set(daemonConfigResponseKeysTyped.keys)
 
+/// v1.21.6 (audit DOC-11): network-enrichment switches an agent may set to
+/// `false` but never to `true`. Mirrors DaemonTimers.agentDisableOnlyConfigKeys
+/// and ConfigCommands.configEgressDisableOnlyKeys — the daemon re-checks this
+/// independently, so a divergence here is a usability bug, not a hole.
+/// Disabling reduces egress and is safe for anything holding the config tier to
+/// call; enabling would let an agent turn on outbound calls that publish the
+/// host's resolved domains (cert transparency) and installed software inventory
+/// (osv.dev), so that direction stays a human action in the dashboard.
+let daemonConfigEgressDisableOnlyKeys: Set<String> = [
+    "threat_intel_enabled",
+    "vuln_scan_enabled",
+    "package_freshness_enabled",
+    "cert_transparency_enabled",
+]
+
 func handleSetDaemonConfig(_ args: [String: Any]) -> Any {
     guard let key = args["key"] as? String else { return toolError("'key' is required") }
     let kind = daemonConfigSafeKeys[key] ?? daemonConfigResponseKeysTyped[key]
+        ?? (daemonConfigEgressDisableOnlyKeys.contains(key) ? "bool" : nil)
     guard let kind else {
-        let allowed = (daemonConfigSafeKeys.keys.sorted() + daemonConfigResponseKeysTyped.keys.sorted()).joined(separator: ", ")
+        let allowed = (daemonConfigSafeKeys.keys.sorted()
+                       + daemonConfigResponseKeysTyped.keys.sorted()
+                       + daemonConfigEgressDisableOnlyKeys.sorted().map { "\($0) (false only)" })
+            .joined(separator: ", ")
         return toolError("'\(key)' is not a settable key. Allowed: \(allowed)")
+    }
+    // Disable-only: refuse the enabling direction here so the agent gets a
+    // reason instead of a silent daemon-side rejection.
+    if daemonConfigEgressDisableOnlyKeys.contains(key), (args["value"] as? Bool) == true {
+        return toolError("'\(key)' can only be set to false. Enabling it turns on outbound network calls, which is a human action: Settings > Network enrichment in MacCrab.app.")
     }
     // Coerce + validate the value to the declared kind. Reject anything else.
     var coerced: Any

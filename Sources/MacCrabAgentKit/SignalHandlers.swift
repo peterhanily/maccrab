@@ -166,14 +166,11 @@ enum SignalHandlers {
 
                     // (freshConfig loaded above, alongside the rule-profile derivation.)
                     let old = state.storage
-                    var newStorage = freshConfig.storage
-                    newStorage.eventsHotTierMinutes  = max(15, newStorage.eventsHotTierMinutes)
-                    newStorage.eventsMaxSizeMB       = max(50, newStorage.eventsMaxSizeMB)
-                    newStorage.aggregateDays         = max(1, newStorage.aggregateDays)
-                    newStorage.alertsRetentionDays   = max(1, newStorage.alertsRetentionDays)
-                    newStorage.alertsMaxSizeMB       = max(50, newStorage.alertsMaxSizeMB)
-                    newStorage.campaignsRetentionDays = max(1, newStorage.campaignsRetentionDays)
-                    newStorage.campaignsMaxSizeMB    = max(50, newStorage.campaignsMaxSizeMB)
+                    // Same floors as boot, from the same function — this used to
+                    // be a hand-maintained copy of DaemonSetup's list and had
+                    // fallen eight knobs behind it, so a reload could re-admit a
+                    // `traces_retention_days: 0` that boot would have clamped.
+                    let newStorage = freshConfig.storage.clampedToSafeFloors()
                     state.storage = newStorage
 
                     // v1.19.1: re-apply the opt-in network-enrichment switches

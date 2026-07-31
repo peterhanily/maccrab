@@ -626,18 +626,20 @@ extension MacCrabCtl {
 
     // MARK: - trace replay
 
-    /// `rulesDirectory` (CLI `--rules <dir>`): when supplied, replay drives the
-    /// REAL `RuleEngine` over the bundle's events via `RuleEngineReplayer`, so
-    /// the alert list is a FRESH result produced by the ruleset under test.
+    /// Replay drives the REAL `RuleEngine` over the bundle's events via
+    /// `RuleEngineReplayer`, so the alert list is a FRESH result produced by an
+    /// actual ruleset. `rulesDirectory` (CLI `--rules <dir>`) names which one;
+    /// omitted, it resolves the installed corpus at
+    /// `<support-dir>/compiled_rules` — the same rules the engine is running.
     ///
-    /// When omitted, the default echo replayer ignores `events` entirely and
-    /// re-emits `matched_rules.json` verbatim, stamping a fixed ruleset hash.
-    /// That is a determinism proof and nothing more — it cannot tell you whether
-    /// today's ruleset still detects what yesterday's did, because it never runs
-    /// a rule. `RuleEngineReplayer` shipped with ZERO production call sites, so
-    /// until now no shipped replay path evaluated anything; the banner below
-    /// names which mode ran, so a green replay is not misread as evidence about
-    /// detection.
+    /// The echo replayer is now the LAST resort, not the default. It ignores
+    /// `events` entirely, re-emits `matched_rules.json` verbatim and stamps a
+    /// fixed ruleset hash: a determinism proof and nothing more. It cannot tell
+    /// you whether today's ruleset still detects what yesterday's did, because
+    /// it never runs a rule — yet it was what every shipped `trace replay`
+    /// invocation got, so the command's headline output was, in the only sense a
+    /// caller cares about, meaningless. It is now reached only when no compiled
+    /// corpus can be found or loaded, and the banner says which mode ran and why.
     static func traceReplay(
         bundlePath: String,
         expectedNormalizationVersion: String,
@@ -662,9 +664,12 @@ extension MacCrabCtl {
         let target = directory ?? url
         defer { cleanupExtracted(directory) }
 
-        // SU-01: drive the REAL rule engine when the caller names a ruleset.
-        // Falls back to the echo replayer (determinism-only) otherwise, and says
-        // which one ran so the two can never be confused.
+        // SU-01: drive the REAL rule engine. An explicitly named ruleset is a
+        // hard requirement — failing to load it exits rather than quietly
+        // downgrading, because the caller asked a specific question ("does THIS
+        // ruleset still detect it?") and the echo replayer cannot answer it.
+        // With no `--rules`, resolve the installed corpus; only if that is
+        // absent or unloadable do we fall back to echo, saying so.
         let engine: ReplayEngine
         if let rulesDirectory {
             do {
@@ -676,9 +681,18 @@ extension MacCrabCtl {
                 exit(9)
             }
         } else {
-            engine = ReplayEngine()
-            print("[replay] mode=echo — determinism only; NO rule was evaluated. "
-                  + "Pass --rules <compiled-rules-dir> to replay against a real ruleset.")
+            let installed = maccrabDataDir() + "/compiled_rules"
+            if let replayer = try? RuleEngineReplayer(
+                rulesDirectory: URL(fileURLWithPath: installed)) {
+                engine = ReplayEngine(replayer: replayer)
+                print("[replay] mode=rule-engine rules=\(installed) (installed corpus; "
+                      + "pass --rules <dir> to replay against a different one)")
+            } else {
+                engine = ReplayEngine()
+                print("[replay] mode=echo — no loadable compiled ruleset at \(installed). "
+                      + "Determinism only; NO rule was evaluated. "
+                      + "Pass --rules <compiled-rules-dir> to replay against a real ruleset.")
+            }
         }
         var options = ReplayEngine.ReplayOptions()
         options.expectedNormalizationVersion = expectedNormalizationVersion

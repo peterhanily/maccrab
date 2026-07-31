@@ -50,6 +50,30 @@ private let configResponseKeys: [String: String] = [
     "ultrasonic_enabled": "bool",
 ]
 
+/// v1.21.6 (audit DOC-11): the four network-enrichment switches, settable
+/// **to `false` only**.
+///
+/// PRIVACY.md offered three ways to stop MacCrab's outbound network calls and
+/// two of them did not work for a non-root user — `config set` rejected these
+/// keys outright, and hand-editing daemon_config.json needs sudo because the
+/// engine writes it root-owned 0600.
+///
+/// They are asymmetric on purpose. `config set` does not edit a file; it drops
+/// a request into the mode-1777 privileged inbox, which the daemon authorizes
+/// on uid alone — the same control plane the S-01/S-02/S-05 findings are about.
+/// Setting one of these **false** only ever reduces egress, so post-compromise
+/// code running as the console user gains nothing by driving it. Setting one
+/// **true** would ENABLE egress (cert-transparency leaks every observed domain;
+/// osv.dev leaks the installed software inventory), which is a capability that
+/// plane should not carry. Turning them back ON is therefore a dashboard /
+/// root-config action, and `set` says so rather than failing opaquely.
+private let configEgressDisableOnlyKeys: Set<String> = [
+    "threat_intel_enabled",
+    "vuln_scan_enabled",
+    "package_freshness_enabled",
+    "cert_transparency_enabled",
+]
+
 /// Dispatch `maccrabctl config <get|set> ...`. Called from MacCrabCtl.main
 /// when args[1] == "config" (rest == args.dropFirst(2)).
 func dispatchConfig(args: [String]) {
@@ -75,6 +99,7 @@ func dispatchConfig(args: [String]) {
 func printConfigUsage() {
     let safe = configSafeKeys.keys.sorted().joined(separator: ", ")
     let resp = configResponseKeys.keys.sorted().joined(separator: ", ")
+    let egress = configEgressDisableOnlyKeys.sorted().joined(separator: ", ")
     print("""
     Usage: maccrabctl config <subcommand>
 
@@ -89,6 +114,10 @@ func printConfigUsage() {
 
     Defense-affecting keys (turning these off reduces detection coverage):
       \(resp)
+
+    Network-enrichment keys (settable to FALSE only — disables outbound calls):
+      \(egress)
+      Enabling these back on is a dashboard / root-config action; see PRIVACY.md.
     """)
 }
 
@@ -126,7 +155,8 @@ private func configGet(args: [String]) {
     if let key = args.first {
         if let value = json[key] {
             print("\(key) = \(value)")
-        } else if configSafeKeys[key] != nil || configResponseKeys[key] != nil {
+        } else if configSafeKeys[key] != nil || configResponseKeys[key] != nil
+                    || configEgressDisableOnlyKeys.contains(key) {
             print("\(key) is not set in daemon_config.json (using its built-in default).")
         } else {
             print("'\(key)' is not present in daemon_config.json.")
@@ -152,7 +182,26 @@ private func configSet(args: [String]) {
     let key = args[0]
     let raw = args[1]
 
+    // Disable-only egress keys: accept `false`, refuse `true` with the reason
+    // and the path that does work. Checked before the kind lookup so the
+    // refusal names the actual constraint instead of "not a settable key".
+    if configEgressDisableOnlyKeys.contains(key) {
+        guard let b = parseBool(raw) else {
+            print("'\(key)' expects a boolean value (true / false).")
+            exit(1)
+        }
+        if b {
+            print("'\(key)' cannot be enabled from the CLI.")
+            print("Turning it ON enables outbound network calls, and `config set` writes through the")
+            print("privileged inbox, which authorizes on uid alone — so an egress-enabling verb there")
+            print("would be reachable by anything running as you. Disabling is allowed; enabling is not.")
+            print("To enable: Settings → Network enrichment in MacCrab.app, or edit daemon_config.json as root.")
+            exit(1)
+        }
+    }
+
     let kind = configSafeKeys[key] ?? configResponseKeys[key]
+        ?? (configEgressDisableOnlyKeys.contains(key) ? "bool" : nil)
     guard let kind else {
         print("'\(key)' is not a settable key.")
         print("Allowed: \(allowedKeyList())")
@@ -201,7 +250,14 @@ private func configSet(args: [String]) {
         exit(1)
     }
     print("Queued daemon_config update: \(key) = \(coerced).")
-    print("The engine applies it on its next config reload / restart.")
+    if configEgressDisableOnlyKeys.contains(key) {
+        // The daemon applies these four the moment it drains the inbox rather
+        // than at the next reload — a privacy control that took effect "on the
+        // next restart" would look like it worked while enrichment kept talking.
+        print("The engine stops this feed's egress as soon as it drains the inbox (within ~5s), not at the next restart.")
+    } else {
+        print("The engine applies it on its next config reload / restart.")
+    }
 }
 
 // MARK: - audit
@@ -251,7 +307,8 @@ func dispatchAudit(args: [String]) {
 // MARK: - helpers
 
 private func allowedKeyList() -> String {
-    (configSafeKeys.keys.sorted() + configResponseKeys.keys.sorted()).joined(separator: ", ")
+    (configSafeKeys.keys.sorted() + configResponseKeys.keys.sorted()
+        + configEgressDisableOnlyKeys.sorted().map { "\($0) (false only)" }).joined(separator: ", ")
 }
 
 private func parseBool(_ s: String) -> Bool? {

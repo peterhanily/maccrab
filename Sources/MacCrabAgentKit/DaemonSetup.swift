@@ -2039,24 +2039,13 @@ enum DaemonSetup {
         // the boot profile on reload, only sequence/graph pick up the fresh one.
         state.bootRuleProfile = config.ruleProfile
 
-        // Apply v1.8.0 per-tier storage budgets. DaemonTimers reads each
-        // knob live so a SIGHUP-driven config reload is honored on the
-        // next sweep without a daemon restart. Floors clamp hostile
-        // values:
-        //   - eventsHotTierMinutes: 15 min minimum. The longest sequence
-        //     rule (ransomware_kill_chain.yml) needs a 10-min window;
-        //     anything shorter risks dropping events mid-sequence.
-        //   - retention days: 1 day minimum
-        //   - size caps: 50 MB minimum
-        var storage = config.storage
-        storage.eventsHotTierMinutes  = max(15, storage.eventsHotTierMinutes)
-        storage.eventsMaxSizeMB       = max(50, storage.eventsMaxSizeMB)
-        storage.aggregateDays         = max(1, storage.aggregateDays)
-        storage.alertsRetentionDays   = max(1, storage.alertsRetentionDays)
-        storage.alertsMaxSizeMB       = max(50, storage.alertsMaxSizeMB)
-        storage.campaignsRetentionDays = max(1, storage.campaignsRetentionDays)
-        storage.campaignsMaxSizeMB    = max(50, storage.campaignsMaxSizeMB)
-        state.storage = storage
+        // Apply v1.8.0 per-tier storage budgets. DaemonTimers reads each knob
+        // live so a SIGHUP-driven config reload is honored on the next sweep
+        // without a daemon restart. Floors live on the type
+        // (StorageConfig.clampedToSafeFloors) so this boot path and the SIGHUP
+        // reload path cannot drift apart — they did, and eight tiers ended up
+        // clamped at neither.
+        state.storage = config.storage.clampedToSafeFloors()
 
         // v1.19.1: seed the opt-in network-enrichment switches (off by default).
         // DaemonTimers (vuln scan) and EventLoop (package freshness) read these

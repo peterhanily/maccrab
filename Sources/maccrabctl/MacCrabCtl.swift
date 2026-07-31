@@ -646,9 +646,11 @@ struct MacCrabCtl {
                                                    validate's structural codes; it runs first)
           trace replay <bundle> [--normalization <version>] [--rules <compiled-rules-dir>]
                                                    Deterministic replay (exits 0,1,6,11).
-                                                   Without --rules NO rule is evaluated: the
-                                                   bundle's recorded matches are echoed back,
-                                                   which proves determinism only.
+                                                   Runs the REAL rule engine. Without --rules it
+                                                   uses the installed compiled_rules corpus. Only
+                                                   if none can be loaded does it fall back to
+                                                   echoing the bundle's recorded matches, which
+                                                   proves determinism only — the banner says so.
           trace replay <bundle> --compare-rules <dir-a> <dir-b>
                                                    Run the ruleset in each compiled-rules
                                                    DIRECTORY over the bundle and diff the

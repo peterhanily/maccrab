@@ -2774,6 +2774,25 @@ enum DaemonTimers {
         "prompt_injection_confidence": "int", "intent_posterior_threshold": "double",
         "subscribe_file_open_events": "bool", "subscribe_introspection_events": "bool",
         "ultrasonic_enabled": "bool",
+        // v1.21.6 (audit DOC-11): the four network-enrichment switches, accepted
+        // ONLY as `false` — see agentDisableOnlyConfigKeys below.
+        "threat_intel_enabled": "bool", "vuln_scan_enabled": "bool",
+        "package_freshness_enabled": "bool", "cert_transparency_enabled": "bool",
+    ]
+
+    /// Keys this plane accepts in the privacy-increasing direction only.
+    ///
+    /// The inbox authorizes on file-owner uid alone, so anything running as the
+    /// console user can drive every verb here. Setting a network-enrichment
+    /// switch to `false` only ever REDUCES egress — harmless for an attacker to
+    /// call, and the thing PRIVACY.md needs a non-root user to be able to do.
+    /// Setting one to `true` would ENABLE egress (cert-transparency publishes
+    /// every domain the host resolves; osv.dev publishes the installed software
+    /// inventory), which is a capability that must not be reachable from a
+    /// uid-only plane. A `true` is refused and audited, not silently dropped.
+    private static let agentDisableOnlyConfigKeys: Set<String> = [
+        "threat_intel_enabled", "vuln_scan_enabled",
+        "package_freshness_enabled", "cert_transparency_enabled",
     ]
 
     /// v1.19.1 (audit): detection-preserving safe ranges for agent-settable
@@ -2840,6 +2859,18 @@ enum DaemonTimers {
                     continue
                 }
             }
+            // Disable-only keys: a `true` here would turn outbound network
+            // enrichment ON from a plane that authorizes on uid alone. Refuse and
+            // audit it — the operator path is the dashboard or the root config.
+            if agentDisableOnlyConfigKeys.contains(key), (value as? Bool) == true {
+                auditLogInbox(state: state, prefix: "set-daemon-config",
+                              id: sanitizeAuditField(key), uid: uid,
+                              result: "rejected_enable_egress")
+                await emitSelfProtectionAlert(
+                    state: state, action: "Network egress enable refused",
+                    detail: "An inbox request tried to set '\(key)' to true, which would enable outbound network calls. The privileged inbox authorizes on uid alone, so it accepts these switches in the disable direction only; the request was refused.")
+                continue
+            }
             // v1.19.1 (audit): clamp numeric thresholds to a detection-preserving
             // range so an agent / console user can't disable a tier (e.g. the
             // live-caught statistical_z_threshold=99). A clamp means the request
@@ -2879,6 +2910,26 @@ enum DaemonTimers {
                     await emitSelfProtectionAlert(
                         state: state, action: "Endpoint Security subscription disabled",
                         detail: "ES event subscription '\(key)' was set to false (disables a class of kernel telemetry on the next daemon restart)")
+                }
+                // Apply the egress switches LIVE rather than on the next reload.
+                // Every other key here is a threshold whose next read is soon
+                // enough, but these are the ones a user reaches for when they
+                // want the network calls to stop NOW — deferring that to a
+                // restart would make `config set … false` look like it worked
+                // while enrichment kept talking. Mirrors the SIGHUP path.
+                if agentDisableOnlyConfigKeys.contains(key), (value as? Bool) == false {
+                    switch key {
+                    case "vuln_scan_enabled":         state.vulnScanEnabled = false
+                    case "package_freshness_enabled": state.packageFreshnessEnabled = false
+                    case "cert_transparency_enabled": state.certTransparencyEnabled = false
+                    case "threat_intel_enabled":
+                        // The feed runs its own network loop; flipping the flag
+                        // alone would not stop it.
+                        state.threatIntelEnabled = false
+                        await state.threatIntel.setNetworkRefresh(false)
+                    default: break
+                    }
+                    print("[inbox] \(key)=false applied live (egress stopped)")
                 }
             } catch {
                 print("[inbox] set-daemon-config \(key) write failed: \(error)")

@@ -48,18 +48,38 @@ of an account in the **admin** group, so that a standard user on a shared Mac
 cannot weaken the operator's configuration. On a managed Mac, ask an admin — or
 use the root file below.
 
-The engine's own `daemon_config.json` (keys `threat_intel_enabled`,
-`vuln_scan_enabled`, `package_freshness_enabled`, `cert_transparency_enabled`)
-works as well, but on a release install it is root-owned `0600`, so editing it
-requires `sudo`. `maccrabctl config set` does **not** accept any of these four
-keys: its allowlist covers detection thresholds and poll intervals only, and
-`maccrabctl config get` will tell you when the root file exists but your account
-cannot read it rather than reporting "defaults".
+From a terminal, `maccrabctl config set` turns any of the four **off**:
 
-Changes are honored live on `SIGHUP` — disabling a
-feed stops its egress without a restart. Local detection (rules, sequences,
-campaigns, bundled IOCs) is unaffected by these toggles and never makes a network
-request.
+```bash
+maccrabctl config set cert_transparency_enabled false
+maccrabctl config set threat_intel_enabled false
+maccrabctl config set vuln_scan_enabled false
+maccrabctl config set package_freshness_enabled false
+```
+
+No `sudo`, and the engine applies it immediately rather than at the next restart.
+
+These four are the only keys the CLI accepts in one direction only: it will
+refuse `true`. That is deliberate, and worth understanding rather than working
+around. `config set` does not edit a file — it drops a request into a
+world-writable directory that the engine authorizes by the requesting account
+alone. Turning a feed **off** only ever reduces what leaves your machine, so it
+is safe for that path to carry. Turning one **on** would enable outbound calls
+that publish real information about your Mac — Certificate Transparency
+publishes every domain you resolve, osv.dev publishes your installed software
+inventory — so enabling stays a deliberate human action in **Settings → Network
+enrichment**, where it cannot be driven by something merely running under your
+account.
+
+The engine's own `daemon_config.json` (same four snake_case keys) works as well,
+but on a release install it is root-owned `0600`, so editing it requires `sudo`.
+`maccrabctl config get` will tell you when the root file exists but your account
+cannot read it, rather than reporting "defaults".
+
+Changes are honored live — disabling a feed stops its egress without a restart,
+whether you used Settings, the CLI, or a `SIGHUP` after a root edit. Local
+detection (rules, sequences, campaigns, bundled IOCs) is unaffected by these
+toggles and never makes a network request.
 
 The local typosquat check is **not** in this table because it runs entirely
 on-device and makes no network request.

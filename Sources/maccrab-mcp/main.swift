@@ -903,8 +903,65 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "list_builtin_rules",
-        "description": "List the built-in maccrab.* detections with their category and effective severity (after any operator override), and whether each is muted. Read-only.",
+        "description": "List the built-in maccrab.* detections with their category and effective severity (after any operator override), and whether each is muted. Read-only. For the 438-rule Sigma corpus, use list_rules instead.",
         "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    // v1.21.6 (audit PAR-09): the read half of the capability matrix — see
+    // ReadParityTools.swift. All read-only, so none is capability-gated.
+    [
+        "name": "list_rules",
+        "description": "List the compiled Sigma detection corpus (id, title, level, tags), annotated with whether each rule is actually LOADED under the active rule_profile and whether it has ever been evaluated or matched. Most rules ship as 'experimental' and are NOT loaded under the default profile, so a rule appearing here does not mean it is running — the state field says which. Read-only. Complements list_builtin_rules (the separate maccrab.* built-in set).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "level": ["type": "string", "description": "filter by severity: critical|high|medium|low|informational"],
+                "tactic": ["type": "string", "description": "substring match against the rule's tags, e.g. 'credential_access' or 'attack.t1555'"],
+                "search": ["type": "string", "description": "substring match against title or rule id"],
+                "limit": ["type": "integer", "description": "max rules to return (1-500, default 100)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "explain_alert",
+        "description": "Explain a single alert: the rule that fired, its compiled detection predicate, logsource and status. Mirrors `maccrabctl why`. For built-in maccrab.* detections there is no predicate and the tool says so rather than implying one is missing. Read-only.",
+        "inputSchema": [
+            "type": "object",
+            "properties": ["alert_id": ["type": "string", "description": "alert id from get_alerts"]],
+            "required": ["alert_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_vulns",
+        "description": "Vulnerability findings (maccrab.vuln.* alerts) from the osv.dev CVE lookup. That lookup is OFF by default, so an empty result means 'not enabled', not 'no vulnerabilities'. Read-only.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "hours": ["type": "number", "description": "lookback window in hours (default 168 = 7 days)"],
+                "limit": ["type": "integer", "description": "max findings (1-200, default 50)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_privacy_alerts",
+        "description": "Privacy-auditor findings (maccrab.privacy.* alerts): bulk egress, domain spikes, high-frequency tracker contacts. Read-only.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "hours": ["type": "number", "description": "lookback window in hours (default 168 = 7 days)"],
+                "limit": ["type": "integer", "description": "max findings (1-200, default 50)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_browser_extensions",
+        "description": "Installed browser extensions across Chrome, Brave, Edge, Arc and Firefox with their risk score, dangerous permissions, host permissions and dev-mode (unpacked) status. Scans the browser profiles of the account this server runs as. Read-only.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "suspicious_only": ["type": "boolean", "description": "only extensions at risk >= 40 or holding a dangerous permission"],
+                "limit": ["type": "integer", "description": "max extensions (1-300, default 100)"],
+            ],
+        ] as [String: Any],
     ],
     [
         "name": "get_audit_log",
@@ -1027,6 +1084,17 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return handleAgentCapabilities()
     case "list_builtin_rules":
         return handleListBuiltinRules()
+    // v1.21.6 (audit PAR-09) — read-only parity tools, see ReadParityTools.swift.
+    case "list_rules":
+        return handleListRules(args)
+    case "explain_alert":
+        return await handleExplainAlert(args)
+    case "get_vulns":
+        return await handleGetVulns(args)
+    case "get_privacy_alerts":
+        return await handleGetPrivacyAlerts(args)
+    case "get_browser_extensions":
+        return handleGetBrowserExtensions(args)
     case "get_audit_log":
         return handleGetAuditLog(args)
     case "set_builtin_rule_setting":

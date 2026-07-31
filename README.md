@@ -243,7 +243,7 @@ For Claude Desktop, add the same command to
 `swift build --target maccrab-mcp`, then copy `.mcp.json` from the repo root
 into your project; it points at the local `.build/debug/maccrab-mcp`.
 
-**Available tools — 62 built-in** (including the 20 always-present `forensics_*` case/plugin meta-tools) **plus per-plugin tools contributed by installed forensic plugins** (31 on a default install: `launchd_*`, `tcc_*`, `safari_*`, `mail_*`, `imessage_*`, `*_analyze_path`, …) **— 93 total here.** Neither `maccrabctl mcp list` (which inventories MCP *server configs*, not tools) nor `agent_capabilities` (which reports control-plane capability tiers) prints a tool list; ask your MCP client for its tool inventory. A representative slice:
+**Available tools — 67 built-in** (including the 20 always-present `forensics_*` case/plugin meta-tools) **plus per-plugin tools contributed by installed forensic plugins** (31 on a default install: `launchd_*`, `tcc_*`, `safari_*`, `mail_*`, `imessage_*`, `*_analyze_path`, …) **— 98 total here.** Neither `maccrabctl mcp list` (which inventories MCP *server configs*, not tools) nor `agent_capabilities` (which reports control-plane capability tiers) prints a tool list; ask your MCP client for its tool inventory. A representative slice:
 
 | Tool | Purpose |
 |------|---------|
@@ -264,6 +264,11 @@ into your project; it points at the local `.build/debug/maccrab-mcp`.
 | `hunt_trace` | (v1.10) Substring search across traces |
 | `verify_bundle` | (v1.10) Verify a `.maccrabtrace` bundle (schema, Merkle, signature) |
 | `trace_from_event` | (v1.10) Pivot from an event id to its containing trace |
+| `list_rules` | (v1.21.6) The compiled Sigma corpus, annotated with whether each rule is actually loaded under the active profile and whether it has ever been evaluated |
+| `explain_alert` | (v1.21.6) Why one alert fired: the rule, its compiled predicate, logsource and status |
+| `get_vulns` | (v1.21.6) Vulnerability findings from the osv.dev lookup (off by default) |
+| `get_privacy_alerts` | (v1.21.6) Privacy-auditor findings: bulk egress, domain spikes, tracker contacts |
+| `get_browser_extensions` | (v1.21.6) Installed extensions with risk score, dangerous permissions and dev-mode status |
 | `check_typosquat_score` | (v1.12) Score a package name against bundled top corpora (Damerau-Levenshtein + Unicode confusable fold) |
 | `scan_package_content` | (v1.12) Walk an installed package dir for obfuscation markers / single-line bundles / Mach-O drops |
 | `analyze_package_metadata` | (v1.12) Inspect a package's registry metadata (versions, maintainer age, download anomalies) |
