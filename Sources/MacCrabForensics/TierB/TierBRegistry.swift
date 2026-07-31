@@ -87,8 +87,19 @@ public actor TierBRegistry {
 
     private let installer: PluginInstaller
 
-    public init(installer: PluginInstaller? = nil) {
+    /// Directory for the verified-binary temp files this registry writes.
+    ///
+    /// Injectable ONLY so tests can isolate. It defaults to
+    /// `NSTemporaryDirectory()`, which is a process-global namespace shared by
+    /// every concurrently-running test suite — five suites resolve bundles, so a
+    /// test asserting "this registry leaked no temp binary" could not attribute
+    /// what it found and failed in a full run while passing in isolation.
+    /// Production always takes the default.
+    private let tempDirectory: String
+
+    public init(installer: PluginInstaller? = nil, tempDirectory: String = NSTemporaryDirectory()) {
         self.installer = installer ?? PluginInstaller()
+        self.tempDirectory = tempDirectory.hasSuffix("/") ? tempDirectory : tempDirectory + "/"
     }
 
     /// Discover + verify a single installed plugin. The plugin's
@@ -187,7 +198,7 @@ public actor TierBRegistry {
         // the path we hand to Process.run — guarantees the
         // spawned bytes are exactly the verified bytes, even if
         // the bundle binary gets swapped between now and exec.
-        let tempBinaryPath = NSTemporaryDirectory()
+        let tempBinaryPath = tempDirectory
             + "maccrab-tier-b-verified-\(UUID().uuidString)"
         do {
             try verifiedBinaryBytes.write(to: URL(fileURLWithPath: tempBinaryPath), options: .atomic)

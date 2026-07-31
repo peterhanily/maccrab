@@ -29,6 +29,9 @@
 import Foundation
 import CryptoKit
 import os.log
+// v1.21.5 (audit S-06): SecStaticCode* — the elevated rule sync must verify this
+// app bundle's own code signature before promoting its Resources to root.
+import Security
 
 enum RuleBundleInstaller {
 
@@ -284,6 +287,26 @@ enum RuleBundleInstaller {
     /// user DOES control (drag-install to e.g. /Volumes/Tom's Disk/), so the
     /// shell-level escaping is load-bearing, not cosmetic.
     private static func copyRulesWithElevation(from src: String, to dst: String) -> Bool {
+        // v1.21.5 (audit S-06): this function is about to run `rm -rf` + `cp -R`
+        // over the ROOT detection corpus, with the SOURCE taken from this app
+        // bundle and its integrity anchored ONLY by verifyManifest — which hashes
+        // files against a manifest.json that lives INSIDE the directory it
+        // validates and carries no signature. An attacker who already holds App
+        // Management (a routinely-granted prompt for Terminal and dev tooling) can
+        // rewrite Contents/Resources/compiled_rules, regenerate manifest.json and
+        // bump .bundle_version, and this path would then promote the entire
+        // attacker-authored corpus to root:admin — replacing detection wholesale,
+        // root-owned, and clearing the daemon's own tamper baseline in the process.
+        // Anchor the trust OUTSIDE that directory: the app bundle's signature seals
+        // Contents/Resources via CodeResources, so a signature that still validates
+        // against MacCrab's designated requirement proves the bundled rules are the
+        // ones we shipped. FAIL CLOSED — a refusal simply leaves the
+        // previously-installed rules in place, the same outcome as the user
+        // dismissing the admin prompt below.
+        guard bundleSignatureIsTrusted() else {
+            logger.critical("Refusing elevated rule sync: MacCrab.app's code signature does not satisfy the MacCrab designated requirement. Detection continues with the previously-installed rules.")
+            return false
+        }
         let parent = (dst as NSString).deletingLastPathComponent
         // Single-line shell command: AppleScript's `do shell script`
         // interprets backslashes inside the quoted string as escapes,
@@ -363,5 +386,28 @@ enum RuleBundleInstaller {
     /// stays only as the same-uid dev-daemon fallback.
     private static func sighupDetectionEngine() {
         _ = V2DaemonControl.reloadDetectionRules()
+    }
+
+    /// v1.21.5 (audit S-06): is the RUNNING app bundle still the one we signed?
+    /// Validates `Bundle.main` against a designated requirement pinning the bundle
+    /// identifier AND MacCrab's Developer ID team (79S425CW99), with resource
+    /// validation left ON (the default for SecStaticCodeCheckValidity) so a
+    /// swapped `Contents/Resources/compiled_rules` file breaks the seal — that is
+    /// the whole point here. Nested-code validation is deliberately NOT requested:
+    /// it would re-hash the embedded system extension and Sparkle framework for no
+    /// benefit to this check, at a real latency cost. ANY failure — unsigned,
+    /// ad-hoc-signed, wrong team, tampered resources, or an API error we cannot
+    /// interpret — returns false, because this gate is the only thing standing
+    /// between an App-Management-holding process and root-owned detection rules.
+    private static func bundleSignatureIsTrusted() -> Bool {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &staticCode) == errSecSuccess,
+              let code = staticCode else { return false }
+        var requirement: SecRequirement?
+        let reqText = "identifier \"com.maccrab.app\" and anchor apple generic"
+            + " and certificate leaf[subject.OU] = \"79S425CW99\""
+        guard SecRequirementCreateWithString(reqText as CFString, [], &requirement) == errSecSuccess,
+              let req = requirement else { return false }
+        return SecStaticCodeCheckValidity(code, [], req) == errSecSuccess
     }
 }

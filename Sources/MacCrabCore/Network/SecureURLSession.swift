@@ -65,9 +65,32 @@ public enum APIProvider: String, Sendable {
     ///   | openssl dgst -sha256 -binary | base64
     /// ```
     ///
+    /// ## What is ACTUALLY enforced today (re-measured 2026-07-29)
+    ///
+    /// The chain-match accepts a hit on ANY cert in the presented chain, and
+    /// every LEAF pin below is stale — re-running the openssl command above
+    /// against all six pinned hosts matched 0/6 leaves (api.anthropic.com now
+    /// presents `yzfNb1bRcNF+H1Fts441Vj0MIuuxepdWKmqKJ/bVV6U=`, not the
+    /// `j5kESgiKjzim…` pinned here; api.openai.com now presents
+    /// `JEM5l00499277DC2tHGecIWfIl199sH4CqM/0w0bHsA=`). Every one of those
+    /// connections is therefore carried by the shared Google Trust Services
+    /// INTERMEDIATE pin, so the property actually enforced is "issued under
+    /// GTS WE1/WR2/WR3" — it resists a rogue third-party CA (the stated goal)
+    /// but it does NOT resist GTS itself and does NOT distinguish
+    /// api.anthropic.com from api.openai.com. Do not describe this as per-host
+    /// leaf key pinning while the leaf hit-rate is 0/6.
+    ///
+    /// There is also NO BACKUP PIN (RFC 7469 §4.3): four providers rest on the
+    /// single WE1 intermediate, so a GTS intermediate rotation fails all of
+    /// them closed at once and the only recovery is the MACCRAB_TLS_PINNING=off
+    /// valve. Pin the announced NEXT intermediate alongside the current one.
+    ///
     /// Leaf pins should be refreshed annually (or when a provider rotates their
-    /// certificate). Intermediate CA pins are stable across leaf rotations but
-    /// should be verified before each release. Last verified: 2026-04-08.
+    /// certificate) — enforce that with a release gate that runs the openssl
+    /// command above and fails when a shipped pin is absent from the live
+    /// chain; "should" on its own produced the 0/6 above. Intermediate CA pins
+    /// are stable across leaf rotations but should be verified before each
+    /// release. Last verified: 2026-04-08 (leaves re-measured STALE 2026-07-29).
     var knownSPKIPins: [String] {
         switch self {
         case .anthropic:

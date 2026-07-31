@@ -37,7 +37,9 @@ struct SecretsStoreTests {
     /// any headless SSH session the prompt lands somewhere no-one can
     /// click and the test hangs. Running locally: set
     /// `MACCRAB_RUN_KEYCHAIN_TESTS=1` and the suite executes for real.
-    private static var isEnabled: Bool {
+    /// Internal (not private): a Swift Testing `.enabled(if:)` trait expression
+    /// is expanded outside this type's scope and cannot see a private member.
+    static var isEnabled: Bool {
         ProcessInfo.processInfo.environment["MACCRAB_RUN_KEYCHAIN_TESTS"] == "1"
     }
 
@@ -45,9 +47,11 @@ struct SecretsStoreTests {
         try? store.delete(testKey)
     }
 
-    @Test("set then get round-trips the value")
+    // `.enabled(if:)` rather than `guard … else { return }`: the guard made a
+    // SKIP report as a PASS, inflating the suite headline with eight tests that
+    // assert nothing in every environment that does not set the opt-in.
+    @Test("set then get round-trips the value", .enabled(if: SecretsStoreTests.isEnabled))
     func roundTrip() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 
@@ -55,16 +59,14 @@ struct SecretsStoreTests {
         #expect(try store.get(testKey) == "test-secret-value-42")
     }
 
-    @Test("get on missing key returns nil (not throw)")
+    @Test("get on missing key returns nil (not throw)", .enabled(if: SecretsStoreTests.isEnabled))
     func missingKeyReturnsNil() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         #expect(try store.get(testKey) == nil)
     }
 
-    @Test("set overwrites an existing value")
+    @Test("set overwrites an existing value", .enabled(if: SecretsStoreTests.isEnabled))
     func overwriteSemantics() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 
@@ -73,9 +75,8 @@ struct SecretsStoreTests {
         #expect(try store.get(testKey) == "second")
     }
 
-    @Test("set with empty string deletes the item")
+    @Test("set with empty string deletes the item", .enabled(if: SecretsStoreTests.isEnabled))
     func emptyStringDeletes() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 
@@ -86,18 +87,16 @@ struct SecretsStoreTests {
         #expect(try store.get(testKey) == nil)
     }
 
-    @Test("delete is idempotent")
+    @Test("delete is idempotent", .enabled(if: SecretsStoreTests.isEnabled))
     func deleteIsIdempotent() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         try store.delete(testKey)
         try store.delete(testKey)
         // If we got here, both deletes returned without throwing.
     }
 
-    @Test("exists reflects storage state without throwing")
+    @Test("exists reflects storage state without throwing", .enabled(if: SecretsStoreTests.isEnabled))
     func existsContract() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 
@@ -108,9 +107,8 @@ struct SecretsStoreTests {
         #expect(!store.exists(testKey))
     }
 
-    @Test("storedKeys lists only the keys we've set")
+    @Test("storedKeys lists only the keys we've set", .enabled(if: SecretsStoreTests.isEnabled))
     func storedKeysListing() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 
@@ -122,9 +120,8 @@ struct SecretsStoreTests {
         #expect(after.subtracting(before) == [testKey])
     }
 
-    @Test("unicode values survive the round trip")
+    @Test("unicode values survive the round trip", .enabled(if: SecretsStoreTests.isEnabled))
     func unicodeRoundTrip() throws {
-        guard Self.isEnabled else { return }
         cleanup()
         defer { cleanup() }
 

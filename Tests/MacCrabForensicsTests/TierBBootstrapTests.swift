@@ -10,17 +10,10 @@ import CryptoKit
 @Suite("TierBBootstrap")
 struct TierBBootstrapTests {
 
-    static var fixtureBinaryPath: String? {
-        let candidates = [
-            ".build/debug/tier-b-fixture-plugin",
-            ".build/release/tier-b-fixture-plugin",
-        ]
-        let fm = FileManager.default
-        for c in candidates where fm.isExecutableFile(atPath: c) {
-            return c
-        }
-        return nil
-    }
+    /// Delegate to the canonical resolver. This copy hunted for
+    /// `tier-b-fixture-plugin`, which is not a product in Package.swift, so it
+    /// always returned nil and the guarded tests below never ran.
+    static var fixtureBinaryPath: String? { TierBRegistryTests.fixtureBinaryPath }
 
     @Test("status returns empty + zeros when no plugins installed")
     func emptyState() async throws {
@@ -127,15 +120,23 @@ struct TierBBootstrapTests {
         let (src, _) = try TierBRegistryTests.signedBundle(manifest: manifest, binaryPath: binary)
         defer { try? FileManager.default.removeItem(at: src) }
         _ = try await installer.install(sourceDir: src, trustOnInstall: true)
-        // Snapshot tmpdir before + after refresh.
-        let tmpdir = NSTemporaryDirectory()
-        let before = (try? FileManager.default.contentsOfDirectory(atPath: tmpdir)) ?? []
-        let beforeVerified = before.filter { $0.hasPrefix("maccrab-tier-b-verified-") }
-        let bootstrap = TierBBootstrap(installer: installer)
+        // Isolate the verified-binary temp files. NSTemporaryDirectory() is a
+        // process-global namespace and five suites resolve bundles concurrently,
+        // so a snapshot there could not attribute what it found: this test passed
+        // in isolation and failed in a full run, which is shared-state coupling,
+        // not a leak. Give the bootstrap its own directory and the assertion
+        // becomes exact.
+        let tmpdir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tierb-bootstrap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpdir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpdir) }
+
+        let bootstrap = TierBBootstrap(installer: installer, tempDirectory: tmpdir.path)
         _ = await bootstrap.refresh()
-        let after = (try? FileManager.default.contentsOfDirectory(atPath: tmpdir)) ?? []
-        let afterVerified = after.filter { $0.hasPrefix("maccrab-tier-b-verified-") }
+
+        let leaked = ((try? FileManager.default.contentsOfDirectory(atPath: tmpdir.path)) ?? [])
+            .filter { $0.hasPrefix("maccrab-tier-b-verified-") }
         // The bootstrap shouldn't leak temp binaries.
-        #expect(afterVerified.count == beforeVerified.count)
+        #expect(leaked.isEmpty, "bootstrap leaked verified temp binaries: \(leaked.sorted())")
     }
 }

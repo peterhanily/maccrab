@@ -1,5 +1,5 @@
-// BlobVault tests — AES-GCM round-trip, deterministic nonce
-// derivation, file layout, has() / delete() semantics.
+// BlobVault tests — AES-GCM round-trip, random per-blob nonce,
+// file layout, has() / delete() semantics.
 
 import Foundation
 import CryptoKit
@@ -80,8 +80,8 @@ struct BlobVaultTests {
         #expect(after == false)
     }
 
-    @Test("Two stores of identical content produce byte-identical files (deterministic nonce)")
-    func deterministicCiphertext() async throws {
+    @Test("Two stores of identical content produce DIFFERENT ciphertext (random nonce) and both decrypt")
+    func randomNonceCiphertext() async throws {
         let layout = tempLayout()
         defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
         let key = freshKey()
@@ -90,15 +90,21 @@ struct BlobVaultTests {
         let (sha, _) = try await vault1.store(payload)
         let firstBytes = try Data(contentsOf: layout.blobPath(for: sha))
 
-        // Delete and re-store from a freshly-constructed vault (same
-        // key) to prove ciphertext equality across separate
-        // invocations.
+        // Delete and re-store from a freshly-constructed vault (same key).
+        // The nonce is now random per seal, so the two files must NOT be
+        // byte-identical. The old content-derived nonce (first 96 bits of
+        // the sha256) reused a nonce across DIFFERENT colliding plaintexts
+        // under one per-case key, which leaks the GHASH subkey and enables
+        // tag forgery in the evidence vault. Dedup still works because it is
+        // keyed on the blob FILENAME, not on the ciphertext bytes.
         await vault1.delete(sha256: sha)
         let vault2 = try BlobVault(layout: layout, dek: key)
         _ = try await vault2.store(payload)
         let secondBytes = try Data(contentsOf: layout.blobPath(for: sha))
 
-        #expect(firstBytes == secondBytes)
+        #expect(firstBytes != secondBytes)
+        let reloaded = try await vault2.load(sha256: sha)
+        #expect(reloaded == payload)
     }
 
     @Test("Wrong key fails AES-GCM open with a CryptoKit error")

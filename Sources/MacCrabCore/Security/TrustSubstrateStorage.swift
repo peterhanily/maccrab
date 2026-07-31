@@ -205,6 +205,12 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
     // MARK: - Public key
 
     public func loadPublicKey() throws -> Data? {
+        // FF-07: normalize the dir mode on the READ path too. The daemon's boot
+        // bootstrap (`DaemonSetup` -> `trustSubstrate.publicKey()`) reaches here
+        // on EVERY start and is the only reliable opportunity to repair a legacy
+        // 0o700 keys/ dir — the write paths all short-circuit once the key
+        // exists, so the intended chmod never actually ran on an upgraded install.
+        normalizeBaseDirectoryPermissions()
         let url = baseDirectory.appendingPathComponent(Self.publicKeyFile)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
@@ -237,6 +243,23 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
         // symlink). The private key stays 0o600, so directory traversal alone
         // never exposes it — reading it still requires file-level `r` the
         // daemon user alone has.
+        normalizeBaseDirectoryPermissions()
+    }
+
+    /// Idempotent chmod of the keys dir to 0o711 — see `ensureBaseDirectory()`
+    /// above for why that mode is the right one. Extracted so a READ path can
+    /// call it too.
+    ///
+    /// FF-07: the chmod used to live only inside `ensureBaseDirectory()`, i.e.
+    /// it only ran on a WRITE — and every write path short-circuits once the
+    /// mode record and the keypair already exist (`selectMode` returns early on
+    /// a stored mode; `publicKey()` returns early on a stored .pub). So a keys/
+    /// dir created at 0o700 by an older build stayed 0o700 forever: on a live
+    /// release install it is still `drwx------ root admin`, which is exactly why
+    /// uid 501 cannot traverse in to read the world-readable `trace-signing.pub`
+    /// the dashboard's trust panel needs. `try?` because only the owning (daemon)
+    /// user can chmod — this is a silent no-op for every other reader.
+    private func normalizeBaseDirectoryPermissions() {
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o711],
             ofItemAtPath: baseDirectory.path

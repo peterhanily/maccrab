@@ -97,7 +97,7 @@ public actor TierBBootstrap {
     @discardableResult
     public func refresh() async -> Status {
         let installer = self.installer
-        let registry = TierBRegistry(installer: installer)
+        let registry = TierBRegistry(installer: installer, tempDirectory: tempDirectory)
         let report = await registry.verifyAll()
         let trusted = await installer.currentTrustedKeys()
         let revoked = await installer.currentRevokedKeys()
@@ -159,7 +159,13 @@ public actor TierBBootstrap {
     private var cachedStatus: Status? = nil
     private static let logger = Logger(subsystem: "com.maccrab.forensics", category: "TierBBootstrap")
 
-    public init(installer: PluginInstaller? = nil) {
+    /// See TierBRegistry.tempDirectory — injectable only so a test can isolate
+    /// its verified-binary temp files from the process-global namespace that
+    /// every other concurrently-running suite also writes into.
+    private let tempDirectory: String
+
+    public init(installer: PluginInstaller? = nil, tempDirectory: String = NSTemporaryDirectory()) {
         self.installer = installer ?? PluginInstaller()
+        self.tempDirectory = tempDirectory
     }
 }

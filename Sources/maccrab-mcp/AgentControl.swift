@@ -83,6 +83,20 @@ let agentToolCapability: [String: AgentCapability] = [
     "set_builtin_rule_setting": .config,
     "reload_rules": .config,
     "refresh_threat_intel": .config,
+    // Network EGRESS, not mutation — but gated for the same reason
+    // refresh_threat_intel is. Both handlers reach out to npm / PyPI from this
+    // host's IP (PackageMetadataAnalyzer → HardenedRegistrySession;
+    // AttestationEnricher → registry.npmjs.org/-/npm/v1/security/attestations
+    // and pypi.org/integrity). Ungated, any connected agent — including one
+    // steered by prompt injection in content MacCrab itself ingested — could
+    // emit an arbitrary sequence of package-name lookups, which is both an
+    // undisclosed egress channel and a low-bandwidth exfil primitive. The
+    // documented `packageFreshnessEnabled` switch does NOT cover this path and
+    // cannot: daemon_config.json is root-owned 0600, so this uid-501 process
+    // can never read it (see ConfigCommands.swift's EACCES branch). A
+    // human-granted capability tier is the gate that actually works here.
+    "analyze_package_metadata": .config,
+    "verify_package_attestation": .config,
     "set_daemon_config": .config,        // defense-affecting keys re-checked → .response
     "create_rule": .authoring,
     "delete_rule": .authoring,
@@ -393,16 +407,29 @@ func handleDeleteRule(_ args: [String: Any]) -> Any {
 private enum CompileOutcome { case success(String); case failure(String) }
 
 /// Locate a bundled compile_rules.py and run it on a single staged rule.
-/// Probes: $MACCRAB_COMPILER, the installed app, then ./Compiler (dev/repo cwd).
+/// Probes: $MACCRAB_COMPILER, then the installed app. The repo-relative
+/// ./Compiler candidate is DEBUG-only (see below).
 private func compileRuleYAML(ruleId: String, yaml: String) -> CompileOutcome {
     let fm = FileManager.default
-    let candidates = [
+    var candidates = [
         ProcessInfo.processInfo.environment["MACCRAB_COMPILER"],
         "/Applications/MacCrab.app/Contents/Resources/Compiler/compile_rules.py",
-        fm.currentDirectoryPath + "/Compiler/compile_rules.py",
     ].compactMap { $0 }
+    // The cwd-relative candidate is DEBUG-only, matching the trust-root probes in
+    // RuleChannelFetch.loadRulesPublicKey / PluginCatalogFetch.loadCatalogPublicKey.
+    // maccrab-mcp is launched by an agent client with cwd = whatever repository the
+    // session happens to be in, so on a release build any checkout that merely
+    // CONTAINS a file at Compiler/compile_rules.py would have that file handed to
+    // /usr/bin/python3 the first time an agent called create_rule — arbitrary code
+    // execution sourced from an attacker-chosen working directory. Release builds
+    // now resolve only $MACCRAB_COMPILER (explicit operator opt-in) or the
+    // code-signed app bundle; the dev loop is unaffected because .mcp.json points
+    // at .build/debug/maccrab-mcp, which is a debug build run from the repo root.
+    #if DEBUG
+    candidates.append(fm.currentDirectoryPath + "/Compiler/compile_rules.py")
+    #endif
     guard let compiler = candidates.first(where: { fm.fileExists(atPath: $0) }) else {
-        return .failure("could not locate compile_rules.py (set MACCRAB_COMPILER, or install MacCrab.app, or run the server from the repo root)")
+        return .failure("could not locate compile_rules.py (set MACCRAB_COMPILER, or install MacCrab.app)")
     }
     let pyDir = (compiler as NSString).deletingLastPathComponent
     let tmp = NSTemporaryDirectory() + "maccrab-mcp-rule-\(UUID().uuidString)"

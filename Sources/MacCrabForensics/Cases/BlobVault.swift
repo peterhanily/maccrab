@@ -29,18 +29,28 @@ public actor BlobVault {
     /// stamp `artifacts.sha256` + `artifacts.blob_relpath`. Path:
     ///     vault/blobs/<first-2-hex>/<sha256>
     ///
-    /// File contents: AES-GCM combined ciphertext (12-byte nonce +
-    /// ciphertext + 16-byte tag). Per plan §3.4 the nonce is
-    /// derived from the sha256 so two stores of the same content
-    /// produce byte-identical files — useful for dedup-driven
-    /// retention enforcement later.
+    /// File contents: AES-GCM combined ciphertext (12-byte RANDOM
+    /// nonce + ciphertext + 16-byte tag).
+    ///
+    /// The nonce used to be the first 96 bits of the content sha256 so
+    /// that two stores of the same content produced byte-identical
+    /// files. That is a nonce-reuse hazard, not a dedup feature: a
+    /// 96-bit truncation collides for DIFFERENT plaintexts at the ~2^48
+    /// birthday bound, and two different blobs sealed under the SAME
+    /// per-case key with the SAME nonce leak the GHASH authentication
+    /// subkey — i.e. tag forgery inside the evidence vault. Collectors
+    /// ingest attacker-influenced content (downloads, mail bodies,
+    /// clipboard, quarantine records), so the attacker gets to choose
+    /// the colliding plaintexts. Dedup is unaffected: it is keyed on the
+    /// blob FILENAME (the sha256, unchanged) via `has(sha256:)`, and
+    /// `load` reads the nonce out of `SealedBox.combined`, so blobs
+    /// written by earlier builds still decrypt.
     @discardableResult
     public func store(_ data: Data) throws -> (sha256: String, relpath: String) {
         let digest = SHA256.hash(data: data)
         let sha = digest.map { String(format: "%02x", $0) }.joined()
 
-        let nonce = try Self.nonce(for: sha)
-        let sealed = try AES.GCM.seal(data, using: key, nonce: nonce)
+        let sealed = try AES.GCM.seal(data, using: key)
 
         let destination = layout.blobPath(for: sha)
         // Make sure the prefix directory exists. createDirectory
@@ -84,36 +94,6 @@ public actor BlobVault {
     /// Delete a blob if present. Idempotent: missing file is fine.
     public func delete(sha256: String) {
         try? FileManager.default.removeItem(at: layout.blobPath(for: sha256))
-    }
-
-    // MARK: - Nonce derivation
-
-    /// AES-GCM nonces are 12 bytes. Per plan §3.4 we derive the
-    /// nonce from the blob's sha256 so identical content produces
-    /// identical ciphertext on storage — the dedup property the
-    /// plan asks for. Two-key + nonce reuse would be catastrophic
-    /// in AES-GCM, but the key+nonce pair is content-derived so
-    /// the only way to hit a collision is to encrypt the SAME
-    /// content twice (which is fine — same plaintext, same
-    /// ciphertext, no information leaked beyond "this content
-    /// exists").
-    private static func nonce(for sha256Hex: String) throws -> AES.GCM.Nonce {
-        // Take the first 24 hex chars (12 bytes) of the sha256.
-        let prefix = String(sha256Hex.prefix(24))
-        guard prefix.count == 24 else {
-            throw BlobVaultError.malformedSha256
-        }
-        var bytes = [UInt8]()
-        var i = prefix.startIndex
-        while i < prefix.endIndex {
-            let next = prefix.index(i, offsetBy: 2)
-            guard let b = UInt8(prefix[i..<next], radix: 16) else {
-                throw BlobVaultError.malformedSha256
-            }
-            bytes.append(b)
-            i = next
-        }
-        return try AES.GCM.Nonce(data: bytes)
     }
 }
 

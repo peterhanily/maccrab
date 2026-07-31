@@ -76,10 +76,17 @@ public actor KeychainDEKVault: DEKVault {
         // Delete any existing item for this (service, account)
         // first. Keychain's add-or-update semantics don't compose
         // cleanly with SecAccessControl — easier to atomic-replace.
+        // kSecUseDataProtectionKeychain MUST be set on every one of the four
+        // SecItem dictionaries in this file. On macOS the default is the LEGACY
+        // file-based keychain; `kSecAttrAccessControl` below implicitly requires
+        // the data-protection keychain, so `store` landed items there while
+        // `retrieve` and `delete` — which set nothing — queried the file-based
+        // keychain and found nothing. Every encrypted case became unopenable.
         let deleteQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: caseID,
+            kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
         _ = SecItemDelete(deleteQuery as CFDictionary)
 
@@ -92,6 +99,7 @@ public actor KeychainDEKVault: DEKVault {
             // Mark synchronizable=false explicitly so this DEK
             // never escapes to iCloud Keychain.
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
+            kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status != errSecSuccess {
@@ -113,6 +121,8 @@ public actor KeychainDEKVault: DEKVault {
             // errSecInteractionNotAllowed when the user-prompt is
             // required).
             kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow,
+            // Must match `store`'s keychain — see the note there.
+            kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -147,6 +157,9 @@ public actor KeychainDEKVault: DEKVault {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: caseID,
+            // Must match `store`'s keychain — without this, deleting a case left
+            // its DEK orphaned in the data-protection keychain forever.
+            kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
         let status = SecItemDelete(query as CFDictionary)
         // errSecItemNotFound is fine — caller may be retrying a

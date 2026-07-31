@@ -190,3 +190,34 @@ struct CaseManifestTests {
         #expect(decoded.createdAtMillis == 1_700_000_000_000)
     }
 }
+
+@Suite("KeychainDEKVault SecItem provisioning (source guard)")
+struct KeychainDEKVaultProvisioningTests {
+
+    /// Every keychain test in the tree is either opt-in (SecretsStoreTests) or
+    /// runs against InMemoryDEKVault, so NOTHING covered which SecItem
+    /// ATTRIBUTES the vault sets — the exact gap that shipped the
+    /// kSecUseDataProtectionKeychain bug (store landed items in the
+    /// data-protection keychain via kSecAttrAccessControl while retrieve/delete
+    /// queried the legacy file-based one, making every encrypted case
+    /// unopenable). A source assertion covers it with no keychain, no prompt
+    /// and no flake, and fails the moment a fifth SecItem dictionary is added
+    /// without the opt-in.
+    @Test("every SecItem dictionary opts into the data-protection keychain")
+    func dataProtectionOnEverySecItemDict() throws {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/MacCrabForensicsTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent("Sources/MacCrabForensics/Cases/KeychainDEKVault.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+        // One `kSecClass: kSecClassGenericPassword` per SecItem dictionary.
+        let dicts = text.components(separatedBy: "kSecClass: kSecClassGenericPassword").count - 1
+        let optIns = text.components(separatedBy: "kSecUseDataProtectionKeychain").count - 1
+        #expect(dicts >= 4, "expected the 4 SecItem dictionaries (delete/add/retrieve/delete); found \(dicts)")
+        #expect(optIns >= dicts,
+                "\(dicts) SecItem dictionaries but only \(optIns) kSecUseDataProtectionKeychain occurrences — a query that omits it hits the LEGACY file-based keychain and silently finds nothing")
+        #expect(text.contains("kSecAttrSynchronizable: kCFBooleanFalse as Any"),
+                "the DEK add-query must pin kSecAttrSynchronizable=false so the key never escapes to iCloud Keychain")
+    }
+}

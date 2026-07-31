@@ -99,12 +99,40 @@ public actor HoneyfileManager {
 
     // MARK: - Init
 
+    /// Home directory the canary set is planted in and looked up against.
+    ///
+    /// v1.21.6 (audit DET-02): this used to be plain `NSHomeDirectory()`. Inside
+    /// the root System Extension that is `/var/root`, so the daemon would have
+    /// planted (and, more importantly, MATCHED `isHoneyfile()` against) paths
+    /// under root's home — while `maccrabctl deception deploy`, which runs as the
+    /// console user, plants them under `/Users/<u>`. The two sets never
+    /// intersected, so even with the tier switched on the enricher's lookup could
+    /// not tag a single real file event. Resolve the real user home when running
+    /// as root; the CLI (non-root) keeps the previous behaviour exactly.
+    ///
+    /// On a multi-user Mac there is no single right answer, so we deliberately
+    /// fall back rather than guess — the caller can pass `homeDir:` explicitly.
+    public nonisolated static func defaultHomeDir() -> String {
+        let fallback = NSHomeDirectory()
+        guard getuid() == 0 else { return fallback }
+        let fm = FileManager.default
+        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return fallback }
+        let homes = users
+            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
+            .map { "/Users/\($0)" }
+            .filter {
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue
+            }
+        return homes.count == 1 ? homes[0] : fallback
+    }
+
     /// - Parameters:
     ///   - homeDir: Override for tilde expansion (tests use this).
     ///   - manifestPath: Where to persist deployed honeyfile records.
     ///     Defaults to MacCrab's support dir.
     public init(
-        homeDir: String = NSHomeDirectory(),
+        homeDir: String = HoneyfileManager.defaultHomeDir(),
         manifestPath: String? = nil
     ) {
         self.homeDir = homeDir

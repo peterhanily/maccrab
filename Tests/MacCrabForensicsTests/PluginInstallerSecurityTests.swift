@@ -319,17 +319,11 @@ struct PluginInstallerSecurityTests {
 @Suite("TierBRegistry security — audit-4: TOCTOU verify-to-spawn")
 struct TierBRegistryTOCTOUTests {
 
-    static var fixtureBinaryPath: String? {
-        let candidates = [
-            ".build/debug/tier-b-fixture-plugin",
-            ".build/release/tier-b-fixture-plugin",
-        ]
-        let fm = FileManager.default
-        for c in candidates where fm.isExecutableFile(atPath: c) {
-            return c
-        }
-        return nil
-    }
+    /// Delegate to the canonical resolver. This copy hunted for
+    /// `tier-b-fixture-plugin`, which is not a product in Package.swift, so the
+    /// audit-4 TOCTOU tests (fresh-temp copy, 0o500 perms, post-resolve swap)
+    /// silently returned at their guard instead of asserting anything.
+    static var fixtureBinaryPath: String? { TierBRegistryTests.fixtureBinaryPath }
 
     @Test("audit-4: resolve() copies binary to fresh temp")
     func resolveCopiesBinary() async throws {

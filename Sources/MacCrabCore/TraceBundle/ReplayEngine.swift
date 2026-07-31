@@ -100,11 +100,22 @@ public actor ReplayEngine {
                     normalizationVersion: "", replayScope: "",
                     deterministic: true,
                     result: .schemaInvalid,
+                    // FF-11: this used to put "throw-<error text>" in the RESULT
+                    // HASH field for a bundle that never parsed — a caller keying
+                    // on `result_sha256` cannot tell that from a computed digest,
+                    // and the HTML report never rendered it anyway, so the reason
+                    // was invisible AND the hash was a lie. Carry the reason as a
+                    // difference row (both the report and the CLI print those)
+                    // and leave the hash empty.
+                    differencesVsOriginal: [ReplayDifference(
+                        type: "replay_threw",
+                        ruleId: String(error.localizedDescription.prefix(120))
+                    )],
                     inputBundleSha256: bundleSha,
                     rulesetSha256: replayer.rulesetSha256,
                     normalizerSha256: replayer.normalizerSha256,
                     replayEngineVersion: engineVersion,
-                    resultSha256: "throw-\(error.localizedDescription.prefix(40))"
+                    resultSha256: ""
                 )
                 entries.append(.init(bundlePath: candidate.path, result: result))
             }
@@ -469,7 +480,18 @@ public actor ReplayEngine {
             replayEngineVersion: engineVersion,
             resultSha256: ""
         )
-        let digest = (try? ReplayResultDigest.compute(for: partial)) ?? "compute_failed"
+        // FF-11: `schema_invalid` means the bundle never parsed — no manifest,
+        // no events, no matched rules — so this "digest" is a hash of an empty
+        // shell with every field defaulted. A caller keying on `result_sha256`
+        // cannot distinguish it from a real computed result, which is exactly how
+        // a parse failure got read as a computed one. Emit nothing for that
+        // outcome. `unsupported_stateful_replay` and
+        // `incompatible_normalization_version` DID parse the bundle (trace id,
+        // versions and the offending engines are all real, and their determinism
+        // is a tested property), so they keep their digest.
+        let digest = outcome == .schemaInvalid
+            ? ""
+            : ((try? ReplayResultDigest.compute(for: partial)) ?? "compute_failed")
         return ReplayResult(
             traceId: partial.traceId,
             bundleId: partial.bundleId,

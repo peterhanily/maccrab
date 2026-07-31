@@ -163,23 +163,39 @@ public actor PanicButton {
         } catch { return false }
     }
 
+    // `try? run()` + `waitUntilExit()` aborts the process when the spawn fails
+    // (NSTask raises "task not launched"), and this sits on the incident-
+    // response path — the worst possible place to turn `posix_spawn` returning
+    // EAGAIN into SIGABRT of the root engine. Check the spawn and report the
+    // step as not-performed instead.
     private nonisolated func flushDNS() -> Bool {
+        var flushed = false
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
         proc.arguments = ["-flushcache"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            flushed = true
+        } catch {
+            logger.error("PanicButton: dscacheutil spawn failed: \(error.localizedDescription, privacy: .public)")
+        }
 
         let proc2 = Process()
         proc2.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         proc2.arguments = ["-HUP", "mDNSResponder"]
         proc2.standardOutput = FileHandle.nullDevice
         proc2.standardError = FileHandle.nullDevice
-        try? proc2.run()
-        proc2.waitUntilExit()
-        return true
+        do {
+            try proc2.run()
+            proc2.waitUntilExit()
+        } catch {
+            logger.error("PanicButton: killall -HUP mDNSResponder spawn failed: \(error.localizedDescription, privacy: .public)")
+            flushed = false
+        }
+        return flushed
     }
 
     private nonisolated func lockScreen() -> Bool {
@@ -189,7 +205,15 @@ public actor PanicButton {
         proc.arguments = ["displaysleepnow"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        // A failed spawn must not reach `terminationStatus` — NSTask raises
+        // "task not launched" there, which is an uncaught ObjC exception and
+        // therefore SIGABRT of the root engine, mid-incident-response.
+        do {
+            try proc.run()
+        } catch {
+            logger.error("PanicButton: pmset spawn failed, screen NOT locked: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
         proc.waitUntilExit()
         return proc.terminationStatus == 0
     }
@@ -202,7 +226,16 @@ public actor PanicButton {
         proc.standardInput = pipe
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        // `waitUntilExit()` on a task that never launched raises "task not
+        // launched" — an uncaught ObjC exception, i.e. SIGABRT of the root
+        // engine on the incident-response path. Bail out before it.
+        do {
+            try proc.run()
+        } catch {
+            logger.error("PanicButton: pbcopy spawn failed, clipboard NOT cleared: \(error.localizedDescription, privacy: .public)")
+            pipe.fileHandleForWriting.closeFile()
+            return
+        }
         pipe.fileHandleForWriting.write(Data()) // Empty clipboard
         pipe.fileHandleForWriting.closeFile()
         proc.waitUntilExit()
@@ -215,7 +248,16 @@ public actor PanicButton {
         proc.arguments = ["blueutil", "--power", "0"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        // Reaching `terminationStatus` after a failed spawn raises "task not
+        // launched" and aborts the root engine. (The comment above is only
+        // true for a MISSING blueutil — /usr/bin/env still launches and exits
+        // non-zero. The crash case is the spawn itself failing, e.g. EAGAIN.)
+        do {
+            try proc.run()
+        } catch {
+            logger.error("PanicButton: env/blueutil spawn failed, Bluetooth NOT disabled: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
         proc.waitUntilExit()
         return proc.terminationStatus == 0
     }

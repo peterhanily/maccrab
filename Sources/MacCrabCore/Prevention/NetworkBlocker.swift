@@ -17,6 +17,13 @@ public actor NetworkBlocker {
     private var blockedIPs: Set<String> = []
     private var isEnabled: Bool = false
 
+    /// Operator disable latch — see the identical latch on DNSSinkhole. The
+    /// threat-intel refresh callback in DaemonSetup used to call `enable(ips:)`
+    /// unconditionally, silently re-arming the PF blocklist on the next feed
+    /// refresh after the user had switched it off in the Prevention workspace.
+    /// Feed-driven repopulation now goes through `refreshFromFeed`.
+    private var operatorDisabled: Bool = false
+
     public init() {}
 
     /// Drop IPs that must never be blocked — loopback, RFC1918/link-local, the
@@ -45,11 +52,25 @@ public actor NetworkBlocker {
 
     /// Enable network blocking with initial IPs from threat intel.
     public func enable(ips: Set<String>) {
+        // An explicit enable is an operator/boot intent: clear the latch.
+        operatorDisabled = false
         blockedIPs = safeSubset(ips)
         isEnabled = true
         writeAnchorFile()
         reloadPF()
         logger.info("Network blocker enabled: \(self.blockedIPs.count) IPs blocked")
+    }
+
+    /// Feed-driven repopulation, for the threat-intel refresh callback ONLY.
+    /// Identical to `enable(ips:)` except that it respects the operator disable
+    /// latch. Anything reacting to a feed update must call this; only a
+    /// deliberate operator or boot-time action may call `enable`.
+    public func refreshFromFeed(ips: Set<String>) {
+        guard !operatorDisabled else {
+            logger.info("Network blocker feed refresh skipped — operator-disabled")
+            return
+        }
+        enable(ips: ips)
     }
 
     /// Add IPs to the block table.
@@ -78,8 +99,11 @@ public actor NetworkBlocker {
     }
 
     /// Remove all blocks.
+    /// Sets the operator disable latch so the threat-intel refresh callback
+    /// cannot silently re-arm PF blocking behind the user's back.
     public func disable() {
         isEnabled = false
+        operatorDisabled = true
         blockedIPs.removeAll()
         do {
             try FileManager.default.removeItem(atPath: anchorPath)
@@ -150,7 +174,20 @@ public actor NetworkBlocker {
         proc.arguments = ["-a", anchorName, "-f", anchorPath]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        // `waitUntilExit()` on an unlaunched NSTask raises "task not launched",
+        // an uncaught ObjC exception that aborts the root engine. Beyond the
+        // crash: a swallowed spawn failure means the PF anchor file was written
+        // but never loaded, so the blocker reports success while blocking
+        // nothing. Surface it.
+        do {
+            try proc.run()
+        } catch {
+            logger.error("NetworkBlocker: pfctl spawn failed — the anchor file was written but NOT loaded, so no blocking is in effect: \(error.localizedDescription, privacy: .public)")
+            return
+        }
         proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            logger.error("NetworkBlocker: pfctl exited \(proc.terminationStatus, privacy: .public) loading anchor \(self.anchorName, privacy: .public) — blocking may not be in effect")
+        }
     }
 }

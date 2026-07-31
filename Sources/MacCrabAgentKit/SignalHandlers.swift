@@ -88,6 +88,23 @@ enum SignalHandlers {
                     // ruleEngine.reloadRules which fully replaces.
                     state.setGraphEvaluator(GraphRuleEvaluator(rules: graphRules))
                     print("[SIGHUP] Graph rules: \(graphRules.count)")
+                    // v1.21.6 (PERF-02): re-point the demand-gated ES families at
+                    // the ruleset just loaded. Without this the boot-time gate
+                    // would create exactly the failure it exists to avoid — an
+                    // ENABLED introspection rule that can never fire because the
+                    // kernel subscription was decided before the rule was enabled.
+                    // Cheap and idempotent (es_subscribe is additive).
+                    if let esCollector = state.collector {
+                        let esSelectors = await state.ruleEngine.enabledEventActionSelectors()
+                        let esDemand = ESCollector.optionalFamiliesDemanded(
+                            selectors: esSelectors.values,
+                            unanalyzable: esSelectors.hasUnanalyzableSelector)
+                        let introspectionOn = freshConfig.subscribeIntrospectionEvents && esDemand.introspection
+                        esCollector.applyOptionalSubscriptions(
+                            introspection: introspectionOn,
+                            memoryProtection: esDemand.memoryProtection)
+                        print("[SIGHUP] ES demand-gated families: introspection=\(introspectionOn), memory_protection=\(esDemand.memoryProtection)")
+                    }
                     await state.suppressionManager.load()
                     let stats = await state.suppressionManager.stats()
                     print("[SIGHUP] Suppressions: \(stats.pathCount) paths across \(stats.ruleCount) rules")

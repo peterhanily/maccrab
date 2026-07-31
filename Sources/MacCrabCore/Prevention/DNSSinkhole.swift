@@ -18,6 +18,17 @@ public actor DNSSinkhole {
     private var sinkholdDomains: Set<String> = []
     private var isEnabled: Bool = false
 
+    /// Operator disable latch. `disable()` is only ever reached from an explicit
+    /// operator action (the dashboard's Prevention toggle, applied by
+    /// DaemonTimers.handlePreventionConfigRequests). The threat-intel refresh
+    /// callback in DaemonSetup used to call `enable(domains:)` unconditionally,
+    /// so it silently RE-ARMED the sinkhole on the next feed refresh while the
+    /// UI still showed "off" — a security control turning itself back on with no
+    /// notice, and the user's *disable* being ignored. Feed-driven repopulation
+    /// now goes through `refreshFromFeed` and honours this latch; only an
+    /// explicit `enable(...)` (operator re-enable, or boot population) clears it.
+    private var operatorDisabled: Bool = false
+
     public init() {}
 
     /// Enable the sinkhole with initial domains from threat intel.
@@ -25,6 +36,8 @@ public actor DNSSinkhole {
     /// IP literals are silently dropped — sinkholing them would brick code
     /// signing, auto-update, or strand the user.
     public func enable(domains: Set<String>) {
+        // An explicit enable is an operator/boot intent: clear the latch.
+        operatorDisabled = false
         let filtered = Self.filterProtected(domains)
         if !filtered.rejected.isEmpty {
             logger.warning("Refused to sinkhole \(filtered.rejected.count) protected entries: \(Self.formatRejected(filtered.rejected), privacy: .public)")
@@ -33,6 +46,18 @@ public actor DNSSinkhole {
         isEnabled = true
         writeHostsFile()
         logger.info("DNS sinkhole enabled: \(filtered.accepted.count) domains redirected to 127.0.0.1 (\(filtered.rejected.count) protected entries dropped)")
+    }
+
+    /// Feed-driven repopulation, for the threat-intel refresh callback ONLY.
+    /// Identical to `enable(domains:)` except that it respects the operator
+    /// disable latch. Anything reacting to a feed update must call this; only a
+    /// deliberate operator or boot-time action may call `enable`.
+    public func refreshFromFeed(domains: Set<String>) {
+        guard !operatorDisabled else {
+            logger.info("DNS sinkhole feed refresh skipped — operator-disabled")
+            return
+        }
+        enable(domains: domains)
     }
 
     /// Add domains to the sinkhole.
@@ -50,8 +75,11 @@ public actor DNSSinkhole {
     }
 
     /// Remove all MacCrab entries from /etc/hosts.
+    /// Sets the operator disable latch so the threat-intel refresh callback
+    /// cannot silently re-arm the sinkhole behind the user's back.
     public func disable() {
         isEnabled = false
+        operatorDisabled = true
         sinkholdDomains.removeAll()
         removeHostsEntries()
         logger.info("DNS sinkhole disabled — /etc/hosts cleaned")

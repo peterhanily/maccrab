@@ -434,12 +434,18 @@ enum DaemonSetup {
         // Shared state across the daemon lifetime for cache reuse.
         let processHasher = ProcessHasher()
 
-        // Deception tier (opt-in via MACCRAB_DECEPTION=1). Plants canary
-        // credential files and exposes an isHoneyfile() lookup the enricher
-        // uses to tag file events touching a canary.
+        // Deception tier (opt-in). Plants canary credential files and exposes an
+        // isHoneyfile() lookup the enricher uses to tag file events touching a
+        // canary.
+        //
+        // v1.21.6 (audit DET-02): the gate was env-var-ONLY. sysextd launches the
+        // System Extension, so an operator has no supported way to set that
+        // variable — the tier (and with it the must-fire `honeyfile_accessed`
+        // rule) was dead on every release install. Read `deception_enabled` from
+        // daemon_config.json as well, mirroring the ultrasonic gate below.
         let honeyfileManager: HoneyfileManager?
         let honeyPromptManager: HoneyPromptManager?
-        if ProcessInfo.processInfo.environment["MACCRAB_DECEPTION"] == "1" {
+        if config.deceptionEnabled || ProcessInfo.processInfo.environment["MACCRAB_DECEPTION"] == "1" {
             let mgr = HoneyfileManager()
             honeyfileManager = mgr
             // v1.12.0 — pair the credential-shape bait (HoneyfileManager) with
@@ -814,8 +820,7 @@ enum DaemonSetup {
         let aiTracker = AIProcessTracker(lineage: lineageRef, registry: aiRegistry)
         let credentialFence = CredentialFence()
         let projectBoundary = ProjectBoundary()
-        let injectionScanner = PromptInjectionScanner(confidenceThreshold: config.promptInjectionConfidence)
-        let scannerStatus = await injectionScanner.isAvailable ? "active" : "unavailable (pip install forensicate)"
+        let scannerStatus = "active (native)"
         print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)")
         print("  Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths")
         print("  Prompt injection scanner: \(scannerStatus)")
@@ -857,8 +862,16 @@ enum DaemonSetup {
         // appeared "Stalled" in the dashboard the entire time their
         // event loops were running normally and just hadn't seen a
         // matching kernel event yet. v1.10.0 audit fix.
-        await collectorRegistry.register(name: "UnifiedLogCollector", expectedIntervalSeconds: 30, eventDriven: true)
-        await collectorRegistry.register(name: "DNSCollector", expectedIntervalSeconds: 30, eventDriven: true)
+        // `expectsContinuousTraffic`: the unified log and DNS see traffic on any
+        // active Mac, so prolonged silence means the sensor is dead rather than
+        // idle. Both shipped broken and reported healthy for months precisely
+        // because event-driven collectors were exempt from any liveness check.
+        await collectorRegistry.register(
+            name: "UnifiedLogCollector", expectedIntervalSeconds: 30,
+            eventDriven: true, expectsContinuousTraffic: true)
+        await collectorRegistry.register(
+            name: "DNSCollector", expectedIntervalSeconds: 30,
+            eventDriven: true, expectsContinuousTraffic: true)
         await collectorRegistry.register(name: "FSEventsCollector", expectedIntervalSeconds: 30, eventDriven: true)
         await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
@@ -985,10 +998,11 @@ enum DaemonSetup {
         let gitSecurityMonitor = GitSecurityMonitor()
 
         // File injection scanner -- scans files AI tools access for hidden prompt injection
+        // Unconditionally active since v1.21.6: the scanner is now pure native
+        // structural analysis (invisible unicode / bidi overrides / tag-char
+        // smuggling) with no external CLI to probe for.
         let fileInjectionScanner = FileInjectionScanner()
-        if await fileInjectionScanner.isAvailable {
-            print("File injection scanner active (forensicate + inline detection)")
-        }
+        print("File injection scanner active (native structural detection)")
 
         // Natural language threat hunter
         let threatHunter = ThreatHunter(databasePath: supportDir + "/events.db")
@@ -1101,16 +1115,25 @@ enum DaemonSetup {
             let maxFeedEnforcedIPs = 100_000
 
             // Register threat intel update callback to populate prevention modules
+            // `refreshFromFeed`, NOT `enable`: this callback fires on every feed
+            // refresh and previously called `enable(...)` unconditionally, with
+            // no consultation of the per-module toggle. A user who switched the
+            // DNS sinkhole or network blocker off in the Prevention workspace
+            // got a UI that said "off" while the daemon re-armed enforcement on
+            // the next refresh — the user's *disable* silently ignored, with
+            // unexpected DNS/PF blocking as the visible result.
+            // `refreshFromFeed` honours the operator disable latch that
+            // `disable()` sets; an explicit re-enable clears it.
             await threatIntel.onUpdate { [dnsSinkhole, networkBlocker, maxFeedEnforcedDomains, maxFeedEnforcedIPs] ips, domains in
                 if domains.count > maxFeedEnforcedDomains {
                     print("Prevention: refusing to sinkhole \(domains.count) feed domains — exceeds \(maxFeedEnforcedDomains) sanity cap (possible feed poisoning); enforcement skipped this refresh")
                 } else {
-                    await dnsSinkhole.enable(domains: domains)
+                    await dnsSinkhole.refreshFromFeed(domains: domains)
                 }
                 if ips.count > maxFeedEnforcedIPs {
                     print("Prevention: refusing to PF-block \(ips.count) feed IPs — exceeds \(maxFeedEnforcedIPs) sanity cap (possible feed poisoning); enforcement skipped this refresh")
                 } else {
-                    await networkBlocker.enable(ips: ips)
+                    await networkBlocker.refreshFromFeed(ips: ips)
                 }
             }
 
@@ -1288,11 +1311,38 @@ enum DaemonSetup {
             let llmConfigPath = supportDir + "/llm_config.json"
             if let data = try? Data(contentsOf: URL(fileURLWithPath: llmConfigPath)),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Migration for the v1.21.6 default flip (LLMConfig.enabled
+                // true -> false). The mere PRESENCE of this file means someone
+                // configured a backend through Settings > AI Backend, so treat it
+                // as opt-in — otherwise an existing user whose file names a
+                // provider but carries no explicit `enabled` key would silently
+                // lose LLM analysis on upgrade. An explicit `"enabled": false`
+                // still wins; this only supplies the missing default.
+                llmConfig.enabled = true
                 if let enabled = json["enabled"] as? Bool { llmConfig.enabled = enabled }
                 if let provider = json["provider"] as? String {
                     llmConfig.provider = LLMProvider(rawValue: provider) ?? llmConfig.provider
                 }
-                if let v = json["ollama_url"] as? String { llmConfig.ollamaURL = v }
+                if let v = json["ollama_url"] as? String {
+                    // v1.21.5 (audit S-02): llm_config.json is writable from the
+                    // 1777 inbox control plane — DaemonTimers.handleLLMConfigRequests
+                    // whitelists `ollama_url` and its default-deny gate only rejects
+                    // NON-loopback URLs, so a uid-501 process can point the ROOT
+                    // engine at http://127.0.0.1:<its own listener> silently. A
+                    // loopback URL is precisely what LLMService.shouldSanitize reads
+                    // as "local Ollama — nothing leaves the host", so the sanitizer
+                    // would be switched OFF and every campaign / alert / behavioral /
+                    // sequence / baseline prompt (usernames, paths, command lines,
+                    // private IPs) handed to that listener verbatim after the next
+                    // restart. An endpoint arriving on this path is therefore NOT
+                    // trusted-local: it still works, the sanitizer just stays on.
+                    // Only a value that DIFFERS from the root-owned baseline
+                    // (daemon_config.json `llm.ollamaURL`, else the compiled default)
+                    // downgrades trust, so the ordinary dashboard write of the
+                    // default URL changes nothing.
+                    if v != llmConfig.ollamaURL { llmConfig.trustLocalEndpoint = false }
+                    llmConfig.ollamaURL = v
+                }
                 if let v = json["ollama_model"] as? String { llmConfig.ollamaModel = v }
                 if let v = json["ollama_api_key"] as? String { llmConfig.ollamaAPIKey = v }
                 if let v = json["claude_api_key"] as? String { llmConfig.claudeAPIKey = v }
@@ -1309,7 +1359,14 @@ enum DaemonSetup {
             // Env vars override everything (backward compat)
             let env = ProcessInfo.processInfo.environment
             if let p = env["MACCRAB_LLM_PROVIDER"] { llmConfig.provider = LLMProvider(rawValue: p) ?? llmConfig.provider }
-            if let v = env["MACCRAB_LLM_OLLAMA_URL"] { llmConfig.ollamaURL = v }
+            // v1.21.5 (audit S-02): the env var is an operator channel uid 501
+            // cannot write (it lives in the daemon's launch environment), so an
+            // endpoint set here re-establishes trusted-local and overrides any
+            // downgrade the file path above applied.
+            if let v = env["MACCRAB_LLM_OLLAMA_URL"] {
+                llmConfig.ollamaURL = v
+                llmConfig.trustLocalEndpoint = true
+            }
             if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { llmConfig.ollamaModel = v }
             if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { llmConfig.claudeAPIKey = v }
             if let v = env["MACCRAB_LLM_CLAUDE_MODEL"] { llmConfig.claudeModel = v }
@@ -1635,6 +1692,39 @@ enum DaemonSetup {
         let bootPushedIDs = await ruleEngine.pushedRuleIDs
         await responseEngine.setDetectionOnlyRuleIDs(bootPushedIDs)
 
+        // A boot with ZERO rules is total loss of tier 1, and it used to be a
+        // `logger.warning` plus a stdout line — stdout being discarded for a
+        // sysextd-launched System Extension. Meanwhile the RELOAD path is
+        // rigorously fail-closed (last-known-good retention + the rule-count
+        // regression guard), so boot was the weak end: delete, chmod or corrupt
+        // `<supportDir>/compiled_rules` and the daemon ingests, enriches, stores
+        // and heartbeats `liveness: true` while evaluating nothing. The
+        // dashboard does catch it (AppState.isProtectionDegraded) but only if
+        // the GUI is running. Raise it on the one channel every surface reads:
+        // alerts.db → dashboard, `maccrabctl alerts`, MCP get_alerts.
+        // Checked AFTER the bundled + user-override + pushed loads so a boot
+        // that got its rules from any source is not falsely flagged.
+        let bootRuleCount = await ruleEngine.ruleCount
+        if bootRuleCount == 0 {
+            logger.critical("No detection rules loaded from \(effectiveRulesDir) — tier-1 detection is INACTIVE")
+            print("CRITICAL: 0 detection rules loaded from \(effectiveRulesDir) — MacCrab is collecting and storing events but evaluating none of them.")
+            let noRulesAlert = Alert(
+                // Synthetic self-defense ruleId, same convention as the
+                // coverage-gap / sensor-degraded meta-alerts. NOT a Rules/ entry.
+                ruleId: "maccrab.self-defense.no_rules_loaded",
+                ruleTitle: "No Detection Rules Loaded",
+                severity: .critical,
+                eventId: UUID().uuidString,
+                processPath: CommandLine.arguments[0],
+                processName: "maccrabd",
+                description: "MacCrab started with 0 single-event detection rules from \(effectiveRulesDir). Events are still collected and stored, but no rule is being evaluated — tier 1 of the detection stack is inactive. The compiled rules directory is missing, unreadable, or empty. Re-run the rule compiler or reinstall, then reload with SIGHUP.",
+                mitreTactics: "attack.defense_evasion",
+                mitreTechniques: "attack.t1562.001",
+                suppressed: false
+            )
+            try? await alertStore.insert(alert: noRulesAlert)
+        }
+
         // Load sequence rules (use same effective dir as single-event rules).
         // v1.21.5: pass the F-04 profile — sequence rules previously bypassed
         // rule_profile entirely, so the 36 experimental sequences ran on
@@ -1700,6 +1790,12 @@ enum DaemonSetup {
                     }
                     let tickPushedIDs = await ruleEngine.pushedRuleIDs
                     await responseEngine.setDetectionOnlyRuleIDs(tickPushedIDs)
+                    // v1.21.6 (PERF-02) KNOWN GAP, documented not hidden: this
+                    // detached watcher has no handle on the ESCollector (it is
+                    // constructed later in this function), so it cannot re-run the
+                    // demand gate. Enabling an introspection rule from the
+                    // dashboard therefore needs a `pkill -HUP com.maccrab.agent`
+                    // before ES starts delivering those events. SIGHUP does it.
                     logger.notice("Rules reloaded after user-rules tick: \(total) active rule(s)")
                 } catch {
                     logger.warning("Reload after user-rules tick failed: \(error.localizedDescription)")
@@ -1742,8 +1838,29 @@ enum DaemonSetup {
 
         if isRoot {
             do {
+                // v1.21.6 (PERF-02): subscribe the two high-rate / zero-yield ES
+                // families ONLY when an ENABLED rule can consume them. Field-
+                // measured: MPROTECT + MMAP + GET_TASK_READ were 24-31% of every
+                // kernel message and produced ONE stored event and ZERO alerts —
+                // their only rules are `experimental` (disabled under the default
+                // stable profile) and nothing selects mprotect_wx/mmap_wx at all.
+                // Rules are fully loaded by this point (base + user overlay), and
+                // SIGHUP re-evaluates via applyOptionalSubscriptions, so
+                // `rule_profile: "all"` still works without a restart.
+                let esActionSelectors = await ruleEngine.enabledEventActionSelectors()
+                let esDemand = ESCollector.optionalFamiliesDemanded(
+                    selectors: esActionSelectors.values,
+                    unanalyzable: esActionSelectors.hasUnanalyzableSelector)
+                if !esDemand.introspection || !esDemand.memoryProtection {
+                    // Never silent: an unsubscribed family is a deliberate coverage
+                    // decision the operator must be able to see and reverse.
+                    logger.notice("ES demand gate: introspection=\(esDemand.introspection), memory_protection=\(esDemand.memoryProtection) — an unsubscribed family means no ENABLED rule selects its event.action. Enable the rule (or set rule_profile: all), then `pkill -HUP com.maccrab.agent`.")
+                    print("ES demand gate: introspection=\(esDemand.introspection), memory_protection=\(esDemand.memoryProtection)")
+                }
                 collector = try ESCollector(subscribeFileOpen: config.subscribeFileOpenEvents,
-                                            subscribeIntrospection: config.subscribeIntrospectionEvents)
+                                            subscribeIntrospection: config.subscribeIntrospectionEvents && esDemand.introspection,
+                                            subscribeMemoryProtection: esDemand.memoryProtection,
+                                            workerMaxInFlight: config.esWorkerMaxInFlight)
                 logger.info("ES collector started successfully (native client)")
                 esMode = "native client"
             } catch {
@@ -1838,7 +1955,6 @@ enum DaemonSetup {
             aiTracker: aiTracker,
             credentialFence: credentialFence,
             projectBoundary: projectBoundary,
-            injectionScanner: injectionScanner,
             aiNetworkSandbox: aiNetworkSandbox,
             fileInjectionScanner: fileInjectionScanner,
             mcpAttributor: mcpAttributor,
@@ -2026,6 +2142,13 @@ enum DaemonSetup {
                     encryption: dbEncryption
                 )
                 state.traceStore = traceStore
+                // v1.21.6: rows written before the search-projection migration
+                // carry a NULL `search_text` and would never be findable. The
+                // migration is pure SQL and cannot decrypt, so backfill here.
+                if let filled = try? await traceStore.backfillSearchProjection(), filled > 0 {
+                    Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+                        .notice("Backfilled search projection for \(filled, privacy: .public) pre-existing spans")
+                }
                 let receiver = OTLPReceiver(
                     port: cfg.port,
                     traceStore: traceStore
@@ -2413,7 +2536,11 @@ func reapOrphanUserDomainDBs(logger: os.Logger) {
         let size = (attrs?[.size] as? UInt64) ?? 0
         let sizeMB = Int(size / 1_000_000)
         logger.warning("Orphan-DB reaper: quarantining /Users/\(user)/Library/Application Support/MacCrab/events.db (\(sizeMB) MB, \(Int(ageSeconds / 86400))d stale)")
-        for suffix in ["", "-wal", "-shm"] {
+        // v1.21.6 (audit DL-09): `-journal` joins the sidecar list. A dev daemon
+        // that crashed out of WAL mode leaves an events.db-journal behind;
+        // moving only db/-wal/-shm stranded it beside the fresh DB. Matches the
+        // four-suffix list CorruptDBBackup already uses.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let src = dbPath + suffix
             let dst = dbPath + ".orphan-" + stamp + suffix
             guard fm.fileExists(atPath: src) else { continue }
@@ -2422,6 +2549,55 @@ func reapOrphanUserDomainDBs(logger: os.Logger) {
             } catch {
                 logger.warning("Orphan-DB reaper: rename \(src) → \(dst) failed: \(error.localizedDescription)")
             }
+        }
+        // v1.21.6 (audit DL-09): bound the quarantine. The doc comment above has
+        // promised "so a later sweep can distinguish repeated quarantines" since
+        // v1.6.14, but no sweep was ever written — the reaper renamed and never
+        // deleted. Every dev-daemon session that left an events.db stale for 24 h
+        // permanently stranded a full copy (up to storage.eventsMaxSizeMB — 420
+        // MB by default — plus its WAL) in the user's home, with no retention
+        // policy of any kind. The sibling helper CorruptDBBackup bounds itself at
+        // 3 events; do the same here.
+        pruneOrphanQuarantines(dbPath: dbPath, keep: 2, logger: logger)
+    }
+}
+
+/// Keep only the `keep` most-recent `events.db.orphan-<stamp>` quarantine events
+/// (grouped by stamp) beside `dbPath`; delete every older file.
+///
+/// Deliberately the same shape as `CorruptDBBackup.prune`, including its symlink
+/// stance — this runs as ROOT inside a user-WRITABLE directory, so neither guard
+/// is optional: we only ever `removeItem` an entry whose name matches the
+/// `<base>.orphan-<yyyyMMdd-HHmmss>` form we generate ourselves, `removeItem`
+/// unlinks the final path component without following it, and any matched entry
+/// that is itself a symlink is skipped rather than removed.
+private func pruneOrphanQuarantines(dbPath: String, keep: Int, logger: os.Logger) {
+    let fm = FileManager.default
+    let directory = (dbPath as NSString).deletingLastPathComponent
+    let base = (dbPath as NSString).lastPathComponent          // "events.db"
+    let marker = base + ".orphan-"
+    guard keep >= 0, let entries = try? fm.contentsOfDirectory(atPath: directory) else { return }
+    // Names are `events.db.orphan-<stamp>` and `events.db.orphan-<stamp>-wal`
+    // etc., so take the fixed-width run after the marker. The stamp is
+    // `yyyyMMdd-HHmmss` (15 chars), which sorts chronologically as TEXT — no
+    // date parsing, and an unparseable name is simply left alone.
+    var stamped: [(name: String, stamp: String)] = []
+    for name in entries where name.hasPrefix(marker) {
+        let stamp = String(name.dropFirst(marker.count).prefix(15))
+        guard stamp.count == 15 else { continue }
+        stamped.append((name, stamp))
+    }
+    let keepStamps = Set(Set(stamped.map { $0.stamp }).sorted(by: >).prefix(keep))
+    for entry in stamped where !keepStamps.contains(entry.stamp) {
+        let path = directory + "/" + entry.name
+        let isSymlink = (try? URL(fileURLWithPath: path)
+            .resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+        if isSymlink { continue }
+        do {
+            try fm.removeItem(atPath: path)
+            logger.notice("Orphan-DB reaper: pruned stale quarantine \(entry.name) (keeping newest \(keep))")
+        } catch {
+            logger.warning("Orphan-DB reaper: prune \(path) failed: \(error.localizedDescription)")
         }
     }
 }

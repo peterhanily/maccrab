@@ -12,17 +12,45 @@ import CryptoKit
 @Suite("TierBRegistry + sandbox enforcement")
 struct TierBRegistryTests {
 
-    static var fixtureBinaryPath: String? {
-        let candidates = [
-            ".build/debug/tier-b-fixture-plugin",
-            ".build/release/tier-b-fixture-plugin",
-        ]
+    /// The Tier-B fixture binary the bundle tests sign + install. Canonical
+    /// resolver — TierBBootstrapTests and TierBRegistryTOCTOUTests delegate here.
+    ///
+    /// This used to look for `.build/{debug,release}/tier-b-fixture-plugin`, a
+    /// name that is not a product in Package.swift and never has been, so it
+    /// always resolved to nil and every `guard let binary = … else { return }`
+    /// returned immediately: ten assertions on the third-party plugin trust
+    /// boundary (revoked-key refusal, temp-binary 0o500, verify→spawn TOCTOU)
+    /// were vacuous in every environment. Resolve the REAL fixture product
+    /// instead, and — because `swift test` builds the test targets and their
+    /// dependencies, NOT sibling executable products — link it on demand the
+    /// way MCPProtocolHarnessTests resolves its binary. `static let` so the
+    /// build runs at most once per test process.
+    static let fixtureBinaryPath: String? = {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/MacCrabForensicsTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
         let fm = FileManager.default
-        for c in candidates where fm.isExecutableFile(atPath: c) {
-            return c
+        var candidates: [String] = []
+        if let d = ProcessInfo.processInfo.environment["MACCRAB_BIN_DIR"], !d.isEmpty {
+            candidates.append(d + "/maccrab-tierb-example")
         }
-        return nil
-    }
+        candidates += [
+            root.appendingPathComponent(".build/debug/maccrab-tierb-example").path,
+            root.appendingPathComponent(".build/release/maccrab-tierb-example").path,
+        ]
+        for c in candidates where fm.isExecutableFile(atPath: c) { return c }
+        let build = Process()
+        build.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        build.arguments = ["swift", "build", "--product", "maccrab-tierb-example"]
+        build.currentDirectoryURL = root
+        build.standardOutput = FileHandle.nullDevice
+        build.standardError = FileHandle.nullDevice
+        try? build.run()
+        build.waitUntilExit()
+        let debug = root.appendingPathComponent(".build/debug/maccrab-tierb-example").path
+        return fm.isExecutableFile(atPath: debug) ? debug : nil
+    }()
 
     /// Build a fully-signed Tier B bundle in a fresh temp dir
     /// with the supplied manifest. Returns the bundle source +

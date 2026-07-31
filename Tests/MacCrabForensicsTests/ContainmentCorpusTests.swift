@@ -131,4 +131,21 @@ struct ContainmentCorpusTests {
         let leaks = out.artifacts.filter { $0.contentType.hasPrefix("leak.") }.map { $0.contentType }
         #expect(leaks.isEmpty, "Swift containment FAILED — leaks: \(leaks)")
     }
+
+    /// The gate on the gate. Every test above is `.enabled(if:)`, and a run in
+    /// which all of them SKIP still reports "3 tests … passed" with rc=0 — so if
+    /// the fixtures or trampoline are missing, `make test-corpus` grepped a green
+    /// line, exited 0, and WROTE `.maccrab-corpus-attest`, which
+    /// prerelease-check.sh accepts as the release's only containment proof. This
+    /// test runs whenever the operator opted in and FAILS if the runtime is not
+    /// really there, so a no-op run can never mint an attestation.
+    @Test("MACCRAB_CORPUS opt-in requires a real runtime — a skipped corpus must not self-attest",
+          .enabled(if: ProcessInfo.processInfo.environment["MACCRAB_CORPUS"] != nil))
+    func optInImpliesRuntimePresent() throws {
+        #expect(SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: Self.trampoline),
+                "trampoline unavailable at \(Self.trampoline) — `swift build` then re-run with MACCRAB_BIN_DIR=$(swift build --show-bin-path)")
+        #expect(FileManager.default.isExecutableFile(atPath: Self.exampleBin), "missing example plugin at \(Self.exampleBin)")
+        #expect(FileManager.default.isExecutableFile(atPath: Self.probeBin), "missing C corpus probe at \(Self.probeBin)")
+        #expect(FileManager.default.isExecutableFile(atPath: Self.swiftProbeBin), "missing Swift corpus probe at \(Self.swiftProbeBin)")
+    }
 }

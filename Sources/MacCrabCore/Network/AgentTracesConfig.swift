@@ -123,6 +123,15 @@ public enum AgentTracesConfigStore {
         case (nil, let uc?):
             return uc
         case (let sc?, let uc?):
+            // A root-owned system config is authoritative — same rule as
+            // NotificationIntegrations.loadEffectiveConfig (v1.21.4 audit A2-01).
+            // Without this a user-home agent_traces_config.json wins the mtime
+            // race and steers the ROOT daemon's OTLP receiver (enable/disable a
+            // detection capability, or move the listener port). Only fall back to
+            // the mtime comparison when the system path is NOT root-owned (the
+            // dev ~/Library path), preserving single-user dev behaviour.
+            let systemUID = (try? fm.attributesOfItem(atPath: systemPath))?[.ownerAccountID] as? NSNumber
+            if systemUID?.uint32Value == 0 { return sc }
             let sm = systemMtime ?? .distantPast
             let um = userMtime ?? .distantPast
             return um > sm ? uc : sc
@@ -146,10 +155,32 @@ public enum AgentTracesConfigStore {
             let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
             guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            // v1.21.4 audit A2-01 added this admin gate to the other four
+            // /Users/* config-walk sites and missed this one: without it any
+            // NON-admin local user (standard account, guest, service account with
+            // a home under /Users) steers the root daemon's OTLP receiver.
+            guard Self.isAdminUID(homeUID) else { continue }
             let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
             candidates.append(Candidate(path: path, mtime: mtime))
         }
         return candidates.max(by: { $0.mtime < $1.mtime })?.path
+    }
+
+    /// Mirrors `NotificationIntegrations.isAdminUID` / `ResponseAction.isAdminUID`
+    /// / `DaemonTimers.isAdminUID` — those are file-private and cannot be reached
+    /// cross-file, so this is replicated for the same reason they are.
+    private static func isAdminUID(_ uid: UInt32) -> Bool {
+        guard let pw = getpwuid(uid) else { return false }
+        let name = String(cString: pw.pointee.pw_name)
+        let baseGID = Int32(bitPattern: pw.pointee.pw_gid)
+        var ngroups: Int32 = 64
+        var groups = [Int32](repeating: 0, count: Int(ngroups))
+        if getgrouplist(name, baseGID, &groups, &ngroups) == -1 {
+            // Buffer too small; ngroups now holds the needed size — retry once.
+            groups = [Int32](repeating: 0, count: Int(ngroups))
+            guard getgrouplist(name, baseGID, &groups, &ngroups) != -1 else { return false }
+        }
+        return groups.prefix(Int(ngroups)).contains(80)   // gid 80 == admin
     }
 }
 

@@ -14,8 +14,18 @@
 // has enabled + receiverEnabled set.
 //
 // Hard invariants from Plan v3:
-//   * Loopback only. NWListener bound to 127.0.0.1 explicitly. Connection
-//     handlers refuse any peer endpoint that is not loopback.
+//   * Loopback only. NWListener bound to 127.0.0.1 explicitly via
+//     `requiredLocalEndpoint` (AI-15 — `requiredInterfaceType` alone left the
+//     socket on the WILDCARD address: `netstat` showed `tcp46 *.4318 LISTEN`).
+//     Connection handlers still refuse any non-loopback peer, as defence in
+//     depth.
+//     CONSEQUENCE, and the one operational trap that bind introduces: it is
+//     IPv4-only, so an exporter configured with `http://localhost:4318` can
+//     resolve to ::1 and get connection-refused where the wildcard bind used to
+//     accept it. Every snippet we ship already says 127.0.0.1 explicitly
+//     (AgentSpansCommand.swift, the `agentTraces.*` strings in all 14 locales,
+//     docs/AGENT_TRACES.md) — keep it that way; do not "helpfully" rewrite any
+//     of them to `localhost`.
 //   * Bind failure surfaces loudly — we do NOT silently fall back to a
 //     different port (that would make the user-facing setup snippet lie).
 //   * Default-off: the daemon starts the receiver only when the master
@@ -118,6 +128,45 @@ public actor OTLPReceiver {
     /// in tests and on hosts that haven't opted in to span persistence.
     private let traceStore: TraceStore?
 
+    /// v1.21.5 (audit S-04): rolling-window ingest budget. The receiver has NO
+    /// caller authentication — the only admission control is "peer endpoint is
+    /// loopback" (handleNewConnection) plus a connection cap — so ANY local uid
+    /// that can reach 127.0.0.1:<port> can POST spans into the ROOT-owned
+    /// traces.db. Without a budget an unprivileged process can push 8 MB bodies
+    /// until the traces retention size cap evicts GENUINE forensic traces: an
+    /// evidence-destruction primitive aimed at the engine's own audit trail.
+    /// Legitimate agent tooling emits a few KB/s (observed batches ~1 MB), so
+    /// 32 MB per 60 s is orders of magnitude of headroom and only ever bites a
+    /// flood. This BOUNDS THE RATE — it mitigates the missing authentication, it
+    /// does not replace it; the real fix is a bearer token in a 0600 root-owned
+    /// file, or a unix socket in a root-owned dir authenticated with
+    /// LOCAL_PEERCRED, both of which need coordinated client-config changes.
+    public static let ingestWindowSeconds: Double = 60.0
+    public static let ingestWindowByteBudget: Int = 32 * 1024 * 1024
+    private var ingestWindowStart: Date = Date()
+    private var ingestWindowBytes: Int = 0
+
+    /// Charge `bytes` against the current window. False means the budget is
+    /// spent and the caller must drop the body BEFORE the store insert. Reuses
+    /// `requestsBadRequest` as the counter, exactly as the connection cap does,
+    /// so no new `OTLPReceiverMetrics` field is introduced — that struct has an
+    /// explicit memberwise init and synthesized Codable, and adding a key would
+    /// break decoding of a metrics blob written by an older build.
+    private func admitIngest(bytes: Int) -> Bool {
+        let now = Date()
+        if now.timeIntervalSince(ingestWindowStart) >= Self.ingestWindowSeconds {
+            ingestWindowStart = now
+            ingestWindowBytes = 0
+        }
+        guard ingestWindowBytes + bytes <= Self.ingestWindowByteBudget else {
+            metrics.requestsBadRequest &+= 1
+            logger.warning("OTLPReceiver: ingest budget exceeded — dropping \(bytes, privacy: .public) byte body")
+            return false
+        }
+        ingestWindowBytes += bytes
+        return true
+    }
+
     public init(port: UInt16 = defaultPort, traceStore: TraceStore? = nil) {
         self.port = port
         self.traceStore = traceStore
@@ -145,10 +194,17 @@ public actor OTLPReceiver {
             throw OTLPReceiverError.invalidPort(Int(port))
         }
         let params = NWParameters.tcp
-        // Bind explicitly to loopback. On macOS this resolves to the IPv4
-        // loopback (127.0.0.1); we additionally verify the peer endpoint
-        // on every accepted connection so a misconfiguration cannot
-        // accidentally expose the receiver beyond loopback.
+        // AI-15: `requiredInterfaceType = .loopback` constrains which INTERFACE
+        // the listener may use — it does NOT choose the local ADDRESS, so the
+        // socket still bound to the wildcard. `netstat -an -p tcp` showed
+        // `tcp46  *.4318  LISTEN` (compare ollama's `127.0.0.1.11434`), which
+        // contradicts this file's own header invariant ("NWListener bound to
+        // 127.0.0.1 explicitly") and means the port is visible to LAN scanning
+        // and completes a TCP handshake from a remote peer BEFORE the
+        // peer-endpoint check below cancels it. `requiredLocalEndpoint` is what
+        // actually pins the bind address. The peer check in
+        // handleNewConnection stays as defence in depth, unchanged.
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: nwPort)
         params.requiredInterfaceType = .loopback
 
         let listener: NWListener
@@ -512,6 +568,19 @@ public actor OTLPReceiver {
     ) {
         Task {
             await receiver.recordBody(body)
+            // v1.21.5 (audit S-04): charge the body against the rolling ingest
+            // budget BEFORE decode + persist. Because the receiver is
+            // unauthenticated, this is what stops an unprivileged local flood
+            // from pushing genuine agent traces out of traces.db via the
+            // retention size cap. Checked here rather than at the Content-Length
+            // parse because this is the only async context on the path — the
+            // header parser is `nonisolated static` and cannot reach actor state
+            // without restructuring its conn/buffer capture pattern, which is
+            // exactly the kind of concurrency churn this fix should not require.
+            guard await receiver.admitIngest(bytes: body.count) else {
+                Self.respond(conn, status: 429, body: "ingest budget exceeded")
+                return
+            }
             // PR-3b: full nested decode → sanitise → extract → persist.
             // PR-3a's decode-and-count remains the fallback when no
             // TraceStore is configured (logging-only mode).
@@ -633,6 +702,7 @@ public actor OTLPReceiver {
         case 411: reason = "Length Required"
         case 413: reason = "Payload Too Large"
         case 415: reason = "Unsupported Media Type"
+        case 429: reason = "Too Many Requests"
         case 503: reason = "Service Unavailable"
         default:  reason = "Error"
         }
