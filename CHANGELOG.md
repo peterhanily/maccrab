@@ -29,6 +29,14 @@ Remediation release over 1.21.5, covering every critical, high and medium findin
 - **Fewer confident false accusations.** The intent scorer asserted certainty on ordinary activity, including against Apple's own malware-removal tool, and labelled routine package installs as worm propagation.
 - **Wider active coverage,** including the privacy-permission and network rule sources, which were evaluating nothing.
 
+### Agent and command-line access
+- **AI agents can now read the detection corpus they were already allowed to edit.** An agent could create and delete rules but had no way to list the 438 shipped detections. Five read-only tools were added: the rule corpus (annotated with whether each rule is actually running under your profile, and whether it has ever matched), an explanation of any single alert, vulnerability findings, privacy findings, and the browser-extension inventory.
+- **Replaying an evidence bundle now actually runs the detection rules.** It previously replayed the bundle's own recorded results back at you, which proved the file was intact but could not tell you whether the current ruleset still catches what it caught. It now runs the installed rules by default.
+- **You can turn off the network-enrichment feeds from the command line** — `maccrabctl config set cert_transparency_enabled false`, and likewise for the other three — without administrator rights, and the feed stops immediately rather than at the next restart. Turning them back on stays a deliberate action in Settings.
+
+### Robustness
+- **Hand-edited storage settings can no longer disable a tier.** Nine retention, size and interval settings accepted a zero or negative value unchanged, which could make a store prune everything the moment it was written or leave a cleanup timer spinning. All settings now have a floor, applied identically at startup and on a configuration reload — the two paths had drifted apart.
+
 ### Interface, documentation and accessibility
 - **The privileged-change audit trail is visible in the dashboard** (System › Health) — previously only an AI agent over MCP could read it.
 - **Documentation corrected where it described things that do not exist,** including a data-deletion command, an at-rest encryption switch, and two ways to disable network access that do not work without administrator rights. The way that does work is now documented.
