@@ -740,7 +740,13 @@ enum DaemonSetup {
             )
             let rollingGraph = RollingCausalGraph(
                 store: causalStore,
-                materializer: materializer
+                materializer: materializer,
+                // Wire the free-space floor the events writer already had. This
+                // store did not, and on an AI-coding-tool host it grew 1-2 GB/h
+                // and took the boot volume to 103 MB free — at which point the
+                // trace hash chain broke with SQLITE_FULL, so the tamper-evidence
+                // guarantee failed exactly when the evidence mattered.
+                volumePath: supportDir
             )
             // v1.17.4 (perf): gate graph ingest on the same default noise
             // filter the EventStore insert path uses (own instance — keeps

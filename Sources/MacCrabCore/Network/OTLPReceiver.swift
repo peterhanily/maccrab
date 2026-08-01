@@ -209,7 +209,17 @@ public actor OTLPReceiver {
 
         let listener: NWListener
         do {
-            listener = try NWListener(using: params, on: nwPort)
+            // MUST be `NWListener(using:)`, NOT `NWListener(using:on:)`.
+            // `requiredLocalEndpoint` already carries the port, and passing `on:`
+            // as well specifies it twice — Network.framework rejects the pair
+            // with EINVAL ("Invalid argument") at construction. The first cut of
+            // the AI-15 fix did exactly that, so the receiver threw on every
+            // start and the whole Agent Traces module bound nothing on the
+            // shipping engine while still advertising itself [STABLE]. The bind
+            // failure was recorded only in agent_traces_status.json, which
+            // nothing but one dashboard tile reads — so it looked healthy
+            // everywhere an operator would actually look.
+            listener = try NWListener(using: params)
         } catch {
             throw OTLPReceiverError.bindFailed("\(error)")
         }

@@ -199,16 +199,81 @@ public actor RollingCausalGraph {
     private let anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)?
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "rolling-graph")
 
+    /// Free-space floor for trace MATERIALIZATION, in MB. Mirrors
+    /// `BatchedEventWriter.freeSpaceFloorMB`, which had the same guard wired to
+    /// events.db only — this store had none, and that asymmetry is what let it
+    /// take a 228 GB boot volume to 103 MB free.
+    private let freeSpaceFloorMB: Int
+    private let volumePath: String?
+    private var lastFreeProbe: (at: ContinuousClock.Instant, freeMB: Int)?
+
+    /// Anchors already materialized this window, keyed by anchor identity.
+    /// `.aiAgentSpawnsShell` fires on (agent, shell-exec) — which for an AI
+    /// coding tool is its NORMAL mode of operation, hundreds of times a minute.
+    /// Materializing a distinct trace per exec is what produced 1-2 GB/hour.
+    /// The same agent spawning the same shell repeatedly is one behavioural
+    /// fact, not thousands of separate causal traces.
+    private var recentAnchorKeys: [String: Date] = [:]
+    private static let anchorDedupWindow: TimeInterval = 300
+
     public init(
         store: CausalGraphStore,
         materializer: TraceMaterializer,
         policy: TracePolicy = .default,
-        anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil
+        anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil,
+        freeSpaceFloorMB: Int = 1024,
+        volumePath: String? = nil
     ) {
         self.store = store
         self.materializer = materializer
         self.policy = policy
         self.anchorCallback = anchorCallback
+        self.freeSpaceFloorMB = max(0, freeSpaceFloorMB)
+        self.volumePath = volumePath
+    }
+
+    /// Returns the free-MB reading when materialization must be SHED, else nil.
+    /// A failed probe allows the write: refusing all trace materialization
+    /// because `statvfs` glitched would be a worse failure than the pressure
+    /// this guards against. Same contract as BatchedEventWriter.
+    private func materializationBlockedFreeMB() -> Int? {
+        guard let volumePath, freeSpaceFloorMB > 0 else { return nil }
+        let now = ContinuousClock.now
+        let freeMB: Int
+        if let cached = lastFreeProbe, cached.at.duration(to: now) < .seconds(15) {
+            freeMB = cached.freeMB
+        } else {
+            let url = URL(fileURLWithPath: volumePath)
+            let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            freeMB = Int((values?.volumeAvailableCapacityForImportantUsage ?? 0) / 1_048_576)
+            lastFreeProbe = (at: now, freeMB: freeMB)
+        }
+        guard freeMB > 0, freeMB < freeSpaceFloorMB else { return nil }
+        return freeMB
+    }
+
+    /// True when this anchor was already materialized inside the dedup window.
+    private func anchorIsDuplicate(_ anchor: AnchorTrigger, now: Date) -> Bool {
+        // Only the agent-activity anchors dedup. The rest are rare by nature and
+        // a repeat genuinely is a separate incident worth its own trace.
+        let key: String
+        switch anchor {
+        case .aiAgentSpawnsShell(let agentEntityId, _):
+            key = "aiAgentSpawnsShell:\(agentEntityId)"
+        case .externalNetworkFromAgent(let agentEntityId, let networkEntityId):
+            key = "externalNetworkFromAgent:\(agentEntityId):\(networkEntityId)"
+        default:
+            return false
+        }
+        if let last = recentAnchorKeys[key], now.timeIntervalSince(last) < Self.anchorDedupWindow {
+            return true
+        }
+        recentAnchorKeys[key] = now
+        if recentAnchorKeys.count > 4096 {
+            let cutoff = now.addingTimeInterval(-Self.anchorDedupWindow)
+            recentAnchorKeys = recentAnchorKeys.filter { $0.value >= cutoff }
+        }
+        return false
     }
 
     // MARK: - Ingestion
@@ -375,7 +440,16 @@ public actor RollingCausalGraph {
         )
         let anchors = AnchorDetector.classify(anchorContext)
         var materialized: [Trace] = []
+        // Admission control BEFORE materializing, not after SQLite returns
+        // SQLITE_FULL. Shedding traces keeps the store — and the boot volume —
+        // usable; the entities and edges above are already persisted, so the
+        // causal substrate is intact and only the derived trace is skipped.
+        if let freeMB = materializationBlockedFreeMB() {
+            logger.error("TraceGraph: shedding \(anchors.count) anchor(s) — only \(freeMB) MB free, floor is \(self.freeSpaceFloorMB) MB")
+            return []
+        }
         for anchor in anchors {
+            if anchorIsDuplicate(anchor, now: event.timestamp) { continue }
             do {
                 let trace = try await materializer.materialize(
                     anchorEntityId: anchor.anchorEntityId,
