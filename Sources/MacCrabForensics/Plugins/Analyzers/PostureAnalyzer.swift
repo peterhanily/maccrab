@@ -17,6 +17,7 @@
 import Foundation
 import CryptoKit
 import CSQLCipher
+import MacCrabCore
 
 public struct PostureAnalyzer: Analyzer {
 
@@ -133,7 +134,11 @@ public struct PostureAnalyzer: Analyzer {
 
     private func readArtifacts(sqlitePath: String, contentType: String, caseID: String) throws -> [ArtifactRow] {
         var db: OpaquePointer?
-        let rc = sqlite3_open_v2(sqlitePath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        let rc = SQLiteOpenPathPolicy.open(
+            sqlitePath,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        )
         guard rc == SQLITE_OK, let h = db else {
             if let h = db { sqlite3_close(h) }
             return []

@@ -133,6 +133,19 @@ public final class ESSeqTracker: @unchecked Sendable {
         }
     }
 
+    /// Record a message intentionally rejected at callback admission before it
+    /// enters the retained-message worker. It still belongs in
+    /// `es_processed_by_type` (the denominator used with copy-backpressure
+    /// drops), but it must not add a near-zero sample to the worker end-to-end
+    /// latency histogram. OPEN/CLOSE noise is usually >99% of this queue; mixing
+    /// those callback-only samples into p99 would make a badly backlogged worker
+    /// look healthy precisely when the latency gauge is needed.
+    public func recordFilteredBeforeWorker(eventType: UInt32) {
+        lock.lock()
+        processedByTypeMap[eventType, default: 0] &+= 1
+        lock.unlock()
+    }
+
     /// Bucket one latency sample. Caller holds `lock`.
     private func recordLatencyLocked(micros: UInt64) {
         let bounds = Self.latencyBoundsMicros

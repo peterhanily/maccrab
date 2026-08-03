@@ -96,26 +96,140 @@ public indirect enum ConditionNode: Sendable, Hashable {
     case predicateGroup(range: Range<Int>, mode: RuleCondition)
 }
 
+/// One shared trust boundary for condition trees consumed by both detection
+/// engines. Rule JSON is untrusted content (bundled, operator-authored, or
+/// eventually channel-delivered), so malformed boolean structure must be
+/// rejected before it can become executable rule logic.
+struct ConditionTreeValidationError: Error, LocalizedError, Equatable {
+    let reason: String
+    var errorDescription: String? { reason }
+}
+
+extension ConditionNode {
+    static let maximumDepth = 64
+    static let maximumNodes = 4_096
+
+    /// Validate references and resource bounds without recursive Swift calls.
+    /// Iteration matters for programmatically-created trees, which have not
+    /// passed through the decoder's depth guard and could otherwise exhaust the
+    /// stack while merely being validated.
+    func validate(predicateCount: Int) throws {
+        var stack: [(node: ConditionNode, depth: Int)] = [(self, 1)]
+        var nodeCount = 0
+
+        func invalid(_ reason: String) -> ConditionTreeValidationError {
+            ConditionTreeValidationError(reason: reason)
+        }
+
+        while let current = stack.popLast() {
+            guard current.depth <= Self.maximumDepth else {
+                throw invalid("depth exceeds \(Self.maximumDepth)")
+            }
+            nodeCount += 1
+            guard nodeCount <= Self.maximumNodes else {
+                throw invalid("node count exceeds \(Self.maximumNodes)")
+            }
+
+            switch current.node {
+            case .and(let operands), .or(let operands):
+                guard !operands.isEmpty else {
+                    throw invalid("AND/OR node has no operands")
+                }
+                for operand in operands {
+                    stack.append((operand, current.depth + 1))
+                }
+            case .not(let operand):
+                stack.append((operand, current.depth + 1))
+            case .predicate(let index):
+                guard index >= 0, index < predicateCount else {
+                    throw invalid("predicate index \(index) outside 0..<\(predicateCount)")
+                }
+            case .predicateGroup(let range, _):
+                guard range.lowerBound >= 0,
+                      range.lowerBound < range.upperBound,
+                      range.upperBound <= predicateCount else {
+                    throw invalid("predicate group \(range) outside 0..<\(predicateCount)")
+                }
+            }
+        }
+    }
+}
+
+/// Shared no-follow, mutation-checked read ceiling for one compiled rule file.
+/// The shipped corpus is currently under 12 KiB/rule; 4 MiB leaves generous
+/// headroom while bounding JSONDecoder's pre-validation allocation for a very
+/// wide attacker-supplied tree.
+enum RuleFileLoadingPolicy {
+    static let maximumBytes = 4 * 1_024 * 1_024
+
+    struct ReadError: Error, LocalizedError {
+        let filename: String
+        var errorDescription: String? {
+            "\(filename) is not a stable no-follow regular file within the \(RuleFileLoadingPolicy.maximumBytes)-byte limit"
+        }
+    }
+
+    static func read(_ url: URL) throws -> Data {
+        guard let data = BoundedRegularFileReader.read(
+            at: url.path,
+            maximumBytes: maximumBytes
+        ) else {
+            throw ReadError(filename: url.lastPathComponent)
+        }
+        return data
+    }
+}
+
 extension ConditionNode: Codable {
     private enum CodingKeys: String, CodingKey {
         case type, operands, index, rangeStart, rangeEnd, mode
     }
 
     public init(from decoder: Decoder) throws {
+        // Each recursive child adds an `operands` coding-key component (plus an
+        // array index). Count that key rather than absolute codingPath length so
+        // the same limit applies at a top-level CompiledRule and inside a
+        // SequenceRule's steps array. Reject on entry, before decoding another
+        // operands array and recursing further.
+        let treeDepth = 1 + decoder.codingPath.lazy.filter {
+            $0.stringValue == CodingKeys.operands.stringValue
+        }.count
+        guard treeDepth <= Self.maximumDepth else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Condition tree depth exceeds \(Self.maximumDepth)"
+            ))
+        }
+
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(String.self, forKey: .type)
 
         switch type {
         case "and":
             let ops = try container.decode([ConditionNode].self, forKey: .operands)
+            guard !ops.isEmpty else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "AND node needs at least one operand"
+                ))
+            }
             self = .and(ops)
         case "or":
             let ops = try container.decode([ConditionNode].self, forKey: .operands)
+            guard !ops.isEmpty else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "OR node needs at least one operand"
+                ))
+            }
             self = .or(ops)
         case "not":
             let ops = try container.decode([ConditionNode].self, forKey: .operands)
-            guard let first = ops.first else {
-                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "NOT node needs one operand"))
+            guard ops.count == 1, let first = ops.first else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "NOT node needs exactly one operand"
+                ))
             }
             self = .not(first)
         case "predicate":
@@ -124,10 +238,10 @@ extension ConditionNode: Codable {
         case "group":
             let start = try container.decode(Int.self, forKey: .rangeStart)
             let end = try container.decode(Int.self, forKey: .rangeEnd)
-            guard start >= 0, end >= start else {
+            guard start >= 0, end > start else {
                 throw DecodingError.dataCorrupted(.init(
                     codingPath: decoder.codingPath,
-                    debugDescription: "Invalid predicate group range: \(start)..<\(end) (must be non-negative with start <= end)"
+                    debugDescription: "Invalid predicate group range: \(start)..<\(end) (must be non-negative and non-empty)"
                 ))
             }
             let mode = try container.decodeIfPresent(RuleCondition.self, forKey: .mode) ?? .allOf
@@ -524,6 +638,9 @@ public actor RuleEngine {
     /// of the prior ruleset is rejected as a suspected truncated/partial content
     /// bundle (the Channel-File-291 COUNT class) — see reloadRules.
     private let reloadMinCountFraction: Double
+    /// Test-only opt-in is injectable, but every shipping initializer inherits
+    /// the single disabled production gate from RuleChannelPolicy.
+    private let allowPushedRules: Bool
 
     public init(
         slowRuleThresholdNs: UInt64 = 50_000_000,          // 50ms — an over-budget eval
@@ -535,6 +652,23 @@ public actor RuleEngine {
         self.autoDisablePathologicalNs = autoDisablePathologicalNs
         self.autoDisableMaxBreaches = max(1, autoDisableMaxBreaches)
         self.reloadMinCountFraction = reloadMinCountFraction
+        self.allowPushedRules = RuleChannelPolicy.productionEnabled
+    }
+
+    /// Internal-only override for containment tests. Production targets cannot
+    /// opt around RuleChannelPolicy through the public initializer.
+    init(
+        slowRuleThresholdNs: UInt64 = 50_000_000,
+        autoDisablePathologicalNs: UInt64 = 1_000_000_000,
+        autoDisableMaxBreaches: Int = 20,
+        reloadMinCountFraction: Double = 0.7,
+        allowPushedRulesForTesting: Bool
+    ) {
+        self.slowRuleThresholdNs = slowRuleThresholdNs
+        self.autoDisablePathologicalNs = autoDisablePathologicalNs
+        self.autoDisableMaxBreaches = max(1, autoDisableMaxBreaches)
+        self.reloadMinCountFraction = reloadMinCountFraction
+        self.allowPushedRules = allowPushedRulesForTesting
     }
 
     /// Whether a rule whose eval just took `elapsedNs` (with `breaches`
@@ -587,6 +721,17 @@ public actor RuleEngine {
     }
 
     // MARK: Rule loading
+
+    private static func validateConditionTree(in rule: CompiledRule) throws {
+        guard let tree = rule.conditionTree else { return }
+        do {
+            try tree.validate(predicateCount: rule.predicates.count)
+        } catch {
+            throw RuleEngineError.invalidRuleFormat(
+                "rule '\(rule.id)' has invalid condition_tree: \(error.localizedDescription)"
+            )
+        }
+    }
 
     /// Active rule-status profile filter (F-04). When non-nil, only rules whose
     /// Sigma `status` is in this set ship enabled from the BUNDLED base load
@@ -662,8 +807,9 @@ public actor RuleEngine {
                 }
             }
             do {
-                let data = try Data(contentsOf: file)
+                let data = try RuleFileLoadingPolicy.read(file)
                 var rule = try decoder.decode(CompiledRule.self, from: data)
+                try Self.validateConditionTree(in: rule)
                 // F-04 stable-profile gate: a rule whose Sigma status falls outside
                 // the active profile ships disabled (deprecated is already
                 // enabled=false). nil profile = every non-deprecated rule enabled.
@@ -730,7 +876,11 @@ public actor RuleEngine {
     /// Returns the number of rules added. Call AFTER the bundled + user rules
     /// are loaded, so existing ids are known.
     @discardableResult
-    public func loadPushedRules(from directory: URL) throws -> Int {
+    func loadPushedRules(from directory: URL) throws -> Int {
+        // Authoritative runtime gate. AgentKit also has no call sites, but this
+        // prevents a future caller inside MacCrabCore from silently activating a
+        // preserved corpus while the release policy remains disabled.
+        guard allowPushedRules else { return 0 }
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
@@ -742,8 +892,15 @@ public actor RuleEngine {
         var added = 0
         var shadowed = 0
         for file in jsonFiles {
-            guard let data = try? Data(contentsOf: file),
-                  var rule = try? decoder.decode(CompiledRule.self, from: data) else { continue }
+            var rule: CompiledRule
+            do {
+                let data = try RuleFileLoadingPolicy.read(file)
+                rule = try decoder.decode(CompiledRule.self, from: data)
+                try Self.validateConditionTree(in: rule)
+            } catch {
+                logger.error("Skipping malformed pushed rule \(file.lastPathComponent): \(error.localizedDescription)")
+                continue
+            }
             // The trust boundary: never let a pushed rule take over an existing id.
             if allRules[rule.id] != nil {
                 shadowed += 1
@@ -1129,9 +1286,11 @@ public actor RuleEngine {
     ) -> Bool {
         switch node {
         case .and(let operands):
+            guard !operands.isEmpty else { return false }
             return operands.allSatisfy { evaluateConditionNode($0, predicates: predicates, against: event, memo: memo) }
 
         case .or(let operands):
+            guard !operands.isEmpty else { return false }
             return operands.contains { evaluateConditionNode($0, predicates: predicates, against: event, memo: memo) }
 
         case .not(let operand):
@@ -1142,10 +1301,13 @@ public actor RuleEngine {
             return evaluatePredicate(predicates[index], against: event, memo: memo)
 
         case .predicateGroup(let range, let mode):
-            let clamped = range.clamped(to: 0..<predicates.count)
-            // An empty slice must not produce a vacuous-truth match.
-            guard !clamped.isEmpty else { return false }
-            let slice = predicates[clamped]
+            // Loaded rules pass the shared validator, but keep evaluation
+            // fail-closed if an invariant ever regresses. Never clamp an
+            // attacker-supplied range into a different executable meaning.
+            guard range.lowerBound >= 0,
+                  range.lowerBound < range.upperBound,
+                  range.upperBound <= predicates.count else { return false }
+            let slice = predicates[range]
             switch mode {
             case .allOf:
                 return slice.allSatisfy { evaluatePredicate($0, against: event, memo: memo) }

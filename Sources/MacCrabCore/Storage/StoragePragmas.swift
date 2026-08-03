@@ -16,6 +16,10 @@ import Foundation
 import CSQLCipher
 
 enum StoragePragmas {
+    struct ApplicationFailure: Error, Sendable, Equatable {
+        let sql: String
+        let metadata: SQLiteFailureDetails
+    }
     /// EventStore page cache. Negative values are KB.
     /// 16 MB covers a typical timestamp-range scan (1K–10K rows × ~2KB JSON =
     /// 2–20 MB of page traffic) without thrashing. Larger queries (full FTS
@@ -45,17 +49,15 @@ enum StoragePragmas {
     /// values; the rest of the alerts schema fits comfortably in cache.
     static let alertMmapSizeBytes: Int64 = 16_777_216 // 16 MB
 
-    /// WAL autocheckpoint threshold (pages). 1000 pages × 4 KB = 4 MB WAL
-    /// before checkpoint. v1.6.21 had this at 10000 (40 MB), which let the
-    /// WAL grow large during write storms before draining. 1000 keeps the
-    /// `.db-wal` file small and reduces transient memory.
+    /// Controlled-checkpoint threshold (pages). 1000 pages × 4 KB = 4 MB WAL
+    /// before the store's floor-aware hook considers a PASSIVE checkpoint.
     ///
     /// Used by the low-volume stores (alerts, campaigns). EventStore uses the
     /// higher `eventWalAutocheckpointPages` below — see the rationale there.
     static let walAutocheckpointPages: Int32 = 1000
 
-    /// EventStore WAL autocheckpoint threshold (pages). 4000 pages × 4 KB =
-    /// 16 MB before the writing connection auto-checkpoints (PASSIVE).
+    /// EventStore controlled-checkpoint threshold (pages). 4000 pages × 4 KB
+    /// = 16 MB before its floor-aware hook considers PASSIVE.
     ///
     /// v1.21.4 per-event perf (#23): events.db is the only high-write-rate
     /// store (a file-write flood is ~474 ev/s, with FTS5 + ~11 secondary
@@ -67,19 +69,18 @@ enum StoragePragmas {
     /// batching the frame copy into larger, more sequential drains.
     ///
     /// WAL-BOUND SAFETY (tensions the v1.18 WAL-bloat fix — must not regress
-    /// the field-observed 251 MB WAL): the bound is still owned by SQLite's own
-    /// auto-checkpoint, NOT by any background timer. In the healthy case the
-    /// auto-checkpoint fires at ~16 MB and resets the WAL write pointer (the
+    /// the field-observed 251 MB WAL): the bound is owned by MacCrab's gated
+    /// hook, not SQLite's path-agnostic default. In the healthy case the hook
+    /// fires at ~16 MB and resets the WAL write pointer (the
     /// file is reused as a ring buffer at that high-water mark), so the WAL
     /// settles at ~16 MB — a comfortable 4× under `journalSizeLimitBytes`
     /// (64 MB), which remains the hard backstop that truncates the sidecar
     /// after any checkpoint. The stalled-long-lived-reader failure mode (a
     /// reader parking the PASSIVE checkpoint so the WAL grows) exists
     /// IDENTICALLY at 4 MB and 16 MB — a stalled reader defeats PASSIVE
-    /// checkpointing at any threshold — and its recovery is unchanged (the
-    /// reader releases → next checkpoint drains → journal_size_limit truncates
-    /// to ≤64 MB). So this raises the healthy steady-state WAL from ~4 MB to
-    /// ~16 MB and changes nothing about unbounded-growth reachability. The
+    /// checkpointing at any threshold. The controlled hook safely defers and
+    /// retries on later commits after the reader releases. So this raises the
+    /// healthy steady-state WAL from ~4 MB to ~16 MB. The
     /// background size-cap sweep additionally runs a TRUNCATE checkpoint
     /// (see `EventStore.walCheckpointTruncate` / DaemonTimers) to reclaim the
     /// 16 MB high-water mark back to zero on its cadence — footprint-neutral in
@@ -118,26 +119,54 @@ enum StoragePragmas {
 
     /// Apply EventStore-specific pragmas to an open handle.
     static func applyEventStorePragmas(to handle: OpaquePointer) {
-        // auto_vacuum MUST come first — see Wave 9B.1 ordering note above.
-        sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(eventWalAutocheckpointPages)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA cache_size = \(eventCacheSizeKB)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA mmap_size = \(eventMmapSizeBytes)", nil, nil, nil)
+        _ = try? applyEventStorePragmasChecked(to: handle)
+    }
+
+    /// Checked variant used by evidence-owning stores during initialization.
+    /// It stops at the first failure so later successful PRAGMAs cannot replace
+    /// SQLite's extended result code / VFS errno before the caller captures it.
+    static func applyEventStorePragmasChecked(to handle: OpaquePointer) throws {
+        try applyChecked([
+            // auto_vacuum MUST come first — see Wave 9B.1 ordering note above.
+            "PRAGMA auto_vacuum = INCREMENTAL",
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA journal_size_limit = \(journalSizeLimitBytes)",
+            "PRAGMA cache_size = \(eventCacheSizeKB)",
+            "PRAGMA mmap_size = \(eventMmapSizeBytes)",
+        ], to: handle)
     }
 
     /// Apply AlertStore-specific pragmas to an open handle.
     static func applyAlertStorePragmas(to handle: OpaquePointer) {
-        // auto_vacuum MUST come first — see Wave 9B.1 ordering note above.
-        sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA mmap_size = \(alertMmapSizeBytes)", nil, nil, nil)
+        _ = try? applyAlertStorePragmasChecked(to: handle)
+    }
+
+    static func applyAlertStorePragmasChecked(to handle: OpaquePointer) throws {
+        try applyChecked([
+            // auto_vacuum MUST come first — see Wave 9B.1 ordering note above.
+            "PRAGMA auto_vacuum = INCREMENTAL",
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA journal_size_limit = \(journalSizeLimitBytes)",
+            "PRAGMA cache_size = \(alertCacheSizeKB)",
+            "PRAGMA mmap_size = \(alertMmapSizeBytes)",
+        ], to: handle)
+    }
+
+    private static func applyChecked(
+        _ statements: [String],
+        to handle: OpaquePointer
+    ) throws {
+        for sql in statements {
+            let rc = sqlite3_exec(handle, sql, nil, nil, nil)
+            guard rc == SQLITE_OK else {
+                throw ApplicationFailure(
+                    sql: sql,
+                    metadata: SQLiteFailureDetails(resultCode: rc, db: handle)
+                )
+            }
+        }
     }
 
     /// Apply CampaignStore-specific pragmas. Same shape as alerts.
@@ -146,7 +175,6 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
-        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
     }
@@ -170,7 +198,8 @@ enum StoragePragmas {
     // Hard cap per call: 200K pages (~800 MB at the 4 KB default page
     // size) so a single sweep can't stall the actor for too long.
     // The caller schedules the next sweep on its own timer; we never
-    // loop inside this call.
+    // loop inside this call. This path-agnostic primitive deliberately does
+    // not checkpoint; persistent callers own the fresh floor/family gates.
 
     /// Maximum pages reclaimed per incremental_vacuum call, regardless
     /// of what the caller requested. Keeps wall-clock bounded (~5-30 s
@@ -234,8 +263,25 @@ enum StoragePragmas {
     /// Errors propagate via `result.autoVacuumActive == false` (when
     /// the file is not in INCREMENTAL mode) or a thrown
     /// `IncrementalVacuumError` (when the SQLite call itself fails).
-    enum IncrementalVacuumError: Error {
-        case sqliteFailed(String)
+    enum IncrementalVacuumError: Error, LocalizedError {
+        case sqliteFailure(
+            context: String,
+            message: String,
+            metadata: SQLiteFailureMetadata
+        )
+
+        var sqliteFailureMetadata: SQLiteFailureMetadata {
+            switch self {
+            case .sqliteFailure(_, _, let metadata): return metadata
+            }
+        }
+
+        var errorDescription: String? {
+            switch self {
+            case .sqliteFailure(let context, let message, let metadata):
+                return "\(context) failed (rc=\(metadata.resultCode), extended=\(metadata.extendedResultCode), system_errno=\(metadata.systemErrno)): \(message)"
+            }
+        }
     }
 
     static func runIncrementalVacuum(
@@ -255,24 +301,15 @@ enum StoragePragmas {
             )
         }
 
-        // Best-effort passive checkpoint: drains as much of the WAL
-        // as we can without blocking concurrent writers. If a writer
-        // is mid-transaction this is a no-op; that's fine — the
-        // truncate checkpoint below will retry under the same lock
-        // semantics that the next size-cap sweep already uses.
-        var passiveLog: Int32 = 0
-        var passiveCkpt: Int32 = 0
-        _ = sqlite3_wal_checkpoint_v2(
-            handle, nil,
-            Int32(SQLITE_CHECKPOINT_PASSIVE),
-            &passiveLog, &passiveCkpt
-        )
+        // Deliberately do not checkpoint here. This shared primitive has no
+        // database path, free-space floor, or family-footprint probe, so it
+        // cannot prove that copying an allocated WAL into the main file is
+        // safe. Persistent-store callers must run their sidecar-aware, fresh
+        // checkpoint admission immediately before and after this primitive.
 
         let freelistBefore = readFreelistCount(handle)
         guard freelistBefore > 0 else {
-            // No pages to reclaim — short-circuit so we don't even
-            // bother with the truncate checkpoint, which would just
-            // be noise in the structured log.
+            // No pages to reclaim.
             return IncrementalVacuumResult(
                 freelistBefore: 0,
                 freelistAfter: 0,
@@ -291,22 +328,15 @@ enum StoragePragmas {
             let rc = sqlite3_exec(handle, sql, nil, nil, &errmsg)
             if rc != SQLITE_OK {
                 let msg = errmsg.flatMap { String(cString: $0) } ?? "unknown error"
+                let metadata = SQLiteFailureMetadata(resultCode: rc, db: handle)
                 sqlite3_free(errmsg)
-                throw IncrementalVacuumError.sqliteFailed(msg)
+                throw IncrementalVacuumError.sqliteFailure(
+                    context: "PRAGMA incremental_vacuum",
+                    message: msg,
+                    metadata: metadata
+                )
             }
         }
-
-        // Truncate the WAL so the pages we just freed don't survive
-        // as zombie copies in the .wal sidecar. Best-effort — if
-        // readers are active the truncate may degrade to RESTART
-        // semantics, which is still fine.
-        var truncLog: Int32 = 0
-        var truncCkpt: Int32 = 0
-        _ = sqlite3_wal_checkpoint_v2(
-            handle, nil,
-            Int32(SQLITE_CHECKPOINT_TRUNCATE),
-            &truncLog, &truncCkpt
-        )
 
         let freelistAfter = readFreelistCount(handle)
         return IncrementalVacuumResult(

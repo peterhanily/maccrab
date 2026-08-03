@@ -159,7 +159,7 @@ public enum LLMSanitizer {
     /// REAL account names — not a generic `\w+` regex — catches those
     /// without nuking ordinary words.
     ///
-    /// Derived from the home directories under `/Users` plus
+    /// Derived from resolver-validated local account records plus
     /// `NSUserName()`. Gated to >= 3 chars and the shared/placeholder
     /// accounts are dropped, so we never word-boundary-redact "Shared",
     /// the `.localized` Spotlight dir, or a 1-2 char alias that would
@@ -167,8 +167,8 @@ public enum LLMSanitizer {
     private static let liveUsernames: [String] = {
         var names = Set<String>()
         names.insert(NSUserName())
-        if let entries = try? FileManager.default.contentsOfDirectory(atPath: "/Users") {
-            for entry in entries { names.insert(entry) }
+        for home in RealUserHomeResolver.all() {
+            names.insert(home.userName)
         }
         // Placeholder dirs + common security-vocabulary account names are
         // preserved (see reservedAccountNames) so redacting every "admin" /

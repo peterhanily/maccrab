@@ -34,7 +34,7 @@ struct LocalizationCoverageTests {
     ///
     /// The budget only ratchets DOWN: lower it as keys are backfilled. Never
     /// raise it to make a build pass.
-    static let missingEnKeyBudget = 555
+    static let missingEnKeyBudget = 552
 
     @Test("no new String(localized:) key without an en.lproj row")
     func localizedKeysHaveEnglishTableRows() throws {

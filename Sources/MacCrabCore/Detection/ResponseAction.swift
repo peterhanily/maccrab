@@ -79,6 +79,10 @@ public struct ResponseActionConfig: Codable, Sendable {
 
 /// Executes response actions when alerts are generated.
 public actor ResponseEngine {
+    /// Response-action maps can contain per-rule entries, so allow more room
+    /// than a toggle file while keeping the root reload path bounded.
+    static let maxActionConfigBytes = 4 * 1024 * 1024
+
 
     private let logger = Logger(subsystem: "com.maccrab", category: "response")
 
@@ -128,25 +132,22 @@ public actor ResponseEngine {
         let ruleId: String
     }
 
-    public init(quarantineDir: String? = nil) {
-        if let dir = quarantineDir {
-            self.quarantineDir = dir
-        } else {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first.map { $0.appendingPathComponent("MacCrab/quarantine").path }
-                ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/quarantine"
-            self.quarantineDir = appSupport
-        }
-        self.pfAnchorPath = {
-            let appSupport = FileManager.default.urls(
+    public init(quarantineDir: String? = nil, supportDirectory: String? = nil) {
+        let appSupport: String = {
+            if let supportDirectory { return supportDirectory }
+            if geteuid() == 0 { return "/Library/Application Support/MacCrab" }
+            return FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
             ).first.map { $0.appendingPathComponent("MacCrab").path }
                 ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-            return (appSupport as NSString).appendingPathComponent("maccrab_blocks.conf")
         }()
+        if let dir = quarantineDir {
+            self.quarantineDir = dir
+        } else {
+            self.quarantineDir = (appSupport as NSString).appendingPathComponent("quarantine")
+        }
+        self.pfAnchorPath = (appSupport as NSString).appendingPathComponent("maccrab_blocks.conf")
         try? FileManager.default.createDirectory(
             atPath: self.quarantineDir,
             withIntermediateDirectories: true
@@ -171,31 +172,22 @@ public actor ResponseEngine {
         defaultActions = actions
     }
 
-    /// Load action configuration. Probes the system path first, then walks
-    /// `/Users/*` for a user-home `actions.json` (user app writes there
+    /// Load action configuration. Probes the system path first, then checks
+    /// resolver-validated homes for a user `actions.json` (the app writes there
     /// because the system path is root-only). Prefers the most recently
     /// modified copy. v1.6.19.1 fix for the wire-the-orphans pattern: pre-
     /// fix, ResponseActionsView wrote to a path the daemon never read.
     public func loadConfig(from path: String) throws {
-        let systemData = try? Data(contentsOf: URL(fileURLWithPath: path))
-        let userPath = Self.findUserHomeActionsPath()
-        let userData = userPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
-
-        let fm = FileManager.default
-        let systemMtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-        let userMtime = userPath.flatMap {
-            (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
-        }
+        let systemSnapshot = Self.configSnapshot(at: path)
+        let userSnapshot = Self.findUserHomeActionsSnapshot()
 
         let chosen: Data? = {
-            switch (systemData, userData) {
+            switch (systemSnapshot, userSnapshot) {
             case (nil, nil):              return nil
-            case (let s?, nil):           return s
-            case (nil, let u?):           return u
+            case (let s?, nil):           return s.data
+            case (nil, let u?):           return u.data
             case (let s?, let u?):
-                let sm = systemMtime ?? .distantPast
-                let um = userMtime ?? .distantPast
-                return um > sm ? u : s
+                return u.modificationDate > s.modificationDate ? u.data : s.data
             }
         }()
         guard let data = chosen else { return }
@@ -204,34 +196,37 @@ public actor ResponseEngine {
         ruleActions = config.rules ?? [:]
     }
 
-    /// Walk `/Users/*` for an `actions.json` owned by the home's uid.
-    /// Returns the most-recently-modified candidate's path, or nil. Same
-    /// shape as `NotificationIntegrations.findUserHomeConfigPath`.
-    nonisolated private static func findUserHomeActionsPath() -> String? {
-        let fm = FileManager.default
-        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
-        struct Candidate { let path: String; let mtime: Date }
-        var candidates: [Candidate] = []
-        for user in users where user != "Shared" && !user.hasPrefix(".") {
-            let home = "/Users/\(user)"
-            let path = home + "/Library/Application Support/MacCrab/actions.json"
-            guard fm.fileExists(atPath: path) else { continue }
-            guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
-                  let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
-            let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+    nonisolated private static func configSnapshot(
+        at path: String
+    ) -> BoundedRegularFileReader.Snapshot? {
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+            at: path,
+            maximumBytes: Self.maxActionConfigBytes
+        ) else { return nil }
+        return snapshot
+    }
+
+    /// Inspect resolver-validated homes and return the most recent snapshot whose
+    /// descriptor owner matches the enclosing admin home. Selection metadata
+    /// and bytes come from the same inode; a path stat followed by a later read
+    /// would let a replacement file inherit the first inode's authority.
+    nonisolated private static func findUserHomeActionsSnapshot()
+        -> BoundedRegularFileReader.Snapshot? {
+        var candidates: [BoundedRegularFileReader.Snapshot] = []
+        for home in RealUserHomeResolver.all() {
+            let path = home.appending("Library/Application Support/MacCrab/actions.json")
+            guard let snapshot = configSnapshot(at: path),
+                  home.userID == snapshot.ownerUID else { continue }
             // v1.21.1 (audit): response actions are privileged (kill / quarantine /
             // blockNetwork), so only honor a user-home actions.json owned by an
             // ADMIN user — the same bar the control-plane inbox enforces
             // (DaemonTimers.isAuthorizedInboxRequest). Without it, any unprivileged
             // local user could drop actions.json in their own home and steer the
             // root engine's response actions on the next reload.
-            guard Self.isAdminUID(homeUID) else { continue }
-            let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
-            candidates.append(Candidate(path: path, mtime: mtime))
+            guard Self.isAdminUID(home.userID) else { continue }
+            candidates.append(snapshot)
         }
-        return candidates.max(by: { $0.mtime < $1.mtime })?.path
+        return candidates.max(by: { $0.modificationDate < $1.modificationDate })
     }
 
     /// True if `uid` belongs to the macOS `admin` group (gid 80). Mirrors
@@ -613,19 +608,12 @@ public actor ResponseEngine {
 
     /// Reload the PF anchor using pfctl. Requires root.
     private nonisolated func reloadPFAnchor() async -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        process.arguments = ["-a", "com.maccrab", "-f", pfAnchorPath]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", "com.maccrab", "-f", pfAnchorPath],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )?.succeeded == true
     }
 
     /// Remove expired network blocks and rewrite the anchor file.
@@ -701,50 +689,34 @@ public actor ResponseEngine {
         "/usr/local/maccrab/scripts/",
     ]
 
-    private static func validateScriptPath(_ path: String) -> Bool {
-        // Must canonicalize first to defeat `..` traversal.
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        let canonical = url.path
-        let inAllowlist = scriptAllowlistedDirs.contains { canonical.hasPrefix($0) }
-        guard inAllowlist else { return false }
-
-        // Reject symlinks — defeat "swap allowlisted path → user-writable
-        // target" trick. attributesOfItem follows symlinks; we want lstat.
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: canonical) else {
-            return false
-        }
-        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
-            return false
-        }
-
-        // Owner must be root (uid 0).
-        let ownerUID = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value
-        guard ownerUID == 0 else { return false }
-
-        // Permissions must be no-world-write, no-group-write.
-        // We accept 0o755, 0o750, 0o700, etc. — anything with the
-        // group-write or world-write bits clear.
-        let posix = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o777
-        let groupWrite: UInt16 = 0o020
-        let worldWrite: UInt16 = 0o002
-        if (posix & (groupWrite | worldWrite)) != 0 {
-            return false
-        }
-        return true
+    private static func validatedScriptPath(_ path: String) -> String? {
+        // Validate every ancestor, not merely the final file. This rejects an
+        // allowlisted leaf reached through a user-writable/symlinked directory,
+        // macOS ACL write grants that POSIX mode bits hide, set-id executables,
+        // and scripts large enough to be an accidental resource sink.
+        PrivilegedExecutablePolicy.validatedPath(
+            path,
+            kind: .regularFile(
+                requireExecutable: true,
+                maximumSize: 1 * 1024 * 1024
+            ),
+            allowedPrefixes: scriptAllowlistedDirs
+        )
     }
 
     /// Execute a user-defined script with alert context as environment variables.
     private nonisolated func runScript(path: String, alert: Alert, event: Event) async -> Bool {
-        guard Self.validateScriptPath(path) else {
-            return false
-        }
-        guard FileManager.default.isExecutableFile(atPath: path) else {
+        guard let trustedScript = Self.validatedScriptPath(path) else {
             return false
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.environment = [
+        // Execute through Apple's immutable /bin/sh rather than asking the
+        // kernel to honor an arbitrary shebang interpreter (for example a
+        // user-owned /opt/homebrew/bin/python). The root-owned script remains
+        // free to opt into other tools explicitly; that is trusted admin code,
+        // not a path selected by an unprivileged actions.json writer.
+        var environment = BoundedPrivilegedProcessRunner.minimalEnvironment
+        environment.merge([
             "MACCRAB_ALERT_ID": alert.id,
             "MACCRAB_ALERT_RULE_ID": alert.ruleId,
             "MACCRAB_ALERT_RULE_TITLE": alert.ruleTitle,
@@ -776,17 +748,16 @@ public actor ResponseEngine {
             "MACCRAB_RULE_TITLE": alert.ruleTitle,
             "MACCRAB_SEVERITY": alert.severity.rawValue,
             "MACCRAB_MITRE_TECHNIQUES": alert.mitreTechniques ?? "",
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        ], uniquingKeysWith: { _, alertValue in alertValue })
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/bin/sh",
+            arguments: ["--", trustedScript],
+            environment: environment,
+            timeout: 30,
+            maximumOutputBytes: nil
+        ) else { return false }
+        return result.succeeded
     }
 }
 

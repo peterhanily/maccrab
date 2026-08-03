@@ -23,6 +23,24 @@ import os.log
 
 public actor FileContentEnricher {
 
+    /// Agent instruction roots mirrored by ESCollector's OPEN admission.
+    /// Internal visibility is intentional: the drift guard exercises the
+    /// actual production lists instead of maintaining a third test-only copy.
+    nonisolated static let agentContentRoots: [String] = [
+        "/.claude/skills/", "/.codex/skills/", "/.cursor/skills/",
+        "/.claude/scripts/", "/.claude/hooks/", "/.claude/agents/",
+        "/.github/workflows/",
+    ]
+
+    /// Exact agent-config suffix set content rules consume. Keep this in
+    /// lockstep with ESCollector.agentConfigReadFileSuffixes and the union of
+    /// the shipped MCP/config FileContent rule predicates (guarded by tests).
+    nonisolated static let agentConfigFileSuffixes: [String] = [
+        "/.claude/claude_desktop_config.json", "/.claude.json", "/.cursor/mcp.json",
+        "/.continue/config.json", "/.vscode/mcp.json", "/.windsurf/mcp.json",
+        "/.claude/settings.json", "/.claude/project.json", "/.claude/local.json",
+    ]
+
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "file-content-enricher")
 
     /// Maximum bytes read from any file. 64 KB covers description /
@@ -41,21 +59,11 @@ public actor FileContentEnricher {
     // close-write events, each calling `scan()` synchronously on the
     // enricher actor. To keep the hot path bounded:
     //
-    //   1. Cache by (path, mtime, size) — repeated reads of the same
-    //      file within npm's install/extract pipeline (which writes →
-    //      reads → writes the same files) hit the cache.
-    //   2. Cap the cache size with FIFO eviction so memory stays
-    //      bounded under storms.
-    //   3. Per-second rate limit (token bucket) so even a fresh-files
+    //   1. Each admitted read is one stable descriptor snapshot. A path-only
+    //      metadata cache can return stale content after same-size/mtime
+    //      replacement, so it is not a valid detection shortcut.
+    //   2. Per-second rate limit (token bucket) so even a fresh-files
     //      storm can't consume more than N enricher-ticks/sec.
-    private struct CacheEntry {
-        let mtime: Int64
-        let size: Int64
-        let content: String
-    }
-    private var cache: [String: CacheEntry] = [:]
-    private var cacheOrder: [String] = [] // FIFO ring
-    private let cacheCap: Int = 512
     private var lastReadAt: Date = .distantPast
     private var readsThisSecond: Int = 0
     private let maxReadsPerSecond: Int = 200
@@ -119,58 +127,26 @@ public actor FileContentEnricher {
         // dead, and even after it they stayed dead because shouldScan
         // returned false for them. Bounded volume (these change rarely vs
         // the event firehose) and the 64 KB / 8 MB read caps still apply.
-        let agentContentRoots: [String] = [
-            "/.claude/skills/", "/.codex/skills/", "/.cursor/skills/",
-            "/.claude/scripts/", "/.claude/hooks/", "/.claude/agents/",
-            "/.github/workflows/",
-        ]
         for root in agentContentRoots where targetPath.contains(root) { return true }
-        let agentConfigFiles: [String] = [
-            "/.claude/claude_desktop_config.json", "/.claude.json", "/.cursor/mcp.json",
-            "/.claude/settings.json", "/.claude/project.json", "/.claude/local.json",
-        ]
-        for file in agentConfigFiles where targetPath.hasSuffix(file) { return true }
+        for file in agentConfigFileSuffixes where targetPath.hasSuffix(file) { return true }
         // NOTE: the non-root maccrabd FSEvents fallback emits no close-class
         // action, so FileContent enrichment is sysext/ES-only by design.
         return false
     }
 
-    /// Read up to `maxBytes` from `path` using SecureFileIO
-    /// (O_NOFOLLOW — refuses to read through symlinks). Returns
+    /// Read up to `maxBytes` from `path` using one descriptor-relative stable
+    /// snapshot. Returns
     /// the decoded UTF-8 text or nil on any error / non-text content
     /// / oversized file.
     ///
     /// v1.12.0 RC3 (Perf-H1): the broadened install-content allowlist
     /// means this function can be hit thousands of times per second
-    /// during an `npm install` storm. We cache by (path, mtime, size)
-    /// AND token-bucket rate-limit to keep the enricher actor latency
-    /// bounded. On rate-limit overflow we return nil — the event
+    /// during an `npm install` storm. A token-bucket rate limit keeps the
+    /// enricher actor latency bounded. On overflow we return nil — the event
     /// flows through enrichment-less, the rule predicating on
     /// FileContent simply doesn't fire on THAT event, and the next
     /// matching event has a fresh budget.
     public func scan(path: String) -> String? {
-        // Pre-flight size check so we don't open giant binaries.
-        var st = stat()
-        let statResult = path.withCString { lstat($0, &st) }
-        guard statResult == 0 else { return nil }
-        // Refuse non-regular files (symlinks, devices, FIFOs).
-        guard (st.st_mode & S_IFMT) == S_IFREG else { return nil }
-        guard st.st_size <= maxFileSize else {
-            logger.debug("Skipped oversized file at \(path, privacy: .private)")
-            return nil
-        }
-        // v1.12.0 RC4 fix (Sec-R4-N2): include nanoseconds in the
-        // mtime field. Pre-fix tv_sec alone meant an attacker who
-        // matched file size + mtime second could replace content and
-        // the daemon would return cached stale bytes.
-        let mtime = Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec)
-        let size = Int64(st.st_size)
-
-        // Cache hit: (path, mtime, size) tuple matches a prior read.
-        if let entry = cache[path], entry.mtime == mtime, entry.size == size {
-            return entry.content
-        }
-
         // Rate limit: token bucket per wall-clock second.
         let now = Date()
         if now.timeIntervalSince(lastReadAt) >= 1.0 {
@@ -182,23 +158,16 @@ public actor FileContentEnricher {
         }
         readsThisSecond += 1
 
-        guard let data = try? SecureFileIO.readBytes(at: path, maxBytes: maxBytes) else {
+        guard case .success(let snapshot) = BoundedRegularFileReader.readPrefixOutcome(
+            at: path,
+            maximumBytes: maxBytes
+        ) else {
             return nil
         }
-        let content = String(data: data, encoding: .utf8)
-        if let content {
-            // FIFO eviction when over cap.
-            if cache.count >= cacheCap, let oldest = cacheOrder.first {
-                cache.removeValue(forKey: oldest)
-                cacheOrder.removeFirst()
-            }
-            cache[path] = CacheEntry(mtime: mtime, size: size, content: content)
-            cacheOrder.append(path)
+        guard snapshot.sizeBytes <= maxFileSize else {
+            logger.debug("Skipped oversized file at \(path, privacy: .private)")
+            return nil
         }
-        return content
+        return String(data: snapshot.data, encoding: .utf8)
     }
 }
-
-// MARK: - Darwin imports
-
-import Darwin

@@ -233,9 +233,8 @@ public actor NotarizationChecker {
         // Rate-limit concurrent spctl calls
         await acquireSlot()
 
-        // Run the blocking spctl OFF the actor. runSpctl is synchronous
-        // (process.run + waitUntilExit + readDataToEndOfFile, up to a 15s
-        // timeout); even though it's `nonisolated`, calling it directly here runs
+        // Run the blocking spctl OFF the actor. runSpctl is synchronous and
+        // bounded to 15 seconds; even though it is `nonisolated`, calling it directly here runs
         // it on the actor's executor and pins the actor for the whole assess — so
         // a slow spctl (cold Chrome ~19s) stalled every event-loop
         // cachedResult(binaryPath:) awaiting this actor (audit: exec-ingest
@@ -296,25 +295,15 @@ public actor NotarizationChecker {
 
     /// Execute spctl and capture combined stdout+stderr.
     private nonisolated func runSpctl(binaryPath: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/spctl")
-        process.arguments = ["--assess", "--type", "execute", "-v", binaryPath]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do {
-            try process.run()
-            // Timeout after 15 seconds to avoid hanging on unresponsive binaries
-            let deadline = DispatchTime.now() + 15
-            DispatchQueue.global().asyncAfter(deadline: deadline) {
-                if process.isRunning { process.terminate() }
-            }
-            process.waitUntilExit()
-            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        } catch {
-            return ""
-        }
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/sbin/spctl",
+            arguments: ["--assess", "--type", "execute", "-v", binaryPath],
+            timeout: 15,
+            maximumOutputBytes: 256 * 1_024
+        ), !result.timedOut, !result.outputLimitExceeded else { return "" }
+        // Rejected assessments exit non-zero; their stderr is still the input
+        // to the accepted/rejected/revoked parser.
+        return String(data: result.output, encoding: .utf8) ?? ""
     }
 
     /// Extract the "source=..." or "origin=..." value from spctl output.
@@ -364,8 +353,11 @@ public actor NotarizationChecker {
     // MARK: - Helpers
 
     private nonisolated func isFromDownloads(_ path: String) -> Bool {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home + "/Downloads/") || path.hasPrefix(home + "/Desktop/")
+        guard let home = RealUserHomeResolver.home(containingPath: path) else {
+            return false
+        }
+        return path.hasPrefix(home.appending("Downloads") + "/")
+            || path.hasPrefix(home.appending("Desktop") + "/")
     }
 
     /// Enrich an event's enrichments dict with notarization info.

@@ -440,8 +440,19 @@ public enum NoiseFilter {
     /// dropping the whole batch.
     public static func isMacCrabManagedFile(event: Event) -> Bool {
         guard let filePath = event.file?.path else { return false }
-        return filePath.hasPrefix("/Library/Application Support/MacCrab/") ||
-               filePath.hasPrefix("\(NSHomeDirectory())/Library/Application Support/MacCrab/")
+        if filePath.hasPrefix("/Library/Application Support/MacCrab/") {
+            return true
+        }
+        // This predicate is on a hot rule-filter path. Reject unrelated user
+        // files before the validated-home lookup (which performs descriptor and
+        // passwd checks) rather than enumerating accounts for every match.
+        guard filePath.contains("/Library/Application Support/MacCrab/") else {
+            return false
+        }
+        guard let home = RealUserHomeResolver.home(containingPath: filePath) else {
+            return false
+        }
+        return filePath.hasPrefix(home.appending("Library/Application Support/MacCrab") + "/")
     }
 
     /// True when the given executable path is inside a trusted browser or

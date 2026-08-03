@@ -30,6 +30,13 @@ public enum CaseManagerError: Error, CustomStringConvertible {
     /// filesystem path — guards against a tampered manifest id steering
     /// removeItem outside the Cases root via "../" or absolute paths.
     case invalidCaseID(id: String)
+    /// A case path component is a symlink or a non-regular object. Case data is
+    /// same-uid attacker writable, so following it would let open/shred escape
+    /// the configured Cases root.
+    case unsafeCasePath(path: String)
+    /// The unencrypted manifest identity must be bound to its directory name.
+    /// Otherwise a tampered manifest can redirect later open/delete operations.
+    case manifestIdentityMismatch(expected: String, actual: String)
     /// Encryption state mismatch — the manifest says the case is
     /// .plaintext but a DEK was supplied (or vice versa).
     case encryptionStateMismatch(declared: CaseEncryptionState, suppliedDEK: Bool)
@@ -52,6 +59,10 @@ public enum CaseManagerError: Error, CustomStringConvertible {
             return "CaseManager: case '\(id)' already exists"
         case .invalidCaseID(let id):
             return "CaseManager: '\(id)' is not a valid case id"
+        case .unsafeCasePath(let path):
+            return "CaseManager: refusing symlink or non-regular case path at '\(path)'"
+        case .manifestIdentityMismatch(let expected, let actual):
+            return "CaseManager: manifest id '\(actual)' does not match case directory '\(expected)'"
         case .encryptionStateMismatch(let declared, let supplied):
             return "CaseManager: encryption_state=\(declared.rawValue) doesn't match suppliedDEK=\(supplied)"
         }
@@ -88,6 +99,7 @@ public actor CaseManager {
 
     private let casesRoot: URL
     private let dekVault: any DEKVault
+    private let caseDirectoryRemover: @Sendable (URL) throws -> Void
 
     /// Construct a CaseManager.
     /// - `casesRoot`: defaults to
@@ -96,10 +108,14 @@ public actor CaseManager {
     ///   InMemoryDEKVault.
     public init(
         casesRoot: URL = CaseDirectoryLayout.defaultCasesRoot,
-        dekVault: any DEKVault
+        dekVault: any DEKVault,
+        caseDirectoryRemover: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.removeItem(at: $0)
+        }
     ) {
         self.casesRoot = casesRoot
         self.dekVault = dekVault
+        self.caseDirectoryRemover = caseDirectoryRemover
     }
 
     // MARK: - Create
@@ -201,8 +217,13 @@ public actor CaseManager {
             // DEK was stored; removeItem tears down the directory we
             // created above (caseID is a freshly-minted UUID, so no
             // traversal exposure).
-            try? await dekVault.delete(for: caseID)
-            try? FileManager.default.removeItem(at: layout.caseDirectory)
+            // Preserve recoverability across a partial rollback: remove the
+            // failed ciphertext first, then its only key. If removal fails, the
+            // key remains available for operator recovery instead of leaving an
+            // undecryptable directory behind.
+            if (try? caseDirectoryRemover(layout.caseDirectory)) != nil {
+                try? await dekVault.delete(for: caseID)
+            }
             throw error
         }
     }
@@ -212,11 +233,21 @@ public actor CaseManager {
     /// Open an existing case. For encrypted cases, prompts the
     /// operator via DEKVault.retrieve. Returns a CaseHandle.
     public func openCase(id: String) async throws -> CaseHandle {
+        try Self.validateCaseID(id)
         let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: id)
         guard FileManager.default.fileExists(atPath: layout.caseDirectory.path) else {
             throw CaseManagerError.caseNotFound(id: id)
         }
+        try Self.requireDirectoryWithoutSymlink(layout.caseDirectory)
+        try Self.requireRegularFileWithoutSymlink(layout.manifestFile)
         let manifest = try Self.readManifest(from: layout.manifestFile, caseID: id)
+        guard manifest.id == id else {
+            throw CaseManagerError.manifestIdentityMismatch(
+                expected: id,
+                actual: manifest.id
+            )
+        }
+        try Self.validateSQLiteFamily(at: layout.sqliteFile)
 
         var dek: Data? = nil
         if manifest.encryptionState != .plaintext {
@@ -260,15 +291,17 @@ public actor CaseManager {
         )
         var out: [CaseManifest] = []
         for entry in entries {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: entry.path, isDirectory: &isDir), isDir.boolValue else {
+            let directoryID = entry.lastPathComponent
+            guard UUID(uuidString: directoryID) != nil,
+                  Self.isDirectoryWithoutSymlink(entry) else {
                 continue
             }
             let manifestPath = entry.appendingPathComponent("manifest.json")
-            guard fm.fileExists(atPath: manifestPath.path) else { continue }
+            guard Self.isRegularFileWithoutSymlink(manifestPath) else { continue }
             do {
                 let data = try Data(contentsOf: manifestPath)
                 let m = try JSONDecoder().decode(CaseManifest.self, from: data)
+                guard m.id == directoryID else { continue }
                 out.append(m)
             } catch {
                 // Skip malformed manifests rather than fail the whole
@@ -289,18 +322,12 @@ public actor CaseManager {
         // Defense-in-depth: case ids are UUIDs minted by createCase.
         // Reject anything else so a "../" or absolute path in a tampered
         // manifest id can never steer removeItem outside the Cases root.
-        guard UUID(uuidString: id) != nil else {
-            throw CaseManagerError.invalidCaseID(id: id)
-        }
+        try Self.validateCaseID(id)
         let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: id)
         guard FileManager.default.fileExists(atPath: layout.caseDirectory.path) else {
             throw CaseManagerError.caseNotFound(id: id)
         }
-
-        // Remove the wrapped DEK from the keychain first. Best-effort:
-        // if the case was plaintext (no DEK on file), delete() is a
-        // no-op.
-        try? await dekVault.delete(for: id)
+        try Self.requireDirectoryWithoutSymlink(layout.caseDirectory)
 
         if shred {
             // Overwrite case.sqlite + WAL + SHM with random bytes
@@ -316,7 +343,12 @@ public actor CaseManager {
             }
         }
 
-        try FileManager.default.removeItem(at: layout.caseDirectory)
+        // Filesystem and Keychain do not share a transaction. Preserve evidence
+        // on the only failure ordering that matters: remove the directory first,
+        // and only after that succeeds erase its sole DEK. The previous ordering
+        // permanently locked the operator out whenever removeItem failed.
+        try caseDirectoryRemover(layout.caseDirectory)
+        try await dekVault.delete(for: id)
     }
 
     /// v1.18: delete every case created before `cutoff`. Routes through
@@ -385,24 +417,82 @@ public actor CaseManager {
         }
     }
 
+    private static func validateCaseID(_ id: String) throws {
+        guard UUID(uuidString: id) != nil else {
+            throw CaseManagerError.invalidCaseID(id: id)
+        }
+    }
+
+    private static func isDirectoryWithoutSymlink(_ url: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return false }
+        return (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFDIR)
+    }
+
+    private static func isRegularFileWithoutSymlink(_ url: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return false }
+        return (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG)
+    }
+
+    private static func requireDirectoryWithoutSymlink(_ url: URL) throws {
+        guard isDirectoryWithoutSymlink(url) else {
+            throw CaseManagerError.unsafeCasePath(path: url.path)
+        }
+    }
+
+    private static func requireRegularFileWithoutSymlink(_ url: URL) throws {
+        guard isRegularFileWithoutSymlink(url) else {
+            throw CaseManagerError.unsafeCasePath(path: url.path)
+        }
+    }
+
+    private static func validateSQLiteFamily(at main: URL) throws {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let url = URL(fileURLWithPath: main.path + suffix)
+            var info = stat()
+            if lstat(url.path, &info) == 0 {
+                guard (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG) else {
+                    throw CaseManagerError.unsafeCasePath(path: url.path)
+                }
+            } else if errno != ENOENT {
+                throw CaseManagerError.unsafeCasePath(path: url.path)
+            }
+        }
+    }
+
     private static func overwriteFileWithRandomBytes(path: String) {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        guard size > 0 else { return }
-        guard let handle = FileHandle(forWritingAtPath: path) else { return }
+        // O_NOFOLLOW is critical here: --shred must overwrite the case file,
+        // never the target of a same-uid attacker's case.sqlite symlink.
+        let fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+              info.st_size > 0 else { return }
         // Write in 64 KB chunks to avoid huge allocations.
         let chunk = 65_536
-        var remaining = size
+        var remaining = Int64(info.st_size)
         while remaining > 0 {
-            let n = min(chunk, remaining)
-            var bytes = [UInt8](repeating: 0, count: n)
-            _ = bytes.withUnsafeMutableBufferPointer {
-                SecRandomCopyBytes(kSecRandomDefault, n, $0.baseAddress!)
+            let n = min(Int64(chunk), remaining)
+            var bytes = [UInt8](repeating: 0, count: Int(n))
+            let randomStatus = bytes.withUnsafeMutableBufferPointer {
+                SecRandomCopyBytes(kSecRandomDefault, Int(n), $0.baseAddress!)
             }
-            handle.write(Data(bytes))
+            guard randomStatus == errSecSuccess else { return }
+            var offset = 0
+            while offset < Int(n) {
+                let written = bytes.withUnsafeBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return -1 }
+                    return write(fd, base.advanced(by: offset), Int(n) - offset)
+                }
+                if written < 0, errno == EINTR { continue }
+                guard written > 0 else { return }
+                offset += written
+            }
             remaining -= n
         }
-        try? handle.synchronize()
-        try? handle.close()
+        _ = fsync(fd)
     }
 }

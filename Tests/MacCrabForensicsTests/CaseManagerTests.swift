@@ -138,6 +138,70 @@ struct CaseManagerLifecycleTests {
         }
     }
 
+    @Test("openCase rejects path traversal before touching the filesystem")
+    func openCaseRejectsTraversal() async {
+        let root = tempRoot()
+        let mgr = CaseManager(casesRoot: root, dekVault: InMemoryDEKVault())
+        await #expect(throws: CaseManagerError.self) {
+            _ = try await mgr.openCase(id: "../outside")
+        }
+    }
+
+    @Test("list skips and open rejects a symlinked case directory")
+    func symlinkedCaseDirectoryIsNeverFollowed() async throws {
+        let root = tempRoot()
+        let outside = tempRoot().appendingPathComponent("outside", isDirectory: true)
+        let id = UUID().uuidString.lowercased()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside.deletingLastPathComponent())
+        }
+        let manifest = CaseManifest(
+            id: id,
+            name: "outside",
+            createdAt: Date(),
+            encryptionState: .plaintext
+        )
+        try JSONEncoder().encode(manifest).write(
+            to: outside.appendingPathComponent("manifest.json")
+        )
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent(id),
+            withDestinationURL: outside
+        )
+
+        let mgr = CaseManager(casesRoot: root, dekVault: InMemoryDEKVault())
+        #expect(try await mgr.listCases().isEmpty)
+        await #expect(throws: CaseManagerError.self) {
+            _ = try await mgr.openCase(id: id)
+        }
+    }
+
+    @Test("manifest id is bound to its directory name")
+    func manifestIdentityMismatchIsRejected() async throws {
+        let root = tempRoot()
+        let mgr = CaseManager(casesRoot: root, dekVault: InMemoryDEKVault())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let handle = try await mgr.createCase(name: "identity", encrypted: false)
+        let forged = CaseManifest(
+            id: UUID().uuidString.lowercased(),
+            name: "identity",
+            createdAt: Date(),
+            encryptionState: .plaintext
+        )
+        try JSONEncoder().encode(forged).write(
+            to: handle.layout.manifestFile,
+            options: .atomic
+        )
+
+        #expect(try await mgr.listCases().isEmpty)
+        await #expect(throws: CaseManagerError.self) {
+            _ = try await mgr.openCase(id: handle.caseID)
+        }
+    }
+
     @Test("deleteCase removes directory + DEK")
     func deleteCase() async throws {
         let root = tempRoot()
@@ -168,6 +232,28 @@ struct CaseManagerLifecycleTests {
 
         try await mgr.deleteCase(id: caseID, shred: true)
         #expect(!FileManager.default.fileExists(atPath: handle.layout.caseDirectory.path))
+    }
+
+    @Test("filesystem deletion failure preserves the only DEK")
+    func deleteFailureDoesNotEraseKeyFirst() async throws {
+        struct ForcedRemovalFailure: Error {}
+
+        let root = tempRoot()
+        let vault = InMemoryDEKVault()
+        let mgr = CaseManager(
+            casesRoot: root,
+            dekVault: vault,
+            caseDirectoryRemover: { _ in throw ForcedRemovalFailure() }
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let handle = try await mgr.createCase(name: "recoverable")
+
+        await #expect(throws: ForcedRemovalFailure.self) {
+            try await mgr.deleteCase(id: handle.caseID)
+        }
+        #expect(FileManager.default.fileExists(atPath: handle.layout.caseDirectory.path))
+        #expect(try await vault.retrieve(for: handle.caseID).count == 32,
+                "a failed remove must leave the DEK available to reopen/recover the case")
     }
 }
 
@@ -214,10 +300,36 @@ struct KeychainDEKVaultProvisioningTests {
         // One `kSecClass: kSecClassGenericPassword` per SecItem dictionary.
         let dicts = text.components(separatedBy: "kSecClass: kSecClassGenericPassword").count - 1
         let optIns = text.components(separatedBy: "kSecUseDataProtectionKeychain").count - 1
-        #expect(dicts >= 4, "expected the 4 SecItem dictionaries (delete/add/retrieve/delete); found \(dicts)")
+        #expect(dicts >= 4, "expected the 4 SecItem match dictionaries (add/update/retrieve/delete); found \(dicts)")
         #expect(optIns >= dicts,
                 "\(dicts) SecItem dictionaries but only \(optIns) kSecUseDataProtectionKeychain occurrences — a query that omits it hits the LEGACY file-based keychain and silently finds nothing")
         #expect(text.contains("kSecAttrSynchronizable: kCFBooleanFalse as Any"),
                 "the DEK add-query must pin kSecAttrSynchronizable=false so the key never escapes to iCloud Keychain")
+    }
+
+    /// Replacement must never create a delete-then-add loss window. This is a
+    /// source guard because CI cannot exercise an access-controlled production
+    /// keychain item without displaying an authentication prompt.
+    @Test("DEK replacement is an atomic update, never delete then add")
+    func replacementPreservesOldKeyOnFailure() throws {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MacCrabForensics/Cases/KeychainDEKVault.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+        guard let storeStart = text.range(of: "public func store(dek:"),
+              let retrieveStart = text.range(of: "public func retrieve(") else {
+            Issue.record("could not isolate KeychainDEKVault.store source")
+            return
+        }
+        let storeBody = String(text[storeStart.lowerBound..<retrieveStart.lowerBound])
+        #expect(!storeBody.contains("SecItemDelete("),
+                "store must not erase the old DEK before replacement is durable")
+        #expect(storeBody.contains("errSecDuplicateItem"))
+        #expect(storeBody.contains("SecItemUpdate("),
+                "duplicate items must be replaced transactionally with SecItemUpdate")
+        #expect(storeBody.contains("kSecAttrAccessControl: access"))
+        #expect(storeBody.contains("kSecAttrSynchronizable: kCFBooleanFalse as Any"))
     }
 }

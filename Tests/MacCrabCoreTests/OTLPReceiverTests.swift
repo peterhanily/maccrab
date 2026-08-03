@@ -291,3 +291,119 @@ struct OTLPReceiverLoopbackTests {
         #expect(m.bytesReceived == 0)
     }
 }
+
+// MARK: - OTLPReceiver asynchronous startup contract
+
+@Suite("OTLPReceiver: asynchronous listener readiness")
+struct OTLPReceiverStartupGateTests {
+
+    @Test("start gate waits for ready instead of treating start(queue:) as success")
+    func readyIsExplicit() async {
+        let gate = OTLPListenerStartupGate()
+        let resolver = Task {
+            try? await Task.sleep(for: .milliseconds(10))
+            gate.observe(.ready)
+        }
+        let outcome = await gate.wait(timeoutSeconds: 1) {}
+        _ = await resolver.result
+        #expect(outcome == .ready)
+    }
+
+    @Test("asynchronous bind failure is returned to start caller")
+    func bindFailureSurfaces() async {
+        let gate = OTLPListenerStartupGate()
+        let resolver = Task {
+            try? await Task.sleep(for: .milliseconds(10))
+            gate.observe(.failed(.posix(.EADDRINUSE)))
+        }
+        let outcome = await gate.wait(timeoutSeconds: 1) {}
+        _ = await resolver.result
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected failed startup outcome, got \(outcome)")
+            return
+        }
+        #expect(!message.isEmpty)
+    }
+
+    @Test("startup cancellation cannot be reported as ready")
+    func cancellationSurfaces() async {
+        let gate = OTLPListenerStartupGate()
+        let resolver = Task {
+            try? await Task.sleep(for: .milliseconds(10))
+            gate.observe(.cancelled)
+        }
+        let outcome = await gate.wait(timeoutSeconds: 1) {}
+        _ = await resolver.result
+        #expect(outcome == .cancelled)
+    }
+
+    @Test("startup wait is bounded when Network.framework never terminates")
+    func startupTimeout() async {
+        let gate = OTLPListenerStartupGate()
+        let outcome = await gate.wait(timeoutSeconds: 0.01) {}
+        #expect(outcome == .timedOut)
+    }
+
+    @Test("first terminal listener state wins exactly once")
+    func firstTerminalStateWins() async {
+        let gate = OTLPListenerStartupGate()
+        gate.observe(.failed(.posix(.EACCES)))
+        gate.observe(.ready)
+        let outcome = await gate.wait(timeoutSeconds: 1) {}
+        guard case .failed = outcome else {
+            Issue.record("late ready overwrote the first terminal state: \(outcome)")
+            return
+        }
+    }
+
+    @Test("shipping start path cannot drift back to pre-ready success")
+    func productionStartWiringGuard() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabCore/Network/OTLPReceiver.swift"
+            ),
+            encoding: .utf8
+        )
+
+        guard let start = source.range(of: "public func start() async throws"),
+              let stop = source.range(of: "public func stop()", range: start.upperBound..<source.endIndex)
+        else {
+            Issue.record("could not isolate the production OTLP start method")
+            return
+        }
+        let body = String(source[start.lowerBound..<stop.lowerBound])
+        #expect(body.contains("let outcome = await startupGate.wait"))
+        #expect(body.contains("case .ready:"))
+        #expect(body.contains("self.listener = listener"))
+        let readyIndex = body.firstRange(of: "case .ready:")?.lowerBound
+            ?? body.startIndex
+        let ownershipIndex = body.firstRange(of: "self.listener = listener")?.lowerBound
+            ?? body.endIndex
+        #expect(readyIndex < ownershipIndex)
+        #expect(!body.contains("listener.start(queue: .global(qos: .utility))\n        self.listener = listener"),
+                "regressed to advertising running immediately after asynchronous start")
+
+        let setup = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonSetup.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(setup.components(separatedBy: "let receiver = makeOTLPReceiver(").count - 1 == 2,
+                "boot and SIGHUP must share the terminal-failure callback factory")
+        #expect(setup.components(separatedBy: "onTerminalFailure:").count - 1 == 1,
+                "post-readiness status publication must have one canonical owner")
+        #expect(setup.components(separatedBy: "onReady:").count - 1 == 1,
+                "ready-state publication must have one canonical actor-ordered owner")
+        #expect(setup.components(separatedBy: "AgentTracesStatus(running: true").count - 1 == 1,
+                "boot and SIGHUP must not race the receiver's ready/terminal callbacks")
+        #expect(setup.contains("if await existing.isRunning"),
+                "same-port SIGHUP must not treat a failed listener owner as live")
+        #expect(setup.contains("listener failed after readiness:"),
+                "post-ready listener failure must replace the persisted running status")
+    }
+}

@@ -29,12 +29,16 @@ public actor BundleExporter {
 
     public enum ExportError: Error, LocalizedError {
         case directoryAlreadyExists(URL)
+        case partialBundle(URL, String)
+        case committedBundle(URL, String)
         case writeFailed(String)
         case encodeFailed(String)
 
         public var errorDescription: String? {
             switch self {
             case .directoryAlreadyExists(let u): return "BundleExporter: directory already exists: \(u.path)"
+            case .partialBundle(let u, let m):    return "BundleExporter: partial export retained at \(u.path): \(m)"
+            case .committedBundle(let u, let m): return "BundleExporter: complete bundle committed at \(u.path), but durability/postflight failed: \(m)"
             case .writeFailed(let m):           return "BundleExporter: write failed: \(m)"
             case .encodeFailed(let m):          return "BundleExporter: encode failed: \(m)"
             }
@@ -115,11 +119,18 @@ public actor BundleExporter {
         to bundleRoot: URL,
         options: Options = Options()
     ) async throws -> URL {
-        if FileManager.default.fileExists(atPath: bundleRoot.path) {
-            throw ExportError.directoryAlreadyExists(bundleRoot)
+        let workspace: BundleExportWorkspace
+        do {
+            workspace = try BundleExportWorkspace.create(at: bundleRoot)
+        } catch let error as BundleExportWorkspace.WorkspaceError {
+            if case .destinationExists = error {
+                throw ExportError.directoryAlreadyExists(bundleRoot)
+            }
+            throw ExportError.writeFailed(error.localizedDescription)
         }
 
-        try createSkeleton(at: bundleRoot)
+        do {
+        try createSkeleton(in: workspace)
 
         let anchor = options.anchorEntityId
             ?? inputs.memberships.first(where: { $0.role == "anchor" })?.entityId
@@ -135,7 +146,7 @@ public actor BundleExporter {
 
         let encoder = canonicalJSONEncoder()
         let manifestData = try encoder.encode(manifest)
-        try manifestData.write(to: bundleRoot.appendingPathComponent("manifest.json"))
+        try workspace.writeNew(manifestData, to: "manifest.json")
 
         // graph.json
         let graph = GraphArtifact(
@@ -146,10 +157,10 @@ public actor BundleExporter {
             rootCauseEntityId: root,
             anchorEntityId: anchor
         )
-        try encoder.encode(graph).write(to: bundleRoot.appendingPathComponent("graph.json"))
+        try workspace.writeNew(encoder.encode(graph), to: "graph.json")
 
         // events.jsonl
-        try writeEventsJsonl(inputs.eventsJsonl, to: bundleRoot.appendingPathComponent("events.jsonl"))
+        try workspace.writeNew(eventsJsonlData(inputs.eventsJsonl), to: "events.jsonl")
 
         // replay/replay_manifest.json
         let replay = ReplayManifestArtifact(
@@ -159,19 +170,28 @@ public actor BundleExporter {
             replayScope: inputs.trace.replayScope,
             policySnapshotJson: inputs.policySnapshotJson
         )
-        try encoder.encode(replay).write(to: bundleRoot.appendingPathComponent("replay/replay_manifest.json"))
+        try workspace.writeNew(
+            encoder.encode(replay),
+            to: "replay/replay_manifest.json"
+        )
 
         // attribution/{machine,human}.json
-        try encoder.encode(MachineAttributionArtifact(entries: inputs.machineAttributions))
-            .write(to: bundleRoot.appendingPathComponent("attribution/machine_attribution.json"))
-        try encoder.encode(HumanOverridesArtifact(verdicts: inputs.humanOverrides))
-            .write(to: bundleRoot.appendingPathComponent("attribution/human_overrides.json"))
+        try workspace.writeNew(
+            encoder.encode(MachineAttributionArtifact(entries: inputs.machineAttributions)),
+            to: "attribution/machine_attribution.json"
+        )
+        try workspace.writeNew(
+            encoder.encode(HumanOverridesArtifact(verdicts: inputs.humanOverrides)),
+            to: "attribution/human_overrides.json"
+        )
 
         // rules/matched_rules.json — drives ReplayEngine's
         // state-requirement check (§17.1.1). Empty when the trace
         // didn't fire any rules (e.g. user-requested traces).
-        try encoder.encode(inputs.matchedRules)
-            .write(to: bundleRoot.appendingPathComponent("rules/matched_rules.json"))
+        try workspace.writeNew(
+            encoder.encode(inputs.matchedRules),
+            to: "rules/matched_rules.json"
+        )
 
         // prov/prov.jsonld
         let provData = try ProvOEncoder.encodeToData(
@@ -179,7 +199,7 @@ public actor BundleExporter {
             entities: inputs.entities,
             edges: inputs.edges
         )
-        try provData.write(to: bundleRoot.appendingPathComponent("prov/prov.jsonld"))
+        try workspace.writeNew(provData, to: "prov/prov.jsonld")
 
         // otel/spans.json
         let otelData = try OtelEncoder.encodeToData(
@@ -188,32 +208,34 @@ public actor BundleExporter {
             edges: inputs.edges,
             otelConventionVersion: inputs.otelConventionVersion
         )
-        try otelData.write(to: bundleRoot.appendingPathComponent("otel/spans.json"))
+        try workspace.writeNew(otelData, to: "otel/spans.json")
 
         // baseline (placeholder)
-        try "reset".write(
-            to: bundleRoot.appendingPathComponent("baseline/baseline_mode.txt"),
-            atomically: true, encoding: .utf8
-        )
-        try "{\"mode\":\"reset\"}".write(
-            to: bundleRoot.appendingPathComponent("baseline/baseline_snapshot.json"),
-            atomically: true, encoding: .utf8
+        try workspace.writeNew(Data("reset".utf8), to: "baseline/baseline_mode.txt")
+        try workspace.writeNew(
+            Data("{\"mode\":\"reset\"}".utf8),
+            to: "baseline/baseline_snapshot.json"
         )
 
         // 2. Redaction sweep — applies before integrity hashing so the
         // hash chain commits to the redacted bytes.
         let activeRedactor = redactorFor(options: options)
-        try activeRedactor.redactDirectory(bundleRoot)
+        try redactArtifacts(in: workspace, using: activeRedactor)
 
         // 3-5. Integrity: per-artifact SHA-256 → Merkle root → write artifacts.
         // Use the shared BundleMerkle helper so the verifier recomputes
         // an identical canonical reduction.
-        let computation = try BundleMerkle.compute(forBundleAt: bundleRoot)
+        let computation = BundleMerkle.compute(
+            exportArtifacts: try workspace.snapshotArtifacts(excludingRootIntegrity: true)
+        )
         let chain = HashChainArtifact(
             artifacts: computation.artifacts,
             merkleRoot: computation.merkleRoot
         )
-        try encoder.encode(chain).write(to: bundleRoot.appendingPathComponent("integrity/hash_chain.json"))
+        try workspace.writeNew(
+            encoder.encode(chain),
+            to: "integrity/hash_chain.json"
+        )
 
         // Real signature when a TrustSubstrate is wired; UNSIGNED placeholder otherwise.
         let signedAt = Date()
@@ -223,13 +245,15 @@ public actor BundleExporter {
             let sigBytes = try await trustSubstrate.sign(payload)
             let publicKey = try await trustSubstrate.publicKey()
             // Bundle the public key DER so verifiers are self-contained.
-            try publicKey.derBytes.write(to: bundleRoot.appendingPathComponent("integrity/trace-signing.pub"))
+            try workspace.writeNew(
+                publicKey.derBytes,
+                to: "integrity/trace-signing.pub"
+            )
             // Manifest's signing key mode must reflect the actual mode used.
             let actualMode = try await trustSubstrate.activeMode()
             let modeString = actualMode.rawValue
             // If the manifest claimed a different mode, rewrite manifest
             // to keep the cross-check honest.
-            let manifestPath = bundleRoot.appendingPathComponent("manifest.json")
             if manifest.traceSigningKeyMode != modeString {
                 let updated = BundleManifest(
                     format: manifest.format,
@@ -250,15 +274,23 @@ public actor BundleExporter {
                     replayScope: manifest.replayScope,
                     attributionOverridePolicy: manifest.attributionOverridePolicy
                 )
-                try encoder.encode(updated).write(to: manifestPath)
+                try workspace.replaceOwned(
+                    encoder.encode(updated),
+                    at: "manifest.json"
+                )
                 // Recompute the Merkle root since manifest.json content changed.
-                let recomputed = try BundleMerkle.compute(forBundleAt: bundleRoot)
+                let recomputed = BundleMerkle.compute(
+                    exportArtifacts: try workspace.snapshotArtifacts(
+                        excludingRootIntegrity: true
+                    )
+                )
                 let updatedChain = HashChainArtifact(
                     artifacts: recomputed.artifacts,
                     merkleRoot: recomputed.merkleRoot
                 )
-                try encoder.encode(updatedChain).write(
-                    to: bundleRoot.appendingPathComponent("integrity/hash_chain.json")
+                try workspace.replaceOwned(
+                    encoder.encode(updatedChain),
+                    at: "integrity/hash_chain.json"
                 )
                 let updatedPayload = Data(recomputed.merkleRoot.utf8)
                 let updatedSig = try await trustSubstrate.sign(updatedPayload)
@@ -290,13 +322,21 @@ public actor BundleExporter {
                 signedAt: signedAt
             )
         }
-        try encoder.encode(signatureArtifact).write(to: bundleRoot.appendingPathComponent("integrity/chain_head_signature.json"))
+        try workspace.writeNew(
+            encoder.encode(signatureArtifact),
+            to: "integrity/chain_head_signature.json"
+        )
 
         // v1.21.5: the former `integrity/bundle_sha256.txt` "PLACEHOLDER"
         // write was removed — a file inside a tar.gz can never contain that
         // archive's own hash. The outer-archive digest now ships as a
         // `<archive>.sha256` sidecar written by `maccrabctl trace export`
         // after packaging (see ArchiveDigest).
+
+        // Publish only after the complete signed tree passes its descriptor-
+        // relative postflight. The requested `.maccrabtrace` name never exposes
+        // a half-built directory.
+        let publishedURL = try workspace.publish()
 
         // Step 6: emit chain head to the unified-log anchor when wired.
         if let unifiedLogAnchor, signatureArtifact.signatureBase64 != "UNSIGNED" {
@@ -311,19 +351,33 @@ public actor BundleExporter {
             try await unifiedLogAnchor.emit(record)
         }
 
-        return bundleRoot
+        return publishedURL
+        } catch let error as ExportError {
+            throw error
+        } catch {
+            if let workspaceError = error as? BundleExportWorkspace.WorkspaceError,
+               case .committedBundle(let url, let detail) = workspaceError {
+                throw ExportError.committedBundle(url, detail)
+            }
+            if let committed = workspace.committedOrPublishedURLIfStillOwned {
+                throw ExportError.committedBundle(
+                    committed,
+                    error.localizedDescription
+                )
+            }
+            if let partial = workspace.diagnosticPartialURLIfStillOwned {
+                throw ExportError.partialBundle(partial, error.localizedDescription)
+            }
+            throw ExportError.writeFailed(error.localizedDescription)
+        }
     }
 
     // MARK: - Helpers
 
-    private func createSkeleton(at bundleRoot: URL) throws {
-        try FileManager.default.createDirectory(at: bundleRoot, withIntermediateDirectories: true)
+    private func createSkeleton(in workspace: BundleExportWorkspace) throws {
         let subdirs = ["replay", "integrity", "prov", "otel", "schema", "rules", "evidence", "baseline", "report", "attribution", "llm"]
         for sub in subdirs {
-            try FileManager.default.createDirectory(
-                at: bundleRoot.appendingPathComponent(sub),
-                withIntermediateDirectories: true
-            )
+            try workspace.createDirectory(sub)
         }
     }
 
@@ -348,11 +402,28 @@ public actor BundleExporter {
         )
     }
 
-    private func writeEventsJsonl(_ lines: [String], to url: URL) throws {
+    private func eventsJsonlData(_ lines: [String]) -> Data {
         let body = lines.joined(separator: "\n")
         // Always append a trailing newline so the file is line-correct.
         let withNewline = body.isEmpty ? "" : body + "\n"
-        try withNewline.write(to: url, atomically: true, encoding: .utf8)
+        return Data(withNewline.utf8)
+    }
+
+    private func redactArtifacts(
+        in workspace: BundleExportWorkspace,
+        using redactor: BundleRedactor
+    ) throws {
+        let artifacts = try workspace.snapshotArtifacts(
+            excludingRootIntegrity: true
+        )
+        for artifact in artifacts {
+            if let replacement = redactor.redactedTextData(
+                artifact.data,
+                relativePath: artifact.path
+            ) {
+                try workspace.replaceOwned(replacement, at: artifact.path)
+            }
+        }
     }
 
     private func redactorFor(options: Options) -> BundleRedactor {
@@ -388,8 +459,8 @@ public actor BundleExporter {
             // simply not see them on the first pass.)
             // Skip integrity/hash_chain.json + chain_head_signature.json
             // even if they happen to exist — they're computed FROM this list.
-            let relative = relativePath(of: url, under: bundleRoot)
-            if relative.hasPrefix("integrity/") {
+            let relative = try BundleArtifactPathPolicy.relativePath(of: url, under: bundleRoot)
+            if BundleArtifactPathPolicy.isRootIntegrityArtifact(relativePath: relative) {
                 continue
             }
             let data = try Data(contentsOf: url)
@@ -400,14 +471,6 @@ public actor BundleExporter {
         // Canonical sorted-path order for the Merkle reduction.
         artifacts.sort { $0.path < $1.path }
         return artifacts
-    }
-
-    private func relativePath(of url: URL, under root: URL) -> String {
-        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        if url.path.hasPrefix(rootPath) {
-            return String(url.path.dropFirst(rootPath.count))
-        }
-        return url.lastPathComponent
     }
 
     /// Pairwise SHA-256 reduction over the artifact hashes. Single-leaf

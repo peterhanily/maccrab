@@ -267,31 +267,18 @@ public actor SDRDeviceMonitor {
 
     private nonisolated func getUSBDevices() -> [USBDevice] {
         // Use system_profiler for reliable USB enumeration
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        proc.arguments = ["SPUSBDataType", "-json"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            // Drain the pipe BEFORE waiting: SPUSBDataType output can exceed the
-            // OS pipe buffer, so waiting first would deadlock (child blocks on
-            // write, parent blocks in waitUntilExit, neither drains).
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return [] }
-
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let usbData = json["SPUSBDataType"] as? [[String: Any]] else {
-                return []
-            }
-
-            return extractUSBDevices(from: usbData)
-        } catch {
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/sbin/system_profiler",
+            arguments: ["SPUSBDataType", "-json"],
+            timeout: 20,
+            maximumOutputBytes: 8 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded,
+              let json = try? JSONSerialization.jsonObject(with: result.output) as? [String: Any],
+              let usbData = json["SPUSBDataType"] as? [[String: Any]] else {
             return []
         }
+        return extractUSBDevices(from: usbData)
     }
 
     private nonisolated func extractUSBDevices(from items: [[String: Any]]) -> [USBDevice] {

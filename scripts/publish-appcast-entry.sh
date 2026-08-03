@@ -1,143 +1,113 @@
 #!/bin/bash
-# publish-appcast-entry.sh — Insert a generated <item> into the site repo's
-# appcast.xml by committing through the GitHub API.
-#
-# Usage:
-#   export SITE_REPO_TOKEN=...     # fine-grained PAT, contents:write on site repo
-#   scripts/publish-appcast-entry.sh \
-#       --item /tmp/item.xml \
-#       [--site-repo the site repo] \
-#       [--version 1.3.5]
-#
-# What it does:
-#   1. Fetches appcast.xml from the site repo via the GitHub Contents API
-#   2. Inserts the new <item> immediately after <channel>'s <language> tag
-#      (or after <description> if no <language>) so it lands as the newest entry
-#   3. Commits the result back with a descriptive message
-#   4. Cloudflare Pages auto-redeploys within ~30s
-#
-# Safe to re-run — if an <item> with the same sparkle:version already exists,
-# this script refuses to publish.
+# Insert a locally generated, schema-validated Sparkle item through GitHub's
+# optimistic-locking Contents API. No PUT occurs until both the fragment and the
+# complete post-insertion feed have parsed successfully.
 
 set -euo pipefail
+umask 077
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ITEM=""
 SITE_REPO="${SITE_REPO:-}"
 VERSION=""
 BRANCH="main"
 
+usage() {
+    echo "usage: $0 --item FILE --site-repo OWNER/REPO --version X [--branch NAME]" >&2
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --item) ITEM="$2"; shift 2 ;;
-        --site-repo) SITE_REPO="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --branch) BRANCH="$2"; shift 2 ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
-        *) echo "unknown arg: $1" >&2; exit 2 ;;
+        --item) [[ $# -ge 2 ]] || { usage; exit 2; }; ITEM="$2"; shift 2 ;;
+        --site-repo) [[ $# -ge 2 ]] || { usage; exit 2; }; SITE_REPO="$2"; shift 2 ;;
+        --version) [[ $# -ge 2 ]] || { usage; exit 2; }; VERSION="$2"; shift 2 ;;
+        --branch) [[ $# -ge 2 ]] || { usage; exit 2; }; BRANCH="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
 
-[[ -n "${SITE_REPO_TOKEN:-}" ]] || { echo "ERROR: SITE_REPO_TOKEN env var not set" >&2; exit 2; }
-[[ -n "$ITEM" && -f "$ITEM" ]]   || { echo "ERROR: --item must point to a readable file" >&2; exit 2; }
+[[ -n "$ITEM" && -f "$ITEM" && ! -L "$ITEM" ]] || { echo "ERROR: --item must be a regular no-link file" >&2; exit 2; }
+[[ -n "$SITE_REPO" && "$SITE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "ERROR: unsafe --site-repo" >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || { echo "ERROR: unsafe or missing --version" >&2; exit 2; }
+[[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$BRANCH" != /* && "$BRANCH" != *..* && "$BRANCH" != *//* ]] || {
+    echo "ERROR: unsafe --branch" >&2; exit 2;
+}
+[[ "${SITE_REPO_TOKEN:-}" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: SITE_REPO_TOKEN missing or malformed" >&2; exit 2; }
 
-# Extract version from the item if --version wasn't passed
-if [[ -z "$VERSION" ]]; then
-    VERSION=$(grep -oE '<sparkle:version>[^<]+</sparkle:version>' "$ITEM" | \
-              sed -E 's/<sparkle:version>([^<]+)<\/sparkle:version>/\1/' | head -1)
-fi
-[[ -n "$VERSION" ]] || { echo "ERROR: could not infer --version and not provided" >&2; exit 2; }
+run_xml_helper() {
+    /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C LANG=C \
+        /usr/bin/python3 -I "$SCRIPT_DIR/_appcast_xml.py" "$@"
+}
+
+# This is deliberately before curl: malformed/XXE/multi-item input cannot
+# trigger even a GET, much less reach the authenticated PUT path.
+BUILD_ID=$(run_xml_helper validate-item --item "$ITEM" --expected-version "$VERSION")
+
+WORK_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-appcast-publish.XXXXXX)
+trap '/bin/rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+AUTH_CONFIG="$WORK_DIR/curl-auth"
+RESPONSE="$WORK_DIR/response.json"
+CURRENT_XML="$WORK_DIR/current.xml"
+NEW_XML="$WORK_DIR/new.xml"
+PAYLOAD="$WORK_DIR/payload.json"
+PUT_RESPONSE="$WORK_DIR/put-response.json"
+
+# Keep the PAT out of argv/process listings. The private config exists only in
+# this mode-0700 temporary directory and is removed by the trap.
+printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\n' \
+    "$SITE_REPO_TOKEN" > "$AUTH_CONFIG"
 
 API="https://api.github.com/repos/${SITE_REPO}/contents/appcast.xml?ref=${BRANCH}"
-
 echo "Fetching current appcast.xml from ${SITE_REPO} (${BRANCH})..."
-RESPONSE=$(curl -sS -H "Authorization: Bearer $SITE_REPO_TOKEN" \
-                    -H "Accept: application/vnd.github+json" "$API")
+/usr/bin/curl -fsS --connect-timeout 10 --max-time 30 --max-filesize 6291456 \
+    --config "$AUTH_CONFIG" "$API" --output "$RESPONSE"
+response_size=$(/usr/bin/stat -f%z "$RESPONSE")
+[[ "$response_size" -le 6291456 ]] || { echo "ERROR: GitHub response exceeds 6 MiB" >&2; exit 1; }
 
-# Parse current content (base64) + SHA for optimistic locking
-CURRENT_B64=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["content"])' | tr -d '\n')
-CURRENT_SHA=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
-CURRENT_XML=$(echo "$CURRENT_B64" | base64 -d)
+CURRENT_SHA=$(run_xml_helper decode-github-response --response "$RESPONSE" --output "$CURRENT_XML")
 
-# Refuse to double-publish the SAME BUILD.
-#
-# The identity Sparkle actually compares is <sparkle:version> (CFBundleVersion),
-# which now carries the per-commit build number (e.g. 1.21.5.1018), not the
-# marketing version. Keying this check on --version (marketing) would, after that
-# change, (a) stop matching real duplicates and (b) — as it did before — hard-
-# refuse a legitimate RE-SPIN of the same marketing version, which is exactly the
-# case where installed users need a new appcast entry or auto-update silently
-# dies for them. Read the identity out of the item being published instead: an
-# identical rebuild is still refused, a genuine re-spin publishes.
-BUILD_ID=$(grep -oE '<sparkle:version>[^<]+</sparkle:version>' "$ITEM" | \
-           sed -E 's#<sparkle:version>([^<]+)</sparkle:version>#\1#' | head -1 || true)
-BUILD_ID="${BUILD_ID:-$VERSION}"
-if echo "$CURRENT_XML" | grep -qF "<sparkle:version>${BUILD_ID}</sparkle:version>"; then
-    echo "ERROR: appcast already contains <sparkle:version>${BUILD_ID}</sparkle:version>. Refusing to publish the identical build twice." >&2
-    echo "       (A re-spin produces a different build id — rebuild, then republish.)" >&2
-    exit 3
-fi
+# The helper rejects duplicate Sparkle build identities, parses the current
+# feed, injects exactly one item, then parses the full resulting feed before it
+# writes NEW_XML. This closes the old regex-only XML publication boundary.
+run_xml_helper inject \
+    --item "$ITEM" \
+    --current "$CURRENT_XML" \
+    --output "$NEW_XML" \
+    --expected-version "$VERSION" \
+    --expected-build "$BUILD_ID"
 
-# Insert item. Anchor after <language> or <description> — whichever is
-# present in the current channel header. We use Python for the XML work
-# because sed across newlines is a path of pain. Pass the current XML
-# through a temp file (not a Python heredoc literal) because the XML can
-# contain backslashes, triple-quotes, or unbalanced quotes from the CDATA
-# release notes, any of which would corrupt a heredoc interpolation.
-CURRENT_XML_FILE=$(mktemp -t maccrab-appcast-current.XXXXXX)
-trap 'rm -f "$CURRENT_XML_FILE"' EXIT
-printf '%s' "$CURRENT_XML" > "$CURRENT_XML_FILE"
+MSG="Publish appcast entry for v${VERSION} (build ${BUILD_ID})"
+/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -c '
+import base64, json, os, sys
+message, xml_path, sha, branch, output = sys.argv[1:]
+data = open(xml_path, "rb").read(4 * 1024 * 1024 + 1)
+if len(data) > 4 * 1024 * 1024:
+    raise SystemExit("new appcast exceeds 4 MiB")
+payload = {"message": message, "content": base64.b64encode(data).decode("ascii"), "sha": sha, "branch": branch}
+fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, separators=(",", ":"))
+' "$MSG" "$NEW_XML" "$CURRENT_SHA" "$BRANCH" "$PAYLOAD"
 
-NEW_XML=$(python3 -c '
-import sys, re
-item_path, current_path = sys.argv[1], sys.argv[2]
-item = open(item_path).read().strip()
-xml  = open(current_path).read()
-# re.sub treats backslashes + digits in the replacement as backrefs,
-# so escape any in the item before substitution.
-def inject(m):
-    return m.group(1) + "\n    " + item
-anchors = [
-    r"(<language>[^<]*</language>)",
-    r"(<description>[^<]*</description>)",
-    r"(<channel>)",
-]
-for pat in anchors:
-    if re.search(pat, xml):
-        xml = re.sub(pat, inject, xml, count=1)
-        break
-sys.stdout.write(xml)
-' "$ITEM" "$CURRENT_XML_FILE")
-
-# Base64 the new content and PUT via Contents API
-NEW_B64=$(echo -n "$NEW_XML" | base64)
-MSG="Publish appcast entry for v${VERSION}"
-PAYLOAD=$(python3 -c '
-import json, sys
-print(json.dumps({
-    "message": sys.argv[1],
-    "content": sys.argv[2],
-    "sha": sys.argv[3],
-    "branch": sys.argv[4],
-}))
-' "$MSG" "$NEW_B64" "$CURRENT_SHA" "$BRANCH")
-
-echo "Publishing to ${SITE_REPO}/appcast.xml on branch ${BRANCH}..."
-curl -sS -X PUT \
-    -H "Authorization: Bearer $SITE_REPO_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
+echo "Publishing validated feed to ${SITE_REPO}/appcast.xml on ${BRANCH}..."
+/usr/bin/curl -fsS --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
+    --config "$AUTH_CONFIG" \
+    -X PUT \
     -H "Content-Type: application/json" \
-    --data "$PAYLOAD" \
+    --data-binary "@$PAYLOAD" \
     "https://api.github.com/repos/${SITE_REPO}/contents/appcast.xml" \
-    | python3 -c '
-import json, sys
-r = json.load(sys.stdin)
-if "commit" in r:
-    print("✓ Published: " + r["commit"]["html_url"])
-else:
-    print("✗ GitHub API error:", r.get("message", r), file=sys.stderr)
-    sys.exit(1)
-'
+    --output "$PUT_RESPONSE"
 
-echo ""
-echo "Cloudflare Pages will redeploy automatically. Verify in ~30-60s:"
-echo "  curl -s https://maccrab.com/appcast.xml | grep -A1 '<sparkle:version>${VERSION}'"
+/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/python3 -I -c '
+import json, re, sys
+with open(sys.argv[1], "rb") as fh:
+    response = json.load(fh)
+url = response.get("commit", {}).get("html_url") if isinstance(response, dict) else None
+if not isinstance(url, str) or not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commit/[a-f0-9]{40}", url):
+    message = response.get("message", response) if isinstance(response, dict) else response
+    raise SystemExit(f"GitHub API did not return a valid commit: {message}")
+print("✓ Published: " + url)
+' "$PUT_RESPONSE"
+
+echo "Cloudflare Pages will redeploy automatically; verify the live build id ${BUILD_ID}."

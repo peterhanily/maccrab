@@ -427,9 +427,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         @Sendable func reconcileRevocations() async {
             let client = RaveCatalogClient()
             let installedCount = (await client.installedPlugins()).count
+            var freshlyVerified: RaveRevocationList? = nil
             if installedCount > 0 {
                 do {
-                    _ = try await client.refreshRevocationsIfStale()
+                    freshlyVerified = try await client.refreshRevocationsIfStale()
                 } catch {
                     // A1-02: an installed store/sideload plugin whose signed
                     // revocation endpoint we cannot reach (offline / withheld /
@@ -442,8 +443,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("[MacCrab] Tier-B revocation refresh FAILED with \(installedCount) plugin(s) installed — revocation data may be stale; plugins will fail-closed past the staleness ceiling. Error: \(error)")
                 }
             }
-            if let recs = try? await RevocationReverifyService.reconcileDefaults(), !recs.isEmpty {
-                NSLog("[MacCrab] Tier-B revocation reconcile: quarantined \(recs.count) plugin(s)")
+            do {
+                let recs = try await RevocationReverifyService.reconcileDefaults(
+                    verifiedList: freshlyVerified)
+                if !recs.isEmpty {
+                    NSLog("[MacCrab] Tier-B revocation reconcile: quarantined \(recs.count) plugin(s)")
+                }
+            } catch {
+                NSLog("[MacCrab] Tier-B revocation reconcile FAILED; existing quarantine remains authoritative. Error: \(error)")
             }
         }
         Task.detached(priority: .utility) { await reconcileRevocations() }
@@ -955,4 +962,3 @@ extension AlertViewModel {
         return "\(Int(seconds / 3600))h ago"
     }
 }
-

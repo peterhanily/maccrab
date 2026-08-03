@@ -30,7 +30,13 @@ extension MacCrabCtl {
         // Constructing DatabaseEncryption would reach for the Keychain, which can
         // block a non-interactive invocation (it hung the MCP stdio server).
         let store: TraceStore
-        do { store = try TraceStore(path: path, encryption: nil) }
+        do {
+            store = try TraceStore(
+                path: path,
+                encryption: nil,
+                forceReadOnly: true
+            )
+        }
         catch {
             FileHandle.standardError.write(Data("Cannot open \(path): \(error)\n".utf8))
             exit(1)
@@ -71,12 +77,13 @@ extension MacCrabCtl {
             }
 
             print("Agent Traces — \(spans.count) span(s) of \(total) in store")
+            print("TRUST: unauthenticated · self-reported loopback data; any local process can submit it. Do not treat it as verified evidence.")
             print(String(repeating: "═", count: 62))
             var lastTrace = ""
             for s in spans.sorted(by: { $0.startNs < $1.startNs }) {
                 if s.traceId != lastTrace {
                     lastTrace = s.traceId
-                    print("\ntrace \(String(s.traceId.prefix(16)))…  tool=\(s.agentTool?.rawValue ?? "-")")
+                    print("\ntrace \(String(s.traceId.prefix(16)))…  tool=\(s.agentTool?.rawValue ?? "-")  trust=\(s.trust.rawValue)")
                 }
                 let started = Date(timeIntervalSince1970: Double(s.startNs) / 1_000_000_000)
                 let ms = max(0, Int((s.endNs &- s.startNs) / 1_000_000))

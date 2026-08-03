@@ -167,7 +167,7 @@ struct KillChainFireTests {
     func wormSelfPropagationSignal() async throws {
         #expect(try await fires("e1f2a3b4-0040-4000-b000-000000000040", [
             proc("/tmp/stage", parent: "/usr/local/bin/npm", at: 0),
-            file("/Users/t/.aws/credentials", action: .close, at: 1),   // step requires FileAction close
+            file("/Users/t/.aws/credentials", action: .open, at: 1),   // credential read is NOTIFY_OPEN
             net(hostname: "registry.npmjs.org", at: 2),
         ]))
     }
@@ -176,7 +176,7 @@ struct KillChainFireTests {
     func npmModuleRequireBulkCred() async throws {
         #expect(try await fires("9c2d052b-a8ce-43fc-a1a9-5ee9c86f0682", [
             proc("/usr/local/bin/node", cmd: "node /app/node_modules/evil/index.js", at: 0),
-            file("/Users/t/.aws/credentials", action: .close, at: 1),   // step requires FileAction close
+            file("/Users/t/.aws/credentials", action: .open, at: 1),   // credential read is NOTIFY_OPEN
         ]))
     }
 

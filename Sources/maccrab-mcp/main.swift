@@ -366,11 +366,12 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "verify_session_bundle",
-        "description": "Verify a .maccrabsession bundle exported by export_session_bundle: recomputes the Merkle root over the content (detects any tamper) and verifies the signature. Returns merkle_ok, signed, signature_ok.",
+        "description": "Verify a .maccrabsession bundle exported by export_session_bundle: recomputes the Merkle root, verifies the signature, and authenticates the signer. A valid signature from an unknown embedded key is reported as self-consistent but UNTRUSTED, not verified. By default only this install's key is trusted; expected_signer_fingerprint supplies an out-of-band SHA-256 trust anchor. Returns merkle_ok, signature_ok, signer_trusted, and authenticated.",
         "inputSchema": [
             "type": "object",
             "properties": [
                 "path": ["type": "string", "description": "Path to the .maccrabsession bundle directory (from export_session_bundle)."],
+                "expected_signer_fingerprint": ["type": "string", "description": "Optional out-of-band SHA-256 fingerprint (64 hex characters) of the signing key expected for this bundle."],
             ],
             "required": ["path"],
         ] as [String: Any],
@@ -505,7 +506,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "get_agent_spans",
-        "description": "Query AGENT TRACES — OTLP spans exported by AI coding tools (traces.db), showing the prompt -> LLM request -> tool call -> execution chain for an agent session. This is a DIFFERENT store from `get_traces`/`hunt_trace` (tracegraph.db, kernel-derived causal provenance). Pass `search` to match span names, attribute keys, tool names and file paths; `trace_id` to expand one trace. Note `claude_code.tool.blocked_on_user` marks a tool call the human DENIED — visible nowhere else, since a denied call spawns no process.",
+        "description": "Query AGENT TRACES — UNAUTHENTICATED, SELF-REPORTED OTLP spans accepted on loopback from AI coding tools (traces.db). Any local process can submit or forge this advisory data; never treat it as verified evidence. This is a DIFFERENT store from `get_traces`/`hunt_trace` (tracegraph.db, kernel-derived causal provenance). Pass `search` to match span names, attribute keys, tool names and file paths; `trace_id` to expand one trace.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -1506,51 +1507,47 @@ private let sharedStylometric = StylometricFingerprinter()
 
 /// Resolve an LLM backend for the MCP server (currently only
 /// classify_package_intent uses it). Builds an LLMConfig from the
-/// dashboard-written `llm_config.json` + env overrides — the same
-/// non-entitled-reader path the sysext uses — and lets
+/// dashboard-written non-secret `llm_config.json`, shared-Keychain secrets,
+/// and env overrides, then lets
 /// `LLMService.makeFromConfig` run its bounded 3 s availability probe.
 /// Returns nil (→ heuristic fallback) when nothing is configured or the
-/// backend is unreachable. Keychain is intentionally NOT read here to
-/// avoid any interactive prompt in an agent-driven server process.
+/// backend is unreachable. Keychain access explicitly forbids authentication
+/// UI so an agent-driven server process can degrade without prompting.
 private func resolveMCPLLMService() async -> LLMService? {
     var config = LLMConfig()
     var hasConfig = false
-    let configPath = dataDir + "/llm_config.json"
-    if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        // Same v1.21.6 default-flip migration as DaemonSetup: the file's presence
-        // is the opt-in, since only Settings > AI Backend writes it. Otherwise
-        // `hasConfig` below reads the new `false` default and every existing
-        // user's MCP server drops to heuristic fallback after an upgrade.
-        config.enabled = true
-        if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
-        if let provider = json["provider"] as? String {
-            config.provider = LLMProvider(rawValue: provider) ?? config.provider
-        }
-        if let v = json["ollama_url"] as? String { config.ollamaURL = v }
-        if let v = json["ollama_model"] as? String { config.ollamaModel = v }
-        if let v = json["ollama_api_key"] as? String { config.ollamaAPIKey = v }
-        if let v = json["claude_api_key"] as? String { config.claudeAPIKey = v }
-        if let v = json["claude_model"] as? String { config.claudeModel = v }
-        if let v = json["openai_url"] as? String { config.openaiURL = v }
-        if let v = json["openai_api_key"] as? String { config.openaiAPIKey = v }
-        if let v = json["openai_model"] as? String { config.openaiModel = v }
-        if let v = json["mistral_api_key"] as? String { config.mistralAPIKey = v }
-        if let v = json["mistral_model"] as? String { config.mistralModel = v }
-        if let v = json["gemini_api_key"] as? String { config.geminiAPIKey = v }
-        if let v = json["gemini_model"] as? String { config.geminiModel = v }
+    let environment = ProcessInfo.processInfo.environment
+    let userSupportDir = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+    ).first?.appendingPathComponent("MacCrab").path
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    let configPaths = LLMConfigFile.runtimeConfigReadPaths(
+        explicitDataDirectory: environment["MACCRAB_DATA_DIR"],
+        userDataDirectory: userSupportDir,
+        resolvedDataDirectory: dataDir
+    )
+    for configPath in configPaths {
+        guard let json = try? LLMConfigFile.loadAndScrub(
+            atPath: configPath,
+            legacySecretMigration: .sharedKeychain(interaction: .disallowed)
+        ) else { continue }
+        LLMConfigFile.applyNonSecretValues(json, to: &config)
         hasConfig = config.enabled
+        break
     }
-    let env = ProcessInfo.processInfo.environment
-    if let p = env["MACCRAB_LLM_PROVIDER"] {
-        config.provider = LLMProvider(rawValue: p) ?? config.provider
+
+    // Never prompt from a stdio server. A denied/locked Keychain item leaves
+    // that provider unavailable and the caller falls back to heuristics.
+    LLMSecretLoader.applyKeychainSecrets(to: &config, interaction: .disallowed)
+
+    if LLMSecretLoader.applyEnvironmentOverrides(
+        environment,
+        to: &config,
+        providerSelectionEnables: true
+    ) {
         hasConfig = true
     }
-    if let v = env["MACCRAB_LLM_OLLAMA_URL"] { config.ollamaURL = v }
-    if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { config.ollamaModel = v }
-    if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { config.claudeAPIKey = v }
-    if let v = env["MACCRAB_LLM_OPENAI_URL"] { config.openaiURL = v }
-    if let v = env["MACCRAB_LLM_OPENAI_KEY"] { config.openaiAPIKey = v }
     guard hasConfig else { return nil }
     return await LLMService.makeFromConfig(config)
 }
@@ -2356,15 +2353,25 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
         modeOverride: .filesystemDegraded
     )
     do {
-        let v = try await AgentSessionBundle.verify(at: URL(fileURLWithPath: path), trustSubstrate: ts)
-        // A valid signature from a FOREIGN signer is not tamper. Pre-fix any
-        // bundle exported on another Mac fell through to "TAMPERED / invalid"
-        // because verify() could only ever check this install's own key — a
-        // false tamper accusation on evidence the tool tells users to share.
-        let verdict = (v.merkleOk && v.signed && v.signatureOk)
+        let options = AgentSessionBundle.VerifyOptions(
+            pinnedKeyFingerprint: args["expected_signer_fingerprint"] as? String
+        )
+        let v = try await AgentSessionBundle.verify(
+            at: URL(fileURLWithPath: path),
+            trustSubstrate: ts,
+            options: options
+        )
+        // Signature validity proves only self-consistency when the verification
+        // key comes from the bundle itself. Keep that fact separate from signer
+        // trust so an AI client cannot mistake rewrite+re-sign for authenticated
+        // evidence. This is a completed verification result (not an MCP tool
+        // execution error), even when authentication is false.
+        let verdict = v.authenticated
             ? (v.signerIsLocalInstall
-                ? "verified"
-                : "verified (FOREIGN signer — signature is valid but the key is not anchored to this install)")
+                ? "verified (authenticated by this install's signing key)"
+                : "verified (authenticated by the expected signing-key fingerprint)")
+            : (v.merkleOk && v.signed && v.signatureOk)
+                ? "UNTRUSTED signer (signature is self-consistent, but the signing key is not trusted)"
             : (v.merkleOk && !v.signed) ? "unsigned (content hash-rooted only — forgeable)"
             : "TAMPERED / invalid"
         return ["content": [["type": "text", "text": jsonStringify([
@@ -2374,6 +2381,8 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
             "signature_ok": v.signatureOk,
             "signer_fingerprint": v.signerFingerprint,
             "signer_is_local_install": v.signerIsLocalInstall,
+            "signer_trusted": v.signerTrusted,
+            "authenticated": v.authenticated,
             "verdict": verdict,
         ] as [String: Any])]]]
     } catch {
@@ -2449,6 +2458,26 @@ func handleGetStatus() async -> Any {
         }
     } else {
         lines.append("Rules Compiled: \(ruleCount)  (enabled count unavailable — daemon heartbeat not readable)")
+    }
+
+    if let heartbeat = hb,
+       let storage = heartbeat["traces_storage_admission"] as? [String: Any] {
+        let blocked = storage["blocked"] as? Bool ?? false
+        let enabled = storage["enabled"] as? Bool ?? false
+        let storeAvailable = storage["store_available"] as? Bool
+        let startupBlocked = storage["startup_blocked"] as? Bool ?? false
+        let reason = (storage["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? "reason not reported"
+
+        if reason == "receiver_disabled" && !blocked {
+            lines.append("Agent Trace DB: Receiver disabled")
+        } else if blocked || (enabled && storeAvailable == false) {
+            let phase = startupBlocked ? "paused at startup" : "persistence paused"
+            lines.append("Agent Trace DB: \(phase) (\(reason))")
+            lines.append("  Unauthenticated/self-reported OTLP spans are not being recorded; kernel detection continues.")
+        } else {
+            lines.append("Agent Trace DB: Active (unauthenticated/self-reported OTLP)")
+        }
     }
 
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
@@ -2741,7 +2770,13 @@ func handleGetAgentSpans(_ args: [String: Any]) async -> Any {
     // and constructing DatabaseEncryption here would reach for the Keychain from a
     // non-interactive stdio server, which can block indefinitely.
     let store: TraceStore
-    do { store = try TraceStore(path: path, encryption: nil) }
+    do {
+        store = try TraceStore(
+            path: path,
+            encryption: nil,
+            forceReadOnly: true
+        )
+    }
     catch { return toolError("Cannot open agent-trace store: \(error.localizedDescription)") }
 
     let limit = min(max((args["limit"] as? Int) ?? 100, 1), 1000)
@@ -2761,13 +2796,16 @@ func handleGetAgentSpans(_ args: [String: Any]) async -> Any {
         guard !spans.isEmpty else {
             return ["content": [["type": "text", "text": "No matching spans (\(total) in store)."]]]
         }
-        var lines = ["Agent Traces — \(spans.count) span(s) of \(total) in store"]
+        var lines = [
+            "Agent Traces — \(spans.count) span(s) of \(total) in store",
+            "TRUST: unauthenticated · self-reported loopback data; any local process can submit it. Do not treat it as verified evidence."
+        ]
         var lastTrace = ""
         for sp in spans.sorted(by: { $0.startNs < $1.startNs }) {
             if sp.traceId != lastTrace {
                 lastTrace = sp.traceId
                 lines.append("")
-                lines.append("trace \(sp.traceId)  tool=\(sp.agentTool?.rawValue ?? "-")")
+                lines.append("trace \(sp.traceId)  tool=\(sp.agentTool?.rawValue ?? "-")  trust=\(sp.trust.rawValue)")
             }
             let ms = max(0, Int((sp.endNs &- sp.startNs) / 1_000_000))
             let nest = sp.parentSpanId == nil ? "" : "  ↳ "
@@ -2813,7 +2851,10 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 200)
     let statusFilter = args["status"] as? String
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: traceGraphPath,
+            forceReadOnly: true
+        )
         // v1.11.1 (audit perf HIGH): push status filter into SQL so a
         // caller asking for `limit:25 status:open` actually gets up
         // to 25 matching rows (pre-fix the filter ran AFTER the limit,
@@ -2855,7 +2896,10 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
         return toolError("Missing required argument: trace_id")
     }
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: traceGraphPath,
+            forceReadOnly: true
+        )
         guard let pair = try await store.loadTrace(id: traceId) else {
             return toolError("Trace \(traceId) not found.")
         }
@@ -2896,7 +2940,10 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
     }
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 100)
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: traceGraphPath,
+            forceReadOnly: true
+        )
         // v1.11.1 (audit perf LOW): SQL-side LIKE instead of pulling
         // 500 candidates + Swift substring scan. Lets SQLite skip
         // deserializing non-matches.
@@ -2919,38 +2966,19 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
         return toolError("Missing required argument: path")
     }
     let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-    var isDir: ObjCBool = false
-    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-    guard exists else {
+    guard FileManager.default.fileExists(atPath: url.path) else {
         return toolError("Path not found: \(url.path)")
     }
-    // For files (assumed .maccrabtrace archives), extract to a tmp
-    // directory before verifying. For directories, verify in place.
-    let bundleDir: URL
-    var tmpDir: URL?
-    if isDir.boolValue {
-        bundleDir = url
-    } else {
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-mcp-verify-\(UUID().uuidString)")
-        do {
-            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            p.currentDirectoryURL = tmp
-            p.arguments = ["-xzf", url.path]
-            try p.run(); p.waitUntilExit()
-            guard p.terminationStatus == 0 else {
-                try? FileManager.default.removeItem(at: tmp)
-                return toolError("Failed to extract bundle archive: \(url.lastPathComponent)")
-            }
-            let inner = (try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
-            bundleDir = inner.count == 1 ? inner[0] : tmp
-            tmpDir = tmp
-        } catch {
-            return toolError("Failed to extract bundle archive: \(error.localizedDescription)")
-        }
+    // Resolve archives and direct directories once. The manifest used for
+    // TOFU lookup, verification, and the signature used for pin/reporting must
+    // all come from the same immutable bounded snapshot.
+    let resolution: SafeTraceBundleResolver.Resolution
+    do {
+        resolution = try SafeTraceBundleResolver.resolve(inputAt: url)
+    } catch {
+        return toolError("Refused unsafe or malformed bundle input: \(error.localizedDescription)")
     }
+    defer { resolution.cleanup() }
     // storage-01 parity: wire the same TOFU pin store maccrabctl uses so an
     // agent verifying a bundle via MCP also gets pin-on-first / reject-on-
     // key-change. Pinned by trace_id; first verify of an unseen trace_id is
@@ -2967,7 +2995,7 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
     // server now share ONE anchor set instead of diverging.
     var options = BundleVerifier.Options()
     let pinStore = TraceKeyPinStore(directory: mcpUserDir())
-    let traceId = (try? Data(contentsOf: bundleDir.appendingPathComponent("manifest.json")))
+    let traceId = resolution.dataIfPresent(at: "manifest.json")
         .flatMap { try? canonicalJSONDecoder().decode(BundleManifest.self, from: $0) }?
         .traceId
     var pinApplied = false
@@ -2975,20 +3003,24 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
         options.pinnedKeyFingerprint = pinned
         pinApplied = true
     }
-    let outcome = await BundleVerifier.verify(at: bundleDir, options: options)
+    let outcome = await BundleVerifier.verify(
+        resolvedBundle: resolution,
+        options: options
+    )
     // Read the signing-key fingerprint ONCE and use it twice: to seed the TOFU
     // pin and to report it. It used to be decoded only inside the success
     // branch and never printed, so the tool could not return the fingerprint
     // its own description promises — and never surfaced it on failure, which is
     // precisely when an operator needs to know which key signed the thing.
-    let signingFingerprint = (try? Data(contentsOf: bundleDir.appendingPathComponent("integrity/chain_head_signature.json")))
+    let signingFingerprint = resolution.dataIfPresent(
+        at: "integrity/chain_head_signature.json"
+    )
         .flatMap { try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: $0) }?
         .signingKeyFingerprint
     // TOFU: on a clean first verify, record the key we just trusted.
     if outcome.exitCode == 0, let traceId, let signingFingerprint {
         pinStore.pinIfAbsent(traceId: traceId, fingerprint: signingFingerprint)
     }
-    if let tmpDir { try? FileManager.default.removeItem(at: tmpDir) }
     var lines = ["Bundle verification — exit \(outcome.exitCode)"]
     lines.append("═══════════════════════════════════")
     lines.append("Path:    \(url.lastPathComponent)")
@@ -3042,7 +3074,10 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
         return toolError("Missing required argument: event_id")
     }
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: traceGraphPath,
+            forceReadOnly: true
+        )
         // v1.11.1 (audit perf HIGH): single SQL UNION across the
         // membership index AND the anchor_event_id column instead of
         // listing 200 traces + linearly scanning each one's members.

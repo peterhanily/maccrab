@@ -79,7 +79,10 @@ public enum D3FENDMapping {
         tactic: .harden
     )
 
-    // Executable allowlisting applied to AI-tool subprocesses.
+    // Legacy source/decoder reference. The former chmod-based AI containment
+    // did not implement executable allowlisting and is not advertised in
+    // `all` or the tactic mappings below.
+    @available(*, deprecated, message: "No AI process-selective enforcement is implemented")
     public static let aiContainment = D3FENDRef(
         id: "D3-EAL",
         name: "Executable Allowlisting",
@@ -125,7 +128,7 @@ public enum D3FENDMapping {
     /// Flat list of every MacCrab-emitted D3FEND technique.
     public static let all: [D3FENDRef] = [
         dnsSinkhole, networkBlocker, persistenceGuard, tccRevocation,
-        aiContainment, panicButton, travelMode, supplyChainGate,
+        panicButton, travelMode, supplyChainGate,
         sandboxAnalyzer, honeyfile,
     ]
 
@@ -141,7 +144,7 @@ public enum D3FENDMapping {
         "D3-OTF":   "OutboundTrafficFiltering",   // networkBlocker
         "D3-PFV":   "FileIntegrityMonitoring",    // persistenceGuard — launch-item integrity
         "D3-UAP":   "UserAccountPermissions",     // tccRevocation
-        "D3-EAL":   "ExecutableAllowlisting",     // aiContainment
+        "D3-EAL":   "ExecutableAllowlisting",     // legacy alert/API decoding only
         "D3-PL":    "ProcessTermination",         // panicButton — kill-and-contain
         "D3-FCR":   "NetworkTrafficFiltering",    // travelMode — stricter firewall profile
         "D3-SBV":   "ServiceBinaryVerification",  // supplyChainGate — binary signature verification
@@ -174,7 +177,7 @@ public enum D3FENDMapping {
         case "privilege_escalation", "credential_access", "collection":
             return [tccRevocation]                        // tighten reachable permissions
         case "execution", "ai_safety":
-            return [aiContainment]                        // executable allowlisting
+            return []                                     // detection only; no AUTH_OPEN boundary
         case "initial_access", "supply_chain":
             return [supplyChainGate]                      // binary signature verification
         case "defense_evasion":

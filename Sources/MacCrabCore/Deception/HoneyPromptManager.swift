@@ -89,6 +89,10 @@ public actor HoneyPromptManager {
     private let homeDir: String
     private let manifestURL: URL
 
+    /// The deployed set is fixed and tiny. Match HoneyfileManager's bounded
+    /// manifest contract so the two halves of the deception tier cannot drift.
+    static let maxManifestBytes = 1 * 1024 * 1024
+
     /// path → entry, fast lookup for isHoneyPrompt().
     private var deployed: [String: HoneyPrompt] = [:]
     /// canary package names → entry, fast lookup for isCanaryPackage().
@@ -97,7 +101,7 @@ public actor HoneyPromptManager {
     // MARK: - Init
 
     public init(
-        homeDir: String = NSHomeDirectory(),
+        homeDir: String = HoneyfileManager.defaultHomeDir(),
         manifestPath: String? = nil
     ) {
         self.homeDir = homeDir
@@ -241,10 +245,25 @@ public actor HoneyPromptManager {
     // MARK: - Manifest persistence
 
     private func loadManifest() {
-        guard let data = try? Data(contentsOf: manifestURL) else { return }
-        if let entries = try? JSONDecoder().decode([HoneyPrompt].self, from: data) {
+        let data: Data
+        switch BoundedRegularFileReader.readOutcome(
+            at: manifestURL.path,
+            maximumBytes: Self.maxManifestBytes
+        ) {
+        case .success(let snapshot):
+            data = snapshot.data
+        case .rejected(.notFound):
+            return // First deployment has no manifest yet.
+        case .rejected(let reason):
+            logger.error("Honey-prompt manifest carrier rejected: \(String(describing: reason), privacy: .public)")
+            return
+        }
+        do {
+            let entries = try JSONDecoder().decode([HoneyPrompt].self, from: data)
             deployed = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
             canaryNames = Dictionary(uniqueKeysWithValues: entries.map { ($0.canaryPackageName, $0) })
+        } catch {
+            logger.error("Honey-prompt manifest decode failed: \(error.localizedDescription)")
         }
     }
 

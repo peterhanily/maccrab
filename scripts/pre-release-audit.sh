@@ -160,13 +160,11 @@ else
         "enrich.vulnScan:syncEnrichmentOverrides"
         "enrich.packageFreshness:syncEnrichmentOverrides"
         "enrich.certTransparency:syncEnrichmentOverrides"
-        # v1.18 agent-control capability tiers → set-agent-capabilities-*.json
-        # dropped into the privileged inbox by syncAgentCapabilities(); the root
-        # daemon consumes it and writes mcp_capabilities.json. They DO round-trip
-        # to the daemon (not UI-only), so they belong here.
-        "agentCapConfig:syncAgentCapabilities"
-        "agentCapAuthoring:syncAgentCapabilities"
-        "agentCapResponse:syncAgentCapabilities"
+        # Agent capability tiers are root-owned runtime state, not AppStorage
+        # bindings. Settings reads appState.agentCapabilities and may only queue
+        # explicit revocations through V2DaemonControl; the paired source guard
+        # in AgentCapabilityDashboardTests prevents the old grant-capable
+        # syncAgentCapabilities()/agentCap* preference path from returning.
     )
 
     # Verify each named sync function exists.
@@ -411,6 +409,31 @@ SYSEXT_LABEL_SD=$(grep -oE 'com\.maccrab\.agent[^"'\'' ]*' \
     Sources/MacCrabCore/Detection/SelfDefense.swift 2>/dev/null \
     | head -1)
 check_pair "Sysext launchd label" "$SYSEXT_LABEL_CASK" "$SYSEXT_LABEL_SD"
+
+# Rule-channel receiver/sender resource ceilings live across the Swift / shell
+# boundary and cannot share a type. Fail loud if either extractor drifts or the
+# offline builder could sign a manifest that every released client refuses.
+RULE_MANIFEST_MAX_CLIENT=$(sed -nE 's/.*maximumManifestBytes:[[:space:]]*([0-9_]+).*/\1/p' \
+    Sources/maccrabctl/RuleChannelFetch.swift | head -1 | tr -d '_')
+RULE_MANIFEST_MAX_SENDER=$(sed -nE 's/^RULE_CHANNEL_MAX_MANIFEST_BYTES=([0-9]+)$/\1/p' \
+    scripts/build-rules-manifest.sh | head -1)
+check_pair "Rule-channel manifest byte ceiling" "$RULE_MANIFEST_MAX_CLIENT" "$RULE_MANIFEST_MAX_SENDER"
+
+RULE_COUNT_MAX_CLIENT=$(sed -nE 's/.*maximumRuleCount:[[:space:]]*([0-9_]+).*/\1/p' \
+    Sources/maccrabctl/RuleChannelFetch.swift | head -1 | tr -d '_')
+RULE_COUNT_MAX_SENDER=$(sed -nE 's/^RULE_CHANNEL_MAX_RULES=([0-9]+)$/\1/p' \
+    scripts/build-rules-manifest.sh | head -1)
+check_pair "Rule-channel decoded-rule ceiling" "$RULE_COUNT_MAX_CLIENT" "$RULE_COUNT_MAX_SENDER"
+
+# The channel is disabled pending owner-approved offline rotation/custody proof.
+# Assert the single production gate is false, source carries no public anchor,
+# and no production call site can load a preserved pushed corpus.
+if anchor_check=$(./scripts/check-rules-trust-anchor.sh 2>&1); then
+    ok "$anchor_check"
+else
+    err "Disabled rule-channel release guard failed:"
+    echo "$anchor_check" | sed 's/^/    /' >&2
+fi
 
 # ---------------------------------------------------------------------
 # PASS 4 — URLSession.shared in Sources/ (v1.6.22)
@@ -2988,6 +3011,29 @@ done
 
 if [[ $pass_2026B_violations -eq 0 ]]; then
     ok "Pass 2026-B: artifacts / artifact_data / plugin_invocations are written only from ArtifactStore.swift"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 2026-E — vendored SQLCipher provenance
+# ---------------------------------------------------------------------
+# The amalgamation is executable third-party source, not an opaque build
+# product. Its checked manifest binds the two vendored files to an exact
+# upstream tag + peeled commit and to their generated SQLite version/source-id.
+# This source-only guard runs in both deterministic CI and the full release
+# audit, so updating either enormous amalgamation file cannot bypass review by
+# merely retaining a plausible VERSION prose file.
+
+section "PASS 2026-E — vendored SQLCipher provenance"
+
+sqlcipher_provenance_output=""
+if sqlcipher_provenance_output=$(./scripts/check-sqlcipher-provenance.sh 2>&1); then
+    ok "Pass 2026-E: $sqlcipher_provenance_output"
+else
+    err "Pass 2026-E: vendored SQLCipher provenance failed"
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "    $line" >&2
+    done <<< "$sqlcipher_provenance_output"
 fi
 
 # ---------------------------------------------------------------------

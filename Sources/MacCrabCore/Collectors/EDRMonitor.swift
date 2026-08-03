@@ -18,6 +18,7 @@ public actor EDRMonitor {
 
     /// How often to scan for EDR/RMM tools (default: 120 seconds).
     private let pollInterval: TimeInterval
+    private let homesProvider: @Sendable () -> [RealUserHome]
 
     /// AsyncStream continuation for emitting discoveries.
     private var continuation: AsyncStream<EDRDiscovery>.Continuation?
@@ -264,6 +265,20 @@ public actor EDRMonitor {
 
     public init(pollInterval: TimeInterval = 120) {
         self.pollInterval = pollInterval
+        self.homesProvider = { RealUserHomeResolver.all() }
+        var capturedContinuation: AsyncStream<EDRDiscovery>.Continuation!
+        self._events = AsyncStream { c in
+            capturedContinuation = c
+        }
+        self.continuation = capturedContinuation
+    }
+
+    init(
+        pollInterval: TimeInterval = 120,
+        homesProvider: @escaping @Sendable () -> [RealUserHome]
+    ) {
+        self.pollInterval = pollInterval
+        self.homesProvider = homesProvider
         var capturedContinuation: AsyncStream<EDRDiscovery>.Continuation!
         self._events = AsyncStream { c in
             capturedContinuation = c
@@ -383,21 +398,36 @@ public actor EDRMonitor {
     /// Scan LaunchDaemons and LaunchAgents for known tool plists.
     private func scanInstalledTools() -> [EDRDiscovery] {
         var results: [EDRDiscovery] = []
-        let plistDirs = [
-            "/Library/LaunchDaemons",
-            "/Library/LaunchAgents",
-            NSHomeDirectory() + "/Library/LaunchAgents",
-        ]
+        let homes = homesProvider()
+        let plistDirs: [(path: String, ownerUID: UInt32?)] = [
+            ("/Library/LaunchDaemons", nil),
+            ("/Library/LaunchAgents", nil),
+        ] + homes.map { ($0.appending("Library/LaunchAgents"), $0.userID) }
         let fm = FileManager.default
 
-        for dir in plistDirs {
-            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+        for scope in plistDirs {
+            let files: [String]
+            if let ownerUID = scope.ownerUID {
+                guard let snapshot = BoundedDirectoryLister.list(
+                    at: scope.path,
+                    maximumEntries: 16_384,
+                    expectedOwnerUID: ownerUID
+                ) else { continue }
+                files = snapshot.entries.compactMap {
+                    $0.ownerUID == ownerUID && $0.kind == .regularFile ? $0.name : nil
+                }
+            } else {
+                guard let systemFiles = try? fm.contentsOfDirectory(atPath: scope.path) else {
+                    continue
+                }
+                files = systemFiles
+            }
             for file in files where file.hasSuffix(".plist") {
                 let fileLower = file.lowercased()
                 for tool in Self.knownTools {
                     for fragment in tool.pathFragments {
                         if fileLower.contains(fragment.lowercased()) {
-                            let fullPath = dir + "/" + file
+                            let fullPath = scope.path + "/" + file
                             // Only report if not already found as a running process
                             if !reportedTools.contains("\(tool.name):") {
                                 results.append(EDRDiscovery(
@@ -413,6 +443,11 @@ public actor EDRMonitor {
             }
         }
         return results
+    }
+
+    static func plistDirectories(homes: [RealUserHome]) -> [String] {
+        ["/Library/LaunchDaemons", "/Library/LaunchAgents"]
+            + homes.map { $0.appending("Library/LaunchAgents") }
     }
 
     /// Get all running processes using sysctl.

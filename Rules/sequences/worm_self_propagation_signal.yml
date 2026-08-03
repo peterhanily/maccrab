@@ -79,7 +79,10 @@ steps:
                   - '/.gem/credentials'
                   - '/.cargo/credentials'
                   - '/.netrc'
-              FileAction: 'close'
+              # Credential reads are ES NOTIFY_OPEN. Unmodified CLOSE is
+              # intentionally discarded at callback admission, so `close`
+              # could never advance this step for an ordinary read.
+              FileAction: 'open'
           condition: selection
       process: pkg_mgr_descendant.descendant
 

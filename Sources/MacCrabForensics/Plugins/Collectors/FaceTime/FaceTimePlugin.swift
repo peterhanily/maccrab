@@ -10,6 +10,7 @@
 import Foundation
 import CSQLCipher
 import CryptoKit
+import MacCrabCore
 
 public struct FaceTimePlugin: Collector {
 
@@ -58,7 +59,11 @@ public struct FaceTimePlugin: Collector {
         do { snap = try LiveDBSnapshot.snapshot(sourcePath: path, layout: layout) }
         catch { return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["snapshot failed: \(error)"], status: .error) }
         var db: OpaquePointer?
-        guard sqlite3_open_v2(snap.path.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let h = db else {
+        guard SQLiteOpenPathPolicy.open(
+            snap.path.path,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK, let h = db else {
             return CollectionResult(artifactsCommitted: 0, artifactsRejected: 0, notes: ["open failed"], status: .error)
         }
         defer { sqlite3_close(h) }

@@ -409,4 +409,50 @@ struct BundleExporterTests {
         #expect(total < 1_000_000, "Fixture 1 raw bundle size \(total) bytes exceeds 1 MB")
         await store.close()
     }
+
+    @Test("export refuses a preplanted bundle-root symlink without touching its target")
+    func refusesRootSymlink() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let process = try await upsertProcess(store, makeProcessNode(
+            key: "root-link",
+            path: "/bin/zsh",
+            isAppleSigned: true
+        ))
+        let trace = try await TraceMaterializer(store: store).materialize(
+            anchorEntityId: process.id,
+            anchorEventId: "ev-root-link",
+            title: "Root link",
+            severity: "low",
+            confidence: 0.5,
+            now: now.addingTimeInterval(1)
+        )
+        let inputs = try await collectInputs(store, trace)
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bundle-export-root-link-\(UUID().uuidString)")
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        let target = root.appendingPathComponent("result.maccrabtrace")
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("unchanged".utf8).write(to: sentinel)
+        try FileManager.default.createSymbolicLink(
+            atPath: target.path,
+            withDestinationPath: outside.path
+        )
+
+        let exporter = BundleExporter(redactor: BundleRedactor(userName: "test"))
+        await #expect(throws: (any Error).self) {
+            _ = try await exporter.export(inputs: inputs, to: target)
+        }
+        #expect(try String(contentsOf: sentinel, encoding: .utf8) == "unchanged")
+        #expect(!FileManager.default.fileExists(
+            atPath: outside.appendingPathComponent("manifest.json").path
+        ))
+        await store.close()
+    }
 }

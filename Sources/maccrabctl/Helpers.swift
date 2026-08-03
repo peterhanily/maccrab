@@ -150,8 +150,10 @@ extension MacCrabCtl {
           alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)
           ai-alerts [--hours H] [--limit N]  AI-Guard alerts (credential fence, boundary, injection, MCP)
           scan-text <text>    Prompt-injection scan (native); reads stdin if no arg
+          agent-capabilities <show|set|disable-all>
+                              Inspect MCP mutation tiers; grants require explicit sudo.
           agent-spans [--search Q] [--trace ID] [--limit N]
-                              Agent Traces (OTLP spans from AI coding tools).
+                              Unauthenticated/self-reported OTLP spans from AI tools.
                               Distinct from `trace` (TraceGraph causal provenance).
           campaigns [N]       Show last N campaigns (default: 10)
           campaigns watch     Live stream campaigns as they are detected
@@ -304,8 +306,7 @@ extension MacCrabCtl {
     ///   1. Env vars — legacy / CI path, kept for backward compat
     ///   2. Keychain (SecretsStore) — authoritative in v1.3.5+, written
     ///      by the dashboard's Settings > AI Backend tab
-    ///   3. llm_config.json — dashboard also writes here so the sysext can
-    ///      read without the shared-keychain-access-group entitlement
+    ///   3. llm_config.json — non-secret provider/model/URL settings only
     ///
     /// Env vars intentionally win over Keychain so CI / one-off invocations
     /// can override without disturbing the user's stored credentials.
@@ -313,60 +314,43 @@ extension MacCrabCtl {
         var config = LLMConfig()
         var hasConfig = false
 
-        // Read dashboard-written llm_config.json (non-secret config + legacy key copy)
-        let supportDir = maccrabDataDir()
-        let configPath = supportDir + "/llm_config.json"
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            // Same v1.21.6 default-flip migration as DaemonSetup: this file only
-            // exists because someone configured a backend in Settings > AI Backend,
-            // so its presence is the opt-in. Without this, `hasConfig` below reads
-            // the new `false` default and the CLI silently loses LLM analysis for
-            // every existing user whose file predates the explicit `enabled` key.
-            config.enabled = true
-            if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
-            if let provider = json["provider"] as? String {
-                config.provider = LLMProvider(rawValue: provider) ?? config.provider
-            }
-            if let v = json["ollama_url"] as? String { config.ollamaURL = v }
-            if let v = json["ollama_model"] as? String { config.ollamaModel = v }
-            if let v = json["ollama_api_key"] as? String { config.ollamaAPIKey = v }
-            if let v = json["claude_api_key"] as? String { config.claudeAPIKey = v }
-            if let v = json["claude_model"] as? String { config.claudeModel = v }
-            if let v = json["openai_url"] as? String { config.openaiURL = v }
-            if let v = json["openai_api_key"] as? String { config.openaiAPIKey = v }
-            if let v = json["openai_model"] as? String { config.openaiModel = v }
-            if let v = json["mistral_api_key"] as? String { config.mistralAPIKey = v }
-            if let v = json["mistral_model"] as? String { config.mistralModel = v }
-            if let v = json["gemini_api_key"] as? String { config.geminiAPIKey = v }
-            if let v = json["gemini_model"] as? String { config.geminiModel = v }
+        // Settings owns the user-home non-secret config. Prefer it even when
+        // event-store resolution selects the root support directory (whose
+        // 0600 config an unprivileged CLI cannot read), then fall back to the
+        // resolved/installed paths. An explicit data-dir remains hermetic.
+        let environment = ProcessInfo.processInfo.environment
+        let userSupportDir = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let configPaths = LLMConfigFile.runtimeConfigReadPaths(
+            explicitDataDirectory: environment["MACCRAB_DATA_DIR"],
+            userDataDirectory: userSupportDir,
+            resolvedDataDirectory: maccrabDataDir()
+        )
+        for configPath in configPaths {
+            guard let json = try? LLMConfigFile.loadAndScrub(
+                atPath: configPath,
+                legacySecretMigration: .sharedKeychain(interaction: .allowed)
+            ) else { continue }
+            LLMConfigFile.applyNonSecretValues(json, to: &config)
             hasConfig = config.enabled
+            break
         }
 
-        // Keychain overrides JSON. CLI runs as user, so the dashboard's
-        // login-keychain items are directly accessible. This is the secure
-        // path when llm_config.json might have stale / missing keys.
-        let secrets = SecretsStore()
-        func keychainValue(_ key: SecretKey) -> String? {
-            (try? secrets.get(key)).flatMap { $0 }
-        }
-        if let v = keychainValue(.ollamaAPIKey)  { config.ollamaAPIKey  = v }
-        if let v = keychainValue(.claudeAPIKey)  { config.claudeAPIKey  = v }
-        if let v = keychainValue(.openaiAPIKey)  { config.openaiAPIKey  = v }
-        if let v = keychainValue(.mistralAPIKey) { config.mistralAPIKey = v }
-        if let v = keychainValue(.geminiAPIKey)  { config.geminiAPIKey  = v }
+        // Persistent credentials come only from the shared Keychain. CLI is an
+        // interactive user command, so the normal Keychain access policy is OK.
+        LLMSecretLoader.applyKeychainSecrets(to: &config, interaction: .allowed)
 
-        // Env vars override everything (backward compat + CI ergonomics)
-        let env = ProcessInfo.processInfo.environment
-        if let p = env["MACCRAB_LLM_PROVIDER"] {
-            config.provider = LLMProvider(rawValue: p) ?? config.provider
+        // Env vars override everything (explicit ephemeral override + CI).
+        if LLMSecretLoader.applyEnvironmentOverrides(
+            environment,
+            to: &config,
+            providerSelectionEnables: true
+        ) {
             hasConfig = true
         }
-        if let v = env["MACCRAB_LLM_OLLAMA_URL"] { config.ollamaURL = v }
-        if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { config.ollamaModel = v }
-        if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { config.claudeAPIKey = v }
-        if let v = env["MACCRAB_LLM_OPENAI_URL"] { config.openaiURL = v }
-        if let v = env["MACCRAB_LLM_OPENAI_KEY"] { config.openaiAPIKey = v }
 
         guard hasConfig else { return nil }
 

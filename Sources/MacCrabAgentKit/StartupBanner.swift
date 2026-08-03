@@ -87,8 +87,9 @@ enum StartupBanner {
 
         Prevention: \(state.preventionEnabled ? "ACTIVE" : "standby (MACCRAB_PREVENTION=1)")
           \(state.preventionEnabled ? "- DNS sinkhole, PF blocker, persistence guard" : "")
-          \(state.preventionEnabled ? "- AI containment, supply chain gate, TCC revocation" : "")
-          \(state.preventionEnabled ? "- Sandbox analysis for suspicious binaries" : "")
+          \(state.preventionEnabled ? "- Supply chain gate, TCC revocation" : "")
+          - AI credential access: detection/attribution only (process-selective blocking unavailable)
+          \(state.preventionEnabled ? "- Suspicious-binary dynamic execution: disabled (unprivileged broker required)" : "")
 
         Forensics:
           - Rootkit detection (dual-API cross-reference)

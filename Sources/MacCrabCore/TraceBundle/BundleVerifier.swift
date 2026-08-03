@@ -58,26 +58,41 @@ public enum BundleVerifier {
         unifiedLogAnchor: UnifiedLogAnchor? = nil,
         options: Options = Options()
     ) async -> BundleValidator.Outcome {
+        do {
+            let resolution = try SafeTraceBundleResolver.resolve(inputAt: directory)
+            defer { resolution.cleanup() }
+            return await verify(
+                resolvedBundle: resolution,
+                unifiedLogAnchor: unifiedLogAnchor,
+                options: options
+            )
+        } catch {
+            return BundleValidator.Outcome(
+                exitCode: 1,
+                kind: .schemaInvalid("unsafe bundle filesystem layout: \(error.localizedDescription)"),
+                messages: [error.localizedDescription]
+            )
+        }
+    }
+
+    /// Verify the same owned snapshot the caller used for identity/pin lookup.
+    /// BundleValidator and every later artifact read reuse this resolution.
+    public static func verify(
+        resolvedBundle resolution: SafeTraceBundleResolver.Resolution,
+        unifiedLogAnchor: UnifiedLogAnchor? = nil,
+        options: Options = Options()
+    ) async -> BundleValidator.Outcome {
         // Step 1: structural validation
-        let validatorOutcome = BundleValidator.validate(at: directory)
+        let validatorOutcome = BundleValidator.validate(resolvedBundle: resolution)
         guard validatorOutcome.exitCode == 0 else {
             return validatorOutcome
         }
 
         // Step 2: recompute Merkle root, compare to stored
-        let computation: BundleMerkle.Computation
-        do {
-            computation = try BundleMerkle.compute(forBundleAt: directory)
-        } catch {
-            return BundleValidator.Outcome(
-                exitCode: 9,
-                kind: .internalError("Merkle recomputation failed: \(error)")
-            )
-        }
-        let chainURL = directory.appendingPathComponent("integrity/hash_chain.json")
+        let computation = BundleMerkle.compute(resolvedBundle: resolution)
         let storedChain: HashChainArtifact
         do {
-            let data = try Data(contentsOf: chainURL)
+            let data = try resolution.data(at: "integrity/hash_chain.json")
             storedChain = try canonicalJSONDecoder().decode(HashChainArtifact.self, from: data)
         } catch {
             return BundleValidator.Outcome(
@@ -119,10 +134,11 @@ public enum BundleVerifier {
         }
 
         // Step 3: signature
-        let sigURL = directory.appendingPathComponent("integrity/chain_head_signature.json")
         let signature: ChainHeadSignatureArtifact
         do {
-            let data = try Data(contentsOf: sigURL)
+            let data = try resolution.data(
+                at: "integrity/chain_head_signature.json"
+            )
             signature = try canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: data)
         } catch {
             return BundleValidator.Outcome(
@@ -144,8 +160,7 @@ public enum BundleVerifier {
 
         // Verify the signature against the Merkle root using the
         // bundled public key. Self-contained — no daemon needed.
-        let pubKeyURL = directory.appendingPathComponent("integrity/trace-signing.pub")
-        guard FileManager.default.fileExists(atPath: pubKeyURL.path) else {
+        guard resolution.containsArtifact("integrity/trace-signing.pub") else {
             return BundleValidator.Outcome(
                 exitCode: 3,
                 kind: .schemaInvalid("integrity/trace-signing.pub missing — cannot verify signature")
@@ -153,7 +168,7 @@ public enum BundleVerifier {
         }
         let pubKeyDER: Data
         do {
-            pubKeyDER = try Data(contentsOf: pubKeyURL)
+            pubKeyDER = try resolution.data(at: "integrity/trace-signing.pub")
         } catch {
             return BundleValidator.Outcome(
                 exitCode: 9,

@@ -78,4 +78,60 @@ struct RevocationReverifyServiceTests {
         let q = await installer.currentQuarantine()
         #expect(q["com.x.rev2"] == nil)
     }
+
+    @Test("offline reconcile preserves an explicit malware quarantine")
+    func offlinePreservesExplicitRevocation() async throws {
+        let id = "com.x.revoked-offline"
+        let installer = try await Self.installThirdParty(id: id)
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let store = Self.freshStore()
+        defer { try? FileManager.default.removeItem(atPath: store.filePath) }
+        let explicit = PluginInstaller.QuarantineRecord(
+            pluginID: id,
+            installedVersion: "1.0",
+            reason: "known malicious plugin",
+            code: "MALWARE",
+            advisoryURL: nil,
+            revocationsSerial: 9,
+            quarantinedAt: "2026-08-01T00:00:00Z")
+        try await installer.applyQuarantine([explicit])
+
+        let records = try await RevocationReverifyService.reconcile(
+            verifiedList: nil,
+            installer: installer,
+            trustStateStore: store,
+            receiptsDir: Self.emptyReceipts())
+
+        #expect(records.contains(explicit))
+        #expect(await installer.currentQuarantine()[id]?.code == "MALWARE")
+    }
+
+    @Test("only a freshly verified list may authoritatively clear an explicit quarantine")
+    func freshListClearsExplicitRevocation() async throws {
+        let id = "com.x.unrevoked-by-signed-list"
+        let installer = try await Self.installThirdParty(id: id)
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let store = Self.freshStore()
+        defer { try? FileManager.default.removeItem(atPath: store.filePath) }
+        try await installer.applyQuarantine([PluginInstaller.QuarantineRecord(
+            pluginID: id,
+            installedVersion: "1.0",
+            reason: "old explicit revocation",
+            code: "MALWARE",
+            advisoryURL: nil,
+            revocationsSerial: 9,
+            quarantinedAt: "2026-08-01T00:00:00Z")])
+
+        let replacement = RaveRevocationList(
+            formatVersion: "1", serial: 10, updatedAt: nil, revocations: [])
+        let records = try await RevocationReverifyService.reconcile(
+            verifiedList: replacement,
+            installer: installer,
+            trustStateStore: store,
+            receiptsDir: Self.emptyReceipts())
+
+        #expect(records.isEmpty)
+        #expect(await installer.currentQuarantine()[id] == nil)
+        #expect(store.currentRevocationsSerial() == 10)
+    }
 }

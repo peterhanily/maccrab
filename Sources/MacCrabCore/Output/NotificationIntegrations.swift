@@ -99,75 +99,73 @@ public actor NotificationIntegrations {
     private var config: Config?
     private let configPath: String
 
+    /// Webhook/SMTP configuration is small even with several integrations.
+    /// This file can come from an admin user's writable home and is consumed by
+    /// the root daemon at boot, so its carrier must remain finite and regular.
+    static let maxConfigBytes = 1 * 1024 * 1024
+
     public init(configPath: String) {
         self.configPath = configPath
         self.config = Self.loadEffectiveConfig(systemPath: configPath)
     }
 
-    /// Resolve the config from `systemPath` first, falling back to the
-    /// console user's `~/Library/Application Support/MacCrab/notifications.json`
-    /// if the system path is missing or older. v1.6.19 wiring: SettingsView
+    /// Resolve the config from `systemPath` first. A valid root-owned system
+    /// config is authoritative; otherwise fall back to the console user's
+    /// `~/Library/Application Support/MacCrab/notifications.json` when the
+    /// system path is missing or older. v1.6.19 wiring: SettingsView
     /// writes to the user-home path because the sysext's
     /// `/Library/Application Support/MacCrab/` is root-only. File ownership
     /// is validated against `/Users/<u>` so a rogue process running as a
     /// different user can't inject a webhook.
     private static func loadEffectiveConfig(systemPath: String) -> Config? {
-        let systemConfig = loadConfigFromDisk(path: systemPath)
-        let userPath = findUserHomeConfigPath()
-        let userConfig = userPath.flatMap { loadConfigFromDisk(path: $0) }
-        // Prefer whichever was written most recently. Falls back to non-nil.
-        let fm = FileManager.default
-        let systemMtime = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
-        let userMtime = userPath.flatMap {
-            (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        let systemSnapshot = configSnapshot(at: systemPath)
+        let systemConfig = systemSnapshot.flatMap(decodeConfig)
+
+        // A valid root-owned system config is authoritative. Return before
+        // even opening a user-home carrier: the prior implementation decoded
+        // both and only then discarded the user value, so an ignored FIFO could
+        // still wedge daemon startup.
+        if let systemConfig, systemSnapshot?.ownerUID == 0 {
+            return systemConfig
         }
+
+        let userSnapshot = findUserHomeConfigSnapshot()
+        let userConfig = userSnapshot.flatMap(decodeConfig)
         switch (systemConfig, userConfig) {
         case (nil, nil):              return nil
         case (let sc?, nil):          return sc
         case (nil, let uc?):          return uc
         case (let sc?, let uc?):
-            // v1.21.4 (audit A2-01): a root-owned system config is
-            // authoritative. Don't let a user-home notifications.json (webhook /
-            // Slack / SMTP exfil destinations) override the operator's config
-            // just by carrying a newer mtime. Only fall back to the mtime
-            // comparison when the system path is NOT root-owned (dev's
-            // ~/Library path), preserving the legacy single-user dev behavior.
-            let systemUID = (try? fm.attributesOfItem(atPath: systemPath))?[.ownerAccountID] as? NSNumber
-            if systemUID?.uint32Value == 0 { return sc }
-            let sm = systemMtime ?? .distantPast
-            let um = userMtime ?? .distantPast
+            // Any valid root-owned system config returned above. Reaching this
+            // case therefore means the system path is non-root-owned (the dev
+            // ~/Library path); retain its legacy mtime precedence behavior.
+            let sm = systemSnapshot?.modificationDate ?? .distantPast
+            let um = userSnapshot?.modificationDate ?? .distantPast
             return um > sm ? uc : sc
         }
     }
 
-    /// Walk `/Users/*` for a notifications.json owned by the home's uid.
-    /// Returns the most-recently-modified candidate's path, or nil.
-    private static func findUserHomeConfigPath() -> String? {
-        let fm = FileManager.default
-        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
-
-        struct Candidate { let path: String; let mtime: Date }
-        var candidates: [Candidate] = []
-        for user in users where user != "Shared" && !user.hasPrefix(".") {
-            let home = "/Users/\(user)"
-            let path = home + "/Library/Application Support/MacCrab/notifications.json"
-            guard fm.fileExists(atPath: path) else { continue }
-            guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
-                  let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
-            let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+    /// Inspect resolver-validated homes for a notifications.json and return
+    /// the most-recent descriptor snapshot owned by the enclosing admin home.
+    private static func findUserHomeConfigSnapshot()
+        -> BoundedRegularFileReader.Snapshot? {
+        var candidates: [BoundedRegularFileReader.Snapshot] = []
+        for home in RealUserHomeResolver.all() {
+            let path = home.appending(
+                "Library/Application Support/MacCrab/notifications.json"
+            )
+            guard let snapshot = configSnapshot(at: path),
+                  home.userID == snapshot.ownerUID else { continue }
             // v1.21.4 (audit A2-01): notifications.json points at webhook / Slack
             // / SMTP destinations that receive every alert payload. Mirror the
             // ResponseAction.findUserHomeActionsPath gate — only honor a
             // user-home config owned by an ADMIN user, so an unprivileged local
             // user on a shared / managed Mac can't redirect alert exfil to an
             // attacker endpoint (or override the operator's config).
-            guard Self.isAdminUID(homeUID) else { continue }
-            let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
-            candidates.append(Candidate(path: path, mtime: mtime))
+            guard Self.isAdminUID(home.userID) else { continue }
+            candidates.append(snapshot)
         }
-        return candidates.max(by: { $0.mtime < $1.mtime })?.path
+        return candidates.max(by: { $0.modificationDate < $1.modificationDate })
     }
 
     /// True if `uid` belongs to the macOS `admin` group (gid 80). Mirrors
@@ -190,10 +188,20 @@ public actor NotificationIntegrations {
         return groups.prefix(Int(ngroups)).contains(80)   // gid 80 == admin
     }
 
-    private static func loadConfigFromDisk(path: String) -> Config? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let decoded = try? JSONDecoder().decode(Config.self, from: data) else { return nil }
-        return decoded
+    private static func configSnapshot(
+        at path: String
+    ) -> BoundedRegularFileReader.Snapshot? {
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+            at: path,
+            maximumBytes: maxConfigBytes
+        ) else { return nil }
+        return snapshot
+    }
+
+    private static func decodeConfig(
+        _ snapshot: BoundedRegularFileReader.Snapshot
+    ) -> Config? {
+        try? JSONDecoder().decode(Config.self, from: snapshot.data)
     }
 
     public func reloadConfig() {

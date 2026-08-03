@@ -94,6 +94,11 @@ public actor HoneyfileManager {
     private let homeDir: String
     private let manifestURL: URL
 
+    /// The deployed set is fixed and tiny. One MiB leaves ample forward-
+    /// compatibility while preventing a user-owned manifest carrier from
+    /// blocking or exhausting the root deception actor.
+    static let maxManifestBytes = 1 * 1024 * 1024
+
     /// path → entry, fast lookup for isHoneyfile().
     private var deployed: [String: Honeyfile] = [:]
 
@@ -113,18 +118,14 @@ public actor HoneyfileManager {
     /// On a multi-user Mac there is no single right answer, so we deliberately
     /// fall back rather than guess — the caller can pass `homeDir:` explicitly.
     public nonisolated static func defaultHomeDir() -> String {
-        let fallback = NSHomeDirectory()
-        guard getuid() == 0 else { return fallback }
-        let fm = FileManager.default
-        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return fallback }
-        let homes = users
-            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
-            .map { "/Users/\($0)" }
-            .filter {
-                var isDir: ObjCBool = false
-                return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue
-            }
-        return homes.count == 1 ? homes[0] : fallback
+        if getuid() != 0,
+           let own = RealUserHomeResolver.home(forUserID: geteuid()) {
+            return own.path
+        }
+        // The root engine may load one user's manifest only when exactly one
+        // validated account exists. Multi-user ambiguity fails closed into an
+        // inert, non-user namespace; DaemonSetup never deploys from root.
+        return RealUserHomeResolver.uniqueHome()?.path ?? "/var/empty"
     }
 
     /// - Parameters:
@@ -261,7 +262,19 @@ public actor HoneyfileManager {
     // MARK: - Manifest persistence
 
     private func loadManifest() {
-        guard let data = try? Data(contentsOf: manifestURL) else { return }
+        let data: Data
+        switch BoundedRegularFileReader.readOutcome(
+            at: manifestURL.path,
+            maximumBytes: Self.maxManifestBytes
+        ) {
+        case .success(let snapshot):
+            data = snapshot.data
+        case .rejected(.notFound):
+            return // First deployment has no manifest yet.
+        case .rejected(let reason):
+            logger.error("Honeyfile manifest carrier rejected: \(String(describing: reason), privacy: .public)")
+            return
+        }
         do {
             let entries = try JSONDecoder().decode([Honeyfile].self, from: data)
             deployed = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })

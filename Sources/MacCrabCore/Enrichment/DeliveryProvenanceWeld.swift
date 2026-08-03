@@ -75,6 +75,15 @@ public struct DeliveryProvenance: Sendable, Equatable {
 /// `QuarantineProvenanceSource`.
 public protocol DeliveryProvenanceSource: Sendable {
     func provenance(forExecutable path: String) async -> DeliveryProvenance?
+    func provenance(forExecutable path: String, userID: UInt32) async -> DeliveryProvenance?
+}
+
+public extension DeliveryProvenanceSource {
+    /// Compatibility path for synthetic/test sources that carry no per-user
+    /// state. Production QuarantineProvenanceSource overrides this requirement.
+    func provenance(forExecutable path: String, userID: UInt32) async -> DeliveryProvenance? {
+        await provenance(forExecutable: path)
+    }
 }
 
 // MARK: - Weld result
@@ -280,10 +289,10 @@ public enum DeliveryProvenanceGate {
 
     /// True when the executable is running IN PLACE from a delivery location
     /// (Downloads, temp, or a mounted DMG) rather than a trusted install root
-    /// like /Applications. `NSHomeDirectory()`-aware for the user Downloads dir.
+    /// like /Applications. Validated-real-home aware for user Downloads dirs.
     public static func isRunInPlace(_ path: String) -> Bool {
-        let home = NSHomeDirectory()
-        if path.hasPrefix(home + "/Downloads/") { return true }
+        if let home = RealUserHomeResolver.home(containingPath: path),
+           path.hasPrefix(home.appending("Downloads") + "/") { return true }
         if path.hasPrefix("/tmp/") || path.hasPrefix("/private/tmp/") { return true }
         if path.hasPrefix("/var/folders/") || path.hasPrefix("/private/var/folders/") { return true }
         if path.hasPrefix("/Volumes/") { return true }  // mounted DMG / removable
@@ -291,8 +300,8 @@ public enum DeliveryProvenanceGate {
     }
 
     static func runInPlaceLabel(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        if path.hasPrefix(home + "/Downloads/") { return "~/Downloads" }
+        if let home = RealUserHomeResolver.home(containingPath: path),
+           path.hasPrefix(home.appending("Downloads") + "/") { return "~/Downloads" }
         if path.hasPrefix("/Volumes/") { return "a mounted volume/DMG" }
         if path.contains("/var/folders/") { return "a temp directory" }
         if path.hasPrefix("/tmp/") || path.hasPrefix("/private/tmp/") { return "/tmp" }
@@ -338,7 +347,10 @@ public actor DeliveryProvenanceWeld {
     /// have no quarantine GUID). Never emits an alert; never mutates severity.
     public func weld(alert: Alert, event: Event) async -> WeldResult? {
         guard Self.triggerRuleIds.contains(alert.ruleId) else { return nil }
-        guard let prov = await source.provenance(forExecutable: event.process.executable) else {
+        guard let prov = await source.provenance(
+            forExecutable: event.process.executable,
+            userID: event.process.userId
+        ) else {
             return nil
         }
 
@@ -437,11 +449,33 @@ public struct QuarantineProvenanceSource: DeliveryProvenanceSource {
     }
 
     public func provenance(forExecutable path: String) async -> DeliveryProvenance? {
+        // Legacy callers have no uid, so the existing no-follow target must be
+        // owned inside one validated home. Paths on volumes or in global app
+        // directories cannot be associated and deliberately lose provenance.
+        guard let home = RealUserHomeResolver.provenanceHome(forPath: path) else {
+            return nil
+        }
+        return await provenance(forExecutable: path, home: home)
+    }
+
+    public func provenance(forExecutable path: String, userID: UInt32) async -> DeliveryProvenance? {
+        guard let home = RealUserHomeResolver.provenanceHome(
+            forPath: path,
+            userID: userID
+        ) else { return nil }
+        return await provenance(forExecutable: path, home: home)
+    }
+
+    private func provenance(forExecutable path: String, home: RealUserHome) async -> DeliveryProvenance? {
         // Deterministic join: the file's com.apple.quarantine xattr GUID keys
         // its LSQuarantineEvent row. No GUID (Preview-made / never downloaded)
         // -> no provenance -> no weld.
         guard let guid = QuarantineEnricher.quarantineGUID(forPath: path),
-              let q = await quarantine.lookupByGUID(guid) else {
+              let q = await quarantine.lookupByGUID(
+                  guid,
+                  userID: home.userID,
+                  executablePath: path
+              ) else {
             return nil
         }
 
@@ -450,9 +484,7 @@ public struct QuarantineProvenanceSource: DeliveryProvenanceSource {
 
         // Chromium keeps its referrer in its own History, not LSQuarantine.
         if originHost == nil, Self.isChromiumAgent(q.downloadAgent) {
-            let fileName = Self.fileName(fromURL: q.downloadURL)
-                ?? (path as NSString).lastPathComponent
-            if let chrome = chromium.origin(forDownloadFileName: fileName) {
+            if let chrome = chromium.origin(forDownloadPath: path, userHome: home) {
                 originHost = Self.host(chrome.referrer)
                     ?? Self.host(chrome.originURL)
                     ?? Self.host(chrome.tabURL)
@@ -499,6 +531,13 @@ public struct QuarantineProvenanceSource: DeliveryProvenanceSource {
 /// backup API (WAL-safe while the browser runs) and read from the frozen snapshot.
 public struct ChromiumDownloadOriginReader: Sendable {
 
+    /// History is attacker-influenced and may be arbitrarily large. This
+    /// enrichment runs inside the long-lived detection process, so a browser DB
+    /// copy must obey the same boot-volume floor as other bounded stores.
+    static let maxSnapshotBytes: Int64 = 512 * 1_048_576
+    static let freeSpaceFloorBytes: Int64 = 1_024 * 1_048_576
+    static let snapshotReserveBytes: Int64 = 16 * 1_048_576
+
     public struct Origin: Sendable, Equatable {
         public let referrer: String
         public let originURL: String  // first hop of the redirect chain
@@ -525,11 +564,16 @@ public struct ChromiumDownloadOriginReader: Sendable {
     /// `fileName` and return its referrer / origin. Returns nil when no
     /// Chromium History has a matching row.
     public func origin(forDownloadFileName fileName: String) -> Origin? {
-        guard !fileName.isEmpty else { return nil }
-        let appSupport = NSHomeDirectory() + "/Library/Application Support/"
+        guard !fileName.isEmpty,
+              let home = RealUserHomeResolver.uniqueHome() else { return nil }
+        return origin(forDownloadFileName: fileName, userHome: home)
+    }
+
+    private func origin(forDownloadFileName fileName: String, userHome: RealUserHome) -> Origin? {
+        let appSupport = userHome.appending("Library/Application Support") + "/"
         for base in Self.browserBases {
             let baseDir = appSupport + base.relPath
-            for historyPath in Self.discoverHistories(baseDir: baseDir) {
+            for historyPath in Self.discoverHistories(baseDir: baseDir, ownerUID: userHome.userID) {
                 if let o = Self.readOrigin(historyPath: historyPath, fileName: fileName) {
                     return o
                 }
@@ -538,66 +582,118 @@ public struct ChromiumDownloadOriginReader: Sendable {
         return nil
     }
 
-    /// Directly read a single `History` SQLite file (used by tests against a
-    /// fixture; production goes through `origin(forDownloadFileName:)`).
+    /// Production exact join. A basename-only match can select a different
+    /// user's/profile's `payload` download; bind discovery to one validated
+    /// home and require the exact Chromium target_path. Conflicting profile
+    /// results fail closed rather than taking directory-enumeration order.
+    public func origin(forDownloadPath path: String, userHome: RealUserHome) -> Origin? {
+        guard RealUserHomeResolver.provenanceHome(
+                  forPath: path,
+                  userID: userHome.userID
+              ) == userHome else { return nil }
+        let appSupport = userHome.appending("Library/Application Support") + "/"
+        var matches: [Origin] = []
+        for base in Self.browserBases {
+            let baseDir = appSupport + base.relPath
+            for historyPath in Self.discoverHistories(baseDir: baseDir, ownerUID: userHome.userID) {
+                if let origin = Self.readOrigin(historyPath: historyPath, targetPath: path),
+                   !matches.contains(origin) {
+                    matches.append(origin)
+                    guard matches.count == 1 else { return nil }
+                }
+            }
+        }
+        return matches.first
+    }
+
+    /// Directly read a single `History` SQLite file (legacy fixture API;
+    /// production uses the event-bound exact target-path method above).
     public func origin(historyPath: String, fileName: String) -> Origin? {
         Self.readOrigin(historyPath: historyPath, fileName: fileName)
     }
 
     // MARK: profile discovery (base itself + immediate subdirs with a History)
 
-    static func discoverHistories(baseDir: String) -> [String] {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: baseDir, isDirectory: &isDir), isDir.boolValue else { return [] }
+    static func discoverHistories(baseDir: String, ownerUID: UInt32? = nil) -> [String] {
+        guard let snapshot = BoundedDirectoryLister.list(
+            at: baseDir,
+            maximumEntries: 512,
+            expectedOwnerUID: ownerUID
+        ) else { return [] }
+        // A bounded partial set is useful provenance enrichment and is never
+        // advertised as a complete browser inventory.
         var result: [String] = []
         let baseHistory = baseDir + "/History"
-        if isReadableRegularFile(baseHistory) { result.append(baseHistory) }
-        if let entries = try? fm.contentsOfDirectory(atPath: baseDir) {
-            for entry in entries.sorted() {
-                let subdir = baseDir + "/" + entry
-                var subIsDir: ObjCBool = false
-                guard fm.fileExists(atPath: subdir, isDirectory: &subIsDir), subIsDir.boolValue else { continue }
-                let hist = subdir + "/History"
-                if isReadableRegularFile(hist) { result.append(hist) }
-            }
+        if snapshot.entries.contains(where: { entry in
+            entry.name == "History"
+                && entry.kind == .regularFile
+                && (ownerUID.map { entry.ownerUID == $0 } ?? true)
+        }), isReadableRegularFile(baseHistory, ownerUID: ownerUID) {
+            result.append(baseHistory)
+        }
+        for entry in snapshot.entries where
+            entry.kind == .directory
+                && (ownerUID.map { entry.ownerUID == $0 } ?? true) {
+            let hist = baseDir + "/" + entry.name + "/History"
+            if isReadableRegularFile(hist, ownerUID: ownerUID) { result.append(hist) }
         }
         return result
     }
 
-    static func isReadableRegularFile(_ path: String) -> Bool {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else { return false }
-        return fm.isReadableFile(atPath: path)
+    static func isReadableRegularFile(_ path: String, ownerUID: UInt32? = nil) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0,
+              (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+              info.st_nlink == 1,
+              ownerUID.map({ info.st_uid == $0 }) ?? true else {
+            return false
+        }
+        return access(path, R_OK) == 0
     }
 
     // MARK: read
 
     static func readOrigin(historyPath: String, fileName: String) -> Origin? {
+        readOrigin(historyPath: historyPath, predicate: "%\(fileName)", exact: false)
+    }
+
+    static func readOrigin(historyPath: String, targetPath: String) -> Origin? {
+        readOrigin(historyPath: historyPath, predicate: targetPath, exact: true)
+    }
+
+    private static func readOrigin(
+        historyPath: String,
+        predicate: String,
+        exact: Bool
+    ) -> Origin? {
         guard let snapshot = snapshot(sourcePath: historyPath) else { return nil }
         defer { try? FileManager.default.removeItem(atPath: snapshot) }
 
         var db: OpaquePointer?
-        guard sqlite3_open_v2(snapshot, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+        guard SQLiteOpenPathPolicy.open(
+            snapshot,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK,
               let h = db else {
             if let h = db { sqlite3_close(h) }
             return nil
         }
         defer { sqlite3_close(h) }
 
-        // Most-recent download whose on-disk target ends with the file name.
+        // Production passes an exact target path. The suffix form remains only
+        // for the backwards-compatible single-fixture test API above.
         let sql = """
             SELECT d.id, COALESCE(d.referrer, ''), COALESCE(d.tab_url, '')
             FROM downloads d
-            WHERE d.target_path LIKE ?
+            WHERE d.target_path \(exact ? "=" : "LIKE") ?
             ORDER BY d.start_time DESC
             LIMIT 1
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(h, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, "%\(fileName)", -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 1, predicate, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
 
         let downloadID = sqlite3_column_int64(stmt, 0)
@@ -622,34 +718,146 @@ public struct ChromiumDownloadOriginReader: Sendable {
     /// Copy `sourcePath` to a fresh temp file via the sqlite backup API
     /// (WAL-safe while the browser holds the live DB). Returns the snapshot
     /// path, or nil on failure. Caller removes it.
-    static func snapshot(sourcePath: String) -> String? {
+    static func snapshot(
+        sourcePath: String,
+        maxBytes: Int64 = maxSnapshotBytes,
+        freeFloorBytes: Int64 = freeSpaceFloorBytes,
+        reserveBytes: Int64 = snapshotReserveBytes
+    ) -> String? {
+        guard maxBytes > 0 else { return nil }
+        var sourceInfo = stat()
+        guard lstat(sourcePath, &sourceInfo) == 0,
+              (UInt32(sourceInfo.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+              sourceInfo.st_nlink == 1 else {
+            return nil
+        }
         let dest = NSTemporaryDirectory() + "maccrab-chromium-\(UUID().uuidString).db"
+        defer {
+            // Success transfers the main path to the caller; sidecars are never
+            // useful to the read-only parser and must not leak on any path.
+            for suffix in ["-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: dest + suffix)
+            }
+        }
         var src: OpaquePointer?
-        guard sqlite3_open_v2(sourcePath, &src, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+        guard SQLiteOpenPathPolicy.open(
+            sourcePath,
+            database: &src,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK,
               let s = src else {
             if let s = src { sqlite3_close(s) }
             return nil
         }
         defer { sqlite3_close(s) }
+
+        guard let pageSize = pragmaInt64(s, name: "page_size"), pageSize > 0,
+              let pageCount = pragmaInt64(s, name: "page_count"), pageCount >= 0 else {
+            return nil
+        }
+        let (logicalBytes, overflow) = pageSize.multipliedReportingOverflow(by: pageCount)
+        guard !overflow, logicalBytes <= maxBytes,
+              hasFreeSpace(
+                  at: NSTemporaryDirectory(),
+                  floor: max(0, freeFloorBytes),
+                  copy: logicalBytes,
+                  reserve: max(0, reserveBytes)
+              ) else {
+            return nil
+        }
+
         var dst: OpaquePointer?
-        guard sqlite3_open_v2(dest, &dst, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+        guard SQLiteOpenPathPolicy.open(
+            dest,
+            database: &dst,
+            flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK,
               let d = dst else {
             if let d = dst { sqlite3_close(d) }
             return nil
         }
-        guard let backup = sqlite3_backup_init(d, "main", s, "main") else {
+        var success = false
+        defer {
             sqlite3_close(d)
-            try? FileManager.default.removeItem(atPath: dest)
+            if !success { try? FileManager.default.removeItem(atPath: dest) }
+        }
+        let maximumPages = max(Int64(1), maxBytes / pageSize)
+        guard sqlite3_exec(d, "PRAGMA page_size = \(pageSize)", nil, nil, nil) == SQLITE_OK,
+              sqlite3_exec(d, "PRAGMA max_page_count = \(maximumPages)", nil, nil, nil) == SQLITE_OK,
+              sqlite3_exec(d, "PRAGMA journal_mode = OFF", nil, nil, nil) == SQLITE_OK else {
             return nil
         }
-        sqlite3_backup_step(backup, -1)
-        sqlite3_backup_finish(backup)
-        let ok = sqlite3_errcode(d) == SQLITE_OK
-        sqlite3_close(d)
-        if !ok {
-            try? FileManager.default.removeItem(atPath: dest)
+        guard let backup = sqlite3_backup_init(d, "main", s, "main") else {
             return nil
         }
+        var finished = false
+        defer { if !finished { sqlite3_backup_finish(backup) } }
+        var busyRetries = 0
+        while true {
+            let rc = sqlite3_backup_step(backup, 256)
+            if rc == SQLITE_DONE { break }
+            if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
+                guard busyRetries < 50 else { return nil }
+                busyRetries += 1
+                usleep(10_000)
+                continue
+            }
+            guard rc == SQLITE_OK else { return nil }
+            busyRetries = 0
+            var destInfo = stat()
+            guard lstat(dest, &destInfo) == 0,
+                  (UInt32(destInfo.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+                  destInfo.st_nlink == 1,
+                  destInfo.st_size >= 0,
+                  Int64(destInfo.st_size) <= maxBytes,
+                  hasFreeSpace(
+                      at: NSTemporaryDirectory(),
+                      floor: max(0, freeFloorBytes),
+                      copy: 0,
+                      reserve: max(0, reserveBytes)
+                  ) else {
+                return nil
+            }
+        }
+        let finishRC = sqlite3_backup_finish(backup)
+        finished = true
+        guard finishRC == SQLITE_OK else { return nil }
+        var finalInfo = stat()
+        guard lstat(dest, &finalInfo) == 0,
+              (UInt32(finalInfo.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+              finalInfo.st_nlink == 1,
+              finalInfo.st_size >= 0,
+              Int64(finalInfo.st_size) <= maxBytes,
+              chmod(dest, 0o600) == 0 else { return nil }
+        success = true
         return dest
+    }
+
+    private static func pragmaInt64(_ db: OpaquePointer, name: String) -> Int64? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA \(name)", -1, &statement, nil) == SQLITE_OK,
+              let statement else { return nil }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    private static func hasFreeSpace(
+        at path: String,
+        floor: Int64,
+        copy: Int64,
+        reserve: Int64
+    ) -> Bool {
+        let (floorAndCopy, overflow1) = floor.addingReportingOverflow(copy)
+        let (required, overflow2) = floorAndCopy.addingReportingOverflow(reserve)
+        guard !overflow1, !overflow2 else { return false }
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return false }
+        let free = UInt64(info.f_bavail).multipliedReportingOverflow(
+            by: UInt64(info.f_bsize)
+        )
+        guard !free.overflow else { return false }
+        return Int64(clamping: free.partialValue) >= required
     }
 }

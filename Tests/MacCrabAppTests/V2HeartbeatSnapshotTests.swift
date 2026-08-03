@@ -100,6 +100,196 @@ struct V2HeartbeatSnapshotTests {
         #expect(partial?.networkBlocker.enabled == false)
     }
 
+    // MARK: - TraceGraph storage admission
+
+    @Test("event-pipeline causality block preserves source, lane, and collector boundaries")
+    func eventPipelineDecode() throws {
+        let pipeline = try #require(V2HeartbeatSnapshot.EventPipeline(from: [
+            "offered_by_source": ["ESCollector": 20, "UnifiedLogCollector": 8],
+            "offered_by_source_and_lane": [
+                "ESCollector": ["priority": 12, "file": 8],
+                "UnifiedLogCollector": ["priority": 6, "file": 2],
+            ],
+            "dropped_by_source_and_lane": [
+                "ESCollector": ["priority": 0, "file": 1],
+                "UnifiedLogCollector": ["priority": 1, "file": 0],
+            ],
+            "terminated_by_source_and_lane": [
+                "ESCollector": ["priority": 1, "file": 0],
+            ],
+            "collector_offered_by_source_and_lane": [
+                "ESCollector": ["priority": 13, "file": 9],
+            ],
+            "upstream_dropped_by_source_and_lane": [
+                "ESCollector": ["priority": 0, "file": 1],
+            ],
+            "upstream_terminated_by_source_and_lane": [
+                "ESCollector": ["priority": 1, "file": 0],
+            ],
+            "merged_dropped_by_source_and_lane": [
+                "UnifiedLogCollector": ["priority": 1, "file": 0],
+            ],
+            "merged_terminated_by_source_and_lane": [
+                "ESCollector": ["priority": 0, "file": 0],
+            ],
+            "offered_by_lane": ["priority": 18, "file": 10],
+            "dequeued_by_lane": ["priority": 16, "file": 9],
+            "completed_by_lane": ["priority": 15, "file": 9],
+            "backlog_estimate_by_lane": ["priority": 1, "file": 0],
+            "in_flight_by_lane": ["priority": 1, "file": 0],
+            "processing_p99_us_by_lane": ["priority": 4_000, "file": 1_000],
+            "latency_sample_count_by_lane": ["priority": 15, "file": 9],
+            "upstream_dropped_by_lane": ["priority": 0, "file": 1],
+            "upstream_terminated_by_lane": ["priority": 1, "file": 0],
+            "merged_dropped_by_lane": ["priority": 1, "file": 1],
+            "merged_terminated_by_lane": ["priority": 0, "file": 0],
+            "collector_capacity_by_source": ["ESCollector": 100_000],
+            "pre_buffer_dropped_by_source": ["ESCollector": 7],
+            "detection_input_dropped_total": 10,
+            "capacity_by_lane": ["priority": 100_000, "file": 100_000],
+            "collector_buffer": [
+                "unified_log_normalized_total": 10,
+                "unified_log_stream_yield_dropped_total": 2,
+                "unified_log_capacity": 512,
+            ],
+        ]))
+
+        #expect(pipeline.offeredBySource["ESCollector"] == 20)
+        #expect(pipeline.offeredBySourceAndLane["UnifiedLogCollector"]?["file"] == 2)
+        #expect(pipeline.droppedBySourceAndLane["ESCollector"]?["file"] == 1)
+        #expect(pipeline.terminatedBySourceAndLane["ESCollector"]?["priority"] == 1)
+        #expect(pipeline.upstreamDroppedByLane["file"] == 1)
+        #expect(pipeline.mergedDroppedBySourceAndLane["UnifiedLogCollector"]?["priority"] == 1)
+        #expect(pipeline.collectorCapacityBySource["ESCollector"] == 100_000)
+        #expect(pipeline.preBufferDroppedBySource["ESCollector"] == 7)
+        #expect(pipeline.detectionInputDroppedTotal == 10)
+        #expect(pipeline.backlogEstimateByLane["priority"] == 1)
+        #expect(pipeline.inFlightByLane["priority"] == 1)
+        #expect(pipeline.processingP99MicrosByLane["priority"] == 4_000)
+        #expect(pipeline.latencySampleCountByLane["file"] == 9)
+        #expect(pipeline.collectorBuffer["unified_log_stream_yield_dropped_total"] == 2)
+        let diagnostics = pipeline.diagnosticDictionary
+        #expect(diagnostics["detection_input_dropped_total"] as? UInt64 == 10)
+        #expect((diagnostics["upstream_dropped_by_lane"] as? [String: UInt64])?["file"] == 1)
+        #expect(V2HeartbeatSnapshot.EventPipeline(from: nil) == nil)
+    }
+
+    @Test("startup storage admission remains a fail-visible evidence gap")
+    func traceGraphStartupAdmissionDecode() throws {
+        let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
+            "enabled": true,
+            "blocked": true,
+            "store_available": false,
+            "startup_blocked": true,
+            "reason": "low_free_space",
+            "free_space_bytes": NSNumber(value: 100_000_000),
+            "free_space_floor_bytes": NSNumber(value: 1_073_741_824),
+        ]))
+
+        #expect(status.enabled)
+        #expect(status.blocked)
+        #expect(status.storeAvailable == false)
+        #expect(status.startupBlocked)
+        #expect(status.reason == "low_free_space")
+        #expect(status.freeSpaceBytes == 100_000_000)
+        #expect(status.freeSpaceFloorBytes == 1_073_741_824)
+        #expect(status.evidenceUnavailable)
+        #expect(status.operatorDetail.contains("paused at startup"))
+        #expect(status.operatorDetail.contains("new causal evidence is not being recorded"))
+    }
+
+    @Test("live healthy admission is not reported as an evidence gap")
+    func traceGraphHealthyAdmissionDecode() throws {
+        let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
+            "enabled": true,
+            "blocked": false,
+            "store_available": true,
+            "startup_blocked": false,
+            "reason": "",
+        ]))
+
+        #expect(!status.evidenceUnavailable)
+        #expect(status.reason == nil)
+    }
+
+    @Test("Agent Trace admission uses the shared wire shape without implying trust")
+    func traceStoreAdmissionDecode() throws {
+        let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
+            "enabled": true,
+            "blocked": true,
+            "store_available": true,
+            "startup_blocked": false,
+            "reason": "footprint_limit",
+            "footprint_bytes": NSNumber(value: 96_000_000),
+            "max_footprint_bytes": NSNumber(value: 100_000_000),
+        ]))
+
+        #expect(status.evidenceUnavailable)
+        #expect(status.reason == "footprint_limit")
+        #expect(status.footprintBytes == 96_000_000)
+        #expect(status.maxFootprintBytes == 100_000_000)
+    }
+
+    @Test("TraceGraph evidence gaps degrade every shared dashboard surface")
+    func traceGraphGlobalDegradedSignal() {
+        #expect(AppState.traceGraphEvidenceUnavailable(blocked: true, storeAvailable: true))
+        #expect(AppState.traceGraphEvidenceUnavailable(blocked: false, storeAvailable: false))
+        #expect(!AppState.traceGraphEvidenceUnavailable(blocked: false, storeAvailable: true))
+        #expect(!AppState.traceGraphEvidenceUnavailable(blocked: nil, storeAvailable: nil))
+    }
+
+    @Test("browser inventory truncation decodes as an explicit coverage gap")
+    func browserInventoryDecode() throws {
+        let inventory = try #require(V2HeartbeatSnapshot.BrowserInventory(from: [
+            "coverage_known": true,
+            "complete": false,
+            "degraded": true,
+            "reason": "directory_budget_exhausted",
+            "last_scan_was_truncated": true,
+            "scans_total": 7,
+            "truncated_scans_total": 2,
+            "inspected_directory_entries_total": 200_321,
+            "truncated_directories_total": 2,
+            "truncated_homes_total": 2,
+            "last_scan_completed_at_unix": 1_785_686_400.5,
+            "last_scan_homes": 2,
+            "last_scan_inspected_directory_entries": 100_321,
+            "last_scan_truncated_directory_count": 1,
+            "last_scan_truncated_home_count": 1,
+            "per_home_directory_entry_budget": 100_000,
+        ]))
+
+        #expect(inventory.coverageKnown)
+        #expect(!inventory.complete)
+        #expect(inventory.degraded)
+        #expect(inventory.lastScanWasTruncated)
+        #expect(inventory.scansTotal == 7)
+        #expect(inventory.lastScanTruncatedHomeCount == 1)
+        #expect(inventory.operatorDetail.contains("partial"))
+        #expect(inventory.diagnosticDictionary["complete"] as? Bool == false)
+        #expect(inventory.diagnosticDictionary["last_scan_truncated_home_count"] as? UInt64 == 1)
+        #expect(V2HeartbeatSnapshot.BrowserInventory(from: nil) == nil)
+        #expect(AppState.browserInventoryEvidenceUnavailable(
+            coverageKnown: true,
+            complete: false,
+            degraded: false,
+            lastScanWasTruncated: false
+        ))
+        #expect(!AppState.browserInventoryEvidenceUnavailable(
+            coverageKnown: true,
+            complete: true,
+            degraded: false,
+            lastScanWasTruncated: false
+        ))
+        let contradictory = try #require(V2HeartbeatSnapshot.BrowserInventory(from: [
+            "coverage_known": true,
+            "complete": false,
+            "degraded": false,
+            "last_scan_was_truncated": true,
+        ]))
+        #expect(contradictory.degraded)
+    }
+
     // MARK: - readFreshest behavior
 
     @Test("readFreshest returns nil when no candidate heartbeat exists")
@@ -139,7 +329,11 @@ struct V2HeartbeatSnapshotTests {
             esSensorDegradedDetail: nil,
             esSensorDegradedSeverity: nil,
             llm: nil,
-            prevention: nil
+            prevention: nil,
+            traceGraphStorageAdmission: nil,
+            traceStoreStorageAdmission: nil,
+            eventPipeline: nil,
+            browserInventory: nil
         )
     }
 }

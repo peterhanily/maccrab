@@ -93,9 +93,8 @@ public actor ReplayEngine {
                 // A throw at replay-time is itself a deterministic failure;
                 // construct a synthetic schemaInvalid result so the report
                 // has a row for the bundle.
-                let bundleSha = (try? inputBundleSha(directory: candidate)) ?? ""
                 let result = ReplayResult(
-                    traceId: "", bundleId: bundleSha,
+                    traceId: "", bundleId: "",
                     rulesetVersion: "", daemonVersion: "",
                     normalizationVersion: "", replayScope: "",
                     deterministic: true,
@@ -111,7 +110,7 @@ public actor ReplayEngine {
                         type: "replay_threw",
                         ruleId: String(error.localizedDescription.prefix(120))
                     )],
-                    inputBundleSha256: bundleSha,
+                    inputBundleSha256: "",
                     rulesetSha256: replayer.rulesetSha256,
                     normalizerSha256: replayer.normalizerSha256,
                     replayEngineVersion: engineVersion,
@@ -138,7 +137,7 @@ public actor ReplayEngine {
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             // Bundle directories typically end in .maccrabtrace; tar.gz
             // archives are caller's responsibility to extract first
-            // (the CLI handles this in `extractIfArchive`).
+            // (the CLI resolves archives through `SafeTraceBundleResolver`).
             if isDir { return true }
             return false
         }.sorted { $0.path < $1.path }
@@ -148,11 +147,23 @@ public actor ReplayEngine {
         bundleAt directory: URL,
         options: ReplayOptions = ReplayOptions()
     ) async throws -> ReplayResult {
+        let resolution = try SafeTraceBundleResolver.resolve(inputAt: directory)
+        defer { resolution.cleanup() }
+        return try await replay(resolvedBundle: resolution, options: options)
+    }
+
+    /// Replay from one owned snapshot. Validation and optional verification
+    /// receive the same token, so no nested stage resolves a second filesystem
+    /// version of the bundle.
+    public func replay(
+        resolvedBundle resolution: SafeTraceBundleResolver.Resolution,
+        options: ReplayOptions = ReplayOptions()
+    ) async throws -> ReplayResult {
         // Step 1 — structural validation.
-        let validatorOutcome = BundleValidator.validate(at: directory)
+        let validatorOutcome = BundleValidator.validate(resolvedBundle: resolution)
         guard validatorOutcome.exitCode == 0 else {
             return makeFailResult(
-                directory: directory,
+                resolution: resolution,
                 outcome: .schemaInvalid,
                 deterministic: true,
                 additionalDifferences: []
@@ -162,13 +173,16 @@ public actor ReplayEngine {
         // Step 1b — tamper-evidence verification (A3-01, opt-in). A bundle
         // that passes the structural validator can still have had its signed
         // artifacts rewritten; when asked, refuse to replay a tampered bundle.
-        if options.verifyTamperEvidence, !isUnsignedBundle(directory: directory) {
+        if options.verifyTamperEvidence, !isUnsignedBundle(resolution) {
             var verifyOptions = BundleVerifier.Options()
             verifyOptions.pinnedKeyFingerprint = options.pinnedKeyFingerprint
-            let verifyOutcome = await BundleVerifier.verify(at: directory, options: verifyOptions)
+            let verifyOutcome = await BundleVerifier.verify(
+                resolvedBundle: resolution,
+                options: verifyOptions
+            )
             guard verifyOutcome.exitCode == 0 else {
                 return makeFailResult(
-                    directory: directory,
+                    resolution: resolution,
                     outcome: .schemaInvalid,
                     deterministic: true,
                     additionalDifferences: []
@@ -177,18 +191,19 @@ public actor ReplayEngine {
         }
 
         // Step 2 — load manifest + replay manifest + matched_rules.
-        guard let manifest = try? loadManifest(directory: directory) else {
+        guard let manifest = try? loadManifest(resolution) else {
             return makeFailResult(
-                directory: directory,
+                resolution: resolution,
                 outcome: .schemaInvalid,
                 deterministic: true,
                 additionalDifferences: []
             )
         }
-        let replayManifest = try loadReplayManifest(directory: directory)
-        let matchedRules = (try? loadMatchedRules(directory: directory)) ?? MatchedRulesArtifact(rules: [])
+        let replayManifest = try loadReplayManifest(resolution)
+        let matchedRules = (try? loadMatchedRules(resolution))
+            ?? MatchedRulesArtifact(rules: [])
 
-        let bundleSha = try inputBundleSha(directory: directory)
+        let bundleSha = try inputBundleSha(resolution)
 
         // Step 3 — compatibility (§17.3).
         if manifest.normalizationVersion != options.expectedNormalizationVersion {
@@ -228,7 +243,7 @@ public actor ReplayEngine {
         }
 
         // Step 5 — deterministic event ordering per §17.1.3.
-        let orderedEvents = try canonicallyOrderedEvents(directory: directory)
+        let orderedEvents = try canonicallyOrderedEvents(resolution)
 
         // Step 6 — hand off to the replayer.
         let replayedAlerts: [ReplayedAlert]
@@ -266,24 +281,26 @@ public actor ReplayEngine {
 
     // MARK: - Loaders
 
-    private func loadManifest(directory: URL) throws -> BundleManifest {
-        let url = directory.appendingPathComponent("manifest.json")
-        let data = try Data(contentsOf: url)
+    private func loadManifest(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) throws -> BundleManifest {
+        let data = try resolution.data(at: "manifest.json")
         return try canonicalJSONDecoder().decode(BundleManifest.self, from: data)
     }
 
-    private func loadReplayManifest(directory: URL) throws -> ReplayManifestArtifact {
-        let url = directory.appendingPathComponent("replay/replay_manifest.json")
-        let data = try Data(contentsOf: url)
+    private func loadReplayManifest(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) throws -> ReplayManifestArtifact {
+        let data = try resolution.data(at: "replay/replay_manifest.json")
         return try canonicalJSONDecoder().decode(ReplayManifestArtifact.self, from: data)
     }
 
-    private func loadMatchedRules(directory: URL) throws -> MatchedRulesArtifact {
-        let url = directory.appendingPathComponent("rules/matched_rules.json")
-        guard FileManager.default.fileExists(atPath: url.path) else {
+    private func loadMatchedRules(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) throws -> MatchedRulesArtifact {
+        guard let data = resolution.dataIfPresent(at: "rules/matched_rules.json") else {
             return MatchedRulesArtifact(rules: [])
         }
-        let data = try Data(contentsOf: url)
         return try canonicalJSONDecoder().decode(MatchedRulesArtifact.self, from: data)
     }
 
@@ -292,27 +309,39 @@ public actor ReplayEngine {
     /// the opt-in tamper-evidence gate so they still replay. A missing /
     /// unreadable signature is treated as "not unsigned" so the verifier — not
     /// this shortcut — decides.
-    private func isUnsignedBundle(directory: URL) -> Bool {
-        let url = directory.appendingPathComponent("integrity/chain_head_signature.json")
-        guard let data = try? Data(contentsOf: url),
+    private func isUnsignedBundle(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) -> Bool {
+        guard let data = resolution.dataIfPresent(
+            at: "integrity/chain_head_signature.json"
+        ),
               let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: data)
         else { return false }
         return sig.signatureBase64 == "UNSIGNED"
     }
 
-    private func inputBundleSha(directory: URL) throws -> String {
+    private func inputBundleSha(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) throws -> String {
         // Hash the manifest content as a stable bundle identifier.
         // The full Merkle root is canonical but expensive; for the
         // replay result's `input_bundle_sha256` field a per-manifest
         // hash is enough to detect "this is the same bundle".
-        let manifestURL = directory.appendingPathComponent("manifest.json")
-        let data = try Data(contentsOf: manifestURL)
+        let data = try resolution.data(at: "manifest.json")
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func canonicallyOrderedEvents(directory: URL) throws -> [String] {
-        let url = directory.appendingPathComponent("events.jsonl")
-        let text = try String(contentsOf: url, encoding: .utf8)
+    private func canonicallyOrderedEvents(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) throws -> [String] {
+        let data = try resolution.data(at: "events.jsonl")
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw SafeTraceArchiveExtractor.ExtractionError
+                .unsafeFilesystemEntry(
+                    path: "events.jsonl",
+                    reason: "captured event stream is not UTF-8"
+                )
+        }
         let lines = text.split(omittingEmptySubsequences: true, whereSeparator: { $0.isNewline })
         // Deterministic ordering by (timestamp_ns, event_id) per §17.1.3.
         // We don't impose a Swift Codable shape on events here — the
@@ -453,14 +482,15 @@ public actor ReplayEngine {
         manifest: BundleManifest? = nil,
         replayManifest: ReplayManifestArtifact? = nil,
         bundleSha: String? = nil,
-        directory: URL? = nil,
+        resolution: SafeTraceBundleResolver.Resolution? = nil,
         outcome: ReplayResult.Outcome,
         deterministic: Bool,
         unsupportedEngines: [String] = [],
         unsupportedRuleIds: [String] = [],
         additionalDifferences: [ReplayDifference]
     ) -> ReplayResult {
-        let bundleSha = bundleSha ?? (directory.flatMap { try? inputBundleSha(directory: $0) } ?? "")
+        let bundleSha = bundleSha
+            ?? (resolution.flatMap { try? inputBundleSha($0) } ?? "")
         let partial = ReplayResult(
             traceId: manifest?.traceId ?? "",
             bundleId: bundleSha,

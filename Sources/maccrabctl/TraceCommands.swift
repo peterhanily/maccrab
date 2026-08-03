@@ -14,10 +14,48 @@ import MacCrabCore
 
 extension MacCrabCtl {
 
+    static let traceExportStoreOpenFailureExitCode: Int32 = 1
+
+    enum TraceExportTargetError: Error, LocalizedError, Equatable {
+        case unsafeTraceIdentifier(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unsafeTraceIdentifier(let identifier):
+                return "trace id cannot be used as an export filename: \(identifier)"
+            }
+        }
+    }
+
     // MARK: - Path helpers
 
     static func tracegraphDBPath() -> String {
         return maccrabDataDir() + "/tracegraph.db"
+    }
+
+    static func traceExportTarget(
+        traceId: String,
+        outputDirectory: URL?,
+        currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+    ) throws -> URL {
+        guard !traceId.isEmpty,
+              traceId.utf8.count <= 128,
+              traceId.first != ".",
+              traceId.unicodeScalars.allSatisfy({ scalar in
+                  let value = scalar.value
+                  return (value >= 48 && value <= 57)
+                      || (value >= 65 && value <= 90)
+                      || (value >= 97 && value <= 122)
+                      || value == 45 || value == 95
+              }) else {
+            throw TraceExportTargetError.unsafeTraceIdentifier(traceId)
+        }
+        let baseDirectory = outputDirectory
+            ?? URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
+        return baseDirectory.appendingPathComponent(
+            "\(traceId).maccrabtrace",
+            isDirectory: true
+        )
     }
 
     private static func openStore() async -> SQLiteCausalGraphStore? {
@@ -28,7 +66,14 @@ extension MacCrabCtl {
             return nil
         }
         do {
-            return try await SQLiteCausalGraphStore(databasePath: path)
+            // Every caller of openStore() is a query/export surface.  A
+            // read-write handle here can pin the daemon's WAL and obstruct
+            // bounded storage recovery even though maccrabctl never mutates
+            // the live graph through this helper.
+            return try await SQLiteCausalGraphStore(
+                databasePath: path,
+                forceReadOnly: true
+            )
         } catch {
             print("Failed to open tracegraph.db: \(error.localizedDescription)")
             return nil
@@ -338,12 +383,11 @@ extension MacCrabCtl {
         includeRawPaths: Bool,
         includeHostname: Bool
     ) async {
-        guard let store = await openStore() else { exit(0) }
-        // Set only once we know the bundle root is one WE created (see below),
-        // and cleared again once the export completes; the catch block names it
-        // so the operator can tell our debris from a directory that was already
-        // there.
-        var partialBundle: URL?
+        // Export is an artifact-producing command. A missing, corrupt, or
+        // inaccessible store is failure, never a successful empty result.
+        guard let store = await openStore() else {
+            exit(traceExportStoreOpenFailureExitCode)
+        }
         do {
             guard let loaded = try await store.loadTrace(id: traceId) else {
                 print("Trace not found: \(traceId)")
@@ -436,18 +480,13 @@ extension MacCrabCtl {
                 print("WARNING: exporting UNSIGNED. Re-run as root (`sudo maccrabctl trace export …`) or export from MacCrab.app for a signed bundle.")
             }
 
-            let target = outputDir
-                ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                    .appendingPathComponent("\(traceId).maccrabtrace")
-            // A mid-export failure (commonly: signing can't write the
-            // root-owned keys/ dir as a normal user) left the half-written
-            // bundle on disk — every artifact dir present but no signed
-            // manifest/Merkle root, so `trace verify` rejects it and the debris
-            // is indistinguishable from a tampered bundle. Only clean up what
-            // WE created: BundleExporter.export throws .directoryAlreadyExists
-            // rather than writing into an existing directory, so anything that
-            // pre-existed at `target` is the operator's and must be left alone.
-            if !FileManager.default.fileExists(atPath: target.path) { partialBundle = target }
+            // `--out` is documented as a directory, matching session export.
+            // BundleExportWorkspace requires that parent to exist and performs
+            // the no-follow/exclusive leaf creation below it.
+            let target = try traceExportTarget(
+                traceId: loaded.trace.id,
+                outputDirectory: outputDir
+            )
 
             let inputs = BundleExporter.Inputs(
                 trace: loaded.trace,
@@ -474,53 +513,52 @@ extension MacCrabCtl {
                 unifiedLogAnchor: SystemUnifiedLogAnchor()
             )
             try await exporter.export(inputs: inputs, to: target, options: options)
-            // The bundle is complete and has its chain head from here on, so a
-            // later failure (tar, sidecar) must NOT report it as a partial.
-            partialBundle = nil
             print("Bundle written: \(target.path)")
 
-            // Tar.gz packaging via /usr/bin/tar.
-            let tarPath = target.path + ".tar.gz"
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            proc.currentDirectoryURL = target.deletingLastPathComponent()
-            proc.arguments = ["-czf", tarPath, target.lastPathComponent]
-            try proc.run()
-            proc.waitUntilExit()
-            if proc.terminationStatus == 0 {
-                let attrs = try? FileManager.default.attributesOfItem(atPath: tarPath)
-                let sizeBytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-                print("Archive: \(tarPath)  (\(sizeBytes) bytes)")
-                // v1.21.5 Phase 2c: outer-archive digest as a shasum-
-                // compatible `<archive>.sha256` sidecar, computed AFTER
-                // packaging (replaces the impossible in-bundle
-                // bundle_sha256.txt placeholder). Transport-integrity
-                // convenience only — the signed Merkle chain inside the
-                // bundle remains the tamper evidence, so a hashing
-                // failure warns without failing the export.
-                if let result = ArchiveDigest.writeSidecar(forArchiveAt: URL(fileURLWithPath: tarPath)) {
-                    print("SHA-256: \(result.hex)")
-                    print("Sidecar: \(result.sidecar.path)")
-                } else {
-                    print("WARNING: could not compute/write archive SHA-256 sidecar; the archive itself is unaffected.")
-                }
-            } else {
-                print("tar exited with status \(proc.terminationStatus); directory left at \(target.path)")
+            // Resolve the finished public directory to one immutable private
+            // snapshot, stream fixed Apple bsdtar stdout through the shared
+            // deadline/output cap, then exclusively publish those exact bytes.
+            // Neither the archive nor digest sidecar can follow or overwrite a
+            // raced destination leaf.
+            let archiveURL = URL(fileURLWithPath: target.path + ".tar.gz")
+            let packaged = try SafeTraceArchivePackager.package(
+                bundleAt: target,
+                archiveAt: archiveURL
+            )
+            print("Archive: \(packaged.archiveURL.path)  (\(packaged.archiveBytes) bytes)")
+            print("SHA-256: \(packaged.sha256Hex)")
+            if let sidecar = packaged.sidecarURL {
+                print("Sidecar: \(sidecar.path)")
             }
+            if let warning = packaged.sidecarWarning {
+                print("WARNING: archive is complete, but its optional SHA-256 sidecar was not safely published: \(warning)")
+            }
+        } catch let error as BundleExporter.ExportError {
+            switch error {
+            case .partialBundle(let url, let detail):
+                print("Export failed before publication: \(detail)")
+                print("  A PARTIAL, UNSIGNED diagnostic is retained at \(url.path) — do not distribute it; `trace validate` will reject it.")
+            case .committedBundle(let url, let detail):
+                print("Export committed a complete bundle at \(url.path), but a durability/postflight or Unified Log anchor step failed: \(detail)")
+                print("  Treat it as unconfirmed evidence and inspect the reported failure before distribution.")
+            default:
+                print("Export failed: \(error.localizedDescription)")
+            }
+            await store.close()
+            exit(1)
+        } catch let error as SafeTraceArchivePackager.PackagingError {
+            switch error {
+            case .archiveCommitted(let url, let digest, let detail):
+                print("Archive committed at \(url.path) with SHA-256 \(digest), but durability/postflight failed: \(detail)")
+            default:
+                print("Archive packaging failed: \(error.localizedDescription)")
+            }
+            print("  The complete bundle directory remains at the requested output path.")
+            await store.close()
+            exit(1)
         } catch {
             print("Export failed: \(error.localizedDescription)")
-            // The exporter writes artifacts incrementally, so an abort partway
-            // through leaves a directory that LOOKS like a bundle but has no
-            // signed chain head. Name it explicitly rather than letting the
-            // operator find it later and mistake it for a usable export.
-            // (Named, not deleted: the debris is often the only evidence of why
-            // the export died, and `trace validate` rejects it anyway. Gated on
-            // `partialBundle`, so a directory that pre-existed this run is never
-            // pointed at — and the default `<cwd>/<id>.maccrabtrace` target is
-            // covered even when `--out` was not passed.)
-            if let partial = partialBundle, FileManager.default.fileExists(atPath: partial.path) {
-                print("  A PARTIAL, UNSIGNED bundle may remain at \(partial.path) — do not distribute it; `trace validate` will reject it.")
-            }
+            await store.close()
             exit(1)
         }
         await store.close()
@@ -530,21 +568,22 @@ extension MacCrabCtl {
 
     static func traceValidate(bundlePath: String) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        let outcome = BundleValidator.validate(at: target)
+        let resolution = resolveBundleOrExit(url, operation: "validate")
+        defer { resolution.cleanup() }
+        let outcome = BundleValidator.validate(resolvedBundle: resolution)
         printOutcome(outcome, label: "validate")
-        cleanupExtracted(directory)
-        exit(outcome.exitCode)
+        exitAfterCleaning(resolution, status: outcome.exitCode)
     }
 
     static func traceInspect(bundlePath: String) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "inspect")
+        defer { resolution.cleanup() }
         do {
-            let manifestData = try Data(contentsOf: target.appendingPathComponent("manifest.json"))
+            try SafeTraceArchiveExtractor.validateBundleDirectory(
+                resolvedBundle: resolution
+            )
+            let manifestData = try resolution.data(at: "manifest.json")
             let manifest = try canonicalJSONDecoder().decode(BundleManifest.self, from: manifestData)
             print("Bundle: \(bundlePath)")
             print(String(repeating: "═", count: 60))
@@ -565,19 +604,21 @@ extension MacCrabCtl {
             print("  otel_aligned:          \(manifest.otelAligned)")
             print("  otel_convention:       \(manifest.otelConventionVersion)")
             // Graph counts
-            if let graphData = try? Data(contentsOf: target.appendingPathComponent("graph.json")),
+            if let graphData = resolution.dataIfPresent(at: "graph.json"),
                let graph = try? canonicalJSONDecoder().decode(GraphArtifact.self, from: graphData) {
                 print("  entities:              \(graph.entities.count)")
                 print("  edges:                 \(graph.edges.count)")
                 print("  memberships:           \(graph.memberships.count)")
             }
             // Integrity
-            if let chainData = try? Data(contentsOf: target.appendingPathComponent("integrity/hash_chain.json")),
+            if let chainData = resolution.dataIfPresent(at: "integrity/hash_chain.json"),
                let chain = try? canonicalJSONDecoder().decode(HashChainArtifact.self, from: chainData) {
                 print("  artifact_count:        \(chain.artifacts.count)")
                 print("  merkle_root:           \(chain.merkleRoot)")
             }
-            if let sigData = try? Data(contentsOf: target.appendingPathComponent("integrity/chain_head_signature.json")),
+            if let sigData = resolution.dataIfPresent(
+                   at: "integrity/chain_head_signature.json"
+               ),
                let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: sigData) {
                 print("  signing_key_mode:      \(sig.signingKeyMode)")
                 print("  signing_key_fingerprint: \(sig.signingKeyFingerprint)")
@@ -586,15 +627,14 @@ extension MacCrabCtl {
             }
         } catch {
             print("Inspect failed: \(error.localizedDescription)")
-            exit(1)
+            exitAfterCleaning(resolution, status: 1)
         }
     }
 
     static func traceVerify(bundlePath: String, checkUnifiedLog: Bool) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "verify")
+        defer { resolution.cleanup() }
         var options = BundleVerifier.Options()
         options.checkUnifiedLog = checkUnifiedLog
         let anchor: UnifiedLogAnchor? = checkUnifiedLog ? SystemUnifiedLogAnchor() : nil
@@ -604,24 +644,30 @@ extension MacCrabCtl {
         // trace_id pins the key it was signed with; a later rewrite-and-resign
         // (attacker swaps the embedded key) then fails with exit 3.
         let pinStore = TraceKeyPinStore()
-        let traceId = (try? Data(contentsOf: target.appendingPathComponent("manifest.json")))
+        let traceId = resolution.dataIfPresent(at: "manifest.json")
             .flatMap { try? canonicalJSONDecoder().decode(BundleManifest.self, from: $0) }?
             .traceId
         if let traceId, let pinned = pinStore.pinnedFingerprint(forTraceId: traceId) {
             options.pinnedKeyFingerprint = pinned
         }
 
-        let outcome = await BundleVerifier.verify(at: target, unifiedLogAnchor: anchor, options: options)
+        let outcome = await BundleVerifier.verify(
+            resolvedBundle: resolution,
+            unifiedLogAnchor: anchor,
+            options: options
+        )
 
         // TOFU: on a clean first verify, record the key we just trusted.
         if outcome.exitCode == 0, let traceId,
-           let sigData = try? Data(contentsOf: target.appendingPathComponent("integrity/chain_head_signature.json")),
+           let sigData = resolution.dataIfPresent(
+               at: "integrity/chain_head_signature.json"
+           ),
            let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: sigData) {
             pinStore.pinIfAbsent(traceId: traceId, fingerprint: sig.signingKeyFingerprint)
         }
 
         printOutcome(outcome, label: "verify")
-        exit(outcome.exitCode)
+        exitAfterCleaning(resolution, status: outcome.exitCode)
     }
 
     // MARK: - trace replay
@@ -647,10 +693,9 @@ extension MacCrabCtl {
     ) async {
         let url = URL(fileURLWithPath: bundlePath)
         // FF-11: `trace replay` takes a BUNDLE PATH, not a trace id. Without this
-        // guard a trace id fell straight through to `extractIfArchive`, which
-        // shells out to /usr/bin/tar; tar printed its own
-        // "…: m: No such file or directory" to stderr, returned non-zero, and the
-        // helper answered `nil` — leaving the engine to report
+        // guard a trace id fell straight through to the archive extractor; the
+        // old helper printed tar's "No such file" error, returned `nil`, and
+        // left the engine to report
         // `result=schema_invalid` against a path that never existed. That blames
         // the bundle for what is a usage error. Reuses exit 9 (the existing
         // "replay could not run" code) rather than inventing a new one, so the
@@ -660,9 +705,8 @@ extension MacCrabCtl {
             print("Usage: maccrabctl trace replay <bundle-path>   — a .maccrabtrace directory or .tar.gz archive, NOT a trace id.")
             exit(9)
         }
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "replay")
+        defer { resolution.cleanup() }
 
         // SU-01: drive the REAL rule engine. An explicitly named ruleset is a
         // hard requirement — failing to load it exits rather than quietly
@@ -678,7 +722,7 @@ extension MacCrabCtl {
                 print("[replay] mode=rule-engine rules=\(rulesDirectory)")
             } catch {
                 print("[replay] cannot load ruleset at \(rulesDirectory): \(error)")
-                exit(9)
+                exitAfterCleaning(resolution, status: 9)
             }
         } else {
             let installed = maccrabDataDir() + "/compiled_rules"
@@ -697,7 +741,10 @@ extension MacCrabCtl {
         var options = ReplayEngine.ReplayOptions()
         options.expectedNormalizationVersion = expectedNormalizationVersion
         do {
-            let result = try await engine.replay(bundleAt: target, options: options)
+            let result = try await engine.replay(
+                resolvedBundle: resolution,
+                options: options
+            )
             print("[replay] result=\(result.result.rawValue) deterministic=\(result.deterministic) exit=\(result.exitCode)")
             print("  trace_id:        \(result.traceId)")
             print("  bundle_id:       \(result.bundleId)")
@@ -736,10 +783,10 @@ extension MacCrabCtl {
                     print(msg)
                 }
             }
-            exit(result.exitCode)
+            exitAfterCleaning(resolution, status: result.exitCode)
         } catch {
             print("Replay failed: \(error.localizedDescription)")
-            exit(9)
+            exitAfterCleaning(resolution, status: 9)
         }
     }
 
@@ -766,9 +813,8 @@ extension MacCrabCtl {
         expectedNormalizationVersion: String
     ) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "compare replay")
+        defer { resolution.cleanup() }
 
         var options = ReplayEngine.ReplayOptions()
         options.expectedNormalizationVersion = expectedNormalizationVersion
@@ -785,17 +831,23 @@ extension MacCrabCtl {
         } catch {
             print("Compare replay failed: \(error)")
             print("  --compare-rules takes two compiled-rules DIRECTORIES (compile_rules.py output), not version labels.")
-            exit(9)
+            exitAfterCleaning(resolution, status: 9)
         }
 
         let resultA: ReplayResult
         let resultB: ReplayResult
         do {
-            resultA = try await engineA.replay(bundleAt: target, options: options)
-            resultB = try await engineB.replay(bundleAt: target, options: options)
+            resultA = try await engineA.replay(
+                resolvedBundle: resolution,
+                options: options
+            )
+            resultB = try await engineB.replay(
+                resolvedBundle: resolution,
+                options: options
+            )
         } catch {
             print("Compare replay failed: \(error.localizedDescription)")
-            exit(9)
+            exitAfterCleaning(resolution, status: 9)
         }
 
         // FF-11: a bundle that failed to parse (or is normalization-incompatible)
@@ -807,7 +859,7 @@ extension MacCrabCtl {
         for (label, r) in [("A", resultA), ("B", resultB)] where r.result != .ok {
             print("[replay-compare] ruleset \(label) did not complete: result=\(r.result.rawValue) exit=\(r.exitCode)")
             print("  No comparison is possible — nothing was evaluated on that side.")
-            exit(r.exitCode)
+            exitAfterCleaning(resolution, status: r.exitCode)
         }
 
         // Build alert id sets keyed by ruleId ALONE. Diff is symmetric: in A
@@ -848,10 +900,10 @@ extension MacCrabCtl {
         // printed above as evidence of which rulesets ran.
         if onlyA.isEmpty && onlyB.isEmpty {
             print("  verdict:         identical")
-            exit(0)
+            exitAfterCleaning(resolution, status: 0)
         } else {
             print("  verdict:         diverged")
-            exit(20)
+            exitAfterCleaning(resolution, status: 20)
         }
     }
 
@@ -877,7 +929,15 @@ extension MacCrabCtl {
 
         let store: SQLiteCausalGraphStore
         do {
-            store = try await SQLiteCausalGraphStore(databasePath: dbPath)
+            // DEBUG seeding is still a real write to the live support DB. Keep
+            // it on the same absolute DB+WAL+SHM budget and emergency free-space
+            // floor as the daemon so a developer tool cannot bypass admission.
+            store = try await SQLiteCausalGraphStore(
+                databasePath: dbPath,
+                maxFootprintBytes: 250 * 1_048_576,
+                freeSpaceFloorBytes: 1_024 * 1_048_576,
+                storageVolumePath: parent
+            )
         } catch {
             print("Failed to open tracegraph.db: \(error.localizedDescription)")
             exit(9)
@@ -1200,33 +1260,37 @@ extension MacCrabCtl {
 
     static func traceToProv(bundlePath: String) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "PROV conversion")
+        defer { resolution.cleanup() }
         do {
-            let provData = try Data(contentsOf: target.appendingPathComponent("prov/prov.jsonld"))
+            try SafeTraceArchiveExtractor.validateBundleDirectory(
+                resolvedBundle: resolution
+            )
+            let provData = try resolution.data(at: "prov/prov.jsonld")
             if let text = String(data: provData, encoding: .utf8) {
                 print(text)
             }
         } catch {
             print("Failed to read prov/prov.jsonld: \(error.localizedDescription)")
-            exit(1)
+            exitAfterCleaning(resolution, status: 1)
         }
     }
 
     static func traceToOtel(bundlePath: String) async {
         let url = URL(fileURLWithPath: bundlePath)
-        let directory = try? extractIfArchive(url)
-        let target = directory ?? url
-        defer { cleanupExtracted(directory) }
+        let resolution = resolveBundleOrExit(url, operation: "OTel conversion")
+        defer { resolution.cleanup() }
         do {
-            let otelData = try Data(contentsOf: target.appendingPathComponent("otel/spans.json"))
+            try SafeTraceArchiveExtractor.validateBundleDirectory(
+                resolvedBundle: resolution
+            )
+            let otelData = try resolution.data(at: "otel/spans.json")
             if let text = String(data: otelData, encoding: .utf8) {
                 print(text)
             }
         } catch {
             print("Failed to read otel/spans.json: \(error.localizedDescription)")
-            exit(1)
+            exitAfterCleaning(resolution, status: 1)
         }
     }
 
@@ -1326,44 +1390,31 @@ extension MacCrabCtl {
         return s + String(repeating: " ", count: width - s.count)
     }
 
-    /// If the path is a .tar.gz / .maccrabtrace archive, extract to a
-    /// temp directory and return the URL. If it's already a directory,
-    /// return nil (caller uses the original URL).
-    private static func extractIfArchive(_ url: URL) throws -> URL? {
-        var isDir: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-        if isDir.boolValue { return nil }
-
-        // Treat as archive — extract via /usr/bin/tar.
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-extract-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        proc.currentDirectoryURL = tempDir
-        proc.arguments = ["-xzf", url.path]
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            try? FileManager.default.removeItem(at: tempDir)
-            return nil
+    /// Resolve both archives and already-unpacked directories to one private,
+    /// bounded snapshot. Every reader in an operation receives this same token,
+    /// preventing validate/read/verify and compare-replay version mixing.
+    private static func resolveBundleOrExit(
+        _ url: URL,
+        operation: String
+    ) -> SafeTraceBundleResolver.Resolution {
+        do {
+            return try SafeTraceBundleResolver.resolve(inputAt: url)
+        } catch {
+            print("\(operation) failed: unsafe or malformed bundle input: \(error.localizedDescription)")
+            exit(8)
         }
-        // Find the single top-level directory inside the temp dir.
-        let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
-        if let first = contents.first, contents.count == 1 {
-            return first
-        }
-        return tempDir
     }
 
-    private static func cleanupExtracted(_ url: URL?) {
-        guard let url else { return }
-        // Walk up to a maccrab-extract-* parent and remove that.
-        let path = url.path
-        if path.contains("maccrab-extract-") {
-            let parent = url.deletingLastPathComponent()
-            try? FileManager.default.removeItem(at: parent.path.contains("maccrab-extract-") ? parent : url)
-        }
+    /// Darwin `exit(3)` does not unwind Swift stack frames, so a `defer` alone
+    /// cannot remove archive scratch space on CLI paths that terminate with a
+    /// published exit code. Clean explicitly first; normal-return paths retain
+    /// their defensive `defer` as well.
+    private static func exitAfterCleaning(
+        _ resolution: SafeTraceBundleResolver.Resolution,
+        status: Int32
+    ) -> Never {
+        resolution.cleanup()
+        exit(status)
     }
 }
 

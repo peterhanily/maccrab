@@ -12,12 +12,13 @@
 // process ancestry."
 
 import Foundation
+import CryptoKit
 import os.log
 
 // MARK: - Sequence Rule Types
 
 /// How the steps of a sequence rule relate to each other.
-public enum CorrelationType: String, Codable, Sendable {
+public enum CorrelationType: String, Codable, Sendable, Hashable {
     /// All steps must share process ancestry (parent/child/grandchild chain).
     case processLineage
     /// All steps must originate from the exact same PID.
@@ -31,7 +32,7 @@ public enum CorrelationType: String, Codable, Sendable {
 }
 
 /// How a step's process relates to another step's process.
-public enum ProcessRelation: String, Codable, Sendable {
+public enum ProcessRelation: String, Codable, Sendable, Hashable {
     /// Exact same process (same PID).
     case same
     /// Child or grandchild of the referenced step's process.
@@ -53,7 +54,7 @@ public enum ProcessRelation: String, Codable, Sendable {
 }
 
 /// Defines which steps must complete before the sequence fires.
-public enum TriggerCondition: Codable, Sendable {
+public enum TriggerCondition: Codable, Sendable, Hashable {
     /// All steps in the sequence must match.
     case allSteps
     /// A specific set of step IDs must match (AND logic).
@@ -109,7 +110,7 @@ public enum TriggerCondition: Codable, Sendable {
 /// Each step defines what kind of event it matches (via logsource category and
 /// predicates), ordering constraints, and optional process relationship
 /// constraints relative to another step.
-public struct SequenceStep: Codable, Sendable {
+public struct SequenceStep: Codable, Sendable, Hashable {
     /// Unique identifier for this step within the rule (e.g. "download", "execute").
     public let id: String
 
@@ -121,6 +122,12 @@ public struct SequenceStep: Codable, Sendable {
 
     /// How predicates are combined: all must match, or any suffices.
     public let condition: RuleCondition
+
+    /// Full Sigma boolean expression for complex step conditions. When
+    /// present this takes precedence over the legacy flat `condition`, exactly
+    /// as it does for CompiledRule. Optional preserves decoding of previously
+    /// compiled sequence rules, which legitimately contain only the flat form.
+    public let conditionTree: ConditionNode?
 
     /// If set, this step must occur after the named step ID.
     public let afterStep: String?
@@ -134,6 +141,7 @@ public struct SequenceStep: Codable, Sendable {
         logsourceCategory: String,
         predicates: [Predicate],
         condition: RuleCondition = .allOf,
+        conditionTree: ConditionNode? = nil,
         afterStep: String? = nil,
         processRelation: ProcessRelationSpec? = nil
     ) {
@@ -141,13 +149,19 @@ public struct SequenceStep: Codable, Sendable {
         self.logsourceCategory = logsourceCategory
         self.predicates = predicates
         self.condition = condition
+        self.conditionTree = conditionTree
         self.afterStep = afterStep
         self.processRelation = processRelation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, logsourceCategory, predicates, condition, afterStep, processRelation
+        case conditionTree = "condition_tree"
     }
 }
 
 /// Specifies a process relationship constraint between two steps.
-public struct ProcessRelationSpec: Codable, Sendable {
+public struct ProcessRelationSpec: Codable, Sendable, Hashable {
     /// The kind of relationship required.
     public let relation: ProcessRelation
     /// The step ID whose process is the reference point.
@@ -161,7 +175,7 @@ public struct ProcessRelationSpec: Codable, Sendable {
 
 /// A sequence rule defines ordered (or unordered) steps that must all match
 /// within a time window, optionally correlated by a shared attribute.
-public struct SequenceRule: Codable, Sendable, Identifiable {
+public struct SequenceRule: Codable, Sendable, Identifiable, Hashable {
     public let id: String
     public let title: String
     public let description: String
@@ -269,6 +283,7 @@ public actor SequenceEngine {
     /// match is advanced. Once the trigger condition is satisfied, the
     /// sequence fires and the partial match is consumed.
     struct PartialMatch: Sendable {
+        let id: UUID
         let ruleId: String
         let createdAt: Date
         var matchedSteps: [String: MatchedStep]   // stepId -> matched event info
@@ -293,12 +308,21 @@ public actor SequenceEngine {
     /// Active partial matches keyed by rule ID.
     private var partialMatches: [String: [PartialMatch]] = [:]
 
-    /// A later (non-initial) step that matched an ordered rule but arrived
-    /// BEFORE its initial step, so there was no partial to advance yet.
+    /// A recent later (non-initial) step for an ordered rule. These entries are
+    /// retained for the rule window even after advancing a currently-known
+    /// partial: another initial event may have happened before this step but be
+    /// delivered later by the other pipeline lane. Treating the entry as
+    /// single-consumer state makes detection depend on lane delivery order.
     private struct PendingStep: Sendable {
         let step: SequenceStep
         let matched: MatchedStep
         let arrivedAt: Date
+    }
+
+    private struct EventEvaluationPlan {
+        let ruleId: String
+        let rule: SequenceRule
+        let matchingSteps: [SequenceStep]
     }
 
     /// v1.21.4 (corr-event-pipeline #95): backfill buffer for out-of-order
@@ -309,18 +333,31 @@ public actor SequenceEngine {
     /// `evaluate` BEFORE its `step[0]` file event. Ordered mode only seeds a
     /// partial from `step[0]`, so that later step would otherwise be dropped and
     /// 23 of the highest-value kill chains (supply-chain, dropper→C2, ransomware)
-    /// would silently never complete. We stash the un-advanceable later step
-    /// here and replay it once `step[0]` seeds a partial. Bounded per rule +
-    /// window-pruned so a later step whose predicate matches broadly (an exec
-    /// with no preceding download) can't grow the buffer unbounded.
+    /// would silently never complete. We retain recent later steps here and
+    /// replay them whenever a delayed `step[0]` seeds a partial. A later event is
+    /// history, not a consumable token: the live path fans one event out to every
+    /// compatible partial, and replay must do the same for partials that become
+    /// known later. Bounded per rule + window-pruned so a broadly matching later
+    /// step cannot grow the history without limit.
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
     /// Per-rule cap on buffered out-of-order later steps. Oldest evicted first.
     private static let maxPendingPerRule = 256
 
-    /// Running count of all partial matches across all rules, to enforce the
-    /// global cap without iterating every time.
-    private var totalPartialCount: Int = 0
+    /// Exact number of partials currently present in `partialMatches`.
+    ///
+    /// This deliberately derives from the source of truth instead of caching a
+    /// second mutable count. The old counter was updated independently on seed,
+    /// completion, sweep, eviction, disable, and reload paths. Worse, an
+    /// `evaluate` can suspend while querying `ProcessLineage`, allowing another
+    /// evaluation to enter the actor and consume the same stale snapshot. Both
+    /// calls then decremented the counter for one stored partial, driving it
+    /// negative and permanently disabling the global cap. The dictionary has at
+    /// most one bucket per sequence rule, so deriving the count is bounded by the
+    /// rule corpus size rather than the (10,000-item) partial pool size.
+    private var totalPartialCount: Int {
+        partialMatches.values.reduce(into: 0) { $0 += $1.count }
+    }
 
     /// Hard cap on total partial matches to bound memory usage.
     private let maxPartialMatches: Int
@@ -367,25 +404,69 @@ public actor SequenceEngine {
     private var regexAccessCounter: UInt64 = 0
     private static let maxRegexCacheSize = 2048
 
-    /// Reference to a partial match by rule ID and creation time, used for
-    /// O(1) LRU eviction. Entries are appended at the back (newest) and
+    /// Reference to a partial match by stable identity, used for LRU eviction.
+    /// Entries are appended at the back (newest) and
     /// removed from the front (oldest), so the array stays naturally sorted
     /// by creation time without any explicit sorting.
     private struct PartialMatchRef: Sendable {
         let ruleId: String
+        let partialId: UUID
         let createdAt: Date
     }
 
     /// Queue of partial-match references ordered oldest-first (append new,
-    /// remove from front). Used by `evictOldest` to avoid the O(n log n)
-    /// sort that previously collected and sorted ALL partial matches.
+    /// advance `evictionQueueHead` at the front). A head index avoids Array's
+    /// O(n) `removeFirst()` shift on every cap eviction. Completed/expired
+    /// partials leave stale refs until the bounded compactor runs; the queue is
+    /// periodically rebuilt from the authoritative partial-ID set so metadata
+    /// cannot grow with lifetime seed throughput.
     private var evictionQueue: [PartialMatchRef] = []
+    private var evictionQueueHead = 0
+
+    /// Maximum stale-reference slack above the configured live-partial cap.
+    /// This amortizes rebuild cost while bounding auxiliary metadata even when
+    /// partials seed and complete rapidly without ever hitting the live cap.
+    private static let evictionQueueStaleSlack = 256
+
+    /// Constructor bounds are defensive because this initializer is public.
+    /// The upper bound leaves headroom for both the 80%-capacity multiplication
+    /// and eviction-reference slack; the lower bound prevents a malformed
+    /// negative/zero cap from disabling every multi-event sequence.
+    private static let minimumPartialMatchLimit = 1
+    private static let maximumPartialMatchLimit =
+        (Int.max - evictionQueueStaleSlack) / 8
+    private static let defaultSweepInterval: TimeInterval = 1.0
 
     /// Cumulative partial matches dropped by the global cap. Read via
     /// `partialsEvictedTotal` and published in the heartbeat — see that
     /// accessor for why an unmetered eviction is a detection-integrity problem
     /// and not just a diagnostics gap.
     private var evictedPartialCount: Int = 0
+
+    /// `SequenceEngine` is an actor, but actor isolation is reentrant at every
+    /// `await`. Evaluation performs asynchronous lineage queries after taking
+    /// snapshots of partial state, so actor isolation alone does not make the
+    /// read/advance/replace transaction atomic. This FIFO lease serializes all
+    /// public state-mutating operations across those suspension points.
+    private enum MutationLeaseAcquisition: Sendable, Equatable {
+        case acquired
+        case cancelled
+        case saturated
+    }
+
+    private struct MutationWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<MutationLeaseAcquisition, Never>
+    }
+
+    private var mutationLeaseHeld = false
+    private var mutationWaiters: [MutationWaiter] = []
+    private var mutationWaiterHead = 0
+    private let mutationWaiterLimit: Int
+    private var mutationWaiterHighWatermark = 0
+    private var cancelledMutationWaiterCount: UInt64 = 0
+    private var saturatedMutationWaiterCount: UInt64 = 0
+    private static let defaultMutationWaiterLimit = 1_024
 
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "SequenceEngine")
 
@@ -397,17 +478,250 @@ public actor SequenceEngine {
     ///   - lineage: The process lineage tracker used for ancestry-based
     ///     correlation checks.
     ///   - maxPartialMatches: Upper bound on total in-flight partial matches
-    ///     across all rules. Oldest are evicted when exceeded. Defaults to 10000.
+    ///     across all rules. Oldest are evicted when exceeded. Values outside
+    ///     the arithmetic-safe range are clamped. Defaults to 10000.
     ///   - sweepInterval: How often (seconds) to scan for expired partial
-    ///     matches. Defaults to 1 second.
+    ///     matches. NaN, infinity, and negative values fall back to 1 second;
+    ///     zero intentionally requests a sweep on every evaluation.
     public init(
         lineage: ProcessLineage,
         maxPartialMatches: Int = 10_000,
         sweepInterval: TimeInterval = 1.0
     ) {
         self.lineage = lineage
-        self.maxPartialMatches = maxPartialMatches
-        self.sweepInterval = sweepInterval
+        self.maxPartialMatches = min(
+            max(maxPartialMatches, Self.minimumPartialMatchLimit),
+            Self.maximumPartialMatchLimit
+        )
+        self.sweepInterval = sweepInterval.isFinite && sweepInterval >= 0
+            ? sweepInterval
+            : Self.defaultSweepInterval
+        self.mutationWaiterLimit = Self.defaultMutationWaiterLimit
+    }
+
+    /// Internal constructor used by bounded-queue tests. Production callers use
+    /// the public initializer above and its fixed 1,024-waiter ceiling.
+    init(
+        lineage: ProcessLineage,
+        maxPartialMatches: Int = 10_000,
+        sweepInterval: TimeInterval = 1.0,
+        mutationWaiterLimit: Int
+    ) {
+        self.lineage = lineage
+        self.maxPartialMatches = min(
+            max(maxPartialMatches, Self.minimumPartialMatchLimit),
+            Self.maximumPartialMatchLimit
+        )
+        self.sweepInterval = sweepInterval.isFinite && sweepInterval >= 0
+            ? sweepInterval
+            : Self.defaultSweepInterval
+        self.mutationWaiterLimit = max(1, mutationWaiterLimit)
+    }
+
+    // MARK: - Reentrancy Guard
+
+    private var activeMutationWaiterCount: Int {
+        max(0, mutationWaiters.count - mutationWaiterHead)
+    }
+
+    private func acquireMutationLease() async -> MutationLeaseAcquisition {
+        guard !Task.isCancelled else { return .cancelled }
+
+        if !mutationLeaseHeld {
+            mutationLeaseHeld = true
+            return .acquired
+        }
+
+        guard activeMutationWaiterCount < mutationWaiterLimit else {
+            Self.incrementSaturating(&saturatedMutationWaiterCount)
+            return .saturated
+        }
+
+        let waiterId = UUID()
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                mutationWaiters.append(MutationWaiter(
+                    id: waiterId,
+                    continuation: continuation
+                ))
+                mutationWaiterHighWatermark = max(
+                    mutationWaiterHighWatermark,
+                    activeMutationWaiterCount
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelMutationWaiter(waiterId) }
+        }
+
+        // Cancellation can race the lease handoff after the waiter has been
+        // removed from the FIFO. In that case the continuation legitimately
+        // owns the lease; release it here before reporting cancellation.
+        if result == .acquired, Task.isCancelled {
+            releaseMutationLease()
+            return .cancelled
+        }
+        return result
+    }
+
+    private func cancelMutationWaiter(_ waiterId: UUID) {
+        guard mutationWaiterHead < mutationWaiters.count,
+              let index = mutationWaiters[mutationWaiterHead...]
+                .firstIndex(where: { $0.id == waiterId }) else { return }
+
+        let waiter = mutationWaiters.remove(at: index)
+        Self.incrementSaturating(&cancelledMutationWaiterCount)
+        compactMutationWaiterPrefix()
+        waiter.continuation.resume(returning: .cancelled)
+    }
+
+    private func compactMutationWaiterPrefix() {
+        guard mutationWaiterHead > 0 else { return }
+        if mutationWaiterHead == mutationWaiters.count {
+            mutationWaiters.removeAll(keepingCapacity: true)
+            mutationWaiterHead = 0
+        } else if mutationWaiterHead >= 1_024
+                    || mutationWaiterHead >= mutationWaiters.count - mutationWaiterHead {
+            mutationWaiters.removeFirst(mutationWaiterHead)
+            mutationWaiterHead = 0
+        }
+    }
+
+    private func releaseMutationLease() {
+        if mutationWaiterHead < mutationWaiters.count {
+            let next = mutationWaiters[mutationWaiterHead]
+            mutationWaiterHead += 1
+            compactMutationWaiterPrefix()
+            next.continuation.resume(returning: .acquired)
+        } else {
+            mutationWaiters.removeAll(keepingCapacity: true)
+            mutationWaiterHead = 0
+            mutationLeaseHeld = false
+        }
+    }
+
+    private static func incrementSaturating(_ value: inout UInt64) {
+        if value < UInt64.max { value += 1 }
+    }
+
+    private func acquireMutationLeaseOrThrow() async throws {
+        switch await acquireMutationLease() {
+        case .acquired:
+            return
+        case .cancelled:
+            throw CancellationError()
+        case .saturated:
+            throw SequenceEngineError.mutationQueueSaturated(mutationWaiterLimit)
+        }
+    }
+
+    // MARK: - State Consistency
+
+    /// Remove a rule ID from every dispatch-index bucket before replacing its
+    /// definition. `loadRules` is additive, so a same-ID rule can otherwise
+    /// leave stale category memberships from its prior definition.
+    private func removeRuleFromIndex(_ ruleId: String) {
+        for category in Array(ruleIndex.keys) {
+            ruleIndex[category]?.remove(ruleId)
+            if ruleIndex[category]?.isEmpty == true {
+                ruleIndex.removeValue(forKey: category)
+            }
+        }
+    }
+
+    /// Drop all in-flight state whose interpretation depends on the specified
+    /// rule definitions. Each surface is keyed independently: a pending-only
+    /// rule has no `partialMatches` bucket, so cleanup must never be nested under
+    /// a partial-bucket loop.
+    private func purgeRuntimeState(for ruleIds: Set<String>, resetStats: Bool) {
+        guard !ruleIds.isEmpty else { return }
+        for ruleId in ruleIds {
+            partialMatches.removeValue(forKey: ruleId)
+            pendingLaterSteps.removeValue(forKey: ruleId)
+            if resetStats {
+                ruleStats.removeValue(forKey: ruleId)
+            }
+        }
+        compactEvictionQueue(force: true)
+    }
+
+    /// Install or replace one additive rule. Equivalent same-ID definitions keep
+    /// their in-flight state; changed definitions cannot safely consume steps
+    /// captured under the old predicate/order/trigger semantics.
+    private func installRule(_ rule: SequenceRule) {
+        if let previous = rules[rule.id] {
+            if previous != rule {
+                purgeRuntimeState(for: [rule.id], resetStats: true)
+            }
+            removeRuleFromIndex(rule.id)
+        }
+        rules[rule.id] = rule
+        for step in rule.steps {
+            ruleIndex[step.logsourceCategory, default: []].insert(rule.id)
+        }
+    }
+
+    /// Number of unconsumed queue entries, excluding the retained Array prefix.
+    private var activeEvictionReferenceCount: Int {
+        max(0, evictionQueue.count - evictionQueueHead)
+    }
+
+    private var evictionReferenceRetentionLimit: Int {
+        let liveBound = max(maxPartialMatches, totalPartialCount)
+        guard liveBound <= Int.max - Self.evictionQueueStaleSlack else {
+            return Int.max
+        }
+        return liveBound + Self.evictionQueueStaleSlack
+    }
+
+    /// Rebuild the eviction queue from stable IDs that still exist in the source
+    /// of truth. Forced rebuilds accompany sweep/reload/disable; opportunistic
+    /// rebuilds cap stale metadata at live-cap + a small amortization allowance.
+    private func compactEvictionQueue(force: Bool = false) {
+        let liveCount = totalPartialCount
+        let prefixNeedsCompaction = evictionQueueHead >= 1_024
+            && evictionQueueHead * 2 >= evictionQueue.count
+        guard force
+                || activeEvictionReferenceCount > evictionReferenceRetentionLimit
+                || prefixNeedsCompaction else { return }
+
+        var liveIds = Set<UUID>()
+        liveIds.reserveCapacity(liveCount)
+        for partials in partialMatches.values {
+            for partial in partials {
+                liveIds.insert(partial.id)
+            }
+        }
+
+        if evictionQueueHead < evictionQueue.count {
+            evictionQueue = evictionQueue[evictionQueueHead...].filter {
+                liveIds.contains($0.partialId)
+            }
+        } else {
+            evictionQueue.removeAll(keepingCapacity: true)
+        }
+        evictionQueueHead = 0
+    }
+
+    /// Pop in O(1) amortized time. Array storage is occasionally compacted in
+    /// bulk instead of shifted once per cap eviction.
+    private func popOldestEvictionReference() -> PartialMatchRef? {
+        guard evictionQueueHead < evictionQueue.count else {
+            evictionQueue.removeAll(keepingCapacity: true)
+            evictionQueueHead = 0
+            return nil
+        }
+
+        let ref = evictionQueue[evictionQueueHead]
+        evictionQueueHead += 1
+        if evictionQueueHead == evictionQueue.count {
+            evictionQueue.removeAll(keepingCapacity: true)
+            evictionQueueHead = 0
+        } else if evictionQueueHead >= 1_024,
+                  evictionQueueHead * 2 >= evictionQueue.count {
+            evictionQueue = Array(evictionQueue[evictionQueueHead...])
+            evictionQueueHead = 0
+        }
+        return ref
     }
 
     // MARK: - Regex Caching
@@ -444,6 +758,17 @@ public actor SequenceEngine {
 
     // MARK: - Rule Loading
 
+    private struct RuleLoadBatch {
+        let rules: [SequenceRule]
+        let sourceFileNames: Set<String>
+        let sourceFileHashes: [String: String]
+        let failures: [String]
+    }
+
+    private struct RuleBundleManifest: Decodable {
+        let hashes: [String: String]
+    }
+
     /// Load sequence rules from JSON files in a directory.
     ///
     /// Each `.json` file must contain a single `SequenceRule`. Files that fail
@@ -458,7 +783,36 @@ public actor SequenceEngine {
     ///   test suite on the legacy behavior.
     /// - Returns: The number of rules successfully loaded.
     @discardableResult
-    public func loadRules(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
+    public func loadRules(from directory: URL, enabledStatuses: Set<String>? = nil) async throws -> Int {
+        try await acquireMutationLeaseOrThrow()
+        defer { releaseMutationLease() }
+        try Task.checkCancellation()
+        return try loadRulesWithLease(from: directory, enabledStatuses: enabledStatuses)
+    }
+
+    /// Synchronous implementation for callers that already hold the mutation
+    /// lease. Initial load remains best-effort, matching `RuleEngine`: malformed
+    /// files are logged and skipped because N-1 rules are better than zero when
+    /// no last-known-good corpus exists yet. Reload stages the same batch but
+    /// rejects any failure before changing live state.
+    private func loadRulesWithLease(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
+        let batch = try readRuleBatch(from: directory, enabledStatuses: enabledStatuses)
+        for rule in batch.rules {
+            installRule(rule)
+        }
+        precompileRegexes()
+        logger.info("Loaded \(batch.rules.count) sequence rules from \(directory.path)")
+        return batch.rules.count
+    }
+
+    /// Read and validate a stable directory snapshot without mutating engine
+    /// state. `RuleFileLoadingPolicy` provides the no-follow bounded file read;
+    /// the second listing catches a compiler/installer changing the candidate
+    /// inventory while it is being staged.
+    private func readRuleBatch(
+        from directory: URL,
+        enabledStatuses: Set<String>?
+    ) throws -> RuleLoadBatch {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: directory.path, isDirectory: &isDir), isDir.boolValue else {
@@ -471,17 +825,25 @@ public actor SequenceEngine {
             options: [.skipsHiddenFiles]
         )
 
-        let jsonFiles = contents.filter { $0.pathExtension == "json" }
+        let jsonFiles = contents
+            .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let sourceFileNames = Set(jsonFiles.map(\.lastPathComponent))
         if jsonFiles.isEmpty {
             logger.warning("No .json sequence rule files found in \(directory.path)")
         }
 
         let decoder = JSONDecoder()
-        var loaded = 0
+        var staged: [SequenceRule] = []
+        var sourceFileHashes: [String: String] = [:]
+        var failures: [String] = []
 
         for file in jsonFiles {
             do {
-                let data = try Data(contentsOf: file)
+                let data = try RuleFileLoadingPolicy.read(file)
+                sourceFileHashes[file.lastPathComponent] = SHA256.hash(data: data)
+                    .map { String(format: "%02x", $0) }
+                    .joined()
                 var rule = try decoder.decode(SequenceRule.self, from: data)
                 // v1.21.5: deprecated = retired detection; must not run under
                 // ANY profile — including nil ("all"). Skipped BEFORE the
@@ -506,23 +868,37 @@ public actor SequenceEngine {
 
                 // Validate rule structure before accepting it.
                 try validateRule(rule)
-
-                rules[rule.id] = rule
-
-                // Build the category -> ruleId index so we can quickly find
-                // which rules have steps relevant to an incoming event.
-                for step in rule.steps {
-                    ruleIndex[step.logsourceCategory, default: []].insert(rule.id)
-                }
-
-                loaded += 1
+                staged.append(rule)
             } catch {
                 logger.error("Failed to load sequence rule from \(file.lastPathComponent): \(error.localizedDescription)")
+                failures.append(file.lastPathComponent)
             }
         }
 
-        // Pre-compile all regex patterns so that evaluateModifier never has to
-        // compile on the hot path.
+        let finalContents = try fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        let finalSourceFileNames = Set(finalContents.compactMap { file -> String? in
+            guard file.pathExtension == "json", file.lastPathComponent != "manifest.json" else {
+                return nil
+            }
+            return file.lastPathComponent
+        })
+        guard finalSourceFileNames == sourceFileNames else {
+            throw SequenceEngineError.ruleDirectoryChangedDuringReload(directory.path)
+        }
+
+        return RuleLoadBatch(
+            rules: staged,
+            sourceFileNames: sourceFileNames,
+            sourceFileHashes: sourceFileHashes,
+            failures: failures
+        )
+    }
+
+    private func precompileRegexes() {
         for rule in rules.values {
             for step in rule.steps {
                 for predicate in step.predicates where predicate.modifier == .regex {
@@ -532,9 +908,60 @@ public actor SequenceEngine {
                 }
             }
         }
+    }
 
-        logger.info("Loaded \(loaded) sequence rules from \(directory.path)")
-        return loaded
+    /// Validate a release corpus against its explicit parent manifest. This is
+    /// the sharp-shrink guard: unlike a percentage threshold, an exact inventory
+    /// permits any intentional removal when the producer updates `manifest.json`
+    /// and rejects even one missing file when it does not. Developer/test trees
+    /// without a manifest keep their legacy flexibility.
+    ///
+    /// - Returns: `true` when an explicit manifest was present (including an
+    ///   intentional manifest declaring zero sequence files).
+    private func validateReloadInventory(
+        directory: URL,
+        sourceFileNames: Set<String>,
+        sourceFileHashes: [String: String]
+    ) throws -> Bool {
+        let manifestURL = directory.deletingLastPathComponent()
+            .appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            return false
+        }
+
+        let manifest: RuleBundleManifest
+        do {
+            let data = try RuleFileLoadingPolicy.read(manifestURL)
+            manifest = try JSONDecoder().decode(RuleBundleManifest.self, from: data)
+        } catch {
+            throw SequenceEngineError.invalidRuleManifest(error.localizedDescription)
+        }
+
+        var expectedHashes: [String: String] = [:]
+        for (rawPath, hash) in manifest.hashes {
+            var path = rawPath
+            while path.hasPrefix("./") { path.removeFirst(2) }
+            let components = path.split(separator: "/", omittingEmptySubsequences: false)
+            guard components.count == 2,
+                  components[0] == "sequences",
+                  components[1].hasSuffix(".json") else { continue }
+            expectedHashes[String(components[1])] = hash.lowercased()
+        }
+        let expected = Set(expectedHashes.keys)
+        guard expected == sourceFileNames else {
+            throw SequenceEngineError.ruleInventoryMismatch(
+                missing: expected.subtracting(sourceFileNames).sorted(),
+                unexpected: sourceFileNames.subtracting(expected).sorted()
+            )
+        }
+
+        let hashMismatches = expected.filter { fileName in
+            sourceFileHashes[fileName]?.lowercased() != expectedHashes[fileName]
+        }.sorted()
+        guard hashMismatches.isEmpty else {
+            throw SequenceEngineError.ruleManifestHashMismatch(hashMismatches)
+        }
+        return true
     }
 
     /// Full-replace reload (SIGHUP / live profile change). `loadRules` is
@@ -543,59 +970,111 @@ public actor SequenceEngine {
     /// deleted from the compiled dir would keep firing from its previously-loaded
     /// copy until a full daemon restart (mother-of-all-audits #6: the v1.21.5
     /// deprecated-skip + profile gate in loadRules gate LOADING but cannot EVICT).
-    /// This clears the rule set + dispatch index first, mirroring
-    /// `RuleEngine.reloadRules` and the graph-evaluator swap so all three tiers
-    /// agree on reload semantics. Last-known-good: if the incoming directory
-    /// yields zero rules (corrupt/empty compiled dir), the previous set is
-    /// retained rather than wiping sequence detection.
-    public func reloadRules(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
-        let prevRules = rules
-        let prevIndex = ruleIndex
-        rules.removeAll()
-        ruleIndex.removeAll()
+    /// This stages a replacement rule set + dispatch index, mirroring the
+    /// last-known-good contract in `RuleEngine.reloadRules`, then swaps only
+    /// after validation. Last-known-good is atomic: any per-file
+    /// failure or explicit manifest-inventory mismatch rejects the candidate
+    /// before live state changes. A legacy manifest-less physically empty
+    /// directory retains the prior corpus, while a nonempty corpus filtered to
+    /// zero by an intentional profile change is allowed to become zero.
+    public func reloadRules(from directory: URL, enabledStatuses: Set<String>? = nil) async throws -> Int {
+        try await acquireMutationLeaseOrThrow()
+        defer { releaseMutationLease() }
+        try Task.checkCancellation()
 
-        let loaded: Int
-        do {
-            loaded = try loadRules(from: directory, enabledStatuses: enabledStatuses)
-        } catch {
-            rules = prevRules
-            ruleIndex = prevIndex
-            throw error
+        // Stage and validate everything first. No live rule, index, partial,
+        // pending step, stat, or regex state changes on any rejection path.
+        let batch = try readRuleBatch(from: directory, enabledStatuses: enabledStatuses)
+        if !batch.failures.isEmpty {
+            throw SequenceEngineError.partialRuleLoadFailure(
+                failedFiles: batch.failures.sorted(),
+                loaded: batch.rules.count
+            )
         }
+        let duplicateRuleIds = Dictionary(grouping: batch.rules, by: \.id)
+            .compactMap { ruleId, definitions in
+                definitions.count > 1 ? ruleId : nil
+            }
+            .sorted()
+        if !duplicateRuleIds.isEmpty {
+            throw SequenceEngineError.duplicateRuleIds(duplicateRuleIds)
+        }
+        let hasExplicitInventory = try validateReloadInventory(
+            directory: directory,
+            sourceFileNames: batch.sourceFileNames,
+            sourceFileHashes: batch.sourceFileHashes
+        )
+        try Task.checkCancellation()
 
-        if loaded == 0 && !prevRules.isEmpty {
-            rules = prevRules
-            ruleIndex = prevIndex
+        let prevRules = rules
+        if batch.sourceFileNames.isEmpty,
+           !hasExplicitInventory,
+           !prevRules.isEmpty {
             logger.warning("Sequence reload from \(directory.path) produced 0 rules; retaining \(prevRules.count) last-known-good rule(s)")
             return prevRules.count
         }
 
-        // Evict partial-match state for rules that no longer exist, so an in-flight
-        // partial for a removed/deprecated sequence cannot complete post-reload.
-        // Mirror setEnabled's accounting EXACTLY: decrement totalPartialCount and
-        // purge evictionQueue + pendingLaterSteps for each evicted rule. (Audit
-        // rc.3-verify: a bare removeValue left totalPartialCount inflated — sweep-
-        // Expired can't reconcile a rule whose dict entry is already gone — which
-        // over time pushes totalPartialCount past the cap and evicts LIVE partials
-        // from surviving rules, silently dropping real sequence detections.)
-        let liveIds = Set(rules.keys)
-        for ruleId in Array(partialMatches.keys) where !liveIds.contains(ruleId) {
-            if let removed = partialMatches.removeValue(forKey: ruleId) {
-                totalPartialCount -= removed.count
-                evictionQueue.removeAll { $0.ruleId == ruleId }
+        var nextRules: [String: SequenceRule] = [:]
+        var nextIndex: [String: Set<String>] = [:]
+        for stagedRule in batch.rules {
+            var rule = stagedRule
+            // A successful reload replaces rule CONTENT, but an explicit runtime
+            // disable is operator state. Preserve it for every surviving ID,
+            // including a changed definition, exactly as RuleEngine does. Apply
+            // it before equivalence testing below so an unchanged disabled rule
+            // remains equal and keeps its telemetry rather than being spuriously
+            // treated as a definition change solely because the loader defaults
+            // every decoded rule to enabled.
+            if prevRules[rule.id]?.enabled == false {
+                rule.enabled = false
             }
-            pendingLaterSteps.removeValue(forKey: ruleId)
+            if let previous = nextRules[rule.id] {
+                for step in previous.steps {
+                    nextIndex[step.logsourceCategory]?.remove(rule.id)
+                    if nextIndex[step.logsourceCategory]?.isEmpty == true {
+                        nextIndex.removeValue(forKey: step.logsourceCategory)
+                    }
+                }
+            }
+            nextRules[rule.id] = rule
+            for step in rule.steps {
+                nextIndex[step.logsourceCategory, default: []].insert(rule.id)
+            }
         }
-        return loaded
+
+        rules = nextRules
+        ruleIndex = nextIndex
+
+        // Retain in-flight state only when BOTH identity and the complete rule
+        // definition are unchanged. A same-ID edit is not compatible state: an
+        // old step key can otherwise combine with a new step and satisfy
+        // `.allSteps` by count without every new-definition step ever occurring.
+        let equivalentRuleIds = Set(rules.compactMap { ruleId, rule in
+            prevRules[ruleId] == rule ? ruleId : nil
+        })
+        let stateRuleIds = Set(partialMatches.keys)
+            .union(pendingLaterSteps.keys)
+            .union(ruleStats.keys)
+        purgeRuntimeState(
+            for: stateRuleIds.subtracting(equivalentRuleIds),
+            resetStats: true
+        )
+        // Even when no invalidated rule currently owns a bucket, remove stale
+        // completed/expired refs and any queue-only state from old definitions.
+        compactEvictionQueue(force: true)
+        precompileRegexes()
+        logger.info("Reloaded \(batch.rules.count) sequence rules from \(directory.path)")
+        return batch.rules.count
     }
 
     /// Add a single rule programmatically (useful for tests).
-    public func addRule(_ rule: SequenceRule) throws {
+    public func addRule(_ rule: SequenceRule) async throws {
+        try await acquireMutationLeaseOrThrow()
+        defer { releaseMutationLease() }
+        try Task.checkCancellation()
+
         try validateRule(rule)
-        rules[rule.id] = rule
-        for step in rule.steps {
-            ruleIndex[step.logsourceCategory, default: []].insert(rule.id)
-        }
+        installRule(rule)
     }
 
     /// Validate that a rule is internally consistent.
@@ -629,6 +1108,23 @@ public actor SequenceEngine {
             }
         }
 
+        // Complex step conditions are executable rule logic. Reject malformed
+        // trees at load rather than clamping/ignoring bad indices and silently
+        // changing a detection's meaning. Legacy flat steps have no tree and
+        // retain their prior evaluation path.
+        for step in rule.steps {
+            if let tree = step.conditionTree {
+                do {
+                    try tree.validate(predicateCount: step.predicates.count)
+                } catch {
+                    throw SequenceEngineError.invalidRule(
+                        rule.id,
+                        "Step '\(step.id)' has invalid condition_tree: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+
         // Validate trigger condition references.
         switch rule.trigger {
         case .steps(let ids):
@@ -655,7 +1151,11 @@ public actor SequenceEngine {
     // MARK: - Rule Management
 
     /// Enable or disable a sequence rule by ID.
-    public func setEnabled(_ ruleId: String, enabled: Bool) {
+    public func setEnabled(_ ruleId: String, enabled: Bool) async {
+        guard await acquireMutationLease() == .acquired else { return }
+        defer { releaseMutationLease() }
+        guard !Task.isCancelled else { return }
+
         guard rules[ruleId] != nil else {
             logger.warning("setEnabled called for unknown sequence rule: \(ruleId)")
             return
@@ -664,10 +1164,9 @@ public actor SequenceEngine {
 
         // If disabling, discard any in-flight partial matches for this rule.
         if !enabled {
-            if let removed = partialMatches.removeValue(forKey: ruleId) {
-                totalPartialCount -= removed.count
-                evictionQueue.removeAll { $0.ruleId == ruleId }
-            }
+            partialMatches.removeValue(forKey: ruleId)
+            pendingLaterSteps.removeValue(forKey: ruleId)
+            compactEvictionQueue(force: true)
         }
     }
 
@@ -730,6 +1229,79 @@ public actor SequenceEngine {
 
     private var ruleStats: [String: SequenceRuleStats] = [:]
 
+    /// Internal diagnostics used by deterministic invariants tests. Keeping the
+    /// representation private while exposing aggregate facts lets tests prove
+    /// equal timestamps still have distinct identities and stale metadata stays
+    /// bounded without reaching into actor state.
+    struct EvictionQueueDiagnostics: Sendable {
+        let referenceCount: Int
+        let uniquePartialIdCount: Int
+        let uniqueCreationTimeCount: Int
+        let retentionLimit: Int
+        let referencesMatchLivePartials: Bool
+    }
+
+    struct ConfigurationDiagnostics: Sendable {
+        let maxPartialMatches: Int
+        let sweepInterval: TimeInterval
+    }
+
+    struct MutationLeaseDiagnostics: Sendable {
+        let held: Bool
+        let waiterCount: Int
+        let waiterStorageCount: Int
+        let waiterLimit: Int
+        let waiterHighWatermark: Int
+        let cancelledWaiterCount: UInt64
+        let saturatedWaiterCount: UInt64
+    }
+
+    func configurationDiagnostics() -> ConfigurationDiagnostics {
+        ConfigurationDiagnostics(
+            maxPartialMatches: maxPartialMatches,
+            sweepInterval: sweepInterval
+        )
+    }
+
+    func evictionQueueDiagnostics() -> EvictionQueueDiagnostics {
+        let refs = evictionQueueHead < evictionQueue.count
+            ? Array(evictionQueue[evictionQueueHead...])
+            : []
+        let refIds = Set(refs.map(\.partialId))
+        let liveIds = Set(partialMatches.values.flatMap { $0.map(\.id) })
+        return EvictionQueueDiagnostics(
+            referenceCount: refs.count,
+            uniquePartialIdCount: refIds.count,
+            uniqueCreationTimeCount: Set(refs.map(\.createdAt)).count,
+            retentionLimit: evictionReferenceRetentionLimit,
+            referencesMatchLivePartials: refIds == liveIds
+        )
+    }
+
+    func mutationLeaseDiagnostics() -> MutationLeaseDiagnostics {
+        MutationLeaseDiagnostics(
+            held: mutationLeaseHeld,
+            waiterCount: activeMutationWaiterCount,
+            waiterStorageCount: mutationWaiters.count,
+            waiterLimit: mutationWaiterLimit,
+            waiterHighWatermark: mutationWaiterHighWatermark,
+            cancelledWaiterCount: cancelledMutationWaiterCount,
+            saturatedWaiterCount: saturatedMutationWaiterCount
+        )
+    }
+
+    /// Internal deterministic test hook: hold the same production lease while
+    /// awaiting an external gate. The actor remains reentrant, allowing tests to
+    /// prove queued cancellation/removal without timing a filesystem or lineage
+    /// operation. No production caller references this method.
+    func holdMutationLeaseForTesting(
+        while operation: @escaping @Sendable () async -> Void
+    ) async {
+        guard await acquireMutationLease() == .acquired else { return }
+        defer { releaseMutationLease() }
+        await operation()
+    }
+
     /// Snapshot of per-rule sequence telemetry (evaluations, fires, last-fire),
     /// sorted most-fired first. Lets a caller/heartbeat/status surface a
     /// never-evaluated or never-fired sequence rule that was previously invisible.
@@ -753,6 +1325,10 @@ public actor SequenceEngine {
     /// - Parameter event: The incoming security event.
     /// - Returns: Array of `RuleMatch` for sequences that completed on this event.
     public func evaluate(_ event: Event) async -> [RuleMatch] {
+        guard await acquireMutationLease() == .acquired else { return [] }
+        defer { releaseMutationLease() }
+        guard !Task.isCancelled else { return [] }
+
         // Periodic housekeeping: sweep expired partials and enforce memory cap.
         let now = Date()
         if now.timeIntervalSince(lastSweep) >= sweepInterval {
@@ -781,8 +1357,7 @@ public actor SequenceEngine {
             return []
         }
 
-        var completedMatches: [RuleMatch] = []
-
+        var plans: [EventEvaluationPlan] = []
         for ruleId in candidateRuleIds {
             guard let rule = rules[ruleId], rule.enabled else { continue }
 
@@ -798,6 +1373,47 @@ public actor SequenceEngine {
             }
 
             guard !matchingSteps.isEmpty else { continue }
+            plans.append(EventEvaluationPlan(
+                ruleId: ruleId,
+                rule: rule,
+                matchingSteps: matchingSteps
+            ))
+        }
+
+        guard !plans.isEmpty else { return [] }
+
+        // Build one atomic ProcessLineage view for every relationship that this
+        // event can actually evaluate. The old path awaited the lineage actor up
+        // to twice per bound step per partial while retaining the mutation lease;
+        // at the 10K cap that turned one broad miss into tens of thousands of
+        // suspension/handoff points and head-of-line blocked the priority lane.
+        var relationshipPIDs: Set<pid_t> = []
+        for plan in plans where planNeedsLineageSnapshot(plan) {
+            relationshipPIDs.insert(event.process.pid)
+            for partial in partialMatches[plan.ruleId] ?? [] {
+                for matched in partial.matchedSteps.values {
+                    relationshipPIDs.insert(matched.processPid)
+                }
+            }
+            for pending in pendingLaterSteps[plan.ruleId] ?? [] {
+                relationshipPIDs.insert(pending.matched.processPid)
+            }
+        }
+
+        let relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+        if relationshipPIDs.isEmpty {
+            relationshipSnapshot = nil
+        } else {
+            relationshipSnapshot = await lineage.relationshipSnapshot(for: relationshipPIDs)
+            guard !Task.isCancelled else { return [] }
+        }
+
+        var completedMatches: [RuleMatch] = []
+
+        for plan in plans {
+            let ruleId = plan.ruleId
+            let rule = plan.rule
+            let matchingSteps = plan.matchingSteps
 
             // Build a MatchedStep from the event for use in partial matches.
             let eventMatchedStep: (SequenceStep) -> MatchedStep = { step in
@@ -815,11 +1431,6 @@ public actor SequenceEngine {
             // --- Phase 1: Try to advance existing partial matches ---
             var advancedPartials: [(Int, PartialMatch)] = []  // (index, updated partial)
             var completedIndices: Set<Int> = []
-            // #95: step IDs that advanced at least one partial on this event. A
-            // matching later step NOT in this set found no partial to advance and
-            // is a backfill-buffer candidate (see Phase 3 below).
-            var advancedStepIds: Set<String> = []
-
             let existingPartials = partialMatches[ruleId] ?? []
             for (idx, partial) in existingPartials.enumerated() {
                 // Check if this partial has expired.
@@ -832,12 +1443,12 @@ public actor SequenceEngine {
                     // identically by the Phase-3 replay path) so the correlation/
                     // ordering/afterStep/processRelation checks can never drift
                     // between the live and replayed paths (cf. corr-detection #275).
-                    guard let updated = await advancePartial(
+                    guard let updated = advancePartial(
                         rule: rule, step: step,
-                        matched: eventMatchedStep(step), partial: partial
+                        matched: eventMatchedStep(step), partial: partial,
+                        relationshipSnapshot: relationshipSnapshot
                     ) else { continue }
                     advancedPartials.append((idx, updated))
-                    advancedStepIds.insert(step.id)
 
                     // Check if trigger condition is now satisfied.
                     if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
@@ -864,7 +1475,6 @@ public actor SequenceEngine {
                 // Remove completed (iterate in reverse to preserve indices).
                 for idx in completedIndices.sorted().reversed() {
                     updatedList.remove(at: idx)
-                    totalPartialCount -= 1
                 }
 
                 partialMatches[ruleId] = updatedList
@@ -905,6 +1515,7 @@ public actor SequenceEngine {
                 guard !alreadyStarted else { continue }
 
                 var newPartial = PartialMatch(
+                    id: UUID(),
                     ruleId: ruleId,
                     createdAt: now,
                     matchedSteps: [:],
@@ -918,8 +1529,11 @@ public actor SequenceEngine {
                     // Don't store the partial -- it's already complete.
                 } else {
                     partialMatches[ruleId, default: []].append(newPartial)
-                    totalPartialCount += 1
-                    evictionQueue.append(PartialMatchRef(ruleId: ruleId, createdAt: now))
+                    evictionQueue.append(PartialMatchRef(
+                        ruleId: ruleId,
+                        partialId: newPartial.id,
+                        createdAt: now
+                    ))
                     seededInitial = true
                 }
             }
@@ -929,15 +1543,23 @@ public actor SequenceEngine {
             // steps that arrived early (via the fast priority consumer while the
             // file consumer lagged) so the sequence can still complete.
             if seededInitial, let buffered = pendingLaterSteps[ruleId], !buffered.isEmpty {
-                completedMatches.append(contentsOf: await replayPendingSteps(ruleId: ruleId, rule: rule, now: now))
+                completedMatches.append(contentsOf: replayPendingSteps(
+                    ruleId: ruleId,
+                    rule: rule,
+                    now: now,
+                    relationshipSnapshot: relationshipSnapshot
+                ))
             }
-            // Buffer this event's matching later step(s) that found NO partial to
-            // advance — they may belong to an initial step still queued on the
-            // other consumer. Ordered rules only (unordered mode seeds from any
-            // constraint-free step, so there is no out-of-order gap to bridge).
+            // Retain every matching later step, even when it advanced a partial
+            // above. It may also belong to an initial event that happened earlier
+            // but is still queued on the other consumer. Ordered rules only
+            // (unordered mode seeds from any constraint-free step, so there is no
+            // out-of-order gap to bridge). Appending AFTER replay also prevents one
+            // event that matches both step[0] and a later step from satisfying two
+            // steps of the same freshly-seeded partial.
             if rule.ordered {
                 let initialStepId = rule.steps.first?.id
-                for step in matchingSteps where step.id != initialStepId && !advancedStepIds.contains(step.id) {
+                for step in matchingSteps where step.id != initialStepId {
                     bufferPendingStep(ruleId: ruleId, step: step, matched: eventMatchedStep(step), now: now)
                 }
             }
@@ -966,6 +1588,11 @@ public actor SequenceEngine {
             ruleStats[match.ruleId]?.lastFiredAt = event.timestamp
         }
 
+        // Completion removes authoritative partials but deliberately does not
+        // search/remove arbitrary queue entries on the hot path. Bound those
+        // stale refs in amortized batches instead.
+        compactEvictionQueue()
+
         return completedMatches
     }
 
@@ -974,6 +1601,16 @@ public actor SequenceEngine {
     /// Evaluate all predicates for a step against an event.
     private func evaluateStepPredicates(_ step: SequenceStep, against event: Event) -> Bool {
         let predicates = step.predicates
+
+        if let tree = step.conditionTree {
+            // A tree without predicates is malformed. validateRule rejects it,
+            // but keep the hot path fail-closed if an invariant ever regresses.
+            guard !predicates.isEmpty else { return false }
+            return evaluateConditionNode(tree, predicates: predicates, against: event)
+        }
+
+        // Preserve the legacy meaning of an intentionally predicate-free flat
+        // step. This behavior applies only when no condition_tree is present.
         guard !predicates.isEmpty else { return true }
 
         switch step.condition {
@@ -985,6 +1622,50 @@ public actor SequenceEngine {
             let groups = Dictionary(grouping: predicates, by: { $0.field })
             return groups.values.allSatisfy { group in
                 group.contains { evaluatePredicate($0, against: event) }
+            }
+        }
+    }
+
+    /// Evaluate the compiler-preserved Sigma boolean structure. Predicate leaf
+    /// evaluation deliberately calls the same sequence evaluator as the legacy
+    /// flat path, so field resolution, modifiers, negation and case folding are
+    /// byte-for-byte identical; only boolean grouping changes.
+    private func evaluateConditionNode(
+        _ node: ConditionNode,
+        predicates: [Predicate],
+        against event: Event
+    ) -> Bool {
+        switch node {
+        case .and(let operands):
+            guard !operands.isEmpty else { return false }
+            return operands.allSatisfy {
+                evaluateConditionNode($0, predicates: predicates, against: event)
+            }
+        case .or(let operands):
+            guard !operands.isEmpty else { return false }
+            return operands.contains {
+                evaluateConditionNode($0, predicates: predicates, against: event)
+            }
+        case .not(let operand):
+            return !evaluateConditionNode(operand, predicates: predicates, against: event)
+        case .predicate(let index):
+            guard index >= 0, index < predicates.count else { return false }
+            return evaluatePredicate(predicates[index], against: event)
+        case .predicateGroup(let range, let mode):
+            guard !range.isEmpty,
+                  range.lowerBound >= 0,
+                  range.upperBound <= predicates.count else { return false }
+            let group = predicates[range]
+            switch mode {
+            case .allOf:
+                return group.allSatisfy { evaluatePredicate($0, against: event) }
+            case .anyOf:
+                return group.contains { evaluatePredicate($0, against: event) }
+            case .oneOfEach:
+                let groups = Dictionary(grouping: group, by: { $0.field })
+                return groups.values.allSatisfy { predicates in
+                    predicates.contains { evaluatePredicate($0, against: event) }
+                }
             }
         }
     }
@@ -1149,6 +1830,56 @@ public actor SequenceEngine {
         }
     }
 
+    private func processRelationNeedsLineage(_ relation: ProcessRelation) -> Bool {
+        switch relation {
+        case .descendant, .ancestor, .sibling, .sameTree:
+            return true
+        case .same, .sameProcess, .any:
+            return false
+        }
+    }
+
+    private func stepNeedsLineageSnapshot(_ step: SequenceStep, rule: SequenceRule) -> Bool {
+        if rule.correlationType == .processLineage, step.processRelation == nil {
+            return true
+        }
+        guard let relation = step.processRelation?.relation else { return false }
+        return processRelationNeedsLineage(relation)
+    }
+
+    private func isInitialStep(_ step: SequenceStep, in rule: SequenceRule) -> Bool {
+        if rule.ordered {
+            return step.id == rule.steps.first?.id
+        }
+        return step.afterStep == nil && step.processRelation == nil
+    }
+
+    /// Whether the live advance or a possible Phase-3 replay can issue an
+    /// ancestry query. Keeping this precise avoids even the single batch actor
+    /// hop for predicate matches whose relations are PID-local (`same`/`any`).
+    private func planNeedsLineageSnapshot(_ plan: EventEvaluationPlan) -> Bool {
+        let existingPartials = partialMatches[plan.ruleId] ?? []
+        let liveAdvanceCanQuery = existingPartials.contains { partial in
+            plan.matchingSteps.contains { step in
+                partial.matchedSteps[step.id] == nil
+                    && stepNeedsLineageSnapshot(step, rule: plan.rule)
+            }
+        }
+        if liveAdvanceCanQuery {
+            return true
+        }
+
+        let canSeed = plan.matchingSteps.contains(where: {
+            isInitialStep($0, in: plan.rule)
+        })
+        guard canSeed, let pending = pendingLaterSteps[plan.ruleId], !pending.isEmpty else {
+            return false
+        }
+        return pending.contains(where: {
+            stepNeedsLineageSnapshot($0.step, rule: plan.rule)
+        })
+    }
+
     // MARK: - Advance / Match Construction (#95 shared helpers)
 
     /// Try to advance `partial` by matching `step` with an already-built
@@ -1165,10 +1896,19 @@ public actor SequenceEngine {
         rule: SequenceRule,
         step: SequenceStep,
         matched: MatchedStep,
-        partial: PartialMatch
-    ) async -> PartialMatch? {
+        partial: PartialMatch,
+        relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+    ) -> PartialMatch? {
         // Skip if this step is already matched in this partial.
         guard partial.matchedSteps[step.id] == nil else { return nil }
+
+        // One source event may match predicates for several sequence steps, but
+        // the live path advances a partial at most once per event. Preserve that
+        // invariant across retained-history replay (and duplicate delivery): the
+        // same event identity must never satisfy two distinct steps in one chain.
+        guard !partial.matchedSteps.values.contains(where: {
+            $0.eventId == matched.eventId
+        }) else { return nil }
 
         // Correlation constraint. For `.processLineage`, a step that declares
         // its OWN `processRelation` governs its process linkage, so the
@@ -1185,7 +1925,12 @@ public actor SequenceEngine {
         let stepGovernsProcessLinkage =
             rule.correlationType == .processLineage && step.processRelation != nil
         if !stepGovernsProcessLinkage {
-            if !(await checkCorrelation(rule.correlationType, partial: partial, candidate: matched)) {
+            if !checkCorrelation(
+                rule.correlationType,
+                partial: partial,
+                candidate: matched,
+                relationshipSnapshot: relationshipSnapshot
+            ) {
                 return nil
             }
         }
@@ -1207,12 +1952,13 @@ public actor SequenceEngine {
             guard let refStep = partial.matchedSteps[spec.relativeToStep] else {
                 return nil
             }
-            let relationHolds = await checkProcessRelation(
+            let relationHolds = checkProcessRelation(
                 spec.relation,
                 eventPid: matched.processPid,
                 eventPath: matched.processPath,
                 referencePid: refStep.processPid,
-                referencePath: refStep.processPath
+                referencePath: refStep.processPath,
+                relationshipSnapshot: relationshipSnapshot
             )
             guard relationHolds else { return nil }
         }
@@ -1237,10 +1983,10 @@ public actor SequenceEngine {
         )
     }
 
-    /// Buffer an ordered rule's later step that arrived before its initial step
-    /// (the A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule
-    /// (oldest evicted) and deduped by (eventId, stepId) so the same event can't
-    /// be buffered twice across re-evaluations.
+    /// Retain an ordered rule's recent later step for delayed initial events (the
+    /// A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule (oldest
+    /// evicted) and deduped by (eventId, stepId) so the same event cannot occupy
+    /// the history twice across re-evaluations.
     private func bufferPendingStep(ruleId: String, step: SequenceStep, matched: MatchedStep, now: Date) {
         var buf = pendingLaterSteps[ruleId] ?? []
         if buf.contains(where: { $0.matched.eventId == matched.eventId && $0.step.id == step.id }) {
@@ -1253,14 +1999,22 @@ public actor SequenceEngine {
         pendingLaterSteps[ruleId] = buf
     }
 
-    /// Replay buffered out-of-order later steps for `ruleId` against the rule's
+    /// Replay retained out-of-order later steps for `ruleId` against the rule's
     /// current partials (called right after an initial step seeds a new partial).
-    /// Buffered steps are tried oldest-first BY EVENT TIMESTAMP so a 3+ step chain
-    /// that arrived fully reversed still assembles in rule order. A step that
-    /// advances a partial is consumed (removed from the buffer); one that
-    /// completes a sequence returns a `RuleMatch`. Window-expired buffered steps
-    /// are pruned. Uses the SAME `advancePartial` as the live path.
-    private func replayPendingSteps(ruleId: String, rule: SequenceRule, now: Date) async -> [RuleMatch] {
+    /// Steps are tried oldest-first BY EVENT TIMESTAMP, with rule-step order as
+    /// the equal-timestamp tie-break, so a 3+ step chain delivered fully reversed
+    /// still assembles in rule order. Each retained event fans out to EVERY
+    /// compatible partial, matching Phase 1. It remains in the bounded history so
+    /// another initial event that happened earlier but is delivered later can
+    /// replay it too; a partial already containing that step or source event
+    /// rejects it idempotently. Window-expired entries are pruned. Uses the SAME
+    /// `advancePartial` as the live path.
+    private func replayPendingSteps(
+        ruleId: String,
+        rule: SequenceRule,
+        now: Date,
+        relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+    ) -> [RuleMatch] {
         guard var pending = pendingLaterSteps[ruleId], !pending.isEmpty else { return [] }
 
         // Drop buffered steps older than the rule window.
@@ -1268,35 +2022,49 @@ public actor SequenceEngine {
         guard !pending.isEmpty else { pendingLaterSteps[ruleId] = nil; return [] }
 
         var matches: [RuleMatch] = []
-        var consumed = Set<Int>()
         var partials = partialMatches[ruleId] ?? []
 
+        let stepOrder = Dictionary(uniqueKeysWithValues: rule.steps.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
         let order = pending.indices.sorted {
-            pending[$0].matched.timestamp < pending[$1].matched.timestamp
+            let lhs = pending[$0]
+            let rhs = pending[$1]
+            if lhs.matched.timestamp != rhs.matched.timestamp {
+                return lhs.matched.timestamp < rhs.matched.timestamp
+            }
+            return (stepOrder[lhs.step.id] ?? Int.max)
+                < (stepOrder[rhs.step.id] ?? Int.max)
         }
         for pi in order {
             let pend = pending[pi]
-            for (idx, partial) in partials.enumerated() {
-                if now.timeIntervalSince(partial.createdAt) > rule.window { continue }
-                guard let updated = await advancePartial(
-                    rule: rule, step: pend.step, matched: pend.matched, partial: partial
-                ) else { continue }
-                consumed.insert(pi)
+            var replayed: [PartialMatch] = []
+            replayed.reserveCapacity(partials.count)
+            for partial in partials {
+                if now.timeIntervalSince(partial.createdAt) > rule.window {
+                    replayed.append(partial)
+                    continue
+                }
+                guard let updated = advancePartial(
+                    rule: rule,
+                    step: pend.step,
+                    matched: pend.matched,
+                    partial: partial,
+                    relationshipSnapshot: relationshipSnapshot
+                ) else {
+                    replayed.append(partial)
+                    continue
+                }
                 if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(updated.matchedSteps.keys), totalSteps: rule.steps.count) {
-                    partials.remove(at: idx)
-                    totalPartialCount -= 1
                     matches.append(makeMatch(rule: rule, partial: updated))
                 } else {
-                    partials[idx] = updated
+                    replayed.append(updated)
                 }
-                break  // one partial advanced per buffered step
             }
+            partials = replayed
         }
 
         partialMatches[ruleId] = partials
-        if !consumed.isEmpty {
-            pending = pending.enumerated().filter { !consumed.contains($0.offset) }.map(\.element)
-        }
         pendingLaterSteps[ruleId] = pending.isEmpty ? nil : pending
         return matches
     }
@@ -1306,8 +2074,9 @@ public actor SequenceEngine {
     private func checkCorrelation(
         _ type: CorrelationType,
         partial: PartialMatch,
-        candidate: MatchedStep
-    ) async -> Bool {
+        candidate: MatchedStep,
+        relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+    ) -> Bool {
         switch type {
         case .none:
             // No correlation required -- always passes.
@@ -1332,10 +2101,15 @@ public actor SequenceEngine {
             // (root) step stays bound, so sibling steps spawned by that root
             // still correlate through it. Step-level `processRelation` (checked
             // separately in Phase 1) further refines rules that declare it.
+            guard let relationshipSnapshot else { return false }
             for bound in partial.matchedSteps.values {
                 if candidate.processPid == bound.processPid { return true }
-                if await lineage.isDescendant(candidate.processPid, of: bound.processPid) { return true }
-                if await lineage.isDescendant(bound.processPid, of: candidate.processPid) { return true }
+                if relationshipSnapshot.isDescendant(candidate.processPid, of: bound.processPid) {
+                    return true
+                }
+                if relationshipSnapshot.isDescendant(bound.processPid, of: candidate.processPid) {
+                    return true
+                }
             }
             return false
 
@@ -1394,33 +2168,26 @@ public actor SequenceEngine {
     private func checkProcessRelation(
         _ relation: ProcessRelation,
         eventPid: pid_t,
-        eventPath: String,
+        eventPath _: String,
         referencePid: pid_t,
-        referencePath: String
-    ) async -> Bool {
+        referencePath _: String,
+        relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
+    ) -> Bool {
         switch relation {
         case .same:
             return eventPid == referencePid
 
         case .descendant:
             // Event process is a child/grandchild of the reference process.
-            return await lineage.isDescendant(eventPid, of: referencePid)
+            return relationshipSnapshot?.isDescendant(eventPid, of: referencePid) == true
 
         case .ancestor:
             // Event process is a parent/grandparent of the reference process.
-            return await lineage.isDescendant(referencePid, of: eventPid)
+            return relationshipSnapshot?.isDescendant(referencePid, of: eventPid) == true
 
         case .sibling:
             // Event process and reference process share a direct parent.
-            // Look up both PIDs in the lineage to find their parents.
-            let eventAncestors = await lineage.ancestors(of: eventPid)
-            let refAncestors = await lineage.ancestors(of: referencePid)
-
-            guard let eventParent = eventAncestors.first,
-                  let refParent = refAncestors.first else {
-                return false
-            }
-            return eventParent.pid == refParent.pid
+            return relationshipSnapshot?.areSiblings(eventPid, referencePid) == true
 
         case .sameProcess:
             // Identical to .same (exact PID); separate token used by authors.
@@ -1429,8 +2196,9 @@ public actor SequenceEngine {
         case .sameTree:
             // Same process, or anywhere in its ancestry/descendants.
             if eventPid == referencePid { return true }
-            if await lineage.isDescendant(eventPid, of: referencePid) { return true }
-            return await lineage.isDescendant(referencePid, of: eventPid)
+            guard let relationshipSnapshot else { return false }
+            if relationshipSnapshot.isDescendant(eventPid, of: referencePid) { return true }
+            return relationshipSnapshot.isDescendant(referencePid, of: eventPid)
 
         case .any:
             // No process-relationship constraint; correlate by window/order only.
@@ -1470,15 +2238,12 @@ public actor SequenceEngine {
         for (ruleId, partials) in partialMatches {
             guard let rule = rules[ruleId] else {
                 // Rule was removed; discard all its partials.
-                totalPartialCount -= partials.count
                 partialMatches.removeValue(forKey: ruleId)
                 continue
             }
 
-            let beforeCount = partials.count
             let surviving = partials.filter { now.timeIntervalSince($0.createdAt) <= rule.window }
             partialMatches[ruleId] = surviving.isEmpty ? nil : surviving
-            totalPartialCount -= (beforeCount - surviving.count)
         }
 
         // #95: prune the out-of-order backfill buffer on the same cadence — a
@@ -1494,15 +2259,10 @@ public actor SequenceEngine {
             pendingLaterSteps[ruleId] = surviving.isEmpty ? nil : surviving
         }
 
-        // Trim eviction queue: remove front entries whose partial matches
-        // have already been expired. We look up the largest window across
-        // all rules as a conservative upper bound -- any ref older than
-        // that is certainly gone.
-        let maxWindow = rules.values.map(\.window).max() ?? 0
-        while let front = evictionQueue.first,
-              now.timeIntervalSince(front.createdAt) > maxWindow {
-            evictionQueue.removeFirst()
-        }
+        // Rebuild from exact live IDs. Age-only front trimming retained every
+        // completed ref until the corpus's largest window elapsed, allowing the
+        // auxiliary queue to scale with seed throughput rather than live state.
+        compactEvictionQueue(force: true)
     }
 
     /// Evict the oldest partial matches to bring total count back under the cap.
@@ -1516,8 +2276,7 @@ public actor SequenceEngine {
         guard count > 0 else { return }
 
         var removed = 0
-        while removed < count && !evictionQueue.isEmpty {
-            let ref = evictionQueue.removeFirst()
+        while removed < count, let ref = popOldestEvictionReference() {
 
             // Look up the partials array for this rule.
             guard var partials = partialMatches[ref.ruleId] else {
@@ -1525,14 +2284,14 @@ public actor SequenceEngine {
                 continue
             }
 
-            // Find the actual partial match by creation time. If it was
-            // already removed (expired, completed, or duplicate ref), skip.
-            guard let idx = partials.firstIndex(where: { $0.createdAt == ref.createdAt }) else {
+            // Find the exact partial. Creation timestamps are not identities:
+            // one event can seed multiple unordered steps at the same instant,
+            // and a stale ref for a completed one must not evict its sibling.
+            guard let idx = partials.firstIndex(where: { $0.id == ref.partialId }) else {
                 continue
             }
 
             partials.remove(at: idx)
-            totalPartialCount -= 1
             removed += 1
 
             if partials.isEmpty {
@@ -1543,9 +2302,22 @@ public actor SequenceEngine {
         }
 
         if removed > 0 {
-            evictedPartialCount += removed
+            evictedPartialCount = Self.saturatingTelemetryAdd(
+                evictedPartialCount,
+                removed
+            )
             logger.warning("Evicted \(removed) oldest partial matches (cap: \(self.maxPartialMatches), cumulative: \(self.evictedPartialCount))")
         }
+        compactEvictionQueue()
+    }
+
+    /// Cumulative diagnostics must never become a crash surface. Exposed at
+    /// internal scope so the Int.max boundary can be tested without performing
+    /// an impossible lifetime number of real evictions.
+    static func saturatingTelemetryAdd(_ current: Int, _ delta: Int) -> Int {
+        guard delta > 0 else { return current }
+        guard current >= 0, current <= Int.max - delta else { return Int.max }
+        return current + delta
     }
 
     // MARK: - Helpers
@@ -1576,6 +2348,13 @@ public actor SequenceEngine {
 public enum SequenceEngineError: Error, LocalizedError {
     case directoryNotFound(String)
     case invalidRule(String, String)
+    case partialRuleLoadFailure(failedFiles: [String], loaded: Int)
+    case invalidRuleManifest(String)
+    case ruleInventoryMismatch(missing: [String], unexpected: [String])
+    case ruleManifestHashMismatch([String])
+    case ruleDirectoryChangedDuringReload(String)
+    case duplicateRuleIds([String])
+    case mutationQueueSaturated(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -1583,6 +2362,22 @@ public enum SequenceEngineError: Error, LocalizedError {
             return "Sequence rule directory not found: \(path)"
         case .invalidRule(let ruleId, let detail):
             return "Invalid sequence rule '\(ruleId)': \(detail)"
+        case .partialRuleLoadFailure(let failedFiles, let loaded):
+            return "Sequence reload rejected: \(failedFiles.count) file(s) failed while \(loaded) rule(s) staged (\(failedFiles.joined(separator: ", ")))"
+        case .invalidRuleManifest(let detail):
+            return "Sequence reload manifest is invalid: \(detail)"
+        case .ruleInventoryMismatch(let missing, let unexpected):
+            let missingText = missing.isEmpty ? "none" : missing.joined(separator: ", ")
+            let unexpectedText = unexpected.isEmpty ? "none" : unexpected.joined(separator: ", ")
+            return "Sequence reload inventory does not match manifest (missing: \(missingText); unexpected: \(unexpectedText))"
+        case .ruleManifestHashMismatch(let files):
+            return "Sequence reload file hash does not match manifest: \(files.joined(separator: ", "))"
+        case .ruleDirectoryChangedDuringReload(let path):
+            return "Sequence rule directory changed while reload was staging: \(path)"
+        case .duplicateRuleIds(let ruleIds):
+            return "Sequence reload rejected duplicate rule id(s): \(ruleIds.joined(separator: ", "))"
+        case .mutationQueueSaturated(let limit):
+            return "Sequence engine mutation queue reached its bounded limit of \(limit) waiter(s)"
         }
     }
 }

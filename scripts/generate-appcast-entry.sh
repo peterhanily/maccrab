@@ -1,267 +1,155 @@
 #!/bin/bash
-# generate-appcast-entry.sh — Produce a Sparkle <item> snippet for a signed DMG.
+# Generate one schema-checked Sparkle <item> from a signed DMG.
 #
-# Reads a signed, notarized MacCrab DMG, pulls the EdDSA signature from the
-# signing Mac's login Keychain via Sparkle's `sign_update` helper, and
-# writes an appcast XML fragment to stdout.
-#
-# Usage:
-#   scripts/generate-appcast-entry.sh \
-#       --dmg /path/to/MacCrab-1.3.5.dmg \
-#       --version 1.3.5 \
-#       [--sparkle-bin <dir-with-sign_update>] \
-#       [--release-notes-md path/to/notes.md] \
-#       [--phased-rollout-interval <seconds>] \  # default 86400 (~7-day phased rollout)
-#       [--immediate] \                          # critical/security release: ship to 100% now
-#     > /tmp/item.xml
-#
-# Rollout (E-06): by default the emitted <item> carries a Sparkle
-# <sparkle:phasedRolloutInterval> so a non-critical release reaches users in
-# staggered groups (a bad build hits only a fraction before you can yank it —
-# see docs/ROLLBACK_RUNBOOK.md). For a critical/security release pass
-# --immediate (or MACCRAB_APPCAST_IMMEDIATE=1) to omit the field and update
-# every client at once.
-#
-# Prereqs:
-#   - DMG is already signed with Developer ID + notarized + stapled
-#   - Sparkle's sign_update is on disk; auto-detected across
-#     ~/Tools/bin, ~/Tools/Sparkle/bin, ~/Tools/Sparkle-2.6.4/bin,
-#     ~/Tools/Sparkle-2*/bin, /usr/local/bin, /opt/homebrew/bin.
-#     Override with --sparkle-bin or the SPARKLE_BIN env var.
-#   - The matching private key lives in the login Keychain
-#     (put there by `generate_keys` — see TROUBLESHOOTING.md)
-#
-# Output goes to stdout. Pipe or redirect to a file you can paste into
-# maccrab-site's appcast.xml. `publish-appcast-entry.sh` can do the push
-# for you once you've eyeballed the result.
+# Release signing tools are never searched on PATH, in ~/Tools, or under
+# Homebrew. Only the exact SwiftPM artifact pinned by Package.resolved and
+# scripts/release-dependencies.lock may touch the Sparkle private key.
 
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DMG=""
 VERSION=""
-SPARKLE_BIN="${SPARKLE_BIN:-}"   # env var override wins over auto-detect
+BUILD_ID=""
 RELEASE_NOTES_MD=""
-FEED_URL="https://maccrab.com/appcast.xml"
-DOWNLOAD_BASE="https://github.com/peterhanily/maccrab/releases/download"
-
-# Phased rollout (E-06). Sparkle staggers a non-critical update across 7 groups,
-# adding PHASED_INTERVAL seconds of delay per group (default 86400 → ~7-day full
-# rollout). A critical/security release must reach 100% at once, so --immediate
-# (or MACCRAB_APPCAST_IMMEDIATE=1) omits the field entirely.
 IMMEDIATE="${MACCRAB_APPCAST_IMMEDIATE:-0}"
 PHASED_INTERVAL="${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}"
 
+usage() {
+    echo "usage: $0 --dmg MacCrab-vX.dmg --version X [--build-number X.N]" >&2
+    echo "          [--release-notes-md FILE] [--phased-rollout-interval N|--immediate]" >&2
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dmg) DMG="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --sparkle-bin) SPARKLE_BIN="$2"; shift 2 ;;
-        --release-notes-md) RELEASE_NOTES_MD="$2"; shift 2 ;;
-        --phased-rollout-interval) PHASED_INTERVAL="$2"; shift 2 ;;
+        --dmg) [[ $# -ge 2 ]] || { usage; exit 2; }; DMG="$2"; shift 2 ;;
+        --version) [[ $# -ge 2 ]] || { usage; exit 2; }; VERSION="$2"; shift 2 ;;
+        --build-number) [[ $# -ge 2 ]] || { usage; exit 2; }; BUILD_ID="$2"; shift 2 ;;
+        --release-notes-md) [[ $# -ge 2 ]] || { usage; exit 2; }; RELEASE_NOTES_MD="$2"; shift 2 ;;
+        --phased-rollout-interval) [[ $# -ge 2 ]] || { usage; exit 2; }; PHASED_INTERVAL="$2"; shift 2 ;;
         --immediate|--critical) IMMEDIATE=1; shift ;;
-        -h|--help)
-            sed -n '2,36p' "$0"; exit 0 ;;
-        *) echo "unknown arg: $1" >&2; exit 2 ;;
+        -h|--help) usage; exit 0 ;;
+        # There is intentionally no --sparkle-bin override. An override turns
+        # the private-key verifier into attacker-selected executable code.
+        *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
 
-# Auto-detect sign_update across a handful of well-known install
-# layouts. Pre-fix the script hardcoded `~/Tools/Sparkle-2.6.4/bin`,
-# which matched only the version-numbered tarball extract. After
-# rolling Sparkle bumps, operators inevitably keep the tool at a
-# version-agnostic path like `~/Tools/bin/` — the hardcoded default
-# then silently failed at the very end of `release.sh` step 6.
-# Try the env var / flag first, then any layout where `sign_update`
-# is executable. Stops at the first hit. v1.10.0 audit fix.
-if [[ -z "$SPARKLE_BIN" ]]; then
-    for candidate in \
-        "${HOME}/Tools/bin" \
-        "${HOME}/Tools/Sparkle/bin" \
-        "${HOME}/Tools/Sparkle-2.6.4/bin" \
-        "${HOME}/Tools/Sparkle-2"*"/bin" \
-        "/usr/local/bin" \
-        "/opt/homebrew/bin"
-    do
-        # Glob expansion above can leave a literal Sparkle-2*/bin if
-        # there are no matches — guard against that with `-x`.
-        if [[ -x "$candidate/sign_update" ]]; then
-            SPARKLE_BIN="$candidate"
-            break
-        fi
-    done
+[[ -n "$DMG" && -n "$VERSION" ]] || { usage; exit 2; }
+[[ -f "$DMG" && ! -L "$DMG" ]] || { echo "ERROR: DMG must be a regular no-link file: $DMG" >&2; exit 1; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
+    echo "ERROR: unsafe version shape: $VERSION" >&2; exit 2;
+}
+BUILD_ID="${BUILD_ID:-${BUILD_NUMBER:-$VERSION}}"
+[[ "$BUILD_ID" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(\.[0-9]+)?$ ]] || {
+    echo "ERROR: unsafe build-number shape: $BUILD_ID" >&2; exit 2;
+}
+[[ "$(/usr/bin/basename "$DMG")" == "MacCrab-v${VERSION}.dmg" ]] || {
+    echo "ERROR: DMG basename must be MacCrab-v${VERSION}.dmg" >&2; exit 2;
+}
+if [[ "$IMMEDIATE" != "0" && "$IMMEDIATE" != "1" ]]; then
+    echo "ERROR: immediate rollout flag must be 0 or 1" >&2; exit 2
+fi
+if [[ "$IMMEDIATE" == "0" ]] && ! [[ "$PHASED_INTERVAL" =~ ^[1-9][0-9]{0,9}$ ]]; then
+    echo "ERROR: phased rollout interval must be a positive decimal" >&2; exit 2
 fi
 
-[[ -n "$DMG"     ]] || { echo "ERROR: --dmg required" >&2; exit 2; }
-[[ -n "$VERSION" ]] || { echo "ERROR: --version required" >&2; exit 2; }
-[[ -f "$DMG"     ]] || { echo "ERROR: DMG not found: $DMG" >&2; exit 1; }
-[[ -n "$SPARKLE_BIN" && -x "$SPARKLE_BIN/sign_update" ]] || {
-    echo "ERROR: sign_update not found." >&2
-    echo "       Searched: ~/Tools/bin, ~/Tools/Sparkle/bin,"  >&2
-    echo "                 ~/Tools/Sparkle-2.6.4/bin, ~/Tools/Sparkle-2*/bin," >&2
-    echo "                 /usr/local/bin, /opt/homebrew/bin." >&2
-    echo "       Override with --sparkle-bin <dir> or export SPARKLE_BIN." >&2
-    echo "       Download Sparkle from https://github.com/sparkle-project/Sparkle/releases" >&2
-    exit 1
+# This validates Package.swift, Package.resolved, the resolved Sparkle package's
+# binary-artifact checksum, and both exact tool hashes before either executes.
+"$SCRIPT_DIR/check-release-dependencies.sh" >/dev/null
+SPARKLE_BIN="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/bin"
+
+run_sparkle_tool() {
+    # GitHub PATs, notary credentials, Python paths, DYLD injection variables,
+    # and every other ambient release secret are deliberately absent.
+    /usr/bin/env -i \
+        PATH=/usr/bin:/bin \
+        HOME="${HOME:?}" \
+        TMPDIR=/private/tmp \
+        LC_ALL=C \
+        LANG=C \
+        "$@"
 }
 
-# Pull ed25519 signature + byte length from the private key in login Keychain.
-# sign_update prints:  sparkle:edSignature="..." length="NNN"
-SIG_LINE=$("$SPARKLE_BIN/sign_update" "$DMG")
-ED_SIG=$(echo "$SIG_LINE" | sed -E 's/.*edSignature="([^"]+)".*/\1/')
-LEN=$(echo    "$SIG_LINE" | sed -E 's/.*length="([^"]+)".*/\1/')
+# sign_update prints: sparkle:edSignature="..." length="NNN".
+SIG_LINE=$(run_sparkle_tool "$SPARKLE_BIN/sign_update" "$DMG")
+ED_SIG=$(printf '%s\n' "$SIG_LINE" | /usr/bin/sed -nE 's/.*sparkle:edSignature="([A-Za-z0-9+\/=]+)".*/\1/p')
+LEN=$(printf '%s\n' "$SIG_LINE" | /usr/bin/sed -nE 's/.*length="([0-9]+)".*/\1/p')
+[[ "$ED_SIG" =~ ^[A-Za-z0-9+/]{86}==$ ]] || { echo "ERROR: sign_update returned an invalid Ed25519 signature shape" >&2; exit 1; }
+[[ "$LEN" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "ERROR: sign_update returned an invalid length" >&2; exit 1; }
+ACTUAL_LEN=$(/usr/bin/stat -f%z "$DMG")
+[[ "$LEN" == "$ACTUAL_LEN" ]] || {
+    echo "ERROR: sign_update length $LEN != DMG size $ACTUAL_LEN" >&2; exit 1;
+}
 
-[[ -n "$ED_SIG" ]] || { echo "ERROR: could not parse edSignature from: $SIG_LINE" >&2; exit 1; }
-[[ -n "$LEN"    ]] || { echo "ERROR: could not parse length from: $SIG_LINE"     >&2; exit 1; }
-
-# Verify the signing key pairs with the SHIPPED public key BEFORE emitting the
-# appcast item. The signature comes from whatever EdDSA private key the login
-# Keychain holds; if that key does NOT pair with the SUPublicEDKey baked into
-# the app (project.yml — canonical), every installed user's Sparkle verification
-# fails silently and the update is dead on arrival. This catches a regenerated /
-# wrong-account / restored-backup key BEFORE publish, not after a yank.
-EXPECTED_PUB=$(grep -E '^[[:space:]]*SUPublicEDKey:' "$SCRIPT_DIR/../Xcode/project.yml" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-if [[ -z "$EXPECTED_PUB" ]]; then
-    echo "ERROR: could not read SUPublicEDKey from Xcode/project.yml to verify the appcast signature" >&2
+# Pair the Keychain key to the public key shipped in MacCrab, then verify the
+# produced signature. These checks are meaningful because their binaries were
+# independently authenticated above; a same-directory substituted pair cannot
+# self-attest anymore.
+EXPECTED_PUB=$(/usr/bin/grep -E '^[[:space:]]*SUPublicEDKey:' "$PROJECT_DIR/Xcode/project.yml" \
+    | /usr/bin/head -1 | /usr/bin/sed -E 's/.*"([^"]+)".*/\1/')
+[[ "$EXPECTED_PUB" =~ ^[A-Za-z0-9+/]{43}=$ ]] || {
+    echo "ERROR: shipped SUPublicEDKey is absent or malformed" >&2; exit 1;
+}
+ACTUAL_PUB=$(run_sparkle_tool "$SPARKLE_BIN/generate_keys" -p | /usr/bin/tr -d '[:space:]')
+[[ "$ACTUAL_PUB" == "$EXPECTED_PUB" ]] || {
+    echo "ERROR: Keychain Sparkle key does not pair with the shipped SUPublicEDKey" >&2; exit 1;
+}
+if ! run_sparkle_tool "$SPARKLE_BIN/sign_update" --verify "$DMG" "$ED_SIG" >/dev/null 2>&1; then
+    echo "ERROR: produced appcast signature failed independent tool verification" >&2
     exit 1
 fi
-# 1. Pairing: generate_keys -p prints the PUBLIC key for the Keychain private
-#    key. It must equal the public key shipped in the app.
-GENKEYS="$SPARKLE_BIN/generate_keys"
-# audit #16: generate_keys is MANDATORY for the pairing check — sign_update
-# --verify (step 2) only proves the signature verifies with the SAME keychain
-# key, NOT that that key pairs with the SHIPPED SUPublicEDKey. If generate_keys
-# is missing we cannot prove the pairing, so HARD-FAIL rather than silently skip
-# and risk publishing an update that bricks auto-update for every installed user.
-# (An explicit ALLOW_UNPAIRED_SPARKLE=1 dev override exists for local dry-runs.)
-if [[ ! -x "$GENKEYS" ]]; then
-    if [[ "${ALLOW_UNPAIRED_SPARKLE:-0}" == "1" ]]; then
-        echo "WARNING: generate_keys not found at $GENKEYS — SKIPPING the Sparkle key-pairing check (ALLOW_UNPAIRED_SPARKLE=1)." >&2
-    else
-        echo "ERROR: generate_keys not found at $GENKEYS — cannot verify the Keychain key pairs with the shipped SUPublicEDKey." >&2
-        echo "       Install Sparkle's tools (or point SPARKLE_BIN at them). Set ALLOW_UNPAIRED_SPARKLE=1 only for a local dry-run. Aborting." >&2
-        exit 1
-    fi
-else
-    ACTUAL_PUB=$("$GENKEYS" -p 2>/dev/null | tr -d '[:space:]')
-    if [[ -z "$ACTUAL_PUB" ]]; then
-        echo "ERROR: generate_keys -p returned no public key — cannot verify pairing with the shipped SUPublicEDKey. Aborting." >&2
-        exit 1
-    fi
-    if [[ "$ACTUAL_PUB" != "$EXPECTED_PUB" ]]; then
-        echo "ERROR: the Keychain Sparkle private key does NOT pair with the shipped SUPublicEDKey." >&2
-        echo "       shipped (project.yml): ${EXPECTED_PUB:0:12}…   keychain: ${ACTUAL_PUB:0:12}…" >&2
-        echo "       Publishing would brick auto-update for every installed user. Aborting." >&2
-        exit 1
-    fi
+echo "  Appcast signature verified with locked Sparkle tools; key pairs with ${EXPECTED_PUB:0:8}…" >&2
+
+# Resolve notes without executing user-site Python. Bound the source before it
+# reaches the converter or shell memory.
+if [[ -z "$RELEASE_NOTES_MD" && -f "$PROJECT_DIR/RELEASE_NOTES/v${VERSION}.md" ]]; then
+    RELEASE_NOTES_MD="$PROJECT_DIR/RELEASE_NOTES/v${VERSION}.md"
 fi
-# 2. Signature validity: confirm the just-produced edSignature actually verifies
-#    for the DMG with the Keychain key (catches a corrupt/partial signature).
-if ! "$SPARKLE_BIN/sign_update" --verify "$DMG" "$ED_SIG" >/dev/null 2>&1; then
-    echo "ERROR: the produced appcast edSignature failed sign_update --verify against the DMG. Aborting." >&2
+WORK_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-appcast.XXXXXX)
+trap '/bin/rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+NOTES_MD="$WORK_DIR/notes.md"
+NOTES_HTML="$WORK_DIR/notes.html"
+
+if [[ -n "$RELEASE_NOTES_MD" ]]; then
+    [[ -f "$RELEASE_NOTES_MD" && ! -L "$RELEASE_NOTES_MD" ]] || {
+        echo "ERROR: release notes must be a regular no-link file" >&2; exit 1;
+    }
+    notes_size=$(/usr/bin/stat -f%z "$RELEASE_NOTES_MD")
+    [[ "$notes_size" -le 1048576 ]] || { echo "ERROR: release notes exceed 1 MiB" >&2; exit 1; }
+    /bin/cp "$RELEASE_NOTES_MD" "$NOTES_MD"
+else
+    printf '%s\n' "No release notes provided for this version. See https://github.com/peterhanily/maccrab/releases/tag/v${VERSION} for details." > "$NOTES_MD"
+fi
+
+if ! /usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C LANG=C \
+        /usr/bin/python3 -I "$SCRIPT_DIR/_md_to_html.py" "$NOTES_MD" > "$NOTES_HTML"; then
+    echo "ERROR: release-note Markdown conversion failed" >&2
     exit 1
 fi
-# Status message → stderr ONLY. stdout is the appcast <item> XML that
-# release.sh captures verbatim into the published appcast file; printing
-# this confirmation to stdout would prepend a stray non-XML "signature
-# verified" line into every published entry.
-echo "  Appcast signature verified; signing key pairs with shipped SUPublicEDKey ${EXPECTED_PUB:0:8}…" >&2
+[[ -s "$NOTES_HTML" ]] || { echo "ERROR: release-note HTML is empty" >&2; exit 1; }
 
-PUB_DATE=$(LC_TIME=en_US.UTF-8 date -u '+%a, %d %b %Y %H:%M:%S +0000')
-DMG_NAME=$(basename "$DMG")
-DOWNLOAD_URL="${DOWNLOAD_BASE}/v${VERSION}/${DMG_NAME}"
-
-# Release notes: prefer explicit --release-notes-md; otherwise the
-# convention is a polished `RELEASE_NOTES/v{VERSION}.md`; as a last
-# resort, cut the matching section out of CHANGELOG.md. The CHANGELOG
-# fallback is information-dense (good for history, noisy in a Sparkle
-# update sheet) so always prefer the RELEASE_NOTES file when it exists.
-if [[ -z "$RELEASE_NOTES_MD" && -f "RELEASE_NOTES/v${VERSION}.md" ]]; then
-    RELEASE_NOTES_MD="RELEASE_NOTES/v${VERSION}.md"
-fi
-
-if [[ -z "$RELEASE_NOTES_MD" ]]; then
-    if [[ -f "CHANGELOG.md" ]]; then
-        NOTES=$(awk -v v="$VERSION" '
-            $0 ~ "^## \\["v"\\]" { found=1; next }
-            found && /^## \[/ { exit }
-            found { print }
-        ' CHANGELOG.md)
-    fi
-    # Strip leading/trailing whitespace. If still empty (no CHANGELOG,
-    # or no matching section), fall back to a placeholder so the Sparkle
-    # UI doesn't render an empty update sheet.
-    NOTES="$(echo "$NOTES" | sed -e '/./,$!d' -e ':a' -e '/^\s*$/{$d;N;ba' -e '}')"
-    if [[ -z "$NOTES" ]]; then
-        NOTES="No release notes provided for this version. See https://github.com/peterhanily/maccrab/releases/tag/v${VERSION} for details."
-    fi
-else
-    NOTES=$(cat "$RELEASE_NOTES_MD")
-fi
-
-# Sparkle renders <description> as HTML, not Markdown. Shipping raw
-# Markdown produced the v1.4.0 update sheet showing **bold** as
-# literal text and every line collapsed onto one paragraph. Convert
-# Markdown → HTML via scripts/_md_to_html.py so RELEASE_NOTES/vX.Y.Z.md
-# stays as the single authoritative source (GitHub release still
-# renders it as Markdown; Sparkle now sees HTML).
-NOTES_TMP=$(mktemp -t maccrab-appcast-notes.XXXXXX.md)
-trap 'rm -f "$NOTES_TMP"' EXIT
-printf '%s' "$NOTES" > "$NOTES_TMP"
-NOTES_HTML=$(python3 "$SCRIPT_DIR/_md_to_html.py" "$NOTES_TMP" 2>/dev/null || true)
-rm -f "$NOTES_TMP"
-if [[ -z "$NOTES_HTML" ]]; then
-    # Converter failed — fall back to the raw Markdown so the sheet
-    # at least shows content. Better than nothing; still fixable by
-    # a follow-up appcast republish.
-    NOTES_HTML="$NOTES"
-fi
-
-# Phased-rollout element (E-06). Omitted for a critical/security release so
-# every client updates at once; otherwise emitted so Sparkle staggers the
-# rollout and a bad build reaches only a fraction of users before you can yank
-# it (see docs/ROLLBACK_RUNBOOK.md).
+PUB_DATE=$(/usr/bin/env -i PATH=/usr/bin:/bin LC_TIME=en_US.UTF-8 /bin/date -u '+%a, %d %b %Y %H:%M:%S +0000')
+GEN_ARGS=(
+    generate
+    --version "$VERSION"
+    --build-number "$BUILD_ID"
+    --pub-date "$PUB_DATE"
+    --signature "$ED_SIG"
+    --length "$LEN"
+    --dmg-name "MacCrab-v${VERSION}.dmg"
+    --notes-file "$NOTES_HTML"
+)
 if [[ "$IMMEDIATE" == "1" ]]; then
-    PHASED_ROLLOUT_XML=""
-    echo "  Appcast rollout: IMMEDIATE (100% now) — no phasedRolloutInterval (critical/security release)." >&2
+    echo "  Appcast rollout: IMMEDIATE (100% now)" >&2
 else
-    if ! [[ "$PHASED_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$PHASED_INTERVAL" -le 0 ]]; then
-        echo "ERROR: --phased-rollout-interval must be a positive integer of seconds; got '$PHASED_INTERVAL'" >&2
-        exit 2
-    fi
-    PHASED_ROLLOUT_XML="  <sparkle:phasedRolloutInterval>${PHASED_INTERVAL}</sparkle:phasedRolloutInterval>"
-    echo "  Appcast rollout: PHASED — phasedRolloutInterval=${PHASED_INTERVAL}s (Sparkle staggers across 7 groups → ~$(( PHASED_INTERVAL * 7 ))s to reach 100%). Use --immediate for a critical/security release." >&2
+    GEN_ARGS+=(--phased-interval "$PHASED_INTERVAL")
+    echo "  Appcast rollout: PHASED — ${PHASED_INTERVAL}s per group" >&2
 fi
 
-# Emit a single Sparkle <item>. HTML notes are embedded as CDATA so
-# tags pass through unescaped. A non-critical release carries
-# <sparkle:phasedRolloutInterval>; --immediate drops that line.
-#
-# <sparkle:version> is CFBundleVersion — the BUILD identity Sparkle compares
-# against the installed bundle — while <sparkle:shortVersionString> is the
-# marketing version. Both used to emit ${VERSION}, but the shipped bundle stamps
-# CFBundleVersion = "${VERSION}.$(git rev-list --count HEAD)" (build-release.sh
-# :568, e.g. 1.21.5.1018). Consequences of the collapse: two builds of the same
-# marketing version were indistinguishable to Sparkle, so a rebuild could never
-# reach installed users, and an installed 1.21.5.1018 already compared as NEWER
-# than an advertised bare "1.21.5". Emit the real build number, falling back to
-# ${VERSION} when this script is invoked standalone without BUILD_NUMBER set.
-cat <<XML
-<item>
-  <title>MacCrab ${VERSION}</title>
-  <link>https://github.com/peterhanily/maccrab/releases/tag/v${VERSION}</link>
-  <sparkle:version>${BUILD_NUMBER:-$VERSION}</sparkle:version>
-  <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
-  <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-  <pubDate>${PUB_DATE}</pubDate>
-${PHASED_ROLLOUT_XML}
-  <description><![CDATA[
-${NOTES_HTML}
-]]></description>
-  <enclosure
-    url="${DOWNLOAD_URL}"
-    length="${LEN}"
-    type="application/octet-stream"
-    sparkle:edSignature="${ED_SIG}" />
-</item>
-XML
+# Generation includes CDATA splitting and a namespace-wrapped XML parse. Only a
+# schema-valid fragment reaches stdout / the publisher.
+/usr/bin/env -i PATH=/usr/bin:/bin TMPDIR=/private/tmp LC_ALL=C LANG=C \
+    /usr/bin/python3 -I "$SCRIPT_DIR/_appcast_xml.py" "${GEN_ARGS[@]}"

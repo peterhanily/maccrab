@@ -243,6 +243,33 @@ actor StorageErrorTracker {
     /// errno in their string body, so we inspect the message before
     /// falling back to the enum case.
     internal static func classifyEventInsertError(_ error: Error) -> String {
+        // Admission failures are typed and should stay typed all the way to
+        // the heartbeat.  Matching only their prose made the live
+        // `.footprintLimit` failure fall through to `other`, hiding the exact
+        // reason event persistence had paused.
+        if let admission = error as? SQLitePersistentStoreAdmissionError {
+            switch admission {
+            case .footprintLimit:
+                return "footprint_limit"
+            case .lowFreeSpace:
+                return "low_free_space"
+            case .transactionEstimateExceedsReserve:
+                return "transaction_reserve"
+            case .pageLimitInstallationFailed, .pageLimitDeferred:
+                return "page_limit"
+            case .sqliteStoragePressure:
+                return "sqlite_storage_pressure"
+            case .invalidPolicy:
+                return "admission_policy"
+            case .unsafeFamilyMember, .partialFamily:
+                return "unsafe_store_family"
+            case .familyProbeFailed:
+                return "family_probe"
+            case .freeSpaceProbeFailed:
+                return "free_space_probe"
+            }
+        }
+
         let raw = error.localizedDescription
         let lower = raw.lowercased()
         // Closed-vocabulary SQLite kinds, ordered by specificity. The

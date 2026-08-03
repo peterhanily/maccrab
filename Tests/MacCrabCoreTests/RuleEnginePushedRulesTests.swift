@@ -59,7 +59,7 @@ struct RuleEnginePushedRulesTests {
         let pushed = try makePushedDir(reIDing: files[0], to: "pushed.test.brand_new_rule")
         defer { try? FileManager.default.removeItem(at: pushed) }
 
-        let engine = RuleEngine()
+        let engine = RuleEngine(allowPushedRulesForTesting: true)
         _ = try await engine.loadRules(from: base)
         let baseCount = await engine.ruleCount
         let added = try await engine.loadPushedRules(from: pushed)
@@ -78,7 +78,7 @@ struct RuleEnginePushedRulesTests {
         let pushed = try makePushedDir(reIDing: files[1], to: existingID)
         defer { try? FileManager.default.removeItem(at: pushed) }
 
-        let engine = RuleEngine()
+        let engine = RuleEngine(allowPushedRulesForTesting: true)
         _ = try await engine.loadRules(from: base)
         let baseCount = await engine.ruleCount
         let added = try await engine.loadPushedRules(from: pushed)
@@ -94,7 +94,7 @@ struct RuleEnginePushedRulesTests {
         let pushed = try makePushedDir(reIDing: files[0], to: "pushed.test.ephemeral")
         defer { try? FileManager.default.removeItem(at: pushed) }
 
-        let engine = RuleEngine()
+        let engine = RuleEngine(allowPushedRulesForTesting: true)
         _ = try await engine.loadRules(from: base)
         _ = try await engine.loadPushedRules(from: pushed)
         #expect(await engine.pushedRuleIDs.contains("pushed.test.ephemeral"))
@@ -106,12 +106,31 @@ struct RuleEnginePushedRulesTests {
     func missingPushedDirNoop() async throws {
         let (base, _) = try makeBaseDir(count: 5)
         defer { try? FileManager.default.removeItem(at: base) }
-        let engine = RuleEngine()
+        let engine = RuleEngine(allowPushedRulesForTesting: true)
         _ = try await engine.loadRules(from: base)
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("does-not-exist-\(UUID().uuidString)")
         let added = try await engine.loadPushedRules(from: missing)
         #expect(added == 0)
         #expect(await engine.pushedRuleIDs.isEmpty)
+    }
+
+    @Test("shipping policy leaves an existing pushed corpus inert by default")
+    func productionPolicyDisablesPushedCorpus() async throws {
+        #expect(!RuleChannelPolicy.productionEnabled)
+        let (base, files) = try makeBaseDir(count: 5)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let pushed = try makePushedDir(reIDing: files[0], to: "pushed.test.must_remain_inert")
+        defer { try? FileManager.default.removeItem(at: pushed) }
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base)
+        let baseCount = await engine.ruleCount
+        let added = try await engine.loadPushedRules(from: pushed)
+
+        #expect(added == 0)
+        #expect(await engine.ruleCount == baseCount)
+        #expect(await engine.pushedRuleIDs.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: pushed.path))
     }
 
     @Test("ResponseEngine never arms an action for a detection-only (pushed) rule")

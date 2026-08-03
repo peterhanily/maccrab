@@ -8,9 +8,9 @@
 //   2. Look up plugin entry from index
 //   3. GET <base>/catalog/<plugin-id>.json + .sig → verify against same key
 //   4. Resolve binary URL from release_url_template (RFC6570 {tag} {file})
-//   5. GET binary URL → verify artifact_sha256
-//   6. Extract via /usr/bin/unzip into temp dir
-//   7. Hand to PluginInstaller.install(sourceDir:) — existing verified path
+//   5. Stream binary URL under a compressed-size ceiling → verify artifact_sha256
+//   6. Preflight ZIP paths/types/sizes, then extract regular files under hard limits
+//   7. Hand the same immutable bytes to PluginInstaller.install(snapshot:)
 //
 // The catalog public key is the rave project's signing key (the one used to
 // sign /rave/catalog.json + /rave/catalog/*.json on the maccrab-site repo).
@@ -32,6 +32,8 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case noCatalogPublicKey
     case catalogPublicKeyInvalid(reason: String)
     case httpFetchFailed(url: URL, status: Int)
+    case httpBodyTooLarge(url: URL, maximumBytes: Int, actualBytes: Int)
+    case unsupportedFetchURL(url: URL)
     case signatureVerifyFailed(url: URL)
     case catalogParseFailed(reason: String)
     case pluginNotInCatalog(id: String)
@@ -39,7 +41,6 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case artifactHashMismatch(expected: String, actual: String)
     case bundleComponentHashMismatch(component: String, expected: String, actual: String)
     case kindMismatch(catalog: String, manifest: String)
-    case unzipFailed(status: Int32)
     case extractedBundleNotFound(extractDir: String)
     case signerKeyMismatch(expected: String, actual: String)
     case signerKeyAbsentOnOfficial(id: String)
@@ -60,6 +61,10 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Rave catalog public key invalid: \(reason)"
         case .httpFetchFailed(let url, let status):
             return "HTTP fetch failed: \(url.absoluteString) → HTTP \(status)"
+        case .httpBodyTooLarge(let url, let maximumBytes, let actualBytes):
+            return "HTTP response from \(url.absoluteString) is \(actualBytes) bytes; limit is \(maximumBytes) bytes"
+        case .unsupportedFetchURL(let url):
+            return "Refusing unsupported plugin-catalog URL: \(url.absoluteString)"
         case .signatureVerifyFailed(let url):
             return "Ed25519 signature verification failed for \(url.absoluteString)"
         case .catalogParseFailed(let reason):
@@ -74,8 +79,6 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Bundle \(component) SHA-256 mismatch — catalog pins \(expected), extracted bundle has \(actual). Refusing to install (O3)."
         case .kindMismatch(let catalog, let manifest):
             return "Plugin kind mismatch — catalog declares kind=\(catalog) but the bundle manifest declares kind=\(manifest). Refusing to install."
-        case .unzipFailed(let status):
-            return "/usr/bin/unzip exited with status \(status)"
         case .extractedBundleNotFound(let extractDir):
             return "Extracted archive did not contain a plugin bundle directory at \(extractDir)"
         case .signerKeyMismatch(let expected, let actual):
@@ -214,9 +217,16 @@ struct PluginCatalogFetcher {
     /// discovery/search. Uses the SAME fetch+verify gate as installPluginByID,
     /// so a tampered or wrong-key catalog fails closed here too.
     func listCatalog() async throws -> [CatalogListEntry] {
+        let limits = PluginFetchLimits.production
         let catalogURL = catalogBase.appendingPathComponent("catalog.json")
-        let catalogData = try await fetch(url: catalogURL)
-        let catalogSig = try await fetch(url: catalogBase.appendingPathComponent("catalog.json.sig"))
+        let catalogData = try await fetch(
+            url: catalogURL,
+            maximumBytes: limits.maximumMetadataBytes
+        )
+        let catalogSig = try await fetch(
+            url: catalogBase.appendingPathComponent("catalog.json.sig"),
+            maximumBytes: limits.maximumSignatureBytes
+        )
         try verify(data: catalogData, signature: catalogSig, url: catalogURL)
         guard let json = try? JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
               let plugins = json["plugins"] as? [String: [String: Any]] else {
@@ -247,6 +257,7 @@ struct PluginCatalogFetcher {
         force: Bool,
         allowUnpinnedPrerelease: Bool = false
     ) async throws -> InstalledPlugin {
+        let fetchLimits = PluginFetchLimits.production
         // Reserved-namespace / impersonation enforcement is in Step 3.1, AFTER the
         // per-plugin entry is fetched + Ed25519-verified — so it can honor the
         // entry's signed trust_tier. A legitimate first-party com.maccrab.* entry
@@ -257,8 +268,14 @@ struct PluginCatalogFetcher {
         // Step 1: catalog index + signature.
         let catalogURL = catalogBase.appendingPathComponent("catalog.json")
         let catalogSigURL = catalogBase.appendingPathComponent("catalog.json.sig")
-        let catalogData = try await fetch(url: catalogURL)
-        let catalogSig = try await fetch(url: catalogSigURL)
+        let catalogData = try await fetch(
+            url: catalogURL,
+            maximumBytes: fetchLimits.maximumMetadataBytes
+        )
+        let catalogSig = try await fetch(
+            url: catalogSigURL,
+            maximumBytes: fetchLimits.maximumSignatureBytes
+        )
         try verify(data: catalogData, signature: catalogSig, url: catalogURL)
 
         // Step 2: locate plugin in index.
@@ -325,9 +342,17 @@ struct PluginCatalogFetcher {
         // plugin quarantines the on-disk copy instead of just refusing while the
         // stale copy keeps loading. (v1.19 dry-run Finding 1: the refusal `throw`
         // short-circuited the reconcile, so quarantine-on-revoke only self-healed
-        // when the operator happened to install some OTHER plugin.) Best-effort:
-        // a reconcile write failure must not block a non-revoked install.
-        try? await Self.reconcileInstalledQuarantine(against: revocations)
+        // when the operator happened to install some OTHER plugin.) A reconcile
+        // write failure is release-authority failure, not an optional side
+        // effect: abort rather than installing while another explicitly revoked
+        // plugin remains runnable.
+        try await Self.reconcileInstalledQuarantine(against: revocations)
+        if let serial = revocations.serial {
+            // Persist acceptance only after quarantine is durable. Otherwise a
+            // crash/write failure can advance the high-water/freshness state and
+            // make a later throttled sweep skip enforcement that never landed.
+            try trustState.recordRevocations(serial: serial)
+        }
         if case .refused(let hit) = RevocationEnforcer.evaluateInstall(
             pluginID: pluginID, version: resolvedVersion, against: revocations
         ) {
@@ -340,8 +365,14 @@ struct PluginCatalogFetcher {
         let entryPath = "catalog/\(pluginID).json"
         let entryURL = catalogBase.appendingPathComponent(entryPath)
         let entrySigURL = catalogBase.appendingPathComponent(entryPath + ".sig")
-        let entryData = try await fetch(url: entryURL)
-        let entrySig = try await fetch(url: entrySigURL)
+        let entryData = try await fetch(
+            url: entryURL,
+            maximumBytes: fetchLimits.maximumMetadataBytes
+        )
+        let entrySig = try await fetch(
+            url: entrySigURL,
+            maximumBytes: fetchLimits.maximumSignatureBytes
+        )
         try verify(data: entryData, signature: entrySig, url: entryURL)
 
         let parsed = try parseCatalogEntry(data: entryData)
@@ -417,7 +448,10 @@ struct PluginCatalogFetcher {
         }
 
         // Step 5: download bundle, verify artifact SHA-256.
-        let zipData = try await fetch(url: binaryURL)
+        let zipData = try await fetch(
+            url: binaryURL,
+            maximumBytes: fetchLimits.maximumArtifactBytes
+        )
         let actualHash = SHA256.hash(data: zipData).hexLower
         guard actualHash == versionEntry.artifactSHA256 else {
             throw PluginCatalogFetchError.artifactHashMismatch(
@@ -426,31 +460,17 @@ struct PluginCatalogFetcher {
             )
         }
 
-        // Step 6: stage in temp + unzip.
-        let fm = FileManager.default
-        let workDir = fm.temporaryDirectory.appendingPathComponent("maccrabctl-fetch-\(UUID().uuidString)")
-        try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: workDir) }
-
-        let zipPath = workDir.appendingPathComponent("bundle.zip")
-        try zipData.write(to: zipPath)
-        let extractDir = workDir.appendingPathComponent("extract")
-        try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        proc.arguments = ["-q", zipPath.path, "-d", extractDir.path]
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            throw PluginCatalogFetchError.unzipFailed(status: proc.terminationStatus)
-        }
-
-        let bundleDir = extractDir.appendingPathComponent(pluginID)
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: bundleDir.path, isDirectory: &isDir), isDir.boolValue else {
-            throw PluginCatalogFetchError.extractedBundleNotFound(extractDir: extractDir.path)
-        }
+        // Step 6: feed the artifact SHA-verified bytes directly through the
+        // bounded plugin ZIP boundary. bsdtar receives them over stdin—not a
+        // same-uid-mutable temp pathname—and the extractor returns an immutable
+        // four-file snapshot for every remaining trust check and installation.
+        let extraction = try SafePluginArchiveExtractor.extract(
+            archiveData: zipData,
+            pluginID: pluginID,
+            limits: .production
+        )
+        defer { extraction.cleanup() }
+        let bundleSnapshot = extraction.snapshot
 
         // O3 (granular, defense-in-depth): when the catalog pins real (non-zero)
         // per-component hashes, the extracted bundle's signature + manifest bytes
@@ -459,25 +479,26 @@ struct PluginCatalogFetcher {
         // placeholder-zero (pre-ceremony) values.
         let zeroHash = String(repeating: "0", count: 64)
         if let sigHash = versionEntry.signatureSHA256, sigHash != zeroHash, RaveSignerPin.isSHA256Hex(sigHash) {
-            let actual = (try? Data(contentsOf: bundleDir.appendingPathComponent("signature")))
-                .map { SHA256.hash(data: $0).hexLower }
+            let actual = SHA256.hash(data: bundleSnapshot.signatureData).hexLower
             guard actual == sigHash else {
                 throw PluginCatalogFetchError.bundleComponentHashMismatch(
-                    component: "signature", expected: sigHash, actual: actual ?? "<missing>")
+                    component: "signature", expected: sigHash, actual: actual)
             }
         }
         if let manHash = versionEntry.manifestSHA256, manHash != zeroHash, RaveSignerPin.isSHA256Hex(manHash) {
-            let actual = (try? Data(contentsOf: bundleDir.appendingPathComponent("manifest.json")))
-                .map { SHA256.hash(data: $0).hexLower }
+            let actual = SHA256.hash(data: bundleSnapshot.manifestData).hexLower
             guard actual == manHash else {
                 throw PluginCatalogFetchError.bundleComponentHashMismatch(
-                    component: "manifest.json", expected: manHash, actual: actual ?? "<missing>")
+                    component: "manifest.json", expected: manHash, actual: actual)
             }
         }
         // #7: the catalog-declared kind must match the bundle manifest's kind when
         // both declare one (catches a kind-spoof between catalog and bundle).
         if let catalogKind = parsed.kind,
-           let manifestKind = (try? TierBManifest.load(fromBundlePath: bundleDir.path))?.kind?.rawValue,
+           let manifestKind = (try? JSONDecoder().decode(
+               TierBManifest.self,
+               from: bundleSnapshot.manifestData
+           ))?.kind?.rawValue,
            catalogKind != manifestKind {
             throw PluginCatalogFetchError.kindMismatch(catalog: catalogKind, manifest: manifestKind)
         }
@@ -491,7 +512,7 @@ struct PluginCatalogFetcher {
         try enforceSignerPin(
             entry: parsed,
             pluginID: pluginID,
-            bundleDir: bundleDir,
+            bundleKeyData: bundleSnapshot.publicKeyData,
             allowUnpinnedPrerelease: allowUnpinnedPrerelease
         )
 
@@ -507,7 +528,7 @@ struct PluginCatalogFetcher {
         let catalogEndorsedSigner = parsed.signerPublicKeySHA256 != nil
         let installer = PluginInstaller()
         let result = try await installer.install(
-            sourceDir: bundleDir,
+            snapshot: bundleSnapshot,
             trustOnInstall: trustOnInstall || catalogEndorsedSigner,
             force: force
         )
@@ -545,11 +566,9 @@ struct PluginCatalogFetcher {
     private func enforceSignerPin(
         entry: ParsedEntry,
         pluginID: String,
-        bundleDir: URL,
+        bundleKeyData: Data,
         allowUnpinnedPrerelease: Bool
     ) throws {
-        let pubURL = bundleDir.appendingPathComponent("signing.key.pub")
-        let bundleKeyData = try? Data(contentsOf: pubURL)
         do {
             try RaveSignerPin.enforce(
                 expectedPin: entry.signerPublicKeySHA256,
@@ -578,7 +597,7 @@ struct PluginCatalogFetcher {
 
     // MARK: - HTTP
 
-    private func fetch(url: URL) async throws -> Data {
+    private func fetch(url: URL, maximumBytes: Int) async throws -> Data {
         // Route through SecureURLSession.shared (TLS 1.2 floor, ephemeral no-disk
         // cache, SSRF-redirect re-validation) — the hardened session every other
         // outbound caller uses. This is the highest-trust channel (it delivers
@@ -588,20 +607,59 @@ struct PluginCatalogFetcher {
         // and a stale CACHED copy would mask a newly published serial — for
         // revocations that means a just-revoked plugin could keep being treated
         // as trusted. Never serve these from cache.
+        guard Self.isAllowedFetchURL(url) else {
+            throw PluginCatalogFetchError.unsupportedFetchURL(url: url)
+        }
         var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
         req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        let (data, response) = try await SecureURLSession.shared.data(for: req)
+        let (bytes, response) = try await SecureURLSession.shared.bytes(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw PluginCatalogFetchError.httpFetchFailed(url: url, status: -1)
         }
         guard (200..<300).contains(http.statusCode) else {
             throw PluginCatalogFetchError.httpFetchFailed(url: url, status: http.statusCode)
         }
-        return data
+        let declared = http.expectedContentLength
+        if declared > Int64(maximumBytes) {
+            let actual = declared > Int64(Int.max) ? Int.max : Int(declared)
+            throw PluginCatalogFetchError.httpBodyTooLarge(
+                url: url,
+                maximumBytes: maximumBytes,
+                actualBytes: actual
+            )
+        }
+        var body = PluginFetchBodyAccumulator(maximumBytes: maximumBytes)
+        for try await byte in bytes {
+            guard body.append(byte) else {
+                throw PluginCatalogFetchError.httpBodyTooLarge(
+                    url: url,
+                    maximumBytes: maximumBytes,
+                    actualBytes: maximumBytes == Int.max ? Int.max : maximumBytes + 1
+                )
+            }
+        }
+        return body.data
+    }
+
+    static func isAllowedFetchURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host,
+              !host.isEmpty,
+              url.user == nil,
+              url.password == nil else { return false }
+        #if DEBUG
+        // Local signed-catalog rehearsals use an HTTP loopback server. This seam
+        // is compiled out alongside the debug-only URL rewrite and key override.
+        return scheme == "https"
+            || (scheme == "http" && LoopbackEndpoint.isLoopback(host: host))
+        #else
+        return scheme == "https"
+        #endif
     }
 
     private func verify(data: Data, signature: Data, url: URL) throws {
-        guard catalogPublicKey.isValidSignature(signature, for: data) else {
+        guard signature.count == PluginFetchLimits.production.maximumSignatureBytes,
+              catalogPublicKey.isValidSignature(signature, for: data) else {
             throw PluginCatalogFetchError.signatureVerifyFailed(url: url)
         }
     }
@@ -613,12 +671,20 @@ struct PluginCatalogFetcher {
     /// monotonic-serial anti-rollback high-water mark. Returns the verified
     /// list. Throws on bad signature (signatureVerifyFailed), malformed body
     /// (revocationsParseFailed), or an older serial (revocationsRollback).
-    /// Advances the persisted revocations high-water mark on accept.
+    /// Does not advance persisted acceptance: the install path records the
+    /// serial only after the derived quarantine set is durable.
     func fetchVerifiedRevocations() async throws -> RaveRevocationList {
         let revURL = catalogBase.appendingPathComponent("revocations.json")
         let revSigURL = catalogBase.appendingPathComponent("revocations.json.sig")
-        let revData = try await fetch(url: revURL)
-        let revSig = try await fetch(url: revSigURL)
+        let limits = PluginFetchLimits.production
+        let revData = try await fetch(
+            url: revURL,
+            maximumBytes: limits.maximumMetadataBytes
+        )
+        let revSig = try await fetch(
+            url: revSigURL,
+            maximumBytes: limits.maximumSignatureBytes
+        )
         try verify(data: revData, signature: revSig, url: revURL)
 
         let list: RaveRevocationList
@@ -638,7 +704,7 @@ struct PluginCatalogFetcher {
         case .rollback(let stored, let incoming):
             throw PluginCatalogFetchError.revocationsRollback(stored: stored, incoming: incoming)
         case .firstSeen, .accepted:
-            try? trustState.recordRevocations(serial: serial)
+            break
         }
         return list
     }

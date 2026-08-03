@@ -32,6 +32,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d /tmp/maccrab-rulemanifest.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Must stay byte-for-byte aligned with RuleChannelLimits.production in
+# Sources/maccrabctl/RuleChannelFetch.swift. The deterministic pre-release audit
+# extracts both sites and fails on drift, so the offline signer cannot produce a
+# manifest that every released client will reject.
+RULE_CHANNEL_MAX_MANIFEST_BYTES=8388608
+RULE_CHANNEL_MAX_RULES=2048
+
 # --- Ed25519 signer (CryptoKit — byte-identical to the client's verify) -------
 build_signer() {
   cat > "$WORK/signer.swift" <<'SWIFT'
@@ -88,9 +95,10 @@ build)
   python3 "$ROOT/Compiler/compile_rules.py" --input-dir "$RULES_DIR" --output-dir "$WORK/compiled" >/dev/null
 
   echo ">>> Assembling rules-manifest.json (serial=$SERIAL corpus=$CORPUS${MINVER:+ min=$MINVER})"
-  python3 - "$WORK/compiled" "$SERIAL" "$CORPUS" "$MINVER" "$OUT/rules-manifest.json" <<'PY'
+  python3 - "$WORK/compiled" "$SERIAL" "$CORPUS" "$MINVER" "$OUT/rules-manifest.json" "$RULE_CHANNEL_MAX_RULES" <<'PY'
 import sys, json, glob, os
-compiled, serial, corpus, minver, out = sys.argv[1:6]
+compiled, serial, corpus, minver, out, max_rules = sys.argv[1:7]
+max_rules = int(max_rules)
 rules = []
 for f in sorted(glob.glob(os.path.join(compiled, "**", "*.json"), recursive=True)):
     if os.path.basename(f) in ("manifest.json", ".bundle_version"): continue
@@ -101,12 +109,20 @@ for f in sorted(glob.glob(os.path.join(compiled, "**", "*.json"), recursive=True
     rules.append(r)
 if not rules:
     sys.exit("no compiled rules found — nothing to publish")
+if len(rules) > max_rules:
+    sys.exit(f"refusing {len(rules)} rules: released clients accept at most {max_rules}")
 m = {"serial": int(serial), "corpus_version": corpus, "rules": rules}
 if minver:
     m["min_maccrab_version"] = minver
 json.dump(m, open(out, "w"), indent=2, sort_keys=True)
 print(f"    {len(rules)} rule(s) inlined")
 PY
+
+  MANIFEST_BYTES="$(wc -c < "$OUT/rules-manifest.json" | tr -d '[:space:]')"
+  if [ "$MANIFEST_BYTES" -gt "$RULE_CHANNEL_MAX_MANIFEST_BYTES" ]; then
+    echo "ERROR: refusing ${MANIFEST_BYTES}-byte rules manifest; released clients accept at most ${RULE_CHANNEL_MAX_MANIFEST_BYTES} bytes" >&2
+    exit 2
+  fi
 
   echo ">>> Signing"
   build_signer

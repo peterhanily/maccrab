@@ -241,6 +241,221 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    @Test("Credential anchors aggregate short-lived polling processes by executable, file, and operation")
+    func credentialAnchorDedupUsesStableExecutableIdentity() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let rollingGraph = RollingCausalGraph(
+            store: store,
+            materializer: TraceMaterializer(store: store)
+        )
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        func credentialRead(
+            pid: Int32,
+            pidversion: UInt32,
+            at timestamp: Date,
+            executable: String = "/usr/local/bin/docker",
+            path: String = "/Users/me/.docker/config.json",
+            operation: String = "read"
+        ) -> Event {
+            Event(
+                timestamp: timestamp,
+                eventCategory: .file,
+                eventType: .info,
+                eventAction: operation,
+                process: processInfo(
+                    pid: pid,
+                    executable: executable,
+                    startTime: timestamp,
+                    auditIdentity: audit(pidversion: pidversion, pid: pid)
+                ),
+                file: FileInfo(
+                    path: path,
+                    name: (path as NSString).lastPathComponent,
+                    directory: (path as NSString).deletingLastPathComponent,
+                    action: .open
+                )
+            )
+        }
+
+        // Runtime reproduction shape: every Docker poll has a distinct kernel
+        // process identity, but it is the same executable reading the same file.
+        #expect(await bridge.process(credentialRead(
+            pid: 501, pidversion: 1, at: now
+        )).count == 1)
+        #expect(await bridge.process(credentialRead(
+            pid: 502, pidversion: 2, at: now.addingTimeInterval(60)
+        )).isEmpty)
+
+        // Read and write are intentionally separate facts even when every
+        // other component of the behavioural identity is unchanged.
+        #expect(await bridge.process(credentialRead(
+            pid: 505,
+            pidversion: 5,
+            at: now.addingTimeInterval(90),
+            operation: "write"
+        )).count == 1)
+
+        // A different executable remains a distinct behavioural fact.
+        #expect(await bridge.process(credentialRead(
+            pid: 503,
+            pidversion: 3,
+            at: now.addingTimeInterval(120),
+            executable: "/usr/bin/security"
+        )).count == 1)
+
+        // The same executable/file may materialize again after the bounded
+        // five-minute aggregation window.
+        #expect(await bridge.process(credentialRead(
+            pid: 504, pidversion: 4, at: now.addingTimeInterval(301)
+        )).count == 1)
+        await store.close()
+    }
+
+    @Test("Credential anchor identity prefers signer, then executable hash")
+    func credentialAnchorIdentityPrecedence() {
+        let file = FileNode(
+            path: "/Users/me/.aws/credentials",
+            pathHash: "credential-path-hash",
+            fileKind: .credentialFile,
+            firstSeen: now,
+            lastSeen: now
+        )
+
+        func process(
+            key: String,
+            path: String,
+            hash: String?,
+            teamId: String?,
+            signingId: String?
+        ) -> ProcessNode {
+            ProcessNode(
+                processKey: key,
+                pid: 500,
+                ppid: 1,
+                executablePath: path,
+                executableHash: hash,
+                signingTeamId: teamId,
+                signingIdentifier: signingId,
+                isAppleSigned: teamId != nil,
+                isNotarized: false,
+                startTime: now
+            )
+        }
+
+        func stableIdentity(_ process: ProcessNode) -> String {
+            let anchors = AnchorDetector.classify(.init(
+                processNode: process,
+                fileNode: file,
+                credentialOperation: "file_read"
+            ))
+            guard let first = anchors.first,
+                  case .credentialAccess(_, let identity, _, _) = first else {
+                Issue.record("expected credential anchor")
+                return ""
+            }
+            return identity
+        }
+
+        let signedA = process(
+            key: "signed-a",
+            path: "/Applications/Tool.app/Contents/MacOS/tool",
+            hash: "hash-a",
+            teamId: "TEAM123456",
+            signingId: "com.example.tool"
+        )
+        let signedB = process(
+            key: "signed-b",
+            path: "/opt/relocated/tool",
+            hash: "hash-b",
+            teamId: "TEAM123456",
+            signingId: "com.example.tool"
+        )
+        #expect(stableIdentity(signedA) == "signer:TEAM123456:com.example.tool")
+        #expect(stableIdentity(signedB) == stableIdentity(signedA))
+
+        let hashA = process(
+            key: "hash-a",
+            path: "/opt/tool-v1/bin/tool",
+            hash: "shared-sha256",
+            teamId: nil,
+            signingId: nil
+        )
+        let hashB = process(
+            key: "hash-b",
+            path: "/opt/tool-v2/bin/tool",
+            hash: "shared-sha256",
+            teamId: nil,
+            signingId: nil
+        )
+        #expect(stableIdentity(hashA) == "sha256:shared-sha256")
+        #expect(stableIdentity(hashB) == stableIdentity(hashA))
+    }
+
+    @Test("Recent anchor keys remain hard-capped under an in-window cardinality flood")
+    func recentAnchorDedupCacheCapacityEviction() {
+        var cache = RecentAnchorDedupCache(capacity: 8, window: 300)
+
+        for index in 0..<10_000 {
+            cache.record("credential-\(index)", at: now)
+        }
+
+        #expect(cache.count == 8)
+        #expect(cache.evictionMetadataCount <= 16)
+        #expect(!cache.contains("credential-0", at: now.addingTimeInterval(1)))
+        #expect(cache.contains("credential-9992", at: now.addingTimeInterval(1)))
+        #expect(cache.contains("credential-9999", at: now.addingTimeInterval(1)))
+    }
+
+    @Test("Failed credential materialization does not consume the dedup window")
+    func failedCredentialMaterializationCanRetryImmediately() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let rollingGraph = RollingCausalGraph(
+            store: store,
+            materializer: TraceMaterializer(store: store)
+        )
+        let file = FileNode(
+            path: "/Users/me/.aws/credentials",
+            pathHash: "retry-credential",
+            fileKind: .credentialFile,
+            firstSeen: now,
+            lastSeen: now
+        )
+        let anchor = AnchorTrigger.credentialAccess(
+            processEntityId: "process:retry-process",
+            stableProcessIdentity: "path:/usr/bin/cat",
+            fileEntityId: file.canonicalId,
+            operation: "file_read"
+        )
+
+        // The anchor entity is absent, so the real materializer fails before
+        // persisting a trace. That failure must leave the key retryable.
+        let failed = await rollingGraph.materializeAnchors(
+            [anchor],
+            eventId: "failed-event",
+            timestamp: now
+        )
+        #expect(failed.isEmpty)
+
+        try await store.upsertEntity(file.toEntity(source: "retry-test"))
+        let retried = await rollingGraph.materializeAnchors(
+            [anchor],
+            eventId: "retry-event",
+            timestamp: now.addingTimeInterval(1)
+        )
+        #expect(retried.count == 1)
+
+        let duplicate = await rollingGraph.materializeAnchors(
+            [anchor],
+            eventId: "duplicate-event",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(duplicate.isEmpty)
+        await store.close()
+    }
+
     @Test("mapAction wires the v1.17.4 file actions into the causal graph (ES-OPEN-3)")
     func mapActionCoversNewFileActions() async throws {
         let (store, dbPath) = try await makeStore()

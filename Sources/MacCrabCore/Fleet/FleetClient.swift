@@ -9,6 +9,7 @@
 // so anything it returns is trivially poisonable and must never flow
 // back into endpoint state.
 
+import CryptoKit
 import Foundation
 import os.log
 
@@ -174,15 +175,14 @@ public actor FleetClient {
     // MARK: - Utilities
 
     private static func hardwareUUID() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
-        process.arguments = ["-rd1", "-c", "IOPlatformExpertDevice"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/sbin/ioreg",
+            arguments: ["-rd1", "-c", "IOPlatformExpertDevice"],
+            timeout: 5,
+            maximumOutputBytes: 1 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded else { return nil }
+        let output = String(data: result.output, encoding: .utf8) ?? ""
         // Extract IOPlatformUUID
         if let range = output.range(of: "IOPlatformUUID\" = \"") {
             let start = range.upperBound
@@ -194,19 +194,8 @@ public actor FleetClient {
     }
 
     private static func sha256(_ string: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
-        process.arguments = ["-a", "256"]
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = outputPipe
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        inputPipe.fileHandleForWriting.write(string.data(using: .utf8) ?? Data())
-        inputPipe.fileHandleForWriting.closeFile()
-        process.waitUntilExit()
-        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return String(output.split(separator: " ").first ?? "unknown")
+        SHA256.hash(data: Data(string.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

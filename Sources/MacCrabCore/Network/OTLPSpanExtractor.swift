@@ -103,7 +103,10 @@ public enum OTLPSpanExtractor {
                     agentTool: agentTool,
                     providerName: providerName,
                     legacyGenAiSystem: legacyGenAi,
-                    attributesJson: sanitised.attributesJson
+                    attributesJson: sanitised.attributesJson,
+                    // Loopback reachability authenticates neither process nor
+                    // uid. All OTLP content remains advisory/self-reported.
+                    trust: .unauthenticatedSelfReported
                 ))
             }
         }

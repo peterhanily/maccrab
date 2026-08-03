@@ -19,8 +19,8 @@
 //   3. The `maxPages` parameter caps the page reclaim per call so
 //      one sweep can never stall the actor for too long.
 //   4. The shared `StoragePragmas.runIncrementalVacuum` correctly
-//      detects the runtime auto_vacuum mode and never throws on
-//      a closed/read-only DB.
+//      detects the runtime auto_vacuum mode and performs no implicit
+//      WAL checkpoint; persistent callers own the path/floor-aware gates.
 //
 // Pre-existing observation pinned by `pragmaOrderMatters`: the
 // current StoragePragmas order (journal_mode WAL FIRST, then
@@ -33,6 +33,7 @@
 
 import Testing
 import Foundation
+import Darwin
 import CSQLCipher
 @testable import MacCrabCore
 
@@ -121,6 +122,33 @@ struct StoragePragmasIncrementalVacuumTests {
     @Test("Hard cap of 200_000 pages is enforced")
     func enforcesHardCap() async throws {
         #expect(StoragePragmas.incrementalVacuumHardCap == 200_000)
+    }
+
+    @Test("Incremental-vacuum errors preserve SQLite rc and VFS errno")
+    func errorPreservesStorageFailureMetadata() {
+        for metadata in [
+            SQLiteFailureMetadata(
+                resultCode: SQLITE_FULL,
+                extendedResultCode: SQLITE_FULL,
+                systemErrno: 0
+            ),
+            SQLiteFailureMetadata(
+                resultCode: SQLITE_IOERR,
+                extendedResultCode: SQLITE_IOERR | Int32(3 << 8),
+                systemErrno: ENOSPC
+            ),
+            SQLiteFailureMetadata(
+                resultCode: SQLITE_IOERR,
+                extendedResultCode: SQLITE_IOERR | Int32(4 << 8),
+                systemErrno: EDQUOT
+            ),
+        ] {
+            let error = StoragePragmas.IncrementalVacuumError.sqliteFailure(
+                context: "injected", message: "disk exhausted", metadata: metadata)
+            #expect(error.sqliteFailureMetadata == metadata)
+            #expect(error.sqliteFailureMetadata.isStorageExhaustion)
+            #expect(error.localizedDescription.contains("system_errno="))
+        }
     }
 
     @Test("readAutoVacuumMode returns 0 for NONE, 2 for INCREMENTAL")

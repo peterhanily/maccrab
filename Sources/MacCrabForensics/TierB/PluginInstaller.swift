@@ -19,6 +19,7 @@
 // a release chapter (plan §12). For now: installs from a local
 // directory and trust-keys are operator-managed via maccrabctl.
 
+import Darwin
 import Foundation
 import CryptoKit
 
@@ -367,18 +368,43 @@ public actor PluginInstaller {
         trustOnInstall: Bool = false,
         force: Bool = false
     ) async throws -> InstalledPlugin {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: sourceDir.path, isDirectory: &isDir), isDir.boolValue else {
-            throw InstallError.sourceNotADirectory(path: sourceDir.path)
+        let snapshot: PluginBundleSnapshot
+        do {
+            snapshot = try PluginBundleSnapshot.capture(sourceDirectory: sourceDir)
+        } catch let error as PluginBundleSnapshot.SnapshotError {
+            switch error {
+            case .sourceNotDirectory:
+                throw InstallError.sourceNotADirectory(path: sourceDir.path)
+            case .unsafeEntry(let path):
+                // Preserve the established public error for link/special-file
+                // rejection while the snapshot boundary now catches both.
+                throw InstallError.symlinkInSourceBundle(path: path)
+            case .missingEntry(let path) where path.hasSuffix("manifest.json"):
+                throw InstallError.manifestUnreadable(message: error.description)
+            default:
+                throw InstallError.ioError(message: error.description)
+            }
         }
+        return try await install(
+            snapshot: snapshot,
+            trustOnInstall: trustOnInstall,
+            force: force
+        )
+    }
+
+    /// Install from an immutable byte capture. Catalog installs use this entry
+    /// point directly: the bytes checked against catalog component hashes and
+    /// the endorsed publisher key are exactly the bytes verified and written.
+    public func install(
+        snapshot: PluginBundleSnapshot,
+        trustOnInstall: Bool = false,
+        force: Bool = false
+    ) async throws -> InstalledPlugin {
+        let fm = FileManager.default
         try fm.createDirectory(at: pluginsRoot, withIntermediateDirectories: true)
 
         // Decode manifest to extract plugin id.
-        let manifestURL = sourceDir.appendingPathComponent("manifest.json")
-        guard let manifestData = try? Data(contentsOf: manifestURL) else {
-            throw InstallError.manifestUnreadable(message: "could not read \(manifestURL.path)")
-        }
+        let manifestData = snapshot.manifestData
         guard let obj = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else {
             throw InstallError.manifestUnreadable(message: "manifest is not valid JSON")
         }
@@ -389,17 +415,11 @@ public actor PluginInstaller {
         guard let pluginID = obj["id"] as? String, !pluginID.isEmpty else {
             throw InstallError.missingPluginID
         }
-        // Source bundle must not contain symlinks. The
-        // signature was computed against the bytes the verifier
-        // sees — if the source has a symlink to /etc/passwd,
-        // those bytes get incorporated into the install, then
-        // an attacker swaps the symlink target post-install.
-        try Self.assertNoSymlinks(in: sourceDir)
 
         // Verify against the current trust+revocation set.
         let trustedKeys = await currentTrustedKeys()
         let revokedKeys = await currentRevokedKeys()
-        let publicKeyData = (try? Data(contentsOf: sourceDir.appendingPathComponent("signing.key.pub"))) ?? Data()
+        let publicKeyData = snapshot.publicKeyData
         let publicKeyHex = publicKeyData.map { String(format: "%02x", $0) }.joined()
 
         var verifyTrust = trustedKeys
@@ -412,7 +432,7 @@ public actor PluginInstaller {
         )
         do {
             _ = try PluginSignatureVerifier.verify(
-                bundle: PluginSignatureVerifier.BundleLayout(bundleRoot: sourceDir),
+                snapshot: snapshot,
                 trustStore: trustStore
             )
         } catch {
@@ -432,10 +452,19 @@ public actor PluginInstaller {
         }
         let tmpURL = pluginsRoot.appendingPathComponent("\(pluginID).tmp.\(UUID().uuidString)")
         do {
-            try fm.copyItem(at: sourceDir, to: tmpURL)
+            try Self.materialize(snapshot, at: tmpURL)
+            // Fail closed if another same-uid process found and changed the
+            // named staging directory while it was being written. This check
+            // is defense in depth; all trust decisions already use `snapshot`.
+            guard try PluginBundleSnapshot.capture(sourceDirectory: tmpURL) == snapshot else {
+                throw InstallError.ioError(
+                    message: "materialized plugin bytes differ from verified snapshot"
+                )
+            }
         } catch {
             try? fm.removeItem(at: tmpURL)
-            throw InstallError.ioError(message: error.localizedDescription)
+            if let installError = error as? InstallError { throw installError }
+            throw InstallError.ioError(message: String(describing: error))
         }
         do {
             if alreadyInstalled { try fm.removeItem(at: destURL) }
@@ -455,6 +484,22 @@ public actor PluginInstaller {
             ofItemAtPath: destURL.appendingPathComponent("binary").path
         )
 
+        // The destination is same-uid writable by design, so execution always
+        // re-verifies it. Still require it to equal the authorized snapshot at
+        // install completion before persisting publisher trust; an attacker can
+        // never turn this install invocation into a trust-store signing oracle.
+        do {
+            guard try PluginBundleSnapshot.capture(sourceDirectory: destURL) == snapshot else {
+                throw InstallError.ioError(
+                    message: "installed plugin bytes differ from verified snapshot"
+                )
+            }
+        } catch let error as InstallError {
+            throw error
+        } catch {
+            throw InstallError.ioError(message: String(describing: error))
+        }
+
         if trustOnInstall {
             try await addTrustedKey(publicKeyHex)
         }
@@ -463,6 +508,72 @@ public actor PluginInstaller {
             installRoot: destURL.path,
             publicKeyHex: publicKeyHex
         )
+    }
+
+    private static func materialize(
+        _ snapshot: PluginBundleSnapshot,
+        at directory: URL
+    ) throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let directoryFD = directory.path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard directoryFD >= 0 else {
+            throw InstallError.ioError(
+                message: "could not pin install staging directory: errno \(errno)"
+            )
+        }
+        defer { Darwin.close(directoryFD) }
+
+        for name in PluginBundleSnapshot.requiredFileNames.sorted() {
+            guard let data = snapshot.data(at: name) else {
+                throw InstallError.ioError(message: "snapshot missing \(name)")
+            }
+            let mode: mode_t = name == "binary" ? 0o700 : 0o600
+            let descriptor = name.withCString {
+                Darwin.openat(
+                    directoryFD,
+                    $0,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    mode
+                )
+            }
+            guard descriptor >= 0 else {
+                throw InstallError.ioError(
+                    message: "could not create staged \(name): errno \(errno)"
+                )
+            }
+
+            let wroteAll = data.withUnsafeBytes { bytes -> Bool in
+                guard let base = bytes.baseAddress else { return data.isEmpty }
+                var offset = 0
+                while offset < bytes.count {
+                    let count = Darwin.write(
+                        descriptor,
+                        base.advanced(by: offset),
+                        bytes.count - offset
+                    )
+                    if count < 0 {
+                        if errno == EINTR { continue }
+                        return false
+                    }
+                    guard count > 0 else { return false }
+                    offset += count
+                }
+                return true
+            }
+            let synchronized = wroteAll && Darwin.fsync(descriptor) == 0
+            Darwin.close(descriptor)
+            guard synchronized else {
+                throw InstallError.ioError(
+                    message: "could not write staged \(name): errno \(errno)"
+                )
+            }
+        }
     }
 
     /// Uninstall by plugin id. Removes the bundle directory.

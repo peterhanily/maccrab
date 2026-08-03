@@ -63,6 +63,34 @@ struct ESHelpersDecodeTests {
 
 @Suite("EsloggerCollector: sequence-gap drop math (v1.18)")
 struct EsloggerSequenceGapTests {
+    @Test("raw sequence extraction happens before intentional event muting")
+    func rawSequenceExtraction() {
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"path":"/System/noise","global_seq_num" : 184467}"#.utf8)
+        ) == 184_467)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"global_seq_num":0}"#.utf8)
+        ) == 0)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"other":42}"#.utf8)
+        ) == nil)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"global_seq_num":18446744073709551616}"#.utf8)
+        ) == nil)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"metadata":{"global_seq_num":999},"global_seq_num":42}"#.utf8)
+        ) == 42)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"path":"\\\"global_seq_num\\\":999","global_seq_num":43}"#.utf8)
+        ) == 43)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"global_seq_num":"44"}"#.utf8)
+        ) == nil)
+        #expect(EsloggerCollector.rawGlobalSequenceNumber(
+            in: Data(#"{"global_seq_num":45x}"#.utf8)
+        ) == nil)
+    }
+
 
     @Test("first observation reports no drop")
     func firstObservation() {
@@ -89,6 +117,35 @@ struct EsloggerSequenceGapTests {
     func noUnderflow() {
         #expect(EsloggerCollector.sequenceGap(previous: 10, current: 10) == 0)   // duplicate
         #expect(EsloggerCollector.sequenceGap(previous: 10, current: 5) == 0)    // out of order
+
+        let outOfOrder = EsloggerCollector.sequenceObservation(
+            previous: 10,
+            current: 5
+        )
+        #expect(outOfOrder.highWater == 10)
+        #expect(outOfOrder.gap == 0)
+        let next = EsloggerCollector.sequenceObservation(
+            previous: outOfOrder.highWater,
+            current: 11
+        )
+        #expect(next.highWater == 11)
+        #expect(next.gap == 0)
+    }
+
+    @Test("maximum sequence values cannot overflow gap arithmetic")
+    func maximumSequenceIsSafe() {
+        #expect(EsloggerCollector.sequenceGap(
+            previous: UInt64.max,
+            current: UInt64.max
+        ) == 0)
+        #expect(EsloggerCollector.sequenceGap(
+            previous: UInt64.max - 1,
+            current: UInt64.max
+        ) == 0)
+        #expect(EsloggerCollector.sequenceGap(
+            previous: 1,
+            current: UInt64.max
+        ) == UInt64.max - 2)
     }
 }
 

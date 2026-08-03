@@ -21,8 +21,8 @@
 #             embedded.provisionprofile     (same profile)
 #             MacOS/com.maccrab.agent       (ES daemon, signed with ES entitlement)
 #             _CodeSignature/CodeResources
-#   bin/maccrabctl                          (CLI tool, no entitlement)
-#   bin/maccrab-mcp                         (MCP server, no entitlement)
+#   bin/maccrabctl                          (CLI tool, shared-Keychain entitlement only)
+#   bin/maccrab-mcp                         (MCP server, shared-Keychain entitlement only)
 #   install.sh                              (thin wrapper; cask + manual installers call this)
 #   compiled_rules/*.json
 #
@@ -40,7 +40,7 @@
 #   scripts/build-release.sh unsigned-build    # stage 1: compile + rules + manifest
 #   scripts/build-release.sh assemble          # stage 2: .app + sysext bundle layout
 #   scripts/build-release.sh sign              # stage 3: codesign + Sparkle embed + guards
-#   scripts/build-release.sh publish           # stage 4: DMG + notarize + release.json + cask
+#   scripts/build-release.sh publish           # stage 4: DMG + notarize (+ GA metadata)
 #
 # Stage handoff: in single-stage mode the staging tree persists at a
 # DETERMINISTIC path ($PROJECT_DIR/.build/maccrab-stage) so stage N can
@@ -51,8 +51,51 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
+PROJECT_DIR="$(/usr/bin/dirname "$SCRIPT_DIR")"
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CONFIG \
+    GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \
+    GIT_CONFIG_PARAMETERS GIT_EXEC_PATH GIT_CEILING_DIRECTORIES \
+    GIT_DISCOVERY_ACROSS_FILESYSTEM
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
+GIT_BIN=/usr/bin/git
+SWIFT_BIN=/usr/bin/swift
+CODESIGN_BIN=/usr/bin/codesign
+SECURITY_BIN=/usr/bin/security
+SHASUM_BIN=/usr/bin/shasum
+XCODEBUILD_BIN=/usr/bin/xcodebuild
+XCRUN_BIN=/usr/bin/xcrun
+SPCTL_BIN=/usr/sbin/spctl
+for required_tool in "$GIT_BIN" "$SWIFT_BIN" "$CODESIGN_BIN" "$SECURITY_BIN" \
+        "$SHASUM_BIN" "$XCODEBUILD_BIN" "$XCRUN_BIN" "$SPCTL_BIN"; do
+    if [ ! -x "$required_tool" ]; then
+        echo "ERROR: fixed release tool is unavailable: $required_tool" >&2
+        exit 1
+    fi
+done
+# Trusted parser library. It reads env files as allowlisted data; external env
+# files and inter-stage state are never shell-sourced.
+# shellcheck source=scripts/release-env.sh
+source "$SCRIPT_DIR/release-env.sh"
+
+# Credentials may arrive through the invoking environment, but unsigned Swift
+# builds, package plugins, rule compilation, and assembly must never inherit
+# them. Preserve explicit caller overrides only as unexported shell variables;
+# the fixed signing/notary phase reintroduces the minimum values deliberately.
+unset MACCRAB_CALLER_DEVELOPER_ID MACCRAB_CALLER_APPLE_ID \
+    MACCRAB_CALLER_APPLE_TEAM_ID MACCRAB_CALLER_NOTARIZE_PASSWORD \
+    MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE
+MACCRAB_CALLER_DEVELOPER_ID="${DEVELOPER_ID:-}"
+MACCRAB_CALLER_APPLE_ID="${APPLE_ID:-}"
+MACCRAB_CALLER_APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
+MACCRAB_CALLER_NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}"
+MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
+unset_maccrab_signing_env
+unset_maccrab_publisher_env
 
 # ─── Stage selection ─────────────────────────────────────────────────
 # First positional arg selects the stage. Absent / "all" runs the full
@@ -75,8 +118,19 @@ esac
 # we never accidentally ship MacCrab-v1.0.0.dmg when the operator
 # forgets to pass VERSION=. Falls back to 1.0.0 only if there are
 # no tags at all (fresh clone, dev sandbox).
-DEFAULT_VERSION="$(cd "$PROJECT_DIR" && git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+if [ -n "${VERSION:-}" ]; then
+    DEFAULT_VERSION=$VERSION
+elif [ "${MACCRAB_TRACKED_EXPORT:-0}" = "1" ]; then
+    echo "ERROR: tracked-only release builds require an explicit VERSION" >&2
+    exit 2
+else
+    DEFAULT_VERSION="$(cd "$PROJECT_DIR" && $GIT_BIN describe --tags --abbrev=0 2>/dev/null | /usr/bin/sed 's/^v//')"
+fi
 VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+    echo "ERROR: VERSION must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N" >&2
+    exit 2
+fi
 
 # v1.10.0 audit fix: derive a unique CFBundleVersion (build number)
 # per build so sysextd can tell two builds of the same VERSION apart
@@ -104,6 +158,10 @@ VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
 # unsigned-build and re-reads it in later stages.
 if [ -z "${BUILD_NUMBER:-}" ]; then
     export BUILD_NUMBER="${VERSION}.$(date +%s)"
+fi
+if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(\.[0-9]+)?$ ]]; then
+    echo "ERROR: BUILD_NUMBER has an unsafe/invalid Sparkle build shape: $BUILD_NUMBER" >&2
+    exit 2
 fi
 
 # Build channel. `release` is the default and reproduces the historical
@@ -137,7 +195,7 @@ BUILD_DIR="$PROJECT_DIR/.build/release"
 #                 `unsigned-build` clears it, `publish` removes it at the
 #                 end just like the all-stages flow did).
 if [ "$STAGE" = "all" ]; then
-    STAGING_DIR="/tmp/maccrab-release-$$"
+    STAGING_DIR="/private/tmp/maccrab-release-$$"
     # Clean up the staging dir on any exit path. Without this trap, every
     # failed release run (Sparkle resolve failure, codesign failure,
     # hdiutil failure, notarize timeout) leaks a multi-MB staged dir to
@@ -152,9 +210,63 @@ fi
 cd "$PROJECT_DIR"
 
 # State carried between stage processes. unsigned-build writes it; the
-# later stages source it so VERSION / BUILD_NUMBER / SU_* stay pinned
+# later stages parse it as allowlisted data so VERSION / BUILD_NUMBER / SU_* stay pinned
 # to the values the bundle was actually stamped with.
 STAGE_ENV="$STAGING_DIR/.build-release-stage-env"
+
+ENV_FILE="$HOME/.maccrab-release-env"
+
+load_signing_phase_values() {
+    unset_maccrab_signing_env
+    if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
+        load_maccrab_env_file signing "$ENV_FILE"
+    fi
+    [ -z "$MACCRAB_CALLER_DEVELOPER_ID" ] || DEVELOPER_ID="$MACCRAB_CALLER_DEVELOPER_ID"
+    [ -z "$MACCRAB_CALLER_APPLE_ID" ] || APPLE_ID="$MACCRAB_CALLER_APPLE_ID"
+    [ -z "$MACCRAB_CALLER_APPLE_TEAM_ID" ] || APPLE_TEAM_ID="$MACCRAB_CALLER_APPLE_TEAM_ID"
+    [ -z "$MACCRAB_CALLER_NOTARIZE_PASSWORD" ] || NOTARIZE_PASSWORD="$MACCRAB_CALLER_NOTARIZE_PASSWORD"
+    [ -z "$MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE" ] \
+        || NOTARIZE_KEYCHAIN_PROFILE="$MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE"
+}
+
+require_tracked_signing_inputs() {
+    local input
+    if [ "${MACCRAB_TRACKED_EXPORT:-0}" = "1" ]; then
+        if [ -e "$PROJECT_DIR/.git" ] || [ -e "$PROJECT_DIR/.swiftpm" ]; then
+            echo "ERROR: tracked-only build export contains forbidden Git/SwiftPM local state" >&2
+            return 1
+        fi
+        if ! [[ "${MACCRAB_RELEASE_SOURCE_COMMIT:-}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "${MACCRAB_RELEASE_SOURCE_TREE:-}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "ERROR: tracked-only build lacks a valid source commit/tree attestation" >&2
+            return 1
+        fi
+        for input in \
+            Xcode/Resources/MacCrabApp.entitlements \
+            Xcode/Resources/MacCrabAgent.entitlements \
+            Xcode/Resources/MacCrabTools.entitlements; do
+            if [ ! -f "$input" ] || [ -L "$input" ]; then
+                echo "ERROR: tracked-only export lacks a regular signing input: $input" >&2
+                return 1
+            fi
+        done
+        return 0
+    fi
+    for input in \
+        Xcode/Resources/MacCrabApp.entitlements \
+        Xcode/Resources/MacCrabAgent.entitlements \
+        Xcode/Resources/MacCrabTools.entitlements; do
+        if ! $GIT_BIN ls-files --error-unmatch "$input" >/dev/null 2>&1; then
+            echo "ERROR: release signing input is not tracked by Git: $input" >&2
+            echo "       A public source tag must describe every shipped capability." >&2
+            return 1
+        fi
+        if ! $GIT_BIN diff --quiet -- "$input" || ! $GIT_BIN diff --cached --quiet -- "$input"; then
+            echo "ERROR: release signing input differs from HEAD: $input" >&2
+            return 1
+        fi
+    done
+}
 
 # ─── Sparkle config: single source of truth ──────────────────────────
 # The shipped app's Info.plist (heredoc below) used to HARDCODE SUPublicEDKey
@@ -174,12 +286,6 @@ load_sparkle_config() {
     fi
 }
 
-# Source credentials from env file if it exists
-ENV_FILE="$HOME/.maccrab-release-env"
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
-fi
-
 # ═════════════════════════════════════════════════════════════════════
 # STAGE 1 — unsigned-build
 #   Compile both architectures, lipo universal binaries, compile rules,
@@ -189,6 +295,9 @@ fi
 #   self-hosted reproducible-build CI runs.
 # ═════════════════════════════════════════════════════════════════════
 stage_unsigned_build() {
+    if [ "${MACCRAB_REQUIRE_TRACKED_RELEASE_INPUTS:-0}" = "1" ]; then
+        require_tracked_signing_inputs
+    fi
     load_sparkle_config
     echo "Building MacCrab v$VERSION..."
     echo "  CFBundleShortVersionString: $VERSION"
@@ -210,6 +319,11 @@ SU_FEEDURL="$SU_FEEDURL"
 CHANNEL="$CHANNEL"
 SU_AUTOCHECK="$SU_AUTOCHECK"
 STAGE_ENV_EOF
+    chmod 0600 "$STAGE_ENV"
+
+    # Copy a byte-for-byte allowlist of PyYAML into private staging before any
+    # Python import. The source is never imported; the staged copy is re-hashed.
+    "$SCRIPT_DIR/prepare-release-pyyaml.sh" "$STAGING_DIR/release-python" >/dev/null
 
     # ─── Compile for both architectures ──────────────────────────────
     # Each arch MUST build. `| tail -1` collapses the log to its last line,
@@ -219,16 +333,21 @@ STAGE_ENV_EOF
     # loop below copied as "arm64 only" while stage_publish still labeled the
     # DMG "universal" — handing Intel users an un-runnable app with no gate.
     echo "  Building arm64..."
-    if ! swift build -c release --arch arm64 2>&1 | tail -1; then
+    if ! $SWIFT_BIN build -c release --arch arm64 2>&1 | /usr/bin/tail -1; then
         echo "  ✗ ABORT: arm64 release build failed — refusing to ship." >&2
         exit 1
     fi
 
     echo "  Building x86_64..."
-    if ! swift build -c release --arch x86_64 2>&1 | tail -1; then
+    if ! $SWIFT_BIN build -c release --arch x86_64 2>&1 | /usr/bin/tail -1; then
         echo "  ✗ ABORT: x86_64 release build failed — refusing to ship a single-arch build mislabeled \"universal\"." >&2
         exit 1
     fi
+
+    # `swift build` resolved the exact Sparkle pin. Authenticate the checkout,
+    # binary-artifact checksum and release helper hashes now, while this clean
+    # resolution is the source for both the framework and later appcast tools.
+    "$SCRIPT_DIR/check-release-dependencies.sh" >/dev/null
 
     # Create universal binaries for every product. maccrabd still builds
     # (it's the legacy SPM target used during `swift run` development) but
@@ -259,7 +378,10 @@ STAGE_ENV_EOF
 
     # ─── Rules ───────────────────────────────────────────────────────
     echo "  Compiling detection rules..."
-    python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
+    "$SCRIPT_DIR/run-release-python.sh" "$STAGING_DIR/release-python" \
+        "$PROJECT_DIR/Compiler/compile_rules.py" \
+        --input-dir "$PROJECT_DIR/Rules/" \
+        --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
     cp -r Rules/ "$STAGING_DIR/rules_source/"
     # v1.12.0: graph rules (Rules/graph/*.json) are already JSON — no
     # compilation step. Stage them next to the compiled single-event
@@ -293,7 +415,7 @@ STAGE_ENV_EOF
                 | sort \
                 | while IFS= read -r f; do
                     rel="${f#./}"
-                    sum=$(shasum -a 256 "$f" | awk '{print $1}')
+                    sum=$($SHASUM_BIN -a 256 "$f" | /usr/bin/awk '{print $1}')
                     echo "    \"$rel\": \"$sum\","
                 done \
                 | sed '$ s/,$//'     # trim trailing comma on final entry
@@ -352,28 +474,17 @@ stage_assemble() {
     echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
 
     # v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
-    # plus a vendored copy of PyYAML's pure-Python module so the dashboard
+    # plus a hash-locked copy of PyYAML's pure-Python module so the dashboard
     # can compile user-edited YAML to the daemon-readable JSON format on
-    # save. macOS ships Python 3 at /usr/bin/python3 but NOT PyYAML, so we
-    # vendor PyYAML's source files (~624 KB, no C extension required —
-    # the pure-Python fallback works fine for our throughput).
+    # save. The copy was staged and verified before rule compilation; never
+    # import or copy directly from the release user's site-packages here.
     mkdir -p "$APP/Contents/Resources/Compiler/yaml"
     cp Compiler/compile_rules.py "$APP/Contents/Resources/Compiler/compile_rules.py"
-    PYYAML_SRC=$(/usr/bin/python3 -c "import yaml, os; print(os.path.dirname(yaml.__file__))" 2>/dev/null)
-    if [ -n "$PYYAML_SRC" ] && [ -d "$PYYAML_SRC" ]; then
-        cp "$PYYAML_SRC"/*.py "$APP/Contents/Resources/Compiler/yaml/"
-        echo "    ✓ Bundled Compiler + PyYAML ($(ls "$APP/Contents/Resources/Compiler/yaml/" | wc -l | tr -d ' ') yaml/ files) → Resources/Compiler/"
-    else
-        # v1.12.0 RC25 (release-eng): hard failure when PyYAML is missing.
-        # Pre-fix this was a warning, so a CI machine without PyYAML
-        # silently shipped a DMG whose in-dashboard Sigma editor couldn't
-        # compile rules. Fail loud so the release pipeline never produces
-        # a half-working artifact.
-        echo "    ✗ ERROR: PyYAML not found at build time. The in-dashboard Sigma editor"
-        echo "      requires it. Aborting release build."
-        echo "      Install with: /usr/bin/python3 -m pip install --user pyyaml"
-        exit 1
-    fi
+    "$SCRIPT_DIR/check-release-pyyaml.sh" "$STAGING_DIR/release-python" >/dev/null
+    cp "$STAGING_DIR/release-python/yaml/"*.py "$APP/Contents/Resources/Compiler/yaml/"
+    cp "$SCRIPT_DIR/release-dependencies.lock" "$APP/Contents/Resources/Compiler/"
+    cp "$SCRIPT_DIR/release-pyyaml.sha256" "$APP/Contents/Resources/Compiler/"
+    echo "    ✓ Bundled Compiler + hash-locked PyYAML ($(ls "$APP/Contents/Resources/Compiler/yaml/" | wc -l | tr -d ' ') yaml/ files) → Resources/Compiler/"
 
     # v1.12.0 fix (Edit-YAML): ship the rule YAML sources inside the .app
     # at Resources/rules/, named by the rule's Sigma `id:` UUID. The
@@ -440,10 +551,38 @@ stage_assemble() {
             break
         fi
     done
-    if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
-        echo "    ✗ WARNING: MacCrab_MacCrabCore.bundle not found in .build/*/release/"
-        echo "      TyposquatDatabase will fall back to in-source starter corpus."
+    # The rule channel is release-disabled pending an owner-approved offline key
+    # rotation/custody record. Check the FINAL app tree that will be code-signed
+    # and placed in the DMG; checking source alone would miss a stale resource.
+    BUNDLED_RULES_PUB="$APP/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub"
+    if ! "$PROJECT_DIR/scripts/check-rules-trust-anchor.sh" --artifact-key "$BUNDLED_RULES_PUB"; then
+        echo "    ✗ Disabled rule-channel invariant failed in final MacCrab.app" >&2
+        exit 1
     fi
+    echo "    ✓ Final MacCrab.app contains no rule-channel trust anchor"
+    for required_bundle in MacCrab_MacCrabCore.bundle MacCrab_MacCrabApp.bundle; do
+        if [ ! -d "$APP/Contents/Resources/$required_bundle" ] \
+                || [ -L "$APP/Contents/Resources/$required_bundle" ]; then
+            echo "    ✗ Required tracked resource bundle was not produced: $required_bundle" >&2
+            echo "      Refusing to ship a fallback corpus or omit first-party app resources." >&2
+            exit 1
+        fi
+    done
+    for corpus_name in typosquat-top-npm.json typosquat-top-pypi.json; do
+        source_corpus="$PROJECT_DIR/Sources/MacCrabCore/Resources/$corpus_name"
+        bundled_corpus=$(/usr/bin/find \
+            "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" \
+            -type f -name "$corpus_name" -print)
+        if [ ! -f "$source_corpus" ] || [ -L "$source_corpus" ] \
+                || [ -z "$bundled_corpus" ] || [ ! -f "$bundled_corpus" ] \
+                || [ -L "$bundled_corpus" ] \
+                || [ "$($SHASUM_BIN -a 256 "$source_corpus" | /usr/bin/awk '{print $1}')" \
+                    != "$($SHASUM_BIN -a 256 "$bundled_corpus" | /usr/bin/awk '{print $1}')" ]; then
+            echo "    ✗ Bundled corpus does not exactly match tracked source: $corpus_name" >&2
+            exit 1
+        fi
+    done
+    echo "    ✓ Required resource bundles and tracked corpus bytes verified"
 
     # v1.12.4 fix (macOS 26 Tahoe crash): SwiftPM emits a stripped Info.plist
     # in the resource bundle that contains only CFBundleDevelopmentRegion.
@@ -668,16 +807,17 @@ stage_sign() {
     SYSEXT_BUNDLE="$APP/Contents/Library/SystemExtensions/${AGENT_ID}.systemextension"
 
     # ─── Code signing ────────────────────────────────────────────────
-    # Provisioning profile + two entitlements files (one per target).
-    # Both live under the version-controlled paths so the signing flow is
+    # Provisioning profile + least-privilege entitlements per principal.
+    # All live under version-controlled paths so the signing flow is
     # reproducible.
     DEVELOPER_ID="${DEVELOPER_ID:-}"
     APP_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabApp.entitlements"
     AGENT_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabAgent.entitlements"
+    TOOLS_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabTools.entitlements"
 
     if [ -n "$DEVELOPER_ID" ]; then
         echo "  Signing with Developer ID..."
-        if ! security find-identity -v -p codesigning | grep -q "$DEVELOPER_ID"; then
+        if ! $SECURITY_BIN find-identity -v -p codesigning | /usr/bin/grep -q "$DEVELOPER_ID"; then
             echo "  ERROR: Certificate not found in keychain: $DEVELOPER_ID"
             exit 1
         fi
@@ -690,12 +830,61 @@ stage_sign() {
         fi
         echo "  Provisioning profile: $PROVISION_PROFILE"
 
+        PROFILE_STAT_BEFORE=$(/usr/bin/stat -f 'size=%z;mtime=%m;mode=%Lp;uid=%u;gid=%g' "$PROVISION_PROFILE")
+        PROFILE_SHA_BEFORE=$($SHASUM_BIN -a 256 "$PROVISION_PROFILE" | /usr/bin/awk '{print $1}')
+
         # Embed the profile at BOTH bundle levels. AMFI walks up from any
         # Mach-O to the nearest enclosing Contents/embedded.provisionprofile;
         # shipping it at both the sysext bundle and the app bundle covers
         # every discovery path Apple uses.
         cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
         cp "$PROVISION_PROFILE" "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile"
+        PROFILE_STAT_AFTER=$(/usr/bin/stat -f 'size=%z;mtime=%m;mode=%Lp;uid=%u;gid=%g' "$PROVISION_PROFILE")
+        PROFILE_SHA_AFTER=$($SHASUM_BIN -a 256 "$PROVISION_PROFILE" | /usr/bin/awk '{print $1}')
+        if [ "$PROFILE_STAT_BEFORE" != "$PROFILE_STAT_AFTER" ] \
+                || [ "$PROFILE_SHA_BEFORE" != "$PROFILE_SHA_AFTER" ] \
+                || [ "$($SHASUM_BIN -a 256 "$APP/Contents/embedded.provisionprofile" | /usr/bin/awk '{print $1}')" != "$PROFILE_SHA_BEFORE" ] \
+                || [ "$($SHASUM_BIN -a 256 "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile" | /usr/bin/awk '{print $1}')" != "$PROFILE_SHA_BEFORE" ]; then
+            echo "  ERROR: provisioning profile changed during stable-copy attestation" >&2
+            exit 1
+        fi
+
+        # Public, content-addressed evidence for every external build input.
+        # No private key is opened. The profile is already a shipped public CMS
+        # payload; only its digest and stable file metadata are recorded.
+        npm_corpus="$PROJECT_DIR/Sources/MacCrabCore/Resources/typosquat-top-npm.json"
+        pypi_corpus="$PROJECT_DIR/Sources/MacCrabCore/Resources/typosquat-top-pypi.json"
+        bundled_npm=$(/usr/bin/find "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" \
+            -type f -name typosquat-top-npm.json -print)
+        bundled_pypi=$(/usr/bin/find "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" \
+            -type f -name typosquat-top-pypi.json -print)
+        ATTESTATION_PATH="$APP/Contents/Resources/release-input-attestation.txt"
+        XCODE_EVIDENCE=$($XCODEBUILD_BIN -version | /usr/bin/tr '\n' ';' | /usr/bin/sed 's/;*$//')
+        SWIFT_EVIDENCE=$($SWIFT_BIN --version | /usr/bin/tr '\n' ';' | /usr/bin/sed 's/;*$//')
+        if [ "${MACCRAB_TRACKED_EXPORT:-0}" = "1" ]; then
+            BUILD_SOURCE_KIND=tracked-git-object-export
+        else
+            BUILD_SOURCE_KIND=standalone-live-worktree
+        fi
+        cat > "$ATTESTATION_PATH" <<ATTESTATION_EOF
+format_version=1
+build_source_kind=$BUILD_SOURCE_KIND
+source_commit=${MACCRAB_RELEASE_SOURCE_COMMIT:-unbound}
+source_tree=${MACCRAB_RELEASE_SOURCE_TREE:-unbound}
+package_resolved_sha256=$($SHASUM_BIN -a 256 "$PROJECT_DIR/Package.resolved" | /usr/bin/awk '{print $1}')
+release_dependency_lock_sha256=$($SHASUM_BIN -a 256 "$SCRIPT_DIR/release-dependencies.lock" | /usr/bin/awk '{print $1}')
+pyyaml_manifest_sha256=$($SHASUM_BIN -a 256 "$SCRIPT_DIR/release-pyyaml.sha256" | /usr/bin/awk '{print $1}')
+provisioning_profile_sha256=$PROFILE_SHA_BEFORE
+provisioning_profile_metadata=$PROFILE_STAT_BEFORE
+core_npm_source_sha256=$($SHASUM_BIN -a 256 "$npm_corpus" | /usr/bin/awk '{print $1}')
+core_npm_bundled_sha256=$($SHASUM_BIN -a 256 "$bundled_npm" | /usr/bin/awk '{print $1}')
+core_pypi_source_sha256=$($SHASUM_BIN -a 256 "$pypi_corpus" | /usr/bin/awk '{print $1}')
+core_pypi_bundled_sha256=$($SHASUM_BIN -a 256 "$bundled_pypi" | /usr/bin/awk '{print $1}')
+xcode_toolchain=$XCODE_EVIDENCE
+swift_toolchain=$SWIFT_EVIDENCE
+ATTESTATION_EOF
+        /bin/chmod 0444 "$ATTESTATION_PATH"
+        echo "    ✓ Release input attestation embedded before code signing"
 
         # Remove raw MacCrabApp / MacCrabAgent from bin/ — the real copies
         # live inside the .app now. Leaving extra unsigned Mach-Os in the
@@ -703,15 +892,32 @@ stage_sign() {
         rm -f "$STAGING_DIR/bin/MacCrabApp"
         rm -f "$STAGING_DIR/bin/MacCrabAgent"
 
-        # 1. CLI tools. No entitlements, just hardened runtime.
+        # 1. Command-line products. ctl/MCP need the shared Keychain group to
+        # resolve dashboard-stored LLM keys; every other binary stays
+        # entitlement-free. Never use APP_ENT here — it also carries the
+        # privileged system-extension.install capability.
         for binary in "$STAGING_DIR"/bin/*; do
             if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
-                codesign --sign "$DEVELOPER_ID" \
-                    --options runtime \
-                    --timestamp \
-                    --force \
-                    "$binary"
-                echo "    ✓ $(basename "$binary") (hardened runtime)"
+                case "$(basename "$binary")" in
+                    maccrabctl|maccrab-mcp)
+                        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
+                            --identifier "com.maccrab.$(basename "$binary")" \
+                            --options runtime \
+                            --entitlements "$TOOLS_ENT" \
+                            --timestamp \
+                            --force \
+                            "$binary"
+                        echo "    ✓ $(basename "$binary") (hardened runtime + shared Keychain only)"
+                        ;;
+                    *)
+                        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
+                            --options runtime \
+                            --timestamp \
+                            --force \
+                            "$binary"
+                        echo "    ✓ $(basename "$binary") (hardened runtime)"
+                        ;;
+                esac
             fi
         done
 
@@ -724,8 +930,22 @@ stage_sign() {
         if [ -d "$APP/Contents/Resources/bin" ]; then
             for binary in "$APP"/Contents/Resources/bin/*; do
                 if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
-                    codesign --sign "$DEVELOPER_ID" --options runtime --timestamp --force "$binary"
-                    echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime)"
+                    case "$(basename "$binary")" in
+                        maccrabctl|maccrab-mcp)
+                            $CODESIGN_BIN --sign "$DEVELOPER_ID" \
+                                --identifier "com.maccrab.$(basename "$binary")" \
+                                --options runtime \
+                                --entitlements "$TOOLS_ENT" \
+                                --timestamp \
+                                --force \
+                                "$binary"
+                            echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime + shared Keychain only)"
+                            ;;
+                        *)
+                            $CODESIGN_BIN --sign "$DEVELOPER_ID" --options runtime --timestamp --force "$binary"
+                            echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime)"
+                            ;;
+                    esac
                 fi
             done
         fi
@@ -733,7 +953,7 @@ stage_sign() {
         # 2. System extension Mach-O — signed with ES entitlement +
         # provisioning-profile-bound identifier. AMFI matches the identifier
         # against application-identifier in the embedded profile.
-        codesign --sign "$DEVELOPER_ID" \
+        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
             --identifier "$AGENT_ID" \
             --options runtime \
             --entitlements "$AGENT_ENT" \
@@ -744,7 +964,7 @@ stage_sign() {
         # 3. System extension bundle — the bundle-level sign creates
         # _CodeSignature/CodeResources and seals the Info.plist + embedded
         # profile + Mach-O together.
-        codesign --sign "$DEVELOPER_ID" \
+        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
             --identifier "$AGENT_ID" \
             --options runtime \
             --entitlements "$AGENT_ENT" \
@@ -759,17 +979,13 @@ stage_sign() {
         # lacks. Without this step the dyld loader fails at launch with
         # "Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle"
         # and the process aborts before SwiftUI gets a chance to render.
+        # Dependency provenance was already authenticated by unsigned-build,
+        # before signing credentials were loaded. Never execute dependency or
+        # package tooling in the credential-bearing phase.
         SPARKLE_SRC="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
         if [ ! -d "$SPARKLE_SRC" ]; then
-            # SPM extracts the xcframework on first build. If it's not
-            # present it means swift build hasn't run yet; run a quick
-            # release build to get it.
-            echo "  Resolving Sparkle framework via swift build..."
-            swift build -c release --product MacCrabApp 2>&1 | tail -3
-        fi
-        if [ ! -d "$SPARKLE_SRC" ]; then
             echo "  ERROR: Sparkle.framework not found at $SPARKLE_SRC"
-            echo "  Ensure Package.swift declares the Sparkle SPM dep and swift build runs clean."
+            echo "  Run the credential-free unsigned-build stage first; refusing to invoke SwiftPM while signing credentials are present."
             exit 1
         fi
 
@@ -789,14 +1005,14 @@ stage_sign() {
                       "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Autoupdate" \
                       "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Updater.app"; do
             if [ -e "$bundle" ]; then
-                codesign --sign "$DEVELOPER_ID" \
+                $CODESIGN_BIN --sign "$DEVELOPER_ID" \
                     --options runtime \
                     --timestamp \
                     --force \
                     "$bundle" 2>/dev/null && echo "    ✓ Signed $(basename "$bundle")"
             fi
         done
-        codesign --sign "$DEVELOPER_ID" \
+        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
             --options runtime \
             --timestamp \
             --force \
@@ -817,16 +1033,17 @@ stage_sign() {
         fi
 
         # 4a-bin. Sign the bundled CLI binaries that ride inside the app
-        # at Contents/Resources/bin/. They have no entitlement (just
-        # hardened runtime + Developer ID + timestamp). Without explicit
+        # at Contents/Resources/bin/. ctl/MCP carry only the shared-Keychain
+        # entitlement (plus hardened runtime + Developer ID + timestamp). Without explicit
         # signing here, --deep on the app-level sign treats them as
         # ordinary resources and notarization rejects unsigned Mach-Os.
         for bin in "$APP/Contents/Resources/bin/maccrabctl" \
                    "$APP/Contents/Resources/bin/maccrab-mcp"; do
             if [ -x "$bin" ]; then
-                codesign --sign "$DEVELOPER_ID" \
+                $CODESIGN_BIN --sign "$DEVELOPER_ID" \
                     --identifier "com.maccrab.$(basename "$bin")" \
                     --options runtime \
+                    --entitlements "$TOOLS_ENT" \
                     --timestamp \
                     --force \
                     "$bin"
@@ -836,7 +1053,7 @@ stage_sign() {
         # 4b. App's inner executable. The app needs the
         # system-extension.install entitlement so OSSystemExtensionRequest
         # can talk to sysextd.
-        codesign --sign "$DEVELOPER_ID" \
+        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
             --identifier "com.maccrab.app" \
             --options runtime \
             --entitlements "$APP_ENT" \
@@ -872,7 +1089,7 @@ stage_sign() {
         # entitlements), and the outer .app sign just seals the bundle
         # via its own primary executable (which already carries APP_ENT
         # from step 4b) plus the CodeResources hash list.
-        codesign --sign "$DEVELOPER_ID" \
+        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
             --identifier "com.maccrab.app" \
             --options runtime \
             --entitlements "$APP_ENT" \
@@ -887,7 +1104,16 @@ stage_sign() {
         # validated); head -5 closes the pipe early and triggers SIGPIPE
         # under `set -o pipefail`. Pipe through a shell function that
         # swallows SIGPIPE explicitly instead.
-        codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | { head -5; cat >/dev/null; } || true
+        CODESIGN_VERIFY_OUTPUT=$(/usr/bin/mktemp /private/tmp/maccrab-codesign-verify.XXXXXX)
+        if ! $CODESIGN_BIN --verify --deep --strict --verbose=2 "$APP" \
+                >"$CODESIGN_VERIFY_OUTPUT" 2>&1; then
+            /usr/bin/head -20 "$CODESIGN_VERIFY_OUTPUT" >&2
+            /bin/rm -f "$CODESIGN_VERIFY_OUTPUT"
+            echo "  ERROR: blocking deep code-signature verification failed" >&2
+            exit 1
+        fi
+        /usr/bin/head -5 "$CODESIGN_VERIFY_OUTPUT"
+        /bin/rm -f "$CODESIGN_VERIFY_OUTPUT"
 
         # ── Nested-entitlement guard (v1.13 audit improvement; see the v1.12.0
         # Sparkle brick above). No nested helper may carry a privileged APP
@@ -900,13 +1126,13 @@ stage_sign() {
         while IFS= read -r _xpc; do
             _exe=$(/usr/bin/find "$_xpc/Contents/MacOS" -maxdepth 1 -type f -print -quit 2>/dev/null)
             [ -n "$_exe" ] || continue
-            if codesign -d --entitlements - "$_exe" 2>/dev/null | grep -qiE 'system-extension\.install|endpoint-security'; then
+            if $CODESIGN_BIN -d --entitlements - "$_exe" 2>/dev/null | /usr/bin/grep -qiE 'system-extension\.install|endpoint-security'; then
                 echo "    ✗ ENTITLEMENT LEAK: $(basename "$_xpc") carries a privileged app entitlement (v1.12.0-class regression)"
                 ent_leak=1
             fi
         done < <(/usr/bin/find "$APP/Contents/Frameworks" -name '*.xpc' -type d 2>/dev/null)
         _sysexe="$APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
-        if [ -f "$_sysexe" ] && codesign -d --entitlements - "$_sysexe" 2>/dev/null | grep -qi 'system-extension\.install'; then
+        if [ -f "$_sysexe" ] && $CODESIGN_BIN -d --entitlements - "$_sysexe" 2>/dev/null | /usr/bin/grep -qi 'system-extension\.install'; then
             echo "    ✗ ENTITLEMENT LEAK: system extension carries system-extension.install (app-only entitlement)"
             ent_leak=1
         fi
@@ -915,6 +1141,43 @@ stage_sign() {
             exit 1
         fi
         echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
+
+        # ctl/MCP persistent LLM credentials live in the app/sysext shared
+        # Keychain group. Prove every shipped copy has that one capability and
+        # none of the app/sysext privileged capabilities. This catches both a
+        # missing entitlement (cloud LLM silently falls back) and a dangerous
+        # APP_ENT/AGENT_ENT copy-paste before notarization.
+        echo "  Verifying CLI/MCP least-privilege Keychain entitlements..."
+        tool_entitlement_error=0
+        for _tool in "$STAGING_DIR/bin/maccrabctl" \
+                     "$STAGING_DIR/bin/maccrab-mcp" \
+                     "$APP/Contents/Resources/bin/maccrabctl" \
+                     "$APP/Contents/Resources/bin/maccrab-mcp"; do
+            if [ ! -x "$_tool" ]; then
+                echo "    ✗ missing shipped tool: $_tool"
+                tool_entitlement_error=1
+                continue
+            fi
+            _tool_entitlements=$($CODESIGN_BIN -d --entitlements - "$_tool" 2>&1 || true)
+            # Xcode 27's codesign renders `--entitlements -` as a structured
+            # [Key]/[String] tree instead of XML. Match the semantic key and
+            # exact value independently so either supported display form is
+            # accepted, while a bare team identifier elsewhere is not.
+            if ! /usr/bin/grep -Fq 'keychain-access-groups' <<<"$_tool_entitlements" \
+                    || ! /usr/bin/grep -Fq '79S425CW99.com.maccrab.shared' <<<"$_tool_entitlements"; then
+                echo "    ✗ $(basename "$_tool") missing shared Keychain access group: $_tool"
+                tool_entitlement_error=1
+            fi
+            if /usr/bin/grep -qiE 'system-extension\.install|endpoint-security\.client' <<<"$_tool_entitlements"; then
+                echo "    ✗ $(basename "$_tool") carries a privileged app/sysext entitlement: $_tool"
+                tool_entitlement_error=1
+            fi
+        done
+        if [ "$tool_entitlement_error" != "0" ]; then
+            echo "  ERROR: CLI/MCP Keychain entitlement guard failed — refusing to ship."
+            exit 1
+        fi
+        echo "    ✓ ctl/MCP carry shared Keychain access only (no app/sysext privilege)"
 
         # NOTE on stapling the .app bundle (intentionally NOT done): we validated
         # it and it does NOT work for this app. Even after a standalone app
@@ -927,7 +1190,7 @@ stage_sign() {
         # per-build app-notarize round-trip that buys nothing here.
     else
         echo "  Ad-hoc signing (set DEVELOPER_ID for distribution signing)"
-        codesign --force --sign - "$APP" 2>/dev/null || true
+        $CODESIGN_BIN --force --sign - "$APP" 2>/dev/null || true
     fi
 }
 
@@ -935,12 +1198,29 @@ stage_sign() {
 # STAGE 4 — publish
 #   Stage supporting files + install.sh, run the never-ship-private-keys
 #   guard, build the DMG (attach + ditto + convert), sign + notarize the
-#   DMG (via notarize.sh when creds are present), write release.json with
-#   the rule breakdown + toolchain provenance, and sed-bump the Homebrew
-#   cask sha256. Removes the staging tree at the end.
+#   DMG (via notarize.sh when creds are present). GA builds also write
+#   release.json with rule/toolchain provenance and sed-bump both Homebrew
+#   cask hashes; RC builds leave all production distribution metadata alone.
+#   Removes the staging tree at the end.
 # ═════════════════════════════════════════════════════════════════════
 stage_publish() {
     APP="$STAGING_DIR/MacCrab.app"
+
+    RELEASE_INPUT_ATTESTATION="$APP/Contents/Resources/release-input-attestation.txt"
+    if [ "${MACCRAB_TRACKED_EXPORT:-0}" = "1" ]; then
+        if [ ! -f "$RELEASE_INPUT_ATTESTATION" ] || [ -L "$RELEASE_INPUT_ATTESTATION" ] \
+                || ! /usr/bin/grep -qx "build_source_kind=tracked-git-object-export" "$RELEASE_INPUT_ATTESTATION" \
+                || ! /usr/bin/grep -qx "source_commit=${MACCRAB_RELEASE_SOURCE_COMMIT:-}" "$RELEASE_INPUT_ATTESTATION" \
+                || ! /usr/bin/grep -qx "source_tree=${MACCRAB_RELEASE_SOURCE_TREE:-}" "$RELEASE_INPUT_ATTESTATION"; then
+            echo "ERROR: signed app lacks the exact tracked-source input attestation" >&2
+            exit 1
+        fi
+    fi
+    if [ -f "$RELEASE_INPUT_ATTESTATION" ] && [ ! -L "$RELEASE_INPUT_ATTESTATION" ]; then
+        RELEASE_INPUT_ATTESTATION_SHA=$($SHASUM_BIN -a 256 "$RELEASE_INPUT_ATTESTATION" | /usr/bin/awk '{print $1}')
+    else
+        RELEASE_INPUT_ATTESTATION_SHA=unavailable
+    fi
 
     # ─── Supporting files + install.sh ───────────────────────────────
     cp "$PROJECT_DIR/LICENSE" "$STAGING_DIR/"
@@ -1048,10 +1328,18 @@ stage_publish() {
     hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
     rm -f "$RW_DMG"
 
-    # Sign and notarize if credentials are available
+    # Load signing/notary values only around the fixed notarization script.
+    # They remain ordinary (unexported) shell variables here and are exported
+    # solely to that one child command below.
+    load_signing_phase_values
     if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then
         echo "  Signing and notarizing DMG..."
-        "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
+        DEVELOPER_ID="${DEVELOPER_ID:-}" \
+        APPLE_ID="${APPLE_ID:-}" \
+        APPLE_TEAM_ID="${APPLE_TEAM_ID:-}" \
+        NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}" \
+        NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}" \
+            "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
 
         # audit #17: notarize.sh prints "Notarization skipped" and exits 0 when the
         # notary credentials (NOTARIZE_KEYCHAIN_PROFILE / APPLE_ID+TEAM_ID+PASSWORD)
@@ -1064,12 +1352,12 @@ stage_publish() {
             echo "  ⚠️  ALLOW_UNNOTARIZED=1 — skipping the notarization gate (RC / dev build)."
         else
             echo "  Verifying notarization (stapler + spctl)..."
-            if ! xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
+            if ! $XCRUN_BIN stapler validate "$DMG_PATH" >/dev/null 2>&1; then
                 echo "ERROR: $DMG_PATH is NOT stapled — notarization did not complete (credentials unset/expired?)." >&2
                 echo "       Set the notary credentials and re-run, or ALLOW_UNNOTARIZED=1 for an intentional RC. Aborting." >&2
                 exit 1
             fi
-            if ! spctl --assess -t open --context context:primary-signature "$DMG_PATH" >/dev/null 2>&1; then
+            if ! $SPCTL_BIN --assess -t open --context context:primary-signature "$DMG_PATH" >/dev/null 2>&1; then
                 echo "ERROR: spctl rejected $DMG_PATH — Gatekeeper would block it on first launch. Aborting." >&2
                 exit 1
             fi
@@ -1078,6 +1366,7 @@ stage_publish() {
     else
         echo "  Skipping code signing (set DEVELOPER_ID for Developer ID signing)"
     fi
+    unset_maccrab_signing_env
 
     echo ""
     echo "═══════════════════════════════════════"
@@ -1108,9 +1397,10 @@ stage_publish() {
     # website can fetch authoritative metadata instead of being hand-edited.
     # Eliminates the version-drift class of bug that the v1.8.0 external
     # review caught (website still showed 1.7.12 / 929 tests).
-    RELEASE_JSON="$PROJECT_DIR/release.json"
-    DMG_SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
-    DMG_SIZE_BYTES=$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")
+    DMG_SHA=$($SHASUM_BIN -a 256 "$DMG_PATH" | /usr/bin/awk '{print $1}')
+    if [[ "$VERSION" != *-rc.* ]]; then
+        RELEASE_JSON="$PROJECT_DIR/release.json"
+        DMG_SIZE_BYTES=$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")
     # `set -e` + grep returning 1 on no match would abort the script; route
     # through `|| true` so a missing test pattern doesn't kill the build.
     TEST_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Test\|^    @Test' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
@@ -1120,13 +1410,16 @@ stage_publish() {
     RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     # v1.18.1: record the toolchain for provenance — RELEASE_PROCESS.md notes
     # historical builds were unreproducible without this.
-    TOOLCHAIN=$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    TOOLCHAIN=$($XCODEBUILD_BIN -version 2>/dev/null | /usr/bin/tr '\n' ' ' | /usr/bin/sed 's/ *$//')
     TOOLCHAIN="${TOOLCHAIN:-unknown}"
-    cat > "$RELEASE_JSON" <<RELEASE_EOF
+        cat > "$RELEASE_JSON" <<RELEASE_EOF
 {
   "version": "$VERSION",
   "release_date": "$RELEASE_DATE",
   "toolchain": "$TOOLCHAIN",
+  "source_commit": "${MACCRAB_RELEASE_SOURCE_COMMIT:-unbound}",
+  "source_tree": "${MACCRAB_RELEASE_SOURCE_TREE:-unbound}",
+  "release_input_attestation_sha256": "$RELEASE_INPUT_ATTESTATION_SHA",
   "rules": $RULE_COUNT,
   "rules_single": $RULES_SINGLE,
   "rules_sequence": $RULES_SEQUENCE,
@@ -1145,17 +1438,24 @@ stage_publish() {
   "min_macos": "13.0"
 }
 RELEASE_EOF
-    echo "  release.json written → $RELEASE_JSON"
+        echo "  release.json written → $RELEASE_JSON"
+    else
+        echo "  RC build: production release.json remains on the current GA."
+    fi
 
     # v1.18: bump the Homebrew cask sha256 to the freshly-built DMG. Pre-this it was
     # a manual step that lagged (a release shipped with the PRIOR version's cask
     # sha256, so `brew install --cask maccrab` failed checksum verification). The
     # DMG sha is authoritative here, so sync the cask(s) in the same breath.
-    for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; do
-        [ -f "$cask" ] || continue
-        /usr/bin/sed -i '' -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"$DMG_SHA\"/" "$cask"
-    done
-    echo "  Homebrew cask sha256 synced to the DMG ($DMG_SHA)"
+    if [[ "$VERSION" == *-rc.* ]]; then
+        echo "  RC build: production Homebrew casks remain on the current GA."
+    else
+        for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; do
+            [ -f "$cask" ] || continue
+            /usr/bin/sed -i '' -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"$DMG_SHA\"/" "$cask"
+        done
+        echo "  Homebrew cask sha256 synced to the DMG ($DMG_SHA)"
+    fi
     echo ""
 
     rm -rf "$STAGING_DIR"
@@ -1169,13 +1469,12 @@ RELEASE_EOF
 # / Sparkle config the unsigned-build stage stamped — otherwise the
 # Info.plist that `assemble` wrote and the bundle that `sign` seals would
 # disagree (a re-derived per-second BUILD_NUMBER, or a Sparkle key that
-# rotated between invocations). Source the persisted env if present; the
+# rotated between invocations). Parse the persisted env if present; the
 # operator's explicit env vars still win for VERSION (so a single-stage
 # re-run can target a different tag deliberately).
 load_stage_env() {
     if [ -f "$STAGE_ENV" ]; then
-        # shellcheck disable=SC1090
-        source "$STAGE_ENV"
+        load_maccrab_env_file stage "$STAGE_ENV"
         export BUILD_NUMBER
     else
         echo "ERROR: stage '$STAGE' needs the staging tree from a prior 'unsigned-build' run," >&2
@@ -1207,7 +1506,9 @@ case "$STAGE" in
         # per-PID staging dir + EXIT trap (set above) own cleanup.
         stage_unsigned_build
         stage_assemble
+        load_signing_phase_values
         stage_sign
+        unset_maccrab_signing_env
         stage_publish
         ;;
     unsigned-build)
@@ -1225,7 +1526,9 @@ case "$STAGE" in
         ;;
     sign)
         load_stage_env
+        load_signing_phase_values
         stage_sign
+        unset_maccrab_signing_env
         echo ""
         echo "  Stage 'sign' complete."
         echo "  Next: scripts/build-release.sh publish"

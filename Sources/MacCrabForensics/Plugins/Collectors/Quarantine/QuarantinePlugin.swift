@@ -12,6 +12,7 @@
 import Foundation
 import CSQLCipher
 import CryptoKit
+import MacCrabCore
 
 public struct QuarantinePlugin: Collector {
 
@@ -82,7 +83,11 @@ public struct QuarantinePlugin: Collector {
         }
 
         var db: OpaquePointer?
-        let rc = sqlite3_open_v2(snap.path.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        let rc = SQLiteOpenPathPolicy.open(
+            snap.path.path,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        )
         guard rc == SQLITE_OK, let h = db else {
             if let h = db { sqlite3_close(h) }
             return CollectionResult(

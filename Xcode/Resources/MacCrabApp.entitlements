@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.system-extension.install</key>
+	<true/>
+	<!-- v1.8.1: shared keychain access group between the dashboard
+	     (.app, user-login session) and the System Extension
+	     (sysextd, root). Pre-fix the sysext couldn't read API keys
+	     written by the dashboard and fell back to env-var / plaintext
+	     llm_config.json paths. With this group declared on both
+	     bundles, both can read/write the same keychain items. The
+	     team-id prefix (79S425CW99) is required by macOS — only
+	     bundles signed by the same team can claim a group. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>79S425CW99.com.maccrab.shared</string>
+	</array>
+</dict>
+</plist>

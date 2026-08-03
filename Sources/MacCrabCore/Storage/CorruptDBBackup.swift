@@ -14,6 +14,60 @@
 
 import Foundation
 
+public enum CorruptDBFamilyMember: String, CaseIterable, Sendable {
+    case database = ""
+    case wal = "-wal"
+    case shm = "-shm"
+    case journal = "-journal"
+}
+
+public enum CorruptDBMovePhase: Sendable, Equatable {
+    case quarantine
+    case rollback
+}
+
+public struct CorruptDBMove: Sendable, Equatable {
+    public let member: CorruptDBFamilyMember
+    public let source: String
+    public let destination: String
+
+    public init(member: CorruptDBFamilyMember, source: String, destination: String) {
+        self.member = member
+        self.source = source
+        self.destination = destination
+    }
+}
+
+public struct CorruptDBBackupResult: Sendable, Equatable {
+    public let timestamp: Int
+    public let moves: [CorruptDBMove]
+}
+
+public enum CorruptDBBackupError: Error, LocalizedError {
+    case noDatabaseFamily(String)
+    case destinationExists(String)
+    case moveFailed(
+        failed: CorruptDBMove,
+        message: String,
+        rolledBack: [CorruptDBMove],
+        rollbackFailures: [String]
+    )
+
+    public var errorDescription: String? {
+        switch self {
+        case .noDatabaseFamily(let path):
+            return "No SQLite database family exists at \(path)"
+        case .destinationExists(let path):
+            return "Refusing to overwrite existing corruption evidence at \(path)"
+        case let .moveFailed(failed, message, _, rollbackFailures):
+            let rollback = rollbackFailures.isEmpty
+                ? "all prior moves rolled back"
+                : "rollback failures: \(rollbackFailures.joined(separator: "; "))"
+            return "Failed to quarantine \(failed.source) to \(failed.destination): \(message) (\(rollback))"
+        }
+    }
+}
+
 public enum CorruptDBBackup {
 
     /// How many distinct corruption events to retain per database. Each event
@@ -21,27 +75,125 @@ public enum CorruptDBBackup {
     /// one `corrupt-<unix-ts>` stamp; we keep the newest `N` stamps' worth.
     public static let defaultRetention = 3
 
-    /// Move `base` and its `-wal` / `-shm` / `-journal` sidecars in `directory`
-    /// to `.corrupt-<unix-ts>` siblings, then prune to `keep` corruption events.
-    /// Allows a fresh init/reopen to succeed while preserving the corrupted DB
-    /// for forensics. Returns the timestamp stamp used (for logging/tests).
+    /// A move hook used by tests to fail each member and verify rollback.  The
+    /// default is `FileManager.moveItem`, which is a same-directory rename for
+    /// every member emitted by this helper.
+    public typealias MoveOperation = @Sendable (
+        _ move: CorruptDBMove,
+        _ phase: CorruptDBMovePhase
+    ) throws -> Void
+
+    /// Atomically-at-the-family-level move `base` and every present SQLite
+    /// sidecar to `.corrupt-<unix-ts>` siblings. If any move fails, every prior
+    /// move is rolled back in reverse order. No source is deleted and pruning
+    /// occurs only after the complete family has been quarantined.
+    ///
+    /// `timestamp` and `moveOperation` are injectable for exhaustive failure
+    /// tests. Production callers should use their defaults.
+    @discardableResult
+    public static func quarantineAtomically(
+        directory: String,
+        base: String,
+        keep: Int = defaultRetention,
+        timestamp requestedTimestamp: Int? = nil,
+        moveOperation: MoveOperation? = nil
+    ) throws -> CorruptDBBackupResult {
+        let fm = FileManager.default
+        let operation: MoveOperation = moveOperation ?? { move, _ in
+            try FileManager.default.moveItem(
+                atPath: move.source,
+                toPath: move.destination
+            )
+        }
+        let present = CorruptDBFamilyMember.allCases.compactMap { member -> (CorruptDBFamilyMember, String)? in
+            let source = "\(directory)/\(base)\(member.rawValue)"
+            guard fm.fileExists(atPath: source) else { return nil }
+            return (member, source)
+        }
+        guard !present.isEmpty else {
+            throw CorruptDBBackupError.noDatabaseFamily("\(directory)/\(base)")
+        }
+
+        func makeMoves(for timestamp: Int) -> [CorruptDBMove] {
+            present.map { member, source in
+                CorruptDBMove(
+                    member: member,
+                    source: source,
+                    destination: "\(source).corrupt-\(timestamp)"
+                )
+            }
+        }
+
+        var timestamp = requestedTimestamp ?? Int(Date().timeIntervalSince1970)
+        var moves = makeMoves(for: timestamp)
+        if requestedTimestamp == nil {
+            // Multiple bounded heals can happen within one wall-clock second.
+            // Pick the next free integer stamp rather than overwriting or
+            // refusing because an earlier evidence family has that timestamp.
+            while moves.contains(where: { fm.fileExists(atPath: $0.destination) }) {
+                timestamp += 1
+                moves = makeMoves(for: timestamp)
+            }
+        } else if let collision = moves.first(where: {
+            fm.fileExists(atPath: $0.destination)
+        }) {
+            throw CorruptDBBackupError.destinationExists(collision.destination)
+        }
+
+        var completed: [CorruptDBMove] = []
+        for move in moves {
+            do {
+                try operation(move, .quarantine)
+                completed.append(move)
+            } catch {
+                var rolledBack: [CorruptDBMove] = []
+                var rollbackFailures: [String] = []
+                for prior in completed.reversed() {
+                    let reverse = CorruptDBMove(
+                        member: prior.member,
+                        source: prior.destination,
+                        destination: prior.source
+                    )
+                    do {
+                        try operation(reverse, .rollback)
+                        rolledBack.append(prior)
+                    } catch {
+                        rollbackFailures.append(
+                            "\(prior.destination) -> \(prior.source): \(error.localizedDescription)"
+                        )
+                    }
+                }
+                throw CorruptDBBackupError.moveFailed(
+                    failed: move,
+                    message: error.localizedDescription,
+                    rolledBack: rolledBack,
+                    rollbackFailures: rollbackFailures
+                )
+            }
+        }
+        prune(directory: directory, base: base, keep: keep)
+        return CorruptDBBackupResult(timestamp: timestamp, moves: moves)
+    }
+
+    /// Compatibility shim for the existing daemon recovery call site. New
+    /// recovery code must use `quarantineAtomically` and handle failure before
+    /// attempting to create a fresh database. This shim keeps that separate
+    /// cross-target migration buildable until DaemonSetup is updated.
+    @available(*, deprecated, message: "Use quarantineAtomically and handle errors")
     @discardableResult
     public static func backup(
         directory: String,
         base: String,
         keep: Int = defaultRetention
     ) -> Int {
-        let ts = Int(Date().timeIntervalSince1970)
-        let suffixes = ["", "-wal", "-shm", "-journal"]
-        for suffix in suffixes {
-            let src = "\(directory)/\(base)\(suffix)"
-            let dst = "\(directory)/\(base)\(suffix).corrupt-\(ts)"
-            if FileManager.default.fileExists(atPath: src) {
-                try? FileManager.default.moveItem(atPath: src, toPath: dst)
-            }
-        }
-        prune(directory: directory, base: base, keep: keep)
-        return ts
+        let timestamp = Int(Date().timeIntervalSince1970)
+        _ = try? quarantineAtomically(
+            directory: directory,
+            base: base,
+            keep: keep,
+            timestamp: timestamp
+        )
+        return timestamp
     }
 
     /// Keep the `keep` most-recent corruption events (grouped by timestamp) for

@@ -7,6 +7,24 @@
 import Foundation
 import os.log
 
+/// Monotonic time + suspension boundary used by `LLMService`'s global call
+/// limiter. Kept internal so focused tests can drive concurrent admission
+/// deterministically without adding a test clock to the public API.
+struct LLMRateLimitClock: Sendable {
+    let now: @Sendable () async -> TimeInterval
+    let sleep: @Sendable (TimeInterval) async throws -> Void
+
+    static let live = LLMRateLimitClock(
+        now: { Foundation.ProcessInfo.processInfo.systemUptime },
+        sleep: { interval in
+            guard interval > 0 else { return }
+            try await Task.sleep(
+                nanoseconds: UInt64((interval * 1_000_000_000).rounded(.up))
+            )
+        }
+    )
+}
+
 /// v1.18: engine LLM health snapshot, surfaced in heartbeat_rich.json so an
 /// "enabled but unreachable / misconfigured" backend is visible instead of
 /// failing silently. Sendable so it can cross the actor boundary.
@@ -37,7 +55,8 @@ public actor LLMService {
     /// (default 5.0, production unchanged) so tests can drive multi-call paths
     /// — circuit breaker, cache — without 5s stalls per call.
     private let minInterval: TimeInterval
-    private var lastCallTime: Date = .distantPast
+    private let rateLimitClock: LLMRateLimitClock
+    private var lastCallTime: TimeInterval?
 
     /// AI-14 admission control. There was NO bound on how many callers could be
     /// in the slow path at once: a burst of N behaviour-threshold crossings
@@ -75,9 +94,25 @@ public actor LLMService {
     public init(backend: any LLMBackend, config: LLMConfig,
                 cache: LLMCache = LLMCache(),
                 minInterval: TimeInterval = 5.0) {
+        self.init(
+            backend: backend,
+            config: config,
+            cache: cache,
+            minInterval: minInterval,
+            rateLimitClock: .live
+        )
+    }
+
+    /// Internal clock-injecting initializer for deterministic concurrency
+    /// tests. Production callers use the public initializer above.
+    init(backend: any LLMBackend, config: LLMConfig,
+         cache: LLMCache = LLMCache(),
+         minInterval: TimeInterval = 5.0,
+         rateLimitClock: LLMRateLimitClock) {
         self.backend = backend
         self.cache = cache
-        self.minInterval = minInterval
+        self.minInterval = max(0, minInterval)
+        self.rateLimitClock = rateLimitClock
         // Only sanitize for cloud providers; Ollama is local. The host is
         // parsed (strict loopback check) rather than substring-matched: a
         // remote Ollama at `http://127.0.0.1.evil.com` must NOT be treated
@@ -94,6 +129,37 @@ public actor LLMService {
         case .mistral: self.modelLabel = config.mistralModel
         case .gemini:  self.modelLabel = config.geminiModel
         }
+    }
+
+    /// Wait for and atomically claim the next backend-call slot.
+    ///
+    /// An actor does not make the old read/sleep/write sequence atomic: every
+    /// caller releases the actor while sleeping, so a burst can read the same
+    /// `lastCallTime`, wake together, and dispatch together. Rechecking after
+    /// every suspension means exactly one resumed caller advances the shared
+    /// timestamp; the others observe that claim and sleep for another interval.
+    /// This is shared by regular and extended-thinking calls.
+    private func waitForRateLimitSlot() async -> Bool {
+        while !Task.isCancelled {
+            let now = await rateLimitClock.now()
+            guard let lastCallTime else {
+                self.lastCallTime = now
+                return true
+            }
+
+            let remaining = minInterval - (now - lastCallTime)
+            guard remaining > 0 else {
+                self.lastCallTime = now
+                return true
+            }
+
+            do {
+                try await rateLimitClock.sleep(remaining)
+            } catch {
+                return false
+            }
+        }
+        return false
     }
 
     /// Whether prompts must be run through `LLMSanitizer` before dispatch.
@@ -321,17 +387,15 @@ public actor LLMService {
         pendingBackendCalls += 1
         defer { pendingBackendCalls -= 1 }
 
-        // Rate limiting
-        let elapsed = Date().timeIntervalSince(lastCallTime)
-        if elapsed < minInterval {
-            try? await Task.sleep(nanoseconds: UInt64((minInterval - elapsed) * 1_000_000_000))
-        }
+        let providerName = await backend.providerName
+
+        // AI-14: claim the slot after the provider lookup so there is no actor
+        // suspension between stamping the actual start boundary and invoking
+        // the backend. Regular and extended-thinking calls share this state.
+        guard await waitForRateLimitSlot() else { return nil }
 
         let start = Date()
-        lastCallTime = Date()
         totalCalls += 1
-
-        let providerName = await backend.providerName
 
         guard let response = await backend.complete(
             systemPrompt: finalSystem, userPrompt: finalUser,
@@ -456,16 +520,14 @@ public actor LLMService {
         pendingBackendCalls += 1
         defer { pendingBackendCalls -= 1 }
 
-        let elapsed = Date().timeIntervalSince(lastCallTime)
-        if elapsed < minInterval {
-            try? await Task.sleep(nanoseconds: UInt64((minInterval - elapsed) * 1_000_000_000))
-        }
+        let providerName = await backend.providerName
+
+        // Shared with query(): a regular and an extended call cannot reserve
+        // the same interval and burst together after the actor re-enters.
+        guard await waitForRateLimitSlot() else { return nil }
 
         let start = Date()
-        lastCallTime = Date()
         totalCalls += 1
-
-        let providerName = await backend.providerName
 
         guard let response = await backend.completeWithExtendedThinking(
             systemPrompt: finalSystem,

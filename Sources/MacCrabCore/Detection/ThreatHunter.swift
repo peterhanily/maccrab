@@ -313,7 +313,11 @@ public actor ThreatHunter {
     private func executeSQL(_ sql: String) -> [[String: String]] {
         // Use SQLite3 C API directly (same pattern as EventStore)
         var db: OpaquePointer?
-        guard sqlite3_open_v2(databasePath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+        guard SQLiteOpenPathPolicy.open(
+            databasePath,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK,
               let handle = db else {
             return []
         }

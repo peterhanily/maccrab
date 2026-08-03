@@ -21,6 +21,45 @@ struct AIToolRegistryTests {
     func detectCodex() {
         let registry = AIToolRegistry()
         #expect(registry.isAITool(executablePath: "/Applications/Codex.app/Contents/Resources/codex") == .codex)
+        // Runtime shape observed from the standalone Codex package on this
+        // host. This path was invisible to AI Guard before the regression fix.
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/.codex/packages/standalone/releases/1.2.3/bin/codex"
+        ) == .codex)
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/.codex/packages/standalone/current/bin/codex"
+        ) == .codex)
+        #expect(registry.isAITool(executablePath: "/Users/user/.local/bin/codex") == .codex)
+    }
+
+    @Test("Codex matching is executable-name anchored, not directory anchored")
+    func codexExecutableNameBoundaries() {
+        let registry = AIToolRegistry()
+
+        // Exact executable names remain portable across supported install
+        // layouts, including the currently observed standalone package.
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/.codex/packages/standalone/releases/1.2.3/bin/codex-cli"
+        ) == .codex)
+        #expect(registry.isAITool(executablePath: "/opt/homebrew/bin/codex") == .codex)
+
+        // A directory component named `codex` is not identity evidence for a
+        // different executable, and prefix lookalikes are not Codex either.
+        #expect(registry.isAITool(executablePath: "/Users/user/src/codex/.build/helper") == nil)
+        #expect(registry.isAITool(executablePath: "/Users/user/src/codex/bin/python") == nil)
+        #expect(registry.isAITool(executablePath: "/usr/local/bin/codex-helper") == nil)
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/.codex/packages/standalone/releases/1.2.3/bin/codex-helper"
+        ) == nil)
+    }
+
+    @Test("Bare tool patterns match whole path components without prefix false positives")
+    func bareToolPatternBoundaries() {
+        let registry = AIToolRegistry()
+        #expect(registry.isAITool(executablePath: "/opt/tools/aider/bin/python") == .aider)
+        #expect(registry.isAITool(executablePath: "/opt/tools/openclaw/bin/node") == .openClaw)
+        #expect(registry.isAITool(executablePath: "/opt/tools/aider-clone/bin/python") == nil)
+        #expect(registry.isAITool(executablePath: "/opt/tools/openclaw-sandbox/bin/node") == nil)
     }
 
     @Test("Detects OpenClaw by path")

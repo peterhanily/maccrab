@@ -38,8 +38,9 @@ reverse-engineering it from `scripts/release.sh`.
 
 ## Inventory of secrets
 
-All four live in the operator's macOS login Keychain on the build
-machine. None are committed; none are ever copied off the build Mac.
+The signing identities/private keys live in the operator's macOS Keychain;
+short-lived account credentials and publisher tokens are stored as mode-0600
+data on the build machine. None are committed or copied into build outputs.
 
 | Secret | Used by | Loss impact |
 |---|---|---|
@@ -48,9 +49,13 @@ machine. None are committed; none are ever copied off the build Mac.
 | Sparkle EdDSA private key (matching `SUPublicEDKey` baked into shipped Info.plist) | `sign_update` during appcast entry generation | **Catastrophic.** Existing v1.x Sparkle clients verify against the embedded public key. If the private key leaks, an attacker can sign a malicious appcast XML and `MacCrab.app` will auto-update to a malicious DMG. **No rotation path** without shipping a new bundle (and convincing every existing user to install it manually). |
 | GitHub fine-grained PAT (`SITE_REPO_TOKEN`), scoped to `contents:write` on `peterhanily/maccrab-site` | `publish-appcast-entry.sh` to commit the appcast entry | Attacker with this token can modify `appcast.xml` to advertise a malicious DMG. Mitigated because the DMG itself still needs a valid EdDSA signature (above), but combined with that key it's a complete supply-chain compromise. |
 
-These four secrets are stored in `~/.maccrab-release-env`, which is
-gitignored and `chmod 600`. The release script sources it on
-invocation. The file is not backed up to iCloud or any sync service.
+The non-Keychain values are stored in `~/.maccrab-release-env`, which is
+gitignored, owned by the release user, `chmod 600`, and excluded from sync.
+Release scripts never source or evaluate it as shell code. An allowlisted parser
+opens it without following symlinks and exposes disjoint `signing` and
+`publisher` projections. Conventional secret names are removed before local CI,
+SwiftPM, rule compilation, unsigned assembly, and documentation generation;
+each fixed signing or publishing child receives only the values it needs.
 
 ## End-to-end release pipeline
 
@@ -59,10 +64,14 @@ on the build Mac (Apple Silicon, macOS 14+).
 
 ### Step 0 — preconditions
 
-- `SITE_REPO_TOKEN` set (or `SKIP_APPCAST=1` for internal-only
-  releases). Hard-fails before any work if missing — added in
-  v1.10.0 after a field-observed silent-fail that left existing
-  users on v1.9 because the appcast never published.
+- `gh` installed, authenticated, and authorized to write this repository.
+  Hard-fails before the build so a missing or expired publisher cannot strand
+  a remote tag without its release asset.
+- For a GA, `SITE_REPO_TOKEN` set. Hard-fails before any work if missing. The optional
+  `SKIP_APPCAST=1` skips only Sparkle; site `release.json` verification and the
+  Homebrew tap remain mandatory because `release.sh` creates a public release.
+  For an internal/local artifact, use `scripts/build-release.sh` and do not run
+  the publisher.
 - `scripts/prerelease-check.sh <version>` — manifest equality:
   `Xcode/project.yml` CFBundleVersion + CFBundleShortVersionString
   match across both targets; both Info.plists match project.yml;
@@ -76,10 +85,40 @@ on the build Mac (Apple Silicon, macOS 14+).
   passes covering AlertSink-bypass regressions, schema-migrator
   call sites, encryption pairings, env-block accessor confinement,
   unbounded-actor-collection bounds. Failure here blocks ship.
+- The worktree, index, and untracked-file set must be empty. `release.sh`, the
+  tag hook, and release-mode CI reject `assume-unchanged` (`h`) and
+  `skip-worktree` (`S`) index entries, force an index refresh, and compare both
+  the worktree and index to the bound commit. Every critical release executor
+  is then hashed directly against its committed blob, without clean/smudge
+  filters. The three shipped entitlement manifests under `Xcode/Resources/`
+  must be tracked and identical to `HEAD`; a source tag must describe every
+  capability granted to shipped code.
+- `/usr/bin/git`, the signing/notarisation tools, and the fixed
+  `/opt/homebrew/bin/gh` publisher are invoked through pinned absolute paths
+  under a system-only `PATH`. `origin` must be exactly the canonical
+  `peterhanily/maccrab` SSH or HTTPS URL; `GH_REPO`/`GH_HOST` are cleared and
+  every GitHub operation is explicitly bound to `peterhanily/maccrab` on
+  `github.com`.
+
+Release candidates are isolated by default. Build an unpublished RC with:
+
+```bash
+VERSION=1.2.3-rc.1 ALLOW_UNNOTARIZED=1 MACCRAB_BUILD_CHANNEL=dev \
+  ./scripts/build-release.sh
+```
+
+`release.sh 1.2.3-rc.1` refuses publication unless `--publish-rc` is explicit.
+That explicit path creates only a verified GitHub prerelease (`latest=false`);
+it does not modify or publish the production appcast, `release.json`, or either
+Homebrew cask.
 
 ### Step 1 — tests
 
-`swift test` — the full unit-test suite (3000+ tests across 500+ suites). Failure blocks ship.
+`release.sh` first runs `scripts/ci-local.sh --clean`, including a fresh dependency
+resolution, builds, the full test suite, and all 19 local gates. This happens
+before artifact construction; the later tag hook repeats clean CI against the
+exact source commit/tree and exact final metadata tree. Release-mode clean CI
+also removes `Tools/AssessmentHarness/.build`. Failure blocks ship.
 
 ### Step 1b — false-positive baseline (detection quality gate)
 
@@ -111,13 +150,22 @@ boolean-as-value bugs. 0 skips required.
 > `sign`, `publish` — each callable individually
 > (`scripts/build-release.sh <stage>`). Running it with no argument (or
 > `all`) executes all four in one process, byte-for-byte identical to
-> the prior linear flow, which is what `release.sh` Step 3 does. Stage
+> the prior linear flow. `release.sh` invokes the four stages explicitly so
+> credentials can be introduced only at the fixed signing/notary boundaries. Stage
 > separation is still useful for iterating locally — e.g. `unsigned-build`
 > + `assemble` + `sign` to produce a signed app without notarising or
 > publishing. See `docs/CI-ARCHITECTURE.md`. Single-stage mode persists the staging
 > tree at `.build/maccrab-stage` and carries `VERSION` / `BUILD_NUMBER`
 > / Sparkle config across invocations so the stamped Info.plist matches
 > the signed bundle.
+
+When orchestrated by `release.sh`, all four stages run in a private
+`/private/tmp/maccrab-release-build.*` workspace exported directly from the
+captured source commit's Git blob objects. The exporter does not consult the
+live index, attributes, filters, archive machinery, `.git`, or repository-local
+`.swiftpm`; ignored files and live-checkout substitutions cannot become build
+inputs. Only the finished DMG and, for a GA, the three generated metadata files
+are copied back to the checkout.
 
 > **Toolchain pin:** release builds use **Xcode 26.x** until the
 > macOS 27 design-QA gate passes (the 27 SDK ignores
@@ -149,6 +197,8 @@ boolean-as-value bugs. 0 skips required.
    - The .systemextension bundle signed with the ES entitlement
    - The outer .app signed with the system-extension.install
      entitlement
+   - A blocking `codesign --verify --deep --strict --verbose=2` check must pass;
+     diagnostic output is retained and a failed verification aborts the build.
 5. `hdiutil create` builds the DMG.
 6. `codesign` the DMG.
 7. `xcrun notarytool submit ... --wait` blocks until Apple either
@@ -156,35 +206,73 @@ boolean-as-value bugs. 0 skips required.
    surface in `notarytool log`).
 8. `xcrun stapler staple` embeds the notarization ticket into the
    DMG so offline machines can verify without phoning Apple.
-9. `release.json` is written with version, release date, rule
-   count, test count, DMG filename, URL, and sha256.
+9. Before code signing, the app receives
+   `Contents/Resources/release-input-attestation.txt`, recording the exact
+   source commit/tree, `Package.resolved`, dependency-lock and PyYAML-manifest
+   hashes, stable provisioning-profile hash/metadata, source and bundled corpus
+   hashes, and Xcode/Swift versions. The app signature seals this evidence. For
+   a GA only, `release.json` records its hash alongside version, release date,
+   rule count, test count, source commit/tree, DMG filename, URL, and sha256. RC
+   builds leave production metadata and casks byte-for-byte unchanged.
 
 Output: `.build/MacCrab-v<version>.dmg`, signed + notarized +
 stapled.
 
-CFBundleVersion (build number) is stamped as `<version>.<unix-time>`
-so sysextd reliably recognizes rebuilds of the same marketing
-version as distinct binaries and replaces the cached active sysext.
-CFBundleShortVersionString stays at the clean `<version>` for
-user-visible display. Override with the `BUILD_NUMBER` env var if
-the build pipeline needs a specific value (e.g. CI run number).
+For `release.sh`, CFBundleVersion is deterministic:
+`<version>.<git-commit-count>`. Rebuilding the same source commit therefore
+reuses its identity instead of creating another system-extension zombie.
+Standalone development builds default to `<version>.<unix-time>` so changed
+bytes at the same marketing version still force sysextd to replace the active
+extension. CFBundleShortVersionString remains `<version>`.
 
 ### Step 4 — homebrew formula bump
 
-The DMG's sha256 is sed-bumped into both `Casks/maccrab.rb` (what
+For a GA, the DMG's sha256 is sed-bumped into both `Casks/maccrab.rb` (what
 the `peterhanily/maccrab` brew tap publishes) and
 `homebrew/maccrab.rb` (in-repo documentation copy — kept in
 lockstep with the cask because a v1.6.5 → v1.6.13 drift episode
-shipped stale formulae for 9 releases). A `chore: update Homebrew
-formula to v<version>` commit lands locally.
+shipped stale formulae for 9 releases). `release.sh` writes only those two files
+and `release.json` into a private temporary index seeded from the captured
+source tree. It verifies the exact three-path diff and blob identities, creates
+an exact one-parent commit with `git commit-tree`, and atomically advances the
+branch with `git update-ref`. No repository hook or live-index side effect can
+alter that metadata commit. RCs retain the exact source commit/tree.
 
 ### Step 5 — GitHub publish
 
-`git tag v<version>`, `git push origin main --tags`,
-`gh release create v<version>` with the DMG attached and notes
-auto-generated from `RELEASE_NOTES/v<version>.md`.
+Create an annotated (signed when configured) `v<version>` tag, push the release
+branch and then that one tag. `release.sh` refuses to start unless Git is
+configured to execute the repository's versioned pre-push hook, and rechecks
+that invariant immediately before the tag push. A created/moved version tag is
+rejected unless `release.sh` supplies one complete manifest: DMG path + SHA-256,
+source commit/tree, final metadata tree, final commit object, annotated tag
+object, and committed hook blob. The hook requires either the exact source tree
+(RC) or an exact one-parent GA metadata commit whose only changed paths are
+`release.json` and the two casks. The peeled tag commit, `HEAD`, committed hook,
+executing hook, and every critical executor blob must all match. Direct
+lightweight/manual tag publication and multi-tag pushes fail closed.
 
-### Step 6 — Sparkle appcast publish
+The tag hook runs clean local CI from that exact commit. It stages the notarized DMG by a
+same-filesystem rename into a private sibling of `.build`. Restoration requires
+the exact original manifest/hash and rejects missing or zero-byte files, partial
+copies, existing destinations, or `.build` symlink redirection.
+
+After the push, `release.sh` rechecks that the DMG is a non-empty regular file,
+re-hashes it, copies those exact bytes into a private random upload snapshot,
+requires that snapshot to remain non-empty, and passes only that snapshot to
+`gh`. An authenticated HTTP 404 first proves that the version has no existing
+GitHub release. Publication begins as a nonce-named **draft** with
+`--verify-tag`. The draft is captured by immutable GitHub release ID; every
+later digest query and PATCH addresses that exact ID. The named asset digest and
+remote tag object are verified before the exact draft is made public.
+
+The publisher issues **no GitHub DELETE requests** and performs no automatic
+remote rollback. Partial create, missing/different digest, failed or ambiguous
+PATCH, and unexpected remote state all fail closed while retaining whatever
+draft or release exists. The error prints the immutable ID, nonce title, known
+state, and canonical releases page for manual inspection and recovery.
+
+### Step 6 — downstream distribution and verification
 
 The release flow that delivers v<version> to existing v(N-1) users
 via Sparkle auto-update:
@@ -199,16 +287,34 @@ via Sparkle auto-update:
      fields, release notes (from RELEASE_NOTES/v<version>.md),
      download URL, and minimum macOS version.
 
+   The `<path>` is the same private post-gate upload snapshot used for GitHub,
+   not a reopened `.build` file. Its type, non-zero length, and SHA-256 are
+   rechecked after GitHub publication, before appcast/downstream publication,
+   and at completion; the private tracked-source build workspace remains the
+   source of the publisher executors throughout.
+
 2. `scripts/publish-appcast-entry.sh --item <xml> --site-repo
    peterhanily/maccrab-site --version <version>` commits the
    updated `appcast.xml` to the site repo via the GitHub Contents
    API, using `SITE_REPO_TOKEN`. The script refuses to double-
    publish a version already in the appcast (idempotency guard).
 
-3. Cloudflare Pages auto-deploys the site repo, typically within
+3. If appcast publication fails, the generated XML is retained at the printed
+   temporary path for an exact manual retry. `SKIP_APPCAST=1` is the only
+   intentional Sparkle bypass.
+
+4. `scripts/publish-release-json.sh` publishes the built manifest to the site.
+   The release script polls the live `https://maccrab.com/release.json` until
+   its version and DMG SHA match the local artifact, then cross-checks that SHA
+   against both `Casks/maccrab.rb` and the GitHub release asset digest.
+
+5. `scripts/publish-cask.sh` publishes the validated cask to
+   `peterhanily/homebrew-maccrab`.
+
+6. Cloudflare Pages auto-deploys the site repo, typically within
    30-60 seconds.
 
-4. Existing v(N-1) clients with auto-update on poll `appcast.xml`
+7. Existing v(N-1) clients with auto-update on poll `appcast.xml`
    once per day (`SUScheduledCheckInterval=86400`). On finding a
    newer `<sparkle:version>`, Sparkle:
    - Downloads the DMG.
@@ -226,6 +332,12 @@ via Sparkle auto-update:
      user re-approval prompt unless the team-id changed (it never
      should).
 
+All attempted downstream failures are accumulated so later publishers still
+run. Any failure ends with `RELEASE INCOMPLETE` and a non-zero exit; the full
+`Released!` banner is printed only when every non-skipped surface succeeded.
+The already digest-verified public GitHub release is intentionally not rolled
+back after a downstream outage; its immutable ID and URL are printed for repair.
+
 ## Continuous integration (local)
 
 MacCrab's CI runs **locally**. There are no GitHub Actions workflows — see
@@ -233,22 +345,28 @@ MacCrab's CI runs **locally**. There are no GitHub Actions workflows — see
 hosted images lacking the pinned Xcode, and a provenance workflow that never
 completed a run).
 
-- **`scripts/ci-local.sh`** — the gate. 13 checks: build, full test suite,
+- **`scripts/ci-local.sh`** — the gate. 19 checks: build, full test suite,
   rule compile + lint, broker fd fuzz (ASan/UBSan), deterministic
   architectural audit, secret/host-path diff scan, assessment-harness
-  build/test/isolation, and the code-quality passes.
+  build/test/isolation, release-artifact lifecycle regression, and the
+  code-quality passes.
 - **`.githooks/pre-push`** — runs it automatically. A **tag** push runs it
-  with `--clean` (wiped `.build`, re-resolved dependencies), so every release
-  is gated on a from-scratch build.
+  with `--clean`, the exact source commit/tree, final metadata tree/commit, and
+  expected DMG SHA (same-filesystem staging,
+  `.build` wiped, dependencies re-resolved, manifest-verified restoration), so
+  every release is gated on a from-scratch build without risking the sole DMG.
 - **`make hooks`** — activates the hook. Required once per clone: git does not
   track `.git/hooks/`, so a fresh checkout has no gate until this is run.
+  `release.sh` enforces this precondition and will not build or push otherwise.
 
 **No SLSA provenance is produced.** The workflow that would have emitted it
 never completed a single run, so no release from v1.19.3 onward carries an
 attestation; the claim has been withdrawn rather than left unbacked. Artifact
 integrity rests on notarised Developer-ID signing, the `release.json` SHA-256
 cross-checked against the Homebrew cask and formula, and Ed25519-signed rule
-manifests. Signing and notarisation have always been local-only and remain so.
+manifests. Current builds do carry the signed, embedded release-input evidence
+described above, but that local evidence is not an independently signed SLSA
+statement. Signing and notarisation have always been local-only and remain so.
 
 With no workflows present, `pre-release-audit.sh` PASS J (orphan GitHub
 Actions secret detector) has nothing to scan and stays clean.
@@ -315,15 +433,33 @@ until users reinstall.
   existing users un-updated, so release.sh hard-fails on a missing
   token to prevent that.
 
+## Local same-UID threat boundary
+
+These controls defend against accidental drift, stale artifacts, malformed
+release invocations, untracked inputs, subprocess secret inheritance, and
+remote publication races. They do **not** establish isolation from malicious
+code already running as the release operator. A process with the same macOS UID
+can rewrite the checkout or hook between checks, read ordinary environment and
+mode-0600 files, invoke Keychain-authorized operations, or attach to cooperating
+processes. File-owner/mode, path, hash, and Git-object checks are integrity
+guards inside that trust boundary—not a sandbox against the owner account.
+
+Cut releases only from a dedicated, quiescent operator account and machine. Do
+not run editors, AI tools, package experimentation, browsers, or unrelated
+agents concurrently with a release. Stronger resistance requires a separate
+ephemeral build identity/host and offline signing or hardware-backed keys.
+
 ## Provenance
 
-`release.json` is regenerated on every `build-release.sh` run and
-committed by `release.sh` step 4. Inspect any historical release's
+`release.json` is regenerated on every GA `build-release.sh` run and
+committed by `release.sh`; RCs deliberately leave it on the current GA. Inspect any historical GA release's
 `release.json` to find:
 
 - Exact version + release date
 - Test count at release time
 - Rule count at release time
+- Exact source commit and tree
+- SHA-256 of the signed app's embedded release-input attestation
 - SHA-256 of the shipped DMG
 
 Reproducing a historical build requires the matching source tag

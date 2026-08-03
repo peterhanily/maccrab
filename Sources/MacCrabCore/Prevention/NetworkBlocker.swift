@@ -169,25 +169,17 @@ public actor NetworkBlocker {
     }
 
     private func reloadPF() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        proc.arguments = ["-a", anchorName, "-f", anchorPath]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        // `waitUntilExit()` on an unlaunched NSTask raises "task not launched",
-        // an uncaught ObjC exception that aborts the root engine. Beyond the
-        // crash: a swallowed spawn failure means the PF anchor file was written
-        // but never loaded, so the blocker reports success while blocking
-        // nothing. Surface it.
-        do {
-            try proc.run()
-        } catch {
-            logger.error("NetworkBlocker: pfctl spawn failed — the anchor file was written but NOT loaded, so no blocking is in effect: \(error.localizedDescription, privacy: .public)")
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", anchorName, "-f", anchorPath],
+            timeout: 10,
+            maximumOutputBytes: nil
+        ) else {
+            logger.error("NetworkBlocker: bounded pfctl launch refused — the anchor file was written but NOT loaded, so no blocking is in effect")
             return
         }
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
-            logger.error("NetworkBlocker: pfctl exited \(proc.terminationStatus, privacy: .public) loading anchor \(self.anchorName, privacy: .public) — blocking may not be in effect")
+        if !result.succeeded {
+            logger.error("NetworkBlocker: pfctl did not complete successfully (status \(result.terminationStatus ?? -1, privacy: .public), timedOut=\(result.timedOut, privacy: .public)) loading anchor \(self.anchorName, privacy: .public) — blocking may not be in effect")
         }
     }
 }

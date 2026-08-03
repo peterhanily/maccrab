@@ -34,15 +34,9 @@ enum SignalHandlers {
                        let overlaid = try? await state.ruleEngine.loadRules(from: URL(fileURLWithPath: overlayDir), requireOwnerUID: geteuid()), overlaid > 0 {
                         print("[SIGHUP] Re-applied \(overlaid) user rule override(s)")
                     }
-                    // Re-apply pushed (detection-only) rules — reloadRules cleared
-                    // the pushed set; load them additive-only and refresh the
-                    // response-engine detection-only gate.
-                    let pushedDir = URL(fileURLWithPath: state.rulesURL.path + "/pushed")
-                    if let pushed = try? await state.ruleEngine.loadPushedRules(from: pushedDir), pushed > 0 {
-                        print("[SIGHUP] Re-applied \(pushed) pushed (detection-only) rule(s)")
-                    }
-                    let reloadedPushedIDs = await state.ruleEngine.pushedRuleIDs
-                    await state.responseEngine.setDetectionOnlyRuleIDs(reloadedPushedIDs)
+                    // The out-of-band rule channel is release-disabled. Preserve
+                    // any pushed corpus on disk, but do not read or evaluate it.
+                    await state.responseEngine.setDetectionOnlyRuleIDs([])
                     // v1.21.5: sequence + graph rules honor the F-04 rule
                     // profile on reload too. RuleEngine re-applies its stored
                     // profile internally, but SequenceEngine/GraphRuleLoader
@@ -171,7 +165,95 @@ enum SignalHandlers {
                     // fallen eight knobs behind it, so a reload could re-admit a
                     // `traces_retention_days: 0` that boot would have clamped.
                     let newStorage = freshConfig.storage.clampedToSafeFloors()
+                    let tracegraphCapChanged = old.tracegraphMaxSizeMB != newStorage.tracegraphMaxSizeMB
+                    let tracegraphCapLowered = newStorage.tracegraphMaxSizeMB < old.tracegraphMaxSizeMB
+                    let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
+                    let eventsCapLowered = newStorage.eventsMaxSizeMB < old.eventsMaxSizeMB
+                    let alertsCapChanged = old.alertsMaxSizeMB != newStorage.alertsMaxSizeMB
+                    let campaignsCapChanged = old.campaignsMaxSizeMB != newStorage.campaignsMaxSizeMB
                     state.storage = newStorage
+
+                    func persistentPolicy(
+                        maxSizeMiB: Int,
+                        transactionReserveBytes: Int64 = 8 * SQLitePersistentStorePolicy.bytesPerMiB
+                    ) -> SQLitePersistentStorePolicy {
+                        SQLitePersistentStorePolicy(
+                            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                                maxSizeMiB: maxSizeMiB
+                            ),
+                            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+                            transactionReserveBytes: transactionReserveBytes,
+                            storageVolumePath: state.supportDir
+                        )
+                    }
+
+                    // Hard admission lives inside each actor, so changing only
+                    // DaemonState would leave the boot-time ceiling in force.
+                    // Adopt lowered policies even when already over budget: the
+                    // returned latch blocks growth while the maintenance paths
+                    // shrink the family and retry max_page_count.
+                    if eventsCapChanged {
+                        do {
+                            let snapshot = try await state.eventStore.updateStorageAdmission(
+                                persistentPolicy(
+                                    maxSizeMiB: newStorage.eventsMaxSizeMB,
+                                    transactionReserveBytes: SQLitePersistentStorePolicy
+                                        .eventTransactionReserveBytes
+                                )
+                            )
+                            let latch = snapshot?.latchedFailure ?? "none"
+                            let pending = snapshot?.pageLimitPending ?? false
+                            print("[SIGHUP] events.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                        } catch {
+                            print("[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription)")
+                        }
+                    }
+                    if alertsCapChanged {
+                        do {
+                            let snapshot = try await state.alertStore.updateStorageAdmission(
+                                persistentPolicy(maxSizeMiB: newStorage.alertsMaxSizeMB)
+                            )
+                            let latch = snapshot?.latchedFailure ?? "none"
+                            let pending = snapshot?.pageLimitPending ?? false
+                            print("[SIGHUP] alerts.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                        } catch {
+                            print("[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription)")
+                        }
+                    }
+                    if campaignsCapChanged, let campaignStore = state.campaignStore {
+                        do {
+                            let snapshot = try await campaignStore.updateStorageAdmission(
+                                persistentPolicy(maxSizeMiB: newStorage.campaignsMaxSizeMB)
+                            )
+                            let latch = snapshot?.latchedFailure ?? "none"
+                            let pending = snapshot?.pageLimitPending ?? false
+                            print("[SIGHUP] campaigns.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
+                        } catch {
+                            print("[SIGHUP] campaigns.db hard admission reload failed closed: \(error.localizedDescription)")
+                        }
+                    }
+                    if let causalStore = state.causalStore {
+                        // Actor-owned admission changes in the same turn as the
+                        // config snapshot. A lower cap is measured and latched
+                        // here, before another graph mutation can be admitted.
+                        let admission = await causalStore.updateStorageAdmission(
+                            maxFootprintBytes: TraceGraphStoragePolicy.capBytes(
+                                maxSizeMiB: newStorage.tracegraphMaxSizeMB),
+                            freeSpaceFloorBytes: TraceGraphStoragePolicy.freeSpaceFloorBytes
+                        )
+                        if tracegraphCapLowered || admission.blocked {
+                            do {
+                                let result = try await causalStore.recoverStorageBudget(
+                                    retentionCutoff: Date().addingTimeInterval(
+                                        -Double(newStorage.tracegraphRetentionDays) * 86_400),
+                                    orphanCutoff: Date().addingTimeInterval(-3_600)
+                                )
+                                print("[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted), edges=\(result.edgesDeleted), entities=\(result.entitiesDeleted), pinned=\(result.pinnedReader)")
+                            } catch {
+                                print("[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription)")
+                            }
+                        }
+                    }
 
                     // v1.19.1: re-apply the opt-in network-enrichment switches
                     // live. vuln-scan + package-freshness are read from state on
@@ -187,7 +269,6 @@ enum SignalHandlers {
                         print("[SIGHUP] Threat-intel network refresh \(freshConfig.threatIntelEnabled ? "ENABLED" : "disabled (egress stopped)")")
                     }
 
-                    let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
                     let anyChange = old.eventsHotTierMinutes  != newStorage.eventsHotTierMinutes
                                  || old.eventsMaxSizeMB       != newStorage.eventsMaxSizeMB
                                  || old.aggregateDays         != newStorage.aggregateDays
@@ -195,9 +276,13 @@ enum SignalHandlers {
                                  || old.alertsMaxSizeMB       != newStorage.alertsMaxSizeMB
                                  || old.campaignsRetentionDays != newStorage.campaignsRetentionDays
                                  || old.campaignsMaxSizeMB    != newStorage.campaignsMaxSizeMB
+                                 || old.tracesRetentionDays   != newStorage.tracesRetentionDays
+                                 || old.tracesMaxSizeMB       != newStorage.tracesMaxSizeMB
+                                 || old.tracegraphRetentionDays != newStorage.tracegraphRetentionDays
+                                 || tracegraphCapChanged
                     if anyChange {
-                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierMinutes)m/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
-                        if eventsCapChanged {
+                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierMinutes)m/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, traces=\(newStorage.tracesRetentionDays)d/\(newStorage.tracesMaxSizeMB)MB, tracegraph=\(newStorage.tracegraphRetentionDays)d/\(newStorage.tracegraphMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
+                        if eventsCapLowered {
                             // Lowered events cap: kick an immediate sweep so the
                             // operator sees the DB shrink in seconds instead of
                             // waiting up to 6h for the next rollup tick.

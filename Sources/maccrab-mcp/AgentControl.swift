@@ -10,12 +10,12 @@
 //   `/Library/Application Support/MacCrab/mcp_capabilities.json`:
 //     { "config": false, "authoring": false, "response": false }
 //   A missing / non-root-owned file (the default) means ALL mutation is denied;
-//   the agent can still read. The human sets grants in the dashboard (Settings →
-//   Agent Control), which routes the choice through the privileged inbox so the
-//   ROOT engine writes the file. The MCP trusts the file ONLY because it is
-//   root-owned — an agent runs as the console user and cannot create a
-//   root-owned file, so it can never grant itself power, and there is no MCP
-//   tool that enables a capability.
+//   the agent can still read. A human grants a tier through the explicit
+//   root-authorized CLI (`sudo maccrabctl agent-capabilities set … on`). The
+//   dashboard may revoke tiers but its console-user request cannot create a new
+//   grant. The MCP trusts only a tightly validated root-owned state file, so an
+//   agent cannot grant itself power, and there is no MCP tool that enables a
+//   capability.
 //
 //   Three tiers, escalating:
 //     • config    — tune detection: built-in rule settings, reload, refresh
@@ -26,8 +26,8 @@
 //                   coverage, so they require the top tier.
 //
 //   Every mutation goes through the privileged inbox IPC (uid + symlink/
-//   hardlink gated, audit-logged by the daemon) — the same path the dashboard
-//   uses. Response actions are untouched: they still never auto-execute.
+//   hardlink gated, audit-logged by the daemon). Response actions are
+//   untouched: they still never auto-execute.
 //
 //   EXCEPTION (audit #15): `set_response_action` does NOT write through the
 //   inbox — it writes the user-home `actions.json` directly, and the root engine
@@ -36,6 +36,7 @@
 //   says so explicitly. The reload is still queued through the inbox.
 
 import Foundation
+import Darwin
 import MacCrabCore
 
 enum AgentCapability: String {
@@ -49,22 +50,73 @@ enum AgentCapability: String {
 /// so a human revoking a tier takes effect immediately.
 ///
 /// SECURITY (the load-bearing invariant): the grants file is trusted ONLY when
-/// it is a regular file owned by root (uid 0) at the system support dir. The
-/// human enables tiers in the dashboard, which routes through the privileged
-/// inbox so the ROOT engine writes this file. An agent runs as the console user
-/// (uid 501) and CANNOT create a root-owned file anywhere, so it cannot grant
-/// itself a capability — even though it can write into its own user-home dir.
-/// We `lstat` (rejecting a symlink an agent could point at a root file) and
-/// require st_uid == 0.
+/// it is a regular, single-link, non-group/world-writable file owned by root
+/// (uid 0) at the system support dir. A human enables tiers through the
+/// root-authorized CLI; the root engine writes this file. An agent runs as the
+/// console user and cannot create or modify a file meeting that trust policy.
 func loadAgentCapabilities() -> Set<AgentCapability> {
-    let path = "/Library/Application Support/MacCrab/mcp_capabilities.json"
-    var st = stat()
-    guard lstat(path, &st) == 0,
-          (st.st_mode & S_IFMT) == S_IFREG,   // a regular file, not a symlink/dir
-          st.st_uid == 0                       // written by the root engine only
+    readTrustedAgentCapabilities(
+        at: "/Library/Application Support/MacCrab/mcp_capabilities.json",
+        expectedOwnerUID: 0
+    )
+}
+
+/// Bounded, descriptor-validated capability load. Root ownership alone is not
+/// sufficient: a root-owned file accidentally left group/world-writable can be
+/// modified in place by an unprivileged process without changing `st_uid`.
+/// Opening no-follow, comparing the opened inode with lstat, requiring a single
+/// link and rejecting writable-by-others closes that bypass and the path/read
+/// TOCTOU. `expectedOwnerUID` is an internal test seam; production always uses 0.
+func readTrustedAgentCapabilities(
+    at path: String,
+    expectedOwnerUID: uid_t
+) -> Set<AgentCapability> {
+    let maximumBytes: off_t = 64 * 1024
+    var pathInfo = stat()
+    guard lstat(path, &pathInfo) == 0,
+          (pathInfo.st_mode & S_IFMT) == S_IFREG,
+          pathInfo.st_uid == expectedOwnerUID,
+          pathInfo.st_nlink == 1,
+          (pathInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+          pathInfo.st_size >= 0,
+          pathInfo.st_size <= maximumBytes
     else { return [] }
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+    let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { return [] }
+    defer { close(fd) }
+    var openedInfo = stat()
+    guard fstat(fd, &openedInfo) == 0,
+          (openedInfo.st_mode & S_IFMT) == S_IFREG,
+          openedInfo.st_uid == expectedOwnerUID,
+          openedInfo.st_nlink == 1,
+          openedInfo.st_dev == pathInfo.st_dev,
+          openedInfo.st_ino == pathInfo.st_ino,
+          (openedInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+          openedInfo.st_size >= 0,
+          openedInfo.st_size <= maximumBytes
+    else { return [] }
+
+    var data = Data()
+    data.reserveCapacity(Int(openedInfo.st_size))
+    var buffer = [UInt8](repeating: 0, count: 4 * 1024)
+    while true {
+        let remaining = Int(maximumBytes) - data.count + 1
+        guard remaining > 0 else { return [] }
+        let requested = min(buffer.count, remaining)
+        let count = buffer.withUnsafeMutableBytes {
+            Darwin.read(fd, $0.baseAddress, requested)
+        }
+        if count == 0 { break }
+        if count < 0 {
+            if errno == EINTR { continue }
+            return []
+        }
+        data.append(contentsOf: buffer[0..<count])
+        if data.count > Int(maximumBytes) { return [] }
+    }
+
+    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return [] }
     var granted: Set<AgentCapability> = []
     for cap in [AgentCapability.config, .authoring, .response] {
@@ -207,7 +259,7 @@ func agentCapabilityDenial(forTool name: String, args: [String: Any]) -> [String
         required = .response
     }
     if granted.contains(required) { return nil }
-    return toolError("MacCrab agent capability '\(required.rawValue)' is not enabled. A human must turn it on in the dashboard (Settings → Agent Control); the grant is stored in a root-owned file that agents cannot write. All agent-control tiers are off by default.")
+    return toolError("MacCrab agent capability '\(required.rawValue)' is not enabled. A human must explicitly grant it with: sudo maccrabctl agent-capabilities set \(required.rawValue) on. The grant is stored in root-owned state that agents cannot write. All agent-control tiers are off by default.")
 }
 
 /// Fail-CLOSED gate for the dynamically-registered per-plugin collector tools
@@ -224,7 +276,7 @@ func agentCapabilityDenial(forTool name: String, args: [String: Any]) -> [String
 /// when `.response` isn't granted; nil to proceed.
 func perPluginCollectorCapabilityDenial(forTool name: String) -> [String: Any]? {
     if loadAgentCapabilities().contains(.response) { return nil }
-    return toolError("MacCrab agent capability 'response' is not enabled. The per-plugin collector tool '\(name)' executes plugin scanner code and commits forensic artifacts (sensitive local data) into a case, so it requires the top 'response' tier — the same gate as forensics_run_collector. A human must turn it on in the dashboard (Settings → Agent Control); the grant is stored in a root-owned file that agents cannot write. All agent-control tiers are off by default.")
+    return toolError("MacCrab agent capability 'response' is not enabled. The per-plugin collector tool '\(name)' executes plugin scanner code and commits forensic artifacts (sensitive local data) into a case, so it requires the top 'response' tier — the same gate as forensics_run_collector. A human must explicitly grant it with: sudo maccrabctl agent-capabilities set response on. The grant is stored in root-owned state that agents cannot write. All agent-control tiers are off by default.")
 }
 
 // MARK: - Read-only: capabilities + built-in rule catalog + audit log
@@ -243,7 +295,7 @@ func handleAgentCapabilities() -> Any {
         lines.append("  [\(on ? "ON " : "off")] \(cap.rawValue) — \(desc)")
     }
     lines.append("")
-    lines.append("Enable a tier in the dashboard (Settings → Agent Control). Grants are stored in a root-owned file that agents cannot write. Every change an agent makes is routed through the privileged inbox and audit-logged by the engine.")
+    lines.append("A human can grant a tier with `sudo maccrabctl agent-capabilities set <tier> on`. Grants are stored in root-owned state that agents cannot write. Every change an agent makes is routed through the privileged inbox and audit-logged by the engine.")
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 

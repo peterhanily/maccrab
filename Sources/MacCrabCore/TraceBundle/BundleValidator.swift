@@ -72,16 +72,40 @@ public enum BundleValidator {
     // MARK: - Public entry point
 
     public static func validate(at directory: URL) -> Outcome {
+        do {
+            let resolution = try SafeTraceBundleResolver.resolve(inputAt: directory)
+            defer { resolution.cleanup() }
+            return validate(resolvedBundle: resolution)
+        } catch {
+            return Outcome(
+                exitCode: 1,
+                kind: .schemaInvalid("unsafe bundle filesystem layout: \(error.localizedDescription)"),
+                messages: [error.localizedDescription]
+            )
+        }
+    }
+
+    /// Consume an already-resolved immutable snapshot. Nested consumers use
+    /// this overload so validation, verification, and replay all see the same
+    /// captured bytes instead of independently reopening the hostile source.
+    public static func validate(
+        resolvedBundle resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome {
+        validateResolvedSnapshot(resolution)
+    }
+
+    private static func validateResolvedSnapshot(
+        _ resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome {
         // Step 1: structural — directory exists and contains required artifacts
-        if let result = validateStructure(at: directory) {
+        if let result = validateStructure(in: resolution) {
             return result
         }
 
         // Step 2: parse manifest
-        let manifestURL = directory.appendingPathComponent("manifest.json")
         let manifest: BundleManifest
         do {
-            let data = try Data(contentsOf: manifestURL)
+            let data = try resolution.data(at: "manifest.json")
             manifest = try canonicalJSONDecoder().decode(BundleManifest.self, from: data)
         } catch {
             return Outcome(
@@ -110,27 +134,27 @@ public enum BundleValidator {
         }
 
         // Step 4: parse graph.json
-        if let result = validateGraph(at: directory, manifest: manifest) { return result }
+        if let result = validateGraph(in: resolution, manifest: manifest) { return result }
 
         // Step 5: parse events.jsonl (line-delimited JSON)
-        if let result = validateEventsJsonl(at: directory) { return result }
+        if let result = validateEventsJsonl(in: resolution) { return result }
 
         // Step 6: parse replay manifest
-        if let result = validateReplayManifest(at: directory) { return result }
+        if let result = validateReplayManifest(in: resolution) { return result }
 
         // Step 7: parse integrity artifacts (structural only — Merkle
         // verification is in BundleVerifier / PR-10c)
-        if let result = validateIntegrityArtifacts(at: directory, manifest: manifest) { return result }
+        if let result = validateIntegrityArtifacts(in: resolution, manifest: manifest) { return result }
 
         // Step 8: redaction policy check (basic)
-        if let result = validateRedactionPolicy(at: directory, manifest: manifest) { return result }
+        if let result = validateRedactionPolicy(in: resolution, manifest: manifest) { return result }
 
         // Step 9: manifest-claim verification (exit 10)
         if manifest.provCompliant {
-            if let result = validateProvOClaim(at: directory) { return result }
+            if let result = validateProvOClaim(in: resolution) { return result }
         }
         if manifest.otelAligned {
-            if let result = validateOtelClaim(at: directory) { return result }
+            if let result = validateOtelClaim(in: resolution) { return result }
         }
 
         // All checks passed.
@@ -139,23 +163,11 @@ public enum BundleValidator {
 
     // MARK: - Step helpers
 
-    private static func validateStructure(at directory: URL) -> Outcome? {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDir) else {
-            return Outcome(
-                exitCode: 9,
-                kind: .internalError("directory does not exist: \(directory.path)")
-            )
-        }
-        guard isDir.boolValue else {
-            return Outcome(
-                exitCode: 9,
-                kind: .internalError("path is not a directory: \(directory.path)")
-            )
-        }
+    private static func validateStructure(
+        in resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome? {
         for path in requiredArtifactPaths {
-            let url = directory.appendingPathComponent(path)
-            if !FileManager.default.fileExists(atPath: url.path) {
+            if !resolution.containsArtifact(path) {
                 return Outcome(
                     exitCode: 1,
                     kind: .schemaInvalid("required artifact missing: \(path)")
@@ -165,10 +177,12 @@ public enum BundleValidator {
         return nil
     }
 
-    private static func validateGraph(at directory: URL, manifest: BundleManifest) -> Outcome? {
-        let url = directory.appendingPathComponent("graph.json")
+    private static func validateGraph(
+        in resolution: SafeTraceBundleResolver.Resolution,
+        manifest: BundleManifest
+    ) -> Outcome? {
         do {
-            let data = try Data(contentsOf: url)
+            let data = try resolution.data(at: "graph.json")
             let graph = try canonicalJSONDecoder().decode(GraphArtifact.self, from: data)
             if graph.trace.id != manifest.traceId {
                 return Outcome(
@@ -208,10 +222,11 @@ public enum BundleValidator {
         }
     }
 
-    private static func validateEventsJsonl(at directory: URL) -> Outcome? {
-        let url = directory.appendingPathComponent("events.jsonl")
+    private static func validateEventsJsonl(
+        in resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome? {
         do {
-            let data = try Data(contentsOf: url)
+            let data = try resolution.data(at: "events.jsonl")
             guard let text = String(data: data, encoding: .utf8) else {
                 return Outcome(exitCode: 1, kind: .schemaInvalid("events.jsonl is not valid UTF-8"))
             }
@@ -244,10 +259,11 @@ public enum BundleValidator {
         }
     }
 
-    private static func validateReplayManifest(at directory: URL) -> Outcome? {
-        let url = directory.appendingPathComponent("replay/replay_manifest.json")
+    private static func validateReplayManifest(
+        in resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome? {
         do {
-            let data = try Data(contentsOf: url)
+            let data = try resolution.data(at: "replay/replay_manifest.json")
             _ = try canonicalJSONDecoder().decode(ReplayManifestArtifact.self, from: data)
             return nil
         } catch {
@@ -259,14 +275,13 @@ public enum BundleValidator {
     }
 
     private static func validateIntegrityArtifacts(
-        at directory: URL,
+        in resolution: SafeTraceBundleResolver.Resolution,
         manifest: BundleManifest
     ) -> Outcome? {
         // hash_chain.json
-        let chainURL = directory.appendingPathComponent("integrity/hash_chain.json")
         let chain: HashChainArtifact
         do {
-            let data = try Data(contentsOf: chainURL)
+            let data = try resolution.data(at: "integrity/hash_chain.json")
             chain = try canonicalJSONDecoder().decode(HashChainArtifact.self, from: data)
         } catch {
             return Outcome(
@@ -276,10 +291,11 @@ public enum BundleValidator {
         }
 
         // chain_head_signature.json
-        let sigURL = directory.appendingPathComponent("integrity/chain_head_signature.json")
         let signature: ChainHeadSignatureArtifact
         do {
-            let data = try Data(contentsOf: sigURL)
+            let data = try resolution.data(
+                at: "integrity/chain_head_signature.json"
+            )
             signature = try canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: data)
         } catch {
             return Outcome(
@@ -312,7 +328,7 @@ public enum BundleValidator {
     }
 
     private static func validateRedactionPolicy(
-        at directory: URL,
+        in resolution: SafeTraceBundleResolver.Resolution,
         manifest: BundleManifest
     ) -> Outcome? {
         // PR-10a baseline check: when manifest claims `host_redacted: true`,
@@ -322,8 +338,8 @@ public enum BundleValidator {
         // for obvious markers like /Users/<name>/ patterns where the
         // user has not been redacted.
         guard manifest.hostRedacted else { return nil }
-        let url = directory.appendingPathComponent("events.jsonl")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        guard let data = try? resolution.data(at: "events.jsonl"),
+              let text = String(data: data, encoding: .utf8) else { return nil }
         // §18.4 redacts user paths to ~/...
         // A residual /Users/<actual_name>/ in the bundle is a violation.
         // The redacted form has /Users/[REDACTED]/ or ~/...
@@ -347,9 +363,10 @@ public enum BundleValidator {
     /// when manifest.prov_compliant is true, the artifact must
     /// exist as valid JSON-LD with a recognizable PROV-O context
     /// and at least one prov:Activity, prov:Entity, or prov:Agent.
-    private static func validateProvOClaim(at directory: URL) -> Outcome? {
-        let url = directory.appendingPathComponent("prov/prov.jsonld")
-        guard let data = try? Data(contentsOf: url),
+    private static func validateProvOClaim(
+        in resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome? {
+        guard let data = try? resolution.data(at: "prov/prov.jsonld"),
               let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return Outcome(
                 exitCode: 10,
@@ -397,9 +414,10 @@ public enum BundleValidator {
     /// manifest.otel_aligned is true, the artifact must be valid
     /// JSON in the OTel `resourceSpans` shape and carry an
     /// `otel.semconv.version` resource attribute.
-    private static func validateOtelClaim(at directory: URL) -> Outcome? {
-        let url = directory.appendingPathComponent("otel/spans.json")
-        guard let data = try? Data(contentsOf: url),
+    private static func validateOtelClaim(
+        in resolution: SafeTraceBundleResolver.Resolution
+    ) -> Outcome? {
+        guard let data = try? resolution.data(at: "otel/spans.json"),
               let json = try? JSONSerialization.jsonObject(with: data, options: []),
               let dict = json as? [String: Any] else {
             return Outcome(

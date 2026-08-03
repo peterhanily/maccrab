@@ -116,6 +116,18 @@ public struct V2SystemWorkspace: View {
                 if heartbeat?.esSensorDegraded == true {
                     sensorDegradedBanner
                 }
+                if let browser = heartbeat?.browserInventory, browser.degraded {
+                    browserInventoryDegradedBanner(browser)
+                }
+                if let storage = heartbeat?.traceGraphStorageAdmission,
+                   storage.evidenceUnavailable {
+                    traceGraphStorageBanner(storage)
+                }
+                if let storage = heartbeat?.traceStoreStorageAdmission,
+                   storage.reason != "receiver_disabled",
+                   storage.blocked || (storage.enabled && storage.storeAvailable == false) {
+                    traceStoreStorageBanner(storage)
+                }
                 healthActionsCard
                 healthSummaryRow
                 collectorsTable
@@ -203,6 +215,12 @@ public struct V2SystemWorkspace: View {
             ]
             if let mem = hb.residentMemoryMB { hbDict["resident_memory_mb"] = mem }
             if let sev = hb.esSensorDegradedSeverity { hbDict["es_sensor_degraded_severity"] = sev }
+            if let pipeline = hb.eventPipeline {
+                hbDict["event_pipeline"] = pipeline.diagnosticDictionary
+            }
+            if let browserInventory = hb.browserInventory {
+                hbDict["browser_inventory"] = browserInventory.diagnosticDictionary
+            }
             diag["heartbeat"] = hbDict
             diag["collectors"] = hb.collectors.map { c -> [String: Any] in
                 var m: [String: Any] = ["name": c.name, "event_count": c.eventCount, "healthy": c.healthy]
@@ -274,6 +292,129 @@ public struct V2SystemWorkspace: View {
                         ? String(localized: "system.sensorDegradedChipLow", defaultValue: "Advisory")
                         : String(localized: "system.sensorDegradedChipHigh", defaultValue: "Degraded"),
                         kind: isBenign ? .warning : .degraded)
+                }
+                Text(detail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    private func browserInventoryDegradedBanner(
+        _ inventory: V2HeartbeatSnapshot.BrowserInventory
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(V2Theme.warning.opacity(0.18))
+                Image(systemName: "puzzlepiece.extension.fill")
+                    .foregroundStyle(V2Theme.warning)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(String(
+                        localized: "system.browserInventoryIncompleteTitle",
+                        defaultValue: "Browser extension inventory incomplete"
+                    ))
+                        .scaledSystem(13, weight: .semibold)
+                        .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(
+                        String(
+                            localized: "system.browserInventoryCoverageGapChip",
+                            defaultValue: "Coverage gap"
+                        ),
+                        kind: .degraded
+                    )
+                }
+                Text(inventory.operatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    /// TraceGraph can be storage-shed while the rest of detection and the
+    /// heartbeat remain healthy. Keep that forensic-evidence gap prominent;
+    /// an empty Investigation view must never be mistaken for "no activity".
+    private func traceGraphStorageBanner(
+        _ storage: V2HeartbeatSnapshot.TraceGraphStorageAdmission
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(V2Theme.warning.opacity(0.18))
+                Image(systemName: "externaldrive.badge.exclamationmark")
+                    .foregroundStyle(V2Theme.warning)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(String(
+                        localized: "system.traceGraphStoragePausedTitle",
+                        defaultValue: "TraceGraph evidence persistence paused"
+                    ))
+                    .scaledSystem(13, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(
+                        String(localized: "system.traceGraphStoragePausedChip", defaultValue: "Evidence gap"),
+                        kind: .degraded
+                    )
+                }
+                Text(storage.operatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    /// traces.db is a separate storage budget from TraceGraph. Its contents
+    /// come from an unauthenticated loopback OTLP endpoint, so losing them does
+    /// not reduce kernel detection coverage; it does make the Agent Traces
+    /// evidence view incomplete and must remain operator-visible.
+    private func traceStoreStorageBanner(
+        _ storage: V2HeartbeatSnapshot.TraceGraphStorageAdmission
+    ) -> some View {
+        let rawReason = storage.reason ?? "unknown reason"
+        let reason = rawReason.replacingOccurrences(of: "_", with: " ")
+        let detail: String
+        if storage.startupBlocked {
+            detail = "The Agent Trace store was paused at startup (\(reason)). Unauthenticated/self-reported OTLP spans are not being recorded; kernel-backed detection continues. Free disk space or adjust the traces storage limit, then restart MacCrab."
+        } else if storage.storeAvailable == false {
+            detail = "The Agent Trace store is unavailable (\(reason)). Unauthenticated/self-reported OTLP spans are not being recorded; kernel-backed detection continues."
+        } else {
+            detail = "Agent Trace persistence is paused (\(reason)). New unauthenticated/self-reported OTLP spans are being shed while bounded recovery runs; kernel-backed detection continues."
+        }
+
+        return HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(V2Theme.warning.opacity(0.18))
+                Image(systemName: "externaldrive.badge.exclamationmark")
+                    .foregroundStyle(V2Theme.warning)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(String(
+                        localized: "system.traceStoreStoragePausedTitle",
+                        defaultValue: "Agent Trace persistence paused"
+                    ))
+                    .scaledSystem(13, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(
+                        String(localized: "system.traceStoreStoragePausedChip", defaultValue: "Advisory evidence gap"),
+                        kind: .degraded
+                    )
                 }
                 Text(detail)
                     .font(V2Theme.meta())

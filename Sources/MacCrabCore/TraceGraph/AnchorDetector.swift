@@ -22,7 +22,12 @@
 import Foundation
 
 public enum AnchorTrigger: Sendable, Equatable {
-    case credentialAccess(processEntityId: String, fileEntityId: String)
+    case credentialAccess(
+        processEntityId: String,
+        stableProcessIdentity: String,
+        fileEntityId: String,
+        operation: String
+    )
     case persistenceCreated(processEntityId: String, persistenceEntityId: String)
     case aiAgentSpawnsShell(agentEntityId: String, processEntityId: String)
     case unsignedDownloadExecution(processEntityId: String)
@@ -31,7 +36,7 @@ public enum AnchorTrigger: Sendable, Equatable {
 
     public var anchorEntityId: String {
         switch self {
-        case .credentialAccess(_, let fileId):           return fileId
+        case .credentialAccess(_, _, let fileId, _):     return fileId
         case .persistenceCreated(_, let persistenceId):  return persistenceId
         case .aiAgentSpawnsShell(_, let processId):      return processId
         case .unsignedDownloadExecution(let processId):  return processId
@@ -73,6 +78,7 @@ public enum AnchorDetector {
         public let networkNode: NetworkNode?
         public let persistenceNode: PersistenceNode?
         public let agentEntityId: String?
+        public let credentialOperation: String
         public let policy: TracePolicy
 
         public init(
@@ -81,6 +87,7 @@ public enum AnchorDetector {
             networkNode: NetworkNode? = nil,
             persistenceNode: PersistenceNode? = nil,
             agentEntityId: String? = nil,
+            credentialOperation: String = "unknown",
             policy: TracePolicy = .default
         ) {
             self.processNode = processNode
@@ -88,6 +95,7 @@ public enum AnchorDetector {
             self.networkNode = networkNode
             self.persistenceNode = persistenceNode
             self.agentEntityId = agentEntityId
+            self.credentialOperation = credentialOperation
             self.policy = policy
         }
     }
@@ -105,7 +113,12 @@ public enum AnchorDetector {
         // 1. Credential file access
         if let file = context.fileNode, file.fileKind == .credentialFile {
             let fileEntityId = FileNode.entityType + ":" + file.pathHash
-            anchors.append(.credentialAccess(processEntityId: processEntityId, fileEntityId: fileEntityId))
+            anchors.append(.credentialAccess(
+                processEntityId: processEntityId,
+                stableProcessIdentity: stableCredentialProcessIdentity(context.processNode),
+                fileEntityId: fileEntityId,
+                operation: context.credentialOperation
+            ))
         }
 
         // 2. Persistence creation
@@ -136,6 +149,22 @@ public enum AnchorDetector {
         }
 
         return anchors
+    }
+
+    /// Identity used only to aggregate repeated credential observations. A
+    /// process key includes pid/pidversion, so short-lived polling CLIs mint a
+    /// new key on every invocation and can otherwise materialize hundreds of
+    /// copies of the same trace. Prefer the signed binary identity, then its
+    /// content hash, and finally its normalized executable path.
+    private static func stableCredentialProcessIdentity(_ process: ProcessNode) -> String {
+        if let teamId = process.signingTeamId, !teamId.isEmpty,
+           let signingId = process.signingIdentifier, !signingId.isEmpty {
+            return "signer:\(teamId):\(signingId)"
+        }
+        if let executableHash = process.executableHash, !executableHash.isEmpty {
+            return "sha256:\(executableHash)"
+        }
+        return "path:\((process.executablePath as NSString).standardizingPath)"
     }
 
     public static func isShellExecutable(_ path: String) -> Bool {

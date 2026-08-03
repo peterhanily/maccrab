@@ -185,6 +185,23 @@ struct BundleValidatorTests {
         #expect(outcome.kind == .valid)
     }
 
+    @Test("Resolved validation ignores same-uid mutation of the temporary tree")
+    func resolvedValidationUsesCapturedBytes() throws {
+        let dir = try buildValidBundle()
+        defer { cleanup(dir) }
+        let resolution = try SafeTraceBundleResolver.resolve(inputAt: dir)
+        defer { resolution.cleanup() }
+
+        // A second process with the same uid can write below a 0700 root.
+        // Corrupt the path-backed copy after resolution; validation must still
+        // consume the byte snapshot owned by the Resolution token.
+        try Data("not-json".utf8).write(
+            to: resolution.bundleDirectory.appendingPathComponent("manifest.json")
+        )
+        let outcome = BundleValidator.validate(resolvedBundle: resolution)
+        #expect(outcome.exitCode == 0)
+    }
+
     @Test("Exit 1: missing manifest.json")
     func missingManifest() throws {
         let dir = try buildValidBundle()

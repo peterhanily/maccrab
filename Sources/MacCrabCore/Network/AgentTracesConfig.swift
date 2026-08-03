@@ -7,8 +7,8 @@
 //
 // File layout follows the v1.6.19 NotificationIntegrations pattern:
 //   * Dashboard (user) writes to ~/Library/Application Support/MacCrab/agent_traces_config.json
-//   * Daemon (root) walks /Users/* for the same file (uid-validated against
-//     each home's owner) and applies the most recent.
+//   * Daemon (root) checks resolver-validated homes for the same uid-bound
+//     file and applies the most recent.
 //   * Daemon SIGHUP triggers reload + receiver lifecycle change.
 //   * Daemon's own /Library/Application Support/MacCrab/agent_traces_config.json
 //     is read first if present (operator can preconfigure).
@@ -65,6 +65,7 @@ public enum AgentTracesConfigStore {
 
     public static let filename = "agent_traces_config.json"
     public static let systemPath = "/Library/Application Support/MacCrab/" + filename
+    static let maxConfigBytes = 64 * 1024
 
     private static let logger = Logger(subsystem: "com.maccrab.network", category: "agent-traces-config")
 
@@ -95,7 +96,10 @@ public enum AgentTracesConfigStore {
 
     /// Read from `path`. Returns nil on missing file or malformed JSON.
     public static func read(from path: String) -> AgentTracesConfig? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+        guard let data = BoundedRegularFileReader.read(
+                  at: path,
+                  maximumBytes: maxConfigBytes
+              ),
               let cfg = try? JSONDecoder().decode(AgentTracesConfig.self, from: data) else {
             return nil
         }
@@ -104,17 +108,21 @@ public enum AgentTracesConfigStore {
 
     /// Resolve the EFFECTIVE config the daemon should obey. Mirrors
     /// NotificationIntegrations.loadEffectiveConfig: try the system
-    /// path first, then walk /Users/* for the most-recent
-    /// uid-validated user-home file. Falls back to default.
+    /// path first, then inspect every resolver-validated local home for the
+    /// most-recent uid-bound user file. Falls back to default.
     public static func loadEffective() -> AgentTracesConfig {
-        let systemCfg = read(from: systemPath)
-        let userPath = findUserHomeConfigPath()
-        let userCfg = userPath.flatMap { read(from: $0) }
-        let fm = FileManager.default
-        let systemMtime = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
-        let userMtime = userPath.flatMap {
-            (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        let systemSnapshot = configSnapshot(at: systemPath)
+        let systemCfg = systemSnapshot.flatMap(decodeConfig)
+
+        // A valid root-owned system config is authoritative. Do not inspect a
+        // user-home carrier that cannot affect the result; an ignored FIFO used
+        // to block the root daemon before this precedence decision ran.
+        if let systemCfg, systemSnapshot?.ownerUID == 0 {
+            return systemCfg
         }
+
+        let userCandidate = findUserHomeConfigSnapshot()
+        let userCfg = userCandidate.flatMap { decodeConfig($0.snapshot) }
         switch (systemCfg, userCfg) {
         case (nil, nil):
             return .defaultConfig
@@ -123,47 +131,54 @@ public enum AgentTracesConfigStore {
         case (nil, let uc?):
             return uc
         case (let sc?, let uc?):
-            // A root-owned system config is authoritative — same rule as
-            // NotificationIntegrations.loadEffectiveConfig (v1.21.4 audit A2-01).
-            // Without this a user-home agent_traces_config.json wins the mtime
-            // race and steers the ROOT daemon's OTLP receiver (enable/disable a
-            // detection capability, or move the listener port). Only fall back to
-            // the mtime comparison when the system path is NOT root-owned (the
-            // dev ~/Library path), preserving single-user dev behaviour.
-            let systemUID = (try? fm.attributesOfItem(atPath: systemPath))?[.ownerAccountID] as? NSNumber
-            if systemUID?.uint32Value == 0 { return sc }
-            let sm = systemMtime ?? .distantPast
-            let um = userMtime ?? .distantPast
+            // Any valid root-owned system config returned above. Reaching this
+            // case therefore means the system path is non-root-owned (the dev
+            // ~/Library path); retain its legacy mtime precedence behavior.
+            let sm = systemSnapshot?.modificationDate ?? .distantPast
+            let um = userCandidate?.snapshot.modificationDate ?? .distantPast
             return um > sm ? uc : sc
         }
     }
 
-    /// Walk /Users/* for an agent_traces_config.json owned by the home's
-    /// uid. Returns the most recent matching path, or nil.
+    /// Inspect resolver-validated homes for an agent_traces_config.json owned
+    /// by the home's uid. Returns the most recent matching path, or nil.
     public static func findUserHomeConfigPath() -> String? {
-        let fm = FileManager.default
-        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
+        findUserHomeConfigSnapshot()?.path
+    }
 
-        struct Candidate { let path: String; let mtime: Date }
-        var candidates: [Candidate] = []
-        for user in users where user != "Shared" && !user.hasPrefix(".") {
-            let home = "/Users/\(user)"
-            let path = home + "/Library/Application Support/MacCrab/" + filename
-            guard fm.fileExists(atPath: path) else { continue }
-            guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
-                  let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
-            let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-            guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+    private static func configSnapshot(
+        at path: String
+    ) -> BoundedRegularFileReader.Snapshot? {
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+            at: path,
+            maximumBytes: maxConfigBytes
+        ) else { return nil }
+        return snapshot
+    }
+
+    private static func decodeConfig(
+        _ snapshot: BoundedRegularFileReader.Snapshot
+    ) -> AgentTracesConfig? {
+        try? JSONDecoder().decode(AgentTracesConfig.self, from: snapshot.data)
+    }
+
+    private static func findUserHomeConfigSnapshot()
+        -> (path: String, snapshot: BoundedRegularFileReader.Snapshot)? {
+        var candidates: [(path: String, snapshot: BoundedRegularFileReader.Snapshot)] = []
+        for home in RealUserHomeResolver.all() {
+            let path = home.appending("Library/Application Support/MacCrab/" + filename)
+            guard let snapshot = configSnapshot(at: path),
+                  home.userID == snapshot.ownerUID else { continue }
             // v1.21.4 audit A2-01 added this admin gate to the other four
-            // /Users/* config-walk sites and missed this one: without it any
+            // user-home config sites and missed this one: without it any
             // NON-admin local user (standard account, guest, service account with
             // a home under /Users) steers the root daemon's OTLP receiver.
-            guard Self.isAdminUID(homeUID) else { continue }
-            let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
-            candidates.append(Candidate(path: path, mtime: mtime))
+            guard Self.isAdminUID(home.userID) else { continue }
+            candidates.append((path: path, snapshot: snapshot))
         }
-        return candidates.max(by: { $0.mtime < $1.mtime })?.path
+        return candidates.max(by: {
+            $0.snapshot.modificationDate < $1.snapshot.modificationDate
+        })
     }
 
     /// Mirrors `NotificationIntegrations.isAdminUID` / `ResponseAction.isAdminUID`

@@ -1,0 +1,10 @@
+# MacCrab release dependency provenance. This is data, never shell-sourced.
+# Bumps must update the exact SwiftPM/PyPI provenance and every derived hash.
+format_version=1
+sparkle_version=2.9.2
+sparkle_revision=6276ba2b404829d139c45ff98427cf90e2efc59b
+sparkle_binary_artifact_sha256=b83e37436774556ed055e0244b297ef2c790e0737393bf65bf495fcbba6eed65
+sparkle_sign_update_sha256=bfb52400c3da18bb4c251ac4818c2c2e1e31c2e649a45b31c11109b6e57b34ad
+sparkle_generate_keys_sha256=2d18ed3a9c744e58150513d9b2e3c2eb76fd0b9621e3e4678d46dd972547e8fe
+pyyaml_version=6.0.3
+pyyaml_file_count=17

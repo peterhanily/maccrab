@@ -61,7 +61,6 @@ struct D3FENDMappingTests {
         #expect(NetworkBlocker.d3fend.id == "D3-OTF")
         #expect(PersistenceGuard.d3fend.id == "D3-PFV")
         #expect(TCCRevocation.d3fend.id == "D3-UAP")
-        #expect(AIContainment.d3fend.id == "D3-EAL")
         #expect(PanicButton.d3fend.id == "D3-PL")
         #expect(TravelMode.d3fend.id == "D3-FCR")
         #expect(SupplyChainGate.d3fend.id == "D3-SBV")
@@ -99,7 +98,7 @@ struct D3FENDMappingTests {
         #expect(D3FENDMapping.forTactic("attack.exfiltration").map(\.id) == ["D3-OTF", "D3-DNSBA"])
         #expect(D3FENDMapping.forTactic("attack.persistence").map(\.id) == ["D3-PFV"])
         #expect(D3FENDMapping.forTactic("attack.privilege_escalation").map(\.id) == ["D3-UAP"])
-        #expect(D3FENDMapping.forTactic("attack.execution").map(\.id) == ["D3-EAL"])
+        #expect(D3FENDMapping.forTactic("attack.execution").isEmpty)
         #expect(D3FENDMapping.forTactic("attack.initial_access").map(\.id) == ["D3-SBV"])
         #expect(D3FENDMapping.forTactic("attack.defense_evasion").map(\.id) == ["D3-EHPV"])
     }
@@ -125,7 +124,7 @@ struct D3FENDMappingTests {
                 == ["D3-OTF", "D3-DNSBA"])
         // Mixed tactics accumulate distinct twins.
         #expect(D3FENDMapping.forTactics("attack.persistence, attack.execution").map(\.id)
-                == ["D3-PFV", "D3-EAL"])
+                == ["D3-PFV"])
         #expect(D3FENDMapping.forTactics("").isEmpty)
         #expect(D3FENDMapping.forTactics("attack.discovery").isEmpty)
     }

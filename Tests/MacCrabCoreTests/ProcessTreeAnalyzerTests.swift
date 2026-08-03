@@ -13,6 +13,19 @@ import Foundation
 @Suite("ProcessTreeAnalyzer")
 struct ProcessTreeAnalyzerTests {
 
+    /// EventLoop promotes an individual process-tree transition into behavior
+    /// scoring only below this value. A source guard below pins this test
+    /// constant to the production call site so the numerical regressions cannot
+    /// quietly become weaker than the shipped admission gate.
+    private let eventLoopAdmissionThreshold = -8.0
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // MacCrabCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+    }
+
     private func tmpModelPath() -> String {
         NSTemporaryDirectory() + "pta_\(UUID().uuidString).json"
     }
@@ -102,5 +115,112 @@ struct ProcessTreeAnalyzerTests {
         let stats = await analyzer.stats()
         #expect(stats.transitions == 3, "legacy first-order counts must decode intact")
         #expect(stats.uniqueEdges == 1)
+    }
+
+    @Test("First-order first-seen parent crosses EventLoop threshold before learning")
+    func firstOrderCrossesEventLoopThresholdBeforeLearning() async {
+        let path = tmpModelPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let analyzer = ProcessTreeAnalyzer(minTransitions: 10_000, modelPath: path)
+
+        // An unseen parent scores 1 / uniqueParents. Seed enough distinct
+        // parents that the pre-observation score is below EventLoop's -8 gate.
+        // Keep the numeric token away from the suffix: normalizeName strips
+        // separator-delimited trailing versions by design.
+        let knownParentCount = 4_096
+        for index in 0..<knownParentCount {
+            await analyzer.recordTransition(
+                parentName: "known-parent-\(index)-stable",
+                childName: "known-child"
+            )
+        }
+        await analyzer.activate()
+
+        let firstSeen = await analyzer.recordTransition(
+            parentName: "previously-unseen-parent",
+            childName: "previously-unseen-child"
+        )
+        let expectedPreObservationScore = log(1.0 / Double(knownParentCount))
+        #expect(abs((firstSeen ?? 0) - expectedPreObservationScore) < 1e-12,
+                "first-seen parent must be scored against the prior 4,096-parent model")
+        #expect((firstSeen ?? 0) < eventLoopAdmissionThreshold,
+                "the regression must exercise EventLoop's production anomaly gate")
+
+        // The first call still learns after scoring. The same 1/1 edge is
+        // ordinary on its next observation, proving the test did not disable
+        // learning merely to obtain an anomalous score.
+        let repeated = await analyzer.recordTransition(
+            parentName: "previously-unseen-parent",
+            childName: "previously-unseen-child"
+        )
+        #expect(repeated == 0.0)
+    }
+
+    @Test("Second-order rare edge crosses EventLoop threshold before learning")
+    func bigramCrossesEventLoopThresholdBeforeLearning() async {
+        let path = tmpModelPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let analyzer = ProcessTreeAnalyzer(minTransitions: 20_000, modelPath: path)
+
+        let parent = "runtime-parent"
+        let dominantChild = "dominant-child"
+        let rareChild = "rare-child"
+        let targetGrandparent = "target-context"
+
+        // In the target grandparent→parent context the rare edge is 1/4096.
+        // A second context makes rareChild common in the first-order model, so
+        // the result can only cross -8 if the second-order model is selected.
+        for _ in 0..<4_095 {
+            await analyzer.recordTransition(
+                parentName: parent,
+                childName: dominantChild,
+                grandparentName: targetGrandparent
+            )
+        }
+        await analyzer.recordTransition(
+            parentName: parent,
+            childName: rareChild,
+            grandparentName: targetGrandparent
+        )
+        for _ in 0..<4_096 {
+            await analyzer.recordTransition(
+                parentName: parent,
+                childName: rareChild,
+                grandparentName: "common-context"
+            )
+        }
+        await analyzer.activate()
+
+        let rareBeforeLearning = await analyzer.recordTransition(
+            parentName: parent,
+            childName: rareChild,
+            grandparentName: targetGrandparent
+        )
+        let expectedPreObservationScore = log(1.0 / 4_096.0)
+        #expect(abs((rareBeforeLearning ?? 0) - expectedPreObservationScore) < 1e-12,
+                "bigram must use the pre-observation 1/4096 count")
+        #expect((rareBeforeLearning ?? 0) < eventLoopAdmissionThreshold,
+                "the second-order regression must cross EventLoop's production gate")
+
+        // After the anomalous observation is learned, its 2/4097 probability
+        // rises above the gate. A learn-before-score implementation would have
+        // returned this non-alerting value on the first call and failed above.
+        let rareAfterLearning = await analyzer.recordTransition(
+            parentName: parent,
+            childName: rareChild,
+            grandparentName: targetGrandparent
+        )
+        #expect((rareAfterLearning ?? -.infinity) > eventLoopAdmissionThreshold)
+    }
+
+    @Test("Process-tree test threshold is pinned to EventLoop production gate")
+    func eventLoopThresholdCannotDrift() throws {
+        let eventLoop = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/MacCrabAgentKit/EventLoop.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(eventLoop.contains("if logProb < -8.0"))
     }
 }

@@ -18,8 +18,9 @@ public actor QuarantineEnricher {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "quarantine-enricher")
 
-    /// Path to the quarantine events database.
-    private let dbPath: String
+    /// Tests may pin one synthetic DB. Production resolves the database from
+    /// the event/path's validated real-user home and never from /var/root.
+    private let dbPathOverride: String?
 
     /// Cache of recent positive lookups to avoid repeated DB reads.
     private var cache: [String: QuarantineInfo] = [:]
@@ -60,14 +61,14 @@ public actor QuarantineEnricher {
     // MARK: - Initialization
 
     public init() {
-        self.dbPath = NSHomeDirectory() + "/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
+        self.dbPathOverride = nil
     }
 
     /// Test seam: point the enricher at an arbitrary QuarantineEventsV2-shaped
     /// SQLite DB. Not reachable in production, which always resolves the real
     /// per-user path via `init()`.
     init(dbPath: String) {
-        self.dbPath = dbPath
+        self.dbPathOverride = dbPath
     }
 
     // MARK: - Public API
@@ -89,28 +90,69 @@ public actor QuarantineEnricher {
     /// persists, the old basename scan would still have attached the download URL
     /// here; the gate now returns nil. This loss is DISPLAY-ONLY: no rule,
     /// sequence, or graph rule reads `quarantine.*` (verified), and
-    /// DeliveryProvenanceWeld resolves provenance via `lookupByGUID` on its own
-    /// path (unaffected). We accept it rather than re-introduce a per-file-event
+    /// DeliveryProvenanceWeld resolves provenance through its event-bound GUID
+    /// path. We accept it rather than re-introduce a per-file-event
     /// external-DB scan (the whole point of the gate) for the rare stripped-xattr
     /// case. The GUID join is strictly MORE precise for the common case.
     public func lookup(filePath: String) -> QuarantineInfo? {
+        if let dbPathOverride {
+            return lookup(filePath: filePath, databasePath: dbPathOverride, cacheScope: "override")
+        }
+        guard let home = RealUserHomeResolver.provenanceHome(forPath: filePath) else {
+            return nil
+        }
+        return lookup(
+            filePath: filePath,
+            databasePath: Self.databasePath(for: home),
+            cacheScope: String(home.userID)
+        )
+    }
+
+    /// Event-aware lookup. The process/event uid is authoritative for paths
+    /// outside a home (Applications, mounted images, temp); if the target lies
+    /// under a user home, the path and uid must agree.
+    public func lookup(filePath: String, userID: UInt32) -> QuarantineInfo? {
+        if let dbPathOverride {
+            return lookup(filePath: filePath, databasePath: dbPathOverride, cacheScope: "override")
+        }
+        guard let home = RealUserHomeResolver.provenanceHome(
+            forPath: filePath,
+            userID: userID
+        ) else { return nil }
+        return lookup(
+            filePath: filePath,
+            databasePath: Self.databasePath(for: home),
+            cacheScope: String(home.userID)
+        )
+    }
+
+    private func lookup(
+        filePath: String,
+        databasePath: String,
+        cacheScope: String
+    ) -> QuarantineInfo? {
+        let pathKey = cacheScope + ":path:" + filePath
         // Positive cache.
-        if let cached = cache[filePath] { return cached }
+        if let cached = cache[pathKey] { return cached }
         // Negative sentinel cache — repeat lookups of a record-less path skip
         // the xattr probe + DB entirely.
-        if negativeCache.contains(filePath) { return nil }
+        if negativeCache.contains(pathKey) { return nil }
 
         // xattr gate: no com.apple.quarantine xattr -> provably no download
         // event for this file. `quarantineGUID` performs the size-only probe
         // and returns nil when the xattr is absent (or carries no GUID).
         guard let guid = Self.quarantineGUID(forPath: filePath) else {
-            rememberNegative(filePath)
+            rememberNegative(pathKey)
             return nil
         }
 
         // Resolve by the deterministic event GUID rather than a basename scan.
-        guard let info = lookupByGUID(guid) else {
-            rememberNegative(filePath)
+        guard let info = lookupByGUID(
+            guid,
+            databasePath: databasePath,
+            cacheScope: cacheScope
+        ) else {
+            rememberNegative(pathKey)
             return nil
         }
 
@@ -119,7 +161,7 @@ public actor QuarantineEnricher {
         if cache.count >= maxCacheSize {
             cache.removeAll()
         }
-        cache[filePath] = info
+        cache[pathKey] = info
 
         return info
     }
@@ -134,19 +176,60 @@ public actor QuarantineEnricher {
     }
 
     /// Look up download provenance directly by the `com.apple.quarantine`
-    /// event GUID (LSQuarantineEventIdentifier). This is the deterministic,
-    /// unforgeable join the delivery-provenance weld uses: the running
+    /// event GUID (LSQuarantineEventIdentifier). This is the deterministic
+    /// join the delivery-provenance weld uses: the running
     /// executable's quarantine xattr carries the GUID that keys its
     /// LSQuarantineEvent row (delivering agent + t0 + origin). Preview-made or
     /// non-downloaded files carry no GUID, so nothing is resolved for them.
+    /// The xattr is user-controlled, so callers must also bind the lookup to
+    /// the event uid and executable path before treating the result as
+    /// provenance; the GUID alone is enrichment, not an authority boundary.
     /// Returns nil when the GUID has no matching row.
     public func lookupByGUID(_ guid: String) -> QuarantineInfo? {
-        let key = "guid:" + guid
+        if let dbPathOverride {
+            return lookupByGUID(guid, databasePath: dbPathOverride, cacheScope: "override")
+        }
+        // The legacy GUID-only API carries no path or uid. It is safe only on a
+        // machine with exactly one validated real user; fast-user-switching or
+        // multiple local accounts deliberately degrade to no provenance.
+        guard let home = RealUserHomeResolver.uniqueHome() else { return nil }
+        return lookupByGUID(
+            guid,
+            databasePath: Self.databasePath(for: home),
+            cacheScope: String(home.userID)
+        )
+    }
+
+    public func lookupByGUID(_ guid: String, userID: UInt32, executablePath: String) -> QuarantineInfo? {
+        if let dbPathOverride {
+            return lookupByGUID(guid, databasePath: dbPathOverride, cacheScope: "override")
+        }
+        guard let home = RealUserHomeResolver.provenanceHome(
+            forPath: executablePath,
+            userID: userID
+        ) else { return nil }
+        return lookupByGUID(
+            guid,
+            databasePath: Self.databasePath(for: home),
+            cacheScope: String(home.userID)
+        )
+    }
+
+    private func lookupByGUID(
+        _ guid: String,
+        databasePath: String,
+        cacheScope: String
+    ) -> QuarantineInfo? {
+        let key = cacheScope + ":guid:" + guid.uppercased()
         if let cached = cache[key] { return cached }
-        guard !guid.isEmpty, FileManager.default.fileExists(atPath: dbPath) else { return nil }
+        guard !guid.isEmpty, FileManager.default.fileExists(atPath: databasePath) else { return nil }
 
         var db: OpaquePointer?
-        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+        guard SQLiteOpenPathPolicy.open(
+            databasePath,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        ) == SQLITE_OK else {
             return nil
         }
         defer { sqlite3_close(db) }
@@ -170,6 +253,10 @@ public actor QuarantineEnricher {
         if cache.count >= maxCacheSize { cache.removeAll() }
         cache[key] = info
         return info
+    }
+
+    static func databasePath(for home: RealUserHome) -> String {
+        home.appending("Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2")
     }
 
     /// Decode one LSQuarantineEvent row (columns in the fixed SELECT order used
@@ -219,6 +306,19 @@ public actor QuarantineEnricher {
     /// Enrich an event's enrichments dict with quarantine provenance.
     public func enrich(_ enrichments: inout [String: String], forFile filePath: String) {
         guard let info = lookup(filePath: filePath) else { return }
+        attach(info, to: &enrichments)
+    }
+
+    public func enrich(
+        _ enrichments: inout [String: String],
+        forFile filePath: String,
+        userID: UInt32
+    ) {
+        guard let info = lookup(filePath: filePath, userID: userID) else { return }
+        attach(info, to: &enrichments)
+    }
+
+    private func attach(_ info: QuarantineInfo, to enrichments: inout [String: String]) {
         enrichments["quarantine.download_url"] = info.downloadURL
         enrichments["quarantine.agent"] = info.downloadAgent
         enrichments["quarantine.timestamp"] = ISO8601DateFormatter().string(from: info.downloadTimestamp)

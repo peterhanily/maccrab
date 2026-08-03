@@ -361,4 +361,43 @@ struct DeliveryProvenanceWeldTests {
         // Non-matching filename -> nil.
         #expect(reader.origin(historyPath: historyPath, fileName: "Nope.dmg") == nil)
     }
+
+    @Test("Chromium History snapshot rejects symlinks, over-cap input, and an unavailable disk reserve")
+    func chromiumSnapshotStorageAdmission() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chromium-snapshot-admission-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("History")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(
+            source.path,
+            &db,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK)
+        #expect(sqlite3_exec(db, "CREATE TABLE downloads(id INTEGER)", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+
+        let link = dir.appendingPathComponent("History-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: source)
+        #expect(ChromiumDownloadOriginReader.snapshot(
+            sourcePath: link.path,
+            maxBytes: 1_048_576,
+            freeFloorBytes: 0,
+            reserveBytes: 0
+        ) == nil)
+        #expect(ChromiumDownloadOriginReader.snapshot(
+            sourcePath: source.path,
+            maxBytes: 1,
+            freeFloorBytes: 0,
+            reserveBytes: 0
+        ) == nil)
+        #expect(ChromiumDownloadOriginReader.snapshot(
+            sourcePath: source.path,
+            maxBytes: 1_048_576,
+            freeFloorBytes: Int64.max,
+            reserveBytes: 0
+        ) == nil)
+    }
 }

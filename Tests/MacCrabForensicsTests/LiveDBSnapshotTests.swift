@@ -106,6 +106,93 @@ struct LiveDBSnapshotTests {
         }
     }
 
+    @Test("SQLite snapshot rejects a symlinked source")
+    func snapshotRejectsSymlinkSource() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let sourcePath = NSTemporaryDirectory() + "test-real-source-\(UUID().uuidString).db"
+        let symlinkPath = NSTemporaryDirectory() + "test-linked-source-\(UUID().uuidString).db"
+        defer {
+            try? FileManager.default.removeItem(atPath: sourcePath)
+            try? FileManager.default.removeItem(atPath: symlinkPath)
+        }
+        try makeSourceDB(at: sourcePath)
+        try FileManager.default.createSymbolicLink(
+            atPath: symlinkPath,
+            withDestinationPath: sourcePath
+        )
+
+        #expect(throws: LiveDBSnapshotError.self) {
+            _ = try LiveDBSnapshot.snapshot(sourcePath: symlinkPath, layout: layout)
+        }
+    }
+
+    @Test("SQLite snapshot rejects a multiply-linked source")
+    func snapshotRejectsHardLinkedSource() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let sourcePath = NSTemporaryDirectory()
+            + "test-hard-source-\(UUID().uuidString).db"
+        let secondLink = sourcePath + ".second-link"
+        defer {
+            try? FileManager.default.removeItem(atPath: sourcePath)
+            try? FileManager.default.removeItem(atPath: secondLink)
+        }
+        try makeSourceDB(at: sourcePath)
+        try FileManager.default.linkItem(
+            atPath: sourcePath,
+            toPath: secondLink
+        )
+
+        #expect(throws: LiveDBSnapshotError.self) {
+            _ = try LiveDBSnapshot.snapshot(
+                sourcePath: sourcePath,
+                layout: layout
+            )
+        }
+    }
+
+    @Test("SQLite snapshot enforces its page cap before copying")
+    func snapshotRejectsSourceAboveCap() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let sourcePath = NSTemporaryDirectory() + "test-capped-source-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+        try makeSourceDB(at: sourcePath)
+
+        #expect(throws: LiveDBSnapshotError.self) {
+            _ = try LiveDBSnapshot.snapshot(
+                sourcePath: sourcePath,
+                layout: layout,
+                maxBytes: 1,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: 0
+            )
+        }
+        let leftovers = (try? FileManager.default.contentsOfDirectory(
+            atPath: layout.snapshotsRoot.path
+        )) ?? []
+        #expect(leftovers.isEmpty, "an over-cap refusal must not leave a partial snapshot")
+    }
+
+    @Test("SQLite snapshot fails closed when its free-space floor cannot be reserved")
+    func snapshotRejectsLowFreeSpace() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let sourcePath = NSTemporaryDirectory() + "test-low-space-source-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+        try makeSourceDB(at: sourcePath)
+
+        #expect(throws: LiveDBSnapshotError.self) {
+            _ = try LiveDBSnapshot.snapshot(
+                sourcePath: sourcePath,
+                layout: layout,
+                freeSpaceFloorBytes: Int64.max,
+                transactionReserveBytes: 0
+            )
+        }
+    }
+
     /// Pass 2026-D-adjacent invariant: snapshot-before-parse must
     /// produce a consistent view even when the source is being
     /// written concurrently. This test takes a snapshot, writes a
@@ -220,6 +307,58 @@ struct LiveDBSnapshotTests {
                 "plaintext snapshot leaked into case snapshots dir: \(remaining)")
     }
 
+    @Test("Deduplicated layout snapshots remain until the last owner releases")
+    func deduplicatedSnapshotUsesSharedLease() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let sourcePath = NSTemporaryDirectory() + "test-lease-source-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+        try makeSourceDB(at: sourcePath)
+
+        var first: LiveDBSnapshotResult? = try LiveDBSnapshot.snapshot(
+            sourcePath: sourcePath,
+            layout: layout
+        )
+        var second: LiveDBSnapshotResult? = try LiveDBSnapshot.snapshot(
+            sourcePath: sourcePath,
+            layout: layout
+        )
+        let path = try #require(first?.path.path)
+        #expect(second?.path.path == path)
+        first = nil
+        #expect(FileManager.default.fileExists(atPath: path),
+                "one collector releasing a deduped snapshot must not break another")
+        second = nil
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test("A planted content-addressed symlink is atomically replaced, never trusted")
+    func plantedFinalSymlinkIsReplaced() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-snapshot-plant-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sourcePath = NSTemporaryDirectory() + "test-plant-source-\(UUID().uuidString).db"
+        let sentinel = dir.deletingLastPathComponent()
+            .appendingPathComponent("snapshot-sentinel-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(atPath: sourcePath)
+            try? FileManager.default.removeItem(at: sentinel)
+        }
+        try makeSourceDB(at: sourcePath)
+        let first = try LiveDBSnapshot.snapshot(sourcePath: sourcePath, destDir: dir)
+        let final = first.path
+        try FileManager.default.removeItem(at: final)
+        try Data("do-not-touch".utf8).write(to: sentinel)
+        try FileManager.default.createSymbolicLink(at: final, withDestinationURL: sentinel)
+
+        let second = try LiveDBSnapshot.snapshot(sourcePath: sourcePath, destDir: dir)
+        var info = stat()
+        #expect(lstat(second.path.path, &info) == 0)
+        #expect((UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG))
+        #expect(try Data(contentsOf: sentinel) == Data("do-not-touch".utf8))
+    }
+
     /// The brokered-TCC path snapshots into a host-owned dir and must be able
     /// to serve the snapshot fd to the sandboxed child AFTER the call returns,
     /// so that (destDir) variant must NOT auto-delete.
@@ -239,5 +378,8 @@ struct LiveDBSnapshotTests {
         }
         let path = try snapshotPath()
         #expect(FileManager.default.fileExists(atPath: path))
+        let attrs = try FileManager.default.attributesOfItem(atPath: dir.path)
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? -1
+        #expect(mode & 0o077 == 0, "snapshot destination must remain owner-only")
     }
 }

@@ -54,8 +54,8 @@ struct TraceKeyPinStoreHardeningTests {
         #expect(store.pinnedFingerprint(forTraceId: "trace-A") == "fp-original")
     }
 
-    @Test("hardened overwrite replaces a symlink target rather than writing through it")
-    func overwriteReplacesSymlink() throws {
+    @Test("hardened overwrite refuses a symlink destination without writing through it")
+    func overwriteRefusesSymlink() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -64,16 +64,17 @@ struct TraceKeyPinStoreHardeningTests {
         let pinPath = dir.appendingPathComponent("trace_key_pins.json")
         try FileManager.default.createSymbolicLink(at: pinPath, withDestinationURL: outside)
 
-        // Writing a pin must NOT follow the symlink to clobber `outside`; the
-        // rename replaces the symlink name with a fresh regular file.
+        // Writing a pin must neither follow the symlink to clobber `outside`
+        // nor replace an unsafe carrier. SecureFileIO.atomicReplace requires
+        // an existing destination to be an owned, single-link regular file.
         TraceKeyPinStore(fileURL: pinPath).pinIfAbsent(traceId: "t", fingerprint: "fp")
 
         // `outside` is untouched...
         #expect(try String(contentsOf: outside, encoding: .utf8) == "{}")
-        // ...and the pin path is now a real file with the pin.
+        // ...and the fail-closed write leaves the symlink entry and no pin.
         var st = stat()
         #expect(lstat(pinPath.path, &st) == 0)
-        #expect((st.st_mode & S_IFMT) == S_IFREG)
-        #expect(TraceKeyPinStore(fileURL: pinPath).pinnedFingerprint(forTraceId: "t") == "fp")
+        #expect((st.st_mode & S_IFMT) == S_IFLNK)
+        #expect(TraceKeyPinStore(fileURL: pinPath).pinnedFingerprint(forTraceId: "t") == nil)
     }
 }

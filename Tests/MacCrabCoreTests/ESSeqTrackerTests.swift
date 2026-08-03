@@ -127,8 +127,26 @@ struct ESSeqTrackerD4Tests {
         t.recordProcessed(eventType: EXEC,  elapsedNanos: 1_000, yielded: true,  yieldDropped: false)
         t.recordProcessed(eventType: EXEC,  elapsedNanos: 1_000, yielded: false, yieldDropped: false)
         t.recordProcessed(eventType: WRITE, elapsedNanos: 1_000, yielded: true,  yieldDropped: true)
+        t.recordFilteredBeforeWorker(eventType: WRITE)
         #expect(t.processedByType()[EXEC] == 2)
-        #expect(t.processedByType()[WRITE] == 1)
+        #expect(t.processedByType()[WRITE] == 2)
+    }
+
+    @Test("callback-filtered volume cannot mask retained-worker p99")
+    func callbackFilteredDoesNotEnterLatencyHistogram() {
+        let t = ESSeqTracker()
+        t.recordProcessed(
+            eventType: EXEC,
+            elapsedNanos: 100_000_000,
+            yielded: true,
+            yieldDropped: false
+        )
+        for _ in 0..<10_000 {
+            t.recordFilteredBeforeWorker(eventType: WRITE)
+        }
+        #expect(t.processedByType()[WRITE] == 10_000)
+        #expect(t.handlerP99Micros() == 128_000,
+                "callback-only noise must not make a 100 ms worker backlog look healthy")
     }
 
     @Test("yield outcome counts split dropped vs enqueued; unyielded counts neither")

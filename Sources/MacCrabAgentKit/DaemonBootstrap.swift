@@ -101,11 +101,13 @@ public enum DaemonBootstrap {
         // read below is unchanged.
         async let priorityConsumer: Void = EventLoop.run(
             state: handles.state,
+            lane: .priority,
             eventStream: streams.priority,
             eventCount: _sharedEventCount
         )
         async let fileConsumer: Void = EventLoop.run(
             state: handles.state,
+            lane: .file,
             eventStream: streams.file,
             eventCount: _sharedEventCount
         )

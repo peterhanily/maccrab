@@ -9,6 +9,7 @@
 // the scanner independently of MacCrab.
 
 import Foundation
+import Darwin
 import os.log
 
 // MARK: - YARAEnricher
@@ -16,9 +17,11 @@ import os.log
 /// Enriches file-creation events by scanning the target file against a
 /// directory of YARA rules.
 ///
-/// The enricher is opt-in: if the `yara` binary is not found at the
-/// configured path, or if the rules directory does not exist, the enricher
-/// silently passes events through unmodified.
+/// The enricher is opt-in and deliberately unavailable inside a root process.
+/// YARA parses attacker-controlled files and third-party rules; running that
+/// parser from the root system extension would turn any parser defect (or a
+/// user-owned Homebrew `yara` shim) into local privilege escalation. A future
+/// privileged deployment must use a separately sandboxed, unprivileged broker.
 ///
 /// Only files created within the configured `scanPaths` prefixes are
 /// scanned, and a 50 MB size cap prevents the scanner from blocking on
@@ -56,6 +59,9 @@ public actor YARAEnricher {
     /// Maximum wall-clock time in seconds for a single YARA scan.
     private let scanTimeout: TimeInterval = 5.0
 
+    /// Hard cap for the merged stdout/stderr stream.
+    private let maximumScanOutputBytes = 1 * 1024 * 1024
+
     /// Number of files scanned since initialisation.
     private var scanCount: Int = 0
 
@@ -84,19 +90,25 @@ public actor YARAEnricher {
 
     /// Default directories that are commonly used for malware staging,
     /// downloads, or persistence.
-    private static let defaultScanPaths: [String] = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    static func defaultScanPaths(
+        effectiveUID: uid_t,
+        homes: [RealUserHome]
+    ) -> [String] {
+        let applicableHomes = effectiveUID == 0
+            ? homes
+            : homes.filter { $0.userID == UInt32(effectiveUID) }
         return [
             "/tmp/",
             "/private/tmp/",
             "/var/folders/",
-            "\(home)/Downloads/",
-            "\(home)/Desktop/",
             "/Library/LaunchAgents/",
             "/Library/LaunchDaemons/",
-            "\(home)/Library/LaunchAgents/",
-        ]
-    }()
+        ] + applicableHomes.flatMap { home in [
+            home.appending("Downloads") + "/",
+            home.appending("Desktop") + "/",
+            home.appending("Library/LaunchAgents") + "/",
+        ] }
+    }
 
     // MARK: - Initialisation
 
@@ -113,21 +125,34 @@ public actor YARAEnricher {
         yaraPath: String = "/usr/local/bin/yara",
         scanPaths: [String] = []
     ) {
+        let effectiveUID = geteuid()
+        let homes = effectiveUID == 0
+            ? RealUserHomeResolver.all()
+            : RealUserHomeResolver.home(forUserID: effectiveUID).map { [$0] } ?? []
         self.rulesPath = rulesPath
         self.yaraPath = yaraPath
-        self.scanPaths = scanPaths.isEmpty ? Self.defaultScanPaths : scanPaths
+        self.scanPaths = scanPaths.isEmpty
+            ? Self.defaultScanPaths(effectiveUID: effectiveUID, homes: homes)
+            : scanPaths
 
-        let fm = FileManager.default
-        let yaraExists = fm.fileExists(atPath: yaraPath)
-        let rulesExist = fm.fileExists(atPath: rulesPath)
-        self.enabled = yaraExists && rulesExist
+        // Do not even enumerate the optional rule tree in the root engine: the
+        // feature is unconditionally disabled there pending a broker.
+        let binaryTrusted = effectiveUID != 0
+            && PrivilegedExecutablePolicy.validatedExecutable(yaraPath) != nil
+        let rulesTrusted = effectiveUID != 0 && Self.isTrustedRulesTree(rulesPath)
+        self.enabled = Self.shouldEnable(
+            effectiveUID: effectiveUID,
+            binaryTrusted: binaryTrusted,
+            rulesTrusted: rulesTrusted
+        )
 
         let log = Logger(subsystem: "com.maccrab.core", category: "YARAEnricher")
-        if !yaraExists {
-            log.info("YARA binary not found at \(yaraPath) — YARA enrichment disabled.")
-        }
-        if !rulesExist {
-            log.info("YARA rules directory not found at \(rulesPath) — YARA enrichment disabled.")
+        if effectiveUID == 0 {
+            log.error("YARA enrichment disabled in the root engine; use an unprivileged sandbox broker.")
+        } else if !binaryTrusted {
+            log.info("YARA binary is missing or not on an immutable root-owned path — YARA enrichment disabled.")
+        } else if !rulesTrusted {
+            log.info("YARA rules are missing or not an immutable root-owned .yar/.yara tree — YARA enrichment disabled.")
         }
         if self.enabled {
             log.info("YARAEnricher initialised — rules: \(rulesPath), binary: \(yaraPath).")
@@ -139,6 +164,14 @@ public actor YARAEnricher {
     /// Returns `true` if the YARA binary and rules directory both exist.
     public func isAvailable() -> Bool {
         enabled
+    }
+
+    static func shouldEnable(
+        effectiveUID: uid_t,
+        binaryTrusted: Bool,
+        rulesTrusted: Bool
+    ) -> Bool {
+        effectiveUID != 0 && binaryTrusted && rulesTrusted
     }
 
     // MARK: - Enrichment
@@ -287,66 +320,88 @@ public actor YARAEnricher {
     /// - Parameter filePath: Absolute path to the file to scan.
     /// - Returns: Array of matched YARA rule names, possibly empty.
     private func runYARAScan(filePath: String) async -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: yaraPath)
-        process.arguments = ["-w", "-s", rulesPath, filePath]
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        // Run in a detached task so we can enforce a timeout.
-        let scanResult: [String]? = await withTaskGroup(of: [String]?.self) { group in
-            group.addTask {
-                do {
-                    try process.run()
-                } catch {
-                    return nil
-                }
-
-                process.waitUntilExit()
-
-                // Read stdout after the process exits to avoid pipe deadlocks
-                // on large output.
-                let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                guard process.terminationStatus == 0,
-                      let output = String(data: data, encoding: .utf8) else {
-                    return []
-                }
-
-                return self.parseYARAOutput(output, filePath: filePath)
-            }
-
-            // Timeout task.
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(self.scanTimeout * 1_000_000_000))
-                if process.isRunning {
-                    process.terminate()
-                }
-                return nil   // signals timeout
-            }
-
-            // Return whichever finishes first.
-            var result: [String]?
-            for await value in group {
-                if let value = value {
-                    result = value
-                    group.cancelAll()
-                    break
-                }
-            }
-
-            // If both returned nil (timeout + failed launch), return empty.
-            return result
-        }
-
-        if scanResult == nil {
-            logger.warning("YARA scan timed out or failed for \(filePath).")
+        // Revalidate immediately before every launch. Once this passes, every
+        // ancestor is root-owned and immutable to unprivileged users, so the
+        // validation-to-exec interval cannot be won by swapping a symlink.
+        guard PrivilegedExecutablePolicy.validatedExecutable(yaraPath) != nil,
+              Self.isTrustedRulesTree(rulesPath),
+              let result = BoundedPrivilegedProcessRunner.run(
+                  executable: yaraPath,
+                  arguments: ["-w", "-s", rulesPath, filePath],
+                  timeout: scanTimeout,
+                  maximumOutputBytes: maximumScanOutputBytes
+              ),
+              result.succeeded,
+              let output = String(data: result.output, encoding: .utf8) else {
+            logger.warning("YARA scan timed out, exceeded its output cap, or failed for \(filePath).")
             return []
         }
+        return parseYARAOutput(output, filePath: filePath)
+    }
 
-        return scanResult ?? []
+    /// Reject links, special files, writable ownership, oversized trees, and
+    /// non-rule files before passing a directory to the third-party parser.
+    private static func isTrustedRulesTree(_ path: String) -> Bool {
+        guard PrivilegedExecutablePolicy.validatedPath(
+            path,
+            kind: .directory,
+            allowedPrefixes: [path]
+        ) != nil,
+              let enumerator = FileManager.default.enumerator(atPath: path) else {
+            return false
+        }
+
+        let maximumEntries = 4_096
+        let maximumRuleBytes: UInt64 = 64 * 1024 * 1024
+        var entryCount = 0
+        var ruleCount = 0
+        var totalRuleBytes: UInt64 = 0
+
+        while let relative = enumerator.nextObject() as? String {
+            entryCount += 1
+            guard entryCount <= maximumEntries,
+                  !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else {
+                return false
+            }
+            let fullPath = (path as NSString).appendingPathComponent(relative)
+            var metadata = stat()
+            guard fullPath.withCString({ Darwin.lstat($0, &metadata) }) == 0 else {
+                return false
+            }
+
+            switch metadata.st_mode & S_IFMT {
+            case S_IFDIR:
+                guard PrivilegedExecutablePolicy.validatedPath(
+                    fullPath,
+                    kind: .directory,
+                    allowedPrefixes: [path]
+                ) != nil else { return false }
+
+            case S_IFREG:
+                let ext = (relative as NSString).pathExtension.lowercased()
+                guard ext == "yar" || ext == "yara",
+                      PrivilegedExecutablePolicy.validatedPath(
+                          fullPath,
+                          kind: .regularFile(
+                              requireExecutable: false,
+                              maximumSize: maximumRuleBytes
+                          ),
+                          allowedPrefixes: [path]
+                      ) != nil,
+                      metadata.st_size >= 0 else {
+                    return false
+                }
+                let size = UInt64(metadata.st_size)
+                let (next, overflow) = totalRuleBytes.addingReportingOverflow(size)
+                guard !overflow, next <= maximumRuleBytes else { return false }
+                totalRuleBytes = next
+                ruleCount += 1
+
+            default:
+                return false
+            }
+        }
+        return ruleCount > 0
     }
 
     /// Parses the text output of a `yara -w -s` invocation.

@@ -168,22 +168,16 @@ public actor PowerAnomalyDetector {
 
     private nonisolated func getPowerAssertions() -> [PowerAssertion] {
         // Use pmset -g assertions and parse output
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        proc.arguments = ["-g", "assertions"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pmset",
+            arguments: ["-g", "assertions"],
+            timeout: 5,
+            maximumOutputBytes: 1 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded else {
             return []
         }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        let output = String(data: result.output, encoding: .utf8) ?? ""
         var assertions: [PowerAssertion] = []
 
         // Parse lines like:

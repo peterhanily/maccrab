@@ -114,6 +114,21 @@ public struct BundleRedactor: Sendable {
 
     // MARK: - Directory sweep
 
+    /// Export-side redaction for bytes obtained from a descriptor-pinned
+    /// workspace snapshot. Returns replacement bytes only when this is a text
+    /// artifact whose content changes. This lets secure exporters avoid
+    /// reopening a raced bundle root by path.
+    func redactedTextData(_ data: Data, relativePath: String) -> Data? {
+        let pathExtension = (relativePath as NSString).pathExtension
+        guard isTextExtension(pathExtension),
+              let original = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let redacted = redact(original)
+        guard redacted != original else { return nil }
+        return Data(redacted.utf8)
+    }
+
     /// Apply redaction to every text file in a bundle directory after
     /// the exporter has written all artifacts. Operates on `.json`,
     /// `.jsonl`, `.md`, and `.html` files; skips binaries.
@@ -128,13 +143,17 @@ public struct BundleRedactor: Sendable {
             let resources = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
             guard resources.isRegularFile == true else { continue }
             guard isTextExtension(fileURL.pathExtension) else { continue }
+            let relative = try BundleArtifactPathPolicy.relativePath(
+                of: fileURL,
+                under: directory
+            )
             // Skip the integrity hash chain + signature — they're
             // hash-of-hashes and signature bytes; redacting them
             // would corrupt the verification path. The signed
             // artifacts are the *post-redaction* outputs anyway.
-            // Use pathComponents to dodge /var ↔ /private/var symlink
-            // resolution that bites simple prefix comparisons on macOS.
-            if fileURL.pathComponents.contains("integrity") {
+            // Match only the root-relative integrity namespace. An ancestor or
+            // nested payload component named `integrity` is ordinary content.
+            if BundleArtifactPathPolicy.isRootIntegrityArtifact(relativePath: relative) {
                 continue
             }
             let original = try String(contentsOf: fileURL, encoding: .utf8)

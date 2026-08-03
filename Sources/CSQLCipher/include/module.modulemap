@@ -1,5 +1,6 @@
 module CSQLCipher [system] {
     header "sqlite3.h"
+    header "MacCrabSQLiteControl.h"
     link "CSQLCipher"
     export *
 }

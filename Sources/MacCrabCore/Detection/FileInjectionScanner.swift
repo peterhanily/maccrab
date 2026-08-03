@@ -27,7 +27,7 @@ public actor FileInjectionScanner {
     ]
 
     /// Maximum file size to scan (5MB)
-    private let maxFileSize: Int = 5 * 1024 * 1024
+    static let maxFileSize: Int = 5 * 1024 * 1024
 
     /// Cache of recently scanned files (path -> timestamp) to avoid re-scanning
     private var scanCache: [String: Date] = [:]
@@ -57,14 +57,16 @@ public actor FileInjectionScanner {
             return nil  // Recently scanned
         }
 
-        // Check file size
-        let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? Int,
-              size > 0, size <= maxFileSize else { return nil }
-
-        // Read file content
-        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        // Read through the same descriptor that was proven regular and within
+        // the cap. A path-based attributes check followed by
+        // String(contentsOfFile:) let an attacker rename a validated small file
+        // and replace it with a FIFO/device/oversized carrier before the open.
+        guard let data = BoundedRegularFileReader.read(
+                  at: path,
+                  maximumBytes: Self.maxFileSize
+              ),
+              !data.isEmpty,
+              let content = String(data: data, encoding: .utf8) else { return nil }
 
         // Native structural checks. These used to sit behind a
         // `guard isAvailable else { return nil }` that probed for an external

@@ -93,6 +93,14 @@ struct TCCEntry: Hashable, Sendable, Codable {
 /// ```
 public actor TCCMonitor {
 
+    public nonisolated static let eventStreamCapacity = 256
+
+    /// App Info.plists are normally tens of KiB. Keep enough room for unusually
+    /// rich bundles while bounding the root actor's scan of admin-writable
+    /// `/Applications` entries.
+    static let maxApplicationInfoPlistBytes = 1 * 1024 * 1024
+    static let maxApplicationDirectoryEntries = 65_536
+
     // MARK: - Database Paths
 
     /// Path to the system-wide TCC database.
@@ -113,27 +121,18 @@ public actor TCCMonitor {
     /// `Rules/collection/microphone_access_unsigned.yml` is `status: stable` and
     /// counts toward advertised coverage while being unable to match.
     ///
-    /// Enumerate real homes under /Users (same approach as
-    /// `DaemonConfig.applyUserOverrides` and `ESCollector.realUserHomes`) and
+    /// Resolve homes through the shared uid/passwd/no-symlink contract and
     /// label each `user:<name>` so `identityKey` stays distinct on a multi-user
     /// Mac. The non-root dev daemon's own home is kept as a fallback so
     /// `swift run maccrabd` behaves exactly as before.
     private static func userDBPaths() -> [(path: String, source: String)] {
         let fm = FileManager.default
-        var seen: Set<String> = []
         var result: [(path: String, source: String)] = []
-        let names = ((try? fm.contentsOfDirectory(atPath: "/Users")) ?? [])
-            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
-            .sorted()
-        for name in names {
-            let path = "/Users/\(name)/Library/Application Support/com.apple.TCC/TCC.db"
-            guard fm.fileExists(atPath: path), seen.insert(path).inserted else { continue }
-            result.append((path, "user:\(name)"))
-        }
-        let ownPath = fm.homeDirectoryForCurrentUser.path
-            + "/Library/Application Support/com.apple.TCC/TCC.db"
-        if fm.fileExists(atPath: ownPath), seen.insert(ownPath).inserted {
-            result.append((ownPath, "user"))
+        for home in RealUserHomeResolver.all() {
+            let path = home.appending("Library/Application Support/com.apple.TCC/TCC.db")
+            if fm.fileExists(atPath: path) {
+                result.append((path, "user:\(home.userName)"))
+            }
         }
         return result
     }
@@ -141,6 +140,9 @@ public actor TCCMonitor {
     // MARK: - Properties
 
     private let logger = Logger(subsystem: "com.maccrab.core", category: "TCCMonitor")
+    private nonisolated let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: eventStreamCapacity
+    )
     private var continuation: AsyncStream<Event>.Continuation?
     private var isRunning = false
 
@@ -164,6 +166,9 @@ public actor TCCMonitor {
 
     /// The asynchronous stream of normalised events.
     public nonisolated let events: AsyncStream<Event>
+    public nonisolated var deliveryCounters: EventCollectorBufferSnapshot {
+        deliveryTelemetry.snapshot()
+    }
 
     // MARK: - Auth Value / Reason Mapping
 
@@ -194,7 +199,9 @@ public actor TCCMonitor {
     /// Creates a new `TCCMonitor`. Call `start()` to begin monitoring.
     public init() {
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(256)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -456,7 +463,10 @@ public actor TCCMonitor {
             previousAuthValue: previousAuthValue
         )
 
-        continuation?.yield(event)
+        if let continuation {
+            let result = continuation.yield(event)
+            deliveryTelemetry.recordYield(offered: event, result: result)
+        }
 
         let sourceLabel = entry.source
         logger.info(
@@ -474,7 +484,10 @@ public actor TCCMonitor {
             previousAuthValue: entry.authValue
         )
 
-        continuation?.yield(event)
+        if let continuation {
+            let result = continuation.yield(event)
+            deliveryTelemetry.recordYield(offered: event, result: result)
+        }
 
         let sourceLabel = entry.source
         logger.info(
@@ -611,7 +624,7 @@ public actor TCCMonitor {
 
         var db: OpaquePointer?
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-        let rc = sqlite3_open_v2(path, &db, flags, nil)
+        let rc = SQLiteOpenPathPolicy.open(path, database: &db, flags: flags)
         guard rc == SQLITE_OK, let db else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             logger.warning("Cannot open TCC database at \(path): \(msg)")
@@ -712,14 +725,31 @@ public actor TCCMonitor {
     /// Searches common application directories for a bundle matching the
     /// given identifier. This avoids requiring main-actor access.
     private func findApplicationURL(bundleId: String) -> URL? {
-        let searchDirs = [
-            "/Applications",
+        // `/Applications` is root:admin 0775 on supported macOS releases, so
+        // local admins control its entries. Enumerate it through the same
+        // descriptor-pinned bounded boundary as user homes. System application
+        // roots are protected by SIP and remain separately classified.
+        if let snapshot = Self.boundedApplicationEntries(
+            at: "/Applications",
+            maximumEntries: Self.maxApplicationDirectoryEntries,
+            expectedDirectoryOwnerUID: 0
+        ), let match = findApplicationURL(
+            bundleId: bundleId,
+            directory: "/Applications",
+            names: snapshot.entries.compactMap {
+                $0.kind == .directory ? $0.name : nil
+            }
+        ) {
+            return match
+        }
+
+        let trustedSystemDirs = [
             "/System/Applications",
             "/System/Applications/Utilities",
         ]
         let fm = FileManager.default
 
-        for dir in searchDirs {
+        for dir in trustedSystemDirs {
             guard let contents = try? fm.contentsOfDirectory(
                 at: URL(fileURLWithPath: dir),
                 includingPropertiesForKeys: nil,
@@ -728,20 +758,51 @@ public actor TCCMonitor {
                 continue
             }
 
-            for url in contents where url.pathExtension == "app" {
-                let plistURL = url.appendingPathComponent("Contents/Info.plist")
-                guard let data = try? Data(contentsOf: plistURL),
-                      let plist = try? PropertyListSerialization.propertyList(
-                        from: data, format: nil
-                      ) as? [String: Any],
-                      let cfBundleId = plist["CFBundleIdentifier"] as? String,
-                      cfBundleId == bundleId else {
-                    continue
-                }
-                return url
+            if let match = findApplicationURL(
+                bundleId: bundleId,
+                directory: dir,
+                names: contents.map(\.lastPathComponent)
+            ) {
+                return match
             }
         }
 
+        return nil
+    }
+
+    static func boundedApplicationEntries(
+        at path: String,
+        maximumEntries: Int,
+        expectedDirectoryOwnerUID: UInt32
+    ) -> BoundedDirectoryLister.Snapshot? {
+        BoundedDirectoryLister.list(
+            at: path,
+            maximumEntries: maximumEntries,
+            expectedOwnerUID: expectedDirectoryOwnerUID
+        )
+    }
+
+    private func findApplicationURL(
+        bundleId: String,
+        directory: String,
+        names: [String]
+    ) -> URL? {
+        for name in names where name.hasSuffix(".app") {
+            let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
+            let plistURL = url.appendingPathComponent("Contents/Info.plist")
+            guard let data = BoundedRegularFileReader.read(
+                      at: plistURL.path,
+                      maximumBytes: Self.maxApplicationInfoPlistBytes
+                  ),
+                  let plist = try? PropertyListSerialization.propertyList(
+                    from: data, format: nil
+                  ) as? [String: Any],
+                  let cfBundleId = plist["CFBundleIdentifier"] as? String,
+                  cfBundleId == bundleId else {
+                continue
+            }
+            return url
+        }
         return nil
     }
 }

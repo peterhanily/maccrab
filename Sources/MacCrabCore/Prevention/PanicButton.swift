@@ -81,18 +81,16 @@ public actor PanicButton {
         var actions: [String] = []
 
         // Remove emergency firewall rules
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        proc.arguments = ["-a", "com.maccrab.emergency", "-F", "all"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
+        if BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", "com.maccrab.emergency", "-F", "all"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        ) != nil {
             actions.append("Emergency firewall rules removed")
-        } catch {
-            logger.error("Failed to remove emergency firewall rules: \(error.localizedDescription)")
-            actions.append("Failed to remove emergency firewall rules: \(error.localizedDescription)")
+        } else {
+            logger.error("Failed to remove emergency firewall rules: trusted pfctl could not be launched")
+            actions.append("Failed to remove emergency firewall rules")
         }
 
         logger.info("Panic mode deactivated — normal operation restored")
@@ -149,116 +147,87 @@ public actor PanicButton {
         block drop out quick all                  # Block everything else
         block drop in quick all                   # Block all incoming
         """
-        let anchorPath = "/tmp/maccrab_emergency.conf"
-        do {
-            try rules.write(toFile: anchorPath, atomically: true, encoding: .utf8)
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-            proc.arguments = ["-a", "com.maccrab.emergency", "-f", anchorPath]
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-            try proc.run()
-            proc.waitUntilExit()
-            return proc.terminationStatus == 0
-        } catch { return false }
+        guard let commandFile = PrivatePrivilegedCommandFile.create(
+            contents: Data(rules.utf8)
+        ) else { return false }
+        defer { commandFile.cleanup() }
+        guard commandFile.hasStableIdentity() else { return false }
+        return BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", "com.maccrab.emergency", "-f", commandFile.path],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )?.succeeded == true
     }
 
-    // `try? run()` + `waitUntilExit()` aborts the process when the spawn fails
-    // (NSTask raises "task not launched"), and this sits on the incident-
-    // response path — the worst possible place to turn `posix_spawn` returning
-    // EAGAIN into SIGABRT of the root engine. Check the spawn and report the
-    // step as not-performed instead.
     private nonisolated func flushDNS() -> Bool {
-        var flushed = false
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-        proc.arguments = ["-flushcache"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            flushed = true
-        } catch {
-            logger.error("PanicButton: dscacheutil spawn failed: \(error.localizedDescription, privacy: .public)")
+        let cacheFlush = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/dscacheutil",
+            arguments: ["-flushcache"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )
+        if cacheFlush == nil {
+            logger.error("PanicButton: trusted dscacheutil could not be launched")
         }
-
-        let proc2 = Process()
-        proc2.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        proc2.arguments = ["-HUP", "mDNSResponder"]
-        proc2.standardOutput = FileHandle.nullDevice
-        proc2.standardError = FileHandle.nullDevice
-        do {
-            try proc2.run()
-            proc2.waitUntilExit()
-        } catch {
-            logger.error("PanicButton: killall -HUP mDNSResponder spawn failed: \(error.localizedDescription, privacy: .public)")
-            flushed = false
+        let responderReload = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/killall",
+            arguments: ["-HUP", "mDNSResponder"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )
+        if responderReload == nil {
+            logger.error("PanicButton: trusted killall could not be launched")
         }
-        return flushed
+        // Preserve the prior contract: this operation reported whether both
+        // tools launched, while their exit statuses were advisory.
+        return cacheFlush != nil && responderReload != nil
     }
 
     private nonisolated func lockScreen() -> Bool {
         // Use pmset to lock immediately
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        proc.arguments = ["displaysleepnow"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        // A failed spawn must not reach `terminationStatus` — NSTask raises
-        // "task not launched" there, which is an uncaught ObjC exception and
-        // therefore SIGABRT of the root engine, mid-incident-response.
-        do {
-            try proc.run()
-        } catch {
-            logger.error("PanicButton: pmset spawn failed, screen NOT locked: \(error.localizedDescription, privacy: .public)")
-            return false
+        let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pmset",
+            arguments: ["displaysleepnow"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )
+        if result == nil {
+            logger.error("PanicButton: trusted pmset could not be launched, screen NOT locked")
         }
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
+        return result?.succeeded == true
     }
 
     private nonisolated func clearClipboard() {
         // Can't use NSPasteboard from daemon (no AppKit), use pbcopy
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pbcopy")
-        let pipe = Pipe()
-        proc.standardInput = pipe
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        // `waitUntilExit()` on a task that never launched raises "task not
-        // launched" — an uncaught ObjC exception, i.e. SIGABRT of the root
-        // engine on the incident-response path. Bail out before it.
-        do {
-            try proc.run()
-        } catch {
-            logger.error("PanicButton: pbcopy spawn failed, clipboard NOT cleared: \(error.localizedDescription, privacy: .public)")
-            pipe.fileHandleForWriting.closeFile()
-            return
+        // The shared runner pins stdin to /dev/null, so pbcopy observes
+        // immediate EOF and replaces the clipboard with empty input.
+        if BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pbcopy",
+            arguments: [],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )?.succeeded != true {
+            logger.error("PanicButton: pbcopy failed, clipboard NOT cleared")
         }
-        pipe.fileHandleForWriting.write(Data()) // Empty clipboard
-        pipe.fileHandleForWriting.closeFile()
-        proc.waitUntilExit()
     }
 
     private nonisolated func disableBluetooth() -> Bool {
-        // Use blueutil if available, otherwise skip
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["blueutil", "--power", "0"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        // Reaching `terminationStatus` after a failed spawn raises "task not
-        // launched" and aborts the root engine. (The comment above is only
-        // true for a MISSING blueutil — /usr/bin/env still launches and exits
-        // non-zero. The crash case is the spawn itself failing, e.g. EAGAIN.)
-        do {
-            try proc.run()
-        } catch {
-            logger.error("PanicButton: env/blueutil spawn failed, Bluetooth NOT disabled: \(error.localizedDescription, privacy: .public)")
+        // blueutil is third-party software and is commonly Homebrew-owned.
+        // A root caller must never PATH-resolve that binary. The operator may
+        // configure an absolute path, but the complete path must pass the same
+        // root-owned, non-writable, no-symlink executable policy as system tools.
+        guard let configured = Foundation.ProcessInfo.processInfo.environment["MACCRAB_BLUEUTIL_PATH"],
+              configured.first == "/",
+              let trusted = PrivilegedExecutablePolicy.validatedExecutable(configured) else {
+            logger.error("PanicButton: no trusted absolute MACCRAB_BLUEUTIL_PATH; Bluetooth NOT disabled")
             return false
         }
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
+        return BoundedPrivilegedProcessRunner.run(
+            executable: trusted,
+            arguments: ["--power", "0"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )?.succeeded == true
     }
 }

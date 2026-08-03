@@ -11,6 +11,10 @@
 import Foundation
 import os.log
 
+/// Cumulative collector-buffer accounting, distinct from the merged detection
+/// lane counters that live downstream in MacCrabAgentKit.
+public typealias UnifiedLogDeliveryCounters = EventCollectorBufferSnapshot
+
 // MARK: - UnifiedLogCollectorError
 
 /// Errors that can occur when creating or running the Unified Log collector.
@@ -52,6 +56,10 @@ public enum UnifiedLogCollectorError: Error, CustomStringConvertible {
 /// ```
 public final class UnifiedLogCollector: @unchecked Sendable {
 
+    /// Bounded collector-local handoff. Published in heartbeat diagnostics from
+    /// this single source of truth so capacity reporting cannot drift.
+    public static let streamCapacity = 512
+
     // MARK: - Monitored Subsystems
 
     /// The set of subsystems we subscribe to, covering the major macOS
@@ -86,9 +94,18 @@ public final class UnifiedLogCollector: @unchecked Sendable {
     private var continuation: AsyncStream<Event>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "UnifiedLogCollector")
     private var readTask: Task<Void, Never>?
+    private let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: streamCapacity
+    )
 
     /// The asynchronous stream of normalised events.
     public let events: AsyncStream<Event>
+
+    /// Snapshot parser output and eviction at this collector's own 512-event
+    /// AsyncStream boundary. These are not merged-lane drops.
+    public var deliveryCounters: UnifiedLogDeliveryCounters {
+        deliveryTelemetry.snapshot()
+    }
 
     // MARK: - Initialisation
 
@@ -126,7 +143,9 @@ public final class UnifiedLogCollector: @unchecked Sendable {
 
         // Build the AsyncStream and capture the continuation
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(512)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.streamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -145,9 +164,15 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         let continuation = self.continuation!
         let log = self.logger
         let fileHandle = pipe.fileHandleForReading
+        let deliveryTelemetry = self.deliveryTelemetry
 
         self.readTask = Task.detached {
-            Self.readLoop(fileHandle: fileHandle, continuation: continuation, logger: log)
+            Self.readLoop(
+                fileHandle: fileHandle,
+                continuation: continuation,
+                logger: log,
+                deliveryTelemetry: deliveryTelemetry
+            )
         }
     }
 
@@ -183,7 +208,8 @@ public final class UnifiedLogCollector: @unchecked Sendable {
     private static func readLoop(
         fileHandle: FileHandle,
         continuation: AsyncStream<Event>.Continuation,
-        logger: Logger
+        logger: Logger,
+        deliveryTelemetry: EventCollectorBufferTelemetry
     ) {
         // Read all available data in a loop. The `log` tool outputs one JSON
         // object per line, sometimes preceded by a `[` or followed by `,`.
@@ -248,6 +274,7 @@ public final class UnifiedLogCollector: @unchecked Sendable {
 
                     if let event = normalise(json: json, logger: logger) {
                         let result = continuation.yield(event)
+                        deliveryTelemetry.recordYield(offered: event, result: result)
                         if case .terminated = result {
                             earlyReturn = true
                         }

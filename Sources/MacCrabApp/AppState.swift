@@ -84,6 +84,19 @@ final class AppState: ObservableObject {
         /// banner. Empty/nil when not degraded.
         var esSensorDegradedDetail: String?
 
+        /// TraceGraph may stop persisting causal evidence while the daemon and
+        /// event detectors remain live. Missing means an older heartbeat;
+        /// false/true are authoritative for daemons that publish the admission
+        /// block. These feed the shared degraded-protection signal used by the
+        /// menu bar, sidebar, and Overview banner.
+        var traceGraphStorageBlocked: Bool?
+        var traceGraphStoreAvailable: Bool?
+
+        /// True when the latest privileged browser-extension walk exhausted its
+        /// bounded per-home dirent budget. Nil means an older heartbeat. This is
+        /// an explicit visibility gap: displayed/alerted extensions are partial.
+        var browserInventoryDegraded: Bool?
+
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
         /// is ~4× the 30s write cadence: tolerates one missed tick and
@@ -163,7 +176,39 @@ final class AppState: ObservableObject {
         // v1.21.4 Phase-1 D2: the ES sensor is losing telemetry to a
         // possible-evasion file-flood — surface it as degraded protection.
         if let hb = heartbeat, hb.esSensorDegraded == true { return true }
+        if let hb = heartbeat, Self.traceGraphEvidenceUnavailable(
+            blocked: hb.traceGraphStorageBlocked,
+            storeAvailable: hb.traceGraphStoreAvailable
+        ) {
+            return true
+        }
+        if let hb = heartbeat, hb.browserInventoryDegraded == true { return true }
         return false
+    }
+
+    /// Pure seam for the dashboard-wide protection signal. Missing fields are
+    /// legacy/unknown, not automatically unhealthy; an explicit live block or
+    /// unavailable store is always a forensic-evidence gap.
+    nonisolated static func traceGraphEvidenceUnavailable(
+        blocked: Bool?,
+        storeAvailable: Bool?
+    ) -> Bool {
+        blocked == true || storeAvailable == false
+    }
+
+    /// Treat any internally-inconsistent new browser block as degraded. Only a
+    /// completely absent block is legacy/unknown; once the daemon publishes the
+    /// block, missing coverage proof cannot become a green inventory.
+    nonisolated static func browserInventoryEvidenceUnavailable(
+        coverageKnown: Bool?,
+        complete: Bool?,
+        degraded: Bool?,
+        lastScanWasTruncated: Bool?
+    ) -> Bool {
+        degraded == true
+            || coverageKnown != true
+            || complete != true
+            || lastScanWasTruncated == true
     }
 
     /// True if storage errors are accumulating — not just a single
@@ -339,6 +384,18 @@ final class AppState: ObservableObject {
         // v1.21.4 Phase-1 D2: sensor-degraded advisory (rich-file only).
         var richSensorDegraded: Bool? = json["es_sensor_degraded"] as? Bool
         var richSensorDegradedDetail: String? = json["es_sensor_degraded_detail"] as? String
+        let inlineTraceGraph = json["tracegraph_storage_admission"] as? [String: Any]
+        var richTraceGraphBlocked: Bool? = inlineTraceGraph?["blocked"] as? Bool
+        var richTraceGraphStoreAvailable: Bool? = inlineTraceGraph?["store_available"] as? Bool
+        let inlineBrowserInventory = json["browser_inventory"] as? [String: Any]
+        var richBrowserInventoryDegraded: Bool? = inlineBrowserInventory.map {
+            Self.browserInventoryEvidenceUnavailable(
+                coverageKnown: $0["coverage_known"] as? Bool,
+                complete: $0["complete"] as? Bool,
+                degraded: $0["degraded"] as? Bool,
+                lastScanWasTruncated: $0["last_scan_was_truncated"] as? Bool
+            )
+        }
         let richPath = "/Library/Application Support/MacCrab/heartbeat_rich.json"
         if let richData = try? Data(contentsOf: URL(fileURLWithPath: richPath)),
            let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any] {
@@ -377,6 +434,22 @@ final class AppState: ObservableObject {
             if let detail = richJSON["es_sensor_degraded_detail"] as? String, !detail.isEmpty {
                 richSensorDegradedDetail = detail
             }
+            if let traceGraph = richJSON["tracegraph_storage_admission"] as? [String: Any] {
+                if let blocked = traceGraph["blocked"] as? Bool {
+                    richTraceGraphBlocked = blocked
+                }
+                if let available = traceGraph["store_available"] as? Bool {
+                    richTraceGraphStoreAvailable = available
+                }
+            }
+            if let browserInventory = richJSON["browser_inventory"] as? [String: Any] {
+                richBrowserInventoryDegraded = Self.browserInventoryEvidenceUnavailable(
+                    coverageKnown: browserInventory["coverage_known"] as? Bool,
+                    complete: browserInventory["complete"] as? Bool,
+                    degraded: browserInventory["degraded"] as? Bool,
+                    lastScanWasTruncated: browserInventory["last_scan_was_truncated"] as? Bool
+                )
+            }
         }
 
         var snapshot = HeartbeatSnapshot(
@@ -393,6 +466,9 @@ final class AppState: ObservableObject {
         )
         snapshot.esSensorDegraded = richSensorDegraded
         snapshot.esSensorDegradedDetail = richSensorDegradedDetail
+        snapshot.traceGraphStorageBlocked = richTraceGraphBlocked
+        snapshot.traceGraphStoreAvailable = richTraceGraphStoreAvailable
+        snapshot.browserInventoryDegraded = richBrowserInventoryDegraded
         // v1.12.0 RC15: pull the boot-phase tracker out of the payload
         // when it's there. Older daemons (v1.11.x and earlier) won't
         // write this field; snapshot.isReady falls back to liveness for
@@ -682,6 +758,27 @@ final class AppState: ObservableObject {
         var provider: String = ""
     }
     @Published var llmStatus = LLMStatus()
+
+    /// Authoritative MCP mutation grants loaded from the root-owned state the
+    /// MCP server itself trusts. Never backed by UserDefaults: a local UI
+    /// preference is not an engine grant. `agentCapabilitiesLoaded == false`
+    /// means the state could not be verified and mutation controls fail closed.
+    @Published private(set) var agentCapabilities = DashboardAgentCapabilities()
+    @Published private(set) var agentCapabilitiesLoaded = false
+    @Published private(set) var agentCapabilitiesError: String?
+
+    func refreshAgentCapabilities() {
+        do {
+            let loaded = try V2DaemonControl.loadAgentCapabilities()
+            if agentCapabilities != loaded { agentCapabilities = loaded }
+            if !agentCapabilitiesLoaded { agentCapabilitiesLoaded = true }
+            if agentCapabilitiesError != nil { agentCapabilitiesError = nil }
+        } catch {
+            if agentCapabilitiesLoaded { agentCapabilitiesLoaded = false }
+            let message = error.localizedDescription
+            if agentCapabilitiesError != message { agentCapabilitiesError = message }
+        }
+    }
 
     /// AI analysis alerts (investigation summaries + defense recommendations)
     @Published var aiAnalysisAlerts: [AlertViewModel] = []
@@ -1410,7 +1507,11 @@ final class AppState: ObservableObject {
         // Path flip or expired TTL — rebuild. Pass the shared
         // encryption instance so the dashboard can decrypt
         // attributes_json written by the daemon.
-        let store = try? TraceStore(path: path, encryption: dbEncryption())
+        let store = try? TraceStore(
+            path: path,
+            encryption: dbEncryption(),
+            forceReadOnly: true
+        )
         cachedTraceStore = store
         cachedTraceStorePath = path
         traceDbLastChecked = Date()
@@ -1898,24 +1999,36 @@ final class AppState: ObservableObject {
         var detectedLLMProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
         var llmConfigured = !detectedLLMProvider.isEmpty
         if !llmConfigured {
-            // AIAnalysisView/SettingsView write llm_config.json to user-home;
-            // read from the same place, not dataDir (which may flip to the
-            // system dir after a sysext upgrade — see uiStateDir comment).
-            // Same v1.21.6 migration as the loader above: the file's presence is
-            // the opt-in, so a missing `enabled` key means enabled. Reading it as
-            // a required binding made this status tile report "not configured"
-            // for anyone whose file predates the key — while the loader happily
-            // ran the backend.
-            if let data = readUIState("llm_config.json"),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               json["enabled"] as? Bool ?? true,
-               let provider = json["provider"] as? String {
-                detectedLLMProvider = provider
-                llmConfigured = true
+            // Settings writes llm_config.json to user-home. Read from the same
+            // place (not the event-store-selected dataDir), scrub legacy key
+            // copies in this owning app context, and use the shared migration
+            // parser so the status tile cannot drift from runtime readers.
+            let currentPath = "\(uiStateDir)/llm_config.json"
+            let legacyPath = "\(dataDir)/llm_config.json"
+            let migration = LLMLegacySecretMigration.sharedKeychain(
+                interaction: .allowed
+            )
+            let json = (try? LLMConfigFile.loadAndScrub(
+                atPath: currentPath,
+                legacySecretMigration: migration
+            )) ?? (legacyPath == currentPath ? nil : try? LLMConfigFile.loadAndScrub(
+                atPath: legacyPath,
+                legacySecretMigration: migration
+            ))
+            if let json {
+                var statusConfig = LLMConfig()
+                LLMConfigFile.applyNonSecretValues(json, to: &statusConfig)
+                detectedLLMProvider = statusConfig.provider.rawValue
+                llmConfigured = statusConfig.enabled
             }
         }
         llmStatus.isConfigured = llmConfigured
         llmStatus.provider = detectedLLMProvider
+
+        // Read the same root-owned capability document the MCP server trusts.
+        // This runs before the DB-exists guard so Settings remains honest even
+        // while the event store/engine is temporarily unavailable.
+        refreshAgentCapabilities()
 
         guard dbExists else {
             eventsPerSecond = 0
@@ -2303,13 +2416,15 @@ final class AppState: ObservableObject {
     /// builds. A prior revision used `LIKE 'com.maccrab.agent%'` which
     /// matched too broadly (any future `com.maccrab.agent.*` would collide).
     private static func querySysextFDAInDB(_ tccPath: String) -> Bool {
-        // `sqlite3_open_v2` follows symlinks. A privileged attacker who can
-        // swap the TCC.db path for a symlink pointing at a malicious DB could
-        // steer our probe. Reject symlinks up front; regular files only.
-        // Mirrors the pattern used in EventStore / AlertStore.
+        // Keep the metadata preflight for a cheap diagnostic, then use the
+        // shared SQLite open boundary so NOFOLLOW is authoritative at open.
         guard !Self.isSymlink(tccPath) else { return false }
         var db: OpaquePointer?
-        guard sqlite3_open_v2(tccPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else { return false }
+        guard SQLiteOpenPathPolicy.open(
+            tccPath,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+        ) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
         let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND client IN ('com.maccrab.agent', 'com.maccrab.agent.systemextension')"
         var stmt: OpaquePointer?
@@ -2322,8 +2437,8 @@ final class AppState: ObservableObject {
     }
 
     /// Return true if `path` is a symbolic link (lstat does NOT follow).
-    /// Missing files return false — the caller's sqlite3_open_v2 will handle
-    /// the not-found case.
+    /// Missing files return false — the shared SQLite opener handles the
+    /// not-found case.
     private static func isSymlink(_ path: String) -> Bool {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
             return false

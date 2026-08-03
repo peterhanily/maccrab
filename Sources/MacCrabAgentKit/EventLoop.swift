@@ -82,46 +82,29 @@ enum EventLoop {
         )
     }
 
-    static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter) async {
-        for await event in eventStream {
+    static func run(
+        state: DaemonState,
+        lane: EventPipelineLane,
+        eventStream: AsyncStream<EventPipelineEnvelope>,
+        eventCount: LockedCounter
+    ) async {
+        for await envelope in eventStream {
+            let event = envelope.event
+            let processingStartedNanos = DispatchTime.now().uptimeNanoseconds
+            state.eventPipelineTelemetry.recordDequeued(lane: lane)
+            defer {
+                let elapsed = DispatchTime.now().uptimeNanoseconds &- processingStartedNanos
+                state.eventPipelineTelemetry.recordCompleted(
+                    lane: lane,
+                    elapsedNanos: elapsed
+                )
+            }
             eventCount.increment()
 
-            // v1.7.9: per-collector counter increment.
-            //
-            // Pre-fix, only secondary collectors with their own MonitorTask
-            // for-await loop (TCC, USB, Clipboard, BrowserExt, etc.) called
-            // recordTick — primary collectors (ESCollector, NetworkCollector,
-            // DNSCollector, UnifiedLogCollector, EsloggerCollector) feed the
-            // merged stream consumed here, but the merged stream lacks source
-            // attribution. Result: heartbeat showed event_count=0 for every
-            // primary collector while the global events_processed climbed
-            // into the millions — operators couldn't trust the per-collector
-            // health flag. Field reproduction during v1.7.6 memory diagnosis.
-            //
-            // Pragmatic attribution by event category. Imperfect (a file event
-            // could come from ESCollector OR FSEventsCollector fallback) but
-            // gives operators non-zero, semantically meaningful counts. The
-            // exact source mapping isn't critical — what matters is "we know
-            // events are flowing through these subsystems".
-            let attributedCollector: String
-            switch event.eventCategory {
-            case .process, .file:
-                // ES is primary; FSEvents only fires on non-root dev builds.
-                // The dashboard's collector_health row labelled ESCollector
-                // is the right place to surface volume.
-                attributedCollector = "ESCollector"
-            case .network:
-                attributedCollector = "NetworkCollector"
-            case .authentication, .registry:
-                attributedCollector = "UnifiedLogCollector"
-            case .tcc:
-                // TCCMonitor has its own MonitorTasks loop that already
-                // records ticks — skip to avoid double-counting.
-                attributedCollector = ""
-            }
-            if !attributedCollector.isEmpty {
-                await state.collectorRegistry.recordTick(name: attributedCollector)
-            }
+            // Source identity travels with the envelope through both bounded
+            // lanes. Credit the collector that actually produced the event;
+            // category heuristics miscredited mixed ES/UL/TCC/network traffic.
+            await state.collectorRegistry.recordTick(name: envelope.source.key)
 
             // v1.10.0 perf: notify MCPAttributor of process exits so its
             // pid→server cache evicts proactively rather than waiting for
@@ -905,7 +888,7 @@ enum EventLoop {
                     )
 
                     // === Prevention: sandbox-analyze unnotarized binaries from Downloads/tmp ===
-                    if preventionEnabled {
+                    if preventionEnabled && SandboxAnalyzer.dynamicExecutionEnabled {
                         if execPath.contains("/Downloads/") || execPath.contains("/tmp/") || execPath.contains("/Users/Shared/") {
                             if let analysis = await sandboxAnalyzer.analyze(binaryPath: execPath) {
                                 if analysis.isSuspicious {
@@ -1132,7 +1115,11 @@ enum EventLoop {
 
             // === Quarantine provenance enrichment for file events ===
             if let filePath = enrichedEvent.file?.path {
-                await state.quarantineEnricher.enrich(&enrichedEvent.enrichments, forFile: filePath)
+                await state.quarantineEnricher.enrich(
+                    &enrichedEvent.enrichments,
+                    forFile: filePath,
+                    userID: enrichedEvent.process.userId
+                )
             }
 
             // === DYLD injection detection ===
@@ -2080,15 +2067,11 @@ enum EventLoop {
             }
 
             // Layer 3: Baseline anomaly detection (Phase 3)
-            // v1.21.4 perf: BaselineEngine.evaluate returns nil for anything that
-            // isn't a process-creation event (it guards on
-            // eventCategory==.process && eventType==.creation as its first check,
-            // before any state mutation). Gate the actor hop on that exact same
-            // condition. Detection-identical: for every other event the elided
-            // call and the internal early-nil produce the same nil result and
-            // leave engine state untouched.
-            let baselineMatchResult = (enrichedEvent.eventCategory == .process
-                                       && enrichedEvent.eventType == .creation)
+            // Gate the actor hop with the same shared predicate used inside
+            // BaselineEngine. ES execs are `.start` + `"exec"`; checking only
+            // `.creation` left the production baseline permanently empty while
+            // fixture-shaped tests stayed green.
+            let baselineMatchResult = BaselineEngine.isProcessCreationEvent(enrichedEvent)
                 ? await state.baselineEngine.evaluate(enrichedEvent)
                 : nil
             if let baselineMatch = baselineMatchResult {

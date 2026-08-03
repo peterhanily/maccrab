@@ -80,4 +80,41 @@ struct BundleRedactorTests {
         // integrity/ contents are NOT touched — they commit to the post-redaction artifacts.
         #expect(intAfter == "{\"path\":\"/Users/alice/x\"}")
     }
+
+    @Test("Only root-relative integrity metadata is exempt from redaction")
+    func integrityExemptionIsRootRelative() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("redact-policy-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let ancestor = scratch.appendingPathComponent("integrity", isDirectory: true)
+        let bundle = ancestor.appendingPathComponent("sample.maccrabtrace", isDirectory: true)
+        let rootIntegrity = bundle.appendingPathComponent("integrity", isDirectory: true)
+        let nestedIntegrity = bundle.appendingPathComponent(
+            "evidence/integrity",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: rootIntegrity,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: nestedIntegrity,
+            withIntermediateDirectories: true
+        )
+
+        let ordinary = bundle.appendingPathComponent("events.jsonl")
+        let rootMetadata = rootIntegrity.appendingPathComponent("hash_chain.json")
+        let nestedPayload = nestedIntegrity.appendingPathComponent("payload.json")
+        let secret = #"{"path":"/Users/alice/private"}"#
+        for url in [ordinary, rootMetadata, nestedPayload] {
+            try secret.write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        try BundleRedactor(userName: "alice").redactDirectory(bundle)
+
+        #expect(try String(contentsOf: ordinary, encoding: .utf8) == #"{"path":"~/private"}"#)
+        #expect(try String(contentsOf: nestedPayload, encoding: .utf8) == #"{"path":"~/private"}"#)
+        #expect(try String(contentsOf: rootMetadata, encoding: .utf8) == secret,
+                "Only the bundle-root integrity namespace is derived metadata")
+    }
 }

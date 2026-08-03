@@ -35,7 +35,7 @@ import os.log
 /// `EventStoreError.busy` on demand to exercise the #13 transient-retry path.
 /// `EventStore` (an actor) satisfies the async requirement via its isolation.
 protocol EventBatchInserting: Sendable {
-    func insert(events: [Event]) async throws
+    func insert(events: [Event]) async throws -> EventBatchInsertResult
 }
 
 extension EventStore: EventBatchInserting {}
@@ -80,6 +80,10 @@ actor BatchedEventWriter {
     /// retried rather than dropped (#13). Distinct from `drops` so a deferred
     /// retry is never conflated with a lost row.
     private let retries = LockedCounter()
+    /// Rows confirmed durable by successful commits. Partial batch failures add
+    /// only their committed prefix; filtered rows are neither persisted nor
+    /// misreported as storage sheds.
+    private let persisted = LockedCounter()
 
     /// Storage-write drops since start. NOT a detection gap — the event was
     /// fully processed by the pipeline; only its events.db row was dropped.
@@ -87,6 +91,8 @@ actor BatchedEventWriter {
 
     /// Cumulative events re-queued after transient contention (#13 observability).
     nonisolated var retriedCount: Int { retries.get() }
+
+    nonisolated var persistedCount: Int { persisted.get() }
 
     /// Event categories worth preserving over a file/write flood when the buffer
     /// is at the hard cap (#24): exec/network/tcc/auth/registry rows are rare and
@@ -211,7 +217,43 @@ actor BatchedEventWriter {
             buffer.removeAll(keepingCapacity: true)
             lowValueCount = 0   // buffer emptied; enqueues during the await re-accrue it
             do {
-                try await store.insert(events: batch)
+                let result = try await store.insert(events: batch)
+                persisted.add(result.persistedCount)
+            } catch let partial as EventBatchInsertFailure {
+                persisted.add(partial.progress.persistedCount)
+                let suffix = partial.uncommittedEvents
+                if partial.replacementReadyForRetry {
+                    // Corruption recovery quarantined the DB containing any
+                    // earlier committed chunks. EventStore resets progress and
+                    // returns the full filter-passing batch; the fresh DB is
+                    // ready, so retry it instead of falsely counting the old
+                    // prefix as durable or permanently shedding recoverable rows.
+                    if buffer.count + suffix.count <= hardCap {
+                        buffer.insert(contentsOf: suffix, at: 0)
+                        lowValueCount += suffix.reduce(0) {
+                            $0 + (Self.isHighValue($1) ? 0 : 1)
+                        }
+                        retries.add(suffix.count)
+                        return
+                    }
+                } else if let eventError = partial.underlyingError as? EventStoreError,
+                   isTransient(eventError) {
+                    // Only the rolled-back/unstarted suffix is retried. The
+                    // committed prefix is already durable and must never be
+                    // duplicated in retry/drop telemetry.
+                    if buffer.count + suffix.count <= hardCap {
+                        buffer.insert(contentsOf: suffix, at: 0)
+                        lowValueCount += suffix.reduce(0) {
+                            $0 + (Self.isHighValue($1) ? 0 : 1)
+                        }
+                        retries.add(suffix.count)
+                        return
+                    }
+                }
+                await StorageErrorTracker.shared.recordEventError(
+                    partial.underlyingError
+                )
+                drops.add(suffix.count)
             } catch let e as EventStoreError where isTransient(e) {
                 // #13: TRANSIENT contention (SQLITE_BUSY/LOCKED) — typically a
                 // reader pinning the WAL past the 5s busy_timeout. Retrying the

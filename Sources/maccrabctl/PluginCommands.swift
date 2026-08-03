@@ -671,7 +671,12 @@ private func runTierBCollector(id: String, handle: CaseHandle, window: MacCrabFo
     // S2: headless/CLI boxes don't get the dashboard's revocation sweep — run the
     // staleness reconcile before the run so a since-revoked-or-stale third-party
     // plugin is quarantined (resolve refuses a quarantined plugin before verify).
-    _ = try? await RevocationReverifyService.reconcileDefaults()
+    do {
+        _ = try await RevocationReverifyService.reconcileDefaults()
+    } catch {
+        throw CaseCommandError.underlying(
+            "Refusing to run plugin '\(id)': revocation quarantine reconciliation failed: \(error)")
+    }
 
     let caseRow = try await handle.store.fetchCase(id: handle.caseID)
     let allowsSensitive = (caseRow?.encryptionState ?? .plaintext) != .plaintext

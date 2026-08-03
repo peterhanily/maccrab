@@ -81,16 +81,36 @@ all caps are tunable under the `storage` block in `daemon_config.json` (see
 | `alerts.db` | 100 MB (`alerts_max_size_mb`) | Retained `alerts_retention_days` (default 365). |
 | `campaigns.db` | 50 MB (`campaigns_max_size_mb`) | Retained `campaigns_retention_days` (default 365). |
 | `tracegraph.db` | 250 MB (`tracegraph_max_size_mb`) | Causal-graph entity/edge substrate; retained `tracegraph_retention_days` (default 90). Over cap, oldest graph is evicted; an orphan sweep also runs. |
-| traces | 100 MB (`traces_max_size_mb`) | Retained `traces_retention_days` (default 90). |
+| `traces.db` + WAL + SHM | 100 MB (`traces_max_size_mb`, minimum 50 MB) | Unauthenticated/self-reported OTLP spans; retained `traces_retention_days` (default 90). Exact aggregate footprint is admission-controlled with transaction reserve and a 1 GiB volume free-space floor. |
 | `event_aggregates` | — | Daily rollups kept `aggregate_days` (default 90); tiny. |
 
 On an actively-used machine this is roughly **~750 MB of disk allocation**
 (much smaller on a lightly-used one). This is **disk, not RAM** — resident
 memory is far smaller.
 
-Enforcement is a periodic size-cap sweep (`events_size_cap_interval_minutes`,
-default 60): over-cap stores are trimmed oldest-first. Retention days and size
-caps are independent ceilings — whichever binds first wins.
+The main event/alert/campaign caps are enforced by periodic size-cap maintenance
+(`events_size_cap_interval_minutes`, default 60). `tracegraph.db` and
+`traces.db` additionally enforce admission on every hot-path mutation, against
+their exact DB+WAL+SHM footprint and a reserved amount for transaction growth.
+SQLite `max_page_count` is a final main-file backstop. Under pressure, writes
+are shed with a typed reason and the heartbeat, CLI, MCP, and dashboard report
+the evidence gap. The traces receiver returns HTTP 507 before protobuf decode
+when even the encoded request cannot fit, and repeats the check against the
+decoded batch before insertion. Bounded recovery deletes a limited oldest or
+expired set, aborts deletion when a pinned WAL reader prevents reclamation, and
+uses incremental vacuum only. Retention days and size caps are independent
+ceilings — whichever binds first wins.
+
+Every persistent read-write SQLite connection also claims checkpoint
+ownership before its first PRAGMA, key, schema read, or write. SQLite's default
+WAL autocheckpoint and last-connection checkpoint are disabled; one MacCrab WAL
+hook takes a fresh main-file, complete DB+WAL+SHM, and `f_bavail` measurement
+before a threshold-triggered `PASSIVE` checkpoint. Attached databases are
+registered as separate exact-path families. A low-space gate, pinned reader,
+path mismatch, or SQLite maintenance failure defers the checkpoint without
+turning an already-durable COMMIT into a reported insert failure. Per-family
+commit-count backoff bounds repeated probe cost while guaranteeing another
+attempt within 64 subsequent commits after pressure clears.
 
 > Before v1.18, `tracegraph.db` had no retention sweep and was field-observed
 > at 17 GB. v1.18 added retention + a size cap + an orphan sweep; v1.19 made
@@ -134,12 +154,16 @@ MacCrab is built to lose capability gracefully rather than fail hard:
   FSEvents, the network tap, BPF DNS — rather than going dark. This is a
   reduced-coverage mode, surfaced as degraded, not a failure. (See
   [`TRUST.md`](TRUST.md) for the entitlement's role.)
-- **Drop-oldest under storm, and counted.** The merged event stream has a
-  bounded cap (`mergedStreamCap`). Under an event storm the stream drops
-  oldest rather than growing memory unbounded — and every drop is **counted**
-  (`events_dropped` / `events_dropped_total`) and exposed in the heartbeat, so
-  a detection gap under load is **visible**, not silent. The insert path
-  likewise records a dropped/passed counter surfaced to the dashboard.
+- **Drop-oldest under storm, and counted.** Detection input is split into
+  independently bounded priority and file-write lanes. Under an event storm a
+  full lane drops its oldest queued event rather than growing memory without
+  bound. The rich heartbeat's `event_pipeline` block exposes source×lane
+  offers, dequeues, completions, backlog/in-flight estimates, merged-lane
+  drops, Unified Log's earlier collector-buffer drops, and lane p99 processing
+  latency. This distinguishes an upstream collector flood from a slow consumer
+  and makes a detection gap under load visible rather than merely reporting one
+  aggregate loss number. Persistence-writer drops remain separate because the
+  event was already evaluated for detection before that storage loss.
 - **Fail-closed data channels.** The signed rule-update channel and the
   plugin catalog both leave the prior good state untouched on any verification
   or write failure (anti-rollback serial, per-item validation, atomic swap).

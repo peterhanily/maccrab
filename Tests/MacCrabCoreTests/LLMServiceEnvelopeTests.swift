@@ -33,11 +33,84 @@ actor RecordingBackend: LLMBackend {
     }
 }
 
+/// Manual monotonic clock for the concurrent rate-limit regression. Sleeping
+/// tasks remain suspended until the test advances time, so the test can wake a
+/// burst on the same instant without relying on wall-clock scheduling.
+private actor ManualLLMRateLimitClock {
+    private struct Sleeper {
+        let deadline: TimeInterval
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var currentTime: TimeInterval = 0
+    private var sleepers: [Sleeper] = []
+
+    func now() -> TimeInterval { currentTime }
+
+    func sleep(for interval: TimeInterval) async throws {
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            let deadline = currentTime + max(0, interval)
+            if deadline <= currentTime {
+                continuation.resume()
+            } else {
+                sleepers.append(Sleeper(deadline: deadline, continuation: continuation))
+            }
+        }
+    }
+
+    func advance(by interval: TimeInterval) {
+        currentTime += interval
+        let ready = sleepers.filter { $0.deadline <= currentTime }
+        sleepers.removeAll { $0.deadline <= currentTime }
+
+        for sleeper in ready {
+            sleeper.continuation.resume()
+        }
+    }
+
+    var sleeperCount: Int { sleepers.count }
+}
+
+private actor RateLimitRecordingBackend: LLMBackend {
+    let providerName = "RateLimitRecording"
+    private let now: @Sendable () async -> TimeInterval
+    private var invocations: [(prompt: String, time: TimeInterval)] = []
+
+    init(now: @escaping @Sendable () async -> TimeInterval) {
+        self.now = now
+    }
+
+    func isAvailable() async -> Bool { true }
+
+    func complete(systemPrompt: String, userPrompt: String,
+                  maxTokens: Int, temperature: Double) async -> String? {
+        invocations.append((prompt: userPrompt, time: await now()))
+        return "ok"
+    }
+
+    func snapshot() -> [(prompt: String, time: TimeInterval)] {
+        invocations
+    }
+}
+
 @Suite("LLMService safety envelope")
 struct LLMServiceEnvelopeTests {
 
     private func cloudConfig() -> LLMConfig {
         var c = LLMConfig(); c.provider = .claude; c.sanitizeForCloud = true; return c
+    }
+
+    private func eventually(
+        maxYields: Int = 10_000,
+        _ predicate: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        for _ in 0..<maxYields {
+            if await predicate() { return true }
+            await Task.yield()
+        }
+        return await predicate()
     }
 
     @Test("Circuit breaker opens after 3 failures; 4th query skips the backend")
@@ -88,5 +161,59 @@ struct LLMServiceEnvelopeTests {
         #expect(second?.response == "hello")
         #expect(second?.cached == true)
         #expect(await backend.calls == 1)  // second served from cache
+    }
+
+    @Test("Concurrent regular and extended calls keep one global interval")
+    func concurrentCallsDoNotBurstAfterSharedSleep() async {
+        let clock = ManualLLMRateLimitClock()
+        let backend = RateLimitRecordingBackend(now: { await clock.now() })
+        let service = LLMService(
+            backend: backend,
+            config: cloudConfig(),
+            minInterval: 5,
+            rateLimitClock: LLMRateLimitClock(
+                now: { await clock.now() },
+                sleep: { try await clock.sleep(for: $0) }
+            )
+        )
+
+        let first = Task {
+            await service.query(
+                systemPrompt: "s", userPrompt: "first", useCache: false
+            )
+        }
+        #expect(await eventually { await backend.snapshot().count == 1 })
+
+        // Both callers observe the same last-call time and suspend for the
+        // same five-second deadline. One uses each public backend path.
+        let regular = Task {
+            await service.query(
+                systemPrompt: "s", userPrompt: "regular", useCache: false
+            )
+        }
+        let extended = Task {
+            await service.queryWithExtendedThinking(
+                systemPrompt: "s", userPrompt: "extended"
+            )
+        }
+        #expect(await eventually { await clock.sleeperCount == 2 })
+
+        // Waking the burst admits exactly one caller. The other must recheck
+        // the timestamp and sleep for a fresh interval instead of bursting.
+        await clock.advance(by: 5)
+        #expect(await eventually {
+            let callCount = await backend.snapshot().count
+            let sleeperCount = await clock.sleeperCount
+            return callCount == 2 && sleeperCount == 1
+        })
+
+        await clock.advance(by: 5)
+        _ = await first.value
+        _ = await regular.value
+        _ = await extended.value
+
+        let invocations = await backend.snapshot().sorted { $0.time < $1.time }
+        #expect(invocations.map(\.prompt).sorted() == ["extended", "first", "regular"])
+        #expect(invocations.map(\.time) == [0, 5, 10])
     }
 }

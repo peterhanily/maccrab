@@ -5,8 +5,39 @@
 // Used by EventStore and AlertStore after base table creation.
 
 import Foundation
+import Darwin
 import CSQLCipher
 import os
+
+/// SQLite preserves the primary result code, extended result code, and the
+/// backing VFS errno separately. Capture all three *before* a cleanup ROLLBACK
+/// can replace the connection's last-error state. Storage users can then
+/// distinguish ENOSPC/EDQUOT from corruption without parsing localized text.
+struct SQLiteFailureMetadata: Sendable, Equatable {
+    let resultCode: Int32
+    let extendedResultCode: Int32
+    let systemErrno: Int32
+
+    init(resultCode: Int32, db: OpaquePointer) {
+        self.resultCode = resultCode
+        self.extendedResultCode = sqlite3_extended_errcode(db)
+        self.systemErrno = sqlite3_system_errno(db)
+    }
+
+    init(resultCode: Int32, extendedResultCode: Int32, systemErrno: Int32) {
+        self.resultCode = resultCode
+        self.extendedResultCode = extendedResultCode
+        self.systemErrno = systemErrno
+    }
+
+    var isStorageExhaustion: Bool {
+        let primary = extendedResultCode & 0xFF
+        return resultCode == SQLITE_FULL
+            || primary == SQLITE_FULL
+            || ((resultCode == SQLITE_IOERR || primary == SQLITE_IOERR)
+                && (systemErrno == ENOSPC || systemErrno == EDQUOT))
+    }
+}
 
 /// v1.19.1 (audit): a real os.Logger so the newer-than-binary (downgrade/skew)
 /// warning surfaces even though every primary store calls `run()` without the
@@ -34,10 +65,46 @@ public struct Migration: Sendable {
     }
 }
 
+/// Storage work that will actually execute after idempotent schema statements
+/// are resolved against sqlite_master / table_info. Metadata-only statements
+/// fit the ordinary transaction reserve; rebuild statements scale with the
+/// existing store and require whole-store headroom from the caller.
+public struct SchemaStorageWork: Sendable, Equatable {
+    public let boundedMetadataStatementCount: Int
+    public let rebuildStatementCount: Int
+
+    public init(
+        boundedMetadataStatementCount: Int,
+        rebuildStatementCount: Int
+    ) {
+        self.boundedMetadataStatementCount = boundedMetadataStatementCount
+        self.rebuildStatementCount = rebuildStatementCount
+    }
+
+    public var isEmpty: Bool {
+        boundedMetadataStatementCount == 0 && rebuildStatementCount == 0
+    }
+
+    public var boundedTransactionEstimateBytes: Int64 {
+        SQLitePersistentStoreAdmission.estimatedTransactionBytes(
+            rowCount: boundedMetadataStatementCount
+        )
+    }
+}
+
 // MARK: - Errors
 
 public enum SchemaMigrationError: Error, LocalizedError {
     case migrationFailed(version: Int, name: String, message: String)
+    case sqliteFailure(
+        version: Int,
+        name: String,
+        context: String,
+        message: String,
+        resultCode: Int32,
+        extendedResultCode: Int32,
+        systemErrno: Int32
+    )
     case versionReadFailed(String)
     case versionWriteFailed(String)
     case unknownVersion(current: Int, maxAvailable: Int)
@@ -47,6 +114,8 @@ public enum SchemaMigrationError: Error, LocalizedError {
         switch self {
         case let .migrationFailed(v, n, m):
             return "Migration v\(v) '\(n)' failed: \(m)"
+        case let .sqliteFailure(v, n, context, message, rc, extended, systemErrno):
+            return "Migration v\(v) '\(n)' \(context) failed (rc=\(rc), extended=\(extended), system_errno=\(systemErrno)): \(message)"
         case let .versionReadFailed(m):
             return "Failed to read user_version: \(m)"
         case let .versionWriteFailed(m):
@@ -56,6 +125,17 @@ public enum SchemaMigrationError: Error, LocalizedError {
         case let .quickCheckFailed(m):
             return "PRAGMA quick_check failed after migrations: \(m)"
         }
+    }
+
+    var sqliteFailureMetadata: SQLiteFailureMetadata? {
+        guard case let .sqliteFailure(
+            _, _, _, _, resultCode, extendedResultCode, systemErrno
+        ) = self else { return nil }
+        return SQLiteFailureMetadata(
+            resultCode: resultCode,
+            extendedResultCode: extendedResultCode,
+            systemErrno: systemErrno
+        )
     }
 }
 
@@ -113,7 +193,8 @@ public enum SchemaMigrator {
         on db: OpaquePointer,
         migrations: [Migration],
         logger: ((String) -> Void)? = nil,
-        skipQuickCheck: Bool = false
+        skipQuickCheck: Bool = false,
+        beforeStorageWork: ((SchemaStorageWork) throws -> Void)? = nil
     ) throws {
         let current = try readVersion(db: db)
         let latest = migrations.map(\.version).max() ?? 0
@@ -177,7 +258,13 @@ public enum SchemaMigrator {
         for m in sorted {
             // Only bump on forward progress; otherwise leave the counter alone.
             let bump = m.version > current
-            try apply(m, db: db, bumpVersion: bump, logger: logger)
+            try apply(
+                m,
+                db: db,
+                bumpVersion: bump,
+                logger: logger,
+                beforeStorageWork: beforeStorageWork
+            )
         }
 
         // Post-migration quick_check: catches structure-level corruption
@@ -249,21 +336,67 @@ public enum SchemaMigrator {
         return Int(sqlite3_column_int(stmt, 0))
     }
 
+    /// Resolve an idempotent schema statement list before it is executed.
+    /// Existing CREATE ... IF NOT EXISTS objects and already-added columns are
+    /// excluded, preventing every daemon restart from demanding rebuild-sized
+    /// scratch for operations that SQLite will treat as no-ops.
+    public static func pendingStorageWork(
+        on db: OpaquePointer,
+        statements: [String]
+    ) -> SchemaStorageWork {
+        var metadata = 0
+        var rebuilds = 0
+        for sql in statements {
+            switch classifyPendingStatement(sql, db: db) {
+            case .none:
+                break
+            case .boundedMetadata:
+                metadata += 1
+            case .storeRebuild:
+                rebuilds += 1
+            }
+        }
+        return SchemaStorageWork(
+            boundedMetadataStatementCount: metadata,
+            rebuildStatementCount: rebuilds
+        )
+    }
+
     // MARK: - Private
 
     private static func apply(
         _ m: Migration,
         db: OpaquePointer,
         bumpVersion: Bool = true,
-        logger: ((String) -> Void)?
+        logger: ((String) -> Void)?,
+        beforeStorageWork: ((SchemaStorageWork) throws -> Void)?
     ) throws {
         logger?("  Applying v\(m.version): \(m.name)\(bumpVersion ? "" : " (idempotent re-run, no version bump)")")
 
+        let pending = pendingStorageWork(on: db, statements: m.sql)
+        // `PRAGMA user_version = N` is itself a persistent header mutation.
+        // Include it even for an otherwise-empty baseline migration so no
+        // schema transaction can begin without an explicit bounded admission.
+        let storageWork = SchemaStorageWork(
+            boundedMetadataStatementCount:
+                pending.boundedMetadataStatementCount + (bumpVersion ? 1 : 0),
+            rebuildStatementCount: pending.rebuildStatementCount
+        )
+        if !storageWork.isEmpty {
+            // This callback runs before BEGIN so a headroom refusal never
+            // leaves an open transaction or partially-applied migration.
+            try beforeStorageWork?(storageWork)
+        }
+
         guard sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil) == SQLITE_OK else {
             let msg = String(cString: sqlite3_errmsg(db))
-            throw SchemaMigrationError.migrationFailed(
-                version: m.version, name: m.name,
-                message: "BEGIN failed: \(msg)"
+            let failure = SQLiteFailureMetadata(
+                resultCode: sqlite3_errcode(db), db: db)
+            throw SchemaMigrationError.sqliteFailure(
+                version: m.version, name: m.name, context: "BEGIN",
+                message: msg, resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
             )
         }
 
@@ -272,6 +405,7 @@ public enum SchemaMigrator {
             let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
             if rc != SQLITE_OK {
                 let msg = errmsg.flatMap { String(cString: $0) } ?? "unknown error"
+                let failure = SQLiteFailureMetadata(resultCode: rc, db: db)
                 sqlite3_free(errmsg)
 
                 // Treat "already-exists" failures as idempotent re-runs — lets the
@@ -288,9 +422,12 @@ public enum SchemaMigrator {
                 }
 
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                throw SchemaMigrationError.migrationFailed(
+                throw SchemaMigrationError.sqliteFailure(
                     version: m.version, name: m.name,
-                    message: "\(sql.prefix(120)) -> \(msg)"
+                    context: String(sql.prefix(120)), message: msg,
+                    resultCode: failure.resultCode,
+                    extendedResultCode: failure.extendedResultCode,
+                    systemErrno: failure.systemErrno
                 )
             }
         }
@@ -301,19 +438,204 @@ public enum SchemaMigrator {
         // would make EventStore's pending-migration filter mis-fire next boot.
         if bumpVersion {
             let bumpSQL = "PRAGMA user_version = \(m.version)"
-            if sqlite3_exec(db, bumpSQL, nil, nil, nil) != SQLITE_OK {
+            let rc = sqlite3_exec(db, bumpSQL, nil, nil, nil)
+            if rc != SQLITE_OK {
                 let msg = String(cString: sqlite3_errmsg(db))
+                let failure = SQLiteFailureMetadata(resultCode: rc, db: db)
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                throw SchemaMigrationError.versionWriteFailed(msg)
+                throw SchemaMigrationError.sqliteFailure(
+                    version: m.version, name: m.name, context: "user_version",
+                    message: msg, resultCode: failure.resultCode,
+                    extendedResultCode: failure.extendedResultCode,
+                    systemErrno: failure.systemErrno
+                )
             }
         }
 
-        if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
+        let commitRC = sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        if commitRC != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
-            throw SchemaMigrationError.migrationFailed(
-                version: m.version, name: m.name,
-                message: "COMMIT failed: \(msg)"
+            let failure = SQLiteFailureMetadata(resultCode: commitRC, db: db)
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            throw SchemaMigrationError.sqliteFailure(
+                version: m.version, name: m.name, context: "COMMIT",
+                message: msg, resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
             )
         }
+    }
+
+    private enum PendingStatementClass {
+        case none
+        case boundedMetadata
+        case storeRebuild
+    }
+
+    private static func classifyPendingStatement(
+        _ sql: String,
+        db: OpaquePointer
+    ) -> PendingStatementClass {
+        let tokens = schemaTokens(sql)
+        let upper = tokens.map { $0.uppercased() }
+        guard let first = upper.first else { return .none }
+
+        if first == "CREATE" {
+            if let indexPosition = upper.firstIndex(of: "INDEX"),
+               let name = objectName(after: indexPosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "index", name: name)
+                    ? .none : .storeRebuild
+            }
+            if let tablePosition = upper.firstIndex(of: "TABLE"),
+               let name = objectName(after: tablePosition, tokens: tokens, upper: upper) {
+                if schemaObjectExists(db: db, type: "table", name: name) {
+                    return .none
+                }
+                // CREATE TABLE AS SELECT and unknown virtual-table modules can
+                // copy existing content. Ordinary empty/bootstrap tables are
+                // metadata bounded.
+                let normalized = " " + upper.joined(separator: " ") + " "
+                return upper.contains("VIRTUAL")
+                    || normalized.contains(" AS SELECT ")
+                    ? .storeRebuild : .boundedMetadata
+            }
+            if let triggerPosition = upper.firstIndex(of: "TRIGGER"),
+               let name = objectName(after: triggerPosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "trigger", name: name)
+                    ? .none : .boundedMetadata
+            }
+            if let viewPosition = upper.firstIndex(of: "VIEW"),
+               let name = objectName(after: viewPosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "view", name: name)
+                    ? .none : .boundedMetadata
+            }
+            return .storeRebuild
+        }
+
+        if first == "DROP" {
+            if let indexPosition = upper.firstIndex(of: "INDEX"),
+               let name = objectName(after: indexPosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "index", name: name)
+                    ? .storeRebuild : .none
+            }
+            if let tablePosition = upper.firstIndex(of: "TABLE"),
+               let name = objectName(after: tablePosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "table", name: name)
+                    ? .storeRebuild : .none
+            }
+            if let triggerPosition = upper.firstIndex(of: "TRIGGER"),
+               let name = objectName(after: triggerPosition, tokens: tokens, upper: upper) {
+                return schemaObjectExists(db: db, type: "trigger", name: name)
+                    ? .boundedMetadata : .none
+            }
+            return .storeRebuild
+        }
+
+        if first == "ALTER", upper.count >= 6, upper[1] == "TABLE" {
+            let table = tokens[2]
+            guard let add = upper.firstIndex(of: "ADD") else {
+                return .storeRebuild
+            }
+            var columnPosition = add + 1
+            if columnPosition < upper.count, upper[columnPosition] == "COLUMN" {
+                columnPosition += 1
+            }
+            guard columnPosition < tokens.count else { return .storeRebuild }
+            return tableHasColumn(db: db, table: table, column: tokens[columnPosition])
+                ? .none : .boundedMetadata
+        }
+
+        // Migration bodies are expected to be DDL. Treat any future/unknown
+        // statement as rebuild-class so adding data-copy SQL cannot silently
+        // bypass whole-store admission.
+        return .storeRebuild
+    }
+
+    private static func schemaTokens(_ sql: String) -> [String] {
+        // DDL bundles (notably the SQLCipher ArtifactStore baseline) retain
+        // human-readable `--` comments in each split statement. Ignore comment
+        // tails before tokenizing so classification sees CREATE/DROP rather
+        // than conservatively treating the leading comment marker as unknown
+        // rebuild work.
+        let uncommented = sql.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ).map { line -> String in
+            let text = String(line)
+            guard let marker = text.range(of: "--") else { return text }
+            return String(text[..<marker.lowerBound])
+        }.joined(separator: "\n")
+        let separators = CharacterSet.whitespacesAndNewlines.union(
+            CharacterSet(charactersIn: "(),;`\"[]")
+        )
+        return uncommented.components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+    }
+
+    private static func objectName(
+        after keywordPosition: Int,
+        tokens: [String],
+        upper: [String]
+    ) -> String? {
+        var position = keywordPosition + 1
+        if position + 2 < upper.count,
+           upper[position] == "IF",
+           upper[position + 1] == "NOT",
+           upper[position + 2] == "EXISTS" {
+            position += 3
+        } else if position + 1 < upper.count,
+                  upper[position] == "IF",
+                  upper[position + 1] == "EXISTS" {
+            position += 2
+        }
+        guard position < tokens.count else { return nil }
+        return tokens[position]
+    }
+
+    private static func schemaObjectExists(
+        db: OpaquePointer,
+        type: String,
+        name: String
+    ) -> Bool {
+        var stmt: OpaquePointer?
+        let sql = "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2 COLLATE NOCASE LIMIT 1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+              let stmt else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(
+            OpaquePointer(bitPattern: -1)!,
+            to: sqlite3_destructor_type.self
+        )
+        sqlite3_bind_text(stmt, 1, type, -1, transient)
+        sqlite3_bind_text(stmt, 2, name, -1, transient)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private static func tableHasColumn(
+        db: OpaquePointer,
+        table: String,
+        column: String
+    ) -> Bool {
+        let escaped = table.replacingOccurrences(of: "\"", with: "\"\"")
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "PRAGMA table_info(\"\(escaped)\")",
+            -1,
+            &stmt,
+            nil
+        ) == SQLITE_OK, let stmt else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let name = sqlite3_column_text(stmt, 1) else { continue }
+            if String(cString: name).caseInsensitiveCompare(column) == .orderedSame {
+                return true
+            }
+        }
+        return false
     }
 }

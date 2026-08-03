@@ -366,20 +366,29 @@ public actor SecurityToolIntegrations {
     // MARK: - Helpers
 
     private nonisolated func isProcessRunning(_ name: String) -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        proc.arguments = ["-x", name]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
+        BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pgrep",
+            arguments: ["-x", name],
+            timeout: 2,
+            maximumOutputBytes: nil
+        )?.succeeded == true
     }
 
     private nonisolated func getBundleVersion(_ appPath: String) -> String? {
         let plistPath = appPath + "/Contents/Info.plist"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: plistPath)),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
-        return plist["CFBundleShortVersionString"] as? String
+        guard let data = BoundedRegularFileReader.read(
+                  at: plistPath,
+                  maximumBytes: 1 * 1024 * 1024
+              ),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data,
+                  format: nil
+              ) as? [String: Any],
+              let version = plist["CFBundleShortVersionString"] as? String,
+              !version.isEmpty,
+              version.utf8.count <= 128 else {
+            return nil
+        }
+        return version
     }
 }

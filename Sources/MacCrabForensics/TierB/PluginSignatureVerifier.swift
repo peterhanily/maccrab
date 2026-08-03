@@ -105,6 +105,40 @@ public struct PluginSignatureVerifier {
         let signature = try Data(contentsOf: URL(fileURLWithPath: bundle.signaturePath))
         let publicKeyBytes = try Data(contentsOf: URL(fileURLWithPath: bundle.publicKeyPath))
 
+        return try verifyCapturedBytes(
+            manifestData: manifestData,
+            binaryData: binaryData,
+            signature: signature,
+            publicKeyBytes: publicKeyBytes,
+            trustStore: trustStore
+        )
+    }
+
+    /// Verify one immutable bundle capture. Installation uses this overload so
+    /// manifest validation, publisher trust, signature verification, and the
+    /// bytes later materialized at the destination are the same values—not
+    /// separate reads of a same-uid-mutable staging directory.
+    public static func verify(
+        snapshot: PluginBundleSnapshot,
+        trustStore: TrustStore
+    ) throws -> Data {
+        try verifyCapturedBytes(
+            manifestData: snapshot.manifestData,
+            binaryData: snapshot.binaryData,
+            signature: snapshot.signatureData,
+            publicKeyBytes: snapshot.publicKeyData,
+            trustStore: trustStore
+        )
+    }
+
+    private static func verifyCapturedBytes(
+        manifestData: Data,
+        binaryData: Data,
+        signature: Data,
+        publicKeyBytes: Data,
+        trustStore: TrustStore
+    ) throws -> Data {
+
         guard signature.count == 64 else {
             throw VerifyError.signatureMalformed(message: "expected 64 bytes, got \(signature.count)")
         }

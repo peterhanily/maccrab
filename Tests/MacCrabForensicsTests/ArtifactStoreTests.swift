@@ -4,7 +4,9 @@
 // INSERT).
 
 import Foundation
+import CSQLCipher
 import Testing
+@testable import MacCrabCore
 @testable import MacCrabForensics
 
 @Suite("ArtifactStore: schema + case CRUD")
@@ -56,6 +58,257 @@ struct ArtifactStoreSchemaCaseCRUDTests {
         let list = try await store.listCases()
         #expect(list.count == 1)
         #expect(list.first?.encryptionState == .plaintext)
+    }
+
+    @Test("Declared encryption state must match key presence")
+    func encryptionStateAndKeyMustAgree() async {
+        let path = tempPath()
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: path,
+                dek: nil,
+                encryptionState: .encryptedKeychain
+            )
+        }
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: path,
+                dek: Data(repeating: 7, count: 32),
+                encryptionState: .plaintext
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: path),
+                "a key/state mismatch must fail before SQLite creates a file")
+    }
+
+    @Test("SQLite family symlinks, hard links, and orphan sidecars fail closed")
+    func unsafeSQLiteFamilyRejected() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-artifact-path-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("target.sqlite")
+        try Data("sentinel".utf8).write(to: target)
+        let linked = dir.appendingPathComponent("case.sqlite")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: target)
+
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: linked.path,
+                dek: nil,
+                encryptionState: .plaintext
+            )
+        }
+        #expect(try Data(contentsOf: target) == Data("sentinel".utf8))
+
+        try FileManager.default.removeItem(at: linked)
+        try FileManager.default.linkItem(at: target, to: linked)
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: linked.path,
+                dek: nil,
+                encryptionState: .plaintext
+            )
+        }
+        #expect(try Data(contentsOf: target) == Data("sentinel".utf8))
+
+        try FileManager.default.removeItem(at: linked)
+        try Data("orphan".utf8).write(to: URL(fileURLWithPath: linked.path + "-wal"))
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: linked.path,
+                dek: nil,
+                encryptionState: .plaintext
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: linked.path))
+    }
+
+    @Test("A database from a newer schema is never silently opened or downgraded")
+    func futureSchemaRejected() async throws {
+        let path = tempPath()
+        try CSQLCipherInitGate.withLock {
+            var db: OpaquePointer?
+            #expect(sqlite3_open_v2(
+                path,
+                &db,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK)
+            guard let db else { return }
+            #expect(sqlite3_exec(db, "PRAGMA user_version = 99", nil, nil, nil) == SQLITE_OK)
+            sqlite3_close(db)
+        }
+
+        await #expect(throws: ArtifactStoreError.self) {
+            _ = try await ArtifactStore(
+                path: path,
+                dek: nil,
+                encryptionState: .plaintext
+            )
+        }
+
+        let version = try CSQLCipherInitGate.withLock { () -> Int32 in
+            var db: OpaquePointer?
+            guard sqlite3_open_v2(
+                path,
+                &db,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK, let db else { return -1 }
+            defer { sqlite3_close(db) }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nil) == SQLITE_OK,
+                  let stmt else { return -1 }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return -1 }
+            return sqlite3_column_int(stmt, 0)
+        }
+        #expect(version == 99)
+    }
+
+    @Test("Latest-version reopen repairs a deleted production index")
+    func latestVersionIndexRepair() async throws {
+        let path = tempPath()
+        var store: ArtifactStore? = try await ArtifactStore(
+            path: path,
+            dek: nil,
+            encryptionState: .plaintext
+        )
+        store = nil
+
+        try CSQLCipherInitGate.withLock {
+            var db: OpaquePointer?
+            #expect(SQLiteOpenPathPolicy.open(
+                path,
+                database: &db,
+                flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+            ) == SQLITE_OK)
+            let handle = try #require(db)
+            defer { sqlite3_close(handle) }
+            #expect(sqlite3_exec(
+                handle,
+                "DROP INDEX idx_artifacts_observed",
+                nil,
+                nil,
+                nil
+            ) == SQLITE_OK)
+        }
+
+        var reopened: ArtifactStore? = try await ArtifactStore(
+            path: path,
+            dek: nil,
+            encryptionState: .plaintext
+        )
+        reopened = nil
+
+        let repaired = try CSQLCipherInitGate.withLock { () -> Bool in
+            var db: OpaquePointer?
+            guard SQLiteOpenPathPolicy.open(
+                path,
+                database: &db,
+                flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            ) == SQLITE_OK, let db else { return false }
+            defer { sqlite3_close(db) }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db,
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_artifacts_observed'",
+                -1,
+                &stmt,
+                nil
+            ) == SQLITE_OK, let stmt else { return false }
+            defer { sqlite3_finalize(stmt) }
+            return sqlite3_step(stmt) == SQLITE_ROW
+        }
+        #expect(repaired)
+    }
+
+    @Test("ArtifactStore shares the package-wide SQLCipher initialization gate")
+    func sharedSQLCipherGateDriftGuard() throws {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MacCrabForensics/Storage/ArtifactStore.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+        #expect(text.contains("CSQLCipherInitGate.withLock"))
+        #expect(!text.contains("static let initLock"),
+                "a private gate does not serialize ArtifactStore against LiveDBSnapshot")
+        #expect(text.contains("operation: \"commit begin savepoint\""))
+        #expect(text.contains("operation: \"commit release savepoint\""),
+                "commit must surface transaction-boundary failures")
+    }
+
+    @Test("A shed-only legacy store initializes before its first recovered write")
+    func shedModeRecoveryRunsSkippedMigration() async throws {
+        let path = tempPath()
+        try CSQLCipherInitGate.withLock {
+            var db: OpaquePointer?
+            #expect(sqlite3_open_v2(
+                path,
+                &db,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK)
+            let handle = try #require(db)
+            defer { sqlite3_close(handle) }
+            #expect(sqlite3_exec(
+                handle,
+                "CREATE TABLE legacy_padding(payload BLOB); "
+                    + "INSERT INTO legacy_padding VALUES (zeroblob(2097152)); "
+                    + "PRAGMA user_version = 0",
+                nil,
+                nil,
+                nil
+            ) == SQLITE_OK)
+        }
+
+        let directory = (path as NSString).deletingLastPathComponent
+        let constrained = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 3 * 1_048_576,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 2 * 1_048_576,
+            storageVolumePath: directory
+        )
+        let store = try await ArtifactStore(
+            path: path,
+            dek: nil,
+            encryptionState: .plaintext,
+            storagePolicy: constrained
+        )
+        #expect((await store.storageAdmissionSnapshot()).latchedFailure != nil)
+
+        // Simulate a retention/reclaim owner shrinking the existing legacy DB
+        // while ArtifactStore remains open for inspection in shed mode.
+        try CSQLCipherInitGate.withLock {
+            var db: OpaquePointer?
+            #expect(sqlite3_open_v2(
+                path,
+                &db,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK)
+            let handle = try #require(db)
+            defer { sqlite3_close(handle) }
+            #expect(sqlite3_exec(
+                handle,
+                "DROP TABLE legacy_padding; VACUUM",
+                nil,
+                nil,
+                nil
+            ) == SQLITE_OK)
+        }
+
+        let row = CaseRecord(
+            id: "shed-recovery",
+            name: "recovered",
+            createdAt: Date(),
+            encryptionState: .plaintext
+        )
+        try await store.insertCase(row)
+        #expect(try await store.fetchCase(id: row.id)?.name == "recovered")
+        #expect((await store.storageAdmissionSnapshot()).latchedFailure == nil)
     }
 
     @Test("setAIContentAllowed flips the case flag")

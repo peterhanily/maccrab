@@ -34,6 +34,14 @@ import os.log
 public enum CausalGraphStoreError: Error, LocalizedError {
     case databaseOpenFailed(String)
     case schemaFailed(String)
+    case sqliteFailure(
+        context: String,
+        message: String,
+        resultCode: Int32,
+        extendedResultCode: Int32,
+        systemErrno: Int32
+    )
+    case transactionFailed(String)
     case prepareFailed(String)
     case bindFailed(String)
     case stepFailed(String)
@@ -44,12 +52,161 @@ public enum CausalGraphStoreError: Error, LocalizedError {
         switch self {
         case .databaseOpenFailed(let m): return "CausalGraphStore: open failed: \(m)"
         case .schemaFailed(let m): return "CausalGraphStore: schema failed: \(m)"
+        case let .sqliteFailure(context, message, rc, extended, systemErrno):
+            return "CausalGraphStore: \(context) failed (rc=\(rc), extended=\(extended), system_errno=\(systemErrno)): \(message)"
+        case .transactionFailed(let m):
+            return "CausalGraphStore: transaction state uncertain: \(m)"
         case .prepareFailed(let m): return "CausalGraphStore: prepare failed: \(m)"
         case .bindFailed(let m): return "CausalGraphStore: bind failed: \(m)"
         case .stepFailed(let m): return "CausalGraphStore: step failed: \(m)"
         case .decodeFailed(let m): return "CausalGraphStore: decode failed: \(m)"
         case .unexpectedNull(let m): return "CausalGraphStore: unexpected null: \(m)"
         }
+    }
+
+    var sqliteFailureMetadata: SQLiteFailureMetadata? {
+        guard case let .sqliteFailure(
+            _, _, resultCode, extendedResultCode, systemErrno
+        ) = self else { return nil }
+        return SQLiteFailureMetadata(
+            resultCode: resultCode,
+            extendedResultCode: extendedResultCode,
+            systemErrno: systemErrno
+        )
+    }
+}
+
+// MARK: - Storage admission / bounded recovery
+
+/// Why the TraceGraph writer is currently refusing growth mutations.
+///
+/// Storage admission is deliberately owned by the SQLite actor rather than by
+/// `RollingCausalGraph`: several legitimate writers (rule hits, replay rows,
+/// continuity records, demo/import tools) never pass through the rolling graph.
+public enum CausalGraphStorageBlockReason: String, Codable, Sendable, Equatable {
+    case footprintLimit = "footprint_limit"
+    case lowFreeSpace = "low_free_space"
+    case probeFailure = "probe_failure"
+    case mutationTooLarge = "mutation_too_large"
+    case recoveryInProgress = "recovery_in_progress"
+}
+
+public enum CausalGraphStorageAdmissionError: Error, LocalizedError, Sendable, Equatable {
+    case footprintLimit(footprintBytes: Int64, admissionThresholdBytes: Int64, capBytes: Int64)
+    case lowFreeSpace(freeBytes: Int64, floorBytes: Int64, requiredFreeBytes: Int64)
+    case probeFailed(String)
+    case mutationTooLarge(estimatedBytes: Int64, transactionReserveBytes: Int64)
+    case recoveryInProgress
+
+    public var errorDescription: String? {
+        switch self {
+        case .footprintLimit(let footprint, let threshold, let cap):
+            return "TraceGraph storage paused: SQLite-family footprint \(footprint) bytes reached the \(threshold)-byte admission threshold (absolute cap \(cap) bytes)"
+        case .lowFreeSpace(let free, let floor, let required):
+            return "TraceGraph storage paused: \(free) bytes free is below the \(required)-byte preflight requirement (\(floor)-byte hard floor plus this transaction's reserved growth)"
+        case .probeFailed(let probe):
+            return "TraceGraph storage paused: configured \(probe) probe failed"
+        case .mutationTooLarge(let estimated, let reserve):
+            return "TraceGraph storage paused: mutation upper bound \(estimated) bytes exceeds the \(reserve)-byte transaction reserve"
+        case .recoveryInProgress:
+            return "TraceGraph storage paused while bounded recovery is running"
+        }
+    }
+
+    fileprivate var blockReason: CausalGraphStorageBlockReason {
+        switch self {
+        case .footprintLimit: return .footprintLimit
+        case .lowFreeSpace: return .lowFreeSpace
+        case .probeFailed: return .probeFailure
+        case .mutationTooLarge: return .mutationTooLarge
+        case .recoveryInProgress: return .recoveryInProgress
+        }
+    }
+}
+
+public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
+    public let enabled: Bool
+    public let blocked: Bool
+    public let reason: CausalGraphStorageBlockReason?
+    public let maxFootprintBytes: Int64?
+    public let admissionThresholdBytes: Int64?
+    public let resumeBelowBytes: Int64?
+    public let transactionReserveBytes: Int64?
+    public let footprintBytes: Int64?
+    public let freeSpaceBytes: Int64?
+    public let freeSpaceFloorBytes: Int64?
+    public let shedMutationsTotal: UInt64
+    public let pinnedReader: Bool
+    public let recovering: Bool
+}
+
+public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
+    public let pinnedReader: Bool
+    public let tracesDeleted: Int
+    public let edgesDeleted: Int
+    public let entitiesDeleted: Int
+    public let vacuumPagesReclaimed: Int
+    public let footprintBytes: Int64?
+    public let autoVacuumMode: Int
+}
+
+/// Injectable probes keep admission failure modes deterministic in tests. A
+/// `nil` result is a failure, and is fail-closed only when that probe's policy
+/// is configured.
+public typealias CausalGraphStorageProbe = @Sendable (_ path: String) -> Int64?
+
+/// Test-only fault seam for SQLite transaction-control statements. Production
+/// callers leave this nil; tests can skip one control statement while
+/// preserving exact rc/extended-rc/VFS errno classification.
+public struct CausalGraphInjectedSQLiteFailure: Sendable, Equatable {
+    public let resultCode: Int32
+    public let extendedResultCode: Int32
+    public let systemErrno: Int32
+
+    public init(
+        resultCode: Int32,
+        extendedResultCode: Int32? = nil,
+        systemErrno: Int32 = 0
+    ) {
+        self.resultCode = resultCode
+        self.extendedResultCode = extendedResultCode ?? resultCode
+        self.systemErrno = systemErrno
+    }
+}
+
+public enum CausalGraphTransactionOperation: String, Sendable, Equatable {
+    case begin
+    case commit
+    case rollback
+}
+
+public typealias CausalGraphTransactionFailureProbe = @Sendable (
+    _ operation: CausalGraphTransactionOperation
+) -> CausalGraphInjectedSQLiteFailure?
+
+public enum CausalGraphPageLimitOperation: String, Sendable, Equatable {
+    case readPageSize
+    case readPageCount
+    case installLimit
+}
+
+public typealias CausalGraphPageLimitFailureProbe = @Sendable (
+    _ operation: CausalGraphPageLimitOperation
+) -> CausalGraphInjectedSQLiteFailure?
+
+/// Single production policy shared by daemon boot, SIGHUP reload, and tools
+/// that deliberately opt into the live-store safety contract.
+public enum TraceGraphStoragePolicy {
+    public static let bytesPerMiB: Int64 = 1_048_576
+    public static let minimumCapMiB = 50
+    public static let freeSpaceFloorBytes: Int64 = 1_024 * bytesPerMiB
+
+    public static func capBytes(maxSizeMiB: Int) -> Int64 {
+        let clampedMiB = max(
+            minimumCapMiB,
+            min(maxSizeMiB, Int(Int64.max / bytesPerMiB))
+        )
+        return Int64(clampedMiB) * bytesPerMiB
     }
 }
 
@@ -60,6 +217,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // MARK: Configuration
 
     private var db: OpaquePointer?
+    private var checkpointController: SQLiteControlledCheckpointController?
     private let databasePath: String
     private let encryption: DatabaseEncryption?
     /// True when the handle ended up read-only — either because the caller
@@ -68,6 +226,66 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// Migrations / chmod / WAL-setup are all gated on this being false.
     private var isReadOnly = false
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "graph-store")
+
+    /// The cap is absolute across main DB, WAL, SHM, and rollback journal.
+    /// Admission stops at `cap - transactionReserve`, leaving enough room for
+    /// the largest permitted transaction. `PRAGMA max_page_count` independently
+    /// prevents the main file growing through that high-water mark.
+    private var maxFootprintBytes: Int64?
+    private var freeSpaceFloorBytes: Int64?
+    private var transactionReserveBytes: Int64?
+    private var admissionThresholdBytes: Int64?
+    private var resumeBelowBytes: Int64?
+    private let storageVolumePath: String
+    private let footprintProbe: CausalGraphStorageProbe
+    private let freeSpaceProbe: CausalGraphStorageProbe
+    private let transactionFailureProbe: CausalGraphTransactionFailureProbe?
+    private let pageLimitFailureProbe: CausalGraphPageLimitFailureProbe?
+    private var lastFootprintBytes: Int64?
+    private var lastFreeSpaceBytes: Int64?
+    private var storageBlockReason: CausalGraphStorageBlockReason?
+    private var footprintAdmissionLatched = false
+    private var shedMutationsTotal: UInt64 = 0
+    private var pinnedReader = false
+    private var recovering = false
+    /// Bound associated with the currently executing actor-isolated growth
+    /// mutation. Used to translate SQLite's own FULL/ENOSPC backstop into the
+    /// same typed admission signal if the conservative preflight is exhausted.
+    private var lastAdmittedMutationUpperBoundBytes: Int64 = 0
+    private var sqliteStorageFailure: CausalGraphStorageAdmissionError?
+    private var sqliteStorageFailureGeneration: UInt64 = 0
+    /// An inherited over-budget database may defer additive indexes/triggers so
+    /// boot can run bounded deletion first. Growth stays fail-closed until the
+    /// deferred migration has run and its objects have been verified.
+    private var deferredMigrationsPending = false
+    private var deferredMigrationFailure: String?
+    /// Sticky for this handle: an inherited duplicate at the global maximum
+    /// means there is no unique predecessor to extend. Never pick one fork
+    /// arbitrarily and continue emitting apparently-valid evidence.
+    private var continuityIntegrityFailure: String?
+
+    private static let mib: Int64 = 1_048_576
+    private static let defaultMinimumTransactionReserve: Int64 = 8 * mib
+    private static let defaultMaximumTransactionReserve: Int64 = 64 * mib
+    /// Conservative per-row allowance for B-tree/index page splits in addition
+    /// to eight times the caller-controlled UTF-8 payload.
+    private static let mutationBaseBytes: Int64 = 1 * mib
+    private static let mutationBytesPerRow: Int64 = 64 * 1024
+    /// Parent trace IDs handled together. Child fanout is independently
+    /// bounded below; limiting IDs alone did not bound a pathological trace.
+    private static let traceCascadeBatchSize = 8
+    /// Narrow child rows (membership/hash-chain) can be deleted in larger
+    /// quanta; JSON-bearing rule-hit/replay rows use a smaller quantum because
+    /// one row can span many SQLite overflow pages.
+    private static let traceCascadeNarrowChildBatchSize = 256
+    private static let traceCascadeWideChildBatchSize = 8
+    /// Total child rows a daemon recovery tick may cascade. Public operator
+    /// prune calls may drain fully, but recovery remains bounded in both trace
+    /// count and fanout even for inherited pre-cap databases.
+    private static let traceRecoveryChildRowBudget = 16_384
+    /// Orphan rows are narrower than a whole trace cascade, but public legacy
+    /// prune APIs must share the same bounded write shape as recovery.
+    private static let substrateDeleteBatchSize = 256
 
     // SQLITE_TRANSIENT lives at file scope (see bottom of file) — used
     // by every sqlite3_bind_text call site here.
@@ -197,7 +415,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     chain_head_signature TEXT,
                     chain_head_published_to_unified_log INTEGER DEFAULT 0,
                     created_at REAL NOT NULL,
-                    UNIQUE(trace_id, sequence_number)
+                    UNIQUE(sequence_number)
                 )
                 """,
                 "CREATE INDEX IF NOT EXISTS idx_hash_chain_trace_seq ON trace_hash_chain(trace_id, sequence_number)",
@@ -218,6 +436,34 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 "CREATE INDEX IF NOT EXISTS idx_edges_lastseen ON trace_edges(last_seen)",
             ]
         ),
+        Migration(
+            version: 3,
+            name: "global_continuity_sequence_guard",
+            sql: [
+                // Existing stores may already contain historical duplicate
+                // global sequence numbers from the old cross-connection race.
+                // A UNIQUE index would make that evidence DB unopenable. This
+                // trigger preserves existing rows for verification while
+                // failing closed on every new duplicate. Fresh v1 tables also
+                // carry the native UNIQUE(sequence_number) constraint.
+                // The shipped v1 legacy index leads with trace_id, so neither
+                // the trigger lookup nor the global-head ORDER BY can seek on
+                // sequence_number. This non-unique index remains buildable on
+                // stores that already contain historical duplicates.
+                "CREATE INDEX IF NOT EXISTS idx_hash_chain_global_seq ON trace_hash_chain(sequence_number)",
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_hash_chain_global_sequence_unique
+                BEFORE INSERT ON trace_hash_chain
+                WHEN EXISTS (
+                    SELECT 1 FROM trace_hash_chain
+                     WHERE sequence_number = NEW.sequence_number
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'duplicate global continuity sequence_number');
+                END
+                """,
+            ]
+        ),
     ]
 
     // MARK: Lifecycle
@@ -236,13 +482,63 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     ///     was 300 MB because the daemon's VACUUM was blocked by the
     ///     dashboard's RW connection. See `EventStore.openDatabase` for
     ///     the full incident notes.
+    ///   - maxFootprintBytes: Optional hard budget for the main database plus
+    ///     its `-wal` and `-shm` sidecars. `nil`/non-positive disables size
+    ///     admission, preserving compatibility for read-only and test stores.
+    ///   - freeSpaceFloorBytes: Optional available-space floor. Probe failure
+    ///     is fail-closed only when this value is configured.
     public init(
         databasePath: String,
         encryption: DatabaseEncryption? = nil,
-        forceReadOnly: Bool = false
+        forceReadOnly: Bool = false,
+        maxFootprintBytes: Int64? = nil,
+        freeSpaceFloorBytes: Int64? = nil,
+        transactionReserveBytes: Int64? = nil,
+        storageVolumePath: String? = nil,
+        footprintProbe: CausalGraphStorageProbe? = nil,
+        freeSpaceProbe: CausalGraphStorageProbe? = nil,
+        transactionFailureProbe: CausalGraphTransactionFailureProbe? = nil,
+        pageLimitFailureProbe: CausalGraphPageLimitFailureProbe? = nil
     ) async throws {
-        self.databasePath = databasePath
+        // Resolve only the existing parent directory, then keep the leaf name
+        // literal. macOS exposes trusted aliases such as /tmp -> /private/tmp;
+        // opening the canonical, ownership-validated parent prevents an
+        // attacker-controlled ancestor symlink from redirecting SQLite after
+        // our check while still supporting those platform paths.
+        let secureDatabasePath = try Self.canonicalDatabasePath(databasePath)
+        self.databasePath = secureDatabasePath
         self.encryption = encryption
+        self.storageVolumePath = storageVolumePath
+            ?? (secureDatabasePath as NSString).deletingLastPathComponent
+        self.footprintProbe = footprintProbe ?? { Self.exactSQLiteFootprintBytes(databasePath: $0) }
+        self.freeSpaceProbe = freeSpaceProbe ?? { Self.availableFilesystemBytes(path: $0) }
+        self.transactionFailureProbe = transactionFailureProbe
+        self.pageLimitFailureProbe = pageLimitFailureProbe
+
+        let cap = maxFootprintBytes.flatMap { $0 > 0 ? $0 : nil }
+        let floor = freeSpaceFloorBytes.flatMap { $0 > 0 ? $0 : nil }
+        self.maxFootprintBytes = cap
+        self.freeSpaceFloorBytes = floor
+        if let cap {
+            let requested = transactionReserveBytes.flatMap { $0 > 0 ? $0 : nil }
+            let automatic = min(
+                Self.defaultMaximumTransactionReserve,
+                max(Self.defaultMinimumTransactionReserve, cap / 4)
+            )
+            // Leave at least one SQLite page for the admission high-water.
+            let reserve = min(requested ?? automatic, max(4_096, cap - 4_096))
+            self.transactionReserveBytes = reserve
+            let threshold = max(0, cap - reserve)
+            self.admissionThresholdBytes = threshold
+            // Resume below both the 80% hysteresis target and the admission
+            // high-water. A 50 MB configured minimum therefore retains a
+            // meaningful transaction reserve instead of oscillating at cap.
+            self.resumeBelowBytes = min(threshold, cap * 4 / 5)
+        } else {
+            self.transactionReserveBytes = nil
+            self.admissionThresholdBytes = nil
+            self.resumeBelowBytes = nil
+        }
         try openDatabase(forceReadOnly: forceReadOnly)
         // Migrations write to the schema (CREATE INDEX, ALTER TABLE). A
         // RO connection cannot run them — and shouldn't need to: the
@@ -253,35 +549,831 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // against the root-owned 0o640 DB) also skips migrations instead
         // of failing.
         if !isReadOnly {
-            try applyMigrations()
+            refreshAdmissionMeasurementsAndLatch()
+            if let admission = currentMeasuredAdmissionError() {
+                if hasUsableRuntimeSchema() {
+                    // An inherited DB already has the complete runtime tables.
+                    // Defer idempotent CREATE INDEX repair until recovery has
+                    // restored headroom; do not amplify its WAL during boot.
+                    logger.fault("TraceGraph schema migration deferred by storage admission: \(admission.localizedDescription, privacy: .public)")
+                    deferredMigrationsPending = true
+                } else {
+                    // A fresh/incomplete DB cannot safely serve runtime queries
+                    // without its schema. Fail typed so DaemonSetup preserves
+                    // any existing file and never labels pressure corruption.
+                    throw admission
+                }
+            } else {
+                try applyMigrations()
+                // Re-apply after migration in case SQLite changed page metadata.
+                try configureMaximumPageCount()
+            }
         }
+        refreshAdmissionMeasurementsAndLatch()
+        try Self.validateSQLiteFileFamily(
+            databasePath: secureDatabasePath,
+            createMainIfMissing: false
+        )
     }
 
     deinit {
-        if let db { sqlite3_close(db) }
+        if let db {
+            checkpointController?.detach(from: db)
+            sqlite3_close(db)
+        }
     }
 
     public func close() {
         if let db {
+            checkpointController?.detach(from: db)
             sqlite3_close(db)
             self.db = nil
+            checkpointController = nil
         }
+    }
+
+    // MARK: Storage admission
+
+    /// Exact logical file footprint used by both hot-path admission and
+    /// heartbeat telemetry. Missing WAL/SHM sidecars contribute zero; a
+    /// missing/unreadable main database makes the probe fail.
+    nonisolated static func exactSQLiteFootprintBytes(databasePath: String) -> Int64? {
+        func size(_ path: String, required: Bool) -> Int64? {
+            var info = stat()
+            let rc = path.withCString { Darwin.lstat($0, &info) }
+            if rc != 0 {
+                return !required && errno == ENOENT ? 0 : nil
+            }
+            // The store rejects sidecar symlinks at open; keep probes fail-
+            // closed if one appears later rather than following it.
+            guard (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+            let value = Int64(info.st_size)
+            return value >= 0 ? value : nil
+        }
+        guard let main = size(databasePath, required: true),
+              let wal = size(databasePath + "-wal", required: false),
+              let shm = size(databasePath + "-shm", required: false),
+              let journal = size(databasePath + "-journal", required: false),
+              main <= Int64.max - wal,
+              main + wal <= Int64.max - shm,
+              main + wal + shm <= Int64.max - journal
+        else { return nil }
+        return main + wal + shm + journal
+    }
+
+    /// Actual immediately-available blocks (`f_bavail`), intentionally not
+    /// APFS "important usage" capacity, which includes purgeable/snapshot
+    /// optimism and can remain large while ordinary writes receive ENOSPC.
+    nonisolated static func availableFilesystemBytes(path: String) -> Int64? {
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return nil }
+        let blocks = UInt64(info.f_bavail)
+        let blockSize = UInt64(info.f_bsize)
+        guard blockSize == 0 || blocks <= UInt64(Int64.max) / blockSize else { return nil }
+        return Int64(blocks * blockSize)
+    }
+
+    /// Read the live SQLite-family footprint without changing admission state.
+    public func storageFootprintBytes() -> Int64? {
+        footprintProbe(databasePath)
+    }
+
+    /// Runtime SIGHUP hook. Lowering a cap measures and latches immediately;
+    /// raising it permits the next mutation as soon as both probes are healthy.
+    @discardableResult
+    public func updateStorageAdmission(
+        maxFootprintBytes: Int64?,
+        freeSpaceFloorBytes: Int64?,
+        transactionReserveBytes requestedReserve: Int64? = nil
+    ) -> CausalGraphStorageAdmissionStatus {
+        // A config reload is an explicit retry boundary (the operator may also
+        // have freed disk space). SQLite will re-latch immediately if its own
+        // FULL/ENOSPC backstop still fires.
+        sqliteStorageFailure = nil
+        let cap = maxFootprintBytes.flatMap { $0 > 0 ? $0 : nil }
+        self.maxFootprintBytes = cap
+        self.freeSpaceFloorBytes = freeSpaceFloorBytes.flatMap { $0 > 0 ? $0 : nil }
+        try? checkpointController?.updateFamily(
+            schema: "main",
+            configuration: SQLiteControlledCheckpointFamily(
+                databasePath: databasePath,
+                storageVolumePath: storageVolumePath,
+                freeSpaceFloorBytes: self.freeSpaceFloorBytes ?? 0,
+                footprintProbe: footprintProbe,
+                freeSpaceProbe: freeSpaceProbe
+            )
+        )
+        if let cap {
+            let automatic = min(
+                Self.defaultMaximumTransactionReserve,
+                max(Self.defaultMinimumTransactionReserve, cap / 4)
+            )
+            let reserve = min(
+                requestedReserve.flatMap { $0 > 0 ? $0 : nil } ?? automatic,
+                max(4_096, cap - 4_096)
+            )
+            transactionReserveBytes = reserve
+            let threshold = max(0, cap - reserve)
+            admissionThresholdBytes = threshold
+            resumeBelowBytes = min(threshold, cap * 4 / 5)
+        } else {
+            transactionReserveBytes = nil
+            admissionThresholdBytes = nil
+            resumeBelowBytes = nil
+            footprintAdmissionLatched = false
+        }
+        do {
+            try configureMaximumPageCount()
+        } catch let admission as CausalGraphStorageAdmissionError {
+            // `throwSQLiteFailure` already latched this exact typed failure.
+            sqliteStorageFailure = admission
+        } catch {
+            // Runtime reload cannot change its established non-throwing API.
+            // Keep the writer fail-closed and surface the exact underlying
+            // error in the log/status transition instead of silently running
+            // without the SQLite backstop.
+            let admission = CausalGraphStorageAdmissionError.probeFailed(
+                "max_page_count backstop: \(error.localizedDescription)")
+            sqliteStorageFailure = admission
+            sqliteStorageFailureGeneration &+= 1
+            logger.fault("\(admission.localizedDescription, privacy: .public)")
+        }
+        refreshAdmissionMeasurementsAndLatch()
+        return makeStorageAdmissionStatus()
+    }
+
+    public func storageAdmissionStatus() -> CausalGraphStorageAdmissionStatus {
+        refreshAdmissionMeasurementsAndLatch()
+        return makeStorageAdmissionStatus()
+    }
+
+    private func makeStorageAdmissionStatus() -> CausalGraphStorageAdmissionStatus {
+        CausalGraphStorageAdmissionStatus(
+            enabled: maxFootprintBytes != nil || freeSpaceFloorBytes != nil
+                || deferredMigrationsPending || sqliteStorageFailure != nil,
+            blocked: storageBlockReason != nil || footprintAdmissionLatched || recovering,
+            reason: recovering ? .recoveryInProgress : storageBlockReason,
+            maxFootprintBytes: maxFootprintBytes,
+            admissionThresholdBytes: admissionThresholdBytes,
+            resumeBelowBytes: resumeBelowBytes,
+            transactionReserveBytes: transactionReserveBytes,
+            footprintBytes: lastFootprintBytes,
+            freeSpaceBytes: lastFreeSpaceBytes,
+            freeSpaceFloorBytes: freeSpaceFloorBytes,
+            shedMutationsTotal: shedMutationsTotal,
+            pinnedReader: pinnedReader,
+            recovering: recovering
+        )
+    }
+
+    private func refreshAdmissionMeasurementsAndLatch() {
+        var measuredReason: CausalGraphStorageBlockReason?
+        if maxFootprintBytes != nil {
+            lastFootprintBytes = footprintProbe(databasePath)
+            if lastFootprintBytes == nil {
+                measuredReason = .probeFailure
+            } else if let footprint = lastFootprintBytes,
+                      let threshold = admissionThresholdBytes,
+                      footprint > threshold {
+                footprintAdmissionLatched = true
+            } else if footprintAdmissionLatched,
+                      let footprint = lastFootprintBytes,
+                      let resume = resumeBelowBytes,
+                      footprint < resume {
+                footprintAdmissionLatched = false
+            }
+            if footprintAdmissionLatched { measuredReason = .footprintLimit }
+        } else {
+            lastFootprintBytes = nil
+            footprintAdmissionLatched = false
+        }
+
+        if freeSpaceFloorBytes != nil {
+            lastFreeSpaceBytes = freeSpaceProbe(storageVolumePath)
+            if lastFreeSpaceBytes == nil {
+                measuredReason = .probeFailure
+            } else if let free = lastFreeSpaceBytes,
+                      let floor = freeSpaceFloorBytes,
+                      free < freeSpaceAdmissionRequirement(floorBytes: floor) {
+                measuredReason = .lowFreeSpace
+            }
+        } else {
+            lastFreeSpaceBytes = nil
+        }
+        if measuredReason == nil, deferredMigrationsPending {
+            measuredReason = .probeFailure
+        }
+        storageBlockReason = sqliteStorageFailure?.blockReason ?? measuredReason
+    }
+
+    nonisolated static func validateInstalledMaximumPageCount(
+        requestedPages: Int64,
+        currentPages: Int64,
+        installedPages: Int64
+    ) throws {
+        guard requestedPages > 0, currentPages >= 0, installedPages > 0 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite max_page_count backstop returned invalid values: requested \(requestedPages), page_count \(currentPages), installed \(installedPages)")
+        }
+        // SQLite cannot lower max_page_count below the inherited page_count.
+        // Every other mismatch means the hard backstop did not install.
+        let expected = max(requestedPages, currentPages)
+        guard installedPages == expected else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite max_page_count backstop mismatch: requested \(requestedPages), page_count \(currentPages), installed \(installedPages)")
+        }
+    }
+
+    private func readPageLimitPragma(
+        db: OpaquePointer,
+        sql: String,
+        operation: CausalGraphPageLimitOperation
+    ) throws -> Int64 {
+        if let injected = pageLimitFailureProbe?(operation) {
+            try throwSQLiteFailure(
+                metadata: SQLiteFailureMetadata(
+                    resultCode: injected.resultCode,
+                    extendedResultCode: injected.extendedResultCode,
+                    systemErrno: injected.systemErrno
+                ),
+                db: db,
+                context: operation.rawValue
+            )
+        }
+        var stmt: OpaquePointer?
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK else {
+            try throwSQLiteFailure(
+                rc: prepareRC, db: db, context: "prepare \(operation.rawValue)")
+        }
+        defer { sqlite3_finalize(stmt) }
+        let stepRC = sqlite3_step(stmt)
+        guard stepRC == SQLITE_ROW else {
+            try throwSQLiteFailure(
+                rc: stepRC, db: db, context: operation.rawValue)
+        }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
+    private func configureMaximumPageCount() throws {
+        guard let db, !isReadOnly else { return }
+        let pageSize = try readPageLimitPragma(
+            db: db, sql: "PRAGMA page_size", operation: .readPageSize)
+        guard pageSize >= 512, pageSize <= 65_536,
+              pageSize.nonzeroBitCount == 1 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite returned invalid page_size \(pageSize) while installing max_page_count")
+        }
+        let currentPages = try readPageLimitPragma(
+            db: db, sql: "PRAGMA page_count", operation: .readPageCount)
+        guard currentPages >= 0 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite returned invalid page_count \(currentPages) while installing max_page_count")
+        }
+        let requestedPages = admissionThresholdBytes.map {
+            max(1, $0 / pageSize)
+        } ?? 2_147_483_646
+        let installedPages = try readPageLimitPragma(
+            db: db,
+            sql: "PRAGMA max_page_count = \(requestedPages)",
+            operation: .installLimit
+        )
+        try Self.validateInstalledMaximumPageCount(
+            requestedPages: requestedPages,
+            currentPages: currentPages,
+            installedPages: installedPages
+        )
+    }
+
+    /// Upper bound reserved for one transaction. The fixed per-row allowance
+    /// covers B-tree/index page splits; caller-controlled strings are charged
+    /// eightfold. Calls whose bound exceeds the reserve are rejected rather
+    /// than being allowed to consume an unbounded WAL in one transaction.
+    private func mutationUpperBound(payloadBytes: Int, rows: Int) -> Int64 {
+        let payload = Int64(max(0, payloadBytes))
+        let rowCount = Int64(max(1, rows))
+        let payloadCharge = payload > Int64.max / 8 ? Int64.max : payload * 8
+        let rowCharge = rowCount > Int64.max / Self.mutationBytesPerRow
+            ? Int64.max
+            : rowCount * Self.mutationBytesPerRow
+        guard payloadCharge <= Int64.max - rowCharge,
+              payloadCharge + rowCharge <= Int64.max - Self.mutationBaseBytes
+        else { return Int64.max }
+        return Self.mutationBaseBytes + payloadCharge + rowCharge
+    }
+
+    private func payloadAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
+    }
+
+    private func payloadBytes(_ entity: TraceEntity) -> Int {
+        var total = entity.id.utf8.count
+        total = payloadAdd(total, entity.entityType.utf8.count)
+        total = payloadAdd(total, entity.stableKey.utf8.count)
+        total = payloadAdd(total, entity.displayName.utf8.count)
+        total = payloadAdd(total, entity.attributesJson.utf8.count)
+        return payloadAdd(total, entity.source.utf8.count)
+    }
+
+    private func payloadBytes(_ edge: TraceEdge) -> Int {
+        var total = edge.id.utf8.count
+        total = payloadAdd(total, edge.sourceEntityId.utf8.count)
+        total = payloadAdd(total, edge.targetEntityId.utf8.count)
+        total = payloadAdd(total, edge.relation.utf8.count)
+        total = payloadAdd(total, edge.confidenceTier.utf8.count)
+        total = payloadAdd(total, edge.evidenceJson.utf8.count)
+        return payloadAdd(total, edge.eventIdsJson.utf8.count)
+    }
+
+    private func payloadBytes(_ trace: Trace) -> Int {
+        let values: [String?] = [
+            trace.id, trace.title, trace.anchorEventId, trace.rootEntityId,
+            trace.severity, trace.status, trace.summaryJson, trace.attackJson,
+            trace.evidenceBundleStatus, trace.daemonVersion,
+            trace.rulesetVersion, trace.policyId, trace.policyVersion,
+            trace.policySha256, trace.policySnapshotJson,
+            trace.traceSigningKeyMode, trace.replayScope,
+            trace.attributionOverridePolicy,
+        ]
+        return values.reduce(0) { payloadAdd($0, $1?.utf8.count ?? 0) }
+    }
+
+    private func payloadBytes(_ member: TraceMembership) -> Int {
+        [member.traceId.utf8.count, member.entityId?.utf8.count ?? 0,
+         member.edgeId?.utf8.count ?? 0, member.role.utf8.count,
+         member.layer.utf8.count]
+            .reduce(0, payloadAdd)
+    }
+
+    private func payloadBytes(_ hit: TraceRuleHit) -> Int {
+        let values: [String?] = [
+            hit.id, hit.traceId, hit.ruleId, hit.ruleTitle, hit.ruleVersion,
+            hit.severity, hit.matchedEventId, hit.matchedEntityId,
+            hit.matchedEdgeId, hit.explanationJson,
+        ]
+        return values.reduce(0) { payloadAdd($0, $1?.utf8.count ?? 0) }
+    }
+
+    private func payloadBytes(_ run: TraceReplayRun) -> Int {
+        [run.id, run.traceId, run.bundleId, run.rulesetVersion,
+         run.daemonVersion, run.normalizationVersion, run.resultJson]
+            .reduce(0) { payloadAdd($0, $1.utf8.count) }
+    }
+
+    private func payloadBytes(_ entry: TraceHashChainEntry) -> Int {
+        let values: [String?] = [
+            entry.id, entry.traceId, entry.previousHash, entry.currentHash,
+            entry.eventId, entry.edgeId, entry.chainHeadSignature,
+        ]
+        return values.reduce(0) { payloadAdd($0, $1?.utf8.count ?? 0) }
+    }
+
+    private func payloadBytes(_ entities: [TraceEntity]) -> Int {
+        entities.reduce(0) { payloadAdd($0, payloadBytes($1)) }
+    }
+
+    private func payloadBytes(_ edges: [TraceEdge]) -> Int {
+        edges.reduce(0) { payloadAdd($0, payloadBytes($1)) }
+    }
+
+    private func payloadBytes(_ members: [TraceMembership]) -> Int {
+        members.reduce(0) { payloadAdd($0, payloadBytes($1)) }
+    }
+
+    private func payloadBytes(_ strings: [String]) -> Int {
+        strings.reduce(0) { payloadAdd($0, $1.utf8.count) }
+    }
+
+    /// Defer even explicit payload accounting until admission is configured.
+    /// Legacy/test/read-only callers keep their old hot path; production still
+    /// performs fresh filesystem probes for every write.
+    private func admitGrowth(
+        payloadBytes: @autoclosure () -> Int,
+        rows: Int
+    ) throws {
+        guard maxFootprintBytes != nil || freeSpaceFloorBytes != nil
+                || deferredMigrationsPending else { return }
+        try admitGrowth(upperBoundBytes: mutationUpperBound(
+            payloadBytes: payloadBytes(), rows: rows))
+    }
+
+    private func admitGrowth(upperBoundBytes: Int64) throws {
+        let admissionConfigured = maxFootprintBytes != nil
+            || freeSpaceFloorBytes != nil
+        guard admissionConfigured || deferredMigrationsPending else { return }
+        if recovering {
+            try rejectGrowth(.recoveryInProgress)
+        }
+        if let sqliteStorageFailure {
+            try rejectGrowth(sqliteStorageFailure)
+        }
+        if let reserve = transactionReserveBytes, upperBoundBytes > reserve {
+            try rejectGrowth(.mutationTooLarge(
+                estimatedBytes: upperBoundBytes,
+                transactionReserveBytes: reserve
+            ))
+        }
+        lastAdmittedMutationUpperBoundBytes = max(0, upperBoundBytes)
+
+        if let floor = freeSpaceFloorBytes {
+            guard let free = freeSpaceProbe(storageVolumePath) else {
+                lastFreeSpaceBytes = nil
+                try rejectGrowth(.probeFailed("free-space"))
+            }
+            lastFreeSpaceBytes = free
+            // Keep a stable reserve above the hard floor, even for a small
+            // mutation. Status refresh and recovery use this same threshold,
+            // so a blocked store cannot momentarily report healthy and emit a
+            // second transition merely because the next payload is smaller.
+            let requiredFree = freeSpaceAdmissionRequirement(
+                floorBytes: floor,
+                mutationUpperBoundBytes: lastAdmittedMutationUpperBoundBytes
+            )
+            if free < requiredFree {
+                try rejectGrowth(.lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    requiredFreeBytes: requiredFree
+                ))
+            }
+        }
+
+        if let cap = maxFootprintBytes, let threshold = admissionThresholdBytes {
+            guard let footprint = footprintProbe(databasePath) else {
+                lastFootprintBytes = nil
+                try rejectGrowth(.probeFailed("SQLite-family footprint"))
+            }
+            lastFootprintBytes = footprint
+            if footprintAdmissionLatched {
+                let resume = resumeBelowBytes ?? threshold
+                if footprint >= resume {
+                    try rejectGrowth(.footprintLimit(
+                        footprintBytes: footprint,
+                        admissionThresholdBytes: threshold,
+                        capBytes: cap
+                    ))
+                }
+                footprintAdmissionLatched = false
+            }
+            if footprint > threshold {
+                footprintAdmissionLatched = true
+                try rejectGrowth(.footprintLimit(
+                    footprintBytes: footprint,
+                    admissionThresholdBytes: threshold,
+                    capBytes: cap
+                ))
+            }
+        }
+
+        // An over-budget inherited DB can boot on its complete v1 runtime
+        // tables so bounded recovery has something to query. It must not resume
+        // ordinary growth until the deferred v2/v3 indexes and uniqueness
+        // trigger have completed and passed shape verification.
+        if deferredMigrationsPending {
+            if let failure = deferredMigrationFailure {
+                try rejectGrowth(.probeFailed(
+                    "deferred schema migration failed: \(failure)"))
+            }
+            try completeDeferredMigrations()
+            // Index creation itself writes pages/WAL. Re-sample before the
+            // caller's mutation so migration growth cannot cross the admission
+            // threshold and then immediately admit another transaction.
+            refreshAdmissionMeasurementsAndLatch()
+            if let admission = currentMeasuredAdmissionError() {
+                try rejectGrowth(admission)
+            }
+        }
+
+        if storageBlockReason != nil {
+            logger.notice("TraceGraph storage admission recovered; mutations resumed")
+        }
+        storageBlockReason = nil
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int64.max : sum
+    }
+
+    private func freeSpaceAdmissionRequirement(
+        floorBytes: Int64,
+        mutationUpperBoundBytes: Int64 = 0
+    ) -> Int64 {
+        let stableReserve = transactionReserveBytes
+            ?? Self.defaultMinimumTransactionReserve
+        return saturatingAdd(
+            floorBytes,
+            max(stableReserve, max(0, mutationUpperBoundBytes))
+        )
+    }
+
+    private func rejectGrowth(_ error: CausalGraphStorageAdmissionError) throws -> Never {
+        shedMutationsTotal &+= 1
+        if storageBlockReason != error.blockReason {
+            logger.fault("\(error.localizedDescription, privacy: .public). Detection continues; TraceGraph persistence is shed.")
+        }
+        storageBlockReason = error.blockReason
+        throw error
+    }
+
+    /// Convert SQLite's final file-growth backstop into the same typed,
+    /// transition-logged shed path as preflight admission. `SQLITE_FULL` covers
+    /// max_page_count and ordinary ENOSPC. Some VFS paths surface disk/quota
+    /// exhaustion as IOERR_WRITE/FSYNC, so retain the SQLite connection's
+    /// system-errno ENOSPC/EDQUOT signal.
+    private func throwSQLiteFailure(
+        rc: Int32,
+        db: OpaquePointer,
+        context: String
+    ) throws -> Never {
+        try throwSQLiteFailure(
+            metadata: SQLiteFailureMetadata(resultCode: rc, db: db),
+            db: db,
+            context: context
+        )
+    }
+
+    private func throwSQLiteFailure(
+        metadata failure: SQLiteFailureMetadata,
+        db: OpaquePointer,
+        context: String
+    ) throws -> Never {
+
+        if let error = latchSQLiteStorageFailure(failure, context: context) {
+            try rejectGrowth(error)
+        }
+
+        throw CausalGraphStoreError.sqliteFailure(
+            context: context,
+            message: String(cString: sqlite3_errmsg(db)),
+            resultCode: failure.resultCode,
+            extendedResultCode: failure.extendedResultCode,
+            systemErrno: failure.systemErrno
+        )
+    }
+
+    /// Preserve SQLite's rc/extended-rc/VFS errno classification at the point
+    /// of failure and latch configured writers. Internal (rather than private)
+    /// so focused fault-classification tests can inject FULL/IOERR metadata
+    /// without requiring a destructive real ENOSPC fixture.
+    @discardableResult
+    func latchSQLiteStorageFailure(
+        _ failure: SQLiteFailureMetadata,
+        context: String
+    ) -> CausalGraphStorageAdmissionError? {
+        guard failure.isStorageExhaustion,
+              maxFootprintBytes != nil || freeSpaceFloorBytes != nil else {
+            return nil
+        }
+        let error = storageAdmissionErrorForSQLiteExhaustion(context: context)
+        sqliteStorageFailure = error
+        sqliteStorageFailureGeneration &+= 1
+        if storageBlockReason != error.blockReason {
+            logger.fault("\(error.localizedDescription, privacy: .public). SQLite maintenance failure is latched; TraceGraph growth remains disabled.")
+        }
+        storageBlockReason = error.blockReason
+        return error
+    }
+
+    private func storageAdmissionErrorForSQLiteExhaustion(
+        context: String
+    ) -> CausalGraphStorageAdmissionError {
+        if let floor = freeSpaceFloorBytes {
+            let required = freeSpaceAdmissionRequirement(
+                floorBytes: floor,
+                mutationUpperBoundBytes: lastAdmittedMutationUpperBoundBytes
+            )
+            guard let free = freeSpaceProbe(storageVolumePath) else {
+                return .probeFailed("free-space after SQLite storage exhaustion during \(context)")
+            }
+            lastFreeSpaceBytes = free
+            if free < required {
+                return .lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    requiredFreeBytes: required
+                )
+            }
+        }
+        if let cap = maxFootprintBytes,
+           let threshold = admissionThresholdBytes {
+            let footprint = footprintProbe(databasePath)
+                ?? lastFootprintBytes
+                ?? threshold
+            lastFootprintBytes = footprint
+            footprintAdmissionLatched = true
+            return .footprintLimit(
+                footprintBytes: footprint,
+                admissionThresholdBytes: threshold,
+                capBytes: cap
+            )
+        }
+        return .probeFailed("SQLite storage exhaustion during \(context)")
+    }
+
+    private func sqliteStorageRetryHeadroomIsHealthy() -> Bool {
+        if let resume = resumeBelowBytes {
+            guard let footprint = lastFootprintBytes, footprint < resume else { return false }
+        }
+        if let floor = freeSpaceFloorBytes {
+            let required = freeSpaceAdmissionRequirement(floorBytes: floor)
+            guard let free = lastFreeSpaceBytes, free >= required else { return false }
+        }
+        return true
     }
 
     // MARK: Open + migrate
 
-    private static func rejectIfSymlink(_ path: String) throws {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return }
-        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
-            throw CausalGraphStoreError.databaseOpenFailed("refusing to open symlink: \(path)")
+    private static func canonicalDatabasePath(_ path: String) throws -> String {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard standardized.hasPrefix("/") else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "database path must be absolute: \(path)")
+        }
+        let leaf = (standardized as NSString).lastPathComponent
+        guard !leaf.isEmpty, leaf != ".", leaf != ".." else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "invalid database filename: \(path)")
+        }
+        let requestedParent = (standardized as NSString).deletingLastPathComponent
+        guard let resolvedParent = requestedParent.withCString({ realpath($0, nil) }) else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "cannot resolve database parent \(requestedParent): errno \(errno)")
+        }
+        defer { free(resolvedParent) }
+        let canonicalParent = String(cString: resolvedParent)
+        try validateTrustedDirectoryChain(canonicalParent)
+        return (canonicalParent as NSString).appendingPathComponent(leaf)
+    }
+
+    /// Every mutable ancestor must be controlled exclusively by root or this
+    /// process. Sticky directories are deliberately rejected: sticky semantics
+    /// prevent one user from renaming another user's child, but still let an
+    /// attacker pre-create a predictable database/WAL name and retain an open
+    /// descriptor to it. SQLite's path-only open cannot make that safe.
+    private static func validateTrustedDirectoryChain(_ directoryPath: String) throws {
+        let effectiveUID = geteuid()
+        var current = "/"
+        for component in directoryPath.split(separator: "/") {
+            current = (current as NSString).appendingPathComponent(String(component))
+            var info = stat()
+            guard current.withCString({ Darwin.lstat($0, &info) }) == 0 else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "cannot inspect database ancestor \(current): errno \(errno)")
+            }
+            let fileType = info.st_mode & mode_t(S_IFMT)
+            guard fileType == mode_t(S_IFDIR) else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "database ancestor is not a directory: \(current)")
+            }
+            guard info.st_uid == 0 || info.st_uid == effectiveUID else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "database ancestor has untrusted owner uid \(info.st_uid): \(current)")
+            }
+            let writableByOthers = (info.st_mode & mode_t(S_IWGRP | S_IWOTH)) != 0
+            guard !writableByOthers else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "database ancestor is writable by an untrusted principal: \(current)")
+            }
+        }
+    }
+
+    /// Validate an already-open SQLite family member. The descriptor, rather
+    /// than a prior lstat result, is authoritative. Combined with the trusted
+    /// (non-group/world-writable) directory chain, another uid cannot replace
+    /// the pathname between this check and SQLite's open.
+    private static func validateSQLiteFileDescriptor(
+        _ fd: Int32,
+        displayPath: String
+    ) throws {
+        var info = stat()
+        guard Darwin.fstat(fd, &info) == 0 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "cannot fstat SQLite file \(displayPath): errno \(errno)")
+        }
+        let fileType = info.st_mode & mode_t(S_IFMT)
+        guard fileType == mode_t(S_IFREG) else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "refusing non-regular SQLite file: \(displayPath)")
+        }
+        guard info.st_nlink == 1 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "refusing multiply-linked SQLite file: \(displayPath)")
+        }
+        let effectiveUID = geteuid()
+        guard info.st_uid == 0 || info.st_uid == effectiveUID else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite file has untrusted owner uid \(info.st_uid): \(displayPath)")
+        }
+        // Accept read-only exposure from legacy 0644 files plus the intended
+        // 0640 root:admin shape. Reject group/world write, execute bits, and
+        // special bits. An old 0660 file is unsafe to open first and chmod
+        // later: a group member may already hold a writable descriptor.
+        let permissions = info.st_mode & mode_t(0o7777)
+        let allowed = mode_t(0o644)
+        guard (permissions & ~allowed) == 0,
+              (permissions & mode_t(S_IRUSR)) != 0 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "SQLite file has unsafe mode \(String(permissions, radix: 8)): \(displayPath)")
+        }
+    }
+
+    /// Open one family member relative to the already-validated parent. A
+    /// missing optional sidecar is normal. O_NOFOLLOW plus fstat prevents a
+    /// symlink/device/FIFO leaf from being accepted.
+    @discardableResult
+    private static func validateSQLiteFileAt(
+        parentFD: Int32,
+        name: String,
+        displayPath: String,
+        allowMissing: Bool
+    ) throws -> Bool {
+        let fd = name.withCString {
+            Darwin.openat(parentFD, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        if fd < 0 {
+            let openErrno = errno
+            if allowMissing && openErrno == ENOENT { return false }
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "cannot securely open SQLite file \(displayPath): errno \(openErrno)")
+        }
+        defer { Darwin.close(fd) }
+        try validateSQLiteFileDescriptor(fd, displayPath: displayPath)
+        return true
+    }
+
+    /// Anchor all leaf operations to the trusted parent directory descriptor.
+    /// For a writer, pre-create a missing main file atomically with the final
+    /// safe mode so SQLite never races a path-only O_CREAT against another uid.
+    private static func validateSQLiteFileFamily(
+        databasePath: String,
+        createMainIfMissing: Bool
+    ) throws {
+        let parent = (databasePath as NSString).deletingLastPathComponent
+        let leaf = (databasePath as NSString).lastPathComponent
+        try validateTrustedDirectoryChain(parent)
+        let parentFD = parent.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard parentFD >= 0 else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "cannot securely open database parent \(parent): errno \(errno)")
+        }
+        defer { Darwin.close(parentFD) }
+
+        var mainExists = try validateSQLiteFileAt(
+            parentFD: parentFD,
+            name: leaf,
+            displayPath: databasePath,
+            allowMissing: true
+        )
+        if !mainExists && createMainIfMissing {
+            let createdFD = leaf.withCString {
+                Darwin.openat(
+                    parentFD, $0,
+                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    mode_t(0o640)
+                )
+            }
+            if createdFD >= 0 {
+                defer { Darwin.close(createdFD) }
+                try validateSQLiteFileDescriptor(createdFD, displayPath: databasePath)
+                mainExists = true
+            } else if errno == EEXIST {
+                // Only root/euid can create in this directory, but still
+                // validate the winner's descriptor rather than trusting errno.
+                mainExists = try validateSQLiteFileAt(
+                    parentFD: parentFD,
+                    name: leaf,
+                    displayPath: databasePath,
+                    allowMissing: false
+                )
+            } else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "cannot atomically create database \(databasePath): errno \(errno)")
+            }
+        }
+        if !createMainIfMissing && !mainExists {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "database does not exist: \(databasePath)")
+        }
+
+        for suffix in ["-wal", "-shm", "-journal"] {
+            _ = try validateSQLiteFileAt(
+                parentFD: parentFD,
+                name: leaf + suffix,
+                displayPath: databasePath + suffix,
+                allowMissing: true
+            )
         }
     }
 
     private func openDatabase(forceReadOnly: Bool = false) throws {
-        try Self.rejectIfSymlink(databasePath)
-        try Self.rejectIfSymlink(databasePath + "-wal")
-        try Self.rejectIfSymlink(databasePath + "-shm")
-        try Self.rejectIfSymlink(databasePath + "-journal")
+        try Self.validateSQLiteFileFamily(
+            databasePath: databasePath,
+            createMainIfMissing: !forceReadOnly
+        )
 
         // v1.21.5 (audit sec-storage-crypto): umask 0o027 ⇒ new SQLite
         // WAL/SHM files are created 0o640 (owner rw, group read-only),
@@ -302,12 +1394,21 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         var rc: Int32
         if forceReadOnly {
             flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-            rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+            rc = SQLiteOpenPathPolicy.open(
+                databasePath,
+                database: &handle,
+                flags: flags
+            )
             self.isReadOnly = true
         } else {
-            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                | SQLITE_OPEN_FULLMUTEX
             let oldUmask = umask(0o027)
-            rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+            rc = SQLiteOpenPathPolicy.open(
+                databasePath,
+                database: &handle,
+                flags: flags
+            )
             umask(oldUmask)
             // Fall back to a read-only handle if the read-write open failed
             // — e.g. a non-root MCP/CLI trace reader against the root-owned
@@ -317,7 +1418,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 if let handle { sqlite3_close(handle) }
                 handle = nil
                 flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-                rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+                rc = SQLiteOpenPathPolicy.open(
+                    databasePath,
+                    database: &handle,
+                    flags: flags
+                )
                 self.isReadOnly = true
             }
         }
@@ -327,15 +1432,43 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             throw CausalGraphStoreError.databaseOpenFailed(msg)
         }
         self.db = openedHandle
-        // Re-clamp existing files (incl. any created 0o660 by an older
-        // build) to 0o640. Skip on a read-only handle — the caller isn't
-        // the owner and has no business touching the mode bits.
-        if !isReadOnly {
-            chmod(databasePath, 0o640)
-            chmod(databasePath + "-wal", 0o640)
-            chmod(databasePath + "-shm", 0o640)
+        var openCompleted = false
+        defer {
+            if !openCompleted, self.db == openedHandle {
+                checkpointController?.detach(from: openedHandle)
+                sqlite3_close(openedHandle)
+                checkpointController = nil
+                self.db = nil
+            }
         }
-
+        if !isReadOnly {
+            checkpointController = try .install(
+                on: openedHandle,
+                thresholdPages: StoragePragmas.walAutocheckpointPages,
+                families: [
+                    "main": SQLiteControlledCheckpointFamily(
+                        databasePath: databasePath,
+                        storageVolumePath: storageVolumePath,
+                        freeSpaceFloorBytes: freeSpaceFloorBytes ?? 0,
+                        footprintProbe: footprintProbe,
+                        freeSpaceProbe: freeSpaceProbe
+                    ),
+                ]
+            )
+        }
+        // Revalidate the descriptor-backed family immediately after SQLite's
+        // pathname open. The trusted directory means no untrusted uid can win
+        // a rename race between our openat/fstat and sqlite3_open_v2.
+        try Self.validateSQLiteFileFamily(
+            databasePath: databasePath,
+            createMainIfMissing: false
+        )
+        if !isReadOnly {
+            // Earliest point at which the handle exists: install the main-file
+            // limit and measure pressure before journal-mode or schema writes.
+            try configureMaximumPageCount()
+            refreshAdmissionMeasurementsAndLatch()
+        }
         // Per-connection pragmas: smaller than EventStore (graph data is
         // moderate volume), larger than alerts (recursive walks are
         // common). Roughly midway: 16 MB cache, 64 MB mmap.
@@ -351,11 +1484,16 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // auto_vacuum, so it stayed in mode 0 (NONE) and incrementalVacuum
         // was a no-op. Field-confirmed bug: tracegraph.db at 11 GB in
         // mode 0 on a v1.12.6 RC1 user machine.
-        if !isReadOnly {
+        if !isReadOnly, storageBlockReason == nil {
+            try admitSchemaStorageWork(SchemaStorageWork(
+                boundedMetadataStatementCount: 1,
+                rebuildStatementCount: 0
+            ))
+            let oldUmask = umask(0o027)
             sqlite3_exec(openedHandle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
             sqlite3_exec(openedHandle, "PRAGMA journal_mode = WAL", nil, nil, nil)
+            umask(oldUmask)
             sqlite3_exec(openedHandle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
-            sqlite3_exec(openedHandle, "PRAGMA wal_autocheckpoint = 1000", nil, nil, nil)
             // v1.18: bound the WAL so it can't outgrow the main DB (see
             // StoragePragmas.journalSizeLimitBytes).
             sqlite3_exec(openedHandle, "PRAGMA journal_size_limit = \(StoragePragmas.journalSizeLimitBytes)", nil, nil, nil)
@@ -365,6 +1503,74 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         sqlite3_exec(openedHandle, "PRAGMA temp_store = MEMORY", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA busy_timeout = 5000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA foreign_keys = ON", nil, nil, nil)
+        // journal_mode can create WAL/SHM after the first validation. Inspect
+        // every member by descriptor again before returning the live handle.
+        try Self.validateSQLiteFileFamily(
+            databasePath: databasePath,
+            createMainIfMissing: false
+        )
+        openCompleted = true
+    }
+
+    private func currentMeasuredAdmissionError() -> CausalGraphStorageAdmissionError? {
+        if let floor = freeSpaceFloorBytes {
+            guard let free = lastFreeSpaceBytes else {
+                return .probeFailed("free-space")
+            }
+            let required = freeSpaceAdmissionRequirement(floorBytes: floor)
+            if free < required {
+                return .lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    requiredFreeBytes: required
+                )
+            }
+        }
+        switch storageBlockReason {
+        case .footprintLimit:
+            guard let cap = maxFootprintBytes,
+                  let threshold = admissionThresholdBytes else { return nil }
+            return .footprintLimit(
+                footprintBytes: lastFootprintBytes ?? threshold,
+                admissionThresholdBytes: threshold,
+                capBytes: cap
+            )
+        case .lowFreeSpace:
+            guard let floor = freeSpaceFloorBytes else { return nil }
+            let required = freeSpaceAdmissionRequirement(floorBytes: floor)
+            return .lowFreeSpace(
+                freeBytes: lastFreeSpaceBytes ?? 0,
+                floorBytes: floor,
+                requiredFreeBytes: required
+            )
+        case .probeFailure:
+            if freeSpaceFloorBytes != nil, lastFreeSpaceBytes == nil {
+                return .probeFailed("free-space")
+            }
+            return .probeFailed("SQLite-family footprint")
+        case .mutationTooLarge, .recoveryInProgress, .none:
+            return nil
+        }
+    }
+
+    /// Baseline v1 contains all runtime tables; v2 adds only performance
+    /// indexes. If these tables exist, an over-budget inherited DB can safely
+    /// defer idempotent migrations while bounded recovery runs.
+    private func hasUsableRuntimeSchema() -> Bool {
+        guard let db else { return false }
+        let sql = """
+        SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN ('trace_entities', 'trace_edges', 'traces',
+                        'trace_membership', 'trace_rule_hits',
+                        'trace_replay_runs', 'trace_hash_chain')
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 7
     }
 
     private func applyMigrations() throws {
@@ -385,17 +1591,271 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 logger: { msg in
                     self.logger.debug("\(msg, privacy: .public)")
                 },
-                skipQuickCheck: true
+                skipQuickCheck: true,
+                beforeStorageWork: { work in
+                    try self.admitSchemaStorageWork(work)
+                }
             )
+            try verifyRequiredMigrationObjects(db: db)
         } catch let error as SchemaMigrationError {
+            // max_page_count is installed before migrations. If it fires, this
+            // is a storage-pressure condition, not evidence of corruption. Keep
+            // the typed error intact so daemon startup preserves (rather than
+            // quarantines) the existing evidence database.
+            if let failure = error.sqliteFailureMetadata {
+                if let admission = latchSQLiteStorageFailure(
+                    failure, context: "schema migration") {
+                    try rejectGrowth(admission)
+                }
+                // Preserve explicit SQLite classification for the daemon's
+                // corruption policy. CORRUPT/NOTADB may be quarantined;
+                // BUSY/LOCKED/PERM/READONLY/other IOERR must not be mislabeled.
+                throw CausalGraphStoreError.sqliteFailure(
+                    context: "schema migration",
+                    message: error.localizedDescription,
+                    resultCode: failure.resultCode,
+                    extendedResultCode: failure.extendedResultCode,
+                    systemErrno: failure.systemErrno
+                )
+            }
             throw CausalGraphStoreError.schemaFailed(error.localizedDescription)
         }
+    }
+
+    /// Schema repairs run during boot and during post-reclaim deferred
+    /// recovery, so they cannot use `admitGrowth`: that method intentionally
+    /// tries to complete deferred migrations and would recurse. Re-probe here
+    /// at the exact DDL boundary. Metadata work keeps the ordinary stable
+    /// reserve; index construction gets main-file-scaled growth and scratch.
+    private func admitSchemaStorageWork(_ work: SchemaStorageWork) throws {
+        guard !work.isEmpty else { return }
+        let configured = maxFootprintBytes != nil || freeSpaceFloorBytes != nil
+        guard configured else { return }
+
+        let metadataEstimate = work.boundedTransactionEstimateBytes
+        if let reserve = transactionReserveBytes,
+           metadataEstimate > reserve {
+            try rejectGrowth(.mutationTooLarge(
+                estimatedBytes: metadataEstimate,
+                transactionReserveBytes: reserve
+            ))
+        }
+
+        guard let footprint = footprintProbe(databasePath) else {
+            lastFootprintBytes = nil
+            try rejectGrowth(.probeFailed("schema SQLite-family footprint"))
+        }
+        lastFootprintBytes = footprint
+        guard let free = freeSpaceProbe(storageVolumePath) else {
+            lastFreeSpaceBytes = nil
+            try rejectGrowth(.probeFailed("schema free-space"))
+        }
+        lastFreeSpaceBytes = free
+
+        if work.rebuildStatementCount > 0 {
+            let main: Int64
+            do {
+                main = try SQLitePersistentStoreAdmission.measureMainFile(
+                    databasePath
+                )
+            } catch {
+                try rejectGrowth(.probeFailed(
+                    "schema main-file measurement: \(error.localizedDescription)"
+                ))
+            }
+            let operations = Int64(work.rebuildStatementCount)
+            let growth = SQLitePersistentStoreAdmission.saturatingMultiply(
+                main,
+                by: operations
+            )
+            let scratch = SQLitePersistentStoreAdmission.saturatingAdd(
+                main,
+                growth
+            )
+            let projected = SQLitePersistentStoreAdmission.saturatingAdd(
+                footprint,
+                growth
+            )
+            if let cap = maxFootprintBytes,
+               projected > cap {
+                try rejectGrowth(.footprintLimit(
+                    footprintBytes: footprint,
+                    admissionThresholdBytes: max(0, cap - growth),
+                    capBytes: cap
+                ))
+            }
+            let floor = freeSpaceFloorBytes ?? 0
+            let required = SQLitePersistentStoreAdmission.saturatingAdd(
+                floor,
+                scratch
+            )
+            if growth == Int64.max || scratch == Int64.max
+                || projected == Int64.max || required == Int64.max
+                || free < required {
+                try rejectGrowth(.lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    requiredFreeBytes: required
+                ))
+            }
+            return
+        }
+
+        if let cap = maxFootprintBytes,
+           let threshold = admissionThresholdBytes,
+           footprint > threshold {
+            try rejectGrowth(.footprintLimit(
+                footprintBytes: footprint,
+                admissionThresholdBytes: threshold,
+                capBytes: cap
+            ))
+        }
+        if let floor = freeSpaceFloorBytes {
+            let required = freeSpaceAdmissionRequirement(
+                floorBytes: floor,
+                mutationUpperBoundBytes: metadataEstimate
+            )
+            if free < required {
+                try rejectGrowth(.lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    requiredFreeBytes: required
+                ))
+            }
+        }
+    }
+
+    private func migrationIndexColumns(
+        db: OpaquePointer,
+        name: String
+    ) throws -> [String] {
+        var stmt: OpaquePointer?
+        let sql = "PRAGMA index_info('\(name)')"
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK else {
+            try throwSQLiteFailure(
+                rc: prepareRC, db: db,
+                context: "prepare migration index verification \(name)")
+        }
+        defer { sqlite3_finalize(stmt) }
+        var columns: [String] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return columns }
+            guard rc == SQLITE_ROW else {
+                try throwSQLiteFailure(
+                    rc: rc, db: db,
+                    context: "migration index verification \(name)")
+            }
+            if let raw = sqlite3_column_text(stmt, 2) {
+                columns.append(String(cString: raw))
+            }
+        }
+    }
+
+    /// SchemaMigrator deliberately treats already-exists as idempotent. Verify
+    /// the load-bearing v2/v3 objects and their shapes so a same-named but
+    /// incorrect inherited object cannot make a deferred migration look done.
+    private func verifyRequiredMigrationObjects(db: OpaquePointer) throws {
+        let expectedIndexes: [(String, [String])] = [
+            ("idx_entities_lastseen", ["last_seen"]),
+            ("idx_edges_lastseen", ["last_seen"]),
+            ("idx_hash_chain_global_seq", ["sequence_number"]),
+        ]
+        for (name, expectedColumns) in expectedIndexes {
+            let actual = try migrationIndexColumns(db: db, name: name)
+            guard actual == expectedColumns else {
+                throw CausalGraphStoreError.schemaFailed(
+                    "migration verification failed for \(name): expected \(expectedColumns), found \(actual)")
+            }
+        }
+
+        var stmt: OpaquePointer?
+        let sql = """
+        SELECT tbl_name, sql
+          FROM sqlite_master
+         WHERE type = 'trigger'
+           AND name = 'trg_hash_chain_global_sequence_unique'
+        """
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK else {
+            try throwSQLiteFailure(
+                rc: prepareRC, db: db,
+                context: "prepare continuity-trigger migration verification")
+        }
+        defer { sqlite3_finalize(stmt) }
+        let stepRC = sqlite3_step(stmt)
+        guard stepRC == SQLITE_ROW,
+              let tableRaw = sqlite3_column_text(stmt, 0),
+              let sqlRaw = sqlite3_column_text(stmt, 1) else {
+            if stepRC != SQLITE_DONE {
+                try throwSQLiteFailure(
+                    rc: stepRC, db: db,
+                    context: "continuity-trigger migration verification")
+            }
+            throw CausalGraphStoreError.schemaFailed(
+                "migration verification failed: continuity uniqueness trigger missing")
+        }
+        let table = String(cString: tableRaw)
+        let triggerSQL = String(cString: sqlRaw).lowercased()
+        guard table == "trace_hash_chain",
+              triggerSQL.contains("sequence_number = new.sequence_number"),
+              triggerSQL.contains("raise(abort") else {
+            throw CausalGraphStoreError.schemaFailed(
+                "migration verification failed: continuity uniqueness trigger has an unexpected definition")
+        }
+        let trailingRC = sqlite3_step(stmt)
+        guard trailingRC == SQLITE_DONE else {
+            try throwSQLiteFailure(
+                rc: trailingRC, db: db,
+                context: "continuity-trigger migration verification trailing row")
+        }
+    }
+
+    private func completeDeferredMigrations() throws {
+        guard deferredMigrationsPending else { return }
+        if let failure = deferredMigrationFailure {
+            throw CausalGraphStorageAdmissionError.probeFailed(
+                "deferred schema migration failed: \(failure)")
+        }
+        do {
+            try applyMigrations()
+            try configureMaximumPageCount()
+            deferredMigrationsPending = false
+            deferredMigrationFailure = nil
+            refreshAdmissionMeasurementsAndLatch()
+            logger.notice("TraceGraph deferred schema migrations completed and verified")
+        } catch let admission as CausalGraphStorageAdmissionError {
+            // Storage failures are retryable after another bounded reclaim.
+            throw admission
+        } catch {
+            deferredMigrationFailure = error.localizedDescription
+            storageBlockReason = .probeFailure
+            logger.fault("TraceGraph deferred schema migration failed; growth remains disabled: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+    }
+
+    private func deferredMigrationHasStorageHeadroom() -> Bool {
+        if maxFootprintBytes != nil {
+            guard lastFootprintBytes != nil, !footprintAdmissionLatched else {
+                return false
+            }
+        }
+        if let floor = freeSpaceFloorBytes {
+            guard let free = lastFreeSpaceBytes,
+                  free >= freeSpaceAdmissionRequirement(floorBytes: floor) else {
+                return false
+            }
+        }
+        return true
     }
 
     // MARK: - upsertEntity
 
     public func upsertEntity(_ entity: TraceEntity) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: payloadBytes(entity), rows: 1)
         let sql = """
         INSERT INTO trace_entities (
             id, entity_type, stable_key, display_name,
@@ -429,7 +1889,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            try throwSQLiteFailure(rc: rc, db: db, context: "upsertEntity")
         }
     }
 
@@ -437,6 +1897,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func upsertEdge(_ edge: TraceEdge) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: payloadBytes(edge), rows: 1)
         let sql = """
         INSERT INTO trace_edges (
             id, source_entity_id, target_entity_id, relation,
@@ -471,7 +1932,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            try throwSQLiteFailure(rc: rc, db: db, context: "upsertEdge")
         }
     }
 
@@ -488,13 +1949,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // boundary would be unsafe). Entities are inserted before edges so the
     // trace_edges→trace_entities FKs hold for in-batch endpoints. Per-row
     // failures (e.g. an edge whose endpoint is neither in the batch nor the
-    // DB) are logged and skipped — best-effort, matching the pre-batch
-    // resilience, never aborting the whole event.
+    // DB) abort and roll back the whole batch. In particular SQLITE_FULL from
+    // `max_page_count` must never be logged-and-committed as partial success.
     public func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         guard !entities.isEmpty || !edges.isEmpty else { return }
+        try admitGrowth(
+            payloadBytes: payloadAdd(payloadBytes(entities), payloadBytes(edges)),
+            rows: entities.count + edges.count
+        )
 
-        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+        try execTransaction(.begin, db: db)
         do {
             if !entities.isEmpty {
                 let sql = """
@@ -526,8 +1991,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     sqlite3_bind_text(stmt, 7, encryptedAttrs, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 8, entity.source, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_double(stmt, 9, entity.confidence)
-                    if sqlite3_step(stmt) != SQLITE_DONE {
-                        logger.debug("upsertBatch entity skipped: \(String(cString: sqlite3_errmsg(db)), privacy: .public)")
+                    let rc = sqlite3_step(stmt)
+                    if rc != SQLITE_DONE {
+                        try throwSQLiteFailure(
+                            rc: rc, db: db, context: "upsertBatch entity")
                     }
                     sqlite3_reset(stmt)
                     sqlite3_clear_bindings(stmt)
@@ -564,17 +2031,18 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     sqlite3_bind_text(stmt, 8, edge.confidenceTier, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 9, encryptedEvidence, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 10, edge.eventIdsJson, -1, SQLITE_TRANSIENT)
-                    if sqlite3_step(stmt) != SQLITE_DONE {
-                        logger.debug("upsertBatch edge skipped: \(String(cString: sqlite3_errmsg(db)), privacy: .public)")
+                    let rc = sqlite3_step(stmt)
+                    if rc != SQLITE_DONE {
+                        try throwSQLiteFailure(
+                            rc: rc, db: db, context: "upsertBatch edge")
                     }
                     sqlite3_reset(stmt)
                     sqlite3_clear_bindings(stmt)
                 }
             }
-            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            try execTransaction(.commit, db: db)
         } catch {
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw error
+            try rollbackAndRethrow(error, db: db)
         }
     }
 
@@ -919,7 +2387,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func saveTrace(_ trace: Trace, members: [TraceMembership]) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+        try admitGrowth(
+            payloadBytes: payloadAdd(payloadBytes(trace), payloadBytes(members)),
+            rows: members.count + 2
+        )
+        try execTransaction(.begin, db: db)
         do {
             try insertOrReplaceTraceRow(trace, db: db)
             // Purge prior memberships for this trace id so re-saves are idempotent.
@@ -933,10 +2405,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             for member in members {
                 try insertMembership(member, db: db)
             }
-            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            try execTransaction(.commit, db: db)
         } catch {
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw error
+            try rollbackAndRethrow(error, db: db)
         }
     }
 
@@ -1008,6 +2479,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func updateTraceStatus(id: String, status: String, updatedAt: Date) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: id.utf8.count + status.utf8.count, rows: 1)
         try execBound(
             db: db,
             sql: "UPDATE traces SET status = ?, updated_at = ? WHERE id = ?",
@@ -1174,6 +2646,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func recordRuleHit(_ hit: TraceRuleHit) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: payloadBytes(hit), rows: 1)
         let sql = """
         INSERT OR REPLACE INTO trace_rule_hits (
             id, trace_id, rule_id, rule_title, rule_version, severity,
@@ -1197,6 +2670,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func recordReplayRun(_ run: TraceReplayRun) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: payloadBytes(run), rows: 1)
         let sql = """
         INSERT OR REPLACE INTO trace_replay_runs (
             id, trace_id, bundle_id, ruleset_version, daemon_version,
@@ -1223,6 +2697,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func appendHashChain(_ entry: TraceHashChainEntry) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        try admitGrowth(payloadBytes: payloadBytes(entry), rows: 1)
         try insertHashChainRow(entry, db: db)
     }
 
@@ -1281,17 +2756,46 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return try decodeHashChainRow(stmt!)
     }
 
+    /// Return the duplicated global maximum, if any, after examining at most
+    /// two rows. The v3 global sequence index makes both MAX and the equality
+    /// lookup seeks on upgraded as well as fresh databases.
+    private func duplicatedGlobalHeadSequence(db: OpaquePointer) throws -> Int? {
+        let sql = """
+        SELECT sequence_number
+          FROM trace_hash_chain
+         WHERE sequence_number = (SELECT MAX(sequence_number) FROM trace_hash_chain)
+         LIMIT 2
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        let firstRC = sqlite3_step(stmt)
+        if firstRC == SQLITE_DONE { return nil }
+        guard firstRC == SQLITE_ROW else {
+            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        let sequence = Int(sqlite3_column_int64(stmt, 0))
+        let secondRC = sqlite3_step(stmt)
+        if secondRC == SQLITE_ROW { return sequence }
+        guard secondRC == SQLITE_DONE else {
+            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        return nil
+    }
+
     public func globalChainHead() async throws -> TraceHashChainEntry? {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         return try globalChainHeadRow(db: db)
     }
 
     /// Append one continuity entry for a materialized trace, linked to the
-    /// current global head. The whole body is `await`-free: on an actor, an
-    /// async method with no internal suspension point runs to completion
-    /// without interleaving another call — so the head-read and the insert
-    /// are effectively atomic and two concurrent materializations cannot both
-    /// claim the same sequence number / fork the chain.
+    /// current global head. Actor isolation prevents interleaving on this
+    /// instance, but the daemon, CLI, tests, or another process can hold a
+    /// second SQLite connection. BEGIN IMMEDIATE serializes the head-read and
+    /// insert across every connection; the schema trigger/native constraint is
+    /// a second fail-closed guard against duplicate global sequence numbers.
     @discardableResult
     public func appendTraceContinuity(
         traceId: String,
@@ -1302,24 +2806,45 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         createdAt: Date = Date()
     ) async throws -> TraceHashChainEntry {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        let head = try globalChainHeadRow(db: db)
-        let nextSeq = (head?.sequenceNumber ?? 0) + 1
-        let id = UUID().uuidString
-        let currentHash = TraceHashChainEntry.computeCurrentHash(
-            id: id, traceId: traceId, sequenceNumber: nextSeq,
-            previousHash: head?.currentHash, eventId: eventId, edgeId: edgeId,
-            createdAt: createdAt
+        if let continuityIntegrityFailure {
+            throw CausalGraphStoreError.stepFailed(continuityIntegrityFailure)
+        }
+        try admitGrowth(
+            payloadBytes: traceId.utf8.count
+                + (eventId?.utf8.count ?? 0)
+                + (edgeId?.utf8.count ?? 0)
+                + (signature?.utf8.count ?? 0),
+            rows: 1
         )
-        let entry = TraceHashChainEntry(
-            id: id, traceId: traceId, sequenceNumber: nextSeq,
-            previousHash: head?.currentHash, currentHash: currentHash,
-            eventId: eventId, edgeId: edgeId,
-            chainHeadSignature: signature,
-            chainHeadPublishedToUnifiedLog: publishedToUnifiedLog,
-            createdAt: createdAt
-        )
-        try insertHashChainRow(entry, db: db)
-        return entry
+        try execTransaction(.begin, db: db, immediate: true)
+        do {
+            if let duplicateSequence = try duplicatedGlobalHeadSequence(db: db) {
+                let failure = "continuity ledger is forked at duplicated global head sequence \(duplicateSequence); refusing to extend either fork"
+                continuityIntegrityFailure = failure
+                throw CausalGraphStoreError.stepFailed(failure)
+            }
+            let head = try globalChainHeadRow(db: db)
+            let nextSeq = (head?.sequenceNumber ?? 0) + 1
+            let id = UUID().uuidString
+            let currentHash = TraceHashChainEntry.computeCurrentHash(
+                id: id, traceId: traceId, sequenceNumber: nextSeq,
+                previousHash: head?.currentHash, eventId: eventId, edgeId: edgeId,
+                createdAt: createdAt
+            )
+            let entry = TraceHashChainEntry(
+                id: id, traceId: traceId, sequenceNumber: nextSeq,
+                previousHash: head?.currentHash, currentHash: currentHash,
+                eventId: eventId, edgeId: edgeId,
+                chainHeadSignature: signature,
+                chainHeadPublishedToUnifiedLog: publishedToUnifiedLog,
+                createdAt: createdAt
+            )
+            try insertHashChainRow(entry, db: db)
+            try execTransaction(.commit, db: db)
+            return entry
+        } catch {
+            try rollbackAndRethrow(error, db: db)
+        }
     }
 
     /// Walk the whole ledger (ordered by sequence_number) and verify:
@@ -1375,7 +2900,16 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     entriesChecked: checked
                 )
             }
-            // 2. Linkage — enforced only across CONTIGUOUS sequence numbers.
+            // 2. Ordering + linkage. Duplicate/decreasing numbers are never a
+            // retention gap and prove the global ledger forked.
+            if let previous,
+               entry.sequenceNumber <= previous.sequenceNumber {
+                return HashChainVerification(
+                    status: .brokenLinkage(atSequence: entry.sequenceNumber),
+                    entriesChecked: checked
+                )
+            }
+            // Linkage is enforced only across CONTIGUOUS sequence numbers.
             // A gap (entry.seq > previous.seq + 1) is authorized retention
             // (prune-by-updated_at deletes interior rows), not tampering, so
             // its broken inbound link is not flagged. See the docstring.
@@ -1426,6 +2960,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// them with anchor-derived default titles.
     public func prefixTraceTitles(ids: [String], with prefix: String) async throws {
         guard let db, !ids.isEmpty else { return }
+        try admitGrowth(
+            payloadBytes: payloadAdd(payloadBytes(ids), prefix.utf8.count),
+            rows: ids.count
+        )
         let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
         let sql = "UPDATE traces SET title = ? || title WHERE id IN (\(placeholders))"
         var stmt: OpaquePointer?
@@ -1438,7 +2976,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             sqlite3_bind_text(stmt, Int32(2 + idx), id, -1, SQLITE_TRANSIENT)
         }
         guard sqlite3_step(stmt) == SQLITE_DONE else {
-            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            try throwSQLiteFailure(
+                rc: sqlite3_errcode(db), db: db, context: "prefixTraceTitles")
         }
     }
 
@@ -1450,6 +2989,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     @discardableResult
     public func deleteTracesWithTitlePrefix(_ prefix: String) async throws -> Int {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        guard checkpointAllowsMaintenance() else { return 0 }
         let pattern = prefix + "%"
 
         // First, gather the matching trace ids.
@@ -1469,39 +3009,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             }
         }
         guard !ids.isEmpty else { return 0 }
-
-        // Cascade delete in a single transaction so a partial failure
-        // doesn't leave the DB half-cleaned.
-        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
-        do {
-            let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
-            let cascades = [
-                "DELETE FROM trace_membership WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_rule_hits  WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_replay_runs WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_hash_chain  WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM traces            WHERE id       IN (\(placeholders))",
-            ]
-            for sql in cascades {
-                var stmt: OpaquePointer?
-                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                    throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-                }
-                for (idx, id) in ids.enumerated() {
-                    sqlite3_bind_text(stmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
-                }
-                let rc = sqlite3_step(stmt)
-                sqlite3_finalize(stmt)
-                guard rc == SQLITE_DONE else {
-                    throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
-                }
-            }
-            sqlite3_exec(db, "COMMIT", nil, nil, nil)
-        } catch {
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw error
-        }
-        return ids.count
+        return try await batchedCascadeDeleteTraces(ids: ids).tracesDeleted
     }
 
     // MARK: - Retention
@@ -1523,6 +3031,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     @discardableResult
     public func pruneTraces(olderThan cutoff: Date) async throws -> Int {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        guard checkpointAllowsMaintenance() else { return 0 }
         let cutoffSecs = cutoff.timeIntervalSince1970
 
         var ids: [String] = []
@@ -1541,8 +3050,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             }
         }
         guard !ids.isEmpty else { return 0 }
-        try cascadeDeleteTraces(ids: ids)
-        return ids.count
+        return try await batchedCascadeDeleteTraces(ids: ids).tracesDeleted
     }
 
     /// Drop the oldest `count` traces by `updated_at` ascending. Used
@@ -1552,6 +3060,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     public func pruneOldestTraces(count: Int) async throws -> Int {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         guard count > 0 else { return 0 }
+        guard checkpointAllowsMaintenance() else { return 0 }
 
         var ids: [String] = []
         let sql = "SELECT id FROM traces ORDER BY updated_at ASC LIMIT ?1"
@@ -1567,8 +3076,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             }
         }
         guard !ids.isEmpty else { return 0 }
-        try cascadeDeleteTraces(ids: ids)
-        return ids.count
+        return try await batchedCascadeDeleteTraces(ids: ids).tracesDeleted
     }
 
     /// Database file size in bytes — used by the storage enforcer.
@@ -1605,7 +3113,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     //
     // trace_entities + trace_edges are the GLOBAL causal-graph substrate:
     // upserted on every ingested event (RollingCausalGraph.ingest) but,
-    // prior to v1.18, NEVER deleted by any path. cascadeDeleteTraces only
+    // prior to v1.18, NEVER deleted by any path. Trace cascade deletion only
     // removes `traces` + its membership / rule_hits / replay / hash_chain
     // children — the substrate was explicitly left orphaned ("the next
     // anchor can re-attach via upsert"). With anchors firing rarely while
@@ -1650,6 +3158,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// references. Edges first, then entities. Returns counts deleted.
     @discardableResult
     public func pruneOrphanedGraph(olderThan cutoff: Date) async throws -> (edges: Int, entities: Int) {
+        guard checkpointAllowsMaintenance() else { return (0, 0) }
         let cutoffSecs = cutoff.timeIntervalSince1970
         let edges = try await batchedSubstrateDelete(
             table: "trace_edges", guardSQL: Self.edgeOrphanGuardSQL, cutoff: cutoffSecs)
@@ -1665,6 +3174,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     @discardableResult
     public func pruneOldestGraph(count: Int) async throws -> (edges: Int, entities: Int) {
         guard count > 0 else { return (0, 0) }
+        guard checkpointAllowsMaintenance() else { return (0, 0) }
         let edges = try await batchedSubstrateDelete(
             table: "trace_edges", guardSQL: Self.edgeOrphanGuardSQL, cutoff: nil, oldestFirstLimit: count)
         let entities = try await batchedSubstrateDelete(
@@ -1684,13 +3194,16 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         guardSQL: String,
         cutoff: Double?,
         oldestFirstLimit: Int? = nil,
-        batchSize: Int = 5000
+        batchSize: Int? = nil
     ) async throws -> Int {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         var total = 0
         var remaining = oldestFirstLimit ?? Int.max
+        let requestedBatchSize = batchSize ?? Self.substrateDeleteBatchSize
+        let boundedBatchSize = max(1, min(requestedBatchSize, Self.substrateDeleteBatchSize))
         while remaining > 0 {
-            let thisBatch = min(batchSize, remaining)
+            guard checkpointAllowsMaintenance() else { break }
+            let thisBatch = min(boundedBatchSize, remaining)
             var conds = [guardSQL]
             if cutoff != nil { conds.append("last_seen < ?1") }
             let order = oldestFirstLimit != nil ? "ORDER BY last_seen ASC " : ""
@@ -1707,11 +3220,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             let rc = sqlite3_step(stmt)
             sqlite3_finalize(stmt)
             guard rc == SQLITE_DONE else {
-                throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+                try throwSQLiteFailure(
+                    rc: rc, db: db, context: "bounded delete from \(table)")
             }
             let n = Int(sqlite3_changes(db))
             total += n
             remaining -= n
+            guard checkpointAllowsMaintenance() else { break }
             if n < thisBatch { break }
             await Task.yield()
         }
@@ -1726,11 +3241,48 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // `auto_vacuum = INCREMENTAL` BEFORE journal_mode, so fresh DBs run
     // in mode 2 and this reclaims freelist pages in place exactly like
     // EventStore. Pre-Wave-9B.1 files still in mode 0 can be converted
-    // once with `maccrabctl maintenance vacuum tracegraph`.
+    // once with an offline full-VACUUM conversion while the engine is stopped.
     @discardableResult
     public func incrementalVacuum(maxPages: Int) async throws -> Int {
         guard let db = db else { return 0 }
-        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
+        guard maxPages > 0,
+              StoragePragmas.readAutoVacuumMode(db) == 2,
+              checkpointAllowsMaintenance() else { return 0 }
+        let boundedPages: Int
+        if maxFootprintBytes != nil || freeSpaceFloorBytes != nil {
+            var stmt: OpaquePointer?
+            var pageSize: Int64 = 4_096
+            if sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &stmt, nil) == SQLITE_OK,
+               sqlite3_step(stmt) == SQLITE_ROW {
+                pageSize = max(512, sqlite3_column_int64(stmt, 0))
+            }
+            sqlite3_finalize(stmt)
+            let reserve = transactionReserveBytes
+                ?? Self.defaultMinimumTransactionReserve
+            // Charge four WAL/page-map pages per reclaimed DB page. This keeps
+            // one public call inside the same transaction reserve as growth.
+            let safeByReserve = max(1, reserve / max(1, pageSize * 4))
+            boundedPages = min(maxPages, Int(min(Int64(8_192), safeByReserve)))
+        } else {
+            // Unconfigured stores are explicitly offline/test-compatible.
+            boundedPages = maxPages
+        }
+        let result: StoragePragmas.IncrementalVacuumResult
+        do {
+            result = try StoragePragmas.runIncrementalVacuum(
+                on: db, maxPages: boundedPages)
+        } catch let error as StoragePragmas.IncrementalVacuumError {
+            try throwSQLiteFailure(
+                metadata: error.sqliteFailureMetadata,
+                db: db,
+                context: error.localizedDescription
+            )
+        }
+        guard checkpointAllowsMaintenance() else {
+            throw CausalGraphStoreError.stepFailed(
+                "incremental VACUUM completed but its WAL could not be fully truncated"
+            )
+        }
         return result.pagesReclaimed
     }
 
@@ -1748,11 +3300,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// once already mode 2.
     public func vacuum() async throws {
         guard let db = db else { return }
-        // Checkpoint PASSIVE before / TRUNCATE after — the same WAL discipline
-        // EventStore.performDedicatedVacuum uses, and the reason it exists.
+        guard maxFootprintBytes == nil, freeSpaceFloorBytes == nil else {
+            throw CausalGraphStoreError.stepFailed(
+                "full VACUUM is disabled on an admission-configured live TraceGraph store; stop the engine and reopen the database through an explicit offline maintenance path"
+            )
+        }
+        guard checkpointAllowsMaintenance() else { return }
+        // checkpointAllowsMaintenance() above performed a fully-drained,
+        // sidecar-admitted TRUNCATE checkpoint before the rewrite.
         // tracegraph.db is in WAL mode, so VACUUM writes its ENTIRE rebuild to
         // tracegraph.db-wal. Without the trailing checkpoint the caller's
-        // measureDatabaseFootprintMB (db + -wal + -shm, DaemonTimers.swift:3491)
+        // measureDatabaseFootprintMB (the complete SQLite family)
         // reads the rebuild stacked ON TOP of the main file it has not replaced
         // yet, and reports the VACUUM as having GROWN the store (field: 138 MB
         // -> 268 MB). The cap can then never read as satisfied, so the next
@@ -1762,38 +3320,147 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // get_trace_detail / the Investigation workspace) to chase a
         // measurement artefact. The leading PASSIVE checkpoint additionally
         // lets VACUUM rebuild from a drained main DB.
-        sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
+        try SQLitePersistentStoreAdmission.requireFullVacuumHeadroom(
+            databasePath: databasePath,
+            storageVolumePath: (databasePath as NSString).deletingLastPathComponent,
+            freeSpaceFloorBytes: 0
+        )
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
             throw CausalGraphStoreError.stepFailed("VACUUM failed: \(msg)")
         }
-        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+        let trailing = checkpointObservation(
+            mode: Int32(SQLITE_CHECKPOINT_TRUNCATE)
+        )
+        guard trailing.completed && !trailing.pinned else {
+            throw CausalGraphStoreError.stepFailed(
+                "VACUUM completed but its WAL could not be fully truncated"
+            )
+        }
+    }
+
+    private struct CheckpointObservation {
+        let completed: Bool
+        let pinned: Bool
+        let logFrames: Int32
+        let checkpointedFrames: Int32
+    }
+
+    /// Fresh floor + sidecar gate for every checkpoint mode. A checkpoint can
+    /// grow the main file by the complete currently allocated WAL family while
+    /// those sidecars remain allocated. The normal footprint cap is omitted:
+    /// draining/truncating WAL is itself the bounded route back under that cap.
+    private func checkpointHeadroomAdmitted() -> Bool {
+        let configured = maxFootprintBytes != nil || freeSpaceFloorBytes != nil
+        func refuse(_ error: CausalGraphStorageAdmissionError) -> Bool {
+            pinnedReader = false
+            if configured {
+                if storageBlockReason != error.blockReason {
+                    logger.fault("\(error.localizedDescription, privacy: .public). WAL checkpoint deferred; existing TraceGraph evidence is retained.")
+                }
+                storageBlockReason = error.blockReason
+            }
+            return false
+        }
+
+        let main: Int64
+        do {
+            main = try SQLitePersistentStoreAdmission.measureMainFile(
+                databasePath
+            )
+        } catch {
+            return refuse(.probeFailed(
+                "checkpoint main-file measurement: \(error.localizedDescription)"
+            ))
+        }
+        let measuredFamily = configured
+            ? footprintProbe(databasePath)
+            : Self.exactSQLiteFootprintBytes(databasePath: databasePath)
+        guard let family = measuredFamily, family >= main else {
+            lastFootprintBytes = nil
+            return refuse(.probeFailed("checkpoint SQLite-family footprint"))
+        }
+        lastFootprintBytes = family
+        let measuredFree = configured
+            ? freeSpaceProbe(storageVolumePath)
+            : Self.availableFilesystemBytes(path: storageVolumePath)
+        guard let free = measuredFree else {
+            lastFreeSpaceBytes = nil
+            return refuse(.probeFailed("checkpoint free-space"))
+        }
+        lastFreeSpaceBytes = free
+        let floor = freeSpaceFloorBytes ?? 0
+        let snapshot = SQLitePersistentStoreAdmission
+            .checkpointAdmissionSnapshot(
+                mainFileBytes: main,
+                familyFootprintBytes: family,
+                freeSpaceBytes: free,
+                freeSpaceFloorBytes: floor
+            )
+        guard snapshot.admitted else {
+            return refuse(.lowFreeSpace(
+                freeBytes: free,
+                floorBytes: floor,
+                requiredFreeBytes: snapshot.requiredFreeBytes
+            ))
+        }
+        return true
+    }
+
+    private func checkpointObservation(mode: Int32) -> CheckpointObservation {
+        guard let db, checkpointHeadroomAdmitted() else {
+            return CheckpointObservation(
+                completed: false, pinned: false, logFrames: 0, checkpointedFrames: 0)
+        }
+        var logFrames: Int32 = 0
+        var checkpointedFrames: Int32 = 0
+        let rc = sqlite3_wal_checkpoint_v2(
+            db, nil, mode, &logFrames, &checkpointedFrames
+        )
+        // Capture the connection/VFS error state before any filesystem probe or
+        // log call can obscure it. BUSY/LOCKED are reader coordination, not
+        // storage exhaustion; FULL and IOERR+ENOSPC/EDQUOT latch admission.
+        if rc != SQLITE_OK, rc != SQLITE_BUSY, rc != SQLITE_LOCKED {
+            let failure = SQLiteFailureMetadata(resultCode: rc, db: db)
+            _ = latchSQLiteStorageFailure(
+                failure, context: "WAL checkpoint mode \(mode)")
+        }
+        // Frame counts, not WAL byte size, identify a reader-pinned snapshot.
+        // A perfectly valid reader can pin one 4 KiB frame; the old >64 MB
+        // heuristic missed that and let DELETE maintenance amplify the WAL.
+        let frameGap = logFrames >= 0
+            && checkpointedFrames >= 0
+            && logFrames > checkpointedFrames
+        let isPinned = rc == SQLITE_BUSY || rc == SQLITE_LOCKED || frameGap
+        pinnedReader = isPinned
+        return CheckpointObservation(
+            completed: rc == SQLITE_OK && !frameGap,
+            pinned: isPinned,
+            logFrames: logFrames,
+            checkpointedFrames: checkpointedFrames
+        )
+    }
+
+    /// Checkpoint before every maintenance write. If a reader has pinned even
+    /// a small WAL snapshot, no DELETE or vacuum is issued on that tick.
+    private func checkpointAllowsMaintenance() -> Bool {
+        let observation = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_TRUNCATE))
+        if observation.pinned {
+            logger.warning("TraceGraph recovery paused: reader pins WAL (\(observation.checkpointedFrames)/\(observation.logFrames) frames checkpointed); no delete or vacuum issued")
+        }
+        return observation.completed && !observation.pinned
     }
 
     /// PASSIVE→RESTART checkpoint chain. Drains the WAL so on-disk
     /// footprint measurements include WAL content.
     @discardableResult
     public func walCheckpoint() async -> Bool {
-        guard let db = db else { return false }
-        var passiveLog: Int32 = 0
-        var passiveCkpt: Int32 = 0
-        let rcPassive = sqlite3_wal_checkpoint_v2(
-            db, nil,
-            Int32(SQLITE_CHECKPOINT_PASSIVE),
-            &passiveLog, &passiveCkpt
-        )
-        if rcPassive == SQLITE_OK, passiveLog == passiveCkpt { return true }
-
-        var restartLog: Int32 = 0
-        var restartCkpt: Int32 = 0
-        let rcRestart = sqlite3_wal_checkpoint_v2(
-            db, nil,
-            Int32(SQLITE_CHECKPOINT_RESTART),
-            &restartLog, &restartCkpt
-        )
-        return rcRestart == SQLITE_OK && restartLog == restartCkpt
+        let passive = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_PASSIVE))
+        if passive.completed { return true }
+        let restart = checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_RESTART))
+        return restart.completed
     }
 
     /// TRUNCATE checkpoint — drains the WAL into the main DB AND shrinks
@@ -1807,15 +3474,221 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// WAL open, which is still progress.
     @discardableResult
     public func walCheckpointTruncate() async -> Bool {
-        guard let db = db else { return false }
-        var log: Int32 = 0
-        var ckpt: Int32 = 0
-        let rc = sqlite3_wal_checkpoint_v2(
-            db, nil,
-            Int32(SQLITE_CHECKPOINT_TRUNCATE),
-            &log, &ckpt
-        )
-        return rc == SQLITE_OK
+        checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_TRUNCATE)).completed
+    }
+
+    /// One small recovery quantum. This is intentionally the only daemon
+    /// size-cap path: it detects a reader pin before the first DELETE, bounds
+    /// every batch, checkpoints between batches, and uses incremental vacuum
+    /// only. It never runs the full-file `VACUUM` rewrite online.
+    public func recoverStorageBudget(
+        retentionCutoff: Date,
+        orphanCutoff: Date,
+        maxTraceDeletes: Int = 256,
+        maxTraceChildRows: Int = 16_384,
+        maxGraphDeletesPerTable: Int = 2_000,
+        maxVacuumPages: Int = 2_048
+    ) async throws -> CausalGraphStorageRecoveryResult {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let traceBudget = max(0, min(maxTraceDeletes, 2_000))
+        let traceChildBudget = max(
+            0, min(maxTraceChildRows, Self.traceRecoveryChildRowBudget))
+        let graphBudget = max(0, min(maxGraphDeletesPerTable, 10_000))
+        let vacuumBudget = max(0, min(maxVacuumPages, 8_192))
+        var tracesDeleted = 0
+        var traceChildRowsDeleted = 0
+        var edgesDeleted = 0
+        var entitiesDeleted = 0
+        var pagesReclaimed = 0
+        let mode = Int(StoragePragmas.readAutoVacuumMode(db))
+
+        func result() -> CausalGraphStorageRecoveryResult {
+            CausalGraphStorageRecoveryResult(
+                pinnedReader: pinnedReader,
+                tracesDeleted: tracesDeleted,
+                edgesDeleted: edgesDeleted,
+                entitiesDeleted: entitiesDeleted,
+                vacuumPagesReclaimed: pagesReclaimed,
+                footprintBytes: footprintProbe(databasePath),
+                autoVacuumMode: mode
+            )
+        }
+
+        // Actor methods are re-entrant at `await Task.yield()` below. A second
+        // timer/SIGHUP-triggered recovery must observe, not join, the active
+        // run; otherwise two callers can independently spend the same budgets.
+        guard !recovering else { return result() }
+
+        let sqliteFailureGenerationAtStart = sqliteStorageFailureGeneration
+        recovering = true
+        defer {
+            recovering = false
+            refreshAdmissionMeasurementsAndLatch()
+            if sqliteStorageFailure != nil,
+               sqliteStorageFailureGeneration == sqliteFailureGenerationAtStart,
+               sqliteStorageRetryHeadroomIsHealthy() {
+                sqliteStorageFailure = nil
+                refreshAdmissionMeasurementsAndLatch()
+                logger.notice("TraceGraph SQLite storage backstop recovered; mutations may retry")
+            }
+        }
+
+        // This checkpoint is the admission test for maintenance. No retention
+        // delete is allowed to run before it (the old timer did both deletes
+        // first and only then guessed pinning from a 64 MB WAL).
+        guard checkpointAllowsMaintenance() else { return result() }
+
+        if traceBudget > 0 {
+            let expired = try selectTraceIDs(
+                olderThan: retentionCutoff.timeIntervalSince1970,
+                oldestFirst: true,
+                limit: traceBudget
+            )
+            if !expired.isEmpty {
+                let cascade = try await batchedCascadeDeleteTraces(
+                    ids: expired,
+                    maxChildRows: traceChildBudget - traceChildRowsDeleted)
+                tracesDeleted += cascade.tracesDeleted
+                traceChildRowsDeleted += cascade.childRowsDeleted
+                guard checkpointAllowsMaintenance() else { return result() }
+            }
+        }
+
+        if graphBudget > 0 {
+            edgesDeleted = try await batchedSubstrateDelete(
+                table: "trace_edges",
+                guardSQL: Self.edgeOrphanGuardSQL,
+                cutoff: orphanCutoff.timeIntervalSince1970,
+                oldestFirstLimit: graphBudget,
+                batchSize: min(256, graphBudget)
+            )
+            guard checkpointAllowsMaintenance() else { return result() }
+            entitiesDeleted = try await batchedSubstrateDelete(
+                table: "trace_entities",
+                guardSQL: Self.entityOrphanGuardSQL,
+                cutoff: orphanCutoff.timeIntervalSince1970,
+                oldestFirstLimit: graphBudget,
+                batchSize: min(256, graphBudget)
+            )
+            guard checkpointAllowsMaintenance() else { return result() }
+        }
+
+        // If retention did not bring a latched store below hysteresis, spend
+        // only the remainder of this tick's budgets on oldest unreferenced
+        // data. There is no unbounded while-loop chasing a file-size target.
+        refreshAdmissionMeasurementsAndLatch()
+        var pressureRemains = footprintAdmissionLatched
+            || storageBlockReason == .lowFreeSpace
+        if pressureRemains, tracesDeleted < traceBudget {
+            let oldest = try selectTraceIDs(
+                olderThan: nil,
+                oldestFirst: true,
+                limit: traceBudget - tracesDeleted
+            )
+            if !oldest.isEmpty {
+                let cascade = try await batchedCascadeDeleteTraces(
+                    ids: oldest,
+                    maxChildRows: traceChildBudget - traceChildRowsDeleted)
+                tracesDeleted += cascade.tracesDeleted
+                traceChildRowsDeleted += cascade.childRowsDeleted
+                guard checkpointAllowsMaintenance() else { return result() }
+            }
+        }
+        // DELETE moves pages to the freelist but does not reduce either the
+        // physical cap measurement or free-space pressure. Reclaim and
+        // checkpoint the trace work before deciding whether to cross into a
+        // different evidence class. This is bounded by the same per-tick
+        // vacuum budget; mode-0 legacy stores remain fail-closed/pressured.
+        if (tracesDeleted > 0 || traceChildRowsDeleted > 0),
+           vacuumBudget > pagesReclaimed,
+           mode == 2 {
+            guard checkpointAllowsMaintenance() else { return result() }
+            pagesReclaimed += try await incrementalVacuum(
+                maxPages: vacuumBudget - pagesReclaimed)
+            guard checkpointAllowsMaintenance() else { return result() }
+        }
+        // Trace cascade may have released enough space. Re-sample before
+        // deleting a different evidence class; a stale pressure bit used to
+        // over-delete graph rows even after the trace fallback succeeded.
+        refreshAdmissionMeasurementsAndLatch()
+        pressureRemains = footprintAdmissionLatched
+            || storageBlockReason == .lowFreeSpace
+        if pressureRemains, graphBudget > 0 {
+            if edgesDeleted < graphBudget {
+                edgesDeleted += try await batchedSubstrateDelete(
+                    table: "trace_edges",
+                    guardSQL: Self.edgeOrphanGuardSQL,
+                    cutoff: nil,
+                    oldestFirstLimit: graphBudget - edgesDeleted,
+                    batchSize: min(256, graphBudget - edgesDeleted)
+                )
+                guard checkpointAllowsMaintenance() else { return result() }
+            }
+            refreshAdmissionMeasurementsAndLatch()
+            pressureRemains = footprintAdmissionLatched
+                || storageBlockReason == .lowFreeSpace
+            if pressureRemains, entitiesDeleted < graphBudget {
+                entitiesDeleted += try await batchedSubstrateDelete(
+                    table: "trace_entities",
+                    guardSQL: Self.entityOrphanGuardSQL,
+                    cutoff: nil,
+                    oldestFirstLimit: graphBudget - entitiesDeleted,
+                    batchSize: min(256, graphBudget - entitiesDeleted)
+                )
+                guard checkpointAllowsMaintenance() else { return result() }
+            }
+        }
+
+        guard checkpointAllowsMaintenance() else { return result() }
+        if vacuumBudget > pagesReclaimed, mode == 2 {
+            pagesReclaimed += try await incrementalVacuum(
+                maxPages: vacuumBudget - pagesReclaimed)
+            guard checkpointAllowsMaintenance() else { return result() }
+        }
+        refreshAdmissionMeasurementsAndLatch()
+        if deferredMigrationsPending,
+           deferredMigrationFailure == nil,
+           deferredMigrationHasStorageHeadroom() {
+            try completeDeferredMigrations()
+            // Migration writes must be checkpointed and measured before the
+            // recovery tick can report that normal growth may resume.
+            guard checkpointAllowsMaintenance() else { return result() }
+            refreshAdmissionMeasurementsAndLatch()
+        }
+        return result()
+    }
+
+    private func selectTraceIDs(
+        olderThan cutoff: Double?,
+        oldestFirst: Bool,
+        limit: Int
+    ) throws -> [String] {
+        guard let db, limit > 0 else { return [] }
+        let predicate = cutoff == nil ? "" : "WHERE updated_at < ?1"
+        let order = oldestFirst ? "ORDER BY updated_at ASC" : ""
+        let bindIndex = cutoff == nil ? 1 : 2
+        let sql = "SELECT id FROM traces \(predicate) \(order) LIMIT ?\(bindIndex)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        if let cutoff { sqlite3_bind_double(stmt, 1, cutoff) }
+        sqlite3_bind_int64(stmt, Int32(bindIndex), Int64(limit))
+        var ids: [String] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return ids }
+            guard rc == SQLITE_ROW else {
+                // Never treat FULL/IOERR/corruption as a short result set and
+                // then delete the partial prefix selected before the fault.
+                try throwSQLiteFailure(
+                    rc: rc, db: db, context: "select trace IDs for recovery")
+            }
+            if let raw = sqlite3_column_text(stmt, 0) {
+                ids.append(String(cString: raw))
+            }
+        }
     }
 
     /// Read the file's current `auto_vacuum` mode. Used by callers
@@ -1838,39 +3711,311 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
-    /// Cascade-delete the listed trace ids across every related
-    /// table inside one transaction. Shared by `pruneTraces`,
-    /// `pruneOldestTraces`, and `deleteTracesWithTitlePrefix`.
-    private func cascadeDeleteTraces(ids: [String]) throws {
-        guard let db, !ids.isEmpty else { return }
-        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+    private struct TraceCascadeProgress {
+        var tracesDeleted = 0
+        var childRowsDeleted = 0
+        var remainingTraces = 0
+    }
+
+    private struct TraceCascadeChildTable {
+        let name: String
+        let rowLimit: Int
+        let byteColumns: [String]
+    }
+
+    private struct TraceCascadeSelection {
+        var rowIDs: [Int64] = []
+        var estimatedUpperBoundBytes: Int64 = 0
+        var oversizedFirstRowBytes: Int64?
+    }
+
+    /// Select a child-row quantum whose conservative WAL/write upper bound fits
+    /// one transaction reserve. The bundled SQLite's `octet_length` reads the
+    /// encoded byte length from record metadata without loading an inherited
+    /// multi-megabyte value into Swift/SQLite memory. Candidate rows remain
+    /// count-bounded as a second independent ceiling.
+    private func boundedCascadeSelection(
+        db: OpaquePointer,
+        child: TraceCascadeChildTable,
+        traceIDs: [String],
+        maxRows: Int,
+        matchColumn: String = "trace_id",
+        additionalPredicate: String = "",
+        initialEstimatedUpperBoundBytes: Int64 = 0
+    ) throws -> TraceCascadeSelection {
+        guard maxRows > 0 else { return TraceCascadeSelection() }
+        let placeholders = traceIDs.map { _ in "?" }.joined(separator: ", ")
+        let byteExpressions = child.byteColumns.map {
+            "COALESCE(octet_length(\($0)), 0)"
+        }.joined(separator: ", ")
+        let sql = """
+        SELECT rowid, \(byteExpressions)
+          FROM \(child.name)
+         WHERE \(matchColumn) IN (\(placeholders))
+               \(additionalPredicate)
+         ORDER BY rowid
+         LIMIT \(maxRows)
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for (idx, id) in traceIDs.enumerated() {
+            sqlite3_bind_text(stmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
+        }
+
+        let transactionBudget = max(
+            0, transactionReserveBytes ?? Self.defaultMinimumTransactionReserve)
+        var selection = TraceCascadeSelection(
+            estimatedUpperBoundBytes: max(
+                Self.mutationBaseBytes, initialEstimatedUpperBoundBytes))
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else {
+                try throwSQLiteFailure(
+                    rc: rc, db: db,
+                    context: "size-bounded cascade selection from \(child.name)")
+            }
+            var payloadBytes: Int64 = 128 // record header + fixed numeric fields
+            for column in 1...child.byteColumns.count {
+                payloadBytes = saturatingAdd(
+                    payloadBytes,
+                    max(0, sqlite3_column_int64(stmt, Int32(column)))
+                )
+            }
+            let payloadCharge = payloadBytes > Int64.max / 8
+                ? Int64.max
+                : payloadBytes * 8
+            let rowCharge = saturatingAdd(
+                payloadCharge, Self.mutationBytesPerRow)
+            let proposed = saturatingAdd(
+                selection.estimatedUpperBoundBytes, rowCharge)
+            if proposed > transactionBudget {
+                if selection.rowIDs.isEmpty {
+                    selection.oversizedFirstRowBytes = proposed
+                }
+                break
+            }
+            selection.rowIDs.append(sqlite3_column_int64(stmt, 0))
+            selection.estimatedUpperBoundBytes = proposed
+        }
+        return selection
+    }
+
+    /// Cascade-delete trace IDs in checkpointed child-row quanta. Bounding the
+    /// number of trace IDs was insufficient: one inherited trace can have
+    /// hundreds of thousands of child rows. Recovery also receives a total
+    /// fanout budget, so one timer tick cannot loop forever on that trace.
+    private func batchedCascadeDeleteTraces(
+        ids: [String],
+        maxChildRows: Int = .max
+    ) async throws -> TraceCascadeProgress {
+        guard !ids.isEmpty else { return TraceCascadeProgress() }
+        var total = TraceCascadeProgress()
+        var remainingChildBudget = max(0, maxChildRows)
+
+        batchLoop: for start in stride(
+            from: 0, to: ids.count, by: Self.traceCascadeBatchSize) {
+            let end = min(start + Self.traceCascadeBatchSize, ids.count)
+            let batch = Array(ids[start..<end])
+            while true {
+                guard checkpointAllowsMaintenance() else { break batchLoop }
+                let progress = try cascadeDeleteTraceBatch(
+                    ids: batch, maxChildRows: remainingChildBudget)
+                total.tracesDeleted += progress.tracesDeleted
+                total.childRowsDeleted += progress.childRowsDeleted
+                total.remainingTraces = progress.remainingTraces
+                remainingChildBudget -= progress.childRowsDeleted
+
+                if progress.remainingTraces == 0 { break }
+                // No rows changed means a constraint or an exhausted fanout
+                // budget prevented forward progress. Never spin indefinitely.
+                if progress.tracesDeleted == 0 && progress.childRowsDeleted == 0 {
+                    break batchLoop
+                }
+                if remainingChildBudget == 0 { break batchLoop }
+                guard checkpointAllowsMaintenance() else { break batchLoop }
+                await Task.yield()
+            }
+        }
+        return total
+    }
+
+    /// One atomic child-row quantum. Only one child table is drained per
+    /// transaction, and JSON-bearing rows use a much smaller limit. Parent
+    /// traces are removed only once all four child tables are empty.
+    private func cascadeDeleteTraceBatch(
+        ids: [String],
+        maxChildRows: Int
+    ) throws -> TraceCascadeProgress {
+        guard let db, !ids.isEmpty else { return TraceCascadeProgress() }
+        try execTransaction(.begin, db: db, immediate: true)
         do {
             let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
-            let cascades = [
-                "DELETE FROM trace_membership WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_rule_hits  WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_replay_runs WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM trace_hash_chain  WHERE trace_id IN (\(placeholders))",
-                "DELETE FROM traces            WHERE id       IN (\(placeholders))",
+            var childRowsDeleted = 0
+            var transactionEstimatedUpperBoundBytes = Self.mutationBaseBytes
+            let childTables: [TraceCascadeChildTable] = [
+                TraceCascadeChildTable(
+                    name: "trace_membership",
+                    rowLimit: Self.traceCascadeNarrowChildBatchSize,
+                    byteColumns: ["trace_id", "entity_id", "edge_id", "role", "layer"]
+                ),
+                TraceCascadeChildTable(
+                    name: "trace_rule_hits",
+                    rowLimit: Self.traceCascadeWideChildBatchSize,
+                    byteColumns: [
+                        "id", "trace_id", "rule_id", "rule_title", "rule_version",
+                        "severity", "matched_event_id", "matched_entity_id",
+                        "matched_edge_id", "explanation_json",
+                    ]
+                ),
+                TraceCascadeChildTable(
+                    name: "trace_replay_runs",
+                    rowLimit: Self.traceCascadeWideChildBatchSize,
+                    byteColumns: [
+                        "id", "trace_id", "bundle_id", "ruleset_version",
+                        "daemon_version", "normalization_version", "result_json",
+                    ]
+                ),
+                TraceCascadeChildTable(
+                    name: "trace_hash_chain",
+                    rowLimit: Self.traceCascadeNarrowChildBatchSize,
+                    byteColumns: [
+                        "id", "trace_id", "previous_hash", "current_hash",
+                        "event_id", "edge_id", "chain_head_signature",
+                    ]
+                ),
             ]
-            for sql in cascades {
-                var stmt: OpaquePointer?
-                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                    throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-                }
-                for (idx, id) in ids.enumerated() {
-                    sqlite3_bind_text(stmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
-                }
-                let rc = sqlite3_step(stmt)
-                sqlite3_finalize(stmt)
-                guard rc == SQLITE_DONE else {
-                    throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            if maxChildRows > 0 {
+                for child in childTables {
+                    let selection = try boundedCascadeSelection(
+                        db: db,
+                        child: child,
+                        traceIDs: ids,
+                        maxRows: min(child.rowLimit, maxChildRows)
+                    )
+                    if let oversized = selection.oversizedFirstRowBytes {
+                        logger.fault("TraceGraph recovery cannot safely delete one inherited \(child.name, privacy: .public) row: conservative \(oversized)-byte write bound exceeds the \((self.transactionReserveBytes ?? Self.defaultMinimumTransactionReserve))-byte transaction reserve; preserving the trace for offline repair")
+                        break
+                    }
+                    guard !selection.rowIDs.isEmpty else { continue }
+                    let rowPlaceholders = selection.rowIDs.map { _ in "?" }
+                        .joined(separator: ", ")
+                    let sql = "DELETE FROM \(child.name) WHERE rowid IN (\(rowPlaceholders))"
+                    var stmt: OpaquePointer?
+                    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                        throw CausalGraphStoreError.prepareFailed(
+                            String(cString: sqlite3_errmsg(db)))
+                    }
+                    for (idx, rowID) in selection.rowIDs.enumerated() {
+                        sqlite3_bind_int64(stmt, Int32(idx + 1), rowID)
+                    }
+                    let rc = sqlite3_step(stmt)
+                    sqlite3_finalize(stmt)
+                    guard rc == SQLITE_DONE else {
+                        try throwSQLiteFailure(
+                            rc: rc, db: db,
+                            context: "bounded cascade delete from \(child.name)")
+                    }
+                    childRowsDeleted = Int(sqlite3_changes(db))
+                    if childRowsDeleted > 0 {
+                        transactionEstimatedUpperBoundBytes =
+                            selection.estimatedUpperBoundBytes
+                        break
+                    }
                 }
             }
-            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+
+            // A trace row itself carries summary/ATT&CK/policy JSON and can be
+            // larger than every child row. Size it before DELETE and start its
+            // budget at this transaction's child-delete charge. This preserves
+            // the final-child+parent atomic step without letting their combined
+            // WAL/page upper bound exceed the reserve.
+            var tracesDeleted = 0
+            let parent = TraceCascadeChildTable(
+                name: "traces",
+                rowLimit: Self.traceCascadeBatchSize,
+                byteColumns: [
+                    "id", "title", "anchor_event_id", "root_entity_id",
+                    "severity", "status", "summary_json", "attack_json",
+                    "evidence_bundle_status", "daemon_version",
+                    "ruleset_version", "policy_id", "policy_version",
+                    "policy_sha256", "policy_snapshot_json",
+                    "trace_signing_key_mode", "replay_scope",
+                    "attribution_override_policy",
+                ]
+            )
+            let parentSelection = try boundedCascadeSelection(
+                db: db,
+                child: parent,
+                traceIDs: ids,
+                maxRows: min(parent.rowLimit, ids.count),
+                matchColumn: "id",
+                additionalPredicate: """
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_membership m WHERE m.trace_id = traces.id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_rule_hits h WHERE h.trace_id = traces.id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_replay_runs r WHERE r.trace_id = traces.id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM trace_hash_chain c WHERE c.trace_id = traces.id)
+                """,
+                initialEstimatedUpperBoundBytes:
+                    transactionEstimatedUpperBoundBytes
+            )
+            if let oversized = parentSelection.oversizedFirstRowBytes {
+                logger.fault("TraceGraph recovery cannot safely delete one inherited traces row: conservative \(oversized)-byte write bound exceeds the \((self.transactionReserveBytes ?? Self.defaultMinimumTransactionReserve))-byte transaction reserve; preserving the trace for offline repair")
+            } else if !parentSelection.rowIDs.isEmpty {
+                let rowPlaceholders = parentSelection.rowIDs.map { _ in "?" }
+                    .joined(separator: ", ")
+                let parentSQL = "DELETE FROM traces WHERE rowid IN (\(rowPlaceholders))"
+                var parentStmt: OpaquePointer?
+                guard sqlite3_prepare_v2(
+                    db, parentSQL, -1, &parentStmt, nil) == SQLITE_OK else {
+                    throw CausalGraphStoreError.prepareFailed(
+                        String(cString: sqlite3_errmsg(db)))
+                }
+                for (idx, rowID) in parentSelection.rowIDs.enumerated() {
+                    sqlite3_bind_int64(parentStmt, Int32(idx + 1), rowID)
+                }
+                let parentRC = sqlite3_step(parentStmt)
+                sqlite3_finalize(parentStmt)
+                guard parentRC == SQLITE_DONE else {
+                    try throwSQLiteFailure(
+                        rc: parentRC, db: db,
+                        context: "bounded cascade parent delete")
+                }
+                tracesDeleted = Int(sqlite3_changes(db))
+            }
+
+            let remainingSQL = "SELECT COUNT(*) FROM traces WHERE id IN (\(placeholders))"
+            var remainingStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, remainingSQL, -1, &remainingStmt, nil) == SQLITE_OK else {
+                throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            for (idx, id) in ids.enumerated() {
+                sqlite3_bind_text(
+                    remainingStmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
+            }
+            let remainingRC = sqlite3_step(remainingStmt)
+            guard remainingRC == SQLITE_ROW else {
+                sqlite3_finalize(remainingStmt)
+                throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            let remainingTraces = Int(sqlite3_column_int64(remainingStmt, 0))
+            sqlite3_finalize(remainingStmt)
+
+            try execTransaction(.commit, db: db)
+            return TraceCascadeProgress(
+                tracesDeleted: tracesDeleted,
+                childRowsDeleted: childRowsDeleted,
+                remainingTraces: remainingTraces
+            )
         } catch {
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw error
+            try rollbackAndRethrow(error, db: db)
         }
     }
 
@@ -1997,7 +4142,96 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         bindings(stmt)
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            try throwSQLiteFailure(rc: rc, db: db, context: "bound growth statement")
+        }
+    }
+
+    private func execTransaction(
+        _ operation: CausalGraphTransactionOperation,
+        db: OpaquePointer,
+        immediate: Bool = false
+    ) throws {
+        if let injected = transactionFailureProbe?(operation) {
+            try throwSQLiteFailure(
+                metadata: SQLiteFailureMetadata(
+                    resultCode: injected.resultCode,
+                    extendedResultCode: injected.extendedResultCode,
+                    systemErrno: injected.systemErrno
+                ),
+                db: db,
+                context: operation.rawValue.uppercased()
+            )
+        }
+        let sql: String
+        switch operation {
+        case .begin: sql = immediate ? "BEGIN IMMEDIATE" : "BEGIN TRANSACTION"
+        case .commit: sql = "COMMIT"
+        case .rollback: sql = "ROLLBACK"
+        }
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else {
+            try throwSQLiteFailure(rc: rc, db: db, context: sql)
+        }
+    }
+
+    private func poisonDatabaseAfterRollbackFailure(
+        db: OpaquePointer,
+        primaryError: Error,
+        rollbackError: Error
+    ) {
+        logger.fault("TraceGraph ROLLBACK failed after \(String(describing: primaryError), privacy: .public): \(String(describing: rollbackError), privacy: .public). Closing the connection because transaction state is uncertain.")
+        if sqliteStorageFailure == nil {
+            sqliteStorageFailure = .probeFailed(
+                "SQLite transaction rollback failed; database handle closed")
+            sqliteStorageFailureGeneration &+= 1
+        }
+        storageBlockReason = sqliteStorageFailure?.blockReason ?? .probeFailure
+        if self.db == db { self.db = nil }
+        isReadOnly = true
+        checkpointController?.detach(from: db)
+        checkpointController = nil
+        let closeRC = sqlite3_close_v2(db)
+        if closeRC != SQLITE_OK {
+            logger.error("sqlite3_close_v2 after failed ROLLBACK returned rc=\(closeRC)")
+        }
+    }
+
+    private func rollbackAndRethrow(
+        _ primaryError: Error,
+        db: OpaquePointer
+    ) throws -> Never {
+        do {
+            try execTransaction(.rollback, db: db)
+        } catch {
+            let rollbackError = error
+            poisonDatabaseAfterRollbackFailure(
+                db: db,
+                primaryError: primaryError,
+                rollbackError: rollbackError
+            )
+            // Preserve the original typed storage failure when both failed; if
+            // only rollback reports storage exhaustion, it supersedes a generic
+            // statement/COMMIT error and becomes the admission signal.
+            if let storage = primaryError as? CausalGraphStorageAdmissionError {
+                throw storage
+            }
+            if let storage = rollbackError as? CausalGraphStorageAdmissionError {
+                throw storage
+            }
+            if let sqlite = primaryError as? CausalGraphStoreError,
+               sqlite.sqliteFailureMetadata != nil {
+                throw sqlite
+            }
+            throw CausalGraphStoreError.transactionFailed(
+                "\(primaryError); rollback also failed: \(rollbackError)")
+        }
+        throw primaryError
+    }
+
+    private func execSQLChecked(db: OpaquePointer, sql: String) throws {
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else {
+            try throwSQLiteFailure(rc: rc, db: db, context: sql)
         }
     }
 

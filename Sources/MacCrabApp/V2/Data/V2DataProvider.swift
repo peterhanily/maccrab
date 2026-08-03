@@ -35,6 +35,22 @@ public enum V2DataSourceMode: String, Sendable, Equatable {
     }
 }
 
+/// Completeness metadata for the on-demand browser inventory shown by the
+/// Detection workspace. Kept separate from the returned row array so an empty
+/// or partial array can never silently mean "nothing installed".
+public struct V2BrowserInventoryCoverage: Sendable, Equatable {
+    public let complete: Bool
+    public let inspectedDirectoryEntries: UInt64
+    public let truncatedDirectoryCount: UInt64
+    public let truncatedHomeCount: UInt64
+    public let homesScanned: Int
+    public let perHomeDirectoryEntryBudget: Int
+
+    public var operatorDetail: String {
+        "The bounded scan inspected \(inspectedDirectoryEntries) directory entries and exhausted its budget in \(truncatedHomeCount) home(s). Displayed rows are partial; a missing extension is not evidence that it is not installed."
+    }
+}
+
 @MainActor
 public protocol V2DataProvider: AnyObject {
     var mode: V2DataSourceMode { get }
@@ -51,6 +67,9 @@ public protocol V2DataProvider: AnyObject {
 
     /// Diagnostic — which DB directory (if any) the live provider opened.
     var dataDir: String? { get }
+    /// Result metadata from the most recent `extensions()` call. Nil means this
+    /// provider has not performed a live browser inventory.
+    var browserInventoryCoverage: V2BrowserInventoryCoverage? { get }
 
     func alerts(since: Date, limit: Int) async -> [V2MockAlert]
     func events(limit: Int) async -> [V2MockEvent]
@@ -290,4 +309,5 @@ extension V2DataProvider {
     /// Default nil — mock/offline providers can't fail a store read, so they
     /// need no override. Only the live provider tracks this.
     public var alertsReadError: String? { nil }
+    public var browserInventoryCoverage: V2BrowserInventoryCoverage? { nil }
 }

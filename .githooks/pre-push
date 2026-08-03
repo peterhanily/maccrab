@@ -14,20 +14,239 @@
 #   git push --no-verify
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$(dirname "$SCRIPT_DIR")"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
+cd "$(/usr/bin/dirname "$SCRIPT_DIR")"
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CONFIG \
+    GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \
+    GIT_CONFIG_PARAMETERS GIT_EXEC_PATH GIT_CEILING_DIRECTORIES \
+    GIT_DISCOVERY_ACROSS_FILESYSTEM
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
 
-# A tag push is a RELEASE. Release gets the clean-tree run: no warm .build, no
-# stale resolved dependencies. That is the check which catches environment drift
-# — the class hosted CI used to catch for us.
-CLEAN=""
+GIT_BIN=/usr/bin/git
+SHASUM_BIN=/usr/bin/shasum
+AWK_BIN=/usr/bin/awk
+# Keep this byte-for-byte list in sync with release.sh and ci-local.sh.  A
+# release tag is rejected unless every executable which can build, validate,
+# sign, or publish it has the exact blob stored in the tagged commit.
+# BEGIN RELEASE_CRITICAL_EXECUTORS
+RELEASE_CRITICAL_EXECUTORS=(
+    .githooks/pre-push
+    scripts/ci-local.sh
+    scripts/release.sh
+    scripts/build-release.sh
+    scripts/release-env.sh
+    scripts/_release_env.py
+    scripts/export-release-source.py
+    scripts/check-release-dependencies.sh
+    scripts/prepare-release-pyyaml.sh
+    scripts/check-release-pyyaml.sh
+    scripts/run-release-python.sh
+    scripts/notarize.sh
+    scripts/check-rules-trust-anchor.sh
+    scripts/generate-appcast-entry.sh
+    scripts/publish-appcast-entry.sh
+    scripts/publish-release-json.sh
+    scripts/publish-cask.sh
+    Compiler/compile_rules.py
+)
+# END RELEASE_CRITICAL_EXECUTORS
+
+reject_hidden_release_index_state() {
+    local hidden
+    hidden=$($GIT_BIN ls-files -v | $AWK_BIN 'substr($0,1,1) == "S" || substr($0,1,1) ~ /^[a-z]$/ { print }')
+    if [ -n "$hidden" ]; then
+        echo "ERROR: release index contains assume-unchanged/skip-worktree entries:" >&2
+        printf '%s\n' "$hidden" >&2
+        return 1
+    fi
+    if ! $GIT_BIN update-index --really-refresh >/dev/null 2>&1 \
+            || ! $GIT_BIN diff-files --quiet -- \
+            || ! $GIT_BIN diff-index --cached --quiet HEAD --; then
+        echo "ERROR: release index/worktree differs from HEAD after a forced refresh" >&2
+        return 1
+    fi
+}
+
+verify_release_executor_blobs() {
+    local commit="$1" path expected actual
+    for path in "${RELEASE_CRITICAL_EXECUTORS[@]}"; do
+        if [ ! -f "$path" ] || [ -L "$path" ]; then
+            echo "ERROR: critical release executor is missing, non-regular, or redirected: $path" >&2
+            return 1
+        fi
+        expected=$($GIT_BIN rev-parse "$commit:$path" 2>/dev/null || true)
+        actual=$($GIT_BIN hash-object --no-filters "$path" 2>/dev/null || true)
+        if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "ERROR: critical release executor does not match $commit: $path" >&2
+            return 1
+        fi
+    done
+}
+
+verify_release_commit_binding() {
+    local final_commit="$1" source_commit="$2" source_tree="$3" metadata_tree="$4"
+    local actual_source_tree actual_metadata_tree parent_line diff_paths
+    actual_source_tree=$($GIT_BIN rev-parse "$source_commit^{tree}" 2>/dev/null || true)
+    actual_metadata_tree=$($GIT_BIN rev-parse "$final_commit^{tree}" 2>/dev/null || true)
+    if [ "$actual_source_tree" != "$source_tree" ] \
+            || [ "$actual_metadata_tree" != "$metadata_tree" ]; then
+        echo "ERROR: release source/metadata tree does not match the manifest" >&2
+        return 1
+    fi
+    if [ "$final_commit" = "$source_commit" ]; then
+        if [ "$metadata_tree" != "$source_tree" ]; then
+            echo "ERROR: metadata-free release must retain the exact source tree" >&2
+            return 1
+        fi
+        return 0
+    fi
+    parent_line=$($GIT_BIN rev-list --parents -n 1 "$final_commit" 2>/dev/null || true)
+    if [ "$parent_line" != "$final_commit $source_commit" ]; then
+        echo "ERROR: release metadata commit is not a single-parent child of the captured source" >&2
+        return 1
+    fi
+    diff_paths=$($GIT_BIN diff-tree --no-commit-id --name-only -r "$source_commit" "$final_commit" \
+        | LC_ALL=C /usr/bin/sort)
+    if [ "$diff_paths" != $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
+        echo "ERROR: release metadata tree changed paths outside the exact GA allowlist" >&2
+        printf '%s\n' "$diff_paths" >&2
+        return 1
+    fi
+}
+
+# A tag push is a RELEASE. Release gets the clean-tree run: no warm Swift build,
+# no stale resolved dependencies. ci-local stages any .build/MacCrab-v*.dmg
+# outside .build during that wipe; release.sh has already notarized the DMG by
+# the time its tag push invokes this hook.
+CLEAN_TREE=0
+ZERO_SHA=0000000000000000000000000000000000000000
+TAG_DMG_COUNT=0
+TAG_DMG_PATHS=()
+TAG_COMMIT=""
+TAG_OBJECT=""
+CREATED_TAG_COUNT=0
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
     case "$remote_ref" in
-        refs/tags/*) CLEAN="--clean" ;;
+        refs/tags/*)
+            CLEAN_TREE=1
+            # Deleting a tag has no artifact to preserve. A created/moved tag
+            # is a release and must map to one exact DMG; do not let an
+            # arbitrary tag silently take the release path without an asset.
+            if [ "$_local_sha" != "$ZERO_SHA" ]; then
+                CREATED_TAG_COUNT=$((CREATED_TAG_COUNT + 1))
+                if [ "$CREATED_TAG_COUNT" -ne 1 ]; then
+                    echo "ERROR: push one release tag at a time so its manifest is unambiguous" >&2
+                    exit 2
+                fi
+                tag_name=${remote_ref#refs/tags/}
+                if ! [[ "$tag_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+                    echo "ERROR: release tag '$tag_name' does not match vMAJOR.MINOR.PATCH[-rc.N]" >&2
+                    exit 2
+                fi
+                TAG_DMG_PATHS[$TAG_DMG_COUNT]=".build/MacCrab-${tag_name}.dmg"
+                TAG_DMG_COUNT=$((TAG_DMG_COUNT + 1))
+                tag_type=$($GIT_BIN cat-file -t "$_local_sha" 2>/dev/null || true)
+                if [ "$tag_type" != "tag" ]; then
+                    echo "ERROR: release tag '$tag_name' must be an annotated tag object" >&2
+                    exit 2
+                fi
+                TAG_COMMIT=$($GIT_BIN rev-parse "$_local_sha^{commit}" 2>/dev/null || true)
+                TAG_OBJECT=$_local_sha
+            fi
+            ;;
     esac
 done
 
-if [ -n "$CLEAN" ]; then
+if [ "$CLEAN_TREE" = "1" ]; then
     echo "Tag push detected — running local CI from a CLEAN tree."
+    CI_ARGS=(--clean)
+    expected_env_path=${MACCRAB_RELEASE_EXPECTED_DMG:-}
+    expected_env_sha=${MACCRAB_RELEASE_EXPECTED_SHA256:-}
+    expected_env_commit=${MACCRAB_RELEASE_EXPECTED_COMMIT:-}
+    expected_env_tag_object=${MACCRAB_RELEASE_EXPECTED_TAG_OBJECT:-}
+    expected_env_hook_blob=${MACCRAB_RELEASE_EXPECTED_HOOK_BLOB:-}
+    expected_env_source_commit=${MACCRAB_RELEASE_SOURCE_COMMIT:-}
+    expected_env_source_tree=${MACCRAB_RELEASE_SOURCE_TREE:-}
+    expected_env_metadata_tree=${MACCRAB_RELEASE_METADATA_TREE:-}
+    if [ "$CREATED_TAG_COUNT" -gt 0 ]; then
+        if [ -z "$expected_env_path" ] || [ -z "$expected_env_sha" ] \
+                || [ -z "$expected_env_commit" ] \
+                || [ -z "$expected_env_tag_object" ] \
+                || [ -z "$expected_env_hook_blob" ] \
+                || [ -z "$expected_env_source_commit" ] \
+                || [ -z "$expected_env_source_tree" ] \
+                || [ -z "$expected_env_metadata_tree" ]; then
+            echo "ERROR: created/moved release tags require DMG, final/source commit, source/metadata tree, tag-object, and hook-blob manifest from release.sh" >&2
+            exit 2
+        fi
+        if ! [[ "$expected_env_commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "$expected_env_tag_object" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "$expected_env_hook_blob" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "$expected_env_source_commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "$expected_env_source_tree" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+                || ! [[ "$expected_env_metadata_tree" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "ERROR: release commit/tree/tag/hook manifest has an invalid object ID" >&2
+            exit 2
+        fi
+        reject_hidden_release_index_state
+        verify_release_commit_binding "$expected_env_commit" "$expected_env_source_commit" \
+            "$expected_env_source_tree" "$expected_env_metadata_tree"
+        verify_release_executor_blobs "$expected_env_commit"
+        committed_hook_blob=$($GIT_BIN rev-parse "$expected_env_commit:.githooks/pre-push" 2>/dev/null || true)
+        running_hook_blob=$($GIT_BIN hash-object --no-filters "$SCRIPT_DIR/pre-push" 2>/dev/null || true)
+        if [ "$expected_env_tag_object" != "$TAG_OBJECT" ] \
+                || [ "$TAG_COMMIT" != "$expected_env_commit" ] \
+                || [ "$($GIT_BIN rev-parse HEAD)" != "$expected_env_commit" ] \
+                || [ "$committed_hook_blob" != "$expected_env_hook_blob" ] \
+                || [ "$running_hook_blob" != "$expected_env_hook_blob" ]; then
+            echo "ERROR: pushed tag, commit, HEAD, and executing hook do not match the release manifest" >&2
+            exit 1
+        fi
+        dirty_source=$($GIT_BIN status --porcelain --untracked-files=all)
+        if [ -n "$dirty_source" ]; then
+            echo "ERROR: release tag push source is dirty or has untracked inputs" >&2
+            printf '%s\n' "$dirty_source" >&2
+            exit 1
+        fi
+        CI_ARGS+=(--expect-release-commit "$expected_env_commit" \
+            --expect-release-source "$expected_env_source_commit" "$expected_env_source_tree" \
+            --expect-release-metadata-tree "$expected_env_metadata_tree")
+    elif [ -n "$expected_env_path" ] || [ -n "$expected_env_sha" ] \
+            || [ -n "$expected_env_commit" ] || [ -n "$expected_env_tag_object" ] \
+            || [ -n "$expected_env_hook_blob" ] || [ -n "$expected_env_source_commit" ] \
+            || [ -n "$expected_env_source_tree" ] || [ -n "$expected_env_metadata_tree" ]; then
+        echo "ERROR: release manifest was supplied but no created/moved version tag was pushed" >&2
+        exit 2
+    fi
+    expected_env_matched=0
+    index=0
+    while [ "$index" -lt "$TAG_DMG_COUNT" ]; do
+        dmg_path=${TAG_DMG_PATHS[$index]}
+        if [ ! -f "$dmg_path" ] || [ -L "$dmg_path" ] || [ ! -s "$dmg_path" ]; then
+            echo "ERROR: tag requires a non-empty regular release DMG at $dmg_path" >&2
+            exit 1
+        fi
+        if [ "$dmg_path" = "$expected_env_path" ]; then
+            dmg_sha=$expected_env_sha
+            expected_env_matched=1
+        else
+            dmg_sha=$($SHASUM_BIN -a 256 "$dmg_path" | $AWK_BIN '{print $1}')
+        fi
+        if ! [[ "$dmg_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: invalid expected SHA-256 for $dmg_path" >&2
+            exit 2
+        fi
+        CI_ARGS+=(--expect-release-dmg "$dmg_path" "$dmg_sha")
+        index=$((index + 1))
+    done
+    if [ "$CREATED_TAG_COUNT" -gt 0 ] && [ "$expected_env_matched" != "1" ]; then
+        echo "ERROR: release expected DMG '$expected_env_path' does not match any pushed tag" >&2
+        exit 2
+    fi
+    exec ./scripts/ci-local.sh "${CI_ARGS[@]}"
 fi
-exec ./scripts/ci-local.sh $CLEAN
+exec ./scripts/ci-local.sh

@@ -3,11 +3,36 @@
 
 import Testing
 import Foundation
+import Darwin
 import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("Schema Migrator")
 struct SchemaMigratorTests {
+
+    @Test("SQLite storage classifier covers FULL and IOERR errno variants")
+    func storageFailureClassifier() {
+        #expect(SQLiteFailureMetadata(
+            resultCode: SQLITE_FULL,
+            extendedResultCode: SQLITE_FULL,
+            systemErrno: 0
+        ).isStorageExhaustion)
+        #expect(SQLiteFailureMetadata(
+            resultCode: SQLITE_IOERR,
+            extendedResultCode: SQLITE_IOERR,
+            systemErrno: ENOSPC
+        ).isStorageExhaustion)
+        #expect(SQLiteFailureMetadata(
+            resultCode: SQLITE_IOERR,
+            extendedResultCode: SQLITE_IOERR,
+            systemErrno: EDQUOT
+        ).isStorageExhaustion)
+        #expect(!SQLiteFailureMetadata(
+            resultCode: SQLITE_IOERR,
+            extendedResultCode: SQLITE_IOERR,
+            systemErrno: EIO
+        ).isStorageExhaustion)
+    }
 
     /// Open a throwaway SQLite DB at a temp path and return the handle + cleanup closure.
     private func openTempDB() -> (handle: OpaquePointer, path: String, close: () -> Void) {

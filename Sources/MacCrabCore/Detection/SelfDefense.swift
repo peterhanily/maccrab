@@ -735,28 +735,18 @@ public actor SelfDefense {
         // `maccrabd`. Match either name with `-f` so impersonation
         // protection covers both the dev (`swift run maccrabd`) and
         // release (sysextd-activated) flavors.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-f", Self.impersonationProcessPattern]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        // `waitUntilExit()` on a task that never launched raises "task not
-        // launched" (NSInvalidArgumentException) — uncaught, that is SIGABRT of
-        // the root System Extension. `posix_spawn` fails with EAGAIN whenever
-        // the per-user or system maxproc limit is exhausted, which any
-        // unprivileged local user can provoke, so this self-defense poll must
-        // not assume the spawn succeeded. No output ⇒ no impersonator observed,
-        // which is the same conclusion as an empty pgrep result.
-        do {
-            try process.run()
-        } catch {
-            logger.error("Impersonation probe: pgrep spawn failed: \(error.localizedDescription, privacy: .public) — skipping this cycle")
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pgrep",
+            arguments: ["-f", Self.impersonationProcessPattern],
+            timeout: 2,
+            maximumOutputBytes: 64 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), !result.timedOut, !result.outputLimitExceeded,
+           result.terminationStatus == 0 || result.terminationStatus == 1 else {
+            logger.error("Impersonation probe did not complete inside its bounded subprocess contract — skipping this cycle")
             return
         }
-        process.waitUntilExit()
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = String(data: result.output, encoding: .utf8) ?? ""
         let pids = output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
 
         // Filter out our own PID
@@ -895,22 +885,14 @@ public actor SelfDefense {
     /// unsigned or ad-hoc binary still trips the alert.
     nonisolated static func isSignedByMacCrabTeam(at path: String) -> Bool {
         guard FileManager.default.fileExists(atPath: path) else { return false }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        process.arguments = ["-dvv", "--verify", "--", path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return false }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.contains("TeamIdentifier=79S425CW99")
-        } catch {
-            return false
-        }
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/codesign",
+            arguments: ["-dvv", "--verify", "--", path],
+            timeout: 15,
+            maximumOutputBytes: 256 * 1_024
+        ), result.succeeded else { return false }
+        let output = String(data: result.output, encoding: .utf8) ?? ""
+        return output.contains("TeamIdentifier=79S425CW99")
     }
 
     /// Called from the file-event handler when a delete/rename fires

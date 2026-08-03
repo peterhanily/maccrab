@@ -49,11 +49,93 @@ struct BatchedEventWriterTests {
         private var failing = true
         private(set) var inserted: [Event] = []
         func setFailing(_ f: Bool) { failing = f }
-        func insert(events: [Event]) throws {
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
             if failing { throw EventStoreError.busy("database is locked") }
             inserted.append(contentsOf: events)
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
         }
         var count: Int { inserted.count }
+    }
+
+    /// Simulates EventStore committing a prefix, then seeing SQLITE_BUSY in
+    /// chunk N. The next call must contain exactly the uncommitted suffix.
+    private actor PartialInserter: EventBatchInserting {
+        private var failedOnce = false
+        private(set) var insertedIDs: [UUID] = []
+        private(set) var calls: [[UUID]] = []
+
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
+            calls.append(events.map(\.id))
+            if !failedOnce {
+                failedOnce = true
+                let prefix = min(3, events.count)
+                insertedIDs.append(contentsOf: events.prefix(prefix).map(\.id))
+                throw EventBatchInsertFailure(
+                    progress: EventBatchInsertResult(
+                        inputCount: events.count,
+                        persistedCount: prefix,
+                        filteredCount: 0,
+                        committedTransactionCount: prefix == 0 ? 0 : 1
+                    ),
+                    uncommittedEvents: Array(events.dropFirst(prefix)),
+                    underlyingError: EventStoreError.busy("chunk N busy")
+                )
+            }
+            insertedIDs.append(contentsOf: events.map(\.id))
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
+        }
+    }
+
+    /// Simulates corruption after an earlier reserve chunk committed. The
+    /// active database is then quarantined, so the apparent committed prefix
+    /// is no longer durable and EventStore returns the complete candidate set.
+    private actor ReplacedDatabaseInserter: EventBatchInserting {
+        let replacementReady: Bool
+        private var failedOnce = false
+        private(set) var insertedIDs: [UUID] = []
+        private(set) var calls: [[UUID]] = []
+
+        init(replacementReady: Bool) {
+            self.replacementReady = replacementReady
+        }
+
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
+            calls.append(events.map(\.id))
+            if !failedOnce {
+                failedOnce = true
+                throw EventBatchInsertFailure(
+                    progress: EventBatchInsertResult(
+                        inputCount: events.count,
+                        persistedCount: 0,
+                        filteredCount: 0,
+                        committedTransactionCount: 0
+                    ),
+                    uncommittedEvents: events,
+                    underlyingError: EventStoreError.stepFailed(
+                        "active database quarantined"
+                    ),
+                    activeDatabaseWasReplaced: true,
+                    replacementReadyForRetry: replacementReady
+                )
+            }
+            insertedIDs.append(contentsOf: events.map(\.id))
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
+        }
     }
 
     private func tempStore() throws -> (EventStore, URL) {
@@ -151,5 +233,75 @@ struct BatchedEventWriterTests {
         await writer.shutdown()
         #expect(await fake.count == 200, "all events persist once contention clears")
         #expect(writer.droppedCount == 0)
+    }
+
+    @Test("partial chunk failure retries only the uncommitted suffix")
+    func partialFailureRetriesSuffixOnly() async throws {
+        let fake = PartialInserter()
+        let writer = BatchedEventWriter(
+            store: fake,
+            flushThreshold: 100_000,
+            hardCap: 100_000
+        )
+        let events = (0..<10).map(makeEvent)
+        for event in events { await writer.enqueue(event) }
+
+        // First shutdown attempt flushes, receives the partial BUSY, and leaves
+        // exactly seven rows queued. Second attempt persists that suffix.
+        await writer.shutdown()
+        await writer.shutdown()
+
+        let calls = await fake.calls
+        #expect(calls.count == 2)
+        #expect(calls[0] == events.map(\.id))
+        #expect(calls[1] == Array(events.dropFirst(3)).map(\.id))
+        #expect(await fake.insertedIDs == events.map(\.id),
+                "committed prefix must not be rewritten and input order is preserved")
+        #expect(writer.persistedCount == 10)
+        #expect(writer.retriedCount == 7)
+        #expect(writer.droppedCount == 0)
+    }
+
+    @Test("database replacement retries the complete candidate batch on the fresh store")
+    func replacementRetriesCompleteBatch() async throws {
+        let fake = ReplacedDatabaseInserter(replacementReady: true)
+        let writer = BatchedEventWriter(
+            store: fake,
+            flushThreshold: 100_000,
+            hardCap: 100_000
+        )
+        let events = (0..<10).map(makeEvent)
+        for event in events { await writer.enqueue(event) }
+
+        await writer.shutdown()
+        await writer.shutdown()
+
+        let expected = events.map(\.id)
+        #expect(await fake.calls == [expected, expected],
+                "the quarantined DB's old committed prefix is not durable")
+        #expect(await fake.insertedIDs == expected)
+        #expect(writer.persistedCount == events.count)
+        #expect(writer.retriedCount == events.count)
+        #expect(writer.droppedCount == 0)
+    }
+
+    @Test("failed replacement reopen drops the complete candidate batch without retry")
+    func failedReplacementReopenDropsCompleteBatch() async throws {
+        let fake = ReplacedDatabaseInserter(replacementReady: false)
+        let writer = BatchedEventWriter(
+            store: fake,
+            flushThreshold: 100_000,
+            hardCap: 100_000
+        )
+        let events = (0..<10).map(makeEvent)
+        for event in events { await writer.enqueue(event) }
+
+        await writer.shutdown()
+
+        #expect(await fake.calls == [events.map(\.id)])
+        #expect(await fake.insertedIDs.isEmpty)
+        #expect(writer.persistedCount == 0)
+        #expect(writer.retriedCount == 0)
+        #expect(writer.droppedCount == events.count)
     }
 }

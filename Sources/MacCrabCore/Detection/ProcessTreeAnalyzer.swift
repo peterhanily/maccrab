@@ -190,14 +190,37 @@ public actor ProcessTreeAnalyzer {
         // Skip launchd -> * transitions (too common, not informative).
         guard parent != "launchd" else { return nil }
 
+        let grandparent = grandparentName.map(normalizeName)
+
+        // Score against the model as it existed BEFORE this observation. The
+        // previous order inserted a first-seen parent -> child edge and then
+        // scored its new 1/1 count as log(1) == 0, teaching away the anomaly
+        // before detection could see it.
+        let preObservationScore: Double?
+        if mode == .active {
+            if let grandparent,
+               grandparent != "launchd",
+               grandparent != parent,
+               let bigramScore = logProbabilityBigram(
+                   grandparent: grandparent,
+                   parent: parent,
+                   child: child
+               ) {
+                preObservationScore = bigramScore
+            } else {
+                preObservationScore = logProbability(parent: parent, child: child)
+            }
+        } else {
+            preObservationScore = nil
+        }
+
         // Update first-order counts.
         transitionCounts[parent, default: [:]][child, default: 0] += 1
         parentTotals[parent, default: 0] += 1
         totalTransitions += 1
 
         // Update second-order counts when grandparent is available.
-        if let gp = grandparentName {
-            let grandparent = normalizeName(gp)
+        if let grandparent {
             if grandparent != "launchd" && grandparent != parent {
                 let bigramKey = "\(grandparent)>\(parent)"
                 bigramCounts[bigramKey, default: [:]][child, default: 0] += 1
@@ -226,17 +249,7 @@ public actor ProcessTreeAnalyzer {
             }
         }
 
-        // Return log-probability in active mode.
-        // Use 2nd-order model when grandparent data is available (more precise).
-        if mode == .active {
-            if let gp = grandparentName {
-                let grandparent = normalizeName(gp)
-                let bigramScore = logProbabilityBigram(grandparent: grandparent, parent: parent, child: child)
-                if bigramScore != nil { return bigramScore }
-            }
-            return logProbability(parent: parent, child: child)
-        }
-        return nil
+        return preObservationScore
     }
 
     /// Score an entire process tree rooted at the given PID.

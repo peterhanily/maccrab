@@ -166,26 +166,14 @@ public actor BTMSnapshotMonitor {
     // MARK: - dumpbtm invocation (read-only)
 
     private nonisolated static func runDumpBTM() -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sfltool")
-        proc.arguments = ["dumpbtm"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            // Drain BEFORE waiting: dumpbtm output can exceed the OS pipe buffer,
-            // so waiting first would deadlock (child blocks on write, parent
-            // blocks in waitUntilExit, neither drains). Same pattern as
-            // SDRDeviceMonitor.getUSBDevices.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return nil }
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/sfltool",
+            arguments: ["dumpbtm"],
+            timeout: 20,
+            maximumOutputBytes: 16 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded else { return nil }
+        return String(data: result.output, encoding: .utf8)
     }
 
     // MARK: - Parsing (pure, unit-testable)

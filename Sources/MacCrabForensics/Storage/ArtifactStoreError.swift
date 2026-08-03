@@ -12,6 +12,15 @@ public enum ArtifactStoreError: Error, CustomStringConvertible {
     /// `sqlite3_open` failed at the C-API level.
     case openFailed(message: String, code: Int32)
 
+    /// The declared at-rest state and supplied key disagree. Never open in a
+    /// weaker mode and discover the mismatch only after SQLite touches disk.
+    case encryptionStateMismatch(state: CaseEncryptionState, suppliedDEK: Bool)
+
+    /// A member of case.sqlite's DB/WAL/SHM/journal family is a symlink,
+    /// non-regular or multiply-linked object, or an orphan sidecar without its
+    /// main database.
+    case unsafeSQLitePath(path: String)
+
     /// SQLCipher's `PRAGMA key` failed — typically wrong DEK or
     /// corrupted header. Surfaces to the operator as "case unlock
     /// failed; check your password / keychain."
@@ -54,6 +63,10 @@ public enum ArtifactStoreError: Error, CustomStringConvertible {
         switch self {
         case .openFailed(let msg, let code):
             return "ArtifactStore open failed (sqlite3 code \(code)): \(msg)"
+        case .encryptionStateMismatch(let state, let supplied):
+            return "ArtifactStore encryption_state=\(state.rawValue) does not match suppliedDEK=\(supplied)"
+        case .unsafeSQLitePath(let path):
+            return "ArtifactStore refusing unsafe SQLite family member at \(path)"
         case .keyApplicationFailed(let msg):
             return "ArtifactStore key application failed: \(msg)"
         case .migrationFailed(let from, let to, let msg):

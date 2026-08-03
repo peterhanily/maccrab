@@ -12,16 +12,32 @@ This directory holds the vendored SQLCipher amalgamation that MacCrab links agai
 
 When upgrading to a newer SQLCipher release (e.g. v4.17.0):
 
-1. **Clone and check out the new release tag:**
+1. **Clone, authenticate, and detach at the exact release commit.** Never
+   build from a mutable branch or from a tag name whose peeled commit has not
+   been recorded first:
+
    ```bash
-   cd /tmp
+   cd /private/tmp
    git clone https://github.com/sqlcipher/sqlcipher.git
    cd sqlcipher
-   git checkout v4.17.0    # whatever the new tag is
+   expected_tag=v4.17.0       # whatever the new release tag is
+   expected_commit=<40-hex peeled commit reviewed from the upstream release>
+   test "$(git rev-parse "${expected_tag}^{commit}")" = "$expected_commit"
+   git checkout --detach "$expected_commit"
+   test "$(git rev-parse HEAD)" = "$expected_commit"
+   git status --porcelain=v1  # must print nothing
    ```
 
-2. **Build the amalgamation with CommonCrypto:**
+   Record the exact repository, tag, peeled commit, SQLCipher version, bundled
+   SQLite version/source id, and final file digests in `PROVENANCE`. The
+   currently blessed `v4.16.0` tag peels to
+   `e2a6040f2ae5cfff2b3e08eb3320007d93cdf3fc`.
+
+2. **Verify the upstream checkout before building, then build the amalgamation
+   with CommonCrypto:**
+
    ```bash
+   make verify-source
    ./configure CFLAGS="-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_CC -DSQLITE_TEMP_STORE=2" \
                LDFLAGS="-framework Security -framework Foundation"
    make sqlite3.c
@@ -36,11 +52,35 @@ When upgrading to a newer SQLCipher release (e.g. v4.17.0):
    cp sqlite3.h <repo>/Sources/CSQLCipher/include/sqlite3.h
    ```
 
-4. **Update this directory's `VERSION` file** with the new SQLCipher + SQLite versions and build date.
+4. **Update `PROVENANCE` and `VERSION`.** Compute the copied-file digests from
+   inside the MacCrab checkout, not the upstream worktree:
 
-5. **Run the full test suite** (`swift test`) against the new amalgamation. SQLite has strong backward compatibility; minor version bumps almost always pass, but any failures should be investigated before merging.
+   ```bash
+   shasum -a 256 Sources/CSQLCipher/sqlite3.c \
+       Sources/CSQLCipher/include/sqlite3.h
+   ```
 
-6. **Tag the bump commit** so future-Peter (or `git blame`) can trace which SQLCipher release the codebase is on at any point.
+   Copy those exact values into `PROVENANCE` and `VERSION`, along with the
+   detached upstream commit and the `SQLITE_VERSION`, `SQLITE_SOURCE_ID`, and
+   `CIPHER_VERSION_NUMBER` values in the generated files.
+
+5. **Run the deterministic provenance guard, then the full test suite** against
+   the new amalgamation:
+
+   ```bash
+   ./scripts/check-sqlcipher-provenance.sh
+   ./scripts/test-sqlcipher-provenance.sh
+   swift test
+   ```
+
+   The guard fails when either vendored file, its version/source macros, the
+   exact upstream commit, or this rebuild workflow drifts from the checked
+   manifest. SQLite has strong backward compatibility; any test failure still
+   needs investigation before merging.
+
+6. **Review the manifest and vendored-file diff together.** Never update a
+   digest merely to silence the guard: independently confirm the upstream tag,
+   peeled commit, build inputs, and generated version/source-id first.
 
 ## Compile flags (set via Package.swift `cSettings`)
 

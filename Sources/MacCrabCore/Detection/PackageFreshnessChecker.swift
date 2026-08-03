@@ -10,9 +10,21 @@
 // Supported registries: npm, PyPI, Homebrew (formula + cask), crates.io
 
 import Foundation
+import Darwin
 import os.log
 
 // MARK: - PackageFreshnessChecker
+
+struct PackageRegistryBodyAccumulator {
+    let maximumBytes: Int
+    private(set) var data = Data()
+
+    mutating func append(_ byte: UInt8) -> Bool {
+        guard data.count < maximumBytes else { return false }
+        data.append(byte)
+        return true
+    }
+}
 
 /// Checks package freshness by querying registry APIs.
 /// Flags packages published within a configurable threshold (default 7 days).
@@ -131,6 +143,14 @@ public actor PackageFreshnessChecker {
     /// Request timeout in seconds.
     private let requestTimeout: TimeInterval = 10
 
+    /// Registry package documents can be large (npm/PyPI retain version
+    /// history), but they must never grow root memory without a ceiling.
+    private static let maximumRegistryResponseBytes = 16 * 1024 * 1024
+
+    /// A single attacker-shaped exec command must not fan out into an
+    /// unbounded task/request set in the root engine.
+    private static let maximumPackagesPerCheck = 100
+
     /// Shared date formatter for ISO 8601 dates.
     private static let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -206,7 +226,7 @@ public actor PackageFreshnessChecker {
     /// Check multiple packages concurrently.
     public func checkPackages(_ packages: [(name: String, registry: Registry)]) async -> [PackageInfo] {
         await withTaskGroup(of: PackageInfo.self, returning: [PackageInfo].self) { group in
-            for pkg in packages {
+            for pkg in packages.prefix(Self.maximumPackagesPerCheck) {
                 group.addTask {
                     await self.checkPackage(name: pkg.name, registry: pkg.registry)
                 }
@@ -325,19 +345,49 @@ public actor PackageFreshnessChecker {
     }
 
     private nonisolated func runCommand(_ path: String, args: [String]) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: path)
-        proc.arguments = args
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)
-        } catch { return nil }
+        // This actor is instantiated inside the root system extension for its
+        // HTTP-only checkPackages API. Installed package inventories are user-
+        // specific and launch npm/pip/brew; they must never cross that privilege
+        // boundary. Gate before `/usr/bin/env` sees PATH or resolves a tool.
+        guard Self.allowsInstalledInventoryExecution(effectiveUID: geteuid()),
+              Self.isAllowedInstalledInventoryCommand(path: path, arguments: args) else {
+            return nil
+        }
+
+        let environment: [String: String] = [
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "TMPDIR": "/private/tmp",
+            "LC_ALL": "C",
+            "NO_COLOR": "1",
+            "HOMEBREW_NO_AUTO_UPDATE": "1",
+        ]
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: path,
+            arguments: args,
+            environment: environment,
+            timeout: 10,
+            maximumOutputBytes: 4 * 1024 * 1024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded else {
+            return nil
+        }
+        return String(data: result.output, encoding: .utf8)
+    }
+
+    static func allowsInstalledInventoryExecution(effectiveUID: uid_t) -> Bool {
+        effectiveUID != 0
+    }
+
+    static func isAllowedInstalledInventoryCommand(
+        path: String,
+        arguments: [String]
+    ) -> Bool {
+        guard path == "/usr/bin/env" else { return false }
+        return arguments == ["npm", "ls", "-g", "--depth=0", "--json"]
+            || arguments == ["pip3", "list", "--format=json", "--user"]
+            || arguments == ["brew", "list", "--formula", "-1"]
+            || arguments == ["brew", "list", "--formula", "--versions"]
     }
 
     /// Clear the result cache.
@@ -575,13 +625,27 @@ public actor PackageFreshnessChecker {
 
         let request = makeRequest(url: url)
         do {
-            let (data, response) = try await SecureURLSession.shared.data(for: request)
+            let (bytes, response) = try await SecureURLSession.shared.bytes(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return nil }
             guard httpResponse.statusCode == 200 else {
                 logger.debug("HTTP \(httpResponse.statusCode) for \(url.absoluteString)")
                 return nil
             }
-            return try JSONDecoder().decode(type, from: data)
+            let declared = httpResponse.expectedContentLength
+            guard declared <= Int64(Self.maximumRegistryResponseBytes) else {
+                logger.debug("Registry response exceeded byte ceiling for \(url.absoluteString)")
+                return nil
+            }
+            var body = PackageRegistryBodyAccumulator(
+                maximumBytes: Self.maximumRegistryResponseBytes
+            )
+            for try await byte in bytes {
+                guard body.append(byte) else {
+                    logger.debug("Registry response exceeded byte ceiling for \(url.absoluteString)")
+                    return nil
+                }
+            }
+            return try JSONDecoder().decode(type, from: body.data)
         } catch {
             logger.debug("Failed to fetch \(url.absoluteString): \(error.localizedDescription)")
             return nil

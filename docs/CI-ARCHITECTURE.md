@@ -30,20 +30,22 @@ Three independent reasons, any one of which is sufficient:
 
 ## Design principle: signing stays on the trusted Mac
 
-Unchanged, and now unconditional. Signing, notarisation, Sparkle appcast signing
-and rule-manifest signing happen only on the machine holding those identities.
-Nothing in the build or release path executes third-party-supplied code.
+Signing, notarisation, Sparkle appcast signing and rule-manifest signing happen
+only on the machine holding those identities. Dependency resolution, SwiftPM,
+package plugins, rule compilation, tests, and unsigned assembly run only after
+conventional signing/publisher variables are removed. Fixed credential-bearing
+phases do not invoke SwiftPM or dependency discovery.
 
 ## What the gate covers
 
-`scripts/ci-local.sh` — 13 checks, ~150s warm:
+`scripts/ci-local.sh` — 19 checks, ~150s warm:
 
 | Group | Checks |
 |---|---|
 | Build | `swift build`, `swift build --build-tests` |
 | Tests | full `swift test` suite |
-| Rules | YAML→JSON compile, rule lint (filter coverage) |
-| Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, secret/host-path diff scan |
+| Rules | YAML→JSON compile, rule-count consistency, rule lint (filter coverage), rule trust-anchor fixtures |
+| Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, release-dependency provenance, release supply-chain fixtures, SQLCipher provenance fixtures, secret/host-path diff scan, release-artifact lifecycle regression |
 | Assessment harness | builds, tests, and stays out of the shipped build |
 | Code quality | no force unwraps in `Sources`, no TODO/FIXME in `Sources` |
 
@@ -58,10 +60,72 @@ environment drift the way a fresh runner could. This project has been bitten by
 that class before — a poisoned `/tmp` cache, Xcode integer-literal arithmetic
 inside `#expect`, and `runner` colliding with a sanitizer reserved word.
 
-The mitigation is `--clean`, which wipes `.build` and re-resolves first.
-`.githooks/pre-push` applies it automatically to any **tag** push, so every
-release is gated on a from-scratch build even though ordinary pushes are not.
-A deliberate trade: fast feedback on commits, strict verification where it counts.
+The mitigation is `--clean`, which records the exact DMG name/SHA manifest,
+requires every member to be a non-empty regular file, renames each signed
+release DMG into a private sibling directory on the **same filesystem**, wipes
+`.build`, re-resolves, and restores only after explicit type/symlink,
+same-device, destination-absence, and whole-manifest checks. It never uses `mv`'s cross-device copy/delete fallback
+and never overwrites an existing restore target.
+`.githooks/pre-push` applies this automatically to a release-tag push and binds
+the gate to the captured source commit/tree, exact final metadata tree/commit,
+annotated tag object, committed/executing hook blob, and pre-tag DMG SHA supplied
+by `release.sh`. The hook and release-mode CI reject hidden
+`assume-unchanged`/`skip-worktree` index state, force a refresh, compare both
+tracked worktree and index, and hash every critical executor directly against
+its committed blob before and after CI. `release.sh` refuses to
+start—and checks again immediately before the tag push—unless Git's configured,
+executable hook is the versioned `.githooks/pre-push` file. Deterministic fixtures
+cover resolve failure, zero-byte artifacts, partial staging failure, device
+mismatch, staged deletion, `.build` symlink redirection, real-Git `h`/`S`
+mutations, wrong source/tree metadata, and extra metadata paths.
+
+`release.sh` also runs `ci-local.sh --clean` before constructing the artifact,
+so a later clean tag check is not asked to retroactively prove the signed bytes
+came from fresh release outputs. Release-mode CI removes the nested Assessment
+Harness build cache. Artifact construction then occurs in a private workspace
+exported directly from the captured commit's Git blob objects: it has no `.git`,
+repository-local `.swiftpm`, ignored inputs, live index, attributes, archive
+filters, or live-checkout bytes. For a GA, a private temporary index seeded from
+the exact source tree admits only `release.json` and the two casks; `commit-tree`
+creates the exact one-parent metadata commit and `update-ref` advances the branch
+atomically. RCs retain the exact source tree.
+
+After the tag gate, `release.sh` requires the restored DMG and private snapshot
+to remain non-empty, copies the validated DMG into a private random upload
+snapshot, and gives that pathname—not `.build`—to `gh`. That same snapshot is
+rehashed through appcast and every downstream publisher. It immediately
+creates a nonce-marked draft with `--verify-tag`, captures its immutable release
+ID, selects the named asset from that ID, and compares GitHub's recorded SHA-256
+with the pre-tag hash. The release flow never issues a GitHub DELETE: failed or
+ambiguous create/digest/PATCH state is retained with immutable ID/title/state
+and a manual-recovery URL. Only after digest and remote-tag verification is the
+exact draft ID published; downstream failure never rolls back that verified
+public release.
+
+Release executors are themselves committed inputs. `release.sh`, the hook, and
+CI share a drift-tested critical-path list and compare raw worktree hashes to
+the bound Git blobs. Git, signing/notarisation tools, and the GitHub CLI use
+fixed absolute paths under a system-only `PATH`; the publisher clears ambient
+GitHub repo/host overrides, requires the canonical `origin`, and explicitly
+addresses `peterhanily/maccrab` on `github.com`. A blocking deep/strict codesign
+verification seals an embedded input record containing source commit/tree,
+dependency and PyYAML hashes, provisioning-profile hash/metadata, source and
+bundled corpus hashes, and Xcode/Swift versions. `release.json` records the hash
+of that signed evidence.
+
+An RC is build-only unless `--publish-rc` is explicit. The explicit path creates
+only a non-latest GitHub prerelease and leaves production appcast,
+`release.json`, and both casks unchanged.
+
+## Local same-UID threat boundary
+
+Git/object/hash/path checks make release drift and races observable, but they do
+not sandbox malicious code already running as the release user. The same UID can
+read mode-0600 data, rewrite the checkout between checks, and request operations
+from Keychain identities authorized to that account. Releases therefore assume
+a dedicated, quiescent operator account with no concurrent editor, agent,
+package experiment, or unrelated process. A stronger boundary requires a
+separate ephemeral build identity/host plus offline or hardware-backed signing.
 
 ## Provenance: no SLSA attestation is produced
 
@@ -75,7 +139,8 @@ What MacCrab *does* provide for artifact integrity:
 
 - **Notarised, Developer-ID-signed** app, system extension and CLI binaries
 - **`release.json`** publishing the DMG SHA-256, cross-checked against the
-  Homebrew cask and formula
+  Homebrew cask and formula, plus the source commit/tree and hash of the signed
+  embedded release-input evidence
 - **Ed25519-signed rule manifests** with anti-rollback serials, verified against
   a public key pinned in the app bundle
 - **Signed plugin catalogue + revocation list** for the Rave store
@@ -97,7 +162,7 @@ and stays clean; if Actions are ever reintroduced, it resumes meaning.
 | Rule-channel private key (`rules.key`) | offline keyholder storage | **no** |
 | Rave catalogue Ed25519 private key | air-gapped, local | **no** |
 | `SITE_REPO_TOKEN` (appcast/catalog publish) | `~/.maccrab-release-env` | **no** |
-| Rule-channel public key (`rules.pub`) | committed; ships in the app bundle | n/a — public by design |
+| Rule-channel public key (`rules.pub`) | **none trusted or shipped; channel disabled** | n/a — a future owner-approved public anchor may ship only after an offline key ceremony |
 
 ## Related
 

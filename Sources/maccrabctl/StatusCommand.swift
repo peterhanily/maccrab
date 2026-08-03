@@ -54,6 +54,18 @@ extension MacCrabCtl {
             print("Database:        Not found (daemon has not run yet)")
         }
 
+        // TraceGraph can be storage-shed while the daemon, collectors and main
+        // events database stay healthy. Surface the forensic-evidence gap next
+        // to storage instead of rendering an empty graph as "no activity".
+        if daemonRunning {
+            for line in traceGraphStorageStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+            for line in traceStoreStorageStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+        }
+
         // ── Events ────────────────────────────────────────────────────────
         do {
             let eventStore = try EventStore(directory: supportDir)
@@ -168,10 +180,13 @@ extension MacCrabCtl {
         for tracesPath in candidatePaths {
             guard FileManager.default.fileExists(atPath: tracesPath) else { continue }
             do {
-                let traceStore = try TraceStore(path: tracesPath)
+                let traceStore = try TraceStore(
+                    path: tracesPath,
+                    forceReadOnly: true
+                )
                 let spanCount = (try? await traceStore.count()) ?? 0
                 if spanCount > 0 {
-                    print("Agent Traces:    \(spanCount) span(s) ingested  (\(tracesPath))")
+                    print("Agent Traces:    \(spanCount) unauthenticated/self-reported span(s) ingested  (\(tracesPath))")
                     anyTraceLine = true
                 }
             } catch {
@@ -363,5 +378,83 @@ extension MacCrabCtl {
             (json["es_sensor_degraded_detail"] as? String) ?? "",
             (json["es_copy_backpressure_dropped_total"] as? NSNumber)?.uint64Value ?? 0
         )
+    }
+
+    /// Operator-facing TraceGraph persistence status from the shared heartbeat
+    /// DTO. Kept pure apart from the bounded heartbeat read so the shipped CLI
+    /// output can be pinned with a fixture in `MacCrabCLITests`.
+    static func traceGraphStorageStatusLines(supportDir: String) -> [String] {
+        guard let storage = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .traceGraphStorageAdmission
+        else { return [] }
+
+        let unavailable = storage.blocked == true
+            || storage.storeAvailable == false
+            || storage.enabled == false
+        guard unavailable else {
+            return ["TraceGraph:      Active ✓"]
+        }
+
+        let state: String
+        if storage.startupBlocked == true {
+            state = "Paused at startup ⚠"
+        } else if storage.storeAvailable == false || storage.enabled == false {
+            state = "Persistence unavailable ⚠"
+        } else {
+            state = "Persistence paused ⚠"
+        }
+
+        let reason = storage.reason.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "reason not reported"
+        var lines = [
+            "TraceGraph:      \(state)",
+            "                 Detection continues, but new causal evidence is not being recorded (\(reason)).",
+        ]
+        if storage.startupBlocked == true {
+            lines.append("                 Free disk space or adjust the TraceGraph storage limit, then restart MacCrab.")
+        }
+        return lines
+    }
+
+    /// Operator-facing traces.db persistence state. A disabled receiver is an
+    /// intentional configuration, while an enabled-but-blocked store means new
+    /// unauthenticated/self-reported OTLP spans are being shed.
+    static func traceStoreStorageStatusLines(supportDir: String) -> [String] {
+        guard let storage = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .traceStoreStorageAdmission
+        else { return [] }
+
+        if storage.reason == "receiver_disabled",
+           storage.blocked != true {
+            return ["Agent Trace DB:  Receiver disabled"]
+        }
+
+        let unavailable = storage.blocked == true
+            || (storage.enabled == true && storage.storeAvailable == false)
+        guard unavailable else {
+            return ["Agent Trace DB:  Active ✓ (unauthenticated/self-reported OTLP)"]
+        }
+
+        let state: String
+        if storage.startupBlocked == true {
+            state = "Paused at startup ⚠"
+        } else if storage.storeAvailable == false || storage.enabled == false {
+            state = "Persistence unavailable ⚠"
+        } else {
+            state = "Persistence paused ⚠"
+        }
+
+        let reason = storage.reason.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "reason not reported"
+        var lines = [
+            "Agent Trace DB:  \(state)",
+            "                 Unauthenticated/self-reported OTLP spans are not being recorded (\(reason)); kernel detection continues.",
+        ]
+        if storage.startupBlocked == true {
+            lines.append("                 Free disk space or adjust the traces storage limit, then restart MacCrab.")
+        }
+        return lines
     }
 }

@@ -3,8 +3,223 @@
 // system extension.
 
 import Foundation
+import Darwin
+
+enum DashboardAgentCapabilityTier: String, CaseIterable, Sendable {
+    case config
+    case authoring
+    case response
+}
+
+struct DashboardAgentCapabilities: Equatable, Sendable {
+    var config = false
+    var authoring = false
+    var response = false
+
+    init(config: Bool = false, authoring: Bool = false, response: Bool = false) {
+        self.config = config
+        self.authoring = authoring
+        self.response = response
+    }
+
+    init?(dictionary: [String: Any]) {
+        guard let config = dictionary[DashboardAgentCapabilityTier.config.rawValue] as? Bool,
+              let authoring = dictionary[DashboardAgentCapabilityTier.authoring.rawValue] as? Bool,
+              let response = dictionary[DashboardAgentCapabilityTier.response.rawValue] as? Bool
+        else { return nil }
+        self.init(config: config, authoring: authoring, response: response)
+    }
+
+    func isEnabled(_ tier: DashboardAgentCapabilityTier) -> Bool {
+        switch tier {
+        case .config: return config
+        case .authoring: return authoring
+        case .response: return response
+        }
+    }
+
+    func setting(_ tier: DashboardAgentCapabilityTier, enabled: Bool) -> Self {
+        var copy = self
+        switch tier {
+        case .config: copy.config = enabled
+        case .authoring: copy.authoring = enabled
+        case .response: copy.response = enabled
+        }
+        return copy
+    }
+
+    var dictionary: [String: Any] {
+        [
+            DashboardAgentCapabilityTier.config.rawValue: config,
+            DashboardAgentCapabilityTier.authoring.rawValue: authoring,
+            DashboardAgentCapabilityTier.response.rawValue: response,
+        ]
+    }
+}
+
+enum DashboardAgentCapabilityChange: Equatable {
+    case unchanged
+    case rootGrantRequired(command: String)
+    case revoke
+}
+
+private enum DashboardAgentCapabilitiesError: Error, LocalizedError {
+    case unsafeState(String)
+    case io(String)
+    case malformed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsafeState(let detail), .io(let detail): return detail
+        case .malformed: return "Root-owned MCP capability state is malformed."
+        }
+    }
+}
 
 public enum V2DaemonControl {
+    private static let installedAgentCapabilitiesPath =
+        "/Library/Application Support/MacCrab/mcp_capabilities.json"
+    private static let maximumAgentCapabilitiesBytes: off_t = 64 * 1024
+
+    /// Load the authoritative root-owned state the MCP server trusts. Missing
+    /// state is the secure all-off default. Unsafe, unreadable, or malformed
+    /// state is an error so the dashboard never displays a fabricated local
+    /// preference as though it were an engine grant.
+    static func loadAgentCapabilities(
+        atPath path: String = installedAgentCapabilitiesPath,
+        expectedOwnerUID: uid_t = 0
+    ) throws -> DashboardAgentCapabilities {
+        var pathInfo = stat()
+        if lstat(path, &pathInfo) != 0 {
+            if errno == ENOENT { return DashboardAgentCapabilities() }
+            throw DashboardAgentCapabilitiesError.io(
+                "Cannot inspect root-owned MCP capability state (errno \(errno))."
+            )
+        }
+        guard (pathInfo.st_mode & S_IFMT) == S_IFREG,
+              pathInfo.st_uid == expectedOwnerUID,
+              pathInfo.st_nlink == 1,
+              (pathInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              pathInfo.st_size >= 0,
+              pathInfo.st_size <= maximumAgentCapabilitiesBytes
+        else {
+            throw DashboardAgentCapabilitiesError.unsafeState(
+                "Cannot trust MCP capability state: it must be a bounded, single-link, root-owned regular file that is not writable by other users."
+            )
+        }
+
+        // O_NONBLOCK keeps a raced FIFO/device from hanging the dashboard;
+        // O_NOFOLLOW refuses a raced symlink. Verify the opened inode against
+        // lstat before consuming any bytes.
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw DashboardAgentCapabilitiesError.io(
+                "Cannot open root-owned MCP capability state (errno \(errno))."
+            )
+        }
+        defer { close(fd) }
+
+        var openedInfo = stat()
+        guard fstat(fd, &openedInfo) == 0,
+              (openedInfo.st_mode & S_IFMT) == S_IFREG,
+              openedInfo.st_uid == expectedOwnerUID,
+              openedInfo.st_nlink == 1,
+              openedInfo.st_dev == pathInfo.st_dev,
+              openedInfo.st_ino == pathInfo.st_ino,
+              (openedInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              openedInfo.st_size >= 0,
+              openedInfo.st_size <= maximumAgentCapabilitiesBytes
+        else {
+            throw DashboardAgentCapabilitiesError.unsafeState(
+                "MCP capability state changed or failed validation while opening."
+            )
+        }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4 * 1024)
+        while true {
+            let remaining = Int(maximumAgentCapabilitiesBytes) - data.count + 1
+            guard remaining > 0 else { throw DashboardAgentCapabilitiesError.malformed }
+            let requested = min(buffer.count, remaining)
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(fd, $0.baseAddress, requested)
+            }
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw DashboardAgentCapabilitiesError.io(
+                    "Cannot read root-owned MCP capability state (errno \(errno))."
+                )
+            }
+            data.append(contentsOf: buffer[0..<count])
+            if data.count > Int(maximumAgentCapabilitiesBytes) {
+                throw DashboardAgentCapabilitiesError.malformed
+            }
+        }
+
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = DashboardAgentCapabilities(dictionary: object)
+        else { throw DashboardAgentCapabilitiesError.malformed }
+        return state
+    }
+
+    /// Pure dashboard policy: a non-root UI has no grant transition. An OFF→ON
+    /// gesture is reverted and translated into the exact root-authorized CLI
+    /// instruction; ON→OFF is the only mutation it may queue.
+    static func dashboardAgentCapabilityChange(
+        tier: DashboardAgentCapabilityTier,
+        currentState: DashboardAgentCapabilities,
+        requestedEnabled: Bool
+    ) -> DashboardAgentCapabilityChange {
+        let current = currentState.isEnabled(tier)
+        guard requestedEnabled != current else { return .unchanged }
+        if requestedEnabled {
+            return .rootGrantRequired(
+                command: "sudo maccrabctl agent-capabilities set \(tier.rawValue) on"
+            )
+        }
+        return .revoke
+    }
+
+    /// Re-read the authoritative state immediately before queuing a revocation,
+    /// then preserve the other two installed grants. The daemon independently
+    /// enforces that this non-root request contains no false→true transition.
+    @discardableResult
+    static func queueAgentCapabilityRevocation(_ tier: DashboardAgentCapabilityTier) -> Bool {
+        guard let inboxDir = resolveInboxDir(),
+              let current = try? loadAgentCapabilities()
+        else { return false }
+        guard current.isEnabled(tier) else { return true }
+        return writeAgentCapabilityRevocationRequest(
+            inboxDir: inboxDir,
+            tier: tier,
+            currentState: current
+        )
+    }
+
+    /// Testable request writer. It can only force the selected tier OFF; it has
+    /// no API capable of constructing a dashboard grant.
+    static func writeAgentCapabilityRevocationRequest(
+        inboxDir: String,
+        tier: DashboardAgentCapabilityTier,
+        currentState: DashboardAgentCapabilities
+    ) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        var payload = currentState.setting(tier, enabled: false).dictionary
+        payload["queuedAt"] = ISO8601DateFormatter().string(from: Date())
+        payload["requester"] = "MacCrabApp"
+        payload["requestedTransition"] = "revoke"
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys]
+        ) else { return false }
+        let path = inboxDir + "/set-agent-capabilities-\(UUID().uuidString).json"
+        return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
+    }
+
     /// Ask the detection engine to reload its rules.
     ///
     /// The release engine is the System Extension, which runs as **root**.
@@ -54,8 +269,8 @@ public enum V2DaemonControl {
     /// URL-hardens before persisting. Cloud API KEYS are NOT sent here (a
     /// uid-501 file steering a root process's outbound URL + keys is an
     /// SSRF/exfil surface) — only provider, URLs, model names, and the
-    /// agentic flag travel this channel; keys travel via the shared
-    /// keychain. Returns true if the request was queued.
+    /// non-secret enable flag travel this channel; keys travel via the shared
+    /// Keychain. Returns true if the request was queued.
     @discardableResult
     public static func sendLLMConfig(_ config: [String: Any]) -> Bool {
         guard let inboxDir = resolveInboxDir() else { return false }

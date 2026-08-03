@@ -6,16 +6,13 @@
 // and arbitrary-path traversal in PackageContentAnalyzer /
 // PromptIntentBridge.
 //
-// All public helpers:
-//   - Use POSIX open(2) directly with O_NOFOLLOW (refuse-on-symlink)
-//     and O_CLOEXEC (no leaked fd's into child processes).
-//   - For writes, also add O_EXCL — refuses to clobber an existing
-//     file. Defeats the "win the race + plant a symlink" TOCTOU
-//     vector against the existence check that FileManager.fileExists
-//     leaves wide open.
-//   - For reads, also enforce a caller-supplied scope prefix —
-//     a path that's outside the scope after symlink-free
-//     `realpath` resolution is rejected.
+// All public reads and writes resolve every path component relative to an
+// already-open directory descriptor. Final-component O_NOFOLLOW alone is not
+// enough: a privileged caller can otherwise be redirected through a raced
+// intermediate symlink. Writes stage complete bytes in a same-directory
+// private temporary and publish with renameatx_np(RENAME_EXCL), so observers
+// never see a partially-written destination and an existing name is never
+// clobbered by atomicCreate.
 
 import Foundation
 import Darwin
@@ -71,13 +68,12 @@ public enum SecureFileIO {
         return normalizedPath.hasPrefix(scopeWithSlash)
     }
 
-    /// Best-effort canonical form. Resolves symlinks when the path
-    /// already exists on disk (read operations / extant dirs) but
-    /// falls back to lexical standardization when the path doesn't
-    /// exist yet (atomicCreate target file). The lexical fallback is
-    /// still safer than the pre-fix code because writes use O_NOFOLLOW
-    /// at the final component AND fail with EEXIST if a symlink-target
-    /// file already exists.
+    /// Best-effort canonical form for the preliminary scope decision. Resolves
+    /// symlinks when the full path exists and falls back to lexical
+    /// standardization when it does not. This check is never the carrier
+    /// boundary: the subsequent reader/writer independently walks every
+    /// component with descriptor-relative O_NOFOLLOW, so a fallback or race
+    /// cannot turn an intermediate symlink into a scope escape.
     private static func realpathOrStandardize(_ p: String) -> String {
         let resolved = p.withCString { cpath -> String? in
             guard let buf = realpath(cpath, nil) else { return nil }
@@ -90,48 +86,394 @@ public enum SecureFileIO {
 
     // MARK: - Writes
 
-    /// Write `data` to `path` atomically, refusing to clobber, refusing
-    /// to follow symlinks, with the chosen POSIX mode. Throws
-    /// `SecureFileIO.Error` on failure.
+    private struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+
+        init(_ metadata: stat) {
+            device = metadata.st_dev
+            inode = metadata.st_ino
+        }
+
+        func matches(_ metadata: stat) -> Bool {
+            device == metadata.st_dev && inode == metadata.st_ino
+        }
+    }
+
+    /// Write `data` to `path` atomically, refusing to clobber and refusing
+    /// symlinks at every component. Complete bytes are fsync'd in a private
+    /// same-directory temporary before exclusive publication.
     /// Use mode 0o400 for credential-shaped bait, 0o600 for
     /// MacCrab-private state, 0o644 for user-visible bait files.
     public static func atomicCreate(at path: String, data: Data, mode: mode_t) throws {
-        // Open with O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC.
-        // O_EXCL means "fail if file exists" — TOCTOU-safe; the kernel
-        // does the existence check + creation atomically.
-        // O_NOFOLLOW means "fail if the path is a symlink" — defeats
-        // the "plant a symlink at the target" attack.
-        let fd = path.withCString { cpath -> Int32 in
-            return open(cpath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
-        }
-        guard fd >= 0 else {
-            switch errno {
-            case EEXIST: throw Error.fileAlreadyExists(path: path)
-            case ELOOP:  throw Error.symlinkRefused(path: path)
-            default:     throw Error.openFailed(path: path, errno: errno)
-            }
-        }
-        defer { close(fd) }
+        try atomicWrite(
+            at: path,
+            data: data,
+            mode: mode,
+            replaceExisting: false,
+            afterDirectoryOpened: nil
+        )
+    }
 
-        try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) throws in
+    /// Atomic replacement for MacCrab-owned state. An existing destination
+    /// must be a single-link regular file owned by the effective uid; a
+    /// symlink, hard link, foreign-owned file, or non-regular carrier fails
+    /// closed. Absent destinations retain exclusive-create semantics.
+    public static func atomicReplace(at path: String, data: Data, mode: mode_t) throws {
+        try atomicWrite(
+            at: path,
+            data: data,
+            mode: mode,
+            replaceExisting: true,
+            afterDirectoryOpened: nil
+        )
+    }
+
+    /// Internal race seam used only by adversarial tests. Production callers
+    /// use the public overload above.
+    static func atomicCreate(
+        at path: String,
+        data: Data,
+        mode: mode_t,
+        afterDirectoryOpened: @escaping (String, Int32) -> Void
+    ) throws {
+        try atomicWrite(
+            at: path,
+            data: data,
+            mode: mode,
+            replaceExisting: false,
+            afterDirectoryOpened: afterDirectoryOpened
+        )
+    }
+
+    private static func atomicWrite(
+        at path: String,
+        data: Data,
+        mode: mode_t,
+        replaceExisting: Bool,
+        afterDirectoryOpened: ((String, Int32) -> Void)?
+    ) throws {
+        guard mode & ~mode_t(0o7777) == 0 else {
+            throw Error.writeFailed(path: path, errno: EINVAL)
+        }
+
+        try withParentDirectory(
+            of: path,
+            afterDirectoryOpened: afterDirectoryOpened
+        ) { parentDescriptor, leaf, normalizedPath in
+            var parentMetadata = stat()
+            guard Darwin.fstat(parentDescriptor, &parentMetadata) == 0 else {
+                throw Error.openFailed(path: path, errno: errno)
+            }
+            let expectedParent = FileIdentity(parentMetadata)
+
+            let temporaryLeaf = ".maccrab-write-\(UUID().uuidString).tmp"
+            let temporaryDescriptor = temporaryLeaf.withCString {
+                Darwin.openat(
+                    parentDescriptor,
+                    $0,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    mode_t(0o600)
+                )
+            }
+            guard temporaryDescriptor >= 0 else {
+                throw openError(path: path, code: errno)
+            }
+
+            var descriptorOpen = true
+            var temporaryExists = true
+            defer {
+                if descriptorOpen { Darwin.close(temporaryDescriptor) }
+                if temporaryExists {
+                    temporaryLeaf.withCString {
+                        _ = Darwin.unlinkat(parentDescriptor, $0, 0)
+                    }
+                }
+            }
+
+            guard Darwin.fchmod(temporaryDescriptor, mode) == 0 else {
+                throw Error.writeFailed(path: path, errno: errno)
+            }
+            try writeAll(data, descriptor: temporaryDescriptor, path: path)
+            guard Darwin.fsync(temporaryDescriptor) == 0 else {
+                throw Error.writeFailed(path: path, errno: errno)
+            }
+
+            var temporaryMetadata = stat()
+            guard Darwin.fstat(temporaryDescriptor, &temporaryMetadata) == 0,
+                  (temporaryMetadata.st_mode & S_IFMT) == S_IFREG,
+                  temporaryMetadata.st_nlink == 1,
+                  temporaryMetadata.st_size == off_t(data.count) else {
+                throw Error.writeFailed(path: path, errno: EIO)
+            }
+            let temporaryIdentity = FileIdentity(temporaryMetadata)
+            // Surface delayed close errors before publication, while the
+            // private temporary can still be removed without changing the
+            // destination contract.
+            guard Darwin.close(temporaryDescriptor) == 0 else {
+                descriptorOpen = false
+                throw Error.writeFailed(path: path, errno: errno)
+            }
+            descriptorOpen = false
+
+            let existingIdentity = try destinationIdentity(
+                parentDescriptor: parentDescriptor,
+                leaf: leaf,
+                path: path,
+                allowExisting: replaceExisting
+            )
+            guard parentStillMatches(
+                normalizedPath: normalizedPath,
+                expected: expectedParent
+            ) else {
+                throw Error.openFailed(path: path, errno: ESTALE)
+            }
+
+            let publicationStatus: Int32
+            if let existingIdentity {
+                // Revalidate immediately before replacement. renameat replaces
+                // the directory entry itself and never follows a leaf symlink.
+                guard destinationStillMatches(
+                    parentDescriptor: parentDescriptor,
+                    leaf: leaf,
+                    expected: existingIdentity
+                ) else {
+                    throw Error.openFailed(path: path, errno: ESTALE)
+                }
+                publicationStatus = temporaryLeaf.withCString { temporaryName in
+                    leaf.withCString { destinationName in
+                        Darwin.renameat(
+                            parentDescriptor,
+                            temporaryName,
+                            parentDescriptor,
+                            destinationName
+                        )
+                    }
+                }
+            } else {
+                publicationStatus = temporaryLeaf.withCString { temporaryName in
+                    leaf.withCString { destinationName in
+                        Darwin.renameatx_np(
+                            parentDescriptor,
+                            temporaryName,
+                            parentDescriptor,
+                            destinationName,
+                            UInt32(RENAME_EXCL)
+                        )
+                    }
+                }
+            }
+            guard publicationStatus == 0 else {
+                if errno == EEXIST {
+                    throw Error.fileAlreadyExists(path: path)
+                }
+                throw openError(path: path, code: errno)
+            }
+            temporaryExists = false
+
+            guard namedFileStillMatches(
+                parentDescriptor: parentDescriptor,
+                leaf: leaf,
+                expected: temporaryIdentity
+            ), parentStillMatches(
+                normalizedPath: normalizedPath,
+                expected: expectedParent
+            ) else {
+                // Exclusive creation can be rolled back without risking an
+                // unrelated inode. Replacement has already committed and is
+                // intentionally left intact rather than attempting a lossy
+                // rollback of the old contents.
+                if !replaceExisting {
+                    unlinkNamedFileIfOwned(
+                        parentDescriptor: parentDescriptor,
+                        leaf: leaf,
+                        expected: temporaryIdentity
+                    )
+                }
+                throw Error.writeFailed(path: path, errno: ESTALE)
+            }
+
+            // Directory fsync is best-effort because publication has already
+            // committed; reporting a failure as "not created" would invite a
+            // destructive retry against the now-existing name.
+            _ = Darwin.fsync(parentDescriptor)
+        }
+    }
+
+    private static func writeAll(
+        _ data: Data,
+        descriptor: Int32,
+        path: String
+    ) throws {
+        try data.withUnsafeBytes { buffer in
             guard let baseAddress = buffer.baseAddress else { return }
-            var remaining = buffer.count
-            var ptr = baseAddress
-            while remaining > 0 {
-                let written = write(fd, ptr, remaining)
-                if written < 0 {
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    buffer.count - offset
+                )
+                if count < 0 {
                     if errno == EINTR { continue }
                     throw Error.writeFailed(path: path, errno: errno)
                 }
-                if written == 0 { break }
-                remaining -= written
-                ptr = ptr.advanced(by: written)
+                guard count > 0 else {
+                    throw Error.writeFailed(path: path, errno: EIO)
+                }
+                offset += count
             }
         }
+    }
 
-        // Force POSIX mode after write — open's mode arg can be masked
-        // by umask; fchmod() ensures we get exactly what we asked for.
-        _ = fchmod(fd, mode)
+    private static func destinationIdentity(
+        parentDescriptor: Int32,
+        leaf: String,
+        path: String,
+        allowExisting: Bool
+    ) throws -> FileIdentity? {
+        var metadata = stat()
+        let status = leaf.withCString {
+            Darwin.fstatat(
+                parentDescriptor,
+                $0,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        if status != 0 {
+            if errno == ENOENT { return nil }
+            throw openError(path: path, code: errno)
+        }
+        guard allowExisting else {
+            throw Error.fileAlreadyExists(path: path)
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_nlink == 1,
+              metadata.st_uid == geteuid() else {
+            throw Error.symlinkRefused(path: path)
+        }
+        return FileIdentity(metadata)
+    }
+
+    private static func destinationStillMatches(
+        parentDescriptor: Int32,
+        leaf: String,
+        expected: FileIdentity
+    ) -> Bool {
+        var metadata = stat()
+        return leaf.withCString {
+            Darwin.fstatat(
+                parentDescriptor,
+                $0,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        } == 0
+            && (metadata.st_mode & S_IFMT) == S_IFREG
+            && metadata.st_nlink == 1
+            && metadata.st_uid == geteuid()
+            && expected.matches(metadata)
+    }
+
+    private static func namedFileStillMatches(
+        parentDescriptor: Int32,
+        leaf: String,
+        expected: FileIdentity
+    ) -> Bool {
+        var metadata = stat()
+        return leaf.withCString {
+            Darwin.fstatat(
+                parentDescriptor,
+                $0,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        } == 0
+            && (metadata.st_mode & S_IFMT) == S_IFREG
+            && metadata.st_nlink == 1
+            && expected.matches(metadata)
+    }
+
+    private static func unlinkNamedFileIfOwned(
+        parentDescriptor: Int32,
+        leaf: String,
+        expected: FileIdentity
+    ) {
+        guard namedFileStillMatches(
+            parentDescriptor: parentDescriptor,
+            leaf: leaf,
+            expected: expected
+        ) else { return }
+        leaf.withCString { _ = Darwin.unlinkat(parentDescriptor, $0, 0) }
+    }
+
+    private static func parentStillMatches(
+        normalizedPath: String,
+        expected: FileIdentity
+    ) -> Bool {
+        (try? withParentDirectory(of: normalizedPath) {
+            parentDescriptor, _, _ in
+            var metadata = stat()
+            return Darwin.fstat(parentDescriptor, &metadata) == 0
+                && expected.matches(metadata)
+        }) == true
+    }
+
+    private static func withParentDirectory<T>(
+        of path: String,
+        afterDirectoryOpened: ((String, Int32) -> Void)? = nil,
+        _ body: (Int32, String, String) throws -> T
+    ) throws -> T {
+        guard let normalizedPath = BoundedRegularFileReader.normalizedAbsolutePath(path) else {
+            throw Error.openFailed(path: path, errno: EINVAL)
+        }
+        let components = normalizedPath
+            .dropFirst()
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let leaf = components.last, !leaf.isEmpty else {
+            throw Error.openFailed(path: path, errno: EINVAL)
+        }
+
+        var directoryDescriptor = Darwin.open(
+            "/",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard directoryDescriptor >= 0 else {
+            throw openError(path: path, code: errno)
+        }
+        defer { Darwin.close(directoryDescriptor) }
+
+        var openedPath = ""
+        for component in components.dropLast() {
+            let nextDescriptor = component.withCString {
+                Darwin.openat(
+                    directoryDescriptor,
+                    $0,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+            }
+            guard nextDescriptor >= 0 else {
+                throw openError(path: path, code: errno)
+            }
+            Darwin.close(directoryDescriptor)
+            directoryDescriptor = nextDescriptor
+            openedPath += "/\(component)"
+            afterDirectoryOpened?(openedPath, directoryDescriptor)
+        }
+        return try body(directoryDescriptor, leaf, normalizedPath)
+    }
+
+    private static func openError(path: String, code: Int32) -> Error {
+        switch code {
+        case ELOOP, ENOTDIR:
+            return .symlinkRefused(path: path)
+        case EEXIST:
+            return .fileAlreadyExists(path: path)
+        default:
+            return .openFailed(path: path, errno: code)
+        }
     }
 
     // MARK: - Reads
@@ -140,39 +482,32 @@ public enum SecureFileIO {
     /// Optionally enforce `scope` — the path must be inside scope after
     /// normalization, or `pathOutsideScope` is thrown.
     public static func readBytes(at path: String, maxBytes: Int, scope: String? = nil) throws -> Data {
+        guard maxBytes >= 0 else {
+            throw Error.readFailed(path: path, errno: EINVAL)
+        }
         if let scope, !isPathInScope(path, scope: scope) {
             throw Error.pathOutsideScope(path: path, scope: scope)
         }
-        let fd = path.withCString { cpath -> Int32 in
-            return open(cpath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        switch BoundedRegularFileReader.readPrefixOutcome(
+            at: path,
+            maximumBytes: maxBytes
+        ) {
+        case .success(let snapshot):
+            return snapshot.data
+        case .rejected(.notFound):
+            throw Error.openFailed(path: path, errno: ENOENT)
+        case .rejected(.inaccessible):
+            throw Error.openFailed(path: path, errno: EACCES)
+        case .rejected(.unsafeCarrier):
+            throw Error.symlinkRefused(path: path)
+        case .rejected(.invalidRequest):
+            throw Error.readFailed(path: path, errno: EINVAL)
+        case .rejected(.oversized):
+            // Prefix mode never rejects solely because the full file is larger.
+            throw Error.readFailed(path: path, errno: EFBIG)
+        case .rejected(.changedDuringRead), .rejected(.ioFailure):
+            throw Error.readFailed(path: path, errno: EIO)
         }
-        guard fd >= 0 else {
-            switch errno {
-            case ELOOP: throw Error.symlinkRefused(path: path)
-            default:    throw Error.openFailed(path: path, errno: errno)
-            }
-        }
-        defer { close(fd) }
-
-        var buffer = Data(count: maxBytes)
-        let actuallyRead = buffer.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> Int in
-            guard let base = raw.baseAddress else { return -1 }
-            var total = 0
-            while total < maxBytes {
-                let n = read(fd, base.advanced(by: total), maxBytes - total)
-                if n < 0 {
-                    if errno == EINTR { continue }
-                    return -1
-                }
-                if n == 0 { break } // EOF
-                total += n
-            }
-            return total
-        }
-        if actuallyRead < 0 {
-            throw Error.readFailed(path: path, errno: errno)
-        }
-        return buffer.prefix(actuallyRead)
     }
 
     /// Returns true if `path` is a regular file (no symlinks followed)
@@ -180,9 +515,10 @@ public enum SecureFileIO {
     /// FileManager.fileExists — which follows symlinks.
     public static func isSafeRegularFile(at path: String, scope: String? = nil) -> Bool {
         if let scope, !isPathInScope(path, scope: scope) { return false }
-        var st = stat()
-        let result = path.withCString { lstat($0, &st) }
-        guard result == 0 else { return false }
-        return (st.st_mode & S_IFMT) == S_IFREG
+        guard case .success = BoundedRegularFileReader.readPrefixOutcome(
+            at: path,
+            maximumBytes: 0
+        ) else { return false }
+        return true
     }
 }

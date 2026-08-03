@@ -1,0 +1,11 @@
+# Checked provenance for MacCrab's only SQLite/SQLCipher implementation.
+# This file is data and must never be shell-sourced.
+format_version=1
+upstream_repository=https://github.com/sqlcipher/sqlcipher
+upstream_tag=v4.16.0
+upstream_commit=e2a6040f2ae5cfff2b3e08eb3320007d93cdf3fc
+sqlcipher_version=4.16.0
+sqlite_version=3.53.1
+sqlite_source_id=c88b22011a54b4f6fbd149e9f8e4de77658ce58143a1af0e3785e4e64751alt1
+sqlite3_c_sha256=0c8371853e124f20bb7728368559fe743ac3d1f0b97d317ba68b70bfe802bcb2
+sqlite3_h_sha256=126a6cdd1a2b2b3f47ec1952defc8e2434ebecfa239f917463e11fdffcfe16dd

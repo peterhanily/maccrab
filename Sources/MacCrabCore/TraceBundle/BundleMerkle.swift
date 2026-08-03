@@ -40,6 +40,20 @@ import CryptoKit
 
 public enum BundleMerkle {
 
+    public enum ComputationError: Error, LocalizedError, Equatable {
+        case cannotEnumerate(String)
+        case enumerationFailed(path: String, detail: String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .cannotEnumerate(let path):
+                return "cannot enumerate bundle for Merkle computation: \(path)"
+            case .enumerationFailed(let path, let detail):
+                return "bundle enumeration failed at \(path): \(detail)"
+            }
+        }
+    }
+
     /// Result of computing the Merkle root for a bundle directory.
     public struct Computation: Sendable, Equatable {
         public let merkleRoot: String          // lowercase hex
@@ -50,31 +64,89 @@ public enum BundleMerkle {
     /// hash list + the resulting Merkle root.
     public static func compute(forBundleAt directory: URL) throws -> Computation {
         var artifacts: [HashChainArtifact.ArtifactHash] = []
+        var enumerationFailure: (URL, Swift.Error)?
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles],
+            errorHandler: { url, error in
+                enumerationFailure = (url, error)
+                return false
+            }
         ) else {
-            return Computation(merkleRoot: reduce([]), artifacts: [])
+            throw ComputationError.cannotEnumerate(directory.path)
         }
 
         for case let url as URL in enumerator {
             let resources = try url.resourceValues(forKeys: [.isRegularFileKey])
             guard resources.isRegularFile == true else { continue }
-            // Skip integrity/* artifacts — they are derived FROM this list.
-            if url.pathComponents.contains("integrity") {
+            let relative = try BundleArtifactPathPolicy.relativePath(of: url, under: directory)
+            // Skip only the bundle-root integrity namespace: those artifacts
+            // are derived FROM this list.  Looking at absolute path components
+            // made `/tmp/integrity/bundle` hash an empty artifact set and also
+            // left arbitrary nested `payload/integrity/*` files unsigned.
+            if BundleArtifactPathPolicy.isRootIntegrityArtifact(relativePath: relative) {
                 continue
             }
             let data = try Data(contentsOf: url)
             let digest = SHA256.hash(data: data)
             let hex = digest.map { String(format: "%02x", $0) }.joined()
-            let relative = relativePath(of: url, under: directory)
             artifacts.append(HashChainArtifact.ArtifactHash(path: relative, sha256: hex))
+        }
+        if let (url, error) = enumerationFailure {
+            throw ComputationError.enumerationFailed(
+                path: url.path,
+                detail: error.localizedDescription
+            )
         }
 
         artifacts.sort { $0.path < $1.path }
         let root = reduce(artifacts.map { $0.sha256 })
         return Computation(merkleRoot: root, artifacts: artifacts)
+    }
+
+    /// Verifier-side computation over the resolver's captured byte snapshot.
+    /// Never reopen `bundleDirectory`: another process with the same uid can
+    /// mutate a mode-0700 temporary tree after resolution.
+    public static func compute(
+        resolvedBundle resolution: SafeTraceBundleResolver.Resolution
+    ) -> Computation {
+        let artifacts = resolution
+            .snapshotArtifacts(excludingRootIntegrity: true)
+            .map { artifact in
+                let digest = SHA256.hash(data: artifact.data)
+                let hex = digest.map { String(format: "%02x", $0) }.joined()
+                return HashChainArtifact.ArtifactHash(
+                    path: artifact.path,
+                    sha256: hex
+                )
+            }
+        return Computation(
+            merkleRoot: reduce(artifacts.map(\.sha256)),
+            artifacts: artifacts
+        )
+    }
+
+    /// Export-side computation over a descriptor-pinned immutable snapshot.
+    /// The workspace has already rejected missing, additional, linked, special,
+    /// replaced, oversized, or concurrently-mutated entries. Keeping this
+    /// overload separate from verifier path traversal prevents a raced export
+    /// root from redirecting the bytes that are signed.
+    static func compute(
+        exportArtifacts: [BundleExportWorkspace.Artifact]
+    ) -> Computation {
+        let artifacts = exportArtifacts.map { artifact in
+            let digest = SHA256.hash(data: artifact.data)
+            let hex = digest.map { String(format: "%02x", $0) }.joined()
+            return HashChainArtifact.ArtifactHash(
+                path: artifact.path,
+                sha256: hex
+            )
+        }.sorted { $0.path < $1.path }
+        return Computation(
+            merkleRoot: reduce(artifacts.map { $0.sha256 }),
+            artifacts: artifacts
+        )
     }
 
     /// Domain-separated, leaf-count-bound SHA-256 reduction (v2). Public
@@ -135,17 +207,6 @@ public enum BundleMerkle {
         return d
     }
 
-    private static func relativePath(of url: URL, under root: URL) -> String {
-        // Use URL.standardizedFileURL to dodge /var ↔ /private/var
-        // symlink resolution differences on macOS.
-        let standardizedURL = url.standardizedFileURL.path
-        let standardizedRoot = root.standardizedFileURL.path
-        let rootPath = standardizedRoot.hasSuffix("/") ? standardizedRoot : standardizedRoot + "/"
-        if standardizedURL.hasPrefix(rootPath) {
-            return String(standardizedURL.dropFirst(rootPath.count))
-        }
-        return url.lastPathComponent
-    }
 }
 
 // MARK: - Hex helper (file-private to avoid clashing with the one in BundleExporter)

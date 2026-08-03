@@ -14,10 +14,66 @@
 
 import Testing
 import Foundation
+import Security
 @testable import MacCrabCore
 
 @Suite("DatabaseEncryption (v1.8.1: AES-GCM)")
 struct DatabaseEncryptionTests {
+
+    @Test("Keychain persistence failure never enables an ephemeral encryption key")
+    func persistenceFailureDisablesEncryptedWrites() {
+        let enc = DatabaseEncryption(
+            enabled: true,
+            keyLoader: { nil },
+            keySaver: { _ in errSecInteractionNotAllowed },
+            keyGenerator: { Data(repeating: 0xA5, count: 32) }
+        )
+        #expect(enc.encryptionWasRequested)
+        #expect(!enc.isEnabled)
+        #expect(enc.keyPersistenceFailureStatus == errSecInteractionNotAllowed)
+    }
+
+    @Test("Persisted key survives a reconstructed encryption instance")
+    func persistedKeySurvivesRestart() {
+        final class KeyBox: @unchecked Sendable {
+            var value: Data?
+        }
+        let box = KeyBox()
+        let writer = DatabaseEncryption(
+            enabled: true,
+            keyLoader: { box.value },
+            keySaver: { key in box.value = key; return errSecSuccess },
+            keyGenerator: { Data(repeating: 0x3C, count: 32) }
+        )
+        #expect(writer.isEnabled)
+        let ciphertext = writer.encrypt("survives restart")
+
+        let reconstructed = DatabaseEncryption(
+            enabled: true,
+            keyLoader: { box.value },
+            keySaver: { _ in Issue.record("existing key should not be saved again"); return errSecParam },
+            keyGenerator: { Issue.record("existing key should not be regenerated"); return Data() }
+        )
+        #expect(reconstructed.isEnabled)
+        #expect(reconstructed.decrypt(ciphertext, expectingEncrypted: true) == "survives restart")
+    }
+
+    @Test("Daemon constructs one encryption instance and gates every encrypted store")
+    func daemonEncryptionWiringCannotDrift() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonSetup.swift"),
+            encoding: .utf8
+        )
+        #expect(source.components(separatedBy: "DatabaseEncryption(enabled:").count - 1 == 1)
+        #expect(!source.contains("earlyDbEncryption"))
+        #expect(source.components(separatedBy: "DatabaseEncryptionAvailabilityError.persistentKeyUnavailable").count - 1 >= 2)
+        #expect(source.contains("preserving the existing store and refusing plaintext/ephemeral-key writes"))
+    }
 
     @Test("v2 round-trip preserves the original plaintext")
     func v2RoundTrip() async throws {
@@ -105,12 +161,21 @@ struct DatabaseEncryptionTests {
         body = body.replacingCharacters(in: mid...mid, with: bad)
         let tampered = prefix + body
 
+        let before = enc.authenticatedDecryptFailures
         let result = enc.decrypt(tampered)
         // Tamper detection: result is NOT the original plaintext.
-        // Two acceptable outcomes: passthrough (returns the tampered
-        // string verbatim) OR the b64 doesn't decode. Either way, the
-        // attacker can't produce the original.
         #expect(result != original)
+        #expect(enc.authenticatedDecryptFailures == before + 1)
+    }
+
+    @Test("Malformed ENC2 base64 cannot bypass the tamper counter")
+    func malformedV2EnvelopeIsDetected() async throws {
+        let enc = DatabaseEncryption(enabled: true)
+        let malformed = "ENC2:not/base64!!!"
+        let before = enc.authenticatedDecryptFailures
+
+        #expect(enc.decrypt(malformed, expectingEncrypted: true) == malformed)
+        #expect(enc.authenticatedDecryptFailures == before + 1)
     }
 
     @Test("Multiple encrypts of same plaintext produce different ciphertexts")

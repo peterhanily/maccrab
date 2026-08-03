@@ -23,6 +23,7 @@
 import Foundation
 import CSQLCipher
 import CryptoKit
+import MacCrabCore
 
 public struct MailLitePlugin: Collector {
 
@@ -156,7 +157,11 @@ public struct MailLitePlugin: Collector {
         now: Date
     ) async throws -> (committed: Int, rejected: Int) {
         var db: OpaquePointer?
-        let rc = sqlite3_open_v2(snapshotPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        let rc = SQLiteOpenPathPolicy.open(
+            snapshotPath,
+            database: &db,
+            flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        )
         guard rc == SQLITE_OK, let h = db else {
             if let h = db { sqlite3_close(h) }
             return (0, 0)

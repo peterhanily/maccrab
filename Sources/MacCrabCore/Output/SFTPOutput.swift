@@ -121,37 +121,52 @@ public actor SFTPOutput: Output {
         }
         defer { try? FileManager.default.removeItem(atPath: batchPath) }
 
-        // Run sftp with strict host checking.
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        proc.arguments = [
+        // Run sftp with strict host checking. Preserve the account's fixed
+        // home-directory lookup for its known_hosts file, but inherit no
+        // process environment or SSH agent socket.
+        let sftpEnvironment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "TMPDIR": "/private/tmp",
+            "LANG": "C",
+            "LC_ALL": "C",
+        ]
+        let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/sftp",
+            arguments: [
             "-b", batchPath,
             "-i", privateKeyPath,
             "-o", "StrictHostKeyChecking=yes",
             "-o", "BatchMode=yes",
             "-P", String(port),
             "\(user)@\(host)",
-        ]
-        proc.standardOutput = FileHandle.nullDevice
-        let errPipe = Pipe()
-        proc.standardError = errPipe
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            if proc.terminationStatus == 0 {
-                stats.sent += count
-                stats.lastSentAt = Date()
+            ],
+            environment: sftpEnvironment,
+            timeout: 60,
+            maximumOutputBytes: 64 * 1_024
+        )
+        if result?.succeeded == true {
+            stats.sent += count
+            stats.lastSentAt = Date()
+        } else {
+            let status = result?.terminationStatus ?? -1
+            let detail: String
+            if result?.timedOut == true {
+                detail = "sftp timed out"
+            } else if result?.outputLimitExceeded == true {
+                detail = "sftp diagnostic output exceeded 65536 bytes"
+            } else if let output = result?.output,
+                      let message = String(data: output, encoding: .utf8),
+                      !message.isEmpty {
+                detail = message
+            } else if result == nil {
+                detail = "sftp could not be launched"
             } else {
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let errMsg = String(data: errData, encoding: .utf8) ?? "status \(proc.terminationStatus)"
-                stats.failed += count
-                stats.lastError = String(errMsg.prefix(200))
-                logger.error("sftp failed (status \(proc.terminationStatus)): \(String(errMsg.prefix(200)))")
+                detail = "status \(status)"
             }
-        } catch {
             stats.failed += count
-            stats.lastError = error.localizedDescription
-            logger.error("sftp spawn failed: \(error.localizedDescription)")
+            stats.lastError = String(detail.prefix(200))
+            logger.error("sftp failed (status \(status)): \(String(detail.prefix(200)))")
         }
     }
 }

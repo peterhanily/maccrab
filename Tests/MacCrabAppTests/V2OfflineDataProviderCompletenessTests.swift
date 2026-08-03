@@ -35,6 +35,7 @@ struct V2OfflineDataProviderCompletenessTests {
         #expect(p.mode == .offline)
         #expect(p.lastErrorDescription == nil)
         #expect(p.dataDir == nil)
+        #expect(p.browserInventoryCoverage == nil)
     }
 
     @Test("EVERY collection accessor returns exactly empty (count == 0)")
@@ -131,7 +132,7 @@ struct V2OfflineDataProviderCompletenessTests {
         // self-documenting "nothing missing" half of Issue 2.
         let coveredRequirements: Set<String> = [
             // properties
-            "mode", "lastErrorDescription", "dataDir",
+            "mode", "lastErrorDescription", "dataDir", "browserInventoryCoverage",
             // read collections
             "alerts(since:limit:)", "events(limit:)", "campaigns(since:limit:)",
             "traces(limit:)", "agentSessions(limit:)", "rules()",
@@ -148,11 +149,11 @@ struct V2OfflineDataProviderCompletenessTests {
         ]
         // The count is pinned: any drift (add/remove) is a visible diff that
         // forces the maintainer back to this file. As of the V2DataProvider
-        // protocol at the time of writing, there are 32 covered members
-        // (3 properties + 18 read accessors + 11 mutations — counting
+        // protocol at the time of writing, there are 33 covered members
+        // (4 properties + 18 read accessors + 11 mutations — counting
         // alertHistogram/kpis/heartbeat among the reads). traceEdges(traceId:)
         // was added in v1.21.4 for the Investigation graph's real causal edges.
-        #expect(coveredRequirements.count == 32,
+        #expect(coveredRequirements.count == 33,
                 "V2DataProvider requirement count changed — re-audit the offline empty surface")
     }
 }

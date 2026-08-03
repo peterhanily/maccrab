@@ -59,6 +59,32 @@ struct LineageNode: Sendable {
 /// have exited.
 public actor ProcessLineage {
 
+    /// Immutable, point-in-time relationship view for a bounded set of PIDs.
+    /// SequenceEngine uses one batch per event instead of suspending once or
+    /// twice for every partial match. The view preserves `isDescendant`'s exact
+    /// semantics (including an untracked immediate parent) and `ancestors`'
+    /// stricter sibling semantics (the direct parent itself must be tracked).
+    struct RelationshipSnapshot: Sendable {
+        fileprivate let ancestorPIDsByPID: [pid_t: Set<pid_t>]
+        fileprivate let trackedDirectParentByPID: [pid_t: pid_t]
+
+        func isDescendant(_ pid: pid_t, of ancestor: pid_t) -> Bool {
+            ancestorPIDsByPID[pid]?.contains(ancestor) == true
+        }
+
+        func areSiblings(_ lhs: pid_t, _ rhs: pid_t) -> Bool {
+            guard let lhsParent = trackedDirectParentByPID[lhs],
+                  let rhsParent = trackedDirectParentByPID[rhs] else { return false }
+            return lhsParent == rhsParent
+        }
+    }
+
+    struct RelationshipSnapshotDiagnostics: Sendable {
+        let requestCount: UInt64
+        let requestedPIDCount: UInt64
+        let largestBatch: Int
+    }
+
     // MARK: Configuration
 
     /// How long to retain nodes for exited processes before pruning.
@@ -103,6 +129,13 @@ public actor ProcessLineage {
     // changes. `setProcessKey` likewise only touches the v1.10 identity fields
     // the walk doesn't read.
     private var ancestorsMemo: [pid_t: [ProcessAncestor]] = [:]
+
+    /// Operation-count diagnostics for the SequenceEngine batching invariant.
+    /// These are internal-only and saturating: observability must not become a
+    /// process-lifetime overflow trap.
+    private var relationshipSnapshotRequestCount: UInt64 = 0
+    private var relationshipSnapshotRequestedPIDCount: UInt64 = 0
+    private var relationshipSnapshotLargestBatch = 0
 
     // MARK: v1.10 TraceGraph promotion buffer
     //
@@ -402,6 +435,77 @@ public actor ProcessLineage {
         }
 
         return false
+    }
+
+    /// Resolve all ancestry needed by one evaluation in a single actor hop.
+    /// Each requested PID is walked at most once and every walk is bounded by
+    /// `maxAncestorDepth`. The returned value never observes a mix of lineage
+    /// generations, unlike thousands of individually awaited queries.
+    func relationshipSnapshot(for pids: Set<pid_t>) -> RelationshipSnapshot {
+        if relationshipSnapshotRequestCount < UInt64.max {
+            relationshipSnapshotRequestCount += 1
+        }
+        let requested = UInt64(pids.count)
+        if relationshipSnapshotRequestedPIDCount > UInt64.max - requested {
+            relationshipSnapshotRequestedPIDCount = UInt64.max
+        } else {
+            relationshipSnapshotRequestedPIDCount += requested
+        }
+        relationshipSnapshotLargestBatch = max(relationshipSnapshotLargestBatch, pids.count)
+
+        var ancestorPIDsByPID: [pid_t: Set<pid_t>] = [:]
+        var trackedDirectParentByPID: [pid_t: pid_t] = [:]
+        let trackedCapacity = min(pids.count, nodes.count)
+        ancestorPIDsByPID.reserveCapacity(trackedCapacity)
+        trackedDirectParentByPID.reserveCapacity(trackedCapacity)
+
+        for pid in pids {
+            // A partial can outlive its ProcessLineage node. Avoid allocating a
+            // visited set for each such miss when the partial pool is saturated.
+            guard nodes[pid] != nil else { continue }
+            var ancestors: Set<pid_t> = []
+            var visited: Set<pid_t> = [pid]
+            var currentPid = pid
+
+            for depth in 0 ..< maxAncestorDepth {
+                guard let node = nodes[currentPid] else { break }
+                let parentPid = node.ppid
+
+                // `isDescendant` checks equality before its cycle guard, so an
+                // untracked parent (and even a corrupt cycle edge) remains a
+                // positive one-hop relationship. Record before stopping.
+                ancestors.insert(parentPid)
+
+                if depth == 0,
+                   parentPid != currentPid,
+                   !visited.contains(parentPid),
+                   nodes[parentPid] != nil {
+                    // `ancestors(of:)`, used by sibling checks, only exposes a
+                    // direct parent when that parent node is itself tracked.
+                    trackedDirectParentByPID[pid] = parentPid
+                }
+
+                guard parentPid != currentPid, !visited.contains(parentPid) else { break }
+                visited.insert(parentPid)
+                currentPid = parentPid
+            }
+            if !ancestors.isEmpty {
+                ancestorPIDsByPID[pid] = ancestors
+            }
+        }
+
+        return RelationshipSnapshot(
+            ancestorPIDsByPID: ancestorPIDsByPID,
+            trackedDirectParentByPID: trackedDirectParentByPID
+        )
+    }
+
+    func relationshipSnapshotDiagnostics() -> RelationshipSnapshotDiagnostics {
+        RelationshipSnapshotDiagnostics(
+            requestCount: relationshipSnapshotRequestCount,
+            requestedPIDCount: relationshipSnapshotRequestedPIDCount,
+            largestBatch: relationshipSnapshotLargestBatch
+        )
     }
 
     // MARK: Maintenance

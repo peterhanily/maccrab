@@ -26,9 +26,17 @@ import os.log
 /// Requires root and macOS 13+ (Ventura).
 public actor EsloggerCollector {
 
+    public nonisolated static let eventStreamCapacity = 4_096
+
     private let logger = Logger(subsystem: "com.maccrab", category: "eslogger-collector")
 
     public nonisolated let events: AsyncStream<Event>
+    private nonisolated let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: eventStreamCapacity
+    )
+    public nonisolated var deliveryCounters: EventCollectorBufferSnapshot {
+        deliveryTelemetry.snapshot()
+    }
     private var continuation: AsyncStream<Event>.Continuation?
     private var process: Process?
     private var readTask: Task<Void, Never>?
@@ -65,6 +73,10 @@ public actor EsloggerCollector {
         return strings.compactMap { $0.data(using: .utf8) }
     }()
 
+    /// Precomputed once: sequence extraction runs on every eslogger line,
+    /// including intentionally muted ones.
+    private static let globalSequenceKeyBytes = Array("global_seq_num".utf8)
+
     /// Track sequence numbers for gap detection.
     private var lastGlobalSeq: UInt64 = 0
     private var droppedEvents: UInt64 = 0
@@ -93,20 +105,22 @@ public actor EsloggerCollector {
             return "eslogger not found (requires macOS 13+)"
         }
         // Try --list-events to verify TCC/FDA
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/eslogger")
-        proc.arguments = ["--list-events"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        try? proc.run()
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/eslogger",
+            arguments: ["--list-events"],
+            timeout: 10,
+            maximumOutputBytes: 256 * 1_024
+        ) else {
+            return "eslogger could not be launched"
+        }
+        if !result.succeeded {
+            let output = String(data: result.output, encoding: .utf8) ?? ""
             if output.contains("TCC") || output.contains("Full Disk Access") || output.contains("FDA") {
                 return "Terminal needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access and add your terminal app."
             }
-            return "eslogger failed with status \(proc.terminationStatus): \(output.prefix(200))"
+            if result.timedOut { return "eslogger preflight timed out" }
+            if result.outputLimitExceeded { return "eslogger preflight output exceeded 262144 bytes" }
+            return "eslogger failed with status \(result.terminationStatus ?? -1): \(output.prefix(200))"
         }
         return nil
     }
@@ -115,7 +129,9 @@ public actor EsloggerCollector {
 
     public init() {
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(4096)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -162,6 +178,7 @@ public actor EsloggerCollector {
             let fileHandle = pipe.fileHandleForReading
             let continuation = self.continuation
             let selfPid = Int32(self.selfPid)
+            let deliveryTelemetry = self.deliveryTelemetry
 
             readTask = Task.detached { [weak self] in
                 // Bind the weak capture to a `let` once. The nested `Task`s below
@@ -174,6 +191,7 @@ public actor EsloggerCollector {
                     fileHandle: fileHandle,
                     continuation: continuation,
                     selfPid: selfPid,
+                    deliveryTelemetry: deliveryTelemetry,
                     onGap: { dropped in
                         Task { await weakSelf?.recordDropped(dropped) }
                     }
@@ -197,6 +215,7 @@ public actor EsloggerCollector {
         fileHandle: FileHandle,
         continuation: AsyncStream<Event>.Continuation?,
         selfPid: Int32,
+        deliveryTelemetry: EventCollectorBufferTelemetry,
         onGap: @Sendable @escaping (UInt64) -> Void
     ) {
         guard let continuation else { return }
@@ -244,6 +263,21 @@ public actor EsloggerCollector {
 
                     guard !lineData.isEmpty else { return }
 
+                    // Account global sequence continuity BEFORE intentional
+                    // fast-path muting. Previously `lastGlobalSeq` advanced only
+                    // for parsed, unmuted events, so every muted system-path or
+                    // self event was later misreported as an upstream eslogger
+                    // loss. The raw numeric extractor avoids paying full JSON
+                    // parsing for lines we deliberately discard.
+                    if let globalSeq = rawGlobalSequenceNumber(in: lineData) {
+                        let observation = Self.sequenceObservation(
+                            previous: lastGlobalSeq,
+                            current: globalSeq
+                        )
+                        if observation.gap > 0 { onGap(observation.gap) }
+                        lastGlobalSeq = observation.highWater
+                    }
+
                     // Fast-path mute: check for system paths BEFORE JSON parsing
                     if shouldMute(lineData) { return }
 
@@ -260,17 +294,11 @@ public actor EsloggerCollector {
                         return
                     }
 
-                    // Sequence gap detection (math lifted to Self.sequenceGap for testability)
-                    if let globalSeq = json["global_seq_num"] as? UInt64 {
-                        let gap = Self.sequenceGap(previous: lastGlobalSeq, current: globalSeq)
-                        if gap > 0 { onGap(gap) }
-                        lastGlobalSeq = globalSeq
-                    }
-
                     // Parse into Event
                     guard let event = EsloggerParser.parse(json) else { return }
 
                     let result = continuation.yield(event)
+                    deliveryTelemetry.recordYield(offered: event, result: result)
                     if case .terminated = result { earlyReturn = true }
                 }
                 if earlyReturn { outerEarlyReturn = true; return }
@@ -293,6 +321,130 @@ public actor EsloggerCollector {
             }
         }
         return false
+    }
+
+    /// Extract the unquoted, top-level JSON integer `global_seq_num` without
+    /// constructing a JSON object. The small lexer skips complete JSON strings
+    /// (including escapes) and nested containers, so attacker-controlled string
+    /// values or nested objects cannot impersonate the sequence field. Internal
+    /// for adversarial tests that pin whitespace, nesting, malformed input, and
+    /// overflow behavior.
+    static func rawGlobalSequenceNumber(in lineData: Data) -> UInt64? {
+        let key = Self.globalSequenceKeyBytes
+
+        return lineData.withUnsafeBytes { rawBuffer -> UInt64? in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            guard !bytes.isEmpty else { return nil }
+
+            @inline(__always)
+            func isWhitespace(_ byte: UInt8) -> Bool {
+                byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+            }
+
+            var index = 0
+            var depth = 0
+            var previousSignificant: UInt8?
+
+            while index < bytes.count {
+                let byte = bytes[index]
+                if isWhitespace(byte) {
+                    index += 1
+                    continue
+                }
+
+                switch byte {
+                case 0x7B, 0x5B: // { [
+                    if depth == 0, byte != 0x7B {
+                        // eslogger emits one JSON object per line. An array is
+                        // not an admitted root even if it contains key-like
+                        // strings that the later dictionary parser rejects.
+                        return nil
+                    }
+                    depth += 1
+                    previousSignificant = byte
+                    index += 1
+
+                case 0x7D, 0x5D: // } ]
+                    guard depth > 0 else { return nil }
+                    depth -= 1
+                    previousSignificant = byte
+                    index += 1
+
+                case 0x22: // JSON string
+                    let openingContext = previousSignificant
+                    let contentStart = index + 1
+                    var cursor = contentStart
+                    var escaped = false
+                    var containsEscape = false
+                    while cursor < bytes.count {
+                        let current = bytes[cursor]
+                        if escaped {
+                            escaped = false
+                        } else if current == 0x5C { // backslash
+                            escaped = true
+                            containsEscape = true
+                        } else if current == 0x22 {
+                            break
+                        }
+                        cursor += 1
+                    }
+                    guard cursor < bytes.count, !escaped else { return nil }
+
+                    let isRootMemberKey = depth == 1
+                        && (openingContext == 0x7B || openingContext == 0x2C)
+                    let isSequenceKey = !containsEscape
+                        && cursor - contentStart == key.count
+                        && key.indices.allSatisfy {
+                            bytes[contentStart + $0] == key[$0]
+                        }
+                    index = cursor + 1
+
+                    if isRootMemberKey && isSequenceKey {
+                        while index < bytes.count, isWhitespace(bytes[index]) {
+                            index += 1
+                        }
+                        guard index < bytes.count, bytes[index] == 0x3A else {
+                            return nil
+                        }
+                        index += 1
+                        while index < bytes.count, isWhitespace(bytes[index]) {
+                            index += 1
+                        }
+
+                        var value: UInt64 = 0
+                        var sawDigit = false
+                        while index < bytes.count {
+                            let digit = bytes[index]
+                            guard digit >= 0x30, digit <= 0x39 else { break }
+                            sawDigit = true
+                            let (scaled, multiplyOverflow) = value
+                                .multipliedReportingOverflow(by: 10)
+                            let (next, addOverflow) = scaled
+                                .addingReportingOverflow(UInt64(digit - 0x30))
+                            guard !multiplyOverflow, !addOverflow else { return nil }
+                            value = next
+                            index += 1
+                        }
+                        guard sawDigit else { return nil }
+                        while index < bytes.count, isWhitespace(bytes[index]) {
+                            index += 1
+                        }
+                        guard index < bytes.count,
+                              bytes[index] == 0x2C || bytes[index] == 0x7D else {
+                            return nil
+                        }
+                        return value
+                    }
+
+                    previousSignificant = 0x22
+
+                default:
+                    previousSignificant = byte
+                    index += 1
+                }
+            }
+            return nil
+        }
     }
 
     // MARK: - Watchdog Restart
@@ -324,12 +476,27 @@ public actor EsloggerCollector {
     /// observation, a contiguous step, a duplicate, or an out-of-order arrival
     /// (never a negative/underflowed count).
     static func sequenceGap(previous: UInt64, current: UInt64) -> UInt64 {
-        guard previous > 0, current > previous + 1 else { return 0 }
-        return current - previous - 1
+        guard previous > 0, current > previous else { return 0 }
+        let distance = current - previous
+        return distance > 1 ? distance - 1 : 0
+    }
+
+    /// Pair gap calculation with a monotonic high-water mark. A duplicate or
+    /// out-of-order line must not move the baseline backwards and make the next
+    /// contiguous observation look like a large loss.
+    static func sequenceObservation(
+        previous: UInt64,
+        current: UInt64
+    ) -> (highWater: UInt64, gap: UInt64) {
+        (
+            highWater: max(previous, current),
+            gap: sequenceGap(previous: previous, current: current)
+        )
     }
 
     private func recordDropped(_ count: UInt64) {
-        droppedEvents += count
+        let (updated, overflow) = droppedEvents.addingReportingOverflow(count)
+        droppedEvents = overflow ? UInt64.max : updated
         logger.warning("eslogger sequence gap: \(count) events likely dropped (total: \(self.droppedEvents))")
     }
 

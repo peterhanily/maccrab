@@ -5,10 +5,12 @@ detection-rule update channel** — how MacCrab fetches and verifies new detecti
 rules without an app release, how to verify a manifest, how to roll back, and
 what a signed-but-hostile rule corpus can and cannot do.
 
-Detection rules are **data**, so distributing them does not require a notarized
-app build or a Sparkle update. The channel delivers an Ed25519-signed manifest;
-the client verifies it and stages the rules into `compiled_rules/pushed/`, where
-the engine loads them **additively** and **detection-only**.
+The codebase contains a design for distributing detection rules as signed data
+without a notarized app build. **That production channel is disabled in this
+release.** The CLI refuses before key lookup or any network request, the app
+ships no `rules.pub`, and the engine preserves but does not read or evaluate an
+existing `compiled_rules/pushed/` corpus. The dormant verifier accepts at most
+an 8 MiB manifest containing at most 2,048 decoded rules.
 
 > Source of truth:
 > `Sources/maccrabctl/RuleChannelFetch.swift` (client fetch + verify),
@@ -25,7 +27,8 @@ the engine loads them **additively** and **detection-only**.
 
 ## What is on the wire
 
-Two files are served at the channel base URL (default
+If a future owner-approved release enables the design, two files are expected at
+the channel base URL (the currently configured default is
 `https://rave.maccrab.com/rules/`, override with `MACCRAB_RULES_BASE_URL`):
 
 | File | Contents |
@@ -36,6 +39,11 @@ Two files are served at the channel base URL (default
 The detection rules are **inline** in the manifest — there is no separate
 tarball. That removes the untar / TOCTOU / partial-extract attack surface a
 side-loaded archive would add: the single signature covers the entire payload.
+
+Operationally, the configured default is not a live distribution channel: a
+direct check of `rules-manifest.json` returned HTTP 404 at 2026-08-02 00:57Z.
+There is no automatic update path; the manual CLI commands are release-gated and
+currently refuse without contacting that endpoint.
 
 Manifest fields:
 
@@ -49,70 +57,87 @@ Manifest fields:
 
 ## The trust key
 
-> **STATUS: not provisioned.** The rule-channel keypair has never been generated,
-> so **no shipped build contains a `rules.pub`** and `maccrabctl rules update` /
-> `rules check-updates` fail closed on every install. Everything below describes
-> the implemented design; the channel becomes usable once a keyholder runs the
-> generation ceremony and the public half is committed. Until then, detection
-> rules ship with the app.
+> **STATUS: DISABLED, no trusted anchor.** The prior 32-byte `rules.pub` had no
+> owner-approved key ceremony, custody record, signed manifest, or public release
+> provenance. Pinning its bytes would preserve unknown authority, not establish
+> trust. It has therefore been removed from source and release artifacts. The
+> channel may be enabled only after the owner performs an offline key rotation,
+> records custody/provenance, and explicitly approves a release carrying the new
+> public anchor.
 
-The manifest is verified against a **separate `rules.pub`** key — **not** the
-app-signing key and **not** the plugin-catalog key. It is a 32-byte Curve25519
-public key bundled into the app.
+The future design verifies manifests against a **separate `rules.pub`** key —
+**not** the app-signing key and **not** the plugin-catalog key. No such key is
+trusted or bundled in this release.
 
-Note the packaging path: SPM emits `Sources/MacCrabApp/Resources/**` into the
-resource bundle, so the key lands at
+If re-enabled, note the packaging path: SPM emits
+`Sources/MacCrabApp/Resources/**` into the resource bundle, so the key would land at
 `…/MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub` — the same
 place the sibling `catalog.pub` actually ships. The loader also probes the legacy
 `…/Contents/Resources/rave-keys/rules.pub`, but **no built bundle has ever
 contained that directory**, so a key placed only there would not be found. A debug
 build may point at a throwaway key via `MACCRAB_RAVE_RULES_PUB_PATH` (DEBUG-only).
 
-### To provision the channel
+### Release and keyholder invariants
 
-Generate the keypair on the offline keyholder machine, commit only the public
-half, and confirm it lands in the resource bundle:
+Do **not** restore the removed `rules.pub` or casually run `keygen`. Enabling the
+channel is an owner-approved cryptographic ceremony, not a repository-local code
+change. The deterministic source and final-artifact guard currently proves the
+safe disabled state: one shared policy literal is false, no anchor ships, and no
+production call site loads a pushed corpus:
 
 ```bash
-scripts/build-rules-manifest.sh keygen ./rules.key ./rules.pub   # rules.key NEVER leaves that machine
-cp rules.pub Sources/MacCrabApp/Resources/rave-keys/rules.pub
-# after a release build:
-ls MacCrab.app/Contents/Resources/MacCrab_MacCrabApp.bundle/rules.pub
+scripts/check-rules-trust-anchor.sh
+scripts/test-rules-trust-anchor.sh
 ```
 
-A separate key **bounds the blast radius**: a leaked rules key can only push
+A future separate key would **bound the blast radius**: a leaked rules key can only push
 detection-only, additive rules (see containment below). It cannot sign an app,
-a plugin, or a revocation list. The matching private key is generated and kept
-**offline** by the keyholder (`build-rules-manifest.sh keygen`).
+a plugin, or a revocation list. The matching private key **must** be controlled by
+the designated offline keyholder; source control contains only the public half
+and cannot attest to private-key custody.
 
 ---
 
 ## How verification works (client side)
 
-`maccrabctl rules update` runs this pipeline; **any** failure is fail-closed and
-leaves the previously installed pushed corpus untouched:
+The production path currently stops at step 0. The remaining steps describe the
+dormant verifier retained for a future approved channel; **any** failure is
+fail-closed and leaves a previously staged corpus untouched:
 
+0. **Release gate.** `RuleChannelPolicy.productionEnabled` is `false`. Both CLI
+   construction and the fetch boundary refuse before key lookup or any network
+   request. The runtime has the same central default and no production loader
+   call sites, so preserved pushed files remain inert.
 1. **Fetch** `rules-manifest.json` and `.sig` over `SecureURLSession` (TLS 1.2
    floor, ephemeral no-disk cache, SSRF-redirect re-validation). The request is
    explicitly no-cache so a stale cached copy can't mask a just-published update
    (the anti-rollback serial only works if the client sees the newest manifest).
-2. **Verify the Ed25519 signature** over the manifest bytes against `rules.pub`.
+2. **Enforce streaming byte ceilings.** `Content-Length` over the limit is
+   rejected immediately, and chunked/undeclared bodies are accumulated through
+   `bytes(for:)` with a hard cap. A manifest over **8 MiB** is refused before
+   signature work, JSON parsing, or staging; `.sig` must be exactly **64 bytes**
+   and its network body is capped at that size.
+3. **Verify the Ed25519 signature** over the manifest bytes against `rules.pub`.
    Because the rules are inline, this one signature over the exact bytes is the
    integrity pin for the whole payload — there is no separate artifact to
    sha256-pin (unlike the plugin catalog, which pins a tarball's sha256). The
    sender's `build-rules-manifest.sh` prints the manifest's sha256 so an operator
    can record and compare it out of band if they wish.
-3. **Require a serial.** A signature-verified manifest with no `serial` is
+4. **Require a serial.** A signature-verified manifest with no `serial` is
    refused (anti-rollback needs one).
-4. **Validate every rule.** Each entry must decode as a `CompiledRule`; a rule
-   id containing a path separator, `..`, or that is empty is rejected. A **single**
-   bad rule refuses the **whole** manifest — there is never a partial corpus.
-5. **Anti-rollback.** The signed serial must be **greater than** the
-   last-accepted serial (a high-water mark persisted in the rave trust-state
-   store). An equal or older serial is rejected as stale/replay.
-6. **Version floor.** If `min_maccrab_version` is set, the running engine must
+5. **Bound and validate every rule.** A manifest containing more than **2,048**
+   decoded rule objects is refused before per-rule decoding. Each entry must
+   decode as a `CompiledRule`; serial must be a nonnegative JSON integer, and
+   rule ids must be unique, nonempty, and free of path separators or `..`. A
+   **single** bad rule refuses the **whole** manifest.
+6. **Anti-rollback and serial uniqueness.** A lower serial is rejected. A
+   signature-valid manifest with the **equal** already-accepted serial is an
+   idempotent success with **no file or trust-state changes**, so different bytes
+   cannot replace a corpus by reusing its serial. Only a greater serial can stage
+   new content.
+7. **Version floor.** If `min_maccrab_version` is set, the running engine must
    satisfy it or the manifest is refused.
-7. **Atomic swap.** The validated rules are written to a sibling temp directory,
+8. **Atomic swap.** The validated rules are written to a sibling temp directory,
    then that directory replaces `compiled_rules/pushed/`. A failed write never
    disturbs the prior corpus. Only after the swap succeeds is the serial
    high-water mark advanced.
@@ -124,11 +149,11 @@ The staged rules load on the engine's next reload (SIGHUP or reload tick).
 ## Operator commands
 
 ```bash
-# Is a newer corpus available? (read-only: fetch + verify, never writes)
+# Currently refuses before network because the release gate is disabled
 maccrabctl rules check-updates
 maccrabctl rules check-updates --json
 
-# Fetch → verify → anti-rollback → version-floor → validate → install
+# Currently refuses before network/filesystem changes
 maccrabctl rules update
 maccrabctl rules update --rules-base https://your.host/rules/
 
@@ -136,11 +161,12 @@ maccrabctl rules update --rules-base https://your.host/rules/
 maccrabctl rules status
 ```
 
-`check-updates` reports the installed serial, the available serial, the corpus
+When the channel is enabled, `check-updates` reports the installed serial, the available serial, the corpus
 version, the rule count, and whether an update is available — **without**
 writing anything, so it is a safe way to verify a freshly published manifest
-before installing it. To dry-run the whole fetch+verify path against a throwaway
-key and server, use `scripts/test-rule-channel-e2e.sh`.
+before installing it. In the current release,
+`scripts/test-rule-channel-e2e.sh` proves that both network-facing commands
+refuse without reaching a local request sentinel.
 
 > Permissions note: on a release build the engine's `compiled_rules/` directory
 > is root-owned (it belongs to the System Extension), so a non-root
@@ -151,7 +177,11 @@ key and server, use `scripts/test-rule-channel-e2e.sh`.
 
 ## Rolling back
 
-The anti-rollback rule means you **cannot** roll back by re-publishing an older
+While the channel is disabled, do **not** delete an existing pushed directory:
+it is preserved for inspection but ignored by every production runtime path.
+
+If a future approved release enables the channel, the anti-rollback rule means
+you **cannot** roll back by re-publishing an older
 serial — the client refuses any serial at or below the last-accepted one. Roll
 back one of two ways:
 
@@ -179,8 +209,9 @@ are currently installed, so you can confirm the rollback took effect.
 
 ## Risk model: what a hostile corpus can and cannot do
 
-Assume the worst case an operator should reason about: the `rules.pub` private
-key is compromised, and an attacker publishes a **validly signed** manifest.
+This is a design analysis for a future enabled channel, not the current release
+state. Assume its signing authority is compromised and an attacker publishes a
+**validly signed** manifest.
 Even then, the pushed corpus is **contained** by two independent boundaries in
 the engine, enforced regardless of the signature:
 
@@ -198,10 +229,11 @@ the engine, enforced regardless of the signature:
   but can **never arm a response action** (kill / quarantine / blockNetwork /
   script), **not even the global default action.**
 
-So the ceiling on a compromised rules key is: **add noise / add benign
-detections.** It cannot silence a built-in detection, cannot weaken response
-posture, cannot arm a destructive action, and cannot touch the app or
-plugin trust chains (a different key signs those). Combined with the client-side
-anti-rollback, version floor, per-rule validation, and fail-closed atomic swap,
-the channel's failure mode is "no update / stale update," never "hostile takeover
-of detection."
+So a compromised rules key cannot silence a built-in detection, weaken response
+posture, arm a destructive action, or touch the app/plugin trust chains (different
+keys sign those). It can still add broad, high-volume detections and therefore
+create alert noise and availability pressure. The 8 MiB / 2,048-rule ceilings
+bound a single accepted corpus; they do not make signer compromise harmless.
+Combined with strict serial progression, version floors, per-rule validation and
+the response-action gate, the intended failure domain is detection quality and
+resource pressure rather than code execution or destructive response.

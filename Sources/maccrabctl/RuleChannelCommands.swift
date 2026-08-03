@@ -35,9 +35,10 @@ func printRulesUsage() {
     print("""
     Usage: maccrabctl rules <subcommand>
 
-    Update detection rules out-of-band from the signed rule-update channel — no
-    app update, no reinstall. Pushed rules are DETECTION-ONLY: they can add new
-    detections but never override a built-in rule or arm a response action.
+    The out-of-band signed rule-update channel is DISABLED in this release
+    pending owner-approved offline key rotation and custody proof. `update` and
+    `check-updates` refuse before key lookup or any network request. Existing
+    files under compiled_rules/pushed are preserved but ignored by the engine.
 
     Subcommands:
       update [--rules-base <url>]      Fetch + verify + install the latest signed
@@ -47,10 +48,8 @@ func printRulesUsage() {
       list                             List the rules currently loaded by the engine.
       count                            Count the rules currently loaded by the engine.
 
-    Trust: the manifest is Ed25519-signed (separate rules.pub key), anti-rollback
-    (monotonic serial), version-floored, and every rule is re-validated before
-    install. A bad manifest leaves the prior pushed corpus intact (fail-closed).
-    Default base: https://rave.maccrab.com/rules/  (or env MACCRAB_RULES_BASE_URL).
+    The dormant parser retains Ed25519 verification, anti-rollback, version-floor,
+    byte/count limits, and atomic staging defenses for a future approved channel.
     """)
 }
 
@@ -67,9 +66,13 @@ private func rulesUpdate(args: [String]) async throws {
     let pushedDir = URL(fileURLWithPath: maccrabDataDir())
         .appendingPathComponent("compiled_rules").appendingPathComponent("pushed")
     do {
-        let n = try await fetcher.update(into: pushedDir)
-        print("✓ Installed \(n) pushed detection rule(s) → \(pushedDir.path)")
-        print("  These load DETECTION-ONLY on the engine's next reload (SIGHUP / reload tick).")
+        switch try await fetcher.update(into: pushedDir) {
+        case .installed(let serial, let ruleCount):
+            print("✓ Installed \(ruleCount) pushed detection rule(s) from serial \(serial) → \(pushedDir.path)")
+            print("  These load DETECTION-ONLY on the engine's next reload (SIGHUP / reload tick).")
+        case .unchanged(let serial):
+            print("✓ Rules serial \(serial) is already installed; no files or trust state changed.")
+        }
     } catch let e as RuleChannelError {
         print("rules update refused: \(e)")
         exit(2)
@@ -124,6 +127,6 @@ private func rulesStatus() async throws {
         .filter { $0.hasSuffix(".json") }.count ?? 0
     print("Pushed rules:")
     print("  Accepted manifest serial: \(serial.map(String.init) ?? "none")")
-    print("  Installed pushed rules:   \(installed) (at \(pushedDir.path))")
-    print("  Pushed rules are detection-only — they never arm a response action.")
+    print("  Preserved on-disk rules:   \(installed) (at \(pushedDir.path))")
+    print("  Active pushed rules:       0 (rule-update channel disabled; on-disk corpus ignored)")
 }

@@ -61,10 +61,12 @@ if args.contains("--background") || args.contains("--bg") || args.contains("-b")
         ]
         for path in appPaths {
             if FileManager.default.fileExists(atPath: path) {
-                let task = Process()
-                task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                task.arguments = [path]
-                try? task.run()
+                _ = BoundedPrivilegedProcessRunner.run(
+                    executable: "/usr/bin/open",
+                    arguments: [path],
+                    timeout: 10,
+                    maximumOutputBytes: nil
+                )
                 break
             }
         }

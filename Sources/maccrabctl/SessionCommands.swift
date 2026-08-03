@@ -81,9 +81,12 @@ func printSessionUsage() {
                                           (events + alerts, Merkle-rooted +
                                           ECDSA-P256 signed). Default out dir:
                                           <user-support>/MacCrab/session_bundles.
-      verify <bundle>                     Verify a .maccrabsession bundle:
-                                          recompute the Merkle root (detects
-                                          tamper) + verify the signature.
+      verify <bundle> [--expect-key <fp>] Verify a .maccrabsession bundle:
+                                          recompute the Merkle root, verify the
+                                          signature, and authenticate its signer.
+                                          By default only this install's key is
+                                          trusted. --expect-key accepts an
+                                          out-of-band SHA-256 key fingerprint.
 
     Note: <session-id> must be a session UUID (from `session list`).
     CLI exports carry EMPTY mutation/tool-call rails — those come from the MCP
@@ -284,8 +287,33 @@ private func sessionExport(args: [String]) async throws {
 }
 
 private func sessionVerify(args: [String]) async throws {
-    guard let path = args.first, !path.hasPrefix("--") else {
-        throw SessionCommandError.usage("Usage: maccrabctl session verify <bundle>")
+    var path: String?
+    var expectedFingerprint: String?
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--expect-key":
+            guard i + 1 < args.count else {
+                throw SessionCommandError.usage("Usage: maccrabctl session verify <bundle> [--expect-key <sha256-fingerprint>]")
+            }
+            let candidate = args[i + 1]
+            guard candidate.count == 64, candidate.allSatisfy({ $0.isHexDigit }) else {
+                throw SessionCommandError.usage("--expect-key must be exactly 64 hexadecimal characters")
+            }
+            expectedFingerprint = candidate
+            i += 2
+        case let arg where arg.hasPrefix("--"):
+            throw SessionCommandError.usage("Unknown session verify option: \(arg)")
+        default:
+            guard path == nil else {
+                throw SessionCommandError.usage("Usage: maccrabctl session verify <bundle> [--expect-key <sha256-fingerprint>]")
+            }
+            path = args[i]
+            i += 1
+        }
+    }
+    guard let path else {
+        throw SessionCommandError.usage("Usage: maccrabctl session verify <bundle> [--expect-key <sha256-fingerprint>]")
     }
     // Same substrate the export path uses, so the public key matches.
     let ts = TrustSubstrate(
@@ -294,14 +322,22 @@ private func sessionVerify(args: [String]) async throws {
         ),
         modeOverride: .filesystemDegraded
     )
-    let v = try await AgentSessionBundle.verify(at: URL(fileURLWithPath: path), trustSubstrate: ts)
-    // A valid signature from a FOREIGN signer is not tamper. Pre-fix a bundle
-    // exported on another Mac printed "TAMPERED / invalid" and exited 1,
-    // because verify() could only ever check this install's own key.
-    let verdict = (v.merkleOk && v.signed && v.signatureOk)
+    let options = AgentSessionBundle.VerifyOptions(pinnedKeyFingerprint: expectedFingerprint)
+    let v = try await AgentSessionBundle.verify(
+        at: URL(fileURLWithPath: path),
+        trustSubstrate: ts,
+        options: options
+    )
+    // A foreign self-signer can prove internal consistency, not identity: an
+    // attacker can rewrite every content file, recompute the root, and sign it
+    // with a key they generated. Keep signature_ok as that useful crypto fact,
+    // but never label it verified or return success without a trust anchor.
+    let verdict = v.authenticated
         ? (v.signerIsLocalInstall
-            ? "verified"
-            : "verified (FOREIGN signer — signature is valid but the key is not anchored to this install)")
+            ? "verified (authenticated by this install's signing key)"
+            : "verified (authenticated by the expected signing-key fingerprint)")
+        : (v.merkleOk && v.signed && v.signatureOk)
+            ? "UNTRUSTED signer (signature is self-consistent, but the signing key is not trusted)"
         : (v.merkleOk && !v.signed) ? "unsigned (content hash-rooted only — forgeable)"
         : "TAMPERED / invalid"
     print("Bundle: \(path)")
@@ -309,15 +345,18 @@ private func sessionVerify(args: [String]) async throws {
     print("  signed:       \(v.signed)")
     print("  signature_ok: \(v.signatureOk)")
     print("  signer:       \(v.signerFingerprint.isEmpty ? "<none recorded>" : v.signerFingerprint)\(v.signerIsLocalInstall ? " (this install)" : "")")
+    print("  signer_trusted: \(v.signerTrusted)")
+    print("  authenticated:  \(v.authenticated)")
     print("  verdict:      \(verdict)")
     // The exit code must be trustworthy for gating: return 0 ONLY for a
-    // genuinely signed-and-verified (authenticated) bundle. An UNSIGNED
+    // signed-and-verified bundle whose signer is TRUSTED. An UNSIGNED
     // (forgeable, content-hash-rooted-only) bundle and a TAMPERED/invalid one
-    // BOTH exit non-zero, so a caller can't mistake a merely well-formed file
-    // for authenticated evidence. Distinct codes let a caller tell them apart:
-    //   0 = authenticated, 2 = unsigned, 1 = tampered/invalid.
-    let authenticated = v.merkleOk && v.signed && v.signatureOk
-    if !authenticated {
+    // BOTH exit non-zero, as does a valid signature from an untrusted key.
+    // Distinct codes let a caller tell them apart:
+    //   0 = authenticated, 3 = untrusted signer, 2 = unsigned,
+    //   1 = tampered/invalid.
+    if !v.authenticated {
+        if v.merkleOk && v.signed && v.signatureOk { exit(3) }
         exit(v.merkleOk && !v.signed ? 2 : 1)
     }
 }

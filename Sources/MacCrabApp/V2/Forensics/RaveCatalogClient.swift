@@ -260,7 +260,7 @@ public actor RaveCatalogClient {
             case .rollback(let stored, let incoming):
                 throw RaveCatalogError.revocationsRollback(stored: stored, incoming: incoming)
             case .firstSeen, .accepted:
-                try? trustState.recordRevocations(serial: serial)
+                break
             }
         } else if let lastAccepted = trustState.currentRevocationsSerial() {
             throw RaveCatalogError.revocationsSerialMissing(lastAccepted: lastAccepted)
@@ -276,6 +276,12 @@ public actor RaveCatalogClient {
         }
         let records = RevocationEnforcer.reconcileQuarantine(installed: refs, against: list)
         try await installer.applyQuarantine(records)
+        // Advance freshness/high-water only after the authoritative quarantine
+        // is durable. Marking the list accepted first creates a crash window in
+        // which the one-hour throttle skips enforcement that never landed.
+        if let serial = list.serial {
+            try trustState.recordRevocations(serial: serial)
+        }
         return list
     }
 

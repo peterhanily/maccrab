@@ -38,16 +38,19 @@ struct CausalGraphUpsertBatchTests {
         await store.close()
     }
 
-    @Test("Best-effort: an edge with a missing endpoint is skipped, valid rows still commit")
-    func batchBestEffort() async throws {
+    @Test("A failed row rolls back the whole batch instead of committing partial growth")
+    func batchFailureIsAtomic() async throws {
         let (store, path) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: path) }
-        try await store.upsertBatch(
-            entities: [ent("a"), ent("b")],
-            edges: [edg("good", from: "a", to: "b"),
-                    edg("bad", from: "a", to: "missing")])  // 'missing' not an entity → FK fail
-        #expect(try await store.entity(id: "a") != nil)
-        #expect(try await store.edge(id: "good") != nil)
+        await #expect(throws: CausalGraphStoreError.self) {
+            try await store.upsertBatch(
+                entities: [ent("a"), ent("b")],
+                edges: [edg("good", from: "a", to: "b"),
+                        edg("bad", from: "a", to: "missing")])
+        }
+        #expect(try await store.entity(id: "a") == nil)
+        #expect(try await store.entity(id: "b") == nil)
+        #expect(try await store.edge(id: "good") == nil)
         #expect(try await store.edge(id: "bad") == nil)
         await store.close()
     }

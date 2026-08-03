@@ -22,24 +22,96 @@ public enum EventStoreError: Error, LocalizedError {
     /// v1.12.0 RC28: distinguish disk-full from generic step failures
     /// so the daemon's insert path can degrade gracefully instead of
     /// silently dropping events under storage exhaustion.
-    case diskFull(String)
+    case diskFull(String, failure: SQLiteFailureDetails? = nil)
     /// v1.21.5-rc.3 (#13): SQLITE_BUSY / SQLITE_LOCKED — a TRANSIENT lock
     /// contention (typically a reader/writer contending the WAL beyond the 5s
     /// busy_timeout). Distinct from `stepFailed` so a batched writer can RETRY
     /// instead of dropping the batch (retrying a transient lock succeeds once the
     /// contention clears; retrying a permanent failure does not).
-    case busy(String)
+    case busy(String, failure: SQLiteFailureDetails? = nil)
+    case sqliteFailure(
+        context: String,
+        message: String,
+        resultCode: Int32,
+        extendedResultCode: Int32,
+        systemErrno: Int32
+    )
 
     public var errorDescription: String? {
         switch self {
         case .databaseOpenFailed(let msg):  return "Database open failed: \(msg)"
         case .prepareFailed(let msg):       return "Prepare failed: \(msg)"
         case .stepFailed(let msg):          return "Step failed: \(msg)"
-        case .diskFull(let msg):            return "Disk full: \(msg)"
-        case .busy(let msg):                return "Database busy (transient): \(msg)"
+        case .diskFull(let msg, _):         return "Disk full: \(msg)"
+        case .busy(let msg, _):             return "Database busy (transient): \(msg)"
+        case let .sqliteFailure(context, message, rc, extended, systemErrno):
+            return "SQLite \(context) failed (rc=\(rc), extended=\(extended), system_errno=\(systemErrno)): \(message)"
         case .encodingFailed(let msg):      return "Encoding failed: \(msg)"
         case .decodingFailed(let msg):      return "Decoding failed: \(msg)"
         }
+    }
+}
+
+public struct EventBatchInsertResult: Sendable, Equatable {
+    public let inputCount: Int
+    public let persistedCount: Int
+    public let filteredCount: Int
+    public let committedTransactionCount: Int
+
+    public init(
+        inputCount: Int,
+        persistedCount: Int,
+        filteredCount: Int,
+        committedTransactionCount: Int
+    ) {
+        self.inputCount = inputCount
+        self.persistedCount = persistedCount
+        self.filteredCount = filteredCount
+        self.committedTransactionCount = committedTransactionCount
+    }
+}
+
+/// A reserve-chunked batch can commit a prefix before a later chunk fails.
+/// The exact uncommitted, insert-filter-passing suffix is carried so callers
+/// never retry or count the already-durable prefix as shed.
+public struct EventBatchInsertFailure: Error, LocalizedError,
+    SQLiteFailureReporting, @unchecked Sendable {
+    public let progress: EventBatchInsertResult
+    public let uncommittedEvents: [Event]
+    public let underlyingError: any Error
+    /// True when corruption recovery quarantined the database that contained
+    /// any previously committed chunks. In that case `progress.persistedCount`
+    /// is reset to zero and `uncommittedEvents` contains every filter-passing
+    /// candidate, because the old prefix is no longer in the active store.
+    public let activeDatabaseWasReplaced: Bool
+    /// A replacement database was opened and prepared successfully, so a
+    /// bounded caller may retry `uncommittedEvents` immediately.
+    public let replacementReadyForRetry: Bool
+
+    public init(
+        progress: EventBatchInsertResult,
+        uncommittedEvents: [Event],
+        underlyingError: any Error,
+        activeDatabaseWasReplaced: Bool = false,
+        replacementReadyForRetry: Bool = false
+    ) {
+        self.progress = progress
+        self.uncommittedEvents = uncommittedEvents
+        self.underlyingError = underlyingError
+        self.activeDatabaseWasReplaced = activeDatabaseWasReplaced
+        self.replacementReadyForRetry = replacementReadyForRetry
+    }
+
+    public var errorDescription: String? {
+        "Event batch stopped after \(progress.persistedCount) persisted row(s); \(uncommittedEvents.count) row(s) remain: \(underlyingError.localizedDescription)"
+    }
+
+    /// Preserve SQLite's primary/extended/VFS classification through the
+    /// partial-progress envelope. Recovery and telemetry callers must never
+    /// lose BUSY/FULL/corruption identity merely because earlier chunks
+    /// committed successfully.
+    public var sqliteFailureDetails: SQLiteFailureDetails? {
+        SQLiteFailureClassifier.details(from: underlyingError)
     }
 }
 
@@ -57,7 +129,22 @@ public actor EventStore {
     // MARK: Properties
 
     private var db: OpaquePointer?
+    private var checkpointController: SQLiteControlledCheckpointController?
     private let databasePath: String
+    private var storagePolicy: SQLitePersistentStorePolicy?
+    private var storageAdmission: SQLitePersistentStoreAdmission?
+    /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
+    /// estimates use this value rather than assuming the usual 4 KiB so legacy
+    /// databases with larger pages remain safely bounded.
+    private var sqlitePageSizeBytes: Int64
+    /// Lazily scanned high-water estimate for maintenance rewrites/deletes.
+    /// New writes can raise it; deletes deliberately do not lower it.
+    private var maintenanceRowMutationHighWaterBytes: Int64? = nil
+    private var maintenanceHighWaterScannedExistingRows = false
+    private var committedBatchInsertTransactions: UInt64 = 0
+    /// Incremented when corruption quarantine removes the active DB family.
+    /// Batch progress is meaningful only within one generation.
+    private var activeDatabaseGeneration: UInt64 = 0
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -360,6 +447,18 @@ public actor EventStore {
         }
     }
 
+    private static func defaultStoragePolicy(
+        for databasePath: String
+    ) -> SQLitePersistentStorePolicy {
+        SQLitePersistentStorePolicy(
+            maxFootprintBytes: 420 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            transactionReserveBytes: SQLitePersistentStorePolicy
+                .eventTransactionReserveBytes,
+            storageVolumePath: (databasePath as NSString).deletingLastPathComponent
+        )
+    }
+
     /// Opens a SQLite database before actor isolation begins.
     /// Returns (db handle, isReadOnly) so init can assign to stored properties.
     ///
@@ -370,15 +469,43 @@ public actor EventStore {
     ///   `VACUUM` and `wal_checkpoint(TRUNCATE)` operations.
     ///   (v1.12.6 RC2, Wave 9A — see lsof field background in v1.12.6 RC1
     ///   recovery notes.)
-    private static func openDatabase(at path: String, forceReadOnly: Bool = false) throws -> (OpaquePointer, Bool, OpaquePointer?) {
-        // Reject symlinks on the DB path and its WAL/SHM/journal sidecars.
-        // `sqlite3_open_v2` follows symlinks, so a privileged attacker who can
-        // swap the DB file for a symlink could redirect writes to an arbitrary
-        // target. `lstat` (attributesOfItem) does NOT follow.
+    private static func openDatabase(
+        at path: String,
+        forceReadOnly: Bool = false,
+        storagePolicy: SQLitePersistentStorePolicy? = nil
+    ) throws -> (
+        OpaquePointer,
+        Bool,
+        OpaquePointer?,
+        SQLitePersistentStoreAdmission?,
+        Int64,
+        SQLiteControlledCheckpointController?
+    ) {
+        // Preflight the DB path and its WAL/SHM/journal sidecars for clear
+        // diagnostics and reject multiply-linked family members. The actual
+        // SQLite open also uses NOFOLLOW through SQLiteOpenPathPolicy, closing
+        // symlink races at the open boundary. Non-symlink replacement safety
+        // relies on the shipping owner-controlled support directory.
         try rejectIfSymlink(path)
         try rejectIfSymlink(path + "-wal")
         try rejectIfSymlink(path + "-shm")
         try rejectIfSymlink(path + "-journal")
+
+        // Admission is deliberately evaluated before SQLite can create or
+        // mutate any family member. Explicit read-only consumers skip it and
+        // never install the mutating max_page_count PRAGMA.
+        _ = try SQLitePersistentStoreAdmission.measureFamily(path)
+        let existingDatabase = try SQLitePersistentStoreAdmission
+            .mainFileExists(path)
+        let effectivePolicy = forceReadOnly
+            ? nil : (storagePolicy ?? Self.defaultStoragePolicy(for: path))
+        var admission = try effectivePolicy.map {
+            try SQLitePersistentStoreAdmission(
+                databasePath: path,
+                policy: $0,
+                latchOperationalPressure: existingDatabase
+            )
+        }
 
         var db: OpaquePointer?
         var isReadOnly = false
@@ -390,31 +517,113 @@ public actor EventStore {
             // channel per v1.10.1), so we skip the RW open and the lock
             // it would imply.
             flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-            rc = sqlite3_open_v2(path, &db, flags, nil)
+            rc = SQLiteOpenPathPolicy.open(path, database: &db, flags: flags)
             isReadOnly = true
         } else {
-            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-            rc = sqlite3_open_v2(path, &db, flags, nil)
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+            if !existingDatabase { flags |= SQLITE_OPEN_CREATE }
+            rc = SQLiteOpenPathPolicy.open(path, database: &db, flags: flags)
             if rc != SQLITE_OK {
                 if let handle = db { sqlite3_close(handle) }
                 db = nil
                 flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-                rc = sqlite3_open_v2(path, &db, flags, nil)
+                rc = SQLiteOpenPathPolicy.open(path, database: &db, flags: flags)
                 isReadOnly = true
+                admission = nil
             }
         }
         guard rc == SQLITE_OK, let handle = db else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            let failure = SQLiteFailureDetails(resultCode: rc, db: db)
             if let db { sqlite3_close(db) }
-            throw EventStoreError.databaseOpenFailed(msg)
+            throw EventStoreError.sqliteFailure(
+                context: "database open",
+                message: msg,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
+            )
+        }
+        var checkpointController: SQLiteControlledCheckpointController?
+        var returnHandleToCaller = false
+        defer {
+            if !returnHandleToCaller {
+                checkpointController?.detach(from: handle)
+                sqlite3_close(handle)
+            }
+        }
+        if !isReadOnly, let effectivePolicy {
+            checkpointController = try .install(
+                on: handle,
+                thresholdPages: StoragePragmas.eventWalAutocheckpointPages,
+                families: [
+                    "main": SQLiteControlledCheckpointFamily(
+                        databasePath: path,
+                        policy: effectivePolicy
+                    ),
+                ]
+            )
         }
 
         if !isReadOnly {
+            do {
+                try admission?.installPageLimit(on: handle)
+            } catch let error as SQLitePersistentStoreAdmissionError
+                where error.isOperationalPressure {
+                // Existing oversized databases open in shed mode so bounded
+                // retention can reclaim them. No schema/growth writes run.
+            }
+        }
+
+        let writerInitializationAllowed = !isReadOnly
+            && !(admission?.growthBlocked ?? false)
+
+        func admitSchemaWork(_ rawWork: SchemaStorageWork) throws {
+            guard var current = admission else { return }
+            defer { admission = current }
+            // A brand-new file has no user rows for CREATE INDEX to scan; treat
+            // all bootstrap/migration DDL as bounded metadata. Existing stores
+            // route every missing CREATE/DROP INDEX through the rebuild gate.
+            let work = existingDatabase ? rawWork : SchemaStorageWork(
+                boundedMetadataStatementCount:
+                    rawWork.boundedMetadataStatementCount
+                        + rawWork.rebuildStatementCount,
+                rebuildStatementCount: 0
+            )
+            if work.rebuildStatementCount > 0 {
+                try current.admitSchemaRebuild(
+                    operationCount: work.rebuildStatementCount
+                )
+            }
+            if work.boundedMetadataStatementCount > 0 {
+                try current.admitWrite(
+                    estimatedTransactionBytes:
+                        work.boundedTransactionEstimateBytes,
+                    on: handle
+                )
+            }
+        }
+
+        if writerInitializationAllowed {
+            try admitSchemaWork(SchemaStorageWork(
+                boundedMetadataStatementCount: 1,
+                rebuildStatementCount: 0
+            ))
             // v1.6.22: pragmas centralized in StoragePragmas.applyEventStorePragmas.
             // Cut from 64 MB cache + 256 MB mmap (v1.6.21) to 16 MB + 64 MB after
             // 2.76 GB resident observation on a test host with 2 long-lived
             // connections to events.db (EventStore + AlertStore).
-            StoragePragmas.applyEventStorePragmas(to: handle)
+            do {
+                try StoragePragmas.applyEventStorePragmasChecked(to: handle)
+            } catch let failure as StoragePragmas.ApplicationFailure {
+                throw EventStoreError.sqliteFailure(
+                    context: failure.sql,
+                    message: String(cString: sqlite3_errmsg(handle)),
+                    resultCode: failure.metadata.resultCode,
+                    extendedResultCode: failure.metadata.extendedResultCode,
+                    systemErrno: failure.metadata.systemErrno
+                )
+            }
         }
         // v1.4.4: `busy_timeout = 5000` tells SQLite to retry a busy-lock
         // for up to 5 seconds instead of failing immediately with
@@ -422,8 +631,8 @@ public actor EventStore {
         // transient "database is locked" errors v1.4.3's fail-loud
         // banner surfaced — WAL autocheckpoint briefly holds the write
         // lock, and without a timeout the next insert fails.
-        Self.exec(handle, "PRAGMA busy_timeout = 5000")
-        Self.exec(handle, "PRAGMA foreign_keys = ON")
+        try Self.exec(handle, "PRAGMA busy_timeout = 5000")
+        try Self.exec(handle, "PRAGMA foreign_keys = ON")
 
         // Create schema
         let schemaSQLs = [
@@ -441,9 +650,6 @@ public actor EventStore {
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)",
-            // Wave-3 P1: query an agent session's events in time order. Partial
-            // index keeps it cheap — only AI-correlated rows are indexed.
-            "CREATE INDEX IF NOT EXISTS idx_events_ai_session ON events(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_events_category ON events(event_category)",
             "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
             // v1.21.5 PERF: idx_events_process_path (process_path) and
@@ -475,12 +681,9 @@ public actor EventStore {
             """,
             // events_au AFTER UPDATE (audit corr-storage): keep the external-
             // content FTS index in sync when an existing event row is UPDATED
-            // in place. The insert path is an UPSERT (INSERT … ON CONFLICT(id)
-            // DO UPDATE) rather than INSERT OR REPLACE precisely so a re-insert
-            // of the same event id UPDATES the row (preserving its rowid)
-            // instead of delete+reinsert with a new rowid — which would orphan
-            // the old FTS posting (no delete trigger fires for a REPLACE with
-            // recursive_triggers off). This trigger removes the stale postings
+            // directly. Normal event insertion treats duplicate immutable ids
+            // as no-ops, but maintenance or future SQL UPDATE surfaces must not
+            // orphan old FTS postings. This trigger removes the stale postings
             // (via the FTS5 'delete' command with old.* values, which does not
             // depend on the content row) and re-adds the fresh ones. The prune
             // paths delete FTS rows explicitly (while the content row is still
@@ -499,7 +702,15 @@ public actor EventStore {
             END
             """,
         ]
-        for sql in schemaSQLs { Self.exec(handle, sql) }
+        if writerInitializationAllowed {
+            try admitSchemaWork(
+                SchemaMigrator.pendingStorageWork(
+                    on: handle,
+                    statements: schemaSQLs
+                )
+            )
+            for sql in schemaSQLs { try Self.exec(handle, sql) }
+        }
 
         // v1.21.4 Tier-A perf: defer FTS5 index merging off the hot insert
         // path. FTS5's default `automerge=4` runs an incremental b-tree
@@ -528,39 +739,46 @@ public actor EventStore {
         // it can't be applied (e.g. a user-uid CLI opened the root daemon's DB
         // RW) the index just keeps the correct default automerge=4. Distinct
         // from the load-bearing schema statements above, whose failures log.
-        if !isReadOnly {
-            sqlite3_exec(handle, "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 16)", nil, nil, nil)
+        if writerInitializationAllowed {
+            if (try? admission?.admitWrite(
+                estimatedTransactionBytes:
+                    SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
+                on: handle
+            )) != nil {
+                sqlite3_exec(handle, "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 16)", nil, nil, nil)
+            }
         }
 
         // Apply versioned schema migrations on top of the baseline tables above.
         // v1 marks "baseline schema present"; later versions add columns for
         // enrichment fields (file/process hashes, session context, etc).
         //
-        // v1.8.0 hardening: catch + log instead of throw. SQLite can return
-        // SQLITE_OK from sqlite3_open_v2 with READWRITE flags against a
-        // file the OS will later refuse writes on (root-owned 0640 +
-        // user-uid open succeeds at the open syscall but EACCESs at the
-        // first WRITE). Pre-fix, this surfaced as a fatal error in any
-        // user-uid CLI tool that touched the root daemon's DB. Now we
-        // log and continue — the store is still readable, which is what
-        // the CLI actually needs for status / events / hunt.
-        if !isReadOnly {
-            do {
-                // v1.12.0: skip the per-init quick_check — it's a 1–2 s
-                // PRAGMA on the 962 MB events.db with FTS5 indexes and
-                // accounts for most of the perceived cold-start cost on
-                // the daemon's boot path. Callers re-invoke
-                // `runQuickCheck()` from a deferred Task once the store
-                // is up.
-                try SchemaMigrator.run(
+        // Migration failures are load-bearing. In particular, callers need
+        // the typed SQLite codes to distinguish explicit corruption from
+        // BUSY/LOCKED/PERM/READONLY/IOERR without parsing a message. Swallowing
+        // one here would let daemon recovery make the wrong evidence decision.
+        if writerInitializationAllowed {
+            // v1.12.0: skip the per-init quick_check — it's a 1–2 s PRAGMA
+            // on a large events.db. A deferred task runs it after startup.
+            try SchemaMigrator.run(
+                on: handle,
+                migrations: Self.schemaMigrations,
+                skipQuickCheck: true,
+                beforeStorageWork: { work in
+                    try admitSchemaWork(work)
+                }
+            )
+            // Wave-3 P1. This index references the v2 ai_tool_session_id
+            // column, so it must be installed AFTER migrations; placing it in
+            // the baseline list made a fresh DB depend on swallowed errors.
+            let aiSessionIndex = "CREATE INDEX IF NOT EXISTS idx_events_ai_session ON events(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL"
+            try admitSchemaWork(
+                SchemaMigrator.pendingStorageWork(
                     on: handle,
-                    migrations: Self.schemaMigrations,
-                    skipQuickCheck: true
+                    statements: [aiSessionIndex]
                 )
-            } catch {
-                Logger(subsystem: "com.maccrab.storage", category: "event-store")
-                    .warning("Schema migration skipped (likely opened RW but DB is effectively read-only for this uid): \(error.localizedDescription, privacy: .public)")
-            }
+            )
+            try Self.exec(handle, aiSessionIndex)
         }
 
         // Prepare insert statement.
@@ -581,14 +799,13 @@ public actor EventStore {
         // are append-only. NULL/0 for fields that aren't present on a
         // given event category (e.g. tcc_decision is only set for TCC
         // events; ai_tool only when a TraceCorrelator binding exists).
-        // audit corr-storage: UPSERT (ON CONFLICT DO UPDATE) rather than
-        // INSERT OR REPLACE. A duplicate `id` now UPDATES the row IN PLACE,
-        // preserving its rowid, so it cannot orphan the external-content
-        // events_fts entry (REPLACE would delete+reinsert with a fresh rowid
-        // and no delete trigger fires). The `events_au` AFTER UPDATE trigger
-        // refreshes the FTS index for the updated row.
+        // Event ids identify immutable evidence. A duplicate is an idempotent
+        // no-op, not a rewrite: this avoids both evidence mutation and a hidden
+        // old-value FTS delete/new-value insert whose storage work cannot be
+        // derived from the incoming event. Direct SQL UPDATEs remain covered by
+        // `events_au`, which keeps the external-content FTS index coherent.
         let insertSQL = """
-            INSERT INTO events (
+            INSERT OR IGNORE INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
                 process_pid, process_name, process_path, process_commandline,
                 process_ppid, process_signer, process_team_id, process_signing_id,
@@ -603,38 +820,68 @@ public actor EventStore {
                 parent_signer_type, ai_tool, ai_tool_child,
                 session_launch_source, tcc_decision
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45)
-            ON CONFLICT(id) DO UPDATE SET
-                timestamp=excluded.timestamp, event_category=excluded.event_category,
-                event_type=excluded.event_type, event_action=excluded.event_action,
-                severity=excluded.severity, process_pid=excluded.process_pid,
-                process_name=excluded.process_name, process_path=excluded.process_path,
-                process_commandline=excluded.process_commandline, process_ppid=excluded.process_ppid,
-                process_signer=excluded.process_signer, process_team_id=excluded.process_team_id,
-                process_signing_id=excluded.process_signing_id, file_path=excluded.file_path,
-                file_action=excluded.file_action, network_dest_ip=excluded.network_dest_ip,
-                network_dest_port=excluded.network_dest_port, tcc_service=excluded.tcc_service,
-                tcc_client=excluded.tcc_client, raw_json=excluded.raw_json,
-                mcp_server_name=excluded.mcp_server_name, mcp_server_category=excluded.mcp_server_category,
-                ai_tool_session_id=excluded.ai_tool_session_id, agent_trace_id=excluded.agent_trace_id,
-                agent_span_id=excluded.agent_span_id, agent_tool=excluded.agent_tool,
-                machine_agent_confidence=excluded.machine_agent_confidence,
-                agent_evidence_json=excluded.agent_evidence_json, user_id=excluded.user_id,
-                user_name=excluded.user_name, group_id=excluded.group_id,
-                working_directory=excluded.working_directory, responsible_pid=excluded.responsible_pid,
-                architecture=excluded.architecture, is_platform_binary=excluded.is_platform_binary,
-                is_notarized=excluded.is_notarized, process_sha256=excluded.process_sha256,
-                parent_name=excluded.parent_name, parent_executable=excluded.parent_executable,
-                parent_signer_type=excluded.parent_signer_type, ai_tool=excluded.ai_tool,
-                ai_tool_child=excluded.ai_tool_child, session_launch_source=excluded.session_launch_source,
-                tcc_decision=excluded.tcc_decision
             """
         var insertStmt: OpaquePointer?
-        if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
+        let prepareRC = !writerInitializationAllowed
+            ? SQLITE_OK
+            : sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil)
+        if prepareRC != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(handle))
-            throw EventStoreError.prepareFailed(msg)
+            let failure = SQLiteFailureDetails(resultCode: prepareRC, db: handle)
+            throw EventStoreError.sqliteFailure(
+                context: "prepare insert",
+                message: msg,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
+            )
         }
 
-        return (handle, isReadOnly, insertStmt)
+        let pageSize = try Self.readPositivePragma(
+            handle,
+            name: "page_size"
+        )
+        guard pageSize <= SQLitePersistentStoreAdmission.maximumSQLitePageBytes else {
+            throw EventStoreError.databaseOpenFailed(
+                "unsupported SQLite page_size \(pageSize)"
+            )
+        }
+
+        returnHandleToCaller = true
+        return (
+            handle,
+            isReadOnly,
+            insertStmt,
+            admission,
+            pageSize,
+            checkpointController
+        )
+    }
+
+    private static func readPositivePragma(
+        _ db: OpaquePointer,
+        name: String
+    ) throws -> Int64 {
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, "PRAGMA \(name)", -1, &stmt, nil)
+        guard rc == SQLITE_OK, let stmt else {
+            throw EventStoreError.databaseOpenFailed(
+                "could not read PRAGMA \(name)"
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw EventStoreError.databaseOpenFailed(
+                "PRAGMA \(name) returned no row"
+            )
+        }
+        let value = sqlite3_column_int64(stmt, 0)
+        guard value > 0 else {
+            throw EventStoreError.databaseOpenFailed(
+                "invalid PRAGMA \(name)=\(value)"
+            )
+        }
+        return value
     }
 
     /// Execute a SQL statement on a raw handle (used during init before actor is live).
@@ -645,12 +892,20 @@ public actor EventStore {
     /// interpolation keeps the diagnostic useful under `sudo log show`
     /// (values here are SQL strings and SQLite return codes, never user
     /// secrets).
-    private static func exec(_ db: OpaquePointer, _ sql: String) {
+    private static func exec(_ db: OpaquePointer, _ sql: String) throws {
         let rc = sqlite3_exec(db, sql, nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
+            let failure = SQLiteFailureDetails(resultCode: rc, db: db)
             Logger(subsystem: "com.maccrab.storage", category: "event-store")
                 .error("sqlite3_exec failed (rc=\(rc, privacy: .public)): \(sql, privacy: .public) — \(msg, privacy: .public)")
+            throw EventStoreError.sqliteFailure(
+                context: sql,
+                message: msg,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
+            )
         }
     }
 
@@ -660,7 +915,11 @@ public actor EventStore {
     /// The directory is created if it does not already exist.
     ///
     /// - Throws: `EventStoreError` if the database cannot be opened or initialized.
-    public init(directory: String = "/Library/Application Support/MacCrab", forceReadOnly: Bool = false) throws {
+    public init(
+        directory: String = "/Library/Application Support/MacCrab",
+        forceReadOnly: Bool = false,
+        storagePolicy: SQLitePersistentStorePolicy? = nil
+    ) throws {
         let maccrabDir = URL(fileURLWithPath: directory)
 
         // Skip dir-create + chmod when forceReadOnly — dashboard is not the
@@ -677,7 +936,12 @@ public actor EventStore {
             )
         }
 
-        self.databasePath = maccrabDir.appendingPathComponent("events.db").path
+        let databasePath = maccrabDir.appendingPathComponent("events.db").path
+        self.databasePath = databasePath
+        let effectiveStoragePolicy = forceReadOnly
+            ? nil
+            : (storagePolicy ?? Self.defaultStoragePolicy(for: databasePath))
+        self.storagePolicy = effectiveStoragePolicy
 
         // v1.21.5 (audit sec-storage-crypto): umask 0o027 ⇒ new SQLite
         // WAL/SHM files are created 0o640 (owner rw, group read-only).
@@ -692,17 +956,31 @@ public actor EventStore {
         // display while closing the direct-write tamper path.
         // (Skip umask + chmod entirely when forceReadOnly — see Wave 9A.)
         if forceReadOnly {
-            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: true)
+            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+                at: databasePath,
+                forceReadOnly: true,
+                storagePolicy: nil
+            )
             self.db = handle
             self.isReadOnly = ro
             self.insertStmt = stmt
+            self.storageAdmission = admission
+            self.sqlitePageSizeBytes = pageSize
+            self.checkpointController = controller
         } else {
             let oldUmask = umask(0o027)
-            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
-            umask(oldUmask)
+            defer { umask(oldUmask) }
+            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+                at: databasePath,
+                forceReadOnly: false,
+                storagePolicy: effectiveStoragePolicy
+            )
             self.db = handle
             self.isReadOnly = ro
             self.insertStmt = stmt
+            self.storageAdmission = admission
+            self.sqlitePageSizeBytes = pageSize
+            self.checkpointController = controller
             // Re-clamp existing files (incl. any created 0o660 by an older
             // build) to 0o640: owner rw, group read-only, no other.
             chmod(databasePath, 0o640)
@@ -715,17 +993,35 @@ public actor EventStore {
     ///
     /// - Parameter path: Full file system path for the SQLite database.
     /// - Throws: `EventStoreError` if the database cannot be opened or initialized.
-    public init(path: String, forceReadOnly: Bool = false) throws {
+    public init(
+        path: String,
+        forceReadOnly: Bool = false,
+        storagePolicy: SQLitePersistentStorePolicy? = nil
+    ) throws {
         self.databasePath = path
-        let (handle, ro, stmt) = try Self.openDatabase(at: path, forceReadOnly: forceReadOnly)
+        let effectiveStoragePolicy = forceReadOnly
+            ? nil
+            : (storagePolicy ?? Self.defaultStoragePolicy(for: path))
+        self.storagePolicy = effectiveStoragePolicy
+        let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+            at: path,
+            forceReadOnly: forceReadOnly,
+            storagePolicy: effectiveStoragePolicy
+        )
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
+        self.storageAdmission = admission
+        self.sqlitePageSizeBytes = pageSize
+        self.checkpointController = controller
     }
 
     deinit {
         if let insertStmt { sqlite3_finalize(insertStmt) }
-        if let db { sqlite3_close(db) }
+        if let db {
+            checkpointController?.detach(from: db)
+            sqlite3_close(db)
+        }
     }
 
     // MARK: - Insert
@@ -781,13 +1077,39 @@ public actor EventStore {
     }
 
     public func insert(event: Event) throws {
+        _ = try insert(event: event, applyInsertFilter: true) { rowMutationBytes in
+            try self.admitStorageWrite(
+                estimatedTransactionBytes: self.eventTransactionEstimate(
+                    rowMutationBytes: rowMutationBytes
+                )
+            )
+        }
+    }
+
+    /// Prepare the complete persisted representation before asking the caller
+    /// to admit the write. Batch insertion uses the callback to close the
+    /// current transaction before adding a row that would exceed its reserve.
+    private func insert(
+        event: Event,
+        applyInsertFilter: Bool,
+        beforeWrite: (Int64) throws -> Void
+    ) throws -> Bool {
         // v1.8.0 Layer 1: drop noise events at insert. Cheaper than letting
         // them hit SQLite + FTS5 + indexes. Self-monitoring (daemon watches
         // its own log/DB) was 17% of volume on field-measured hardware.
-        if let filter = insertFilter, filter.shouldDrop(event: event) {
-            return
+        if applyInsertFilter,
+           let filter = insertFilter,
+           filter.shouldDrop(event: event) {
+            return false
         }
         guard let stmt = insertStmt else {
+            // An inherited pressure-bound store deliberately opens without a
+            // prepared writer. Preserve the authoritative typed admission
+            // cause instead of masking it as a generic prepare failure. This
+            // branch is off the normal insert hot path.
+            if storageAdmission?.growthBlocked == true {
+                try admitStorageWrite(estimatedTransactionBytes: 0)
+            }
             throw EventStoreError.prepareFailed("Insert statement not prepared")
         }
 
@@ -884,6 +1206,18 @@ public actor EventStore {
             throw EventStoreError.encodingFailed(error.localizedDescription)
         }
 
+        let indexedCommandLine = Self.boundIndexedText(
+            sanitizedCommandLine,
+            maxBytes: Self.maxIndexedCommandLineBytes
+        )
+        let mutationBytes = Self.estimatedEventMutationBytes(
+            event: event,
+            indexedCommandLine: indexedCommandLine,
+            rawJSON: jsonString,
+            pageSizeBytes: sqlitePageSizeBytes
+        )
+        try beforeWrite(mutationBytes)
+
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
 
@@ -909,7 +1243,7 @@ public actor EventStore {
         // independently of raw_json because this column feeds the events_fts
         // index directly — an oversized argv would otherwise blow up the FTS
         // index unbounded. See maxIndexedCommandLineBytes.
-        bindText(stmt, index: 10, value: Self.boundIndexedText(sanitizedCommandLine, maxBytes: Self.maxIndexedCommandLineBytes))
+        bindText(stmt, index: 10, value: indexedCommandLine)
         // 11: process_ppid
         sqlite3_bind_int(stmt, 11, event.process.ppid)
         // 12: process_signer
@@ -1035,20 +1369,24 @@ public actor EventStore {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            let failure = SQLiteFailureDetails(resultCode: rc, db: db)
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             // v1.12.0 RC28 audit fix (Resil-B1): surface SQLITE_FULL
             // distinctly so EventLoop can stop trying to insert (no
             // point hammering a full disk) instead of treating it as
-            // a transient step failure. SQLite errors here can also
-            // be SQLITE_IOERR_NOSPC (extended code 0x0D0A) which has
-            // the same semantic.
-            if rc == SQLITE_FULL || (rc & 0xFF) == SQLITE_FULL || rc == 0x0D0A {
-                throw EventStoreError.diskFull(msg)
+            // a transient step failure. The vendored Unix VFS reports
+            // ENOSPC writes as primary SQLITE_FULL; other VFS paths may
+            // retain ENOSPC/EDQUOT in sqlite3_system_errno().
+            if failure.primaryResultCode == SQLITE_FULL
+                || failure.systemErrno == ENOSPC
+                || failure.systemErrno == EDQUOT {
+                throw EventStoreError.diskFull(msg, failure: failure)
             }
             // #13: transient lock contention (past the 5s busy_timeout) — the
             // batched writer retries rather than dropping the batch.
             if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
-                throw EventStoreError.busy(msg)
+                throw EventStoreError.busy(msg, failure: failure)
             }
             // C-04: a mid-run corruption code triggers a bounded, rate-limited
             // close→quarantine→reopen so ingestion recovers instead of failing
@@ -1056,11 +1394,145 @@ public actor EventStore {
             // the *next* insert lands in the freshly-reopened DB. (When reached
             // from the batch `insert(events:)`, the enclosing transaction's
             // ROLLBACK runs on the reopened handle as a harmless no-op.)
-            if Self.isCorruptionResultCode(rc) {
-                attemptCorruptionSelfHeal(reason: msg)
+            if failure.isExplicitCorruption {
+                attemptCorruptionSelfHeal(failure: failure, reason: msg)
             }
-            throw EventStoreError.stepFailed(msg)
+            throw EventStoreError.sqliteFailure(
+                context: "insert step",
+                message: msg,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
+            )
         }
+        if sqlite3_changes(db) > 0 {
+            maintenanceRowMutationHighWaterBytes = max(
+                maintenanceRowMutationHighWaterBytes ?? 0,
+                mutationBytes
+            )
+        }
+        return true
+    }
+
+    /// Derive the transaction estimate from exactly what the insert binds.
+    /// `raw_json` is capped at 64 KiB and the independently indexed command
+    /// line at 16 KiB, but every other projected string is counted at its real
+    /// UTF-8 length so an adversarial path/enrichment can only make admission
+    /// stricter. Table bytes and every secondary-index key are counted once;
+    /// FTS input is counted four times for token/posting expansion. The shared
+    /// estimator doubles that durable representation for WAL/page-image writes
+    /// and charges up to 20 random leaf pages per row at the authoritative DB
+    /// page size (events table + PK + 13 live indexes + three FTS5 backing
+    /// b-trees, with two pages of margin). Interior tree/header slack is charged once per transaction by
+    /// `eventTransactionEstimate`, so batching does not pay it once per event.
+    static func estimatedEventMutationBytes(
+        event: Event,
+        indexedCommandLine: String,
+        rawJSON: String,
+        pageSizeBytes: Int64
+    ) -> Int64 {
+        func bytes(_ value: String?) -> Int64 {
+            guard let value else { return 0 }
+            return Int64(value.utf8.count)
+        }
+        func add(_ total: inout Int64, _ value: Int64) {
+            total = SQLitePersistentStoreAdmission.saturatingAdd(total, value)
+        }
+        func addStrings(_ total: inout Int64, _ values: [String?]) {
+            for value in values { add(&total, bytes(value)) }
+        }
+
+        let aiTool = event.enrichments["ai_tool"]
+            ?? event.enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+        let tccDecision = event.tcc.map { $0.allowed ? "granted" : "denied" }
+
+        // Row payload: every text column bound by insert(event:). Numeric/null
+        // columns receive a fixed-width allowance below.
+        var logical: Int64 = 45 * 16
+        addStrings(&logical, [
+            event.id.uuidString,
+            event.eventCategory.rawValue,
+            event.eventType.rawValue,
+            event.eventAction,
+            event.severity.rawValue,
+            event.process.name,
+            event.process.executable,
+            indexedCommandLine,
+            event.process.codeSignature?.signerType.rawValue,
+            event.process.codeSignature?.teamId,
+            event.process.codeSignature?.signingId,
+            event.file?.path,
+            event.file?.action.rawValue,
+            event.network?.destinationIp,
+            event.tcc?.service,
+            event.tcc?.client,
+            rawJSON,
+            event.enrichments["mcp_server_name"],
+            event.enrichments["mcp_server_category"],
+            event.enrichments["ai_tool_session_id"],
+            event.enrichments[TraceCorrelator.EnrichmentKey.traceId],
+            event.enrichments[TraceCorrelator.EnrichmentKey.spanId],
+            event.enrichments[TraceCorrelator.EnrichmentKey.agentTool],
+            event.enrichments[TraceCorrelator.EnrichmentKey.confidence],
+            event.enrichments[TraceCorrelator.EnrichmentKey.evidenceJson],
+            event.process.userName.isEmpty ? nil : event.process.userName,
+            event.process.workingDirectory.isEmpty ? nil : event.process.workingDirectory,
+            event.process.architecture,
+            event.process.hashes?.sha256,
+            event.process.ancestors.first?.name,
+            event.process.ancestors.first?.executable,
+            event.enrichments["ParentSignerType"],
+            aiTool,
+            event.process.session?.launchSource?.rawValue,
+            tccDecision,
+        ])
+
+        // Secondary indexes. Duplicates are intentional: they are separate
+        // durable b-tree keys. Fixed numeric timestamp/rowid portions receive
+        // 16 bytes per listed key.
+        let indexedStrings: [String?] = [
+            event.id.uuidString,                         // PRIMARY KEY
+            event.eventCategory.rawValue,               // category + composites
+            event.eventCategory.rawValue,
+            event.eventCategory.rawValue,
+            event.eventCategory.rawValue,
+            event.severity.rawValue,                    // severity + composites
+            event.severity.rawValue,
+            event.severity.rawValue,
+            event.process.executable,                   // process/timestamp
+            event.enrichments["mcp_server_name"],
+            event.enrichments[TraceCorrelator.EnrichmentKey.traceId],
+            event.enrichments["ai_tool_session_id"],
+            event.process.userName.isEmpty ? nil : String(event.process.userId),
+            aiTool,
+            event.process.ancestors.first?.executable,
+        ]
+        addStrings(&logical, indexedStrings)
+        add(&logical, Int64(indexedStrings.count) * 16)
+
+        // FTS5 can materialize a token dictionary plus postings/doclist data.
+        // Count four copies here; the shared WAL multiplier below makes this
+        // an eightfold allowance for the source text.
+        var ftsBytes: Int64 = 0
+        addStrings(&ftsBytes, [
+            event.process.name,
+            event.process.executable,
+            indexedCommandLine,
+            event.file?.path,
+            event.network?.destinationIp,
+            event.tcc?.service,
+            event.tcc?.client,
+        ])
+        add(
+            &logical,
+            SQLitePersistentStoreAdmission.saturatingMultiply(ftsBytes, by: 4)
+        )
+
+        return SQLitePersistentStoreAdmission.conservativeEncodedRowMutationBytes(
+            logicalRepresentationBytes: logical,
+            pageSizeBytes: pageSizeBytes,
+            maximumLeafPageTouches: 20
+        )
     }
 
     // MARK: - Payload truncation (v1.12.6)
@@ -1247,21 +1719,125 @@ public actor EventStore {
         )
     }
 
-    /// Persists a batch of events inside a single transaction.
+    /// Persists a batch in reserve-bounded transactions. A very large caller
+    /// array (the daemon buffer is independently capped at 250K) can no longer
+    /// grow one WAL transaction without limit. Each chunk commits before the
+    /// next fresh disk probe; immutable event-id duplicate no-ops make retry
+    /// after a later chunk failure idempotent, though the whole input array is intentionally no
+    /// longer one atomic unit. On failure, `EventBatchInsertFailure` carries
+    /// the exact committed count and filter-passing suffix.
     ///
     /// - Parameter events: The events to store.
-    /// - Throws: `EventStoreError` on serialisation or database failure.
-    public func insert(events: [Event]) throws {
-        try execute("BEGIN TRANSACTION")
-        do {
-            for event in events {
-                try insert(event: event)
+    /// - Throws: `EventBatchInsertFailure` on serialisation/database failure.
+    @discardableResult
+    public func insert(events: [Event]) throws -> EventBatchInsertResult {
+        let startingGeneration = activeDatabaseGeneration
+        var candidates: [Event] = []
+        candidates.reserveCapacity(events.count)
+        var filteredCount = 0
+        for event in events {
+            if let filter = insertFilter, filter.shouldDrop(event: event) {
+                filteredCount += 1
+            } else {
+                candidates.append(event)
             }
-            try execute("COMMIT")
-        } catch {
-            try? execute("ROLLBACK")
-            throw error
         }
+
+        let reserve = storageAdmission?.transactionReserveBytes
+            ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
+        var transactionOpen = false
+        var rowMutationEstimate: Int64 = 0
+        var rowsInOpenTransaction = 0
+        var committedRows = 0
+        var committedTransactions = 0
+
+        func commitOpenTransaction() throws {
+            guard transactionOpen else { return }
+            try execute("COMMIT")
+            committedBatchInsertTransactions &+= 1
+            committedTransactions += 1
+            committedRows += rowsInOpenTransaction
+            transactionOpen = false
+            rowMutationEstimate = 0
+            rowsInOpenTransaction = 0
+        }
+
+        do {
+            for event in candidates {
+                _ = try insert(
+                    event: event,
+                    applyInsertFilter: false
+                ) { rowBytes in
+                    let nextRows = SQLitePersistentStoreAdmission
+                        .saturatingAdd(rowMutationEstimate, rowBytes)
+                    let nextEstimate = eventTransactionEstimate(
+                        rowMutationBytes: nextRows
+                    )
+                    if transactionOpen, nextEstimate > reserve {
+                        try commitOpenTransaction()
+                    }
+                    if !transactionOpen {
+                        let firstEstimate = eventTransactionEstimate(
+                            rowMutationBytes: rowBytes
+                        )
+                        try execute(
+                            "BEGIN TRANSACTION",
+                            estimatedTransactionBytes: firstEstimate
+                        )
+                        transactionOpen = true
+                    }
+                    rowMutationEstimate = SQLitePersistentStoreAdmission
+                        .saturatingAdd(rowMutationEstimate, rowBytes)
+                }
+                rowsInOpenTransaction += 1
+            }
+            try commitOpenTransaction()
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: committedRows,
+                filteredCount: filteredCount,
+                committedTransactionCount: committedTransactions
+            )
+        } catch {
+            if transactionOpen { try? execute("ROLLBACK") }
+            let databaseWasReplaced = activeDatabaseGeneration
+                != startingGeneration
+            let durableRows = databaseWasReplaced ? 0 : committedRows
+            let durableTransactions = databaseWasReplaced
+                ? 0 : committedTransactions
+            let progress = EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: durableRows,
+                filteredCount: filteredCount,
+                committedTransactionCount: durableTransactions
+            )
+            throw EventBatchInsertFailure(
+                progress: progress,
+                uncommittedEvents: databaseWasReplaced
+                    ? candidates
+                    : Array(candidates.dropFirst(committedRows)),
+                underlyingError: error,
+                activeDatabaseWasReplaced: databaseWasReplaced,
+                replacementReadyForRetry: databaseWasReplaced
+                    && db != nil && insertStmt != nil && !isReadOnly
+            )
+        }
+    }
+
+    private func eventTransactionEstimate(
+        rowMutationBytes: Int64
+    ) -> Int64 {
+        SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: rowMutationBytes,
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 48
+        )
+    }
+
+    /// Deterministic regression surface for verifying that the reserve guard
+    /// still batches ordinary events instead of degenerating to per-row commits.
+    func batchInsertTransactionCount() -> UInt64 {
+        committedBatchInsertTransactions
     }
 
     // MARK: - Query
@@ -1620,6 +2196,88 @@ public actor EventStore {
 
     // MARK: - Pruning
 
+    private struct AggregateRollupFailure: Error {
+        let underlying: any Error
+    }
+
+    /// Keep aggregate accounting, FTS deletion, and source deletion in one
+    /// transaction. If trend aggregation alone fails, roll the whole attempt
+    /// back and retry an atomic FTS+source delete so disk-cap convergence still
+    /// outranks best-effort trend data without double-counting on a later run.
+    private func deleteEventBatchAtomically(
+        aggregateSQL: String?,
+        ftsSQL: String,
+        eventsSQL: String,
+        estimatedTransactionBytes: Int64,
+        bind: (OpaquePointer) -> Void
+    ) throws -> Int {
+        func run(aggregate: String?) throws -> Int {
+            try execute(
+                "BEGIN IMMEDIATE TRANSACTION",
+                maintenance: true,
+                estimatedTransactionBytes: estimatedTransactionBytes
+            )
+            var committed = false
+            do {
+                if let aggregate {
+                    do {
+                        let statement = try prepare(aggregate)
+                        bind(statement)
+                        let rc = sqlite3_step(statement)
+                        sqlite3_finalize(statement)
+                        guard rc == SQLITE_DONE else {
+                            try throwLatchedStoragePressureIfPresent(
+                                resultCode: rc
+                            )
+                            throw EventStoreError.stepFailed(
+                                "event aggregate step failed"
+                            )
+                        }
+                    } catch {
+                        throw AggregateRollupFailure(underlying: error)
+                    }
+                }
+
+                let fts = try prepare(ftsSQL)
+                bind(fts)
+                let ftsRC = sqlite3_step(fts)
+                sqlite3_finalize(fts)
+                guard ftsRC == SQLITE_DONE else {
+                    try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
+                    throw EventStoreError.stepFailed("event FTS delete failed")
+                }
+
+                let events = try prepare(eventsSQL)
+                bind(events)
+                let eventsRC = sqlite3_step(events)
+                sqlite3_finalize(events)
+                guard eventsRC == SQLITE_DONE else {
+                    try throwLatchedStoragePressureIfPresent(
+                        resultCode: eventsRC
+                    )
+                    throw EventStoreError.stepFailed("event delete failed")
+                }
+                let deleted = Int(sqlite3_changes(db))
+                try execute("COMMIT")
+                committed = true
+                return deleted
+            } catch {
+                if !committed { try? execute("ROLLBACK") }
+                throw error
+            }
+        }
+
+        if aggregateSQL != nil {
+            do {
+                return try run(aggregate: aggregateSQL)
+            } catch let failure as AggregateRollupFailure {
+                Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                    .warning("Layer-3 roll-up failed and was rolled back; retrying the FTS+event delete atomically without trend data: \(failure.underlying.localizedDescription, privacy: .public)")
+            }
+        }
+        return try run(aggregate: nil)
+    }
+
     /// Deletes events older than the specified date for data retention.
     ///
     /// Deletes in batches of 100,000 rows and yields between batches so that
@@ -1652,7 +2310,16 @@ public actor EventStore {
         // transaction); the caller vacuums after COMMIT.
         withinTransaction: Bool = false
     ) async throws -> Int {
-        let batchSize: Int32 = 100_000
+        guard !withinTransaction else {
+            throw EventStoreError.stepFailed(
+                "prune within an unbounded caller transaction is disabled; use reserve-bounded batches"
+            )
+        }
+        let batchSize = maintenanceBatchRowLimit(mutationsPerCandidate: 2)
+        let batchEstimate = maintenanceEstimate(
+            rowCount: Int(batchSize),
+            mutationsPerCandidate: 2
+        )
         let timestamp = date.timeIntervalSince1970
         var totalDeleted = 0
 
@@ -1693,27 +2360,13 @@ public actor EventStore {
         }
 
         while true {
-            // FTS batch
-            let ftsStmt = try prepare(deleteFTS)
-            bindSelector(ftsStmt)
-            let rc1 = sqlite3_step(ftsStmt)
-            sqlite3_finalize(ftsStmt)
-            guard rc1 == SQLITE_DONE else {
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw EventStoreError.stepFailed("FTS prune failed: \(msg)")
-            }
-
-            // Events batch
-            let evtStmt = try prepare(deleteEvents)
-            bindSelector(evtStmt)
-            let rc2 = sqlite3_step(evtStmt)
-            sqlite3_finalize(evtStmt)
-            guard rc2 == SQLITE_DONE else {
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw EventStoreError.stepFailed("Event prune failed: \(msg)")
-            }
-
-            let rowsDeleted = Int(sqlite3_changes(db))
+            let rowsDeleted = try deleteEventBatchAtomically(
+                aggregateSQL: nil,
+                ftsSQL: deleteFTS,
+                eventsSQL: deleteEvents,
+                estimatedTransactionBytes: batchEstimate,
+                bind: bindSelector
+            )
             totalDeleted += rowsDeleted
 
             // No more rows in this batch — pruning is complete.
@@ -1723,9 +2376,7 @@ public actor EventStore {
             // queries are not starved between batches — but NEVER while a caller
             // holds an open transaction (see withinTransaction: a suspension here
             // lets a reentrant insert issue a nested BEGIN and lose its batch).
-            if !withinTransaction {
-                await Task.yield()
-            }
+            await Task.yield()
         }
 
         // v1.10.0 perf: incremental_vacuum reclaims pages freed by the
@@ -1738,8 +2389,26 @@ public actor EventStore {
         // actor on a freshly-pruned giant DB.
         // incremental_vacuum is illegal inside a transaction — skip it when the
         // caller holds one (rollUpAndPrune runs it after COMMIT instead).
-        if !withinTransaction, totalDeleted > 0, let db {
-            sqlite3_exec(db, "PRAGMA incremental_vacuum(5000)", nil, nil, nil)
+        if totalDeleted > 0, let db {
+            let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
+                requestedPages: Int.max,
+                reserveBytes: storageTransactionReserveBytes,
+                pageSizeBytes: sqlitePageSizeBytes
+            )
+            guard plan.pages > 0 else { return totalDeleted }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: plan.estimatedTransactionBytes
+            )
+            let rc = sqlite3_exec(
+                db,
+                "PRAGMA incremental_vacuum(\(plan.pages))",
+                nil,
+                nil,
+                nil
+            )
+            if rc != SQLITE_OK {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            }
         }
 
         return totalDeleted
@@ -1776,7 +2445,10 @@ public actor EventStore {
         newerThan floorCutoff: Date? = nil
     ) async throws -> Int {
         guard count > 0 else { return 0 }
-        let batchSize: Int32 = min(100_000, Int32(count))
+        let batchSize: Int32 = min(
+            maintenanceBatchRowLimit(mutationsPerCandidate: 3),
+            Int32(clamping: count)
+        )
         var remaining = count
         var totalDeleted = 0
 
@@ -1869,48 +2541,27 @@ public actor EventStore {
                 GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
                 ON CONFLICT(day, event_category, process_signer, process_path)
                 DO UPDATE SET count = count + excluded.count
-                """
+            """
             while remaining > 0 {
-                let thisBatch = min(batchSize, Int32(remaining))
-
-                // Best-effort by construction: the roll-up is trend data, the
-                // DELETE below is the disk-budget guarantee. A failed aggregate
-                // must never abort the prune — that would reintroduce the
-                // unbounded growth Layer 3 exists to stop.
-                if let aggStmt = try? prepare(aggregateEligible) {
-                    bindText(aggStmt, index: 1, value: protectedCategory.rawValue)
-                    sqlite3_bind_double(aggStmt, 2, floorTs)
-                    sqlite3_bind_int(aggStmt, 3, thisBatch)
-                    if sqlite3_step(aggStmt) != SQLITE_DONE {
-                        Logger(subsystem: "com.maccrab.storage", category: "event-store")
-                            .warning("Layer-3 roll-up INSERT failed — batch deleted without an aggregate row")
-                    }
-                    sqlite3_finalize(aggStmt)
+                let thisBatch = min(batchSize, Int32(clamping: remaining))
+                let estimate = maintenanceEstimate(
+                    rowCount: Int(thisBatch),
+                    mutationsPerCandidate: 3
+                )
+                let deleted = try deleteEventBatchAtomically(
+                    aggregateSQL: aggregateEligible,
+                    ftsSQL: deleteEligibleFTS,
+                    eventsSQL: deleteEligibleEvents,
+                    estimatedTransactionBytes: estimate
+                ) { statement in
+                    bindText(
+                        statement,
+                        index: 1,
+                        value: protectedCategory.rawValue
+                    )
+                    sqlite3_bind_double(statement, 2, floorTs)
+                    sqlite3_bind_int(statement, 3, thisBatch)
                 }
-
-                let ftsStmt = try prepare(deleteEligibleFTS)
-                bindText(ftsStmt, index: 1, value: protectedCategory.rawValue)
-                sqlite3_bind_double(ftsStmt, 2, floorTs)
-                sqlite3_bind_int(ftsStmt, 3, thisBatch)
-                let rc1 = sqlite3_step(ftsStmt)
-                sqlite3_finalize(ftsStmt)
-                guard rc1 == SQLITE_DONE else {
-                    let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                    throw EventStoreError.stepFailed("FTS category-prune failed: \(msg)")
-                }
-
-                let evtStmt = try prepare(deleteEligibleEvents)
-                bindText(evtStmt, index: 1, value: protectedCategory.rawValue)
-                sqlite3_bind_double(evtStmt, 2, floorTs)
-                sqlite3_bind_int(evtStmt, 3, thisBatch)
-                let rc2 = sqlite3_step(evtStmt)
-                sqlite3_finalize(evtStmt)
-                guard rc2 == SQLITE_DONE else {
-                    let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                    throw EventStoreError.stepFailed("Event category-prune failed: \(msg)")
-                }
-
-                let deleted = Int(sqlite3_changes(db))
                 if deleted == 0 { break }  // no more eligible rows — engage valve below
                 totalDeleted += deleted
                 remaining -= deleted
@@ -1955,38 +2606,19 @@ public actor EventStore {
             """
 
         while remaining > 0 {
-            let thisBatch = min(batchSize, Int32(remaining))
-
-            // Best-effort (see Phase 1): never let a failed aggregate abort the
-            // prune — convergence of the disk cap outranks trend fidelity.
-            if let aggStmt = try? prepare(aggregateOldest) {
-                sqlite3_bind_int(aggStmt, 1, thisBatch)
-                if sqlite3_step(aggStmt) != SQLITE_DONE {
-                    Logger(subsystem: "com.maccrab.storage", category: "event-store")
-                        .warning("Layer-3 roll-up INSERT failed — batch deleted without an aggregate row")
-                }
-                sqlite3_finalize(aggStmt)
+            let thisBatch = min(batchSize, Int32(clamping: remaining))
+            let estimate = maintenanceEstimate(
+                rowCount: Int(thisBatch),
+                mutationsPerCandidate: 3
+            )
+            let deleted = try deleteEventBatchAtomically(
+                aggregateSQL: aggregateOldest,
+                ftsSQL: deleteFTS,
+                eventsSQL: deleteEvents,
+                estimatedTransactionBytes: estimate
+            ) { statement in
+                sqlite3_bind_int(statement, 1, thisBatch)
             }
-
-            let ftsStmt = try prepare(deleteFTS)
-            sqlite3_bind_int(ftsStmt, 1, thisBatch)
-            let rc1 = sqlite3_step(ftsStmt)
-            sqlite3_finalize(ftsStmt)
-            guard rc1 == SQLITE_DONE else {
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw EventStoreError.stepFailed("FTS oldest-prune failed: \(msg)")
-            }
-
-            let evtStmt = try prepare(deleteEvents)
-            sqlite3_bind_int(evtStmt, 1, thisBatch)
-            let rc2 = sqlite3_step(evtStmt)
-            sqlite3_finalize(evtStmt)
-            guard rc2 == SQLITE_DONE else {
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw EventStoreError.stepFailed("Event oldest-prune failed: \(msg)")
-            }
-
-            let deleted = Int(sqlite3_changes(db))
             if deleted == 0 { break }  // table empty
             totalDeleted += deleted
             remaining -= deleted
@@ -2158,6 +2790,7 @@ public actor EventStore {
         windowSeconds: TimeInterval = 30,
         maxRows: Int = 50
     ) throws {
+        let requestedRows = max(1, maxRows)
         let alertTs = alertTimestamp.timeIntervalSince1970
         let lo = alertTs - windowSeconds
         // Backward-only: the upper bound is the alert timestamp itself. A
@@ -2194,19 +2827,155 @@ public actor EventStore {
                     ELSE 4
                 END,
                 ABS(timestamp - ?4) ASC
-            LIMIT ?5
+            LIMIT ?5 OFFSET ?6
             """
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bindText(stmt, index: 1, value: alertId)
-        sqlite3_bind_double(stmt, 2, lo)
-        sqlite3_bind_double(stmt, 3, hi)
-        sqlite3_bind_double(stmt, 4, alertTs)
-        sqlite3_bind_int(stmt, 5, Int32(max(1, maxRows)))
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw EventStoreError.stepFailed("recordAlertEvidence failed: \(msg)")
+        var offset = 0
+        while offset < requestedRows {
+            let plan = try alertEvidenceBatchPlan(
+                alertId: alertId,
+                lowerTimestamp: lo,
+                upperTimestamp: hi,
+                alertTimestamp: alertTs,
+                offset: offset,
+                maximumRows: requestedRows - offset
+            )
+            guard plan.rowCount > 0 else { break }
+            let thisBatch = plan.rowCount
+            try admitStorageWrite(
+                estimatedTransactionBytes: plan.estimatedTransactionBytes
+            )
+            let stmt = try prepare(sql)
+            bindText(stmt, index: 1, value: alertId)
+            sqlite3_bind_double(stmt, 2, lo)
+            sqlite3_bind_double(stmt, 3, hi)
+            sqlite3_bind_double(stmt, 4, alertTs)
+            sqlite3_bind_int(stmt, 5, Int32(clamping: thisBatch))
+            sqlite3_bind_int(stmt, 6, Int32(clamping: offset))
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+                throw EventStoreError.stepFailed("recordAlertEvidence failed: \(msg)")
+            }
+            maintenanceRowMutationHighWaterBytes = max(
+                maintenanceRowMutationHighWaterBytes ?? 0,
+                plan.maximumRowMutationBytes
+            )
+            offset += thisBatch
         }
+    }
+
+    /// Read the exact source rows selected by the following INSERT...SELECT and
+    /// choose the largest prefix that fits the reserve. This closes the old
+    /// 64-KiB non-raw assumption: legacy/adversarial projected columns are
+    /// charged at their actual stored byte lengths before any evidence write.
+    private func alertEvidenceBatchPlan(
+        alertId: String,
+        lowerTimestamp: Double,
+        upperTimestamp: Double,
+        alertTimestamp: Double,
+        offset: Int,
+        maximumRows: Int
+    ) throws -> (
+        rowCount: Int,
+        estimatedTransactionBytes: Int64,
+        maximumRowMutationBytes: Int64
+    ) {
+        let sql = """
+            SELECT id, timestamp, event_category, event_type, event_action,
+                   severity, process_pid, process_name, process_path,
+                   process_commandline, process_ppid, process_signer,
+                   process_team_id, process_signing_id, file_path, file_action,
+                   network_dest_ip, network_dest_port, tcc_service, tcc_client,
+                   raw_json, mcp_server_name, mcp_server_category,
+                   ai_tool_session_id
+            FROM events
+            WHERE timestamp BETWEEN ?1 AND ?2
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4
+                END,
+                ABS(timestamp - ?3) ASC
+            LIMIT ?4 OFFSET ?5
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, lowerTimestamp)
+        sqlite3_bind_double(statement, 2, upperTimestamp)
+        sqlite3_bind_double(statement, 3, alertTimestamp)
+        sqlite3_bind_int(statement, 4, Int32(clamping: max(0, maximumRows)))
+        sqlite3_bind_int(statement, 5, Int32(clamping: max(0, offset)))
+
+        let fixed = SQLitePersistentStoreAdmission.transactionFixedOverheadBytes(
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 16
+        )
+        var rowBytes: Int64 = 0
+        var maximumRowMutationBytes: Int64 = 0
+        var count = 0
+        var step = sqlite3_step(statement)
+        while step == SQLITE_ROW {
+            func bytes(_ column: Int32) -> Int64 {
+                sqlite3_column_type(statement, column) == SQLITE_NULL
+                    ? 0 : Int64(sqlite3_column_bytes(statement, column))
+            }
+            var logical = Int64(25 * 16 + 3 * 16)
+            logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                logical,
+                SQLitePersistentStoreAdmission.saturatingMultiply(
+                    Int64(clamping: alertId.utf8.count), by: 3
+                )
+            )
+            for column in Int32(0)..<Int32(24) {
+                logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                    logical, bytes(column)
+                )
+            }
+            // id is copied into the composite PK and event-id index.
+            logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                logical,
+                SQLitePersistentStoreAdmission.saturatingMultiply(
+                    bytes(0), by: 2
+                )
+            )
+            let candidate = SQLitePersistentStoreAdmission
+                .conservativeEncodedRowMutationBytes(
+                    logicalRepresentationBytes: logical,
+                    pageSizeBytes: sqlitePageSizeBytes,
+                    maximumLeafPageTouches: 4
+                )
+            let nextRows = SQLitePersistentStoreAdmission.saturatingAdd(
+                rowBytes, candidate
+            )
+            let nextTransaction = SQLitePersistentStoreAdmission.saturatingAdd(
+                fixed, nextRows
+            )
+            if nextTransaction > storageTransactionReserveBytes {
+                if count == 0 {
+                    throw SQLitePersistentStoreAdmissionError
+                        .transactionEstimateExceedsReserve(
+                            estimatedBytes: nextTransaction,
+                            reserveBytes: storageTransactionReserveBytes
+                        )
+                }
+                break
+            }
+            rowBytes = nextRows
+            maximumRowMutationBytes = max(maximumRowMutationBytes, candidate)
+            count += 1
+            step = sqlite3_step(statement)
+        }
+        if step != SQLITE_DONE && step != SQLITE_ROW {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
+            throw EventStoreError.stepFailed("alert evidence estimate step failed")
+        }
+        return (
+            count,
+            SQLitePersistentStoreAdmission.saturatingAdd(fixed, rowBytes),
+            maximumRowMutationBytes
+        )
     }
 
     /// v1.8.0-rc6: trim alert_evidence to at most `perAlertMax` rows per
@@ -2217,6 +2986,8 @@ public actor EventStore {
     @discardableResult
     public func pruneAlertEvidenceCap(perAlertMax: Int) async throws -> Int {
         guard perAlertMax > 0 else { return 0 }
+        let batch = maintenanceBatchRowLimit()
+        let estimate = maintenanceEstimate(rowCount: Int(batch))
         // Window function (SQLite 3.25+) ranks rows within each alert; we
         // delete those that fall outside the cap. macOS 13 ships SQLite
         // 3.39+, so this is safe.
@@ -2240,16 +3011,30 @@ public actor EventStore {
                     FROM alert_evidence
                 )
                 WHERE rn > ?1
+                LIMIT ?2
             )
             """
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(perAlertMax))
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw EventStoreError.stepFailed("pruneAlertEvidenceCap failed: \(msg)")
+        var total = 0
+        while true {
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: estimate
+            )
+            let stmt = try prepare(sql)
+            sqlite3_bind_int(stmt, 1, Int32(clamping: perAlertMax))
+            sqlite3_bind_int(stmt, 2, batch)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+                throw EventStoreError.stepFailed("pruneAlertEvidenceCap failed: \(msg)")
+            }
+            let deleted = Int(sqlite3_changes(db))
+            total += deleted
+            if deleted == 0 { break }
+            await Task.yield()
         }
-        return Int(sqlite3_changes(db))
+        return total
     }
 
     /// v1.8.0-rc6: drop alert_evidence rows older than `cutoff`. Aligns
@@ -2258,15 +3043,35 @@ public actor EventStore {
     /// outlive the alert.
     @discardableResult
     public func pruneAlertEvidence(olderThan cutoff: Date) async throws -> Int {
-        let sql = "DELETE FROM alert_evidence WHERE timestamp < ?1"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw EventStoreError.stepFailed("pruneAlertEvidence failed: \(msg)")
+        let batch = maintenanceBatchRowLimit()
+        let estimate = maintenanceEstimate(rowCount: Int(batch))
+        let sql = """
+            DELETE FROM alert_evidence WHERE rowid IN (
+                SELECT rowid FROM alert_evidence
+                WHERE timestamp < ?1 ORDER BY rowid LIMIT ?2
+            )
+            """
+        var total = 0
+        while true {
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: estimate
+            )
+            let stmt = try prepare(sql)
+            sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 2, batch)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+                throw EventStoreError.stepFailed("pruneAlertEvidence failed: \(msg)")
+            }
+            let deleted = Int(sqlite3_changes(db))
+            total += deleted
+            if deleted == 0 { break }
+            await Task.yield()
         }
-        return Int(sqlite3_changes(db))
+        return total
     }
 
     /// v1.17.5 (RC H2): bound the alert_evidence table by TOTAL payload size.
@@ -2277,7 +3082,11 @@ public actor EventStore {
     @discardableResult
     public func pruneAlertEvidenceBySize(maxBytes: Int64, batchSize: Int = 2000) async throws -> Int {
         guard maxBytes > 0 else { return 0 }
-        let batch = max(1, batchSize)
+        let batch = min(
+            max(1, batchSize),
+            Int(maintenanceBatchRowLimit())
+        )
+        let estimate = maintenanceEstimate(rowCount: batch)
         // `maxBytes` is a PHYSICAL footprint budget. The raw_json text is only
         // part of each row's on-disk cost (25 columns + 3 indexes), so the prior
         // SUM(LENGTH(raw_json)) cap let the physical table grow ~1.7x past the
@@ -2332,11 +3141,15 @@ public actor EventStore {
         // to 4096 iterations so a pathological table can't wedge the sweep.
         for _ in 0..<4096 {
             if total <= rawJsonBudget { break }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: estimate
+            )
             let stmt = try prepare(
                 "DELETE FROM alert_evidence WHERE rowid IN (SELECT rowid FROM alert_evidence ORDER BY timestamp ASC LIMIT \(batch))")
             let rc = sqlite3_step(stmt)
             sqlite3_finalize(stmt)
             guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
                 let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
                 throw EventStoreError.stepFailed("pruneAlertEvidenceBySize failed: \(msg)")
             }
@@ -2369,15 +3182,34 @@ public actor EventStore {
     /// a successful 0.
     @discardableResult
     public func deleteEvidence(alertId: String) throws -> Int {
-        let sql = "DELETE FROM alert_evidence WHERE alert_id = ?1"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bindText(stmt, index: 1, value: alertId)
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw EventStoreError.stepFailed("deleteEvidence failed: \(msg)")
+        let batch = maintenanceBatchRowLimit()
+        let estimate = maintenanceEstimate(rowCount: Int(batch))
+        let sql = """
+            DELETE FROM alert_evidence WHERE rowid IN (
+                SELECT rowid FROM alert_evidence
+                WHERE alert_id = ?1 ORDER BY rowid LIMIT ?2
+            )
+            """
+        var total = 0
+        while true {
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: estimate
+            )
+            let stmt = try prepare(sql)
+            bindText(stmt, index: 1, value: alertId)
+            sqlite3_bind_int(stmt, 2, batch)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+                throw EventStoreError.stepFailed("deleteEvidence failed: \(msg)")
+            }
+            let deleted = Int(sqlite3_changes(db))
+            total += deleted
+            if deleted == 0 { break }
         }
-        return Int(sqlite3_changes(db))
+        return total
     }
 
     /// The 24h roll-up sweep that replaces the legacy size-cap-and-VACUUM
@@ -2420,41 +3252,26 @@ public actor EventStore {
         newerThan floorCutoff: Date? = nil
     ) async throws -> Int {
         guard let db = db else { return 0 }
-
-        // v1.8.0 audit fix: wrap aggregation + event-prune in a single
-        // transaction. Pre-fix, a crash between Step 1 (INSERT INTO
-        // event_aggregates ... ON CONFLICT DO UPDATE) and Step 2 (DELETE
-        // events) caused silent double-counting on the next sweep — the
-        // aggregates from the crashed run already existed, and re-aggregating
-        // the same events on retry added to the existing counts.
-        //
-        // BEGIN IMMEDIATE acquires the write lock up front, so concurrent
-        // actor writes queue behind it. The actor model already serializes
-        // writes through this store, so the transaction is just a durability
-        // guarantee — no additional latency over actor isolation alone.
-        try execute("BEGIN IMMEDIATE TRANSACTION")
-        var transactionCommitted = false
-        defer {
-            // Belt-and-braces: if we throw out of this function before the
-            // explicit COMMIT, SQLite needs an explicit ROLLBACK to release
-            // the write lock and discard partial aggregates.
-            if !transactionCommitted {
-                try? execute("ROLLBACK")
-            }
-        }
-
-        // Per-category floor: the aggregate SELECT and the delete below MUST
-        // use the identical predicate so protected rows spared from deletion
-        // are also spared from aggregation (no double-count on a later sweep).
+        // Each chunk is independently atomic: aggregate + FTS delete + event
+        // delete either all commit or all roll back. The old implementation
+        // wrapped every eligible row on the host in one transaction, allowing
+        // an arbitrarily large WAL despite the nominal reserve. A default
+        // 32 MiB event reserve and three conservative row mutations yields 42
+        // source rows per transaction, followed by a fresh family/free probe.
+        let batch = maintenanceBatchRowLimit(mutationsPerCandidate: 3)
+        let transactionEstimate = maintenanceEstimate(
+            rowCount: Int(batch),
+            mutationsPerCandidate: 3
+        )
         let hasFloor = protectedCategory != nil && floorCutoff != nil
-        let aggFloorPredicate = hasFloor
+        let floorPredicate = hasFloor
             ? " AND (event_category <> ?2 OR timestamp < ?3)"
             : ""
-
-        // Step 1: roll up older events into daily aggregates.
-        // strftime('%Y-%m-%d', timestamp, 'unixepoch') turns the REAL epoch
-        // into a sortable ISO date string. UTC; localized display happens
-        // in the UI layer.
+        let selector = """
+            SELECT rowid FROM events
+            WHERE timestamp < ?1\(floorPredicate)
+            ORDER BY rowid LIMIT ?4
+            """
         let aggregateSQL = """
             INSERT INTO event_aggregates (day, event_category, process_signer, process_path, count)
             SELECT
@@ -2463,49 +3280,96 @@ public actor EventStore {
                 COALESCE(process_signer, ''),
                 COALESCE(process_path, ''),
                 COUNT(*) AS c
-            FROM events
-            WHERE timestamp < ?1\(aggFloorPredicate)
+            FROM events WHERE rowid IN (\(selector))
             GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
             ON CONFLICT(day, event_category, process_signer, process_path)
             DO UPDATE SET count = count + excluded.count
             """
-        let aggStmt = try prepare(aggregateSQL)
-        sqlite3_bind_double(aggStmt, 1, cutoff.timeIntervalSince1970)
-        if let protectedCategory, let floorCutoff {
-            bindText(aggStmt, index: 2, value: protectedCategory.rawValue)
-            sqlite3_bind_double(aggStmt, 3, floorCutoff.timeIntervalSince1970)
+        let deleteFTS = "DELETE FROM events_fts WHERE rowid IN (\(selector))"
+        let deleteEvents = "DELETE FROM events WHERE rowid IN (\(selector))"
+
+        func bindChunk(_ stmt: OpaquePointer) {
+            sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
+            if let protectedCategory, let floorCutoff {
+                bindText(stmt, index: 2, value: protectedCategory.rawValue)
+                sqlite3_bind_double(stmt, 3, floorCutoff.timeIntervalSince1970)
+            }
+            sqlite3_bind_int(stmt, 4, batch)
         }
-        guard sqlite3_step(aggStmt) == SQLITE_DONE else {
-            let msg = String(cString: sqlite3_errmsg(db))
-            sqlite3_finalize(aggStmt)
-            throw EventStoreError.stepFailed("rollUp aggregate failed: \(msg)")
+
+        var deleted = 0
+        while true {
+            try execute(
+                "BEGIN IMMEDIATE TRANSACTION",
+                maintenance: true,
+                estimatedTransactionBytes: transactionEstimate
+            )
+            var committed = false
+            do {
+                let aggregate = try prepare(aggregateSQL)
+                bindChunk(aggregate)
+                let aggregateRC = sqlite3_step(aggregate)
+                sqlite3_finalize(aggregate)
+                guard aggregateRC == SQLITE_DONE else {
+                    try throwLatchedStoragePressureIfPresent(resultCode: aggregateRC)
+                    throw EventStoreError.stepFailed(
+                        "rollUp aggregate failed: \(String(cString: sqlite3_errmsg(db)))"
+                    )
+                }
+
+                let fts = try prepare(deleteFTS)
+                bindChunk(fts)
+                let ftsRC = sqlite3_step(fts)
+                sqlite3_finalize(fts)
+                guard ftsRC == SQLITE_DONE else {
+                    try throwLatchedStoragePressureIfPresent(resultCode: ftsRC)
+                    throw EventStoreError.stepFailed(
+                        "rollUp FTS prune failed: \(String(cString: sqlite3_errmsg(db)))"
+                    )
+                }
+
+                let events = try prepare(deleteEvents)
+                bindChunk(events)
+                let eventsRC = sqlite3_step(events)
+                sqlite3_finalize(events)
+                guard eventsRC == SQLITE_DONE else {
+                    try throwLatchedStoragePressureIfPresent(resultCode: eventsRC)
+                    throw EventStoreError.stepFailed(
+                        "rollUp event prune failed: \(String(cString: sqlite3_errmsg(db)))"
+                    )
+                }
+                let thisBatch = Int(sqlite3_changes(db))
+                try execute("COMMIT")
+                committed = true
+                deleted += thisBatch
+                if thisBatch == 0 { break }
+            } catch {
+                if !committed { try? execute("ROLLBACK") }
+                throw error
+            }
+            await Task.yield()
         }
-        sqlite3_finalize(aggStmt)
 
-        // Step 2: prune the rolled-up events. Reuses the existing batched
-        // FTS+events delete loop — keeps the write lock from being held too
-        // long on machines with 100K+ aged events to migrate on first run.
-        // Inside the same transaction so a crash before COMMIT rolls back
-        // both aggregates AND deletes atomically. Same floor predicate as the
-        // aggregate SELECT above, so spared rows stay both un-aggregated and
-        // un-deleted.
-        let deleted = try await prune(
-            olderThan: cutoff,
-            protecting: protectedCategory,
-            newerThan: floorCutoff,
-            // We hold BEGIN IMMEDIATE — prune must not suspend (nested-BEGIN
-            // reentrancy data-loss) or vacuum (illegal mid-transaction).
-            withinTransaction: true
-        )
-
-        try execute("COMMIT")
-        transactionCommitted = true
-
-        // v1.21.4 (audit): prune skipped incremental_vacuum inside the
-        // transaction (illegal there) — reclaim the freed pages now that the
-        // write lock is released. Bounded (5K pages), non-blocking.
         if deleted > 0 {
-            sqlite3_exec(db, "PRAGMA incremental_vacuum(5000)", nil, nil, nil)
+            let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
+                requestedPages: Int.max,
+                reserveBytes: storageTransactionReserveBytes,
+                pageSizeBytes: sqlitePageSizeBytes
+            )
+            guard plan.pages > 0 else { return deleted }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: plan.estimatedTransactionBytes
+            )
+            let rc = sqlite3_exec(
+                db,
+                "PRAGMA incremental_vacuum(\(plan.pages))",
+                nil,
+                nil,
+                nil
+            )
+            if rc != SQLITE_OK {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            }
         }
 
         // Step 3: trim aggregates older than `aggregateRetentionDays`.
@@ -2514,11 +3378,30 @@ public actor EventStore {
         // leaves stale aggregates that the next sweep cleans up.
         let aggDays = max(1, aggregateRetentionDays)
         let cutoffDay = Self.isoDay(Date().addingTimeInterval(-Double(aggDays) * 86400))
-        let trimSQL = "DELETE FROM event_aggregates WHERE day < ?1"
-        let trimStmt = try prepare(trimSQL)
-        bindText(trimStmt, index: 1, value: cutoffDay)
-        _ = sqlite3_step(trimStmt)
-        sqlite3_finalize(trimStmt)
+        let trimBatch = maintenanceBatchRowLimit()
+        let trimEstimate = maintenanceEstimate(rowCount: Int(trimBatch))
+        let trimSQL = """
+            DELETE FROM event_aggregates WHERE rowid IN (
+                SELECT rowid FROM event_aggregates
+                WHERE day < ?1 ORDER BY rowid LIMIT ?2
+            )
+            """
+        while true {
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: trimEstimate
+            )
+            let trimStmt = try prepare(trimSQL)
+            bindText(trimStmt, index: 1, value: cutoffDay)
+            sqlite3_bind_int(trimStmt, 2, trimBatch)
+            let trimRC = sqlite3_step(trimStmt)
+            sqlite3_finalize(trimStmt)
+            if trimRC != SQLITE_DONE {
+                try throwLatchedStoragePressureIfPresent(resultCode: trimRC)
+                throw EventStoreError.stepFailed("aggregate retention trim failed")
+            }
+            if sqlite3_changes(db) == 0 { break }
+            await Task.yield()
+        }
 
         return deleted
     }
@@ -2557,7 +3440,11 @@ public actor EventStore {
     /// rebuilt DB.
     public func vacuum() async throws {
         guard let db = db else { return }
-        _ = await walCheckpoint()
+        guard walCheckpoint() else {
+            throw EventStoreError.busy(
+                "VACUUM refused because the pre-checkpoint did not fully drain"
+            )
+        }
         // One-shot auto_vacuum conversion (audit corr-storage): `PRAGMA
         // auto_vacuum = INCREMENTAL` is a SILENT no-op on an already-populated
         // DB — the mode only changes on the next VACUUM. Fresh installs get
@@ -2568,13 +3455,31 @@ public actor EventStore {
         // VACUUM (already disk-pre-flighted by the size-cap caller) also
         // converts the file to INCREMENTAL, so subsequent low-disk sweeps can
         // reclaim in place. Idempotent + harmless once already mode 2.
-        sqlite3_exec(db, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
+        let autoVacuumRC = sqlite3_exec(
+            db,
+            "PRAGMA auto_vacuum = INCREMENTAL",
+            nil,
+            nil,
+            nil
+        )
+        if autoVacuumRC != SQLITE_OK {
+            try throwLatchedStoragePressureIfPresent(resultCode: autoVacuumRC)
+            throw EventStoreError.stepFailed("auto_vacuum conversion failed")
+        }
+        // Re-probe at the exact whole-file rewrite boundary. Caller preflights
+        // are advisory and may race another disk consumer.
+        try admitStorageFullVacuum()
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
             let msg = String(cString: sqlite3_errmsg(db))
             throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
         }
-        _ = await walCheckpoint()
+        guard walCheckpointTruncate() else {
+            throw EventStoreError.busy(
+                "VACUUM completed but its WAL could not be fully drained/truncated"
+            )
+        }
     }
 
     /// Checkpoint the WAL into the main DB file. Uses the non-
@@ -2592,8 +3497,9 @@ public actor EventStore {
     /// or no progress; the caller should still be able to VACUUM
     /// but the shrink may be smaller than expected.
     @discardableResult
-    public func walCheckpoint() async -> Bool {
+    public func walCheckpoint() -> Bool {
         guard let db = db else { return false }
+        guard (try? admitStorageCheckpoint()) != nil else { return false }
         // PASSIVE: never blocks. Returns immediately; may leave
         // pages in the WAL if readers are active.
         var passiveLog: Int32 = 0
@@ -2605,6 +3511,16 @@ public actor EventStore {
         )
         let passiveDrained = (rcPassive == SQLITE_OK && passiveLog == passiveCkpt)
         if passiveDrained { return true }
+        guard rcPassive == SQLITE_OK else {
+            if rcPassive != SQLITE_BUSY, rcPassive != SQLITE_LOCKED {
+                _ = latchStoragePressureIfPresent(resultCode: rcPassive)
+            }
+            return false
+        }
+
+        // PASSIVE may have grown main and consumed free blocks. Re-probe before
+        // the blocking attempt; a pre-PASSIVE observation is stale here.
+        guard (try? admitStorageCheckpoint()) != nil else { return false }
 
         // RESTART: parks new writers very briefly; forces all
         // readers to start from the new WAL file (existing ones
@@ -2617,6 +3533,11 @@ public actor EventStore {
             Int32(SQLITE_CHECKPOINT_RESTART),
             &restartLog, &restartCkpt
         )
+        if rcRestart != SQLITE_OK,
+           rcRestart != SQLITE_BUSY,
+           rcRestart != SQLITE_LOCKED {
+            _ = latchStoragePressureIfPresent(resultCode: rcRestart)
+        }
         return rcRestart == SQLITE_OK && restartLog == restartCkpt
     }
 
@@ -2634,8 +3555,9 @@ public actor EventStore {
     /// discipline (DaemonTimers). Best-effort: TRUNCATE degrades to RESTART-
     /// like progress under an active reader, which is still fine.
     @discardableResult
-    public func walCheckpointTruncate() async -> Bool {
+    public func walCheckpointTruncate() -> Bool {
         guard let db = db else { return false }
+        guard (try? admitStorageCheckpoint()) != nil else { return false }
         var log: Int32 = 0
         var ckpt: Int32 = 0
         let rc = sqlite3_wal_checkpoint_v2(
@@ -2643,102 +3565,32 @@ public actor EventStore {
             Int32(SQLITE_CHECKPOINT_TRUNCATE),
             &log, &ckpt
         )
-        return rc == SQLITE_OK
+        if rc != SQLITE_OK, rc != SQLITE_BUSY, rc != SQLITE_LOCKED {
+            _ = latchStoragePressureIfPresent(resultCode: rc)
+        }
+        return rc == SQLITE_OK && log == ckpt
     }
 
-    // MARK: - Off-actor full VACUUM (B-03)
+    // MARK: - Disabled off-actor full VACUUM compatibility entry point
 
-    /// Run a full `VACUUM` on a DEDICATED short-lived connection instead of the
-    /// actor's long-lived ingestion connection (`self.db`).
-    ///
-    /// A full VACUUM rewrites the whole file and can take minutes on a large
-    /// events.db. Routing it through the actor `vacuum()` holds the actor for
-    /// the entire rewrite, so every `insert(event:)` is head-of-line-blocked
-    /// behind maintenance. This variant:
-    ///   1. is `nonisolated` + `static` — it touches no actor state, so callers
-    ///      never hop onto (and park) the EventStore actor; ingestion keeps
-    ///      flowing on the actor's own connection, and
-    ///   2. runs the blocking sqlite work on a detached thread (via a
-    ///      continuation) so it doesn't park a Swift-concurrency cooperative
-    ///      thread either.
-    ///
-    /// Two connections to one WAL database in the same process is safe: SQLite
-    /// serializes them at the file-lock level (both use `FULLMUTEX`), so under
-    /// concurrent inserts the VACUUM simply contends for the write lock and
-    /// retries within `busy_timeout` rather than corrupting or deadlocking.
-    /// VACUUM bumps the schema cookie; the ingestion connection's `prepare_v2`
-    /// insert statement auto-reprepares on the resulting `SQLITE_SCHEMA`.
-    ///
-    /// Re-checks the symlink guard on the privileged path before opening.
-    public static func vacuumOnDedicatedConnection(at path: String) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            // Detached thread: a multi-minute blocking VACUUM must not sit on a
-            // cooperative-pool thread (there are only ~core-count of them).
-            Thread.detachNewThread {
-                do {
-                    try Self.performDedicatedVacuum(at: path)
-                    cont.resume()
-                } catch {
-                    cont.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    /// Synchronous body of `vacuumOnDedicatedConnection`. Opens its own RW
-    /// connection, checkpoints + VACUUMs + checkpoints, and closes. Blocking —
-    /// only ever called from the detached thread above.
-    private static func performDedicatedVacuum(at path: String) throws {
-        try rejectIfSymlink(path)
-        try rejectIfSymlink(path + "-wal")
-        try rejectIfSymlink(path + "-shm")
-        try rejectIfSymlink(path + "-journal")
-
-        var conn: OpaquePointer?
-        // READWRITE (no CREATE): the file must already exist to be vacuumed.
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
-        guard sqlite3_open_v2(path, &conn, flags, nil) == SQLITE_OK, let db = conn else {
-            let msg = conn.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
-            if let conn { sqlite3_close(conn) }
-            throw EventStoreError.databaseOpenFailed("dedicated VACUUM connection: \(msg)")
-        }
-        defer { sqlite3_close(db) }
-
-        // Retry (rather than fail instantly) when the ingestion connection is
-        // mid-write and VACUUM wants the exclusive lock. 15 s tolerates a busy
-        // host without wedging the maintenance task indefinitely.
-        sqlite3_exec(db, "PRAGMA busy_timeout = 15000", nil, nil, nil)
-
-        // Give this connection the SAME per-connection pragmas the actor's
-        // ingestion connection gets. SQLite pragmas are per-CONNECTION, so this
-        // short-lived handle previously ran the entire multi-hundred-MB rewrite
-        // on stock defaults: a 2 MB page cache (vs the actor's 16 MB),
-        // `synchronous = FULL` (vs NORMAL), a 1000-page / 4 MB WAL
-        // auto-checkpoint threshold (vs 4000 / 16 MB) and no
-        // `journal_size_limit` — so VACUUM fsync'd and checkpointed its own
-        // rebuild output ~4x more often than the write path this DB is tuned
-        // for. Routing through the shared helper also stops the two connections
-        // drifting apart again. NOT setting `wal_autocheckpoint = 0`
-        // deliberately: that would let the WAL grow to the full size of the
-        // rebuild, and the only time this runs is after a 1.3x free-disk
-        // pre-flight on a host already short on disk.
-        //
-        // The helper issues `auto_vacuum = INCREMENTAL` first, which preserves
-        // the one-shot legacy mode-0 (NONE) -> INCREMENTAL conversion this
-        // VACUUM performs (see the actor `vacuum()` for the full rationale);
-        // no-op once the file is already mode 2.
-        StoragePragmas.applyEventStorePragmas(to: db)
-
-        // Same WAL discipline as the actor `vacuum()`, on this connection:
-        // pre-checkpoint so VACUUM rebuilds a drained main DB; post-checkpoint
-        // (best-effort TRUNCATE) so the on-disk footprint reflects the rebuild.
-        sqlite3_exec(db, "PRAGMA wal_checkpoint(PASSIVE)", nil, nil, nil)
-        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
-        if rc != SQLITE_OK {
-            let msg = String(cString: sqlite3_errmsg(db))
-            throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
-        }
-        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+    /// Retained only so older maintenance callers fail with a specific error.
+    /// A detached connection cannot prevent the ingestion actor from committing
+    /// between the final free-space probe and acquisition of SQLite's VACUUM
+    /// writer lock. Full VACUUM must run through the owning actor's `vacuum()`
+    /// method, which serializes checkpoint -> admission -> rewrite.
+    public static func vacuumOnDedicatedConnection(
+        at path: String,
+        storagePolicy suppliedPolicy: SQLitePersistentStorePolicy? = nil
+    ) async throws {
+        _ = path
+        _ = suppliedPolicy
+        // Fail closed: a detached connection cannot prevent the ingestion
+        // actor from committing between its final stat and acquisition of the
+        // VACUUM writer lock. Call `vacuum()` on the owning EventStore actor so
+        // checkpoint -> headroom gate -> rewrite is one serialized operation.
+        throw EventStoreError.stepFailed(
+            "concurrent dedicated VACUUM is disabled; use EventStore.vacuum() on the owning actor"
+        )
     }
 
     // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
@@ -2762,8 +3614,41 @@ public actor EventStore {
     @discardableResult
     public func incrementalVacuum(maxPages: Int) async throws -> Int {
         guard let db = db else { return 0 }
-        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
-        return result.pagesReclaimed
+        guard StoragePragmas.readAutoVacuumMode(db) == 2 else { return 0 }
+        let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
+            requestedPages: max(0, maxPages),
+            reserveBytes: storageTransactionReserveBytes,
+            pageSizeBytes: sqlitePageSizeBytes
+        )
+        guard plan.pages > 0 else { return 0 }
+        // The shared incremental-vacuum primitive cannot safely checkpoint:
+        // it has no path/floor/family probes. Drain through this actor's fresh
+        // whole-sidecar gate, then re-probe ordinary maintenance headroom.
+        guard walCheckpoint() else {
+            throw EventStoreError.stepFailed(
+                "incremental VACUUM refused because the pre-checkpoint did not fully drain"
+            )
+        }
+        try admitStorageMaintenanceWrite(
+            estimatedTransactionBytes: plan.estimatedTransactionBytes
+        )
+        do {
+            let result = try StoragePragmas.runIncrementalVacuum(
+                on: db,
+                maxPages: plan.pages
+            )
+            guard walCheckpointTruncate() else {
+                throw EventStoreError.stepFailed(
+                    "incremental VACUUM completed but its WAL could not be fully drained/truncated"
+                )
+            }
+            return result.pagesReclaimed
+        } catch let error as StoragePragmas.IncrementalVacuumError {
+            try throwLatchedStoragePressureIfPresent(
+                details: error.sqliteFailureMetadata.publicDetails
+            )
+            throw error
+        }
     }
 
     /// Read the file's `PRAGMA auto_vacuum` mode at runtime. Returns
@@ -2800,9 +3685,25 @@ public actor EventStore {
     @discardableResult
     public func mergeFTS(pages: Int = 1000) async -> Bool {
         guard let db = db, !isReadOnly else { return false }
-        let n = max(1, pages)
-        let sql = "INSERT INTO events_fts(events_fts, rank) VALUES('merge', \(n))"
-        return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+        let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
+            requestedPages: max(1, pages),
+            reserveBytes: storageTransactionReserveBytes,
+            pageSizeBytes: sqlitePageSizeBytes,
+            fixedTreePageTouches: 16,
+            // Vendored FTS5 performs merge work in 64-leaf-page quanta.
+            overshootPages: 64
+        )
+        guard plan.pages > 0 else { return false }
+        guard (try? admitStorageMaintenanceWrite(
+            estimatedTransactionBytes: plan.estimatedTransactionBytes
+        )) != nil else { return false }
+        let sql = "INSERT INTO events_fts(events_fts, rank) VALUES('merge', \(plan.pages))"
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        if rc != SQLITE_OK {
+            _ = latchStoragePressureIfPresent(resultCode: rc)
+            return false
+        }
+        return true
     }
 
     /// Full FTS5 `optimize` — merges EVERY events_fts segment into one and drops
@@ -2857,10 +3758,25 @@ public actor EventStore {
                 .debug("optimizeFTS skipped: last full optimize was \(Int(now.timeIntervalSince(last)))s ago (min interval \(Int(Self.minFullFTSOptimizeInterval))s); bounded mergeFTS still runs each sweep")
             return false
         }
+        // Full optimize rewrites all FTS segments and scales with the existing
+        // store. It therefore uses whole-store schema/rebuild headroom rather
+        // than pretending to fit the ordinary bounded row transaction reserve.
+        guard (try? admitStorageSchemaRebuild()) != nil else { return false }
         // Stamp BEFORE the exec so a slow or repeatedly-failing optimize cannot
         // be re-attempted on every subsequent sweep.
         lastFullFTSOptimizeAt = now
-        return sqlite3_exec(db, "INSERT INTO events_fts(events_fts) VALUES('optimize')", nil, nil, nil) == SQLITE_OK
+        let rc = sqlite3_exec(
+            db,
+            "INSERT INTO events_fts(events_fts) VALUES('optimize')",
+            nil,
+            nil,
+            nil
+        )
+        if rc != SQLITE_OK {
+            _ = latchStoragePressureIfPresent(resultCode: rc)
+            return false
+        }
+        return true
     }
 
     // MARK: - Reentrancy guard for size-cap enforcement
@@ -2917,8 +3833,10 @@ public actor EventStore {
     /// corruption (as opposed to a transient lock / disk-full). Extended codes
     /// (e.g. `SQLITE_CORRUPT_VTAB`) share the low byte with their primary code.
     static func isCorruptionResultCode(_ rc: Int32) -> Bool {
-        let primary = rc & 0xFF
-        return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
+        SQLiteFailureClassifier.isExplicitCorruption(
+            resultCode: rc,
+            extendedResultCode: rc
+        )
     }
 
     /// Close the current connection, quarantine the corrupt DB (+ sidecars)
@@ -2929,8 +3847,16 @@ public actor EventStore {
     ///
     /// `now:` is injectable for tests; production callers use the default.
     @discardableResult
-    func attemptCorruptionSelfHeal(reason: String, now: Date = Date()) -> Bool {
+    func attemptCorruptionSelfHeal(
+        failure: SQLiteFailureDetails,
+        reason: String,
+        now: Date = Date()
+    ) -> Bool {
         let log = Logger(subsystem: "com.maccrab.storage", category: "event-store")
+        // This guard belongs at the mutating boundary, not only at the caller.
+        // A future recovery caller cannot accidentally quarantine on BUSY,
+        // LOCKED, PERM, READONLY, IOERR, FULL, or a misleading error string.
+        guard failure.isExplicitCorruption else { return false }
         guard !isReadOnly else { return false }
         guard selfHealCount < Self.selfHealMaxAttempts else {
             log.error("EventStore: corruption self-heal cap (\(Self.selfHealMaxAttempts, privacy: .public)) reached — not reopening. reason=\(reason, privacy: .public)")
@@ -2949,7 +3875,11 @@ public actor EventStore {
         // (queries prepare + finalize locally), so a v1 close succeeds cleanly.
         if let insertStmt { sqlite3_finalize(insertStmt) }
         insertStmt = nil
-        if let db { sqlite3_close(db) }
+        if let db {
+            checkpointController?.detach(from: db)
+            sqlite3_close(db)
+        }
+        checkpointController = nil
         db = nil
 
         // Quarantine the corrupt files aside (bounded retention). This *moves*
@@ -2959,7 +3889,16 @@ public actor EventStore {
         // guard on the privileged path before it recreates the file.
         let dir = (databasePath as NSString).deletingLastPathComponent
         let base = (databasePath as NSString).lastPathComponent
-        CorruptDBBackup.backup(directory: dir, base: base)
+        do {
+            try CorruptDBBackup.quarantineAtomically(directory: dir, base: base)
+            // Any chunks committed before this corruption event now live only
+            // in the quarantined family, not the active store. Advance the
+            // generation before reopening (including if reopen later fails).
+            activeDatabaseGeneration &+= 1
+        } catch {
+            log.error("EventStore: corruption quarantine FAILED: \(error.localizedDescription, privacy: .public). Original DB family was rolled back; refusing to create a fresh store.")
+            return false
+        }
 
         // Reopen from the (now-empty) path. openDatabase re-applies pragmas +
         // schema + re-prepares the insert statement.
@@ -2968,11 +3907,18 @@ public actor EventStore {
             // the same 0o027/0o640 (group read-only, not group-write) as the
             // primary init — a self-heal must not silently re-loosen perms.
             let oldUmask = umask(0o027)
-            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
-            umask(oldUmask)
+            defer { umask(oldUmask) }
+            let (handle, ro, stmt, admission, pageSize, controller) = try Self.openDatabase(
+                at: databasePath,
+                forceReadOnly: false,
+                storagePolicy: storagePolicy
+            )
             db = handle
             isReadOnly = ro
             insertStmt = stmt
+            storageAdmission = admission
+            sqlitePageSizeBytes = pageSize
+            checkpointController = controller
             chmod(databasePath, 0o640)
             chmod(databasePath + "-wal", 0o640)
             chmod(databasePath + "-shm", 0o640)
@@ -2995,19 +3941,405 @@ public actor EventStore {
     }
 
     /// Executes a SQL statement that does not return rows.
-    private func execute(_ sql: String) throws {
+    private func execute(
+        _ sql: String,
+        maintenance: Bool = false,
+        estimatedTransactionBytes: Int64? = nil
+    ) throws {
+        if sql.trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased().hasPrefix("BEGIN") {
+            guard let estimatedTransactionBytes else {
+                throw EventStoreError.stepFailed(
+                    "BEGIN requires an explicit bounded transaction estimate"
+                )
+            }
+            if maintenance {
+                try admitStorageMaintenanceWrite(
+                    estimatedTransactionBytes: estimatedTransactionBytes
+                )
+            } else {
+                try admitStorageWrite(
+                    estimatedTransactionBytes: estimatedTransactionBytes
+                )
+            }
+        }
         var errmsg: UnsafeMutablePointer<CChar>?
         let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
         if rc != SQLITE_OK {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            let failure = SQLiteFailureDetails(resultCode: rc, db: db)
             let msg = errmsg.flatMap { String(cString: $0) } ?? "unknown error"
             sqlite3_free(errmsg)
             // #13: BEGIN/COMMIT can return SQLITE_BUSY/LOCKED under WAL contention
             // (past busy_timeout) — transient, retryable. Surface it distinctly.
             if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
-                throw EventStoreError.busy(msg)
+                throw EventStoreError.busy(msg, failure: failure)
             }
-            throw EventStoreError.stepFailed(msg)
+            throw EventStoreError.sqliteFailure(
+                context: sql,
+                message: msg,
+                resultCode: failure.resultCode,
+                extendedResultCode: failure.extendedResultCode,
+                systemErrno: failure.systemErrno
+            )
         }
+    }
+
+    /// Exact DB+WAL+SHM+journal admission immediately before growth writes. The
+    /// controller is a value so copy it out and always write it back, including
+    /// on a thrown probe, preserving the sticky pressure latch.
+    private func admitStorageWrite(
+        estimatedTransactionBytes: Int64
+    ) throws {
+        guard var admission = storageAdmission else { return }
+        let wasBlocked = admission.growthBlocked
+        let writerSetupPending = !isReadOnly && insertStmt == nil
+        do {
+            try admission.admitWrite(
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                on: db
+            )
+        } catch {
+            storageAdmission = admission
+            throw error
+        }
+        let recovered = wasBlocked && !admission.growthBlocked
+        storageAdmission = admission
+        if recovered || (writerSetupPending && !admission.growthBlocked) {
+            try reopenAfterStorageRecovery()
+        }
+    }
+
+    /// Retention/reclaim writes are the bounded route back under the ceiling.
+    private func admitStorageMaintenanceWrite(
+        estimatedTransactionBytes: Int64
+    ) throws {
+        guard var admission = storageAdmission else { return }
+        defer { storageAdmission = admission }
+        try admission.admitMaintenanceWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes
+        )
+    }
+
+    /// A checkpoint can copy the complete WAL into main while leaving the WAL
+    /// allocated. It therefore has a whole-sidecar gate, not the small ordinary
+    /// maintenance transaction gate.
+    private func admitStorageCheckpoint() throws {
+        guard var admission = storageAdmission else { return }
+        defer { storageAdmission = admission }
+        try admission.admitCheckpoint()
+    }
+
+    private var storageTransactionReserveBytes: Int64 {
+        storageAdmission?.transactionReserveBytes
+            ?? SQLitePersistentStorePolicy.eventTransactionReserveBytes
+    }
+
+    private func maintenanceRowMutationUpperBound() -> Int64 {
+        if maintenanceHighWaterScannedExistingRows,
+           let cached = maintenanceRowMutationHighWaterBytes {
+            return max(
+                SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
+                cached
+            )
+        }
+        guard let db else { return storageTransactionReserveBytes }
+
+        func maximumLogicalBytes(
+            table: String,
+            columns: [String],
+            duplicatedIndexColumns: [String],
+            indexRepresentationCount: Int64,
+            ftsColumns: [String] = []
+        ) -> Int64? {
+            func length(_ column: String) -> String {
+                "COALESCE(length(CAST(\"\(column)\" AS BLOB)), 0)"
+            }
+            var terms = columns.map(length)
+            terms.append(contentsOf: duplicatedIndexColumns.map(length))
+            terms.append(contentsOf: ftsColumns.map {
+                "4 * \(length($0))"
+            })
+            let fixed = SQLitePersistentStoreAdmission.saturatingAdd(
+                Int64(columns.count * 16),
+                SQLitePersistentStoreAdmission.saturatingMultiply(
+                    indexRepresentationCount, by: 16
+                )
+            )
+            let expression = ([String(fixed)] + terms)
+                .joined(separator: " + ")
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db,
+                "SELECT COALESCE(MAX(\(expression)), 0) FROM \"\(table)\"",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK, let statement else {
+                sqlite3_finalize(statement)
+                return nil
+            }
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return max(0, sqlite3_column_int64(statement, 0))
+        }
+
+        let eventColumns = [
+            "id", "timestamp", "event_category", "event_type", "event_action",
+            "severity", "process_pid", "process_name", "process_path",
+            "process_commandline", "process_ppid", "process_signer",
+            "process_team_id", "process_signing_id", "file_path", "file_action",
+            "network_dest_ip", "network_dest_port", "tcc_service", "tcc_client",
+            "raw_json", "mcp_server_name", "mcp_server_category",
+            "ai_tool_session_id", "agent_trace_id", "agent_span_id", "agent_tool",
+            "machine_agent_confidence", "agent_evidence_json", "user_id",
+            "user_name", "group_id", "working_directory", "responsible_pid",
+            "architecture", "is_platform_binary", "is_notarized",
+            "process_sha256", "parent_name", "parent_executable",
+            "parent_signer_type", "ai_tool", "ai_tool_child",
+            "session_launch_source", "tcc_decision",
+        ]
+        let eventIndexes = [
+            "id", "event_category", "event_category", "event_category",
+            "event_category", "severity", "severity", "severity",
+            "process_path", "mcp_server_name", "agent_trace_id",
+            "ai_tool_session_id", "user_id", "ai_tool", "parent_executable",
+        ]
+        let eventFTS = [
+            "process_name", "process_path", "process_commandline", "file_path",
+            "network_dest_ip", "tcc_service", "tcc_client",
+        ]
+        let evidenceColumns = [
+            "alert_id", "id", "timestamp", "event_category", "event_type",
+            "event_action", "severity", "process_pid", "process_name",
+            "process_path", "process_commandline", "process_ppid",
+            "process_signer", "process_team_id", "process_signing_id",
+            "file_path", "file_action", "network_dest_ip", "network_dest_port",
+            "tcc_service", "tcc_client", "raw_json", "mcp_server_name",
+            "mcp_server_category", "ai_tool_session_id",
+        ]
+        let candidates: [Int64?] = [
+            maximumLogicalBytes(
+                table: "events",
+                columns: eventColumns,
+                duplicatedIndexColumns: eventIndexes,
+                indexRepresentationCount: 14,
+                ftsColumns: eventFTS
+            ),
+            maximumLogicalBytes(
+                table: "alert_evidence",
+                columns: evidenceColumns,
+                duplicatedIndexColumns: ["alert_id", "alert_id", "id", "id"],
+                indexRepresentationCount: 3
+            ),
+            maximumLogicalBytes(
+                table: "event_aggregates",
+                columns: ["day", "event_category", "process_signer", "process_path", "count"],
+                duplicatedIndexColumns: [
+                    "day", "day", "day", "event_category", "event_category",
+                    "process_signer", "process_path",
+                ],
+                indexRepresentationCount: 3
+            ),
+            maximumLogicalBytes(
+                table: "attribution_overrides",
+                columns: [
+                    "event_id", "machine_confidence", "user_verdict", "user_note",
+                    "schema_version", "created_at", "updated_at",
+                ],
+                duplicatedIndexColumns: ["event_id", "user_verdict"],
+                indexRepresentationCount: 3
+            ),
+        ]
+        var upper = max(
+            SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
+            maintenanceRowMutationHighWaterBytes ?? 0
+        )
+        for logical in candidates.compactMap({ $0 }) {
+            upper = max(
+                upper,
+                SQLitePersistentStoreAdmission
+                    .conservativeEncodedRowMutationBytes(
+                        logicalRepresentationBytes: logical,
+                        pageSizeBytes: sqlitePageSizeBytes,
+                        maximumLeafPageTouches: 20
+                    )
+            )
+        }
+        maintenanceRowMutationHighWaterBytes = upper
+        maintenanceHighWaterScannedExistingRows = true
+        return upper
+    }
+
+    private func maintenanceBatchRowLimit(
+        mutationsPerCandidate: Int = 1
+    ) -> Int32 {
+        let fixed = SQLitePersistentStoreAdmission.transactionFixedOverheadBytes(
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 48
+        )
+        let bytesPerCandidate = SQLitePersistentStoreAdmission
+            .saturatingMultiply(
+                maintenanceRowMutationUpperBound(),
+                by: Int64(max(1, mutationsPerCandidate))
+            )
+        let available = max(0, storageTransactionReserveBytes - fixed)
+        let rows = SQLitePersistentStoreAdmission.maximumRowsPerTransaction(
+            reserveBytes: available,
+            bytesPerRow: bytesPerCandidate
+        )
+        return Int32(clamping: max(1, rows))
+    }
+
+    private func maintenanceEstimate(
+        rowCount: Int,
+        mutationsPerCandidate: Int = 1
+    ) -> Int64 {
+        let rowBytes = SQLitePersistentStoreAdmission.saturatingMultiply(
+            maintenanceRowMutationUpperBound(),
+            by: Int64(max(1, mutationsPerCandidate))
+        )
+        return SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: SQLitePersistentStoreAdmission.saturatingMultiply(
+                Int64(max(0, rowCount)), by: rowBytes
+            ),
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 48
+        )
+    }
+
+    private func admitStorageSchemaRebuild(operationCount: Int = 1) throws {
+        guard var admission = storageAdmission else { return }
+        defer { storageAdmission = admission }
+        try admission.admitSchemaRebuild(operationCount: operationCount)
+    }
+
+    private func admitStorageFullVacuum() throws {
+        guard var admission = storageAdmission else { return }
+        defer { storageAdmission = admission }
+        try admission.admitFullVacuum()
+    }
+
+    private func throwLatchedStoragePressureIfPresent(resultCode: Int32) throws {
+        if let pressure = latchStoragePressureIfPresent(resultCode: resultCode) {
+            throw pressure
+        }
+    }
+
+    @discardableResult
+    private func latchStoragePressureIfPresent(
+        resultCode: Int32
+    ) -> SQLitePersistentStoreAdmissionError? {
+        guard var admission = storageAdmission else { return nil }
+        defer { storageAdmission = admission }
+        return admission.latchSQLitePressure(resultCode: resultCode, db: db)
+    }
+
+    private func throwLatchedStoragePressureIfPresent(
+        details: SQLiteFailureDetails
+    ) throws {
+        guard var admission = storageAdmission else { return }
+        defer { storageAdmission = admission }
+        if let pressure = admission.latchSQLitePressure(details: details) {
+            throw pressure
+        }
+    }
+
+    public func storageAdmissionSnapshot() -> SQLitePersistentStoreAdmissionSnapshot? {
+        guard var admission = storageAdmission else { return nil }
+        defer { storageAdmission = admission }
+        return admission.snapshot()
+    }
+
+    public func updateStorageAdmission(
+        _ policy: SQLitePersistentStorePolicy
+    ) throws -> SQLitePersistentStoreAdmissionSnapshot? {
+        guard !isReadOnly, let db else { return nil }
+        guard var admission = storageAdmission else {
+            var created = try SQLitePersistentStoreAdmission(
+                databasePath: databasePath,
+                policy: policy,
+                latchOperationalPressure: true
+            )
+            try checkpointController?.updateFamily(
+                schema: "main",
+                configuration: SQLiteControlledCheckpointFamily(
+                    databasePath: databasePath,
+                    policy: policy
+                )
+            )
+            do {
+                try created.installPageLimit(on: db)
+            } catch let error as SQLitePersistentStoreAdmissionError
+                where error.isOperationalPressure {
+                // Retained as a sticky pending ceiling.
+            } catch {
+                storagePolicy = policy
+                storageAdmission = created
+                throw error
+            }
+            storagePolicy = policy
+            storageAdmission = created
+            return created.snapshot()
+        }
+        let wasBlocked = admission.growthBlocked
+        let writerSetupPending = !isReadOnly && insertStmt == nil
+        let result: SQLitePersistentStoreAdmissionSnapshot
+        do {
+            result = try admission.updatePolicy(policy, on: db)
+        } catch {
+            storageAdmission = admission
+            storagePolicy = policy
+            try? checkpointController?.updateFamily(
+                schema: "main",
+                configuration: SQLiteControlledCheckpointFamily(
+                    databasePath: databasePath,
+                    policy: policy
+                )
+            )
+            throw error
+        }
+        storageAdmission = admission
+        storagePolicy = policy
+        try checkpointController?.updateFamily(
+            schema: "main",
+            configuration: SQLiteControlledCheckpointFamily(
+                databasePath: databasePath,
+                policy: policy
+            )
+        )
+        if (wasBlocked || writerSetupPending) && !admission.growthBlocked {
+            try reopenAfterStorageRecovery()
+            return storageAdmissionSnapshot()
+        }
+        return result
+    }
+
+    private func reopenAfterStorageRecovery() throws {
+        guard let policy = storagePolicy else { return }
+        let (
+            newDB,
+            newReadOnly,
+            newStatement,
+            newAdmission,
+            newPageSizeBytes,
+            newCheckpointController
+        ) = try Self.openDatabase(
+            at: databasePath,
+            forceReadOnly: false,
+            storagePolicy: policy
+        )
+        if let insertStmt { sqlite3_finalize(insertStmt) }
+        if let db {
+            checkpointController?.detach(from: db)
+            sqlite3_close(db)
+        }
+        db = newDB
+        isReadOnly = newReadOnly
+        insertStmt = newStatement
+        storageAdmission = newAdmission
+        sqlitePageSizeBytes = newPageSizeBytes
+        checkpointController = newCheckpointController
     }
 
     /// Prepares a SQL statement.
@@ -3087,6 +4419,42 @@ public actor EventStore {
     /// `updated_at`. Documents Plan v3 review #10's "single source of
     /// truth per event" contract.
     public func recordAttributionOverride(_ override: AttributionOverride) throws {
+        let logicalBytes = [
+            override.eventId,
+            override.machineConfidence,
+            override.verdict.rawValue,
+            override.userNote,
+        ].reduce(Int64(64)) { total, value in
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                total,
+                Int64(value?.utf8.count ?? 0)
+            )
+        }
+        let indexedLogicalBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+            logicalBytes,
+            Int64(override.eventId.utf8.count
+                + override.verdict.rawValue.utf8.count + 3 * 16)
+        )
+        let newRowBytes = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: indexedLogicalBytes,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: 4
+            )
+        let rowBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+            newRowBytes,
+            try existingAttributionOverrideMutationBytes(
+                eventId: override.eventId
+            )
+        )
+        try admitStorageWrite(
+            estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                .conservativeTransactionBytes(
+                    rowMutationBytes: rowBytes,
+                    pageSizeBytes: sqlitePageSizeBytes,
+                    maximumTreePathPageTouches: 8
+                )
+        )
         guard let db else {
             throw EventStoreError.databaseOpenFailed("db not open")
         }
@@ -3124,10 +4492,70 @@ public actor EventStore {
         sqlite3_bind_int(stmt, 5, Int32(override.schemaVersion))
         sqlite3_bind_double(stmt, 6, override.createdAt.timeIntervalSince1970)
         sqlite3_bind_double(stmt, 7, override.updatedAt.timeIntervalSince1970)
-        if sqlite3_step(stmt) != SQLITE_DONE {
+        let rc = sqlite3_step(stmt)
+        if rc != SQLITE_DONE {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
             let msg = String(cString: sqlite3_errmsg(db))
             throw EventStoreError.stepFailed(msg)
         }
+        maintenanceRowMutationHighWaterBytes = max(
+            maintenanceRowMutationHighWaterBytes ?? 0,
+            rowBytes
+        )
+    }
+
+    private func existingAttributionOverrideMutationBytes(
+        eventId: String
+    ) throws -> Int64 {
+        guard let db else { return 0 }
+        let sql = """
+            SELECT event_id, machine_confidence, user_verdict, user_note,
+                   schema_version, created_at, updated_at
+            FROM attribution_overrides WHERE event_id = ?1 LIMIT 1
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            sqlite3_finalize(statement)
+            throw EventStoreError.prepareFailed(
+                "existing attribution override estimate"
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: eventId)
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return 0 }
+        guard step == SQLITE_ROW else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
+            throw EventStoreError.stepFailed(
+                "existing attribution override estimate step"
+            )
+        }
+        func bytes(_ column: Int32) -> Int64 {
+            sqlite3_column_type(statement, column) == SQLITE_NULL
+                ? 0 : Int64(sqlite3_column_bytes(statement, column))
+        }
+        var logical = Int64(7 * 16)
+        for column in Int32(0)..<Int32(7) {
+            logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                logical, bytes(column)
+            )
+        }
+        logical = SQLitePersistentStoreAdmission.saturatingAdd(
+            logical,
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                bytes(0), bytes(2)
+            )
+        )
+        logical = SQLitePersistentStoreAdmission.saturatingAdd(
+            logical, 3 * 16
+        )
+        return SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logical,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: 4
+            )
     }
 
     /// Look up the operator verdict for a given event, or nil if none.
@@ -3257,19 +4685,37 @@ public actor EventStore {
         // alongside the rest of the retention sweep. If overrides ever
         // grow large enough for this to matter, switch to a LEFT JOIN
         // delete pattern.
+        let batch = maintenanceBatchRowLimit()
+        let estimate = maintenanceEstimate(rowCount: Int(batch))
         let sql = """
-            DELETE FROM attribution_overrides
-            WHERE event_id NOT IN (SELECT id FROM events)
+            DELETE FROM attribution_overrides WHERE rowid IN (
+                SELECT rowid FROM attribution_overrides
+                WHERE event_id NOT IN (SELECT id FROM events)
+                ORDER BY rowid LIMIT ?1
+            )
             """
         var changes = 0
-        var stmt: OpaquePointer?
-        defer { if let s = stmt { sqlite3_finalize(s) } }
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            let msg = String(cString: sqlite3_errmsg(db))
-            throw EventStoreError.prepareFailed(msg)
-        }
-        if sqlite3_step(stmt) == SQLITE_DONE {
-            changes = Int(sqlite3_changes(db))
+        while true {
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: estimate
+            )
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+                  let stmt else {
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw EventStoreError.prepareFailed(msg)
+            }
+            sqlite3_bind_int(stmt, 1, batch)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                let msg = String(cString: sqlite3_errmsg(db))
+                throw EventStoreError.stepFailed("purge attribution overrides failed: \(msg)")
+            }
+            let deleted = Int(sqlite3_changes(db))
+            changes += deleted
+            if deleted == 0 { break }
         }
         return changes
     }

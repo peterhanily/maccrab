@@ -7,8 +7,9 @@
 //   1. Fresh install (no events.db) — no-op, returns false
 //   2. Old-shape events.db with alerts data — copies + drops + creates alerts.db
 //   3. Idempotent — running twice doesn't duplicate or fail
-//   4. Partial-rerun safe — INSERT OR IGNORE preserves target rows, drops source
+//   4. Partial-rerun safe — identical target rows are verified before source drop
 //   5. v1-shape source (no llm_investigation_json) — column intersection works
+//   6. Divergent primary-key collision — fail closed and retain source
 //
 // Tests use raw sqlite3 to construct old-shape events.db files because we
 // no longer have a code path that writes alerts there.
@@ -67,7 +68,7 @@ struct AlertsTableRelocatorTests {
 
         for i in 0..<rowCount {
             let id = "alert-\(i)"
-            let ts = Date().timeIntervalSince1970 - Double(i)
+            let ts = 1_700_000_000.0 - Double(i)
             let sql = """
                 INSERT INTO alerts (id, timestamp, rule_id, rule_title, severity, event_id, suppressed)
                 VALUES ('\(id)', \(ts), 'test.rule', 'Test \(i)', 'high', 'evt-\(i)', 0)
@@ -95,6 +96,45 @@ struct AlertsTableRelocatorTests {
         sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM alerts", -1, &stmt, nil)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    private func replaceLegacyRuleID(
+        at directory: URL,
+        with ruleID: String
+    ) throws {
+        let path = directory.appendingPathComponent("events.db").path
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(
+            path,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let db = handle else {
+            throw TestSetupError.openFailed
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "UPDATE alerts SET rule_id = ?1",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            sqlite3_finalize(statement)
+            throw TestSetupError.openFailed
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(
+            statement,
+            1,
+            ruleID,
+            -1,
+            unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        )
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw TestSetupError.openFailed
+        }
     }
 
     enum TestSetupError: Error {
@@ -183,5 +223,109 @@ struct AlertsTableRelocatorTests {
         let alertsDB = try AlertStore(directory: dir.path)
         let alerts = try await alertsDB.alerts(since: Date.distantPast, limit: 1000)
         #expect(alerts.isEmpty)
+    }
+
+    @Test("Divergent target primary-key collision retains authoritative source")
+    func divergentTargetCollisionFailsClosed() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try makeOldEventsDB(at: dir, rowCount: 1)
+        var bootstrap: AlertStore? = try AlertStore(directory: dir.path)
+        try await bootstrap?.insert(alert: Alert(
+            id: "alert-0",
+            timestamp: Date(timeIntervalSince1970: 1),
+            ruleId: "conflicting.rule",
+            ruleTitle: "Divergent target row",
+            severity: .low,
+            eventId: "conflicting-event"
+        ))
+        bootstrap = nil
+
+        let migrated = AlertsTableRelocator.relocate(directory: dir.path)
+
+        #expect(migrated == false)
+        #expect(eventsAlertsCount(at: dir) == 1,
+                "a divergent OR IGNORE collision must never drain the source")
+        let target = try AlertStore(directory: dir.path)
+        let alerts = try await target.alerts(
+            since: Date.distantPast,
+            limit: 10
+        )
+        #expect(alerts.count == 1)
+        #expect(alerts.first?.ruleTitle == "Divergent target row")
+    }
+
+    @Test("Identical pre-existing target row is verified before source drain")
+    func identicalTargetRowCompletesPartialRerun() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try makeOldEventsDB(at: dir, rowCount: 1)
+        var bootstrap: AlertStore? = try AlertStore(directory: dir.path)
+        try await bootstrap?.insert(alert: Alert(
+            id: "alert-0",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            ruleId: "test.rule",
+            ruleTitle: "Test 0",
+            severity: .high,
+            eventId: "evt-0"
+        ))
+        bootstrap = nil
+
+        let migrated = AlertsTableRelocator.relocate(directory: dir.path)
+
+        #expect(migrated == true)
+        #expect(eventsAlertsCount(at: dir) == nil)
+        let target = try AlertStore(directory: dir.path)
+        let alerts = try await target.alerts(
+            since: Date.distantPast,
+            limit: 10
+        )
+        #expect(alerts.count == 1)
+        #expect(alerts.first?.id == "alert-0")
+    }
+
+    @Test("Target indexed-text amplification is admitted before source copy or drain")
+    func indexedTargetAmplificationFailsClosed() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try makeOldEventsDB(at: dir, rowCount: 1)
+        // The legacy table stores rule_id once. The current destination stores
+        // it in the table and two independent indexes, so source dbstat bytes
+        // alone are not a target-growth bound.
+        try replaceLegacyRuleID(
+            at: dir,
+            with: String(repeating: "r", count: 4 * 1_048_576)
+        )
+        let eventPolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 64 * 1_048_576,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 1_048_576,
+            storageVolumePath: dir.path
+        )
+        let alertPolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 16 * 1_048_576,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 1_048_576,
+            storageVolumePath: dir.path
+        )
+
+        let migrated = AlertsTableRelocator.relocate(
+            directory: dir.path,
+            eventStoragePolicy: eventPolicy,
+            alertStoragePolicy: alertPolicy
+        )
+
+        #expect(!migrated)
+        #expect(eventsAlertsCount(at: dir) == 1,
+                "target headroom refusal must leave authoritative source intact")
+        let target = try AlertStore(
+            directory: dir.path,
+            storagePolicy: alertPolicy
+        )
+        #expect(try await target.count() == 0,
+                "admission must occur before INSERT...SELECT begins")
     }
 }

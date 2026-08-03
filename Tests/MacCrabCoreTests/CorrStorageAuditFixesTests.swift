@@ -4,9 +4,9 @@
 //   #1  auto_vacuum=NONE upgraded DBs never convert → incrementalVacuum no-op.
 //        Fix: vacuum() sets PRAGMA auto_vacuum=INCREMENTAL before VACUUM, so a
 //        legacy mode-0 file converts on its next full VACUUM.
-//   #2  events_fts drift on re-insert. Fix: insert is an in-place UPSERT (not
-//        INSERT OR REPLACE) + an AFTER UPDATE FTS trigger, so re-inserting the
-//        same event id cannot orphan the old external-content FTS posting.
+//   #2  events_fts drift on re-insert. Fix: event ids are immutable evidence
+//        keys (`INSERT OR IGNORE`), so a duplicate is an idempotent no-op and
+//        cannot delete or rewrite the original external-content FTS posting.
 //   #3  alert_evidence "forward window" was never populated. Fix: capture is
 //        explicitly backward-looking ([alertTs - window, alertTs]).
 //   #4  delete(alertId:) orphaned the evidence copy. Fix: EventStore.deleteEvidence.
@@ -137,31 +137,31 @@ struct AutoVacuumConversionTests {
     }
 }
 
-// MARK: - #2 events_fts consistency on re-insert (UPSERT + AFTER UPDATE trigger)
+// MARK: - #2 events_fts consistency on duplicate immutable event id
 
 @Suite("corr-storage #2: re-inserting the same event id keeps events_fts consistent")
 struct EventsFTSReinsertTests {
 
-    @Test("UPSERT updates in place; old FTS token is dropped, new token present, no orphan")
-    func reinsertRefreshesFTS() async throws {
+    @Test("Duplicate id is a no-op; original row and FTS posting remain immutable")
+    func duplicateIDPreservesOriginalFTS() async throws {
         let (store, tmp, path) = try await makeEventStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let id = UUID()
         try await store.insert(event: makeEvent(id: id, commandLine: "/bin/tool zzzalphamarker"))
-        // Re-insert the SAME id with a different command line (the latent
-        // duplicate-id path the finding is about).
+        // Re-insert the SAME id with a different command line. Event IDs are
+        // evidence identities, not mutable record keys.
         try await store.insert(event: makeEvent(id: id, commandLine: "/bin/tool zzzbetamarker"))
 
-        // In-place UPSERT: exactly one row, not a duplicate.
+        // Exactly one immutable original row, not a duplicate or replacement.
         #expect(rawInt(at: path, "SELECT count(*) FROM events") == 1)
 
-        // FTS index: old token gone, new token present (no orphaned posting).
+        // FTS continues to describe the authoritative original row.
         #expect(rawInt(at: path, "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?1",
-                       bindText: "zzzalphamarker") == 0,
-                "stale FTS posting for the replaced command line must be removed")
+                       bindText: "zzzalphamarker") == 1)
         #expect(rawInt(at: path, "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?1",
-                       bindText: "zzzbetamarker") == 1)
+                       bindText: "zzzbetamarker") == 0,
+                "a duplicate event id must not rewrite historical evidence")
 
         // The definitive check: external-content FTS index matches the events table.
         #expect(ftsIntegrityOK(at: path), "events_fts integrity-check must pass (no drift)")

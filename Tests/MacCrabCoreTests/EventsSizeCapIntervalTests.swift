@@ -202,6 +202,103 @@ struct EventsSizeCapIntervalTests {
         }
     }
 
+    // MARK: - 1c. Exact reserve-aware maintenance boundary
+
+    @Test("300 MiB events cap derives exact admission and proactive boundaries")
+    func exactReserveBoundaryArithmetic() {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 300)
+
+        #expect(boundary.nominalCapBytes == 314_572_800)
+        #expect(boundary.hardAdmissionBoundaryBytes == 281_018_368)
+        #expect(boundary.proactiveSweepBoundaryBytes == 247_463_936)
+        // 80% of 300 MiB is 240 MiB, which would land above the proactive
+        // 236 MiB watermark. The shared target must not immediately re-arm.
+        #expect(boundary.targetBytes == 247_463_936)
+    }
+
+    @Test("manual and watchdog decision covers the hard-boundary-to-cap gap")
+    func exactBoundaryDecisionCoversAdmissionGap() {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 300)
+
+        #expect(!boundary.requiresMaintenance(
+            footprintBytes: boundary.proactiveSweepBoundaryBytes
+        ))
+        #expect(boundary.requiresMaintenance(
+            footprintBytes: boundary.proactiveSweepBoundaryBytes + 1
+        ))
+        #expect(boundary.requiresMaintenance(
+            footprintBytes: boundary.hardAdmissionBoundaryBytes
+        ))
+        #expect(boundary.requiresMaintenance(
+            footprintBytes: boundary.nominalCapBytes - 1
+        ))
+
+        // The old decimal-MB guard treated this as exactly "300 MB" and did
+        // not run (`300 > configured 300` is false), even though exact binary-
+        // MiB admission had already paused writes below it.
+        let strandedFootprint: Int64 = 300_999_999
+        #expect(strandedFootprint / 1_000_000 == 300)
+        #expect(strandedFootprint > boundary.hardAdmissionBoundaryBytes)
+        #expect(strandedFootprint < boundary.nominalCapBytes)
+        #expect(boundary.requiresMaintenance(footprintBytes: strandedFootprint))
+    }
+
+    @Test("undersized and extreme event caps retain a positive safe maintenance window")
+    func boundaryRejectsZeroTargetConfigurations() {
+        let minimumMiB = DaemonConfig.StorageConfig.minimumEventsSizeMiB
+        #expect(minimumMiB == 96)
+
+        // These were all accepted as 50–65 MiB before the adversarial pass;
+        // subtracting two fixed 32-MiB reserves yielded a 0–1 MiB target.
+        for requested in [50, 64, 65, minimumMiB] {
+            let boundary = EventsSizeCapBoundary(maxSizeMiB: requested)
+            #expect(boundary.nominalCapBytes == 96 * 1_048_576)
+            #expect(boundary.hardAdmissionBoundaryBytes == 64 * 1_048_576)
+            #expect(boundary.proactiveSweepBoundaryBytes == 32 * 1_048_576)
+            #expect(boundary.targetBytes == 32 * 1_048_576)
+            #expect(boundary.targetBytes > 0)
+            #expect(boundary.targetBytes < boundary.hardAdmissionBoundaryBytes)
+        }
+
+        var config = DaemonConfig.StorageConfig()
+        config.eventsMaxSizeMB = 50
+        #expect(config.clampedToSafeFloors().eventsMaxSizeMB == minimumMiB)
+
+        let defaultBoundary = EventsSizeCapBoundary(maxSizeMiB: 420)
+        #expect(defaultBoundary.nominalCapBytes == 420 * 1_048_576)
+        #expect(defaultBoundary.proactiveSweepBoundaryBytes > 0)
+        #expect(defaultBoundary.targetBytes > 0)
+
+        let extreme = EventsSizeCapBoundary(maxSizeMiB: .max)
+        #expect(extreme.nominalCapBytes
+            == Int64(DaemonConfig.StorageConfig.maximumSizeMiB) * 1_048_576)
+        #expect(extreme.targetBytes > 0)
+        #expect(extreme.targetBytes < extreme.hardAdmissionBoundaryBytes)
+    }
+
+    @Test("maintenance footprint uses the authoritative four-file family probe")
+    func exactFootprintIncludesJournalAndRejectsPartialFamily() throws {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-footprint-parity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let path = tmp.appendingPathComponent("events.db").path
+
+        try Data(repeating: 1, count: 11).write(to: URL(fileURLWithPath: path))
+        try Data(repeating: 2, count: 13).write(to: URL(fileURLWithPath: path + "-wal"))
+        try Data(repeating: 3, count: 17).write(to: URL(fileURLWithPath: path + "-shm"))
+        try Data(repeating: 4, count: 19).write(to: URL(fileURLWithPath: path + "-journal"))
+
+        #expect(try measureDatabaseFootprintBytes(dbPath: path) == 60)
+        #expect(try measureDatabaseFootprintBytes(dbPath: path)
+            == SQLitePersistentStoreAdmission.measureFamily(path))
+
+        try FileManager.default.removeItem(atPath: path)
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            _ = try measureDatabaseFootprintBytes(dbPath: path)
+        }
+    }
+
     // MARK: - 2. Adaptive ladder no-collapse contract
 
     /// The internal ladder is rebuilt inside `runAdaptiveRollupSweep`.
@@ -283,8 +380,8 @@ struct EventsSizeCapIntervalTests {
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
-            targetSizeMB: 1,
-            capSizeMB: 1,
+            targetSizeBytes: 1_000_000,
+            capSizeBytes: 1_000_000,
             hotTierMinutes: 30,
             aggregateDays: 90,
             alertsRetentionDays: 365
@@ -343,8 +440,8 @@ struct EventsSizeCapIntervalTests {
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
-            targetSizeMB: 1,
-            capSizeMB: 1,
+            targetSizeBytes: 1_000_000,
+            capSizeBytes: 1_000_000,
             hotTierMinutes: 15,        // FLOOR — pre-fix this collapsed the ladder
             aggregateDays: 90,
             alertsRetentionDays: 365
@@ -387,15 +484,15 @@ struct EventsSizeCapIntervalTests {
         // small over-fraction floors Layer 3's dropTarget at 10_000 —
         // comfortably below the 12_000 eligible file rows — so the valve is
         // NOT reached and the 500 exec rows are spared deterministically.
-        let measured = measureDatabaseFootprintMB(dbPath: dbPath)
-        #expect(measured >= 2, "12.5k events should occupy >= 2 MB on disk (was \(measured))")
-        let capMB = max(1, measured - 1)
+        let measured = try measureDatabaseFootprintBytes(dbPath: dbPath)
+        #expect(measured >= 2_000_000, "12.5k events should occupy >= 2 MB on disk (was \(measured) bytes)")
+        let capBytes = max(1_000_000, measured - 1_000_000)
 
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
-            targetSizeMB: capMB,
-            capSizeMB: capMB,
+            targetSizeBytes: capBytes,
+            capSizeBytes: capBytes,
             hotTierMinutes: 15,
             aggregateDays: 90,
             alertsRetentionDays: 365,
@@ -431,8 +528,8 @@ struct EventsSizeCapIntervalTests {
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
-            targetSizeMB: 1,
-            capSizeMB: 1,
+            targetSizeBytes: 1_000_000,
+            capSizeBytes: 1_000_000,
             hotTierMinutes: 15,
             aggregateDays: 90,
             alertsRetentionDays: 365,

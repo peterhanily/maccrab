@@ -105,7 +105,6 @@ enum SchemaV1 {
         "PRAGMA auto_vacuum = INCREMENTAL",
         "PRAGMA journal_mode = WAL",
         "PRAGMA synchronous = NORMAL",
-        "PRAGMA wal_autocheckpoint = 1000",
         "PRAGMA cache_size = -8192",   // ~8 MB cache, negative = KB
         "PRAGMA mmap_size = 16777216", // 16 MB mmap window
     ]

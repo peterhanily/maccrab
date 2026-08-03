@@ -29,6 +29,10 @@ public actor MCPMonitor {
 
     /// Baseline of known servers keyed by "configFile::serverName".
     private var knownServers: [String: MCPServerEntry] = [:]
+    /// Last read failure per path. The 60-second poll reports each stable
+    /// failure state once, then re-arms after the file becomes readable or its
+    /// failure class changes.
+    private var reportedConfigFailures: [String: ConfigReadFailure] = [:]
     private var baselined = false
 
     private let pollInterval: TimeInterval
@@ -60,6 +64,31 @@ public actor MCPMonitor {
         let args: [String]
         let configFile: String
         let tool: String
+    }
+
+    private enum ConfigReadFailure: Sendable, Equatable {
+        case malformedJSON
+        case carrier(BoundedRegularFileReader.Rejection)
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            switch (lhs, rhs) {
+            case (.malformedJSON, .malformedJSON):
+                return true
+            case (.carrier(.oversized), .carrier(.oversized)):
+                // A growing poison file remains one failure class; do not emit
+                // a fresh alert every poll merely because its byte count rose.
+                return true
+            case (.carrier(let left), .carrier(let right)):
+                return left == right
+            default:
+                return false
+            }
+        }
+    }
+
+    private enum ConfigParseResult: Sendable {
+        case success([MCPServerEntry])
+        case failure(ConfigReadFailure)
     }
 
     // MARK: - Public snapshot for MCPAttributor (v1.7.0)
@@ -164,9 +193,18 @@ public actor MCPMonitor {
     /// Hard cap on how much of a server source file is read.
     private static let maxServerSourceScanBytes = 512 * 1024
 
-    /// "path|mtime|size" fingerprints already scanned, so the 60 s poll does
-    /// not re-read — and re-emit on — an unchanged file. Cleared wholesale past
-    /// the cap: this is cheap re-scan avoidance, not a correctness cache.
+    /// MCP clients accumulate project history in their JSON config (notably
+    /// `~/.claude.json`), so this is deliberately larger than the small
+    /// toggle/config caps elsewhere. It is still finite: these files live in
+    /// user-writable homes and are read by the root daemon during startup and
+    /// every poll.
+    static let maxConfigBytes = 4 * 1024 * 1024
+
+    /// Descriptor-identity/change-time fingerprints already scanned, so the
+    /// 60 s poll does not re-parse or re-emit on an unchanged file. The bounded
+    /// descriptor read still occurs to bind all fingerprint fields to the same
+    /// inode. Cleared wholesale past the cap: this is cheap parse avoidance,
+    /// not a correctness cache.
     private var scannedServerSources: Set<String> = []
 
     /// Known-good MCP packages commonly used with npx.
@@ -290,9 +328,23 @@ public actor MCPMonitor {
     }
 
     private func scanConfig(tool: String, path: String) {
-        guard FileManager.default.fileExists(atPath: path) else { return }
+        guard FileManager.default.fileExists(atPath: path) else {
+            reportedConfigFailures.removeValue(forKey: path)
+            return
+        }
 
-        let servers = parseConfig(tool: tool, path: path)
+        let servers: [MCPServerEntry]
+        switch parseConfig(tool: tool, path: path) {
+        case .success(let parsed):
+            reportedConfigFailures.removeValue(forKey: path)
+            servers = parsed
+        case .failure(let failure):
+            reportConfigFailure(failure, tool: tool, path: path)
+            // A rejected or malformed carrier says nothing about whether the
+            // previously parsed servers were removed. Preserve the last known
+            // baseline instead of emitting false removals and erasing it.
+            return
+        }
 
         // Build set of current server keys for this config
         let currentKeys = Set(servers.map { Self.serverKey(configFile: path, name: $0.name) })
@@ -358,10 +410,21 @@ public actor MCPMonitor {
 
     // MARK: - Config Parsing
 
-    private func parseConfig(tool: String, path: String) -> [MCPServerEntry] {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return []
+    private func parseConfig(tool: String, path: String) -> ConfigParseResult {
+        let snapshot: BoundedRegularFileReader.Snapshot
+        switch BoundedRegularFileReader.readOutcome(
+            at: path,
+            maximumBytes: Self.maxConfigBytes
+        ) {
+        case .success(let read):
+            snapshot = read
+        case .rejected(let reason):
+            return .failure(.carrier(reason))
+        }
+        guard let json = try? JSONSerialization.jsonObject(
+            with: snapshot.data
+        ) as? [String: Any] else {
+            return .failure(.malformedJSON)
         }
 
         var servers: [MCPServerEntry] = []
@@ -389,7 +452,7 @@ public actor MCPMonitor {
             }
         }
 
-        guard !merged.isEmpty else { return [] }
+        guard !merged.isEmpty else { return .success([]) }
         let serversDict = merged
 
         for (name, value) in serversDict {
@@ -414,7 +477,67 @@ public actor MCPMonitor {
             ))
         }
 
-        return servers
+        return .success(servers)
+    }
+
+    private func reportConfigFailure(
+        _ failure: ConfigReadFailure,
+        tool: String,
+        path: String
+    ) {
+        guard reportedConfigFailures[path] != failure else { return }
+        reportedConfigFailures[path] = failure
+
+        switch failure {
+        case .malformedJSON:
+            logger.warning("MCP config malformed JSON: \(path, privacy: .public)")
+        case .carrier(.notFound):
+            // Expected when a watched file is atomically replaced between the
+            // directory scan and descriptor open.
+            break
+        case .carrier(.inaccessible):
+            logger.warning("MCP config inaccessible: \(path, privacy: .public)")
+        case .carrier(.ioFailure):
+            logger.warning("MCP config read failed: \(path, privacy: .public)")
+        case .carrier(.invalidRequest):
+            logger.error("MCP config path rejected as invalid: \(path, privacy: .public)")
+        case .carrier(.unsafeCarrier):
+            emitRejectedConfigEvent(
+                tool: tool,
+                path: path,
+                detail: "unsafe non-regular, linked, or symlinked carrier"
+            )
+        case .carrier(.changedDuringRead):
+            emitRejectedConfigEvent(
+                tool: tool,
+                path: path,
+                detail: "carrier changed during the descriptor read"
+            )
+        case .carrier(.oversized(let actual, let maximum)):
+            emitRejectedConfigEvent(
+                tool: tool,
+                path: path,
+                detail: "oversized carrier (\(actual) bytes; maximum \(maximum))"
+            )
+        }
+    }
+
+    private func emitRejectedConfigEvent(tool: String, path: String, detail: String) {
+        emitEvent(
+            configFile: path,
+            serverName: "(config)",
+            command: "",
+            args: [],
+            eventType: .suspicious,
+            reason: "MCP \(tool) configuration rejected: \(detail)",
+            tool: tool
+        )
+    }
+
+    /// Internal runtime seam used to verify rejection observability without
+    /// depending on a real user's MCP configuration directory.
+    func _testScanConfig(tool: String, path: String) {
+        scanConfig(tool: tool, path: path)
     }
 
     // MARK: - Suspicious Pattern Detection
@@ -532,32 +655,35 @@ public actor MCPMonitor {
     /// user-writable paths on a 60 s poll:
     ///   * four zero-FP markers only (see `toolPoisoningStrongMarkers`);
     ///   * text extensions only, so we never scan our own MCP binary;
-    ///   * `SecureFileIO` (O_NOFOLLOW + bounded read) plus the lstat
-    ///     regular-file check, so a symlink / FIFO / device planted at the
-    ///     configured path cannot redirect or block the read;
-    ///   * a (path, mtime, size) fingerprint so an unchanged file is read once
-    ///     rather than on every poll.
+    ///   * one descriptor-relative `BoundedRegularFileReader` snapshot, so a
+    ///     symlink / FIFO / device or parent/leaf replacement cannot redirect,
+    ///     block, or separate the fingerprint metadata from the scanned bytes;
+    ///   * a descriptor identity + ctime fingerprint so same-size replacement
+    ///     with a restored mtime cannot inherit an earlier clean decision.
     private func scanServerSourceForToolPoisoning(server: MCPServerEntry) {
         for path in ([server.command] + server.args) where path.hasPrefix("/") {
             let ext = (path as NSString).pathExtension.lowercased()
             guard Self.scannableServerSourceExtensions.contains(ext),
-                  SecureFileIO.isSafeRegularFile(at: path),
-                  let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                  let size = attrs[.size] as? Int, size > 0,
-                  size <= Self.maxServerSourceScanBytes,
-                  let mtime = attrs[.modificationDate] as? Date else { continue }
+                  case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+                      at: path,
+                      maximumBytes: Self.maxServerSourceScanBytes
+                  ), !snapshot.data.isEmpty else { continue }
 
-            let fingerprint = "\(path)|\(mtime.timeIntervalSince1970)|\(size)"
+            let fingerprint = [
+                path,
+                String(snapshot.deviceID),
+                String(snapshot.inodeNumber),
+                String(snapshot.statusChangeSeconds),
+                String(snapshot.statusChangeNanoseconds),
+                String(snapshot.sizeBytes),
+            ].joined(separator: "|")
             guard !scannedServerSources.contains(fingerprint) else { continue }
             if scannedServerSources.count >= 512 {
                 scannedServerSources.removeAll(keepingCapacity: true)
             }
             scannedServerSources.insert(fingerprint)
 
-            guard let data = try? SecureFileIO.readBytes(
-                at: path, maxBytes: Self.maxServerSourceScanBytes
-            ) else { continue }
-            let text = String(decoding: data, as: UTF8.self)
+            let text = String(decoding: snapshot.data, as: UTF8.self)
 
             let reason: String?
             if let marker = Self.toolPoisoningStrongMarkers.first(where: {
@@ -610,25 +736,12 @@ public actor MCPMonitor {
     /// it needs was never opened. (The `maccrabctl mcp` subcommand runs as the
     /// user, which is why the CLI listed servers the daemon could not see.)
     ///
-    /// Enumerate the real homes under `/Users`, same pattern as
-    /// `ESCollector.realUserHomes()`, and keep the process's own home so the
-    /// non-root dev daemon and unit tests behave exactly as before.
+    /// Use the shared uid/passwd/no-symlink home contract. A privileged caller
+    /// must not trust a bare `/Users/*` directory walk or append `/var/root`.
     private nonisolated static func expandTildeForAllHomes(_ path: String) -> [String] {
         guard path.hasPrefix("~/") else { return [path] }
         let suffix = String(path.dropFirst(1))   // keeps the leading "/"
-        let fm = FileManager.default
-        var homes: [String] = []
-        if let users = try? fm.contentsOfDirectory(atPath: "/Users") {
-            for user in users.sorted() where user != "Shared" && !user.hasPrefix(".") {
-                var isDir: ObjCBool = false
-                let home = "/Users/\(user)"
-                guard fm.fileExists(atPath: home, isDirectory: &isDir), isDir.boolValue else { continue }
-                homes.append(home)
-            }
-        }
-        let own = NSHomeDirectory()
-        if !homes.contains(own) { homes.append(own) }
-        return homes.map { $0 + suffix }
+        return RealUserHomeResolver.all().map { $0.path + suffix }
     }
 
     /// `configPaths` expanded across every real user home — the concrete list

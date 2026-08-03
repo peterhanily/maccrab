@@ -115,6 +115,25 @@ struct ReplayEngineTests {
         #expect(r1 == r2, "ReplayResult must be byte-equal across runs")
     }
 
+    @Test("Resolved replay ignores same-uid temporary-tree rewrites")
+    func resolvedReplayUsesCapturedBytes() async throws {
+        let bundle = try await makeBundle(matchedRules: [])
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let resolution = try SafeTraceBundleResolver.resolve(inputAt: bundle)
+        defer { resolution.cleanup() }
+
+        try Data("not-json".utf8).write(
+            to: resolution.bundleDirectory.appendingPathComponent("manifest.json")
+        )
+        try Data(#"{"event_id":"attacker","timestamp_ns":1}"#.utf8).write(
+            to: resolution.bundleDirectory.appendingPathComponent("events.jsonl")
+        )
+
+        let result = try await ReplayEngine().replay(resolvedBundle: resolution)
+        #expect(result.result == .ok)
+        #expect(result.traceId != "")
+    }
+
     // MARK: - Fixture 7b — fail-closed for unsupported stateful replay
 
     /// Fixture 7b from §27.2 — bundle references a rule that requires

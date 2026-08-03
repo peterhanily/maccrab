@@ -1458,7 +1458,11 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
             print(f"  WARNING: Step '{step_id}' in {source_file} has no detection, skipping rule", file=sys.stderr)
             return None
 
-        predicates, condition_type, _ = parse_detection_block(detection)
+        # Preserve the same hierarchical Sigma boolean expression emitted for
+        # single-event rules. Discarding this tree made multi-key OR groups in
+        # sequence steps flatten to `any_of` (over-detection), while mixed
+        # `(A or B) and C` flattened to `all_of` (often impossible to satisfy).
+        predicates, condition_type, condition_tree = parse_detection_block(detection)
 
         # Parse process relation (e.g., "shell.same", "execute.descendant")
         process_rel = None
@@ -1477,14 +1481,17 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
         if ordered and prev_step_id is not None:
             after_step = prev_step_id
 
-        compiled_steps.append({
+        compiled_step = {
             "id": step_id,
             "logsourceCategory": logsource_cat,
             "predicates": predicates,
             "condition": condition_type,
             "afterStep": after_step,
             "processRelation": process_rel,
-        })
+        }
+        if condition_tree is not None:
+            compiled_step["condition_tree"] = condition_tree
+        compiled_steps.append(compiled_step)
 
         prev_step_id = step_id
 

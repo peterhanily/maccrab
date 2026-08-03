@@ -11,6 +11,7 @@
 
 import Foundation
 import CSQLCipher
+import MacCrabCore
 
 /// Per-case SQLCipher store. One instance per open case; the
 /// CaseManager (lands v1.13a-1.5) owns lifecycle. The store does
@@ -19,19 +20,20 @@ import CSQLCipher
 public actor ArtifactStore {
 
     private var db: OpaquePointer?
+    private var checkpointController: SQLiteControlledCheckpointController?
     private let path: String
     private let encryptionState: CaseEncryptionState
-
-    /// Process-wide lock serializing the SQLite open + PRAGMA key
-    /// + initial schema migration window. SQLCipher's
-    /// `sqlcipher_extra_init` + `PRAGMA key` sequence is sensitive
-    /// to concurrent open() calls — under parallel test runs we
-    /// observed sporadic SQLITE_MISUSE (21) on subsequent
-    /// prepare() calls. Serializing the init window resolves the
-    /// race; once the connection is fully opened + keyed + migrated,
-    /// SQLITE_OPEN_FULLMUTEX handles per-connection thread safety
-    /// for normal usage.
-    private static let initLock = NSLock()
+    private let storagePolicy: SQLitePersistentStorePolicy
+    private var storageAdmission: SQLitePersistentStoreAdmission
+    /// Authoritative SQLCipher page size read after the key is applied. Row
+    /// estimates charge dirty leaf/tree pages at this value rather than
+    /// assuming that every legacy case uses SQLite's current default.
+    private let sqlitePageSizeBytes: Int64
+    /// Existing databases may open read/shed-only while over cap or below the
+    /// free-space floor. In that state the open PRAGMAs and migrations are
+    /// intentionally skipped; the first later-admitted writer must complete
+    /// them before it is allowed to prepare application SQL.
+    private var initializationPending: Bool
 
     /// Open / create the per-case store. If `dek` is supplied,
     /// applies `PRAGMA key` BEFORE any other PRAGMA. SQLCipher
@@ -40,10 +42,21 @@ public actor ArtifactStore {
     public init(
         path: String,
         dek: Data?,
-        encryptionState: CaseEncryptionState
+        encryptionState: CaseEncryptionState,
+        storagePolicy suppliedPolicy: SQLitePersistentStorePolicy? = nil
     ) async throws {
         self.path = path
         self.encryptionState = encryptionState
+        let policy = suppliedPolicy ?? Self.defaultStoragePolicy(for: path)
+        self.storagePolicy = policy
+
+        let expectsDEK = encryptionState != .plaintext
+        guard expectsDEK == (dek != nil) else {
+            throw ArtifactStoreError.encryptionStateMismatch(
+                state: encryptionState,
+                suppliedDEK: dek != nil
+            )
+        }
 
         // v1.21.5: the locked open + key + migrate window lives in a
         // synchronous static helper because NSLock.lock()/unlock()
@@ -52,29 +65,96 @@ public actor ArtifactStore {
         // serialization is byte-for-byte the same; keeping it in a
         // sync function also makes it impossible to later introduce
         // an `await` while the gate is held.
-        self.db = try Self.openKeyedAndMigrated(path: path, dek: dek)
+        let opened = try Self.openKeyedAndMigrated(
+            path: path,
+            dek: dek,
+            storagePolicy: policy
+        )
+        self.db = opened.handle
+        self.storageAdmission = opened.admission
+        self.sqlitePageSizeBytes = opened.pageSizeBytes
+        self.initializationPending = opened.initializationPending
+        self.checkpointController = opened.checkpointController
     }
 
     /// Synchronous open + PRAGMA key + migrate window, held under
     /// the process-wide `initLock`. On failure the handle is closed
     /// here (still inside the gate) before the error propagates.
-    private static func openKeyedAndMigrated(path: String, dek: Data?) throws -> OpaquePointer {
-        // Acquire the process-wide init lock and hold it through
-        // the entire open + key + migrate window.
-        initLock.lock()
-        defer { initLock.unlock() }
+    private static func openKeyedAndMigrated(
+        path: String,
+        dek: Data?,
+        storagePolicy: SQLitePersistentStorePolicy
+    ) throws -> (
+        handle: OpaquePointer,
+        admission: SQLitePersistentStoreAdmission,
+        pageSizeBytes: Int64,
+        initializationPending: Bool,
+        checkpointController: SQLiteControlledCheckpointController
+    ) {
+        // ArtifactStore and LiveDBSnapshot both link the same SQLCipher global
+        // state. A private lock here did not serialize against snapshot opens,
+        // despite CSQLCipherInitGate's contract, and recreated the parallel
+        // SQLITE_MISUSE race whenever those two surfaces overlapped.
+        return try CSQLCipherInitGate.withLock {
+            try openKeyedAndMigratedUnderGate(
+                path: path,
+                dek: dek,
+                storagePolicy: storagePolicy
+            )
+        }
+    }
+
+    private static func openKeyedAndMigratedUnderGate(
+        path: String,
+        dek: Data?,
+        storagePolicy: SQLitePersistentStorePolicy
+    ) throws -> (
+        handle: OpaquePointer,
+        admission: SQLitePersistentStoreAdmission,
+        pageSizeBytes: Int64,
+        initializationPending: Bool,
+        checkpointController: SQLiteControlledCheckpointController
+    ) {
+
+        try validateSQLiteFamily(path: path)
+        _ = try SQLitePersistentStoreAdmission.measureFamily(path)
+        let existingDatabase = try SQLitePersistentStoreAdmission
+            .mainFileExists(path)
+        var admission = try SQLitePersistentStoreAdmission(
+            databasePath: path,
+            policy: storagePolicy,
+            latchOperationalPressure: existingDatabase
+        )
 
         var handle: OpaquePointer?
-        let rc = sqlite3_open_v2(
+        let rc = SQLiteOpenPathPolicy.open(
             path,
-            &handle,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-            nil
+            database: &handle,
+            flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                | SQLITE_OPEN_FULLMUTEX
         )
         guard rc == SQLITE_OK, let h = handle else {
             let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open returned \(rc)"
             if let h = handle { sqlite3_close(h) }
             throw ArtifactStoreError.openFailed(message: msg, code: rc)
+        }
+
+        let checkpointController: SQLiteControlledCheckpointController
+        do {
+            checkpointController = try .install(
+                on: h,
+                thresholdPages: SQLiteControlledCheckpointController
+                    .defaultThresholdPages,
+                families: [
+                    "main": SQLiteControlledCheckpointFamily(
+                        databasePath: path,
+                        policy: storagePolicy
+                    ),
+                ]
+            )
+        } catch {
+            sqlite3_close(h)
+            throw error
         }
 
         do {
@@ -86,29 +166,97 @@ public actor ArtifactStore {
                 try applyDEK(handle: h, dek: dek)
             }
 
-            // Then the operational PRAGMAs.
-            for pragma in SchemaV1.openPragmas {
-                let rcP = sqlite3_exec(h, pragma, nil, nil, nil)
-                // PRAGMAs are advisory at this stage. If
-                // journal_mode=WAL is rejected we still proceed.
-                if rcP != SQLITE_OK {
-                    // Log via OSLog in a follow-up commit; for now,
-                    // silent. Error path is exercised by tests.
-                    _ = rcP
-                }
+            // Reject a future schema before WAL/auto_vacuum PRAGMAs can mutate
+            // it. Opening a case with an older binary must be observational.
+            let onDiskVersion = try readSchemaVersion(handle: h)
+            guard onDiskVersion <= SchemaV1.userVersion else {
+                throw ArtifactStoreError.migrationFailed(
+                    fromVersion: Int(onDiskVersion),
+                    toVersion: Int(SchemaV1.userVersion),
+                    message: "database schema is newer than this build"
+                )
             }
 
-            // Schema migration.
-            try migrate(handle: h)
+            // SQLCipher's page size is readable only after the key is applied.
+            // Install the hard main-file ceiling after the observational future-
+            // schema check, but before WAL/schema writes.
+            do {
+                try admission.installPageLimit(on: h)
+            } catch let error as SQLitePersistentStoreAdmissionError
+                where error.isOperationalPressure {
+                // Existing oversized case opens for read/inspection in shed mode.
+            }
+
+            if !admission.growthBlocked {
+                do {
+                    try admission.admitWrite(
+                        estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                            .conservativeRowMutationBytes,
+                        on: h
+                    )
+                    try performOperationalInitialization(
+                        handle: h,
+                        admission: &admission,
+                        existingDatabase: existingDatabase
+                    )
+                } catch let error as SQLitePersistentStoreAdmissionError
+                    where error.isOperationalPressure {
+                    // Preserve the keyed handle for read/inspection. The first
+                    // later writer retries initialization after fresh probes.
+                }
+            }
+            let pageSizeBytes = try readPageSize(handle: h)
+            return (
+                h,
+                admission,
+                pageSizeBytes,
+                admission.growthBlocked,
+                checkpointController
+            )
         } catch {
+            checkpointController.detach(from: h)
             sqlite3_close(h)
             throw error
         }
-        return h
+    }
+
+    private static func performOperationalInitialization(
+        handle: OpaquePointer,
+        admission: inout SQLitePersistentStoreAdmission,
+        existingDatabase: Bool
+    ) throws {
+        for pragma in SchemaV1.openPragmas {
+            let rc = sqlite3_exec(handle, pragma, nil, nil, nil)
+            guard rc == SQLITE_OK else {
+                throw ArtifactStoreError.stepFailed(
+                    operation: "open pragma \(pragma)",
+                    message: String(cString: sqlite3_errmsg(handle)),
+                    code: rc
+                )
+            }
+        }
+        try migrate(
+            handle: handle,
+            admission: &admission,
+            existingDatabase: existingDatabase
+        )
+    }
+
+    private static func defaultStoragePolicy(for databasePath: String)
+        -> SQLitePersistentStorePolicy {
+        SQLitePersistentStorePolicy(
+            maxFootprintBytes: 1_024 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            transactionReserveBytes: 16 * 1_048_576,
+            storageVolumePath: (databasePath as NSString).deletingLastPathComponent
+        )
     }
 
     deinit {
-        if let h = db { sqlite3_close(h) }
+        if let db {
+            checkpointController?.detach(from: db)
+            sqlite3_close(db)
+        }
     }
 
     // MARK: - PRAGMA key (SQLCipher unlock)
@@ -150,29 +298,188 @@ public actor ArtifactStore {
 
     // MARK: - Migrations
 
-    private static func migrate(handle: OpaquePointer) throws {
-        var currentVersion: Int32 = 0
+    private static func readSchemaVersion(handle: OpaquePointer) throws -> Int32 {
         var stmt: OpaquePointer?
         let p = sqlite3_prepare_v2(handle, "PRAGMA user_version", -1, &stmt, nil)
-        if p == SQLITE_OK {
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                currentVersion = sqlite3_column_int(stmt, 0)
-            }
+        guard p == SQLITE_OK, let stmt else {
+            sqlite3_finalize(stmt)
+            throw ArtifactStoreError.migrationFailed(
+                fromVersion: 0,
+                toVersion: Int(SchemaV1.userVersion),
+                message: String(cString: sqlite3_errmsg(handle))
+            )
         }
-        sqlite3_finalize(stmt)
+        defer { sqlite3_finalize(stmt) }
+        let versionStep = sqlite3_step(stmt)
+        guard versionStep == SQLITE_ROW else {
+            throw ArtifactStoreError.migrationFailed(
+                fromVersion: 0,
+                toVersion: Int(SchemaV1.userVersion),
+                message: "PRAGMA user_version step failed: \(String(cString: sqlite3_errmsg(handle)))"
+            )
+        }
+        return sqlite3_column_int(stmt, 0)
+    }
 
-        if currentVersion < SchemaV1.userVersion {
-            let rc = sqlite3_exec(handle, SchemaV1.createDDL, nil, nil, nil)
-            if rc != SQLITE_OK {
-                let msg = String(cString: sqlite3_errmsg(handle))
+    private static func migrate(
+        handle: OpaquePointer,
+        admission: inout SQLitePersistentStoreAdmission,
+        existingDatabase: Bool
+    ) throws {
+        let currentVersion = try readSchemaVersion(handle: handle)
+
+        guard currentVersion <= SchemaV1.userVersion else {
+            throw ArtifactStoreError.migrationFailed(
+                fromVersion: Int(currentVersion),
+                toVersion: Int(SchemaV1.userVersion),
+                message: "database schema is newer than this build"
+            )
+        }
+
+        let baselineStatements = SchemaV1.createDDL
+            .components(separatedBy: ";")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let work = SchemaMigrator.pendingStorageWork(
+            on: handle,
+            statements: baselineStatements
+        )
+        let needsVersionBump = currentVersion < SchemaV1.userVersion
+
+        if !work.isEmpty || needsVersionBump {
+            // Always resolve the idempotent baseline, even at the latest
+            // user_version, so a deleted production index is repaired. Fresh
+            // empty files charge every CREATE as bounded metadata; an existing
+            // case routes only actually-missing indexes through whole-store
+            // rebuild admission.
+            if existingDatabase {
+                if work.boundedMetadataStatementCount > 0 || needsVersionBump {
+                    let metadataCount = work.boundedMetadataStatementCount
+                        + (needsVersionBump ? 1 : 0)
+                    try admission.admitWrite(
+                        estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                            .estimatedTransactionBytes(rowCount: metadataCount),
+                        on: handle
+                    )
+                }
+                if work.rebuildStatementCount > 0 {
+                    try admission.admitSchemaRebuild(
+                        operationCount: work.rebuildStatementCount
+                    )
+                }
+            } else {
+                let statementCount = work.boundedMetadataStatementCount
+                    + work.rebuildStatementCount
+                    + (needsVersionBump ? 1 : 0)
+                try admission.admitWrite(
+                    estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                        .estimatedTransactionBytes(rowCount: statementCount),
+                    on: handle
+                )
+            }
+            let begin = sqlite3_exec(handle, "BEGIN IMMEDIATE", nil, nil, nil)
+            guard begin == SQLITE_OK else {
                 throw ArtifactStoreError.migrationFailed(
                     fromVersion: Int(currentVersion),
                     toVersion: Int(SchemaV1.userVersion),
-                    message: msg
+                    message: "BEGIN IMMEDIATE failed: \(String(cString: sqlite3_errmsg(handle)))"
                 )
             }
-            let bump = "PRAGMA user_version = \(SchemaV1.userVersion)"
-            sqlite3_exec(handle, bump, nil, nil, nil)
+            var committed = false
+            defer {
+                if !committed { sqlite3_exec(handle, "ROLLBACK", nil, nil, nil) }
+            }
+            var statements = baselineStatements
+            if needsVersionBump {
+                statements.append("PRAGMA user_version = \(SchemaV1.userVersion)")
+            }
+            for sql in statements {
+                let rc = sqlite3_exec(handle, sql, nil, nil, nil)
+                guard rc == SQLITE_OK else {
+                    throw ArtifactStoreError.migrationFailed(
+                        fromVersion: Int(currentVersion),
+                        toVersion: Int(SchemaV1.userVersion),
+                        message: String(cString: sqlite3_errmsg(handle))
+                    )
+                }
+            }
+            let commit = sqlite3_exec(handle, "COMMIT", nil, nil, nil)
+            guard commit == SQLITE_OK else {
+                throw ArtifactStoreError.migrationFailed(
+                    fromVersion: Int(currentVersion),
+                    toVersion: Int(SchemaV1.userVersion),
+                    message: "COMMIT failed: \(String(cString: sqlite3_errmsg(handle)))"
+                )
+            }
+            committed = true
+        }
+    }
+
+    private static func readPageSize(handle: OpaquePointer) throws -> Int64 {
+        var stmt: OpaquePointer?
+        let prepare = sqlite3_prepare_v2(handle, "PRAGMA page_size", -1, &stmt, nil)
+        guard prepare == SQLITE_OK, let stmt else {
+            sqlite3_finalize(stmt)
+            throw ArtifactStoreError.stepFailed(
+                operation: "read page_size prepare",
+                message: String(cString: sqlite3_errmsg(handle)),
+                code: prepare
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+        let step = sqlite3_step(stmt)
+        guard step == SQLITE_ROW else {
+            throw ArtifactStoreError.stepFailed(
+                operation: "read page_size step",
+                message: String(cString: sqlite3_errmsg(handle)),
+                code: step
+            )
+        }
+        let pageSize = sqlite3_column_int64(stmt, 0)
+        guard pageSize > 0,
+              pageSize <= SQLitePersistentStoreAdmission.maximumSQLitePageBytes else {
+            throw ArtifactStoreError.stepFailed(
+                operation: "read page_size validate",
+                message: "invalid SQLite page size \(pageSize)",
+                code: SQLITE_CORRUPT
+            )
+        }
+        return pageSize
+    }
+
+    private static func validateSQLiteFamily(path: String) throws {
+        var mainExists = false
+        var sidecarExists = false
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let member = path + suffix
+            var info = stat()
+            if lstat(member, &info) == 0 {
+                guard (UInt32(info.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG),
+                      info.st_nlink == 1 else {
+                    throw ArtifactStoreError.unsafeSQLitePath(path: member)
+                }
+                if suffix.isEmpty { mainExists = true } else { sidecarExists = true }
+            } else if errno != ENOENT {
+                throw ArtifactStoreError.unsafeSQLitePath(path: member)
+            }
+        }
+        if sidecarExists && !mainExists {
+            throw ArtifactStoreError.unsafeSQLitePath(path: path)
+        }
+    }
+
+    private static func executeChecked(
+        _ db: OpaquePointer,
+        sql: String,
+        operation: String
+    ) throws {
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else {
+            throw ArtifactStoreError.stepFailed(
+                operation: operation,
+                message: String(cString: sqlite3_errmsg(db)),
+                code: rc
+            )
         }
     }
 
@@ -182,6 +489,21 @@ public actor ArtifactStore {
     /// twice with the same id is a no-op (silently accepted).
     public func insertCase(_ row: CaseRecord) throws {
         guard let db = db else { return }
+        let logicalBytes = Self.logicalRepresentationBytes(
+            strings: [
+                row.id, row.name, row.notes, row.encryptionState.rawValue,
+                // PRIMARY KEY index copy.
+                row.id,
+            ],
+            fixedBytes: 64
+        )
+        try admitStorageWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes(
+                logicalRepresentationBytes: logicalBytes,
+                maximumLeafPageTouches: 2,
+                maximumTreePathPageTouches: 8
+            )
+        )
         let sql = """
             INSERT OR IGNORE INTO cases (
                 id, name, created_at, time_window_start, time_window_end,
@@ -221,6 +543,7 @@ public actor ArtifactStore {
         sqlite3_bind_int(stmt, 9, row.scheduledTrusted ? 1 : 0)
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
             throw ArtifactStoreError.stepFailed(
                 operation: "insertCase step",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -286,6 +609,20 @@ public actor ArtifactStore {
     /// `maccrabctl case allow-ai --content <id>`.
     public func setAIContentAllowed(caseID: String, allowed: Bool) throws {
         guard let db = db else { return }
+        let existingBytes = try existingCaseMutationBytes(caseID: caseID)
+        try admitStorageWrite(
+            estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                .saturatingAdd(
+                    existingBytes,
+                    estimatedTransactionBytes(
+                        logicalRepresentationBytes: Self.logicalRepresentationBytes(
+                            strings: [caseID], fixedBytes: 16
+                        ),
+                        maximumLeafPageTouches: 2,
+                        maximumTreePathPageTouches: 8
+                    )
+                )
+        )
         let sql = "UPDATE cases SET ai_content_allowed = ? WHERE id = ?"
         var stmt: OpaquePointer?
         let p = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
@@ -301,6 +638,7 @@ public actor ArtifactStore {
         sqlite3_bind_text(stmt, 2, caseID, -1, SQLITE_TRANSIENT)
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
             throw ArtifactStoreError.stepFailed(
                 operation: "setAIContentAllowed step",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -313,6 +651,20 @@ public actor ArtifactStore {
     /// `maccrabctl case mark-trusted-scheduled <id>`.
     public func setScheduledTrusted(caseID: String, trusted: Bool) throws {
         guard let db = db else { return }
+        let existingBytes = try existingCaseMutationBytes(caseID: caseID)
+        try admitStorageWrite(
+            estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                .saturatingAdd(
+                    existingBytes,
+                    estimatedTransactionBytes(
+                        logicalRepresentationBytes: Self.logicalRepresentationBytes(
+                            strings: [caseID], fixedBytes: 16
+                        ),
+                        maximumLeafPageTouches: 2,
+                        maximumTreePathPageTouches: 8
+                    )
+                )
+        )
         let sql = "UPDATE cases SET scheduled_trusted = ? WHERE id = ?"
         var stmt: OpaquePointer?
         let p = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
@@ -328,6 +680,7 @@ public actor ArtifactStore {
         sqlite3_bind_text(stmt, 2, caseID, -1, SQLITE_TRANSIENT)
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
             throw ArtifactStoreError.stepFailed(
                 operation: "setScheduledTrusted step",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -362,19 +715,52 @@ public actor ArtifactStore {
         }
 
         let json = try Self.encodeJSON(record.data)
+        let logicalBytes = Self.logicalRepresentationBytes(
+            strings: [
+                record.caseID,
+                record.pluginID,
+                record.pluginVersion,
+                record.contentType,
+                record.sourcePath,
+                record.sha256,
+                record.blobRelpath,
+                record.summary,
+                record.confidence.rawValue,
+                record.privacyClass.rawValue,
+                record.actor,
+                json,
+                // Three artifacts secondary-index key copies plus the
+                // artifact_data INTEGER PRIMARY KEY representation.
+                record.caseID,
+                record.caseID,
+                record.caseID,
+                record.contentType,
+                record.privacyClass.rawValue,
+            ],
+            fixedBytes: 192
+        )
+        try admitStorageWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes(
+                logicalRepresentationBytes: logicalBytes,
+                maximumLeafPageTouches: 8,
+                maximumTreePathPageTouches: 20
+            )
+        )
 
         // Wrap the two INSERTs in a savepoint so artifact + payload
         // commit atomically. SAVEPOINT vs BEGIN/COMMIT so it nests
         // correctly under a future write-batching transaction.
         let savepointName = "commit_artifact"
-        sqlite3_exec(db, "SAVEPOINT \(savepointName)", nil, nil, nil)
+        try executeCheckedForWrite(
+            db,
+            sql: "SAVEPOINT \(savepointName)",
+            operation: "commit begin savepoint"
+        )
 
-        var rolledBack = false
+        var released = false
         defer {
-            if rolledBack {
+            if !released {
                 sqlite3_exec(db, "ROLLBACK TO SAVEPOINT \(savepointName)", nil, nil, nil)
-                sqlite3_exec(db, "RELEASE SAVEPOINT \(savepointName)", nil, nil, nil)
-            } else {
                 sqlite3_exec(db, "RELEASE SAVEPOINT \(savepointName)", nil, nil, nil)
             }
         }
@@ -391,7 +777,6 @@ public actor ArtifactStore {
         let pA = sqlite3_prepare_v2(db, insertArtifact, -1, &aStmt, nil)
         defer { sqlite3_finalize(aStmt) }
         guard pA == SQLITE_OK else {
-            rolledBack = true
             throw ArtifactStoreError.stepFailed(
                 operation: "commit prepare artifact",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -441,7 +826,7 @@ public actor ArtifactStore {
         }
         let stepA = sqlite3_step(aStmt)
         guard stepA == SQLITE_DONE else {
-            rolledBack = true
+            try throwLatchedStoragePressureIfPresent(resultCode: stepA)
             throw ArtifactStoreError.stepFailed(
                 operation: "commit step artifact",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -455,7 +840,6 @@ public actor ArtifactStore {
         let pD = sqlite3_prepare_v2(db, insertData, -1, &dStmt, nil)
         defer { sqlite3_finalize(dStmt) }
         guard pD == SQLITE_OK else {
-            rolledBack = true
             throw ArtifactStoreError.stepFailed(
                 operation: "commit prepare data",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -466,13 +850,20 @@ public actor ArtifactStore {
         sqlite3_bind_text(dStmt, 2, json, -1, SQLITE_TRANSIENT)
         let stepD = sqlite3_step(dStmt)
         guard stepD == SQLITE_DONE else {
-            rolledBack = true
+            try throwLatchedStoragePressureIfPresent(resultCode: stepD)
             throw ArtifactStoreError.stepFailed(
                 operation: "commit step data",
                 message: String(cString: sqlite3_errmsg(db)),
                 code: stepD
             )
         }
+
+        try executeCheckedForWrite(
+            db,
+            sql: "RELEASE SAVEPOINT \(savepointName)",
+            operation: "commit release savepoint"
+        )
+        released = true
 
         return artifactID
     }
@@ -612,6 +1003,21 @@ public actor ArtifactStore {
                 code: SQLITE_MISUSE
             )
         }
+        let logicalBytes = Self.logicalRepresentationBytes(
+            strings: [
+                caseID, pluginID, pluginVersion, inputsJSON, "running",
+                // idx_plugin_invocations_case_time key copy.
+                caseID,
+            ],
+            fixedBytes: 48
+        )
+        try admitStorageWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes(
+                logicalRepresentationBytes: logicalBytes,
+                maximumLeafPageTouches: 3,
+                maximumTreePathPageTouches: 8
+            )
+        )
         let sql = """
             INSERT INTO plugin_invocations (
                 case_id, plugin_id, plugin_version, inputs_json,
@@ -635,6 +1041,7 @@ public actor ArtifactStore {
         sqlite3_bind_int64(stmt, 5, Int64(startedAt.timeIntervalSince1970 * 1000))
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
             throw ArtifactStoreError.stepFailed(
                 operation: "recordInvocationStart step",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -655,6 +1062,22 @@ public actor ArtifactStore {
         completedAt: Date = Date()
     ) throws {
         guard let db = db else { return }
+        let existingBytes = try existingInvocationMutationBytes(id: id)
+        let logicalBytes = Self.logicalRepresentationBytes(
+            strings: [exitStatus, errorMessage, snapshotHash],
+            fixedBytes: 64
+        )
+        try admitStorageWrite(
+            estimatedTransactionBytes: SQLitePersistentStoreAdmission
+                .saturatingAdd(
+                    existingBytes,
+                    estimatedTransactionBytes(
+                        logicalRepresentationBytes: logicalBytes,
+                        maximumLeafPageTouches: 2,
+                        maximumTreePathPageTouches: 6
+                    )
+                )
+        )
         let sql = """
             UPDATE plugin_invocations
             SET completed_at = ?, exit_status = ?,
@@ -689,6 +1112,7 @@ public actor ArtifactStore {
         sqlite3_bind_int64(stmt, 7, id)
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
             throw ArtifactStoreError.stepFailed(
                 operation: "recordInvocationEnd step",
                 message: String(cString: sqlite3_errmsg(db)),
@@ -698,6 +1122,211 @@ public actor ArtifactStore {
     }
 
     // MARK: - Read helpers
+
+    private func throwLatchedStoragePressureIfPresent(resultCode: Int32) throws {
+        if let pressure = storageAdmission.latchSQLitePressure(
+            resultCode: resultCode,
+            db: db
+        ) {
+            throw pressure
+        }
+    }
+
+    private func existingCaseMutationBytes(caseID: String) throws -> Int64 {
+        guard let db else { return 0 }
+        let sql = """
+            SELECT id, name, created_at, time_window_start, time_window_end,
+                   notes, encryption_state, ai_content_allowed, scheduled_trusted
+            FROM cases WHERE id = ?1 LIMIT 1
+            """
+        return try existingRowMutationBytes(
+            db: db,
+            sql: sql,
+            textBinding: caseID,
+            columnCount: 9,
+            duplicatedIndexColumns: [0],
+            indexRepresentationCount: 1,
+            maximumLeafPageTouches: 2,
+            operation: "existing case estimate"
+        )
+    }
+
+    private func existingInvocationMutationBytes(id: Int64) throws -> Int64 {
+        guard let db else { return 0 }
+        let sql = """
+            SELECT id, case_id, plugin_id, plugin_version, inputs_json,
+                   started_at, completed_at, exit_status, artifacts_committed,
+                   artifacts_rejected, error_message, snapshot_hash
+            FROM plugin_invocations WHERE id = ?1 LIMIT 1
+            """
+        return try existingRowMutationBytes(
+            db: db,
+            sql: sql,
+            integerBinding: id,
+            columnCount: 12,
+            duplicatedIndexColumns: [1],
+            indexRepresentationCount: 1,
+            maximumLeafPageTouches: 2,
+            operation: "existing invocation estimate"
+        )
+    }
+
+    private func existingRowMutationBytes(
+        db: OpaquePointer,
+        sql: String,
+        textBinding: String? = nil,
+        integerBinding: Int64? = nil,
+        columnCount: Int32,
+        duplicatedIndexColumns: [Int32],
+        indexRepresentationCount: Int64,
+        maximumLeafPageTouches: Int,
+        operation: String
+    ) throws -> Int64 {
+        var statement: OpaquePointer?
+        let prepare = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+        guard prepare == SQLITE_OK, let statement else {
+            sqlite3_finalize(statement)
+            throw ArtifactStoreError.stepFailed(
+                operation: operation,
+                message: String(cString: sqlite3_errmsg(db)),
+                code: prepare
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+        if let textBinding {
+            sqlite3_bind_text(statement, 1, textBinding, -1, SQLITE_TRANSIENT)
+        } else if let integerBinding {
+            sqlite3_bind_int64(statement, 1, integerBinding)
+        }
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return 0 }
+        guard step == SQLITE_ROW else {
+            try throwLatchedStoragePressureIfPresent(resultCode: step)
+            throw ArtifactStoreError.stepFailed(
+                operation: operation,
+                message: String(cString: sqlite3_errmsg(db)),
+                code: step
+            )
+        }
+        func bytes(_ column: Int32) -> Int64 {
+            sqlite3_column_type(statement, column) == SQLITE_NULL
+                ? 0 : Int64(sqlite3_column_bytes(statement, column))
+        }
+        var logical = Int64(columnCount) * 16
+        for column in Int32(0)..<columnCount {
+            logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                logical, bytes(column)
+            )
+        }
+        for column in duplicatedIndexColumns {
+            logical = SQLitePersistentStoreAdmission.saturatingAdd(
+                logical, bytes(column)
+            )
+        }
+        logical = SQLitePersistentStoreAdmission.saturatingAdd(
+            logical,
+            SQLitePersistentStoreAdmission.saturatingMultiply(
+                indexRepresentationCount, by: 16
+            )
+        )
+        return SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logical,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: maximumLeafPageTouches
+            )
+    }
+
+    private func admitStorageWrite(
+        estimatedTransactionBytes: Int64
+    ) throws {
+        try storageAdmission.admitWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes,
+            on: db
+        )
+        guard initializationPending else { return }
+        guard let db else {
+            throw ArtifactStoreError.stepFailed(
+                operation: "storage recovery initialization",
+                message: "db handle closed",
+                code: SQLITE_MISUSE
+            )
+        }
+        do {
+            try Self.performOperationalInitialization(
+                handle: db,
+                admission: &storageAdmission,
+                existingDatabase: true
+            )
+            initializationPending = false
+            // Initialization can itself consume headroom. Re-probe at the
+            // application transaction boundary instead of relying on the
+            // pre-initialization observation.
+            try storageAdmission.admitWrite(
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                on: db
+            )
+        } catch {
+            let rc = sqlite3_extended_errcode(db)
+            if let pressure = storageAdmission.latchSQLitePressure(
+                resultCode: rc,
+                db: db
+            ) {
+                throw pressure
+            }
+            throw error
+        }
+    }
+
+    private func estimatedTransactionBytes(
+        logicalRepresentationBytes: Int64,
+        maximumLeafPageTouches: Int,
+        maximumTreePathPageTouches: Int
+    ) -> Int64 {
+        let rowBytes = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logicalRepresentationBytes,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: maximumLeafPageTouches
+            )
+        return SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: rowBytes,
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: maximumTreePathPageTouches
+        )
+    }
+
+    private static func logicalRepresentationBytes(
+        strings: [String?],
+        fixedBytes: Int64
+    ) -> Int64 {
+        strings.reduce(max(0, fixedBytes)) { total, value in
+            guard let value else { return total }
+            return SQLitePersistentStoreAdmission.saturatingAdd(
+                total,
+                Int64(clamping: value.utf8.count)
+            )
+        }
+    }
+
+    private func executeCheckedForWrite(
+        _ db: OpaquePointer,
+        sql: String,
+        operation: String
+    ) throws {
+        do {
+            try Self.executeChecked(db, sql: sql, operation: operation)
+        } catch let error as ArtifactStoreError {
+            if case .stepFailed(_, _, let code) = error {
+                try throwLatchedStoragePressureIfPresent(resultCode: code)
+            }
+            throw error
+        }
+    }
+
+    public func storageAdmissionSnapshot() -> SQLitePersistentStoreAdmissionSnapshot {
+        storageAdmission.snapshot()
+    }
 
     private static func readCaseRow(stmt: OpaquePointer) throws -> CaseRecord {
         let id = String(cString: sqlite3_column_text(stmt, 0))

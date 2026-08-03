@@ -9,11 +9,20 @@
 
 import Testing
 import Foundation
+import Darwin
 import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("C-04: EventStore mid-run corruption self-heal")
 struct EventStoreCorruptionSelfHealTests {
+
+    private var explicitCorruption: SQLiteFailureDetails {
+        SQLiteFailureDetails(
+            resultCode: SQLITE_CORRUPT,
+            extendedResultCode: SQLITE_CORRUPT,
+            systemErrno: 0
+        )
+    }
 
     private func makeTempStore() async throws -> (EventStore, URL) {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -66,7 +75,10 @@ struct EventStoreCorruptionSelfHealTests {
         try await insertSample(store, count: 5)
         #expect(try await store.count() == 5)
 
-        let healed = await store.attemptCorruptionSelfHeal(reason: "simulated SQLITE_CORRUPT")
+        let healed = await store.attemptCorruptionSelfHeal(
+            failure: explicitCorruption,
+            reason: "simulated SQLITE_CORRUPT"
+        )
         #expect(healed == true)
 
         // The corrupt DB was quarantined aside using the shared naming scheme,
@@ -89,13 +101,34 @@ struct EventStoreCorruptionSelfHealTests {
 
         let t0 = Date()
         // Attempt #1 at t0 heals.
-        #expect(await store.attemptCorruptionSelfHeal(reason: "c1", now: t0) == true)
+        #expect(await store.attemptCorruptionSelfHeal(failure: explicitCorruption, reason: "c1", now: t0) == true)
         // A second attempt 10 s later is inside the 5-minute cooldown → refused.
-        #expect(await store.attemptCorruptionSelfHeal(reason: "c2", now: t0.addingTimeInterval(10)) == false)
+        #expect(await store.attemptCorruptionSelfHeal(failure: explicitCorruption, reason: "c2", now: t0.addingTimeInterval(10)) == false)
         // Past the cooldown, attempts #2 and #3 go through...
-        #expect(await store.attemptCorruptionSelfHeal(reason: "c3", now: t0.addingTimeInterval(400)) == true)
-        #expect(await store.attemptCorruptionSelfHeal(reason: "c4", now: t0.addingTimeInterval(800)) == true)
+        #expect(await store.attemptCorruptionSelfHeal(failure: explicitCorruption, reason: "c3", now: t0.addingTimeInterval(400)) == true)
+        #expect(await store.attemptCorruptionSelfHeal(failure: explicitCorruption, reason: "c4", now: t0.addingTimeInterval(800)) == true)
         // ...but the 4th distinct attempt is refused by the lifetime cap (3).
-        #expect(await store.attemptCorruptionSelfHeal(reason: "c5", now: t0.addingTimeInterval(1200)) == false)
+        #expect(await store.attemptCorruptionSelfHeal(failure: explicitCorruption, reason: "c5", now: t0.addingTimeInterval(1200)) == false)
+    }
+
+    @Test("non-corruption failures never close, move, or recreate the store")
+    func nonCorruptionPreservesEvidence() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try await insertSample(store, count: 2)
+
+        let refused = await store.attemptCorruptionSelfHeal(
+            failure: SQLiteFailureDetails(
+                resultCode: SQLITE_IOERR,
+                extendedResultCode: SQLITE_IOERR,
+                systemErrno: EIO
+            ),
+            reason: "malformed database text must not override SQLITE_IOERR"
+        )
+
+        #expect(!refused)
+        #expect(try await store.count() == 2)
+        let entries = try FileManager.default.contentsOfDirectory(atPath: tmp.path)
+        #expect(!entries.contains { $0.contains(".corrupt-") })
     }
 }

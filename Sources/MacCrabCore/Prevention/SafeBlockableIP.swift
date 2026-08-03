@@ -219,17 +219,14 @@ public enum SafeBlockableIP {
     }
 
     private static func resolveDefaultGatewayUncached() -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/sbin/route")
-        proc.arguments = ["-n", "get", "default"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return nil }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0,
-              let data = try? pipe.fileHandleForReading.readToEnd() ?? nil,
-              let out = String(data: data, encoding: .utf8) else {
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/route",
+            arguments: ["-n", "get", "default"],
+            timeout: 5,
+            maximumOutputBytes: 64 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded,
+              let out = String(data: result.output, encoding: .utf8) else {
             return nil
         }
         for line in out.split(separator: "\n") {

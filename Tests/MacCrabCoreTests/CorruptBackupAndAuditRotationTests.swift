@@ -13,7 +13,148 @@
 
 import Testing
 import Foundation
+import Darwin
+import CSQLCipher
+@testable import MacCrabCore
 @testable import MacCrabAgentKit
+
+@Suite("Startup SQLite quarantine authorization")
+struct StartupSQLiteQuarantineAuthorizationTests {
+    private struct InjectedMoveFailure: Error {}
+
+    private func makeFamily(base: String = "evidence.db") throws -> URL {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("MacCrabStartupRecovery-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        for member in CorruptDBFamilyMember.allCases {
+            try Data("original:\(member.rawValue)".utf8).write(
+                to: directory.appendingPathComponent(base + member.rawValue)
+            )
+        }
+        return directory
+    }
+
+    private func expectFamilyIntact(
+        _ directory: URL,
+        base: String = "evidence.db"
+    ) throws {
+        for member in CorruptDBFamilyMember.allCases {
+            let source = directory.appendingPathComponent(base + member.rawValue)
+            #expect(FileManager.default.fileExists(atPath: source.path))
+            #expect(try Data(contentsOf: source) == Data("original:\(member.rawValue)".utf8))
+        }
+        let entries = try FileManager.default.contentsOfDirectory(
+            atPath: directory.path
+        )
+        #expect(!entries.contains { $0.contains(".corrupt-") })
+    }
+
+    @Test("BUSY, PERM, READONLY, IOERR, and untyped failures preserve DB/WAL/SHM")
+    func nonCorruptionNeverMovesEvidence() throws {
+        let directory = try makeFamily()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let failures: [any Error] = [
+            EventStoreError.sqliteFailure(
+                context: "open", message: "busy",
+                resultCode: SQLITE_BUSY,
+                extendedResultCode: SQLITE_BUSY,
+                systemErrno: 0
+            ),
+            EventStoreError.sqliteFailure(
+                context: "open", message: "permission",
+                resultCode: SQLITE_PERM,
+                extendedResultCode: SQLITE_PERM,
+                systemErrno: EPERM
+            ),
+            AlertStoreError.sqliteFailure(
+                context: "open", message: "read-only",
+                resultCode: SQLITE_READONLY,
+                extendedResultCode: SQLITE_READONLY,
+                systemErrno: EROFS
+            ),
+            CausalGraphStoreError.sqliteFailure(
+                context: "open", message: "I/O",
+                resultCode: SQLITE_IOERR,
+                extendedResultCode: SQLITE_IOERR | Int32(3 << 8),
+                systemErrno: EIO
+            ),
+            // A corruption-looking string without captured SQLite result codes
+            // must never authorize evidence movement.
+            EventStoreError.databaseOpenFailed(
+                "database disk image is malformed"
+            ),
+        ]
+
+        for failure in failures {
+            #expect(throws: DaemonSetup.DatabaseQuarantineAuthorizationError.self) {
+                try DaemonSetup.quarantineExplicitSQLiteCorruption(
+                    directory: directory.path,
+                    base: "evidence.db",
+                    error: failure,
+                    timestamp: 1_700_000_010
+                )
+            }
+            try expectFamilyIntact(directory)
+        }
+    }
+
+    @Test("atomic move failure surfaces and rolls the whole family back")
+    func atomicFailureSurfacesWithoutFreshDBWindow() throws {
+        let directory = try makeFamily()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let corruption = CausalGraphStoreError.sqliteFailure(
+            context: "schema",
+            message: "corrupt",
+            resultCode: SQLITE_CORRUPT,
+            extendedResultCode: SQLITE_CORRUPT,
+            systemErrno: 0
+        )
+
+        #expect(throws: CorruptDBBackupError.self) {
+            try DaemonSetup.quarantineExplicitSQLiteCorruption(
+                directory: directory.path,
+                base: "evidence.db",
+                error: corruption,
+                timestamp: 1_700_000_011,
+                moveOperation: { move, phase in
+                    if phase == .quarantine, move.member == .shm {
+                        throw InjectedMoveFailure()
+                    }
+                    try FileManager.default.moveItem(
+                        atPath: move.source,
+                        toPath: move.destination
+                    )
+                }
+            )
+        }
+        try expectFamilyIntact(directory)
+    }
+
+    @Test("all three production startup owners use the typed atomic boundary")
+    func productionOwnersCannotDriftToBlanketQuarantine() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/MacCrabAgentKit/DaemonSetup.swift"),
+            encoding: .utf8
+        )
+        let boundaryUses = source.components(
+            separatedBy: "quarantineExplicitSQLiteCorruption("
+        ).count - 1
+        #expect(boundaryUses == 4,
+                "one declaration plus EventStore, AlertStore, and TraceGraph owners")
+        #expect(source.contains("CorruptDBBackup.quarantineAtomically("))
+        #expect(!source.contains("CorruptDBBackup.backup("),
+                "the deprecated failure-swallowing quarantine shim must stay unreachable")
+        #expect(!source.contains("try? FileManager.default.moveItem(atPath: src"),
+                "TraceGraph must not return to partial best-effort family moves")
+    }
+}
 
 @Suite("C-03: corrupt-backup retention sweep")
 struct CorruptBackupPruneTests {

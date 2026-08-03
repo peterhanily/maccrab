@@ -29,9 +29,17 @@ import os.log
 ///   ESCollector (entitlement) -> EsloggerCollector (FDA) -> KdebugCollector (root only)
 public actor KdebugCollector {
 
+    public nonisolated static let eventStreamCapacity = 1_024
+
     private let logger = Logger(subsystem: "com.maccrab", category: "kdebug-collector")
 
     public nonisolated let events: AsyncStream<Event>
+    private nonisolated let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: eventStreamCapacity
+    )
+    public nonisolated var deliveryCounters: EventCollectorBufferSnapshot {
+        deliveryTelemetry.snapshot()
+    }
     private var continuation: AsyncStream<Event>.Continuation?
     private var process: Process?
     private var readTask: Task<Void, Never>?
@@ -68,7 +76,9 @@ public actor KdebugCollector {
 
     public init() {
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(1024)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -119,12 +129,14 @@ public actor KdebugCollector {
             let fileHandle = pipe.fileHandleForReading
             let continuation = self.continuation
             let selfPid = Int32(self.selfPid)
+            let deliveryTelemetry = self.deliveryTelemetry
 
             readTask = Task.detached { [weak self] in
                 Self.readLoop(
                     fileHandle: fileHandle,
                     continuation: continuation,
-                    selfPid: selfPid
+                    selfPid: selfPid,
+                    deliveryTelemetry: deliveryTelemetry
                 )
                 Task { [weak self] in await self?.handleExit() }
             }
@@ -145,7 +157,8 @@ public actor KdebugCollector {
     private static func readLoop(
         fileHandle: FileHandle,
         continuation: AsyncStream<Event>.Continuation?,
-        selfPid: Int32
+        selfPid: Int32,
+        deliveryTelemetry: EventCollectorBufferTelemetry
     ) {
         guard let continuation else { return }
 
@@ -182,6 +195,7 @@ public actor KdebugCollector {
                         guard let event = parseFsUsageLine(line, selfPid: selfPid) else { return }
 
                         let result = continuation.yield(event)
+                        deliveryTelemetry.recordYield(offered: event, result: result)
                         if case .terminated = result { earlyReturn = true }
                     }
                     if earlyReturn { outerBreak = true; return }

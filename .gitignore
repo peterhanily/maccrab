@@ -46,6 +46,12 @@ events.jsonl
 
 # Entitlements for local dev signing (may contain team-specific info)
 *.entitlements
+# Release inputs are public capability declarations, not credentials. All
+# three must be tracked so a source tag describes the privileges codesign
+# grants to the shipped app, system extension, CLI, and MCP binaries.
+!Xcode/Resources/MacCrabApp.entitlements
+!Xcode/Resources/MacCrabAgent.entitlements
+!Xcode/Resources/MacCrabTools.entitlements
 
 # -----------------------------------------------------------------------------
 # Signing, release, and notarization artifacts

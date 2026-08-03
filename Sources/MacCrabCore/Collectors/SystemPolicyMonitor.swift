@@ -23,6 +23,7 @@ public actor SystemPolicyMonitor {
     private var continuation: AsyncStream<SystemPolicyEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
     private let pollInterval: TimeInterval
+    private let homesProvider: @Sendable () -> [RealUserHome]
 
     /// Baseline state for diffing.
     private var knownPlugins: Set<String> = []
@@ -89,6 +90,20 @@ public actor SystemPolicyMonitor {
 
     public init(pollInterval: TimeInterval = 300) { // Every 5 minutes
         self.pollInterval = pollInterval
+        self.homesProvider = { RealUserHomeResolver.all() }
+        var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
+        self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
+            capturedContinuation = continuation
+        }
+        self.continuation = capturedContinuation
+    }
+
+    init(
+        pollInterval: TimeInterval = 300,
+        homesProvider: @escaping @Sendable () -> [RealUserHome]
+    ) {
+        self.pollInterval = pollInterval
+        self.homesProvider = homesProvider
         var capturedContinuation: AsyncStream<SystemPolicyEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             capturedContinuation = continuation
@@ -234,17 +249,42 @@ public actor SystemPolicyMonitor {
     // MARK: - Plugin Directories
 
     private func checkPluginDirectories() {
-        let directories: [(String, PolicyEventType, String, String)] = [
-            ("/Library/DirectoryServices/PlugIns", .directoryServicePlugin, "attack.persistence", "attack.t1556"),
-            ("/Library/Spotlight", .spotlightImporter, "attack.persistence", "attack.t1547"),
-            (NSHomeDirectory() + "/Library/Spotlight", .spotlightImporter, "attack.persistence", "attack.t1547"),
+        var directories: [(
+            path: String,
+            type: PolicyEventType,
+            tactic: String,
+            technique: String,
+            ownerUID: UInt32?
+        )] = [
+            ("/Library/DirectoryServices/PlugIns", .directoryServicePlugin, "attack.persistence", "attack.t1556", nil),
+            ("/Library/Spotlight", .spotlightImporter, "attack.persistence", "attack.t1547", nil),
         ]
+        directories.append(contentsOf: homesProvider().map {
+            ($0.appending("Library/Spotlight"), .spotlightImporter, "attack.persistence", "attack.t1547", $0.userID)
+        })
 
-        for (dir, type, tactic, technique) in directories {
-            guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+        for scope in directories {
+            let items: [String]
+            if let ownerUID = scope.ownerUID {
+                guard let snapshot = BoundedDirectoryLister.list(
+                    at: scope.path,
+                    maximumEntries: 16_384,
+                    expectedOwnerUID: ownerUID
+                ) else { continue }
+                // A truncated result is a bounded partial inventory; this
+                // monitor never treats it as evidence that the directory is clean.
+                items = snapshot.entries.compactMap {
+                    $0.ownerUID == ownerUID && $0.kind == .directory ? $0.name : nil
+                }
+            } else {
+                guard let systemItems = try? FileManager.default.contentsOfDirectory(
+                    atPath: scope.path
+                ) else { continue }
+                items = systemItems
+            }
 
             for item in items where item.hasSuffix(".bundle") || item.hasSuffix(".dsplug") || item.hasSuffix(".mdimporter") {
-                let fullPath = dir + "/" + item
+                let fullPath = scope.path + "/" + item
                 if !knownPlugins.contains(fullPath) {
                     knownPlugins.insert(fullPath)
 
@@ -253,12 +293,12 @@ public actor SystemPolicyMonitor {
 
                     if isUnsigned {
                         emit(SystemPolicyEvent(
-                            type: type,
-                            description: "Unsigned \(type.rawValue) found: \(item) at \(dir)",
+                            type: scope.type,
+                            description: "Unsigned \(scope.type.rawValue) found: \(item) at \(scope.path)",
                             path: fullPath,
                             severity: .high,
-                            mitreTactic: tactic,
-                            mitreTechnique: technique
+                            mitreTactic: scope.tactic,
+                            mitreTechnique: scope.technique
                         ))
                     }
                 }
@@ -398,19 +438,31 @@ public actor SystemPolicyMonitor {
     // MARK: - Quarantine xattr Scanning
 
     private func scanDownloadsForMissingQuarantine() {
-        let downloadsDir = NSHomeDirectory() + "/Downloads"
-        guard let items = try? FileManager.default.contentsOfDirectory(atPath: downloadsDir) else { return }
+        for home in homesProvider() {
+            scanDownloadsForMissingQuarantine(in: home)
+        }
+    }
 
-        for item in items {
+    private func scanDownloadsForMissingQuarantine(in home: RealUserHome) {
+        let downloadsDir = home.appending("Downloads")
+        guard let snapshot = BoundedDirectoryLister.list(
+            at: downloadsDir,
+            maximumEntries: 65_536,
+            expectedOwnerUID: home.userID
+        ) else { return }
+
+        // Deliberately process a bounded partial inventory when truncated; no
+        // clean/completeness state is emitted by this monitor.
+        for entry in snapshot.entries where
+            entry.ownerUID == home.userID
+                && (entry.kind == .regularFile || entry.kind == .directory) {
+            let item = entry.name
             let fullPath = downloadsDir + "/" + item
 
             // Skip items we have already alerted on. The poll cycle re-runs
             // every 5 minutes; without this guard a single unquarantined file
             // generates one alert per poll indefinitely.
             if quarantineAlerted.contains(fullPath) { continue }
-
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir)
 
             // Check executables and app bundles only. Disk images (.dmg/.iso)
             // are containers, not executables — macOS cannot codesign them
@@ -631,43 +683,50 @@ public actor SystemPolicyMonitor {
 
     private func scanPluginPaths() -> Set<String> {
         var paths: Set<String> = []
-        let dirs = [
-            "/Library/Security/SecurityAgentPlugins",
-            "/Library/DirectoryServices/PlugIns",
-            "/Library/Spotlight",
-            NSHomeDirectory() + "/Library/Spotlight",
+        var dirs: [(path: String, ownerUID: UInt32?)] = [
+            ("/Library/Security/SecurityAgentPlugins", nil),
+            ("/Library/DirectoryServices/PlugIns", nil),
+            ("/Library/Spotlight", nil),
         ]
-        for dir in dirs {
-            if let items = try? FileManager.default.contentsOfDirectory(atPath: dir) {
-                for item in items {
-                    paths.insert(dir + "/" + item)
+        dirs.append(contentsOf: homesProvider().map {
+            ($0.appending("Library/Spotlight"), $0.userID)
+        })
+        for scope in dirs {
+            let items: [String]
+            if let ownerUID = scope.ownerUID {
+                guard let snapshot = BoundedDirectoryLister.list(
+                    at: scope.path,
+                    maximumEntries: 16_384,
+                    expectedOwnerUID: ownerUID
+                ) else { continue }
+                items = snapshot.entries.compactMap {
+                    $0.ownerUID == ownerUID && $0.kind == .directory ? $0.name : nil
                 }
+            } else {
+                guard let systemItems = try? FileManager.default.contentsOfDirectory(
+                    atPath: scope.path
+                ) else { continue }
+                items = systemItems
+            }
+            for item in items {
+                paths.insert(scope.path + "/" + item)
             }
         }
         return paths
     }
 
     private nonisolated func runCommand(_ path: String, args: [String], timeout: TimeInterval = 10) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            // Timeout: kill process if it hangs
-            let deadline = DispatchTime.now() + timeout
-            DispatchQueue.global().asyncAfter(deadline: deadline) {
-                if process.isRunning { process.terminate() }
-            }
-            // Drain the pipe BEFORE waiting so large command output can't
-            // deadlock (child blocks on write, parent blocks in waitUntilExit).
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            process.waitUntilExit()
-            return output
-        } catch {
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: path,
+            arguments: args,
+            timeout: timeout,
+            maximumOutputBytes: 8 * 1_024 * 1_024
+        ), !result.timedOut, !result.outputLimitExceeded else {
             return ""
         }
+        // Several callers intentionally inspect diagnostic output from a
+        // non-zero status (for example codesign and profiles), so preserve
+        // the old output semantics rather than requiring `succeeded` here.
+        return String(data: result.output, encoding: .utf8) ?? ""
     }
 }

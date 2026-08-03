@@ -8,10 +8,151 @@
 # Set these in ~/.maccrab-release-env (sourced automatically) or export them.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
+PROJECT_DIR="$(/usr/bin/dirname "$SCRIPT_DIR")"
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CONFIG \
+    GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \
+    GIT_CONFIG_PARAMETERS GIT_EXEC_PATH GIT_CEILING_DIRECTORIES \
+    GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_SSH GIT_SSH_COMMAND GIT_PROXY_COMMAND
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
+GIT_BIN=/usr/bin/git
+SHASUM_BIN=/usr/bin/shasum
+AWK_BIN=/usr/bin/awk
+SED_BIN=/usr/bin/sed
+GREP_BIN=/usr/bin/grep
+TAR_BIN=/usr/bin/tar
+CURL_BIN=/usr/bin/curl
+GH_BIN=/opt/homebrew/bin/gh
+CANONICAL_GH_REPO=peterhanily/maccrab
+CANONICAL_GH_HOST=github.com
+unset GH_REPO GH_HOST
+
+cd "$PROJECT_DIR"
+
+# BEGIN RELEASE_CRITICAL_EXECUTORS
+RELEASE_CRITICAL_EXECUTORS=(
+    .githooks/pre-push
+    scripts/ci-local.sh
+    scripts/release.sh
+    scripts/build-release.sh
+    scripts/release-env.sh
+    scripts/_release_env.py
+    scripts/export-release-source.py
+    scripts/check-release-dependencies.sh
+    scripts/prepare-release-pyyaml.sh
+    scripts/check-release-pyyaml.sh
+    scripts/run-release-python.sh
+    scripts/notarize.sh
+    scripts/check-rules-trust-anchor.sh
+    scripts/generate-appcast-entry.sh
+    scripts/publish-appcast-entry.sh
+    scripts/publish-release-json.sh
+    scripts/publish-cask.sh
+    Compiler/compile_rules.py
+)
+# END RELEASE_CRITICAL_EXECUTORS
+
+reject_hidden_release_index_state() {
+    local hidden
+    hidden=$($GIT_BIN ls-files -v | $AWK_BIN 'substr($0,1,1) == "S" || substr($0,1,1) ~ /^[a-z]$/ { print }')
+    if [ -n "$hidden" ]; then
+        echo "ERROR: release index contains assume-unchanged/skip-worktree entries:" >&2
+        printf '%s\n' "$hidden" >&2
+        return 1
+    fi
+    if ! $GIT_BIN update-index --really-refresh >/dev/null 2>&1 \
+            || ! $GIT_BIN diff-files --quiet -- \
+            || ! $GIT_BIN diff-index --cached --quiet HEAD --; then
+        echo "ERROR: release index/worktree differs from HEAD after a forced refresh" >&2
+        return 1
+    fi
+}
+
+verify_release_executor_blobs() {
+    local commit="$1" path expected actual
+    for path in "${RELEASE_CRITICAL_EXECUTORS[@]}"; do
+        if [ ! -f "$path" ] || [ -L "$path" ]; then
+            echo "ERROR: critical release executor is missing, non-regular, or redirected: $path" >&2
+            return 1
+        fi
+        expected=$($GIT_BIN rev-parse "$commit:$path" 2>/dev/null || true)
+        actual=$($GIT_BIN hash-object --no-filters "$path" 2>/dev/null || true)
+        if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "ERROR: critical release executor does not match $commit: $path" >&2
+            return 1
+        fi
+    done
+}
+
+require_clean_release_source() {
+    local dirty input tracked_swiftpm
+    reject_hidden_release_index_state
+    dirty=$($GIT_BIN status --porcelain --untracked-files=all)
+    if [ -n "$dirty" ]; then
+        echo "ERROR: release source is not clean; tracked, staged, and untracked inputs must be committed first:" >&2
+        printf '%s\n' "$dirty" >&2
+        return 1
+    fi
+    tracked_swiftpm=$($GIT_BIN ls-files '.swiftpm/**' ':(glob)**/.swiftpm/**')
+    if [ -n "$tracked_swiftpm" ]; then
+        echo "ERROR: repository-local SwiftPM configuration must not be a release input:" >&2
+        printf '%s\n' "$tracked_swiftpm" >&2
+        return 1
+    fi
+    for input in \
+        Xcode/Resources/MacCrabApp.entitlements \
+        Xcode/Resources/MacCrabAgent.entitlements \
+        Xcode/Resources/MacCrabTools.entitlements; do
+        if ! $GIT_BIN ls-files --error-unmatch "$input" >/dev/null 2>&1; then
+            echo "ERROR: shipped signing capability is not tracked: $input" >&2
+            return 1
+        fi
+    done
+}
+
+if [ ! -x "$GIT_BIN" ] || [ ! -x "$SHASUM_BIN" ] \
+        || [ ! -x "$AWK_BIN" ] || [ ! -x "$TAR_BIN" ]; then
+    echo "ERROR: required fixed system release tools are unavailable" >&2
+    exit 1
+fi
+require_clean_release_source
+SOURCE_COMMIT=$($GIT_BIN rev-parse --verify 'HEAD^{commit}')
+SOURCE_TREE=$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")
+verify_release_executor_blobs "$SOURCE_COMMIT"
+
+# Trusted parser library; ~/.maccrab-release-env is data, never shell code.
+# shellcheck source=scripts/release-env.sh
+source "$SCRIPT_DIR/release-env.sh"
+
+# Capture caller-provided credentials as ordinary, unexported shell variables,
+# then remove their public names from the environment before any CI, SwiftPM,
+# package plugin, rule compiler, coverage tool, or unsigned assembly runs.
+unset MACCRAB_CALLER_DEVELOPER_ID MACCRAB_CALLER_APPLE_ID \
+    MACCRAB_CALLER_APPLE_TEAM_ID MACCRAB_CALLER_NOTARIZE_PASSWORD \
+    MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE MACCRAB_CALLER_GH_TOKEN \
+    MACCRAB_CALLER_SITE_REPO_TOKEN MACCRAB_CALLER_TAP_REPO_TOKEN \
+    MACCRAB_SIGN_DEVELOPER_ID MACCRAB_SIGN_APPLE_ID MACCRAB_SIGN_APPLE_TEAM_ID \
+    MACCRAB_SIGN_NOTARIZE_PASSWORD MACCRAB_SIGN_NOTARIZE_KEYCHAIN_PROFILE \
+    MACCRAB_PUBLISH_GH_TOKEN MACCRAB_PUBLISH_SITE_REPO_TOKEN \
+    MACCRAB_PUBLISH_TAP_REPO_TOKEN
+MACCRAB_CALLER_DEVELOPER_ID="${DEVELOPER_ID:-}"
+MACCRAB_CALLER_APPLE_ID="${APPLE_ID:-}"
+MACCRAB_CALLER_APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
+MACCRAB_CALLER_NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}"
+MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
+MACCRAB_CALLER_GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+MACCRAB_CALLER_SITE_REPO_TOKEN="${SITE_REPO_TOKEN:-}"
+MACCRAB_CALLER_TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-}"
+unset_maccrab_signing_env
+unset_maccrab_publisher_env
+
 VERSION=""
 SKIP_PRERELEASE=0
+PUBLISH_RC=0
 # Re-spinning a version used to die at `git tag` ("tag already exists") AFTER the
 # full build + notarize had burnt ~15 minutes, leaving the release half-done with
 # no way forward but manual surgery. --respin is the explicit opt-in to re-point
@@ -27,6 +168,7 @@ for arg in "$@"; do
     case "$arg" in
         --skip-prerelease-check) SKIP_PRERELEASE=1 ;;
         --respin) RESPIN=1 ;;
+        --publish-rc) PUBLISH_RC=1 ;;
         -*) echo "Unknown flag: $arg"; exit 1 ;;
         *) [ -z "$VERSION" ] && VERSION="$arg" ;;
     esac
@@ -37,8 +179,143 @@ if [ -z "$VERSION" ]; then
     echo "Example: $0 1.1.0"
     exit 1
 fi
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+    echo "ERROR: version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N" >&2
+    exit 2
+fi
+VERSION_IS_RC=0
+if [[ "$VERSION" == *-rc.* ]]; then VERSION_IS_RC=1; fi
+if [ "$VERSION_IS_RC" = "1" ] && [ "$PUBLISH_RC" != "1" ]; then
+    echo "ERROR: release.sh will not put an RC on a public channel implicitly." >&2
+    echo "For an unpublished candidate use:" >&2
+    echo "  VERSION=$VERSION ALLOW_UNNOTARIZED=1 MACCRAB_BUILD_CHANNEL=dev ./scripts/build-release.sh" >&2
+    echo "To publish an isolated GitHub prerelease only, re-run with --publish-rc." >&2
+    exit 2
+fi
+if [ "$VERSION_IS_RC" != "1" ] && [ "$PUBLISH_RC" = "1" ]; then
+    echo "ERROR: --publish-rc requires a -rc.N version" >&2
+    exit 2
+fi
 
 cd "$PROJECT_DIR"
+
+ENV_FILE="$HOME/.maccrab-release-env"
+
+load_signing_values() {
+    unset_maccrab_signing_env
+    if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
+        load_maccrab_env_file signing "$ENV_FILE"
+    fi
+    [ -z "$MACCRAB_CALLER_DEVELOPER_ID" ] || DEVELOPER_ID="$MACCRAB_CALLER_DEVELOPER_ID"
+    [ -z "$MACCRAB_CALLER_APPLE_ID" ] || APPLE_ID="$MACCRAB_CALLER_APPLE_ID"
+    [ -z "$MACCRAB_CALLER_APPLE_TEAM_ID" ] || APPLE_TEAM_ID="$MACCRAB_CALLER_APPLE_TEAM_ID"
+    [ -z "$MACCRAB_CALLER_NOTARIZE_PASSWORD" ] || NOTARIZE_PASSWORD="$MACCRAB_CALLER_NOTARIZE_PASSWORD"
+    [ -z "$MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE" ] \
+        || NOTARIZE_KEYCHAIN_PROFILE="$MACCRAB_CALLER_NOTARIZE_KEYCHAIN_PROFILE"
+    MACCRAB_SIGN_DEVELOPER_ID="${DEVELOPER_ID:-}"
+    MACCRAB_SIGN_APPLE_ID="${APPLE_ID:-}"
+    MACCRAB_SIGN_APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
+    MACCRAB_SIGN_NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}"
+    MACCRAB_SIGN_NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
+    unset_maccrab_signing_env
+}
+
+load_publisher_values() {
+    unset_maccrab_publisher_env
+    if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
+        load_maccrab_env_file publisher "$ENV_FILE"
+    fi
+    [ -z "$MACCRAB_CALLER_GH_TOKEN" ] || GH_TOKEN="$MACCRAB_CALLER_GH_TOKEN"
+    [ -z "$MACCRAB_CALLER_SITE_REPO_TOKEN" ] || SITE_REPO_TOKEN="$MACCRAB_CALLER_SITE_REPO_TOKEN"
+    [ -z "$MACCRAB_CALLER_TAP_REPO_TOKEN" ] || TAP_REPO_TOKEN="$MACCRAB_CALLER_TAP_REPO_TOKEN"
+
+    # Prefer the credential Git already uses successfully for cross-repo
+    # publication, but keep it unexported until one fixed publisher command.
+    local git_pat
+    git_pat=$(printf 'protocol=https\nhost=github.com\n\n' \
+        | $GIT_BIN credential fill 2>/dev/null | $SED_BIN -n 's/^password=//p' || true)
+    MACCRAB_PUBLISH_GH_TOKEN="${GH_TOKEN:-$git_pat}"
+    MACCRAB_PUBLISH_SITE_REPO_TOKEN="${SITE_REPO_TOKEN:-$git_pat}"
+    MACCRAB_PUBLISH_TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-${SITE_REPO_TOKEN:-$git_pat}}"
+    unset_maccrab_publisher_env
+    unset git_pat
+}
+
+publisher_gh() {
+    local family=${1:-}
+    local subcommand
+    shift || true
+    case "$family" in
+        api)
+            set -- api --hostname "$CANONICAL_GH_HOST" "$@"
+            ;;
+        release)
+            subcommand=${1:?gh release subcommand required}
+            shift
+            set -- release "$subcommand" --repo "$CANONICAL_GH_REPO" "$@"
+            ;;
+        *)
+            echo "ERROR: unsupported GitHub CLI command family: $family" >&2
+            return 2
+            ;;
+    esac
+    if [ -n "$MACCRAB_PUBLISH_GH_TOKEN" ]; then
+        GH_TOKEN="$MACCRAB_PUBLISH_GH_TOKEN" "$GH_BIN" "$@"
+    else
+        "$GH_BIN" "$@"
+    fi
+}
+
+require_canonical_origin() {
+    local origin_url
+    origin_url=$($GIT_BIN remote get-url origin 2>/dev/null || true)
+    case "$origin_url" in
+        https://github.com/peterhanily/maccrab.git|git@github.com:peterhanily/maccrab.git)
+            return 0 ;;
+        *)
+            echo "ERROR: origin is not the canonical MacCrab repository: ${origin_url:-<missing>}" >&2
+            return 1 ;;
+    esac
+}
+
+# release.sh relies on the version-controlled pre-push hook for the clean tag
+# gate. Git does not activate repository hooks on clone, so merely having
+# .githooks/pre-push in the tree is not enough: fail before build/tag work unless
+# the hook Git will execute is this exact executable file.
+VERSIONED_PRE_PUSH="$PROJECT_DIR/.githooks/pre-push"
+require_versioned_pre_push_gate() {
+    local configured_pre_push
+    configured_pre_push=$($GIT_BIN rev-parse --git-path hooks/pre-push 2>/dev/null || true)
+    case "$configured_pre_push" in
+        /*) ;;
+        *) configured_pre_push="$PROJECT_DIR/$configured_pre_push" ;;
+    esac
+    if [ ! -x "$VERSIONED_PRE_PUSH" ] \
+            || [ ! -x "$configured_pre_push" ] \
+            || [ ! "$configured_pre_push" -ef "$VERSIONED_PRE_PUSH" ]; then
+        echo "ERROR: the versioned pre-push release gate is not configured/executable." >&2
+        echo "Run 'make hooks' and verify 'git rev-parse --git-path hooks/pre-push'" >&2
+        echo "resolves to $VERSIONED_PRE_PUSH before building or publishing a release." >&2
+        return 1
+    fi
+}
+require_versioned_pre_push_gate
+current_branch=$($GIT_BIN symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
+if [ "$current_branch" != "$RELEASE_BRANCH" ]; then
+    echo "ERROR: on branch '$current_branch' but releases must be cut from '$RELEASE_BRANCH'." >&2
+    exit 1
+fi
+require_clean_release_source
+if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
+        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ]; then
+    echo "ERROR: release source commit/tree changed during preflight" >&2
+    exit 1
+fi
+verify_release_executor_blobs "$SOURCE_COMMIT"
+
+is_nonempty_regular_release_artifact() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ]
+}
 
 # Post-publish failures used to be logged and swallowed: each of Steps 6 / 6b /
 # 6c / 6d printed "! ... failed, run it manually" and the script still ended with
@@ -59,38 +336,11 @@ release_fail() {
     echo "  ✗ $1" >&2
 }
 
-# Source credentials from env file if it exists
-ENV_FILE="$HOME/.maccrab-release-env"
-if [ -f "$ENV_FILE" ]; then
-    echo "Loading credentials from $ENV_FILE"
-    source "$ENV_FILE"
-fi
-
-# v1.18: derive GitHub tokens from the login-Keychain git credential when not
-# explicitly set. In the field the standalone SITE_REPO_TOKEN AND the gh OAuth
-# token both expired, which (a) aborted this script at Step 0a and (b) 401'd
-# `gh release create` mid-release. The git credential that `git push` already
-# uses is API-valid + repo-write for both maccrab and maccrab-site, so falling
-# back to it removes the release's dependence on separately-maintained tokens
-# that silently rot. Export GH_TOKEN / SITE_REPO_TOKEN to override.
-_maccrab_git_pat() { printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p'; }
-_MACCRAB_PAT="$(_maccrab_git_pat || true)"
-if [ -n "${_MACCRAB_PAT:-}" ]; then
-    export GH_TOKEN="${GH_TOKEN:-$_MACCRAB_PAT}"
-    # The Keychain git credential is what `git push` already uses successfully
-    # for BOTH maccrab and maccrab-site / homebrew-maccrab, so it's the reliable
-    # source for the publish-to-other-repo tokens. The standalone SITE_REPO_TOKEN
-    # in ~/.maccrab-release-env rotted in the field (dead PAT → 401 → the appcast
-    # / release.json publish silently failed, the v1.20.0 GA hit exactly this).
-    # PREFER the live credential over a possibly-stale env value, not the reverse.
-    export SITE_REPO_TOKEN="$_MACCRAB_PAT"
-    export TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-$_MACCRAB_PAT}"
-    echo "  ✓ GitHub tokens available (Keychain git credential preferred for site/tap publish)"
-fi
-unset _MACCRAB_PAT
-
-# Verify credentials
-if [ -z "${DEVELOPER_ID:-}" ]; then
+# Parse each credential projection as data, copy it into unexported phase-local
+# variables, and immediately clear the conventional environment names again.
+load_signing_values
+load_publisher_values
+if [ -z "$MACCRAB_SIGN_DEVELOPER_ID" ]; then
     echo "ERROR: DEVELOPER_ID not set."
     echo ""
     echo "Either export it or create ~/.maccrab-release-env with:"
@@ -100,6 +350,23 @@ if [ -z "${DEVELOPER_ID:-}" ]; then
     echo '  export NOTARIZE_PASSWORD="xxxx-xxxx-xxxx-xxxx"'
     exit 1
 fi
+if [ ! -x "$GH_BIN" ]; then
+    echo "ERROR: GitHub CLI (gh) is required to publish the release asset." >&2
+    echo "Install/authenticate gh before building, tagging, or pushing a release." >&2
+    exit 1
+fi
+require_canonical_origin
+if ! publisher_gh api user >/dev/null 2>&1; then
+    echo "ERROR: GitHub CLI authentication is invalid or expired." >&2
+    echo "Run 'gh auth login' and verify access before building, tagging, or pushing a release." >&2
+    exit 1
+fi
+gh_repo_can_push=$(publisher_gh api "repos/$CANONICAL_GH_REPO" --jq '.permissions.push // false' 2>/dev/null || true)
+if [ "$gh_repo_can_push" != "true" ]; then
+    echo "ERROR: GitHub CLI credentials cannot publish to this repository." >&2
+    echo "Grant repository write access before building, tagging, or pushing a release." >&2
+    exit 1
+fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
@@ -107,28 +374,21 @@ echo "║  MacCrab v$VERSION Release                       "
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 
-# Step 0a: appcast publishing precondition. v1.10.0-rc audit fix:
-# step 6 below auto-publishes the appcast entry to the site repo
-# when SITE_REPO_TOKEN is set, otherwise soft-fails with a warning.
-# A soft-fail at minute ~12 of the release after the operator has
-# already burnt notarization + DMG time is too late to recover —
-# field-observed multiple times: "everything looked green but
-# existing v1.x users never received the update." Now: refuse to
-# start if the token is missing AND the operator hasn't explicitly
-# opted out via SKIP_APPCAST=1. Catches the gap before any work
-# is wasted.
-if [ -z "${SITE_REPO_TOKEN:-}" ] && [ "${SKIP_APPCAST:-0}" != "1" ]; then
-    echo "ERROR: SITE_REPO_TOKEN env var not set and SKIP_APPCAST != 1." >&2
+# Step 0a: distribution publishing precondition. v1.10.0-rc audit fix:
+# Step 6 publishes both the Sparkle feed and the site's release metadata.
+# A missing token discovered after the tag/asset is public strands users on
+# stale distribution surfaces, so release.sh always requires it up front.
+# `SKIP_APPCAST=1` is deliberately narrow: it skips Sparkle only; it is not an
+# internal/dry-run escape hatch and cannot bypass release.json or the tap cask.
+if [ "$VERSION_IS_RC" != "1" ] && [ -z "$MACCRAB_PUBLISH_SITE_REPO_TOKEN" ]; then
+    echo "ERROR: SITE_REPO_TOKEN env var not set." >&2
     echo "" >&2
-    echo "Without one of these, step 6 (Sparkle appcast publish) will not" >&2
-    echo "run, and existing v1.x users WILL NOT receive v$VERSION via" >&2
-    echo "auto-update — only the brew-upgrade path will deliver the new" >&2
-    echo "version to them." >&2
+    echo "Without it, release.json and the Sparkle feed cannot be published" >&2
+    echo "and verified after the public GitHub release is created." >&2
     echo "" >&2
-    echo "Either:" >&2
-    echo "  - Add SITE_REPO_TOKEN to ~/.maccrab-release-env (recommended)" >&2
-    echo "  - Or set SKIP_APPCAST=1 to confirm an intentional skip" >&2
-    echo "    (e.g. internal-only / dry-run releases)" >&2
+    echo "Add SITE_REPO_TOKEN to ~/.maccrab-release-env before publishing." >&2
+    echo "SKIP_APPCAST=1 skips only Sparkle; release.json and the Homebrew cask" >&2
+    echo "remain mandatory for every release.sh publication." >&2
     exit 1
 fi
 
@@ -155,35 +415,47 @@ echo "Step 0b/6: Architectural audit..."
     exit 1
 }
 
-# Step 1: Tests
-#
-# Pre-fix: `swift test 2>&1 | grep "Test run with"` matched both
-# pass AND fail summary lines (Swift Testing prints the same prefix
-# in either case), so the OR-chain only fired when grep matched
-# nothing — i.e., the test runner crashed. Any test-suite failure
-# was silently treated as success and the release shipped broken.
-# Now: capture the swift test exit code FIRST, then report.
-echo "Step 1/6: Running tests..."
-if ! swift test; then
-    echo "Tests failed — fix and re-run release.sh"
+# Step 1: clean local CI before the artifact build. Running the clean gate only
+# from the later tag push cannot retroactively prove that the signed DMG came
+# from freshly resolved release outputs. Credentials remain unexported here.
+echo "Step 1/6: Running clean local CI before the release build..."
+./scripts/ci-local.sh --clean
+require_clean_release_source
+if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
+        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ]; then
+    echo "ERROR: clean CI changed the captured release source commit/tree" >&2
     exit 1
 fi
+verify_release_executor_blobs "$SOURCE_COMMIT"
 
-# Step 2: Rule compilation
-echo "Step 2/6: Compiling rules..."
-python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/compiled_rules 2>&1 | tail -1
-
-# Step 2b: Regenerate README rule-count table + docs/COVERAGE.md so
-# they match the YAML tree being released. v1.10 shipped with stale
-# numbers in the README's hand-written coverage paragraph; auto-gen
-# closes that drift window.
-echo "Step 2b/6: Regenerating coverage docs..."
-python3 scripts/coverage_matrix.py --update-readme README.md Rules/
-python3 scripts/generate-coverage-doc.py > docs/COVERAGE.md
-if ! git diff --quiet -- README.md docs/COVERAGE.md; then
-    echo "  README.md / docs/COVERAGE.md changed — staging diff for the release commit"
-    git add README.md docs/COVERAGE.md
+# All build stages run from an exact Git-object export, never from the live
+# worktree. Ignored .swiftpm configuration, nested ignored resources, local
+# package caches, and hidden-index modifications therefore cannot influence the
+# artifact. The private export and immutable upload snapshot live until the
+# complete downstream publication finishes.
+BUILD_WORKSPACE=""
+METADATA_INDEX=""
+UPLOAD_SNAPSHOT_DIR=""
+cleanup_release_private_state() {
+    local status=$?
+    trap - EXIT
+    [ -z "$METADATA_INDEX" ] || /bin/rm -f "$METADATA_INDEX"
+    [ -z "$BUILD_WORKSPACE" ] || /bin/rm -rf "$BUILD_WORKSPACE"
+    [ -z "$UPLOAD_SNAPSHOT_DIR" ] || /bin/rm -rf "$UPLOAD_SNAPSHOT_DIR"
+    exit "$status"
+}
+trap cleanup_release_private_state EXIT
+BUILD_WORKSPACE=$(/usr/bin/mktemp -d /private/tmp/maccrab-release-build.XXXXXX)
+/bin/chmod 700 "$BUILD_WORKSPACE"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    /usr/bin/python3 -I "$SCRIPT_DIR/export-release-source.py" \
+    --repo "$PROJECT_DIR" --commit "$SOURCE_COMMIT" --destination "$BUILD_WORKSPACE"
+if [ -e "$BUILD_WORKSPACE/.git" ] || [ -e "$BUILD_WORKSPACE/.swiftpm" ]; then
+    echo "ERROR: tracked-only export contains forbidden Git/SwiftPM local state" >&2
+    exit 1
 fi
+echo "Step 2/6: Exact tracked-only source exported from $SOURCE_COMMIT / $SOURCE_TREE"
 
 # Step 3: Build DMG
 echo "Step 3/5: Building DMG..."
@@ -196,9 +468,48 @@ echo "Step 3/5: Building DMG..."
 # epoch stays as build-release.sh's fallback for the dev loop (`make dev`
 # rebuilds the SAME VERSION with changed code and needs a distinct tuple
 # each time to force sysextd to replace the active extension).
-export BUILD_NUMBER="${VERSION}.$(git rev-list --count HEAD)"
+BUILD_NUMBER="${VERSION}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
-VERSION="$VERSION" ./scripts/build-release.sh
+if [ "$VERSION_IS_RC" = "1" ]; then
+    RELEASE_BUILD_CHANNEL=dev
+else
+    RELEASE_BUILD_CHANNEL=release
+fi
+(
+    cd "$BUILD_WORKSPACE"
+    MACCRAB_REQUIRE_TRACKED_RELEASE_INPUTS=1 MACCRAB_TRACKED_EXPORT=1 \
+        MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+        VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" MACCRAB_BUILD_CHANNEL="$RELEASE_BUILD_CHANNEL" \
+        ./scripts/build-release.sh unsigned-build
+    MACCRAB_TRACKED_EXPORT=1 MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+        MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
+        MACCRAB_BUILD_CHANNEL="$RELEASE_BUILD_CHANNEL" ./scripts/build-release.sh assemble
+    DEVELOPER_ID="$MACCRAB_SIGN_DEVELOPER_ID" MACCRAB_TRACKED_EXPORT=1 \
+        MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+        VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" MACCRAB_BUILD_CHANNEL="$RELEASE_BUILD_CHANNEL" \
+        ./scripts/build-release.sh sign
+    DEVELOPER_ID="$MACCRAB_SIGN_DEVELOPER_ID" \
+    APPLE_ID="$MACCRAB_SIGN_APPLE_ID" \
+    APPLE_TEAM_ID="$MACCRAB_SIGN_APPLE_TEAM_ID" \
+    NOTARIZE_PASSWORD="$MACCRAB_SIGN_NOTARIZE_PASSWORD" \
+    NOTARIZE_KEYCHAIN_PROFILE="$MACCRAB_SIGN_NOTARIZE_KEYCHAIN_PROFILE" \
+    MACCRAB_TRACKED_EXPORT=1 MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+    MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
+        MACCRAB_BUILD_CHANNEL="$RELEASE_BUILD_CHANNEL" ./scripts/build-release.sh publish
+)
+
+BUILD_DMG_PATH="$BUILD_WORKSPACE/.build/MacCrab-v$VERSION.dmg"
+DMG_PATH=".build/MacCrab-v$VERSION.dmg"
+if ! is_nonempty_regular_release_artifact "$BUILD_DMG_PATH"; then
+    echo "ERROR: tracked-only build did not produce a non-empty regular release DMG at $BUILD_DMG_PATH" >&2
+    exit 1
+fi
+/bin/mkdir -p "$PROJECT_DIR/.build"
+/bin/cp -p "$BUILD_DMG_PATH" "$PROJECT_DIR/$DMG_PATH"
+if ! is_nonempty_regular_release_artifact "$DMG_PATH"; then
+    echo "ERROR: build did not produce a non-empty regular release DMG at $DMG_PATH" >&2
+    exit 1
+fi
 
 # (v1.6.11) PKG build removed — productbuild's distribution-XML
 # pkg-ref name didn't match the component pkg filename, producing
@@ -214,16 +525,36 @@ VERSION="$VERSION" ./scripts/build-release.sh
 # release since v1.6.5 landed with a stale Casks/maccrab.rb — brew
 # users saw old versions for nine releases before anyone noticed.
 # Both files are now updated in lockstep.
-DMG_PATH=".build/MacCrab-v$VERSION.dmg"
-if [ -f "$DMG_PATH" ]; then
+SHA=$($SHASUM_BIN -a 256 "$DMG_PATH" | $AWK_BIN '{print $1}')
+if [ "$VERSION_IS_RC" != "1" ] && is_nonempty_regular_release_artifact "$DMG_PATH"; then
     echo "Step 4/5: Updating Homebrew formulae..."
-    SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
     for formula in homebrew/maccrab.rb Casks/maccrab.rb; do
-        if [ -f "$formula" ]; then
-            sed -i '' "s/version \".*\"/version \"$VERSION\"/" "$formula"
-            sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$formula"
-            echo "  Updated $formula (sha256: ${SHA:0:16}...)"
+        if [ -f "$BUILD_WORKSPACE/$formula" ]; then
+            $SED_BIN -i '' "s/version \".*\"/version \"$VERSION\"/" "$BUILD_WORKSPACE/$formula"
+            $SED_BIN -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$BUILD_WORKSPACE/$formula"
+            echo "  Generated $formula (sha256: ${SHA:0:16}...)"
         fi
+    done
+else
+    echo "Step 4/5: RC isolation — production Homebrew casks remain unchanged."
+fi
+
+# Re-assert the captured source before copying generated metadata back. Only
+# these three files may differ, and they are committed below through a private
+# temporary index rather than an extensible commit hook.
+require_clean_release_source
+if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+    echo "ERROR: HEAD changed while the tracked-only artifact was built" >&2
+    exit 1
+fi
+verify_release_executor_blobs "$SOURCE_COMMIT"
+if [ "$VERSION_IS_RC" != "1" ]; then
+    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+        if [ ! -f "$BUILD_WORKSPACE/$metadata_path" ] || [ -L "$BUILD_WORKSPACE/$metadata_path" ]; then
+            echo "ERROR: tracked-only build did not produce required GA metadata: $metadata_path" >&2
+            exit 1
+        fi
+        /bin/cp -p "$BUILD_WORKSPACE/$metadata_path" "$PROJECT_DIR/$metadata_path"
     done
 fi
 
@@ -234,7 +565,6 @@ echo "Step 5/5: Creating GitHub release..."
 # whose release.json still carried the PREVIOUS build's hash. v1.21.5's tagged
 # tree says 6611efa8 while the DMG that actually shipped is 9eb6f493. Stage it
 # alongside the casks so the tagged tree describes the artifact being tagged.
-git add homebrew/maccrab.rb Casks/maccrab.rb release.json 2>/dev/null || true
 # Step 5a: PRE-TAG artifact/manifest consistency gate.
 #
 # The cross-source SHA check (Step 6c) ran AFTER `git tag`, `git push` and
@@ -243,55 +573,162 @@ git add homebrew/maccrab.rb Casks/maccrab.rb release.json 2>/dev/null || true
 # Assert HERE, while nothing has been published and nothing is tagged, that
 # release.json and both casks describe the DMG we are about to ship. Any
 # mismatch aborts before a single byte reaches users.
-gate_dmg_sha=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
-gate_json_sha=$(grep -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' release.json 2>/dev/null | head -1 | grep -oE '[a-f0-9]{64}' || true)
-if [ "$gate_json_sha" != "$gate_dmg_sha" ]; then
-    echo "  ✗ release.json sha256 ($gate_json_sha) != built DMG ($gate_dmg_sha)" >&2
-    echo "    Re-run scripts/build-release.sh so release.json describes THIS DMG." >&2
+if ! is_nonempty_regular_release_artifact "$DMG_PATH"; then
+    echo "  ✗ Built release artifact is missing, empty, non-regular, or redirected: $DMG_PATH" >&2
     exit 1
 fi
-for gate_cask in Casks/maccrab.rb homebrew/maccrab.rb; do
-    [ -f "$gate_cask" ] || continue
-    gate_cask_sha=$(grep -oE 'sha256[[:space:]]+"[a-f0-9]{64}"' "$gate_cask" | head -1 | grep -oE '[a-f0-9]{64}' || true)
-    if [ "$gate_cask_sha" != "$gate_dmg_sha" ]; then
-        echo "  ✗ $gate_cask sha256 ($gate_cask_sha) != built DMG ($gate_dmg_sha)" >&2
-        echo "    brew install --cask would fail checksum verification for every user." >&2
+gate_dmg_sha=$($SHASUM_BIN -a 256 "$DMG_PATH" | $AWK_BIN '{print $1}')
+if [ "$VERSION_IS_RC" != "1" ]; then
+    gate_json_sha=$($GREP_BIN -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' release.json 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    if [ "$gate_json_sha" != "$gate_dmg_sha" ]; then
+        echo "  ✗ release.json sha256 ($gate_json_sha) != built DMG ($gate_dmg_sha)" >&2
+        echo "    Re-run scripts/build-release.sh so release.json describes THIS DMG." >&2
         exit 1
     fi
-done
-echo "  ✓ Pre-tag gate: release.json + casks all describe DMG ${gate_dmg_sha:0:16}..."
+    for gate_cask in Casks/maccrab.rb homebrew/maccrab.rb; do
+        [ -f "$gate_cask" ] || {
+            echo "  ✗ required GA cask is missing: $gate_cask" >&2
+            exit 1
+        }
+        gate_cask_sha=$($GREP_BIN -oE 'sha256[[:space:]]+"[a-f0-9]{64}"' "$gate_cask" | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+        if [ "$gate_cask_sha" != "$gate_dmg_sha" ]; then
+            echo "  ✗ $gate_cask sha256 ($gate_cask_sha) != built DMG ($gate_dmg_sha)" >&2
+            echo "    brew install --cask would fail checksum verification for every user." >&2
+            exit 1
+        fi
+    done
+    echo "  ✓ Pre-tag gate: release.json + casks all describe DMG ${gate_dmg_sha:0:16}..."
+else
+    echo "  ✓ RC pre-tag gate: artifact hashed; production release.json and casks were not touched."
+fi
 
-git diff --cached --quiet || git commit -m "chore: update Homebrew formula to v$VERSION"
+validate_generated_release_paths() {
+    local changed staged
+    changed=$($GIT_BIN diff --name-only | LC_ALL=C /usr/bin/sort)
+    staged=$($GIT_BIN diff --cached --name-only)
+    if [ -n "$staged" ]; then
+        echo "ERROR: release generation found a pre-staged path; metadata index must be isolated" >&2
+        printf '%s\n' "$staged" >&2
+        return 1
+    fi
+    if [ "$VERSION_IS_RC" = "1" ]; then
+        if [ -n "$changed" ]; then
+            echo "ERROR: RC build changed the captured production source tree" >&2
+            printf '%s\n' "$changed" >&2
+            return 1
+        fi
+    elif [ "$changed" != $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
+        echo "ERROR: GA generation did not produce the exact metadata allowlist" >&2
+        printf '%s\n' "$changed" >&2
+        return 1
+    fi
+}
+validate_generated_release_paths
 
-# Nothing tracked may be left uncommitted at tag time — that is exactly how
-# release.json drifted out of the tagged tree. Tracked-file check only
-# (--untracked-files=no) so scratch files in a working repo don't block a
-# release, while a generated-but-unstaged manifest does.
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "  ✗ Tracked files are still modified after the release commit:" >&2
-    git status --porcelain --untracked-files=no >&2
-    echo "    Commit or stash them — the tag must describe the tree being shipped." >&2
+if [ "$VERSION_IS_RC" = "1" ]; then
+    METADATA_TREE="$SOURCE_TREE"
+    FINAL_COMMIT="$SOURCE_COMMIT"
+else
+    METADATA_INDEX=$(/usr/bin/mktemp /private/tmp/maccrab-release-index.XXXXXX)
+    /bin/rm -f "$METADATA_INDEX"
+    GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
+        read-tree "$SOURCE_TREE"
+    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+        metadata_source_entry=$($GIT_BIN ls-tree "$SOURCE_TREE" -- "$metadata_path")
+        IFS=$' \t' read -r metadata_mode metadata_type metadata_source_blob \
+            metadata_source_name <<< "$metadata_source_entry"
+        if [ "$metadata_mode" != "100644" ] || [ "$metadata_type" != "blob" ] \
+                || [ "$metadata_source_name" != "$metadata_path" ]; then
+            echo "ERROR: GA metadata source is not an ordinary tracked file: $metadata_path" >&2
+            exit 1
+        fi
+        metadata_working_blob=$($GIT_BIN hash-object -w --no-filters "$metadata_path")
+        GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN -c core.hooksPath=/dev/null \
+            update-index --add --cacheinfo \
+            "$metadata_mode,$metadata_working_blob,$metadata_path"
+    done
+    METADATA_TREE=$(GIT_INDEX_FILE="$METADATA_INDEX" $GIT_BIN write-tree)
+    metadata_diff=$($GIT_BIN diff-tree --no-commit-id --name-only -r \
+        "$SOURCE_TREE" "$METADATA_TREE" | LC_ALL=C /usr/bin/sort)
+    if [ "$metadata_diff" != $'Casks/maccrab.rb\nhomebrew/maccrab.rb\nrelease.json' ]; then
+        echo "ERROR: precomputed metadata tree differs outside the exact allowlist" >&2
+        printf '%s\n' "$metadata_diff" >&2
+        exit 1
+    fi
+    for metadata_path in release.json Casks/maccrab.rb homebrew/maccrab.rb; do
+        metadata_blob=$($GIT_BIN rev-parse "$METADATA_TREE:$metadata_path" 2>/dev/null || true)
+        working_blob=$($GIT_BIN hash-object --no-filters "$metadata_path" 2>/dev/null || true)
+        if [ -z "$metadata_blob" ] || [ "$working_blob" != "$metadata_blob" ]; then
+            echo "ERROR: precomputed metadata blob changed before commit: $metadata_path" >&2
+            exit 1
+        fi
+    done
+    FINAL_COMMIT=$($GIT_BIN -c core.hooksPath=/dev/null \
+        commit-tree "$METADATA_TREE" -p "$SOURCE_COMMIT" \
+        -m "chore: update release metadata to v$VERSION")
+    $GIT_BIN -c core.hooksPath=/dev/null update-ref \
+        "refs/heads/$RELEASE_BRANCH" "$FINAL_COMMIT" "$SOURCE_COMMIT"
+    $GIT_BIN -c core.hooksPath=/dev/null read-tree "$FINAL_COMMIT"
+fi
+
+# The final commit is either the exact source commit (RC) or one hookless,
+# single-parent metadata commit with the precomputed tree. No pre-commit or
+# commit-msg hook is part of this trust transition.
+if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
+        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
+        || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ]; then
+    echo "ERROR: final release commit/source/metadata tree binding failed" >&2
     exit 1
 fi
-# Branch guard. A tag cut from a non-release branch points at a commit that need
-# not be reachable from main, and `gh release create` builds the published
-# artifact from that tag — so the shipped binary's source need not be public.
-current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-if [ "$current_branch" != "$RELEASE_BRANCH" ]; then
-    echo "  ✗ On branch '$current_branch' but releases must be cut from '$RELEASE_BRANCH'." >&2
-    echo "    Merge to $RELEASE_BRANCH and re-run, or set RELEASE_BRANCH=$current_branch to" >&2
-    echo "    override deliberately." >&2
+if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ] \
+        && [ "$($GIT_BIN rev-list --parents -n 1 "$FINAL_COMMIT")" != "$FINAL_COMMIT $SOURCE_COMMIT" ]; then
+    echo "ERROR: final metadata commit is not the captured source's single child" >&2
+    exit 1
+fi
+reject_hidden_release_index_state
+final_dirty=$($GIT_BIN status --porcelain --untracked-files=all)
+if [ -n "$final_dirty" ]; then
+    echo "  ✗ Files remain outside the final release commit:" >&2
+    printf '%s\n' "$final_dirty" >&2
+    exit 1
+fi
+verify_release_executor_blobs "$FINAL_COMMIT"
+EXPECTED_HOOK_BLOB=$($GIT_BIN rev-parse "$FINAL_COMMIT:.githooks/pre-push")
+CURRENT_HOOK_BLOB=$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")
+if [ "$EXPECTED_HOOK_BLOB" != "$CURRENT_HOOK_BLOB" ]; then
+    echo "ERROR: the executable pre-push hook bytes do not match the final release commit" >&2
+    exit 1
+fi
+
+# Never let an upload failure path delete a release that predated this run.
+# Establish an authoritative HTTP 404 before creating/moving the local tag; a
+# generic CLI/network failure is not evidence of absence and must fail closed.
+github_release_probe=""
+github_release_probe_status=0
+if github_release_probe=$(publisher_gh api -i \
+        "repos/$CANONICAL_GH_REPO/releases/tags/v$VERSION" 2>&1); then
+    echo "  ✗ GitHub release v$VERSION already exists." >&2
+    echo "    Refusing to replace or roll back a release this run did not create." >&2
+    exit 1
+else
+    github_release_probe_status=$?
+fi
+if ! printf '%s\n' "$github_release_probe" \
+        | $GREP_BIN -qE 'HTTP(/[^[:space:]]+)?[[:space:]]+404|\(HTTP 404\)'; then
+    echo "  ✗ Could not prove GitHub release v$VERSION is absent" \
+        "(probe exit $github_release_probe_status)." >&2
+    echo "    Refusing to begin a draft publication with indeterminate remote state." >&2
     exit 1
 fi
 
 # Existing-tag handling. Pre-fix `git tag` simply failed here under `set -e`,
 # aborting the release after the build + notarize had already completed.
-if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+if $GIT_BIN rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
     if [ "$RESPIN" = "1" ]; then
-        echo "  Re-spin: moving tag v$VERSION from $(git rev-parse --short "v$VERSION") to $(git rev-parse --short HEAD)"
-        git tag -d "v$VERSION"
+        echo "  Re-spin: moving tag v$VERSION from $($GIT_BIN rev-parse --short "v$VERSION") to $($GIT_BIN rev-parse --short HEAD)"
+        $GIT_BIN tag -d "v$VERSION"
     else
-        echo "  ✗ Tag v$VERSION already exists (at $(git rev-parse --short "v$VERSION"))." >&2
+        echo "  ✗ Tag v$VERSION already exists (at $($GIT_BIN rev-parse --short "v$VERSION"))." >&2
         echo "    Bump the version, or pass --respin to re-point it at this build." >&2
         exit 1
     fi
@@ -304,57 +741,291 @@ fi
 # write can silently move one. Annotated is the floor; signing is applied when
 # available rather than made mandatory, because an unconditional `git tag -s` on
 # a machine with no user.signingkey would hard-fail every release.
-if [ -n "$(git config --get user.signingkey || true)" ]; then
-    git tag -s "v$VERSION" -m "MacCrab v$VERSION"
+if [ -n "$($GIT_BIN config --get user.signingkey || true)" ]; then
+    $GIT_BIN tag -s "v$VERSION" -m "MacCrab v$VERSION"
     echo "  ✓ Signed annotated tag v$VERSION"
 else
     echo "  ! No git user.signingkey configured — creating an ANNOTATED (unsigned) tag." >&2
     echo "    Enable signing so releases are verifiable by users and mirrors:" >&2
     echo "      git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub" >&2
-    git tag -a "v$VERSION" -m "MacCrab v$VERSION"
+    $GIT_BIN tag -a "v$VERSION" -m "MacCrab v$VERSION"
+fi
+TAG_OBJECT=$($GIT_BIN rev-parse "refs/tags/v$VERSION")
+TAG_TYPE=$($GIT_BIN cat-file -t "$TAG_OBJECT")
+TAG_COMMIT=$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")
+if [ "$TAG_TYPE" != "tag" ] || [ "$TAG_COMMIT" != "$FINAL_COMMIT" ]; then
+    echo "ERROR: release tag is not an annotated tag bound to final commit $FINAL_COMMIT" >&2
+    exit 1
 fi
 
 # Push THIS commit to the release branch explicitly, and only the new tag.
 # `git push origin main --tags` pushed the local `main` ref — which need not
 # contain HEAD — plus every stray local tag in the repo.
-git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
+require_canonical_origin
+$GIT_BIN push origin "HEAD:refs/heads/$RELEASE_BRANCH"
+# The warm branch-push hook runs arbitrary project checks and could itself alter
+# local Git configuration. Re-assert the exact hook immediately before the tag
+# push rather than relying only on the pre-build check above.
+require_canonical_origin
+require_versioned_pre_push_gate
+reject_hidden_release_index_state
+verify_release_executor_blobs "$FINAL_COMMIT"
+if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
+        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
+        || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ] \
+        || [ -n "$($GIT_BIN status --porcelain --untracked-files=all)" ] \
+        || [ "$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")" != "$EXPECTED_HOOK_BLOB" ] \
+        || [ "$($GIT_BIN rev-parse "refs/tags/v$VERSION")" != "$TAG_OBJECT" ] \
+        || [ "$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")" != "$FINAL_COMMIT" ]; then
+    echo "ERROR: branch-push CI changed HEAD, source, hook, or release tag; refusing tag push" >&2
+    exit 1
+fi
 if [ "$RESPIN" = "1" ]; then
-    git push --force origin "refs/tags/v$VERSION"
+    MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
+    MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
+    MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
+    MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
+    MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
+    MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+    MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+    MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
+        $GIT_BIN push --force origin "refs/tags/v$VERSION"
 else
-    git push origin "refs/tags/v$VERSION"
+    MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
+    MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
+    MACCRAB_RELEASE_EXPECTED_COMMIT="$FINAL_COMMIT" \
+    MACCRAB_RELEASE_EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
+    MACCRAB_RELEASE_EXPECTED_HOOK_BLOB="$EXPECTED_HOOK_BLOB" \
+    MACCRAB_RELEASE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+    MACCRAB_RELEASE_SOURCE_TREE="$SOURCE_TREE" \
+    MACCRAB_RELEASE_METADATA_TREE="$METADATA_TREE" \
+        $GIT_BIN push origin "refs/tags/v$VERSION"
 fi
 
-# Upload release artifacts (DMG only — PKG dropped in v1.6.11)
-ARTIFACTS=""
-[ -f ".build/MacCrab-v$VERSION.dmg" ] && ARTIFACTS=".build/MacCrab-v$VERSION.dmg"
+require_canonical_origin
+remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" | $AWK_BIN 'NR == 1 {print $1}')
+if [ "$remote_tag_object" != "$TAG_OBJECT" ]; then
+    echo "ERROR: remote tag object does not match the locally verified annotated tag" >&2
+    echo "  expected: $TAG_OBJECT" >&2
+    echo "  remote:   ${remote_tag_object:-<missing>}" >&2
+    exit 1
+fi
 
-if command -v gh &>/dev/null && [ -n "$ARTIFACTS" ]; then
-    # v1.21.5: publish the curated RELEASE_NOTES/v<X>.md (the file Step 0's
-    # prerelease-check already requires for GA releases) instead of GitHub's
-    # --generate-notes commit list. Pre-fix, every release shipped with bare
-    # auto-generated notes while the polished file only reached Sparkle users
-    # via the appcast — the v1.21.4 GA had to be repaired post-hoc with
-    # `gh release edit --notes-file`.
-    NOTES_FILE="RELEASE_NOTES/v$VERSION.md"
-    if [ -f "$NOTES_FILE" ]; then
-        gh release create "v$VERSION" $ARTIFACTS \
-            --title "MacCrab v$VERSION" \
-            --notes-file "$NOTES_FILE"
-        echo "  ✓ Release notes: $NOTES_FILE"
-    else
-        echo "  ! WARNING: $NOTES_FILE not found — falling back to GitHub auto-generated notes." >&2
-        echo "    Write the curated notes, then repair with:" >&2
-        echo "      gh release edit v$VERSION --notes-file $NOTES_FILE" >&2
-        gh release create "v$VERSION" $ARTIFACTS \
-            --title "MacCrab v$VERSION" \
-            --generate-notes
+# The tag push runs the pre-push hook's clean CI gate. That gate historically
+# wiped .build and therefore deleted the signed + notarized + stapled DMG before
+# this upload step. Never turn a missing (or replaced) artifact into a successful
+# release: re-check the exact bytes that passed the pre-tag manifest gate.
+if ! is_nonempty_regular_release_artifact "$DMG_PATH"; then
+    echo "  ✗ Release artifact disappeared, became empty/non-regular, or was redirected during the push/CI gate: $DMG_PATH" >&2
+    echo "    The tag exists remotely, but no GitHub release asset was uploaded." >&2
+    echo "    Stop here; recover/rebuild the notarized DMG before publishing anything else." >&2
+    exit 1
+fi
+post_push_dmg_sha=$($SHASUM_BIN -a 256 "$DMG_PATH" | $AWK_BIN '{print $1}')
+if [ "$post_push_dmg_sha" != "$gate_dmg_sha" ]; then
+    echo "  ✗ Release artifact changed during the push/CI gate." >&2
+    echo "    Before push: $gate_dmg_sha" >&2
+    echo "    After push:  $post_push_dmg_sha" >&2
+    echo "    Refusing to upload bytes that did not pass the pre-tag manifest gate." >&2
+    exit 1
+fi
+echo "  ✓ Post-push gate: notarized DMG survived unchanged (${post_push_dmg_sha:0:16}...)"
+
+# Snapshot the exact validated bytes into a private, random path before handing
+# a pathname to gh. Re-validating .build and then asking another process to open
+# it left a swap window in which different bytes could be uploaded.
+DMG_NAME="MacCrab-v$VERSION.dmg"
+UPLOAD_SNAPSHOT_DIR=$(/usr/bin/mktemp -d /private/tmp/maccrab-release-upload.XXXXXX)
+if ! /bin/chmod 700 "$UPLOAD_SNAPSHOT_DIR"; then
+    /bin/rmdir "$UPLOAD_SNAPSHOT_DIR" || true
+    UPLOAD_SNAPSHOT_DIR=""
+    echo "  ✗ Could not make the release upload snapshot directory private." >&2
+    exit 1
+fi
+UPLOAD_SNAPSHOT="$UPLOAD_SNAPSHOT_DIR/$DMG_NAME"
+if ! /bin/cp -p "$BUILD_DMG_PATH" "$UPLOAD_SNAPSHOT"; then
+    echo "  ✗ Could not create private release upload snapshot." >&2
+    exit 1
+fi
+/bin/chmod 600 "$UPLOAD_SNAPSHOT"
+if ! is_nonempty_regular_release_artifact "$UPLOAD_SNAPSHOT"; then
+    echo "  ✗ Private upload snapshot is not a non-empty regular file." >&2
+    exit 1
+fi
+upload_snapshot_sha=$($SHASUM_BIN -a 256 "$UPLOAD_SNAPSHOT" | $AWK_BIN '{print $1}')
+if [ "$upload_snapshot_sha" != "$gate_dmg_sha" ]; then
+    echo "  ✗ DMG changed while the private upload snapshot was created." >&2
+    echo "    Expected: $gate_dmg_sha" >&2
+    echo "    Snapshot: $upload_snapshot_sha" >&2
+    exit 1
+fi
+verify_immutable_upload_snapshot() {
+    local current_sha
+    if ! is_nonempty_regular_release_artifact "$UPLOAD_SNAPSHOT"; then
+        echo "CRITICAL: immutable release snapshot disappeared or changed type" >&2
+        return 1
     fi
-    echo ""
-    echo "  ✓ GitHub release created: https://github.com/peterhanily/maccrab/releases/tag/v$VERSION"
+    current_sha=$($SHASUM_BIN -a 256 "$UPLOAD_SNAPSHOT" | $AWK_BIN '{print $1}')
+    if [ "$current_sha" != "$gate_dmg_sha" ]; then
+        echo "CRITICAL: immutable release snapshot changed during publication" >&2
+        return 1
+    fi
+}
+
+# Create an explicitly owned DRAFT first. GitHub's normal `gh release create`
+# publishes after upload, which exposes unverified bytes and makes rollback
+# impossible when immutable releases are enabled. A random marker proves which
+# draft belongs to this run; after capture, every query/PATCH uses its
+# immutable database ID rather than the mutable tag name.
+RELEASE_RUN_NONCE=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
+RELEASE_DRAFT_TITLE="MacCrab v$VERSION [release-run:$RELEASE_RUN_NONCE]"
+RELEASE_FINAL_TITLE="MacCrab v$VERSION"
+NOTES_FILE="RELEASE_NOTES/v$VERSION.md"
+GH_RELEASE_CREATE_ARGS=("v$VERSION" "$UPLOAD_SNAPSHOT" \
+    --title "$RELEASE_DRAFT_TITLE" --draft --verify-tag)
+if [ "$VERSION_IS_RC" = "1" ]; then
+    GH_RELEASE_CREATE_ARGS+=(--prerelease --latest=false)
+fi
+if [ -f "$NOTES_FILE" ]; then
+    GH_RELEASE_CREATE_ARGS+=(--notes-file "$NOTES_FILE")
 else
+    echo "  ! WARNING: $NOTES_FILE not found — falling back to generated notes." >&2
+    GH_RELEASE_CREATE_ARGS+=(--generate-notes)
+fi
+
+release_record_by_tag() {
+    publisher_gh release view "v$VERSION" --json databaseId,name,isDraft \
+        --jq '[.databaseId,.name,.isDraft] | @tsv' 2>/dev/null
+}
+
+report_manual_release_recovery() {
+    local release_id="${1:-unknown}" title="${2:-unknown}" state="${3:-unknown}"
+    echo "    MANUAL RECOVERY REQUIRED: retained GitHub release ID $release_id" >&2
+    echo "    title=$title state=$state" >&2
+    echo "    inspect: https://github.com/$CANONICAL_GH_REPO/releases" >&2
+    echo "    The release pipeline never removes ambiguous or failed remote records automatically." >&2
+}
+
+release_create_status=0
+if publisher_gh release create "${GH_RELEASE_CREATE_ARGS[@]}"; then
+    :
+else
+    release_create_status=$?
+fi
+
+release_record=""
+for release_record_attempt in 1 2 3 4 5; do
+    release_record=$(release_record_by_tag || true)
+    [ -n "$release_record" ] && break
+    [ "$release_record_attempt" = "5" ] || sleep 2
+done
+IFS=$'\t' read -r observed_release_id observed_release_name observed_release_draft \
+    <<< "$release_record"
+
+if [ "$release_create_status" -ne 0 ]; then
+    echo "  ✗ GitHub draft creation/upload failed (exit $release_create_status)." >&2
+    if [[ "${observed_release_id:-}" =~ ^[0-9]+$ ]] \
+            && [ "${observed_release_name:-}" = "$RELEASE_DRAFT_TITLE" ] \
+            && [ "${observed_release_draft:-}" = "true" ]; then
+        report_manual_release_recovery "$observed_release_id" "$observed_release_name" draft
+    elif [ -n "${observed_release_id:-}" ]; then
+        echo "    A release exists for the tag but lacks this run's nonce; leaving unowned ID $observed_release_id untouched." >&2
+        report_manual_release_recovery "$observed_release_id" "${observed_release_name:-unknown}" \
+            "draft=${observed_release_draft:-unknown}"
+    else
+        echo "    No owned draft became visible; inspect the canonical releases page before retrying." >&2
+    fi
+    exit 1
+fi
+
+if ! [[ "${observed_release_id:-}" =~ ^[0-9]+$ ]] \
+        || [ "${observed_release_name:-}" != "$RELEASE_DRAFT_TITLE" ] \
+        || [ "${observed_release_draft:-}" != "true" ]; then
+    echo "CRITICAL: create returned success but the nonce-marked draft could not be identified." >&2
+    report_manual_release_recovery "${observed_release_id:-unknown}" \
+        "${observed_release_name:-unknown}" "draft=${observed_release_draft:-unknown}"
+    exit 1
+fi
+OWNED_RELEASE_ID="$observed_release_id"
+
+# Verify the exact owned draft, named asset, and still-current remote tag before
+# making any bytes public.
+remote_upload_sha=""
+for remote_digest_attempt in 1 2 3 4 5; do
+    remote_upload_sha=$(publisher_gh api \
+        "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
+        --jq ".assets[] | select(.name == \"$DMG_NAME\") | .digest" \
+        2>/dev/null | $SED_BIN -n 's/^sha256://p' | /usr/bin/head -1 || true)
+    [ "$remote_upload_sha" = "$gate_dmg_sha" ] && break
+    [ -n "$remote_upload_sha" ] && break
+    [ "$remote_digest_attempt" = "5" ] || sleep 2
+done
+remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" | $AWK_BIN 'NR == 1 {print $1}')
+if [ "$remote_upload_sha" != "$gate_dmg_sha" ] \
+        || [ "$remote_tag_object" != "$TAG_OBJECT" ]; then
+    echo "  ✗ Owned draft failed asset or tag verification." >&2
+    echo "    Expected asset: $gate_dmg_sha" >&2
+    echo "    Draft asset:    ${remote_upload_sha:-<missing>}" >&2
+    echo "    Expected tag:   $TAG_OBJECT" >&2
+    echo "    Remote tag:     ${remote_tag_object:-<missing>}" >&2
+    report_manual_release_recovery "$OWNED_RELEASE_ID" "$RELEASE_DRAFT_TITLE" draft
+    exit 1
+fi
+echo "  ✓ Draft asset digest and remote tag verified (${remote_upload_sha:0:16}...)"
+
+if [ "$VERSION_IS_RC" = "1" ]; then
+    RELEASE_PRERELEASE=true
+    RELEASE_MAKE_LATEST=false
+else
+    RELEASE_PRERELEASE=false
+    RELEASE_MAKE_LATEST=true
+fi
+publish_status=0
+if publisher_gh api -X PATCH "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
+        -f "name=$RELEASE_FINAL_TITLE" \
+        -F "draft=false" \
+        -F "prerelease=$RELEASE_PRERELEASE" \
+        -f "make_latest=$RELEASE_MAKE_LATEST" >/dev/null; then
+    :
+else
+    publish_status=$?
+fi
+
+published_record=$(publisher_gh api \
+    "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
+    --jq '[.id,.name,.draft,.prerelease,.tag_name,.html_url] | @tsv' \
+    2>/dev/null || true)
+IFS=$'\t' read -r published_id published_name published_draft \
+    published_prerelease published_tag PUBLISHED_RELEASE_URL <<< "$published_record"
+published_upload_sha=$(publisher_gh api \
+    "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
+    --jq ".assets[] | select(.name == \"$DMG_NAME\") | .digest" \
+    2>/dev/null | $SED_BIN -n 's/^sha256://p' | /usr/bin/head -1 || true)
+published_remote_tag_object=$($GIT_BIN ls-remote origin "refs/tags/v$VERSION" | $AWK_BIN 'NR == 1 {print $1}')
+if [ "$published_id" != "$OWNED_RELEASE_ID" ] \
+        || [ "$published_name" != "$RELEASE_FINAL_TITLE" ] \
+        || [ "$published_draft" != "false" ] \
+        || [ "$published_prerelease" != "$RELEASE_PRERELEASE" ] \
+        || [ "$published_tag" != "v$VERSION" ] \
+        || [ "$published_upload_sha" != "$gate_dmg_sha" ] \
+        || [ "$published_remote_tag_object" != "$TAG_OBJECT" ]; then
+    echo "CRITICAL: exact release ID $OWNED_RELEASE_ID was not verified published (PATCH exit $publish_status)." >&2
+    echo "    Publication state is ambiguous; leaving it untouched for manual inspection." >&2
+    report_manual_release_recovery "$OWNED_RELEASE_ID" \
+        "${published_name:-$RELEASE_DRAFT_TITLE}" "draft=${published_draft:-unknown}"
+    exit 1
+fi
+
+echo ""
+echo "  ✓ Verified GitHub release published: ${PUBLISHED_RELEASE_URL:-https://github.com/peterhanily/maccrab/releases/tag/v$VERSION} (ID $OWNED_RELEASE_ID)"
+verify_immutable_upload_snapshot
+if [ "$VERSION_IS_RC" = "1" ]; then
     echo ""
-    echo "  Create release manually at: https://github.com/peterhanily/maccrab/releases/new?tag=v$VERSION"
-    echo "  Upload: $ARTIFACTS"
+    echo "═══════════════════════════════════════"
+    echo "  MacCrab v$VERSION Prerelease Published"
+    echo "═══════════════════════════════════════"
+    echo "  Production appcast, release.json, and Homebrew casks were not published."
+    exit 0
 fi
 
 # Step 6: Publish appcast entry. Pre-fix this script stopped after
@@ -362,44 +1033,71 @@ fi
 # generate-appcast-entry.sh + publish-appcast-entry.sh manually. The
 # procedural gap meant several point releases shipped to GitHub but
 # never reached existing users' Sparkle clients. Now: always try.
-# Soft-fail if SITE_REPO_TOKEN is missing (log + skip; release stays
-# successful) or SKIP_APPCAST=1 was passed (CI / manual override).
+# SKIP_APPCAST=1 skips only the Sparkle feed. It does not skip release.json,
+# live SHA verification, or the Homebrew tap: release.sh has already published
+# a public GitHub tag/asset, so those surfaces must not be reported complete
+# while serving an older version.
+SITE_REPO="${SITE_REPO:-peterhanily/maccrab-site}"
 if [ "${SKIP_APPCAST:-0}" = "1" ]; then
     echo ""
     echo "  Step 6/6: Skipping appcast publish (SKIP_APPCAST=1)"
-elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
+else
     echo ""
     echo "Step 6/6: Publishing appcast entry..."
-    SITE_REPO="${SITE_REPO:-peterhanily/maccrab-site}"
-    APPCAST_ITEM=$(mktemp -t maccrab-appcast-item.XXXXXX.xml)
-    if "$SCRIPT_DIR/generate-appcast-entry.sh" \
-            --dmg "$DMG_PATH" --version "$VERSION" \
+    verify_immutable_upload_snapshot
+    APPCAST_ITEM=$(/usr/bin/mktemp /private/tmp/maccrab-appcast-item.XXXXXX)
+    keep_appcast_item=0
+    APPCAST_ROLLOUT_ARGS=()
+    if [ "${MACCRAB_APPCAST_IMMEDIATE:-0}" = "1" ]; then
+        APPCAST_ROLLOUT_ARGS+=(--immediate)
+    elif [ "${MACCRAB_APPCAST_IMMEDIATE:-0}" = "0" ]; then
+        APPCAST_ROLLOUT_ARGS+=(--phased-rollout-interval "${MACCRAB_PHASED_ROLLOUT_INTERVAL:-86400}")
+    else
+        echo "  ✗ MACCRAB_APPCAST_IMMEDIATE must be 0 or 1" >&2
+        exit 2
+    fi
+    # The generator gets no GitHub/notary credentials. Its only executable
+    # dependencies are the checked SwiftPM tools and fixed Apple utilities.
+    if /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \
+            "$BUILD_WORKSPACE/scripts/generate-appcast-entry.sh" \
+            --dmg "$UPLOAD_SNAPSHOT" --version "$VERSION" --build-number "$BUILD_NUMBER" \
+            "${APPCAST_ROLLOUT_ARGS[@]}" \
             > "$APPCAST_ITEM"; then
-        if SITE_REPO_TOKEN="$SITE_REPO_TOKEN" \
-                "$SCRIPT_DIR/publish-appcast-entry.sh" \
+        # The publisher receives only the one PAT it needs; Apple credentials,
+        # other PATs and signing configuration are not inherited.
+        if /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR=/private/tmp LC_ALL=C LANG=C \
+                SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" \
+                "$BUILD_WORKSPACE/scripts/publish-appcast-entry.sh" \
                 --item "$APPCAST_ITEM" \
                 --site-repo "$SITE_REPO" \
                 --version "$VERSION"; then
             echo "  ✓ Appcast entry published; existing v1.x users will see the update within ~30s"
         else
-            echo "  ! Appcast publish failed — run 'scripts/publish-appcast-entry.sh --item $APPCAST_ITEM' manually" >&2
+            keep_appcast_item=1
+            release_fail "appcast publish failed — the generated item remains at $APPCAST_ITEM; rerun 'scripts/publish-appcast-entry.sh --item $APPCAST_ITEM --site-repo $SITE_REPO --version $VERSION' after fixing credentials; existing Sparkle users will not receive v$VERSION"
         fi
     else
-        echo "  ! Appcast generate failed — fix Sparkle sign_update + private key and retry" >&2
+        release_fail "appcast generation failed — fix Sparkle sign_update + private key and retry; existing Sparkle users will not receive v$VERSION"
     fi
-    rm -f "$APPCAST_ITEM"
+    if [ "$keep_appcast_item" = "0" ]; then
+        rm -f "$APPCAST_ITEM"
+    else
+        echo "  ! Appcast recovery item retained: $APPCAST_ITEM" >&2
+    fi
+fi
 
-    # Step 6b: Push the freshly built release.json into the site repo.
+# Step 6b: Push the freshly built release.json into the site repo.
     # publish-release-json.sh has existed since v1.8 (created exactly
     # to fix a class of v1.7.12 / 929-tests post-release drift bug) but
     # was never wired into release.sh, so https://maccrab.com/release.json
     # silently lagged the actual release every cycle. v1.10.1 closed
     # that gap by adding this step. The site's JSON-LD softwareVersion +
     # the JS-rendered version pill both read this file.
-    echo ""
-    echo "Step 6b: Publishing release.json to site..."
-    if SITE_REPO_TOKEN="$SITE_REPO_TOKEN" SITE_REPO="$SITE_REPO" \
-            "$SCRIPT_DIR/publish-release-json.sh"; then
+echo ""
+echo "Step 6b: Publishing release.json to site..."
+verify_immutable_upload_snapshot
+if SITE_REPO_TOKEN="$MACCRAB_PUBLISH_SITE_REPO_TOKEN" SITE_REPO="$SITE_REPO" \
+            "$BUILD_WORKSPACE/scripts/publish-release-json.sh"; then
         echo "  ✓ release.json pushed to the site repo"
         # Verify the PUBLISHED file, not the local one. Step 6c below only ever
         # read ./release.json — which build-release.sh regenerated minutes
@@ -411,9 +1109,9 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
         live_ver=""
         live_sha=""
         for _ in $(seq 1 12); do
-            live=$(curl -fsS --max-time 10 "https://maccrab.com/release.json" 2>/dev/null || true)
-            live_ver=$(printf '%s' "$live" | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
-            live_sha=$(printf '%s' "$live" | grep -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' | head -1 | grep -oE '[a-f0-9]{64}' || true)
+            live=$($CURL_BIN -fsS --max-time 10 "https://maccrab.com/release.json" 2>/dev/null || true)
+            live_ver=$(printf '%s' "$live" | $GREP_BIN -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | /usr/bin/head -1 | $SED_BIN -E 's/.*"([^"]+)"$/\1/' || true)
+            live_sha=$(printf '%s' "$live" | $GREP_BIN -oE '"sha256"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
             if [ "$live_ver" = "$VERSION" ] && [ "$live_sha" = "$SHA" ]; then
                 published_ok=1
                 break
@@ -446,9 +1144,12 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
     echo "Step 6c: Cross-source SHA sanity check..."
     # || true so set -e + pipefail don't abort the post-publish step
     # when grep finds nothing (we WANT to fall through and report).
-    local_release_sha=$(grep -oE '"sha256":\s*"[a-f0-9]{64}"' release.json 2>/dev/null | head -1 | grep -oE '[a-f0-9]{64}' || true)
-    cask_sha=$(grep -oE 'sha256\s+"[a-f0-9]{64}"' Casks/maccrab.rb 2>/dev/null | head -1 | grep -oE '[a-f0-9]{64}' || true)
-    gh_release_sha=$(gh release view "v$VERSION" --json assets --jq '.assets[0].digest' 2>/dev/null | sed 's/^sha256://' || true)
+    local_release_sha=$($GREP_BIN -oE '"sha256":\s*"[a-f0-9]{64}"' release.json 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    cask_sha=$($GREP_BIN -oE 'sha256\s+"[a-f0-9]{64}"' Casks/maccrab.rb 2>/dev/null | /usr/bin/head -1 | $GREP_BIN -oE '[a-f0-9]{64}' || true)
+    gh_release_sha=$(publisher_gh api \
+        "repos/$CANONICAL_GH_REPO/releases/$OWNED_RELEASE_ID" \
+        --jq ".assets[] | select(.name == \"$DMG_NAME\") | .digest" \
+        2>/dev/null | $SED_BIN -n 's/^sha256://p' | /usr/bin/head -1 || true)
 
     cross_check_ok=1
     if [ -z "$local_release_sha" ] || [ -z "$cask_sha" ] || [ -z "$gh_release_sha" ]; then
@@ -478,25 +1179,16 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
     # existing clone with rebase conflicts. Token needs write on the tap repo.
     echo ""
     echo "Step 6d: Publishing cask to homebrew-maccrab tap..."
-    if TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-${GH_TOKEN:-$SITE_REPO_TOKEN}}" \
-            "$SCRIPT_DIR/publish-cask.sh"; then
+    verify_immutable_upload_snapshot
+    if TAP_REPO_TOKEN="$MACCRAB_PUBLISH_TAP_REPO_TOKEN" \
+            "$BUILD_WORKSPACE/scripts/publish-cask.sh"; then
         echo "  ✓ Cask published; 'brew install --cask peterhanily/maccrab/maccrab' serves v$VERSION"
-    else
-        echo "  ! Cask publish failed — set TAP_REPO_TOKEN (PAT with contents:write on peterhanily/homebrew-maccrab) then run 'scripts/publish-cask.sh' manually" >&2
-    fi
 else
-    echo ""
-    echo "  Step 6/6: Skipping appcast publish."
-    if [ -z "${SITE_REPO_TOKEN:-}" ]; then
-        echo "  → SITE_REPO_TOKEN env var not set. Existing users will NOT receive the update."
-        echo "    To publish: SITE_REPO_TOKEN=<pat> scripts/publish-appcast-entry.sh \\"
-        echo "                  --item <(scripts/generate-appcast-entry.sh --dmg $DMG_PATH --version $VERSION)"
-        echo "    Also remember: SITE_REPO_TOKEN=<pat> scripts/publish-release-json.sh"
-        echo "                  (so maccrab.com/release.json stops lagging the release)"
-    fi
+    release_fail "cask publish failed — set TAP_REPO_TOKEN (PAT with contents:write on peterhanily/homebrew-maccrab) then run 'scripts/publish-cask.sh' manually; Homebrew users will not receive v$VERSION"
 fi
 
 echo ""
+verify_immutable_upload_snapshot
 # The release is only "released" if every publish step landed. Pre-fix this
 # banner printed unconditionally and the script exited 0 even when the appcast,
 # release.json, the cross-source SHA check and the tap cask had all failed —
@@ -511,6 +1203,9 @@ if [ "$RELEASE_FAILURE_COUNT" -gt 0 ]; then
     printf '%s' "$RELEASE_FAILURES"
     echo ""
     echo "  Fix each item above, re-run the named script, then re-verify:"
+    echo "    verified GitHub release remains published: ${PUBLISHED_RELEASE_URL:-<unknown>} (ID $OWNED_RELEASE_ID)"
+    echo "    It is intentionally not rolled back: the asset was verified before publication"
+    echo "    and immutable-release policy may prohibit deletion."
     echo "    curl -s https://maccrab.com/release.json"
     echo "    curl -s https://maccrab.com/appcast.xml | grep sparkle:version"
     exit 1

@@ -5,7 +5,18 @@ import os.log
 /// Calculates a real-time security score (0-100) for the system.
 /// Higher is better. Factors in system config, runtime behavior, and hygiene.
 public actor SecurityScorer {
-    public init() {}
+    private let homesProvider: @Sendable () -> [RealUserHome]
+
+    public init() {
+        self.homesProvider = {
+            if geteuid() == 0 { return RealUserHomeResolver.all() }
+            return RealUserHomeResolver.home(forUserID: geteuid()).map { [$0] } ?? []
+        }
+    }
+
+    init(homesProvider: @escaping @Sendable () -> [RealUserHome]) {
+        self.homesProvider = homesProvider
+    }
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "security-score")
 
     public struct ScoreResult: Sendable {
@@ -35,6 +46,7 @@ public actor SecurityScorer {
     public func calculate(recentCriticalHigh: Int? = nil) async -> ScoreResult {
         var factors: [Factor] = []
         var recommendations: [String] = []
+        let realHomes = homesProvider()
 
         // === System Configuration (40 points max) ===
 
@@ -130,12 +142,28 @@ public actor SecurityScorer {
         factors.append(Factor(name: "Authorization Plugins", category: "hygiene", score: noAuthPlugins ? 5 : 0, maxScore: 5, status: noAuthPlugins ? "pass" : "warn", detail: noAuthPlugins ? "No third-party auth plugins" : "Third-party auth plugins detected"))
 
         // SSH keys have passphrase? (6 points — approximate check)
-        let sshKeysSecure = checkSSHKeySecurity()
-        factors.append(Factor(name: "SSH Key Security", category: "hygiene", score: sshKeysSecure ? 6 : 3, maxScore: 6, status: sshKeysSecure ? "pass" : "warn", detail: sshKeysSecure ? "SSH keys appear secure" : "SSH keys found — ensure they have passphrases"))
+        let sshKeysSecure = checkSSHKeySecurity(homes: realHomes)
+        factors.append(Factor(
+            name: "SSH Key Security", category: "hygiene",
+            score: sshKeysSecure == true ? 6 : 3, maxScore: 6,
+            status: sshKeysSecure == true ? "pass" : "warn",
+            detail: sshKeysSecure.map {
+                $0 ? "No private SSH keys found in validated user homes" : "SSH keys found — ensure they have passphrases"
+            } ?? "User homes unavailable — SSH key posture unknown"
+        ))
 
         // .env files in home? (6 points)
-        let noEnvFiles = !FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.env")
-        factors.append(Factor(name: "Credential Files", category: "hygiene", score: noEnvFiles ? 6 : 2, maxScore: 6, status: noEnvFiles ? "pass" : "warn", detail: noEnvFiles ? "No .env files in home directory" : ".env file found in home directory"))
+        let noEnvFiles: Bool? = realHomes.isEmpty ? nil : realHomes.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.appending(".env"))
+        }
+        factors.append(Factor(
+            name: "Credential Files", category: "hygiene",
+            score: noEnvFiles == true ? 6 : 2, maxScore: 6,
+            status: noEnvFiles == true ? "pass" : "warn",
+            detail: noEnvFiles.map {
+                $0 ? "No .env files in validated user homes" : ".env file found in a user home"
+            } ?? "User homes unavailable — credential-file posture unknown"
+        ))
 
         // Calculate total
         let totalMax = factors.reduce(0) { $0 + $1.maxScore }
@@ -165,14 +193,14 @@ public actor SecurityScorer {
     /// "unknown" rather than a placeholder full mark.
     private func recentCriticalHighFromStore() async -> Int? {
         let fm = FileManager.default
-        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first.map { $0.appendingPathComponent("MacCrab").path }
-            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
         let systemDir = "/Library/Application Support/MacCrab"
 
         // Prefer whichever dir actually has a readable alerts.db (system first — that's
         // where the root daemon writes on release builds).
-        let candidates = [systemDir, userDir].filter {
+        let userDirs = homesProvider().map {
+            $0.appending("Library/Application Support/MacCrab")
+        }
+        let candidates = ([systemDir] + userDirs).filter {
             fm.isReadableFile(atPath: $0 + "/alerts.db")
         }
         guard let dir = candidates.first else { return nil }
@@ -202,30 +230,15 @@ public actor SecurityScorer {
     private nonisolated func runProbe(_ path: String, _ args: [String],
                                       captureStderr: Bool = false,
                                       timeout: TimeInterval = 2.0) -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: path)
-        proc.arguments = args
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = captureStderr ? pipe : FileHandle.nullDevice
-        do { try proc.run() } catch { return "" }
-
-        let q = DispatchQueue(label: "maccrab.probe")
-        var captured = ""
-        var done = false
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let s = String(data: data, encoding: .utf8) ?? ""
-            q.sync { captured = s; done = true }
-            sem.signal()
-        }
-        if sem.wait(timeout: .now() + timeout) == .timedOut {
-            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-            _ = sem.wait(timeout: .now() + 1.0)  // reader unblocks on post-kill EOF
-        }
-        proc.waitUntilExit()
-        return q.sync { done ? captured : "" }
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: path,
+            arguments: args,
+            timeout: timeout,
+            maximumOutputBytes: 1 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: captureStderr
+        ), !result.timedOut, !result.outputLimitExceeded,
+           result.terminationStatus != nil else { return "" }
+        return String(data: result.output, encoding: .utf8) ?? ""
     }
 
     private nonisolated func checkSIP() -> Bool {
@@ -280,11 +293,32 @@ public actor SecurityScorer {
             || fm.fileExists(atPath: "/Library/Apple/System/Library/CoreServices/XProtect.app")
     }
 
-    private nonisolated func checkSSHKeySecurity() -> Bool {
-        let sshDir = NSHomeDirectory() + "/.ssh"
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: sshDir) else { return true }
-        let privateKeys = files.filter { $0.hasPrefix("id_") && !$0.hasSuffix(".pub") }
-        return privateKeys.isEmpty  // Simplified: true if no private keys (or would need to check passphrase)
+    private nonisolated func checkSSHKeySecurity(homes: [RealUserHome]) -> Bool? {
+        guard !homes.isEmpty else { return nil }
+        for home in homes {
+            let sshDir = home.appending(".ssh")
+            var metadata = stat()
+            if lstat(sshDir, &metadata) != 0 {
+                if errno == ENOENT { continue }
+                return nil
+            }
+            guard (metadata.st_mode & S_IFMT) == S_IFDIR,
+                  let snapshot = BoundedDirectoryLister.list(
+                      at: sshDir,
+                      maximumEntries: 16_384,
+                      expectedOwnerUID: home.userID
+                  ) else { return nil }
+            // Any private-key-shaped entry makes the simplified grade fail;
+            // symlink/special entries are not silently treated as safe.
+            if snapshot.entries.contains(where: {
+                $0.name.hasPrefix("id_") && !$0.name.hasSuffix(".pub")
+            }) {
+                return false
+            }
+            // A truncated directory cannot support a positive "no key" claim.
+            if snapshot.wasTruncated { return nil }
+        }
+        return true  // Simplified: true only if no private key was found.
     }
 
     private nonisolated func countTmpProcesses() -> Int {

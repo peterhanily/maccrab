@@ -16,13 +16,15 @@
 // drops the shared/upgrade locks that block VACUUM.
 //
 // This suite locks the new behaviour down so a future refactor of
-// `openDatabase` can't quietly bring back the RW open. Six tests:
+// `openDatabase` or a query-only client can't quietly bring back the RW open:
 //   1. EventStore RO insert throws
 //   2. AlertStore RO insert throws
 //   3. CampaignStore RO insert throws
 //   4. TraceStore (SQLiteCausalGraphStore) RO upsert throws
 //   5. Reading from a RO store succeeds (the real dashboard use case)
 //   6. RO + RW connections coexist (WAL mode sanity)
+//   7. The TraceGraph query-client shape can read but cannot mutate
+//   8. maccrabctl + maccrab-mcp query callsites remain explicitly RO
 
 import Testing
 import Foundation
@@ -260,5 +262,99 @@ struct StoreReadOnlyTests {
         await #expect(throws: (any Error).self) {
             try await reader.insert(event: sampleEvent())
         }
+    }
+
+    // MARK: - Test 7: TraceGraph query-client behavior
+
+    @Test("TraceGraph query-client shape can read but cannot mutate")
+    func traceGraphQueryClientReadsWithoutWriteCapability() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let path = dir.appendingPathComponent("tracegraph.db").path
+        let existingID = "query-client-existing"
+
+        let writer = try await SQLiteCausalGraphStore(databasePath: path)
+        try await writer.upsertEntity(sampleEntity(id: existingID))
+        await writer.close()
+
+        let reader = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            forceReadOnly: true
+        )
+        defer { Task { await reader.close() } }
+
+        #expect(try await reader.entity(id: existingID)?.id == existingID)
+        await #expect(throws: (any Error).self) {
+            try await reader.upsertEntity(sampleEntity(id: "query-client-write"))
+        }
+    }
+
+    // MARK: - Test 8: query-only executable callsites
+
+    @Test("maccrabctl and maccrab-mcp TraceGraph query handles stay read-only")
+    func traceGraphQueryClientSourceWiring() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        func source(_ relativePath: String) throws -> String {
+            try String(
+                contentsOf: root.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+        }
+
+        // Return each complete constructor call so a new callsite cannot hide
+        // behind a file-wide count of `forceReadOnly: true` belonging to some
+        // unrelated store.
+        func traceStoreCalls(in source: String) -> [String] {
+            let marker = "SQLiteCausalGraphStore("
+            var calls: [String] = []
+            var searchStart = source.startIndex
+            while let markerRange = source.range(
+                of: marker,
+                range: searchStart..<source.endIndex
+            ) {
+                var depth = 1
+                var cursor = markerRange.upperBound
+                while cursor < source.endIndex, depth > 0 {
+                    switch source[cursor] {
+                    case "(": depth += 1
+                    case ")": depth -= 1
+                    default: break
+                    }
+                    cursor = source.index(after: cursor)
+                }
+                guard depth == 0 else { break }
+                calls.append(String(source[markerRange.lowerBound..<cursor]))
+                searchStart = cursor
+            }
+            return calls
+        }
+
+        let cliCalls = traceStoreCalls(
+            in: try source("Sources/maccrabctl/TraceCommands.swift")
+        )
+        #expect(cliCalls.count == 2,
+                "classify every new maccrabctl TraceGraph open as query-only or mutating")
+        let cliQueryCall = try #require(
+            cliCalls.first { $0.contains("databasePath: path") }
+        )
+        #expect(cliQueryCall.contains("forceReadOnly: true"),
+                "maccrabctl openStore() serves only query/export commands")
+        let demoWriterCall = try #require(
+            cliCalls.first { $0.contains("maxFootprintBytes:") }
+        )
+        #expect(!demoWriterCall.contains("forceReadOnly: true"),
+                "the DEBUG-only demo seeder is the one intentional CLI writer")
+
+        let mcpCalls = traceStoreCalls(
+            in: try source("Sources/maccrab-mcp/main.swift")
+        )
+        #expect(mcpCalls.count == 4,
+                "classify every new MCP TraceGraph open before changing this guard")
+        #expect(mcpCalls.allSatisfy { $0.contains("forceReadOnly: true") },
+                "all MCP TraceGraph handlers are query-only")
     }
 }

@@ -556,8 +556,14 @@
 "agentTraces.attributes" = "attributes";
 "agentTraces.emptyHint" = "Toggle the receiver on with the switch above, then point your AI tool's OTel exporter at http://127.0.0.1:4318. Claude Code: set CLAUDE_CODE_ENABLE_TELEMETRY=1, OTEL_TRACES_EXPORTER=otlp, OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf, OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318. See docs/AGENT_TRACES.md.";
 "agentTraces.emptyTitle" = "No agent traces yet";
-"agentTraces.privacyBody" = "Span attribute values pass through the secret-shape sanitiser, then AES-GCM-encrypted under the same shared key as events.db. Tamper detection is built in. Spans only ever leave your Mac if you configure your AI tool to export to this receiver.";
+"agentTraces.privacyBody" = "Span attribute values pass through the secret-shape sanitiser, then are AES-GCM-encrypted with the installation's trace database key. This protects at-rest ciphertext, not source authenticity. Spans only ever leave your Mac if you configure your AI tool to export to this receiver.";
 "agentTraces.privacyTitle" = "Local-only · sanitised · AES-GCM at rest";
+"agentTraces.trustBody" = "Loopback is not authentication. Any local process can submit or forge these OTLP spans. Treat them as advisory and corroborate them with Endpoint Security or other kernel-backed evidence.";
+"agentTraces.trustTitle" = "Unauthenticated · self-reported";
+"system.traceGraphStoragePausedChip" = "Evidence gap";
+"system.traceGraphStoragePausedTitle" = "TraceGraph evidence persistence paused";
+"system.traceStoreStoragePausedChip" = "Advisory evidence gap";
+"system.traceStoreStoragePausedTitle" = "Agent Trace persistence paused";
 "agentTraces.refresh" = "Refresh";
 "agentTraces.searchPlaceholder" = "Search by trace_id…";
 "agentTraces.selectTrace" = "Select a trace to view its spans";
@@ -917,3 +923,24 @@
 "system.auditNone" = "No privileged changes have been recorded yet.";
 "system.auditEmpty" = "The audit log is present but empty.";
 "system.auditUnreadable" = "The audit log exists but this account can't read it (the engine writes it root-owned, admin-readable). Run: sudo maccrabctl audit";
+
+/* 2026-08-02 adversarial remediation: newly introduced operator copy. */
+"common.ok" = "OK";
+"detection.browserInventoryIncompleteTitle" = "Inventory incomplete — displayed counts are partial";
+"settings.agentControlAuthority" = "Authoritative engine state";
+"settings.agentControlLoadError" = "Unable to verify root-owned state: %@";
+"settings.agentTier.revokePending" = "Revocation remains queued. Use Refresh after the detection engine processes its inbox.";
+"settings.agentTier.revokeQueueFailed" = "Could not queue the revocation. The displayed root-owned state was not changed.";
+"settings.agentTier.revokeQueued" = "Revocation queued; waiting for the engine to publish the new root-owned state.";
+"settings.agentTier.revoked" = "Capability revoked in the root-owned engine state.";
+"settings.agentTier.rootGrantBody" = "The dashboard cannot grant MCP capabilities. Run this command in Terminal:\n%@";
+"settings.agentTier.rootGrantTitle" = "Administrator authorization required";
+"settings.llm.configWriteFailed" = "LLM settings were not applied because the secure configuration write failed.";
+"settings.llm.keyDeleted" = "Stored Keychain credential deleted and verified.";
+"settings.llm.keyReadFailed" = "Could not read this provider's Keychain credential. The stored value was left unchanged.";
+"settings.llm.keySaveFailed" = "The Keychain credential could not be saved and verified. No LLM configuration change was applied.";
+"settings.llm.keySaved" = "Keychain credential saved and verified.";
+"settings.llm.keyVerifyFailed" = "The Keychain credential could not be verified. No LLM configuration change was applied.";
+"settings.llm.legacyMigrationFailed" = "A legacy plaintext credential could not be moved and verified in Keychain. The original file was left unchanged.";
+"system.browserInventoryCoverageGapChip" = "Coverage gap";
+"system.browserInventoryIncompleteTitle" = "Browser extension inventory incomplete";

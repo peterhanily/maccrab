@@ -201,6 +201,52 @@ struct PluginInstallerSecurityTests {
         }
     }
 
+    @Test("same-uid source swap after capture cannot change installed bytes or bless attacker key")
+    func immutableSnapshotClosesVerifyCopyRace() async throws {
+        let legitimate = try Self.freshSignedBundle(pluginID: "com.test.snapshot-race")
+        let attacker = try Self.freshSignedBundle(pluginID: "com.test.snapshot-race")
+        defer {
+            try? FileManager.default.removeItem(at: legitimate)
+            try? FileManager.default.removeItem(at: attacker)
+        }
+
+        let authorized = try PluginBundleSnapshot.capture(sourceDirectory: legitimate)
+        let attackerSnapshot = try PluginBundleSnapshot.capture(sourceDirectory: attacker)
+        let authorizedKeyHex = authorized.publicKeyData
+            .map { String(format: "%02x", $0) }.joined()
+        let attackerKeyHex = attackerSnapshot.publicKeyData
+            .map { String(format: "%02x", $0) }.joined()
+        #expect(authorizedKeyHex != attackerKeyHex)
+
+        // This is the old catalog/install window: after signer-pin validation,
+        // a same-uid process replaces every staged component with a coherent,
+        // attacker-self-signed bundle. Installation must consume `authorized`,
+        // never reopen the now-attacker-controlled source path.
+        for name in PluginBundleSnapshot.requiredFileNames {
+            try attackerSnapshot.data(at: name)!.write(
+                to: legitimate.appendingPathComponent(name),
+                options: .atomic
+            )
+        }
+
+        let installer = Self.freshInstaller()
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let installed = try await installer.install(
+            snapshot: authorized,
+            trustOnInstall: true
+        )
+        let installedRoot = URL(fileURLWithPath: installed.installRoot)
+        #expect(try Data(contentsOf: installedRoot.appendingPathComponent("binary"))
+                == authorized.binaryData)
+        #expect(try Data(contentsOf: installedRoot.appendingPathComponent("signing.key.pub"))
+                == authorized.publicKeyData)
+
+        let trusted = await installer.currentTrustedKeys()
+        #expect(trusted.contains(authorizedKeyHex))
+        #expect(!trusted.contains(attackerKeyHex),
+                "catalog install must never host-sign trust for the swapped publisher key")
+    }
+
     // MARK: - audit-3: trust list file perms
 
     @Test("audit-3: trusted-keys.json + revoked-keys.json end up 0o600")

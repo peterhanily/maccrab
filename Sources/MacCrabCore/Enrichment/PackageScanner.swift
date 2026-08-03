@@ -296,67 +296,22 @@ public actor PackageScanner {
     /// the dashboard panel works fine when the user doesn't have
     /// npm or pip installed.
     ///
-    /// v1.12.0 post-audit (H-Sec3): the subprocess inherits a tightly
-    /// pinned environment so a daemon-side `DYLD_INSERT_LIBRARIES`
-    /// (or any other env var poisoned by a parent) does not leak
-    /// into the spawned tool. HOME=/var/empty also prevents the tool
-    /// from writing to / reading from a user-controlled dotfile path.
+    /// The shared root-safe runner validates the complete executable path,
+    /// supplies a minimal environment and stdin EOF, drains output under a
+    /// fixed cap, and uses a monotonic hard-kill deadline.
     private nonisolated func runTool(
         _ executable: String,
         _ args: [String],
         timeoutSeconds: Int = 5
     ) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executable)
-        task.arguments = args
-        task.environment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": "/var/empty",
-            "LANG": "C",
-        ]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        task.standardOutput = stdout
-        task.standardError = stderr
-
-        do {
-            try task.run()
-        } catch {
-            return nil
-        }
-
-        // v1.12.0 post-audit (M-Perf2): wait for the subprocess via
-        // `Process.waitUntilExit()` instead of a `Thread.sleep`-based
-        // polling loop. The actor that called us is blocked either
-        // way, but this drops the 50ms-poll-quantum latency floor
-        // (every successful tool invocation used to pay one extra
-        // sleep tick) AND prevents wasting CPU on the polling check.
-        // Timeout is enforced by spawning a watchdog Task that calls
-        // `task.terminate()` after `timeoutSeconds`.
-        //
-        // v1.12.0 RC2 fix (M-Perf-N1): pre-fix the watchdog was
-        // scheduled via `DispatchQueue.global().asyncAfter(deadline:
-        // execute: DispatchWorkItem)` and the let-binding captured
-        // the *return value* of that call — which is Void, not the
-        // work item. So `.cancel()` could never be called and every
-        // successful invocation leaked a delayed `task.terminate()`
-        // for up to `timeoutSeconds`. Bind the DispatchWorkItem
-        // separately so we can cancel it after `waitUntilExit()`.
-        let watchdog = DispatchWorkItem { [weak task] in
-            guard let task else { return }
-            if task.isRunning {
-                task.terminate()
-            }
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeoutSeconds), execute: watchdog)
-        task.waitUntilExit()
-        // Natural exit — cancel the pending terminate() so it doesn't
-        // fire against a finished or recycled Process.
-        watchdog.cancel()
-
-        guard task.terminationStatus == 0 else { return nil }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: executable,
+            arguments: args,
+            timeout: TimeInterval(timeoutSeconds),
+            maximumOutputBytes: 8 * 1_024 * 1_024,
+            mergeStandardErrorIntoOutput: false
+        ), result.succeeded else { return nil }
+        return String(data: result.output, encoding: .utf8)
     }
 
     private nonisolated func toolPath(_ name: String) -> String? {

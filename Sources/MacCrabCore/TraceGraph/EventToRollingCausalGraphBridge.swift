@@ -80,6 +80,11 @@ public actor EventToRollingCausalGraphBridge {
         }
         do {
             return try await rollingGraph.ingest(normalized)
+        } catch is CausalGraphStorageAdmissionError {
+            // Expected fail-closed shedding. SQLiteCausalGraphStore already
+            // increments telemetry and logs only block/recovery transitions;
+            // a warning here for every source event would defeat that design.
+            return []
         } catch {
             logger.warning("rolling graph ingest failed: \(error.localizedDescription, privacy: .public)")
             return []

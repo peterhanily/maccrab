@@ -40,15 +40,12 @@ struct SettingsView: View {
     // notifies on the most serious detections. Existing installs retain
     // whatever value is already in UserDefaults.
     @AppStorage("minAlertSeverity") var minAlertSeverity: String = "critical"
-    // v1.18 agent control-plane: which MCP capability tiers an AI agent may
-    // use. All OFF by default; only the human flips these. Written to
-    // mcp_capabilities.json which the MCP server reads.
-    @AppStorage("agentCapConfig") private var agentCapConfig: Bool = false
-    @AppStorage("agentCapAuthoring") private var agentCapAuthoring: Bool = false
-    @AppStorage("agentCapResponse") private var agentCapResponse: Bool = false
-    // Confirm-on-enable gate for the defense-affecting tier (an agent granted
-    // this can disable ES introspection → reduce detection). Security-critical.
-    @State private var confirmAgentResponseTier = false
+    // MCP capability toggles display the root-owned state the MCP server trusts.
+    // The non-root dashboard can revoke an installed grant but cannot create
+    // one; an OFF→ON gesture surfaces the exact sudo command and stays OFF.
+    @State private var agentCapabilityGrantCommand: String?
+    @State private var agentCapabilityStatus: String?
+    @State private var agentCapabilityRefreshTask: Task<Void, Never>?
     // v1.19.1 network-enrichment privacy opt-ins. All OFF by default — MacCrab
     // is on-device by default; nothing about your machine leaves it until you
     // flip one of these. The daemon defaults match (DaemonConfig defaults are
@@ -116,6 +113,10 @@ struct SettingsView: View {
     // transient state; `syncLLMConfig()` persists it, `loadAPIKeyForProvider()`
     // populates it on appear / provider change.
     @State private var llmAPIKey: String = ""
+    @State private var llmLoadedAPIKey: String?
+    @State private var llmAPIKeyReadSucceeded = false
+    @State private var llmCredentialStatus: String?
+    @State private var llmCredentialStatusIsError = false
     private let secrets = SecretsStore()
 
     // AppleLanguages entries are region-tagged ("en-IE", "zh-Hant-TW"), and on
@@ -566,66 +567,79 @@ struct SettingsView: View {
 
                 GroupBox(String(localized: "settings.agentControl", defaultValue: "Agent Control (MCP)")) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(String(localized: "settings.agentControlHelp", defaultValue: "Let a Claude/Codex agent on this Mac customise MacCrab through the MCP server. Every tier is off by default and each change is audit-logged. Turn on only what you need."))
+                        Text(String(localized: "settings.agentControlHelp", defaultValue: "Root-owned MCP mutation grants currently active in the detection engine. This dashboard can revoke a tier, but granting one requires administrator authorization in Terminal. Every applied change is audit-logged."))
                             .font(.caption).foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        Toggle(isOn: $agentCapConfig) {
+
+                        HStack {
+                            Text(String(localized: "settings.agentControlAuthority", defaultValue: "Authoritative engine state"))
+                                .font(.caption).fontWeight(.medium)
+                            Spacer()
+                            Button(String(localized: "common.refresh", defaultValue: "Refresh")) {
+                                appState.refreshAgentCapabilities()
+                            }
+                            .controlSize(.small)
+                        }
+
+                        if let error = appState.agentCapabilitiesError {
+                            Text(String(localized: "settings.agentControlLoadError", defaultValue: "Unable to verify root-owned state: \(error)"))
+                                .font(.caption).foregroundColor(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Toggle(isOn: agentCapabilityBinding(.config)) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.agentTier.config", defaultValue: "Tune detection"))
                                 Text(String(localized: "settings.agentTier.configDesc", defaultValue: "Built-in rule settings, reload rules, refresh intel, safe daemon tunables."))
                                     .font(.caption).foregroundColor(.secondary)
                             }
                         }
-                        .onChange(of: agentCapConfig) { _ in syncAgentCapabilities() }
-                        Toggle(isOn: $agentCapAuthoring) {
+                        .disabled(!appState.agentCapabilitiesLoaded)
+
+                        Toggle(isOn: agentCapabilityBinding(.authoring)) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.agentTier.authoring", defaultValue: "Author rules"))
                                 Text(String(localized: "settings.agentTier.authoringDesc", defaultValue: "Create and delete detection rules (validated by the compiler)."))
                                     .font(.caption).foregroundColor(.secondary)
                             }
                         }
-                        .onChange(of: agentCapAuthoring) { _ in syncAgentCapabilities() }
-                        // Enabling this tier requires an explicit confirm (it lets an
-                        // agent reduce detection). The binding does NOT commit on
-                        // turn-ON — it only raises the dialog — so dismissing the
-                        // dialog any way (Esc, click-outside, Cancel) leaves the toggle
-                        // OFF rather than stuck ON-but-never-granted. Grant commits it.
-                        Toggle(isOn: Binding(
-                            get: { agentCapResponse },
-                            set: { wantOn in
-                                if wantOn {
-                                    confirmAgentResponseTier = true
-                                } else {
-                                    agentCapResponse = false
-                                    syncAgentCapabilities()
-                                }
-                            }
-                        )) {
+                        .disabled(!appState.agentCapabilitiesLoaded)
+
+                        Toggle(isOn: agentCapabilityBinding(.response)) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(String(localized: "settings.agentTier.response", defaultValue: "Change defense-affecting config"))
-                                Text(String(localized: "settings.agentTier.responseDesc", defaultValue: "Toggle ES introspection / file-open subscriptions and ultrasonic. Disabling these reduces detection — grant with care."))
+                                Text(String(localized: "settings.agentTier.responseDesc", defaultValue: "Allows ES introspection, file-open subscriptions, and ultrasonic controls to be changed. Revoking this tier removes that agent authority."))
                                     .font(.caption).foregroundColor(.orange)
                             }
+                        }
+
+                        .disabled(!appState.agentCapabilitiesLoaded)
+
+                        if let status = agentCapabilityStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .padding(8)
                 }
-                .confirmationDialog(
-                    String(localized: "settings.agentTier.confirmTitle",
-                           defaultValue: "Let an AI agent change defense-affecting settings?"),
-                    isPresented: $confirmAgentResponseTier, titleVisibility: .visible
+                .onAppear { appState.refreshAgentCapabilities() }
+                .onDisappear { agentCapabilityRefreshTask?.cancel() }
+                .alert(
+                    String(localized: "settings.agentTier.rootGrantTitle",
+                           defaultValue: "Administrator authorization required"),
+                    isPresented: Binding(
+                        get: { agentCapabilityGrantCommand != nil },
+                        set: { if !$0 { agentCapabilityGrantCommand = nil } }
+                    )
                 ) {
-                    Button(String(localized: "settings.agentTier.confirmGrant",
-                                  defaultValue: "Grant — I control this agent"), role: .destructive) {
-                        agentCapResponse = true     // commit ONLY on explicit grant
-                        syncAgentCapabilities()
-                    }
-                    Button(String(localized: "common.cancel", defaultValue: "Cancel"), role: .cancel) {
-                        agentCapResponse = false   // defensive: never granted, stay OFF
+                    Button(String(localized: "common.ok", defaultValue: "OK"), role: .cancel) {
+                        agentCapabilityGrantCommand = nil
                     }
                 } message: {
-                    Text(String(localized: "settings.agentTier.confirmBody",
-                                defaultValue: "An agent granted this tier can turn OFF Endpoint Security introspection and other event capture — reducing MacCrab's detection. Every change is audit-logged. Grant only if you fully control this agent."))
+                    Text(String(localized: "settings.agentTier.rootGrantBody",
+                                defaultValue: "The dashboard cannot grant MCP capabilities. Run this command in Terminal:\n\(agentCapabilityGrantCommand ?? "")"))
                 }
 
                 GroupBox(String(localized: "settings.netEnrich", defaultValue: "Network enrichment (privacy)")) {
@@ -1075,6 +1089,18 @@ struct SettingsView: View {
                             case "gemini":  geminiSettings
                             default:        ollamaSettings
                             }
+
+                            if let status = llmCredentialStatus {
+                                Label(
+                                    status,
+                                    systemImage: llmCredentialStatusIsError
+                                        ? "exclamationmark.triangle.fill"
+                                        : "checkmark.circle.fill"
+                                )
+                                .font(.caption)
+                                .foregroundColor(llmCredentialStatusIsError ? .orange : .green)
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
                             // Invalidate the test result on any config edit
                             // so a stale "OK" doesn't mislead after the user
                             // changes the URL/key/model.
@@ -1165,11 +1191,15 @@ struct SettingsView: View {
             .padding(4)
         }
         .onAppear {
+            // Upgrade cleanup: old releases copied provider keys into this
+            // file. The no-follow scrub preserves non-secret settings and
+            // removes those plaintext copies before the editor uses the file.
+            let migrationSucceeded = scrubLegacyLLMConfig()
             // Populate the SecureField from the Keychain on first render.
             // Without this, the field always starts blank even when the
             // user has already configured a key — they'd be tricked into
             // thinking nothing is stored and re-type.
-            loadAPIKeyForProvider()
+            loadAPIKeyForProvider(preserveStatus: !migrationSucceeded)
         }
     }
 
@@ -1351,34 +1381,111 @@ struct SettingsView: View {
         }
     }
 
-    /// Pull the API key for the currently-selected provider out of the
-    /// Keychain into the bound @State field. Called on view appear and
-    /// whenever the provider changes. Silent on failure — UI shows
-    /// "empty" which is indistinguishable from "not set", which matches
-    /// user expectation.
-    private func loadAPIKeyForProvider() {
+    /// Pull the selected provider key into transient editor state. A failed
+    /// read is NOT treated as "no key": `llmAPIKeyReadSucceeded` remains false,
+    /// which prevents the programmatically empty field from deleting a valid
+    /// stored credential on a later config onChange.
+    private func loadAPIKeyForProvider(preserveStatus: Bool = false) {
         guard let key = secretKeyForCurrentProvider() else {
+            llmLoadedAPIKey = nil
+            llmAPIKeyReadSucceeded = true
             llmAPIKey = ""
             return
         }
-        let loaded = (try? secrets.get(key)) ?? nil
-        llmAPIKey = loaded ?? ""
+        do {
+            let loaded = try secrets.get(key)
+            llmLoadedAPIKey = loaded
+            llmAPIKeyReadSucceeded = true
+            llmAPIKey = loaded ?? ""
+            if !preserveStatus {
+                llmCredentialStatus = nil
+                llmCredentialStatusIsError = false
+            }
+        } catch {
+            llmLoadedAPIKey = nil
+            llmAPIKeyReadSucceeded = false
+            llmAPIKey = ""
+            llmCredentialStatus = String(
+                localized: "settings.llm.keyReadFailed",
+                defaultValue: "Could not read this provider's Keychain credential. The stored value was left unchanged."
+            )
+            llmCredentialStatusIsError = true
+        }
     }
 
-    /// Persist the current llmAPIKey into the Keychain for the selected
-    /// provider. Called from `syncLLMConfig()` on every config edit.
-    /// An empty value deletes the slot (matches SecretsStore.set semantics).
-    private func saveAPIKeyToKeychain() {
-        guard let key = secretKeyForCurrentProvider() else { return }
-        try? secrets.set(key, value: llmAPIKey)
+    /// Persist only an actual editor change, then require exact read-back before
+    /// any JSON/config state is applied. An empty value is considered an
+    /// explicit deletion only after a successful Keychain read established the
+    /// prior state; a transient empty field after read failure is a no-op.
+    private func saveAPIKeyToKeychain() -> Bool {
+        guard let key = secretKeyForCurrentProvider() else { return true }
+        let candidate = llmAPIKey
+        if !llmAPIKeyReadSucceeded && candidate.isEmpty {
+            // Preserve the value we could not inspect. The visible error from
+            // loadAPIKeyForProvider explains why the field is empty.
+            return true
+        }
+        if llmAPIKeyReadSucceeded,
+           candidate == (llmLoadedAPIKey ?? "") {
+            return true
+        }
+
+        do {
+            try secrets.set(key, value: candidate)
+            let readBack = try secrets.get(key)
+            let verified = candidate.isEmpty ? readBack == nil : readBack == candidate
+            guard verified else {
+                llmCredentialStatus = String(
+                    localized: "settings.llm.keyVerifyFailed",
+                    defaultValue: "The Keychain credential could not be verified. No LLM configuration change was applied."
+                )
+                llmCredentialStatusIsError = true
+                return false
+            }
+            llmLoadedAPIKey = readBack
+            llmAPIKeyReadSucceeded = true
+            llmCredentialStatus = candidate.isEmpty
+                ? String(localized: "settings.llm.keyDeleted", defaultValue: "Stored Keychain credential deleted and verified.")
+                : String(localized: "settings.llm.keySaved", defaultValue: "Keychain credential saved and verified.")
+            llmCredentialStatusIsError = false
+            return true
+        } catch {
+            llmCredentialStatus = String(
+                localized: "settings.llm.keySaveFailed",
+                defaultValue: "The Keychain credential could not be saved and verified. No LLM configuration change was applied."
+            )
+            llmCredentialStatusIsError = true
+            return false
+        }
     }
 
-    /// Write LLM config to a JSON file the daemon can read.
-    ///
-    /// The Keychain is the authoritative store for API keys in v1.3.5+ —
-    /// but until the sysext ships with a shared `keychain-access-groups`
-    /// entitlement, it still reads the key from this JSON file. Writing
-    /// both keeps the sysext working today and sets us up to drop the
+    @discardableResult
+    private func scrubLegacyLLMConfig() -> Bool {
+        let path = NSHomeDirectory() + "/Library/Application Support/MacCrab/llm_config.json"
+        var migrationFailure: Error?
+        do {
+            _ = try LLMConfigFile.loadAndScrub(
+                atPath: path,
+                legacySecretMigration: .sharedKeychain(
+                    store: secrets,
+                    interaction: .allowed
+                ),
+                onScrubFailure: { migrationFailure = $0 }
+            )
+        } catch {
+            migrationFailure = error
+        }
+        guard migrationFailure == nil else {
+            llmCredentialStatus = String(
+                localized: "settings.llm.legacyMigrationFailed",
+                defaultValue: "A legacy plaintext credential could not be moved and verified in Keychain. The original file was left unchanged."
+            )
+            llmCredentialStatusIsError = true
+            return false
+        }
+        return true
+    }
+
     /// v1.6.21 surface E: probe the LLM backend without firing a real
     /// alert. Builds an LLMConfig from the editor state, calls
     /// `LLMService.makeFromConfig` (which does an availability check),
@@ -1433,9 +1540,13 @@ struct SettingsView: View {
         }
     }
 
-    /// JSON-side secret once the entitlement lands.
+    /// Persist non-secret LLM settings and save the selected provider's key to
+    /// the shared Keychain. API keys never enter the JSON dictionary.
     private func syncLLMConfig() {
-        saveAPIKeyToKeychain()
+        // A credential edit is not applied merely because SecItemAdd/Update
+        // returned: exact read-back is required. On failure the user sees the
+        // status above and neither JSON nor root-engine config is changed.
+        guard saveAPIKeyToKeychain() else { return }
 
         let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
         try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
@@ -1449,40 +1560,34 @@ struct SettingsView: View {
         ]
 
         switch llmProvider {
-        case "ollama":
-            if !llmAPIKey.isEmpty { config["ollama_api_key"] = llmAPIKey }
         case "openai":
             config["openai_url"] = llmOpenAIURL
-            config["openai_api_key"] = llmAPIKey
             config["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
         case "claude":
-            config["claude_api_key"] = llmAPIKey
             config["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
         case "mistral":
-            config["mistral_api_key"] = llmAPIKey
             config["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel
         case "gemini":
-            config["gemini_api_key"] = llmAPIKey
             config["gemini_model"] = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
         default: break
         }
 
-        if let data = try? JSONSerialization.data(withJSONObject: config) {
-            // v1.10.2 (audit security HIGH): write atomically THEN tighten
-            // perms so the API key copy never lands at 0o644 (umask
-            // default). Keychain is the primary store; this file copy
-            // is what maccrabctl / maccrab-mcp read when they resolve the
-            // USER data dir (dev and non-root installs) — the app's own
-            // reader, AppState.ensureLLMService, was deleted in v1.21.6 as
-            // unreachable code, so this is no longer written for us. It
-            // previously left every Claude
-            // / OpenAI / Mistral / Gemini key world-readable in
-            // ~/Library/Application Support/MacCrab/llm_config.json.
-            try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: Int16(0o600))],
-                ofItemAtPath: configPath
+        do {
+            try LLMConfigFile.writeNonSecretJSON(
+                config,
+                toPath: configPath,
+                legacySecretMigration: .sharedKeychain(
+                    store: secrets,
+                    interaction: .allowed
+                )
             )
+        } catch {
+            llmCredentialStatus = String(
+                localized: "settings.llm.configWriteFailed",
+                defaultValue: "LLM settings were not applied because the secure configuration write failed."
+            )
+            llmCredentialStatusIsError = true
+            return
         }
 
         // v1.17.4: also push the NON-SECRET config to the ROOT engine via the
@@ -1562,34 +1667,82 @@ struct SettingsView: View {
         )
     }
 
+    private func agentCapabilityBinding(_ tier: DashboardAgentCapabilityTier) -> Binding<Bool> {
+        Binding(
+            get: { appState.agentCapabilities.isEnabled(tier) },
+            set: { requested in
+                handleAgentCapabilityChange(tier: tier, requestedEnabled: requested)
+            }
+        )
+    }
+
+    private func handleAgentCapabilityChange(
+        tier: DashboardAgentCapabilityTier,
+        requestedEnabled: Bool
+    ) {
+        let decision = V2DaemonControl.dashboardAgentCapabilityChange(
+            tier: tier,
+            currentState: appState.agentCapabilities,
+            requestedEnabled: requestedEnabled
+        )
+        switch decision {
+        case .unchanged:
+            return
+        case .rootGrantRequired(let command):
+            // The binding reads only authoritative AppState, so the attempted
+            // OFF→ON gesture immediately renders OFF again. No inbox request is
+            // created; the exact administrator command is the only grant path.
+            agentCapabilityGrantCommand = command
+        case .revoke:
+            guard V2DaemonControl.queueAgentCapabilityRevocation(tier) else {
+                agentCapabilityStatus = String(
+                    localized: "settings.agentTier.revokeQueueFailed",
+                    defaultValue: "Could not queue the revocation. The displayed root-owned state was not changed."
+                )
+                appState.refreshAgentCapabilities()
+                return
+            }
+            agentCapabilityStatus = String(
+                localized: "settings.agentTier.revokeQueued",
+                defaultValue: "Revocation queued; waiting for the engine to publish the new root-owned state."
+            )
+            pollAgentCapabilityRevocation(tier)
+        }
+    }
+
+    private func pollAgentCapabilityRevocation(_ tier: DashboardAgentCapabilityTier) {
+        agentCapabilityRefreshTask?.cancel()
+        agentCapabilityRefreshTask = Task { @MainActor in
+            // The daemon inbox poll is normally 5 seconds. Keep the toggle tied
+            // to actual disk state while waiting instead of optimistically lying.
+            for attempt in 0..<28 {
+                guard !Task.isCancelled else { return }
+                appState.refreshAgentCapabilities()
+                if appState.agentCapabilitiesLoaded,
+                   !appState.agentCapabilities.isEnabled(tier) {
+                    agentCapabilityStatus = String(
+                        localized: "settings.agentTier.revoked",
+                        defaultValue: "Capability revoked in the root-owned engine state."
+                    )
+                    return
+                }
+                if attempt < 27 {
+                    do { try await Task.sleep(nanoseconds: 250_000_000) }
+                    catch { return }
+                }
+            }
+            agentCapabilityStatus = String(
+                localized: "settings.agentTier.revokePending",
+                defaultValue: "Revocation remains queued. Use Refresh after the detection engine processes its inbox."
+            )
+        }
+    }
+
     /// v1.11.0 RC2 ship-blocker fix: 500ms debounce around
     /// `syncAlertNotificationConfig`. Same shape + rationale as
     /// `scheduleWebhookSync` below — rapid Picker tab/click cycles
     /// previously fired one SIGHUP per onChange, and each SIGHUP
     /// runs the retroactive scan + storage reload + rule reload.
-    /// v1.18: persist the agent-control capability grants. SECURITY: the MCP
-    /// server trusts mcp_capabilities.json ONLY when it is root-owned, so the
-    /// dashboard (uid 501) does NOT write it directly — it routes the human's
-    /// choice through the privileged inbox and the ROOT engine writes the file.
-    /// This is what makes "an agent can't grant itself a tier" hold: an agent
-    /// at uid 501 can write a user-owned file, but the MCP ignores any file not
-    /// owned by root.
-    private func syncAgentCapabilities() {
-        let payload: [String: Any] = [
-            "config": agentCapConfig,
-            "authoring": agentCapAuthoring,
-            "response": agentCapResponse,
-            "requester": "MacCrabApp",
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        let inboxDir = "/Library/Application Support/MacCrab/inbox"
-        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
-        for dir in [inboxDir, userInboxDir] {
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let path = "\(dir)/set-agent-capabilities-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
-    }
 
     private func scheduleAlertNotificationSync() {
         pendingAlertNotificationSync?.cancel()

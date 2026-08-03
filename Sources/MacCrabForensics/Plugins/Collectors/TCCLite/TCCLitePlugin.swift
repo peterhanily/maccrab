@@ -17,6 +17,7 @@
 import Foundation
 import CSQLCipher
 import CryptoKit
+import MacCrabCore
 
 public struct TCCLitePlugin: Collector {
 
@@ -146,10 +147,10 @@ public struct TCCLitePlugin: Collector {
 
             // Parse the snapshot read-only.
             var db: OpaquePointer?
-            let openRC = sqlite3_open_v2(
-                snap.path.path, &db,
-                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
-                nil
+            let openRC = SQLiteOpenPathPolicy.open(
+                snap.path.path,
+                database: &db,
+                flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
             )
             guard openRC == SQLITE_OK, let h = db else {
                 notes.append("\(scope) snapshot open failed: \(openRC)")

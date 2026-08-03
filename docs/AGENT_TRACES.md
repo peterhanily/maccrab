@@ -41,11 +41,18 @@ every alert can answer:
 ## Trust framing
 
 The agent's OTel self-report is **advisory**. The kernel events are
-**authoritative**. Trace correlation gives you a hypothesis about intent
-that MacCrab verifies against the ground truth ES delivers. If a
-compromised agent lies in its spans — claims a `Read` while shelling out
-— the kernel events still expose the shell. The trace is for attribution
-and UX, never for trust.
+**authoritative**. The OTLP endpoint has no bearer token or client identity:
+loopback limits network reachability, but it is not authentication. Any local
+process can submit, replay, or forge a span. Every stored `SpanRecord` therefore
+carries the fixed trust label `unauthenticated_self_reported`; legacy rows and
+JSON records are assigned that same label when read. No detection rule treats
+the label, span contents, or apparent tool identity as authentication.
+
+Trace correlation gives you a hypothesis about intent that MacCrab verifies
+against the ground truth ES delivers. If a compromised agent lies in its spans
+— claims a `Read` while shelling out — the kernel events still expose the
+shell. The trace is for attribution and UX, never for trust. CLI, MCP, and
+dashboard views render this provenance explicitly.
 
 ## AI-agent session attribution and the lethal trifecta
 
@@ -90,10 +97,12 @@ not drive high-severity rules on its own (see **Limitations**).
 Two distinct records, two distinct guarantees — stated plainly so the
 word "tamper-evident" isn't doing unearned work:
 
-- **The OTel span store (`traces.db`).** Append-only, and AES-GCM
-  authenticated at rest (see **Privacy → Storage contract**): a modified
-  ciphertext fails the GCM tag check and surfaces a warning instead of
-  decrypting to garbage. That is at-rest integrity, not a portable proof.
+- **The OTel span store (`traces.db`).** New spans are inserted, while bounded
+  retention/pressure maintenance can delete expired or oldest rows. Sanitised
+  attribute ciphertext is AES-GCM authenticated at rest (see **Privacy →
+  Storage contract**): a modified ciphertext fails the GCM tag check and
+  surfaces a warning instead of decrypting to garbage. That is at-rest
+  integrity, not source authentication or a portable proof.
 
 - **The exportable causal record (`.maccrabtrace` / `tracegraph.db`).**
   This is the "signed, replayable record" a reviewer can verify offline.
@@ -127,7 +136,9 @@ verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.s
 - **OTLP receiver: loopback-only, opt-in.** When enabled it binds to
   `127.0.0.1:4318` with `requiredInterfaceType = .loopback`; every
   accepted connection's peer endpoint is verified to be loopback before
-  any read.
+  any read. There is no bearer-token or client-identity check: any local
+  process can submit or forge data, so every resulting span is explicitly
+  `unauthenticated_self_reported`.
 - **Attribute sanitiser.** Span attributes pass through
   `OTLPAttributeSanitizer` before persistence. Attribute keys signalling
   secrets (`*api_key*`, `*token*`, `*secret*`, `*password*`,
@@ -143,13 +154,24 @@ verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.s
 - **Storage contract.** `traces.db` lives next to `events.db` with the
   same 0640 root:admin permissions. **Span attributes are sanitised
   for known secret shapes, then AES-GCM-encrypted at rest** under the
-  same shared key as `events.db` / `alerts.db` (the v1.8.1
-  `DatabaseEncryption` path). Tamper detection is built in: a
+  installation's Keychain-backed database-encryption key (the v1.8.1
+  `DatabaseEncryption` path). This does not authenticate the span source.
+  At-rest tamper detection is built in: a
   modified ciphertext fails the GCM authentication tag check and
   surfaces a logged warning instead of decrypting to garbage. Legacy
   plaintext rows from earlier installs continue to read unchanged
   (the decrypt path is a passthrough when the `ENC2:` prefix is
   absent).
+- **Disk admission.** The configured `traces_max_size_mb` applies to the exact
+  `traces.db` + `traces.db-wal` + `traces.db-shm` footprint, with transaction
+  reserve and a `PRAGMA max_page_count` backstop. Every mutation passes through
+  one writer gate; the receiver checks the encoded body before protobuf decode,
+  then checks an exact decoded-batch bound before insertion. Writes pause before
+  the cap or when the containing volume has less than the 1 GiB free-space
+  floor. Pressure returns HTTP 507 and is published in
+  `traces_storage_admission` for CLI, MCP, and dashboard visibility. Recovery is
+  bounded, refuses to delete under a pinned WAL reader, and uses incremental
+  vacuum only—never a full online `VACUUM`.
 
 ## Enabling
 

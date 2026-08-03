@@ -73,23 +73,16 @@ public actor KeychainDEKVault: DEKVault {
             throw DEKVaultError.osError(status: -1, message: msg)
         }
 
-        // Delete any existing item for this (service, account)
-        // first. Keychain's add-or-update semantics don't compose
-        // cleanly with SecAccessControl — easier to atomic-replace.
-        // kSecUseDataProtectionKeychain MUST be set on every one of the four
-        // SecItem dictionaries in this file. On macOS the default is the LEGACY
-        // file-based keychain; `kSecAttrAccessControl` below implicitly requires
-        // the data-protection keychain, so `store` landed items there while
-        // `retrieve` and `delete` — which set nothing — queried the file-based
-        // keychain and found nothing. Every encrypted case became unopenable.
-        let deleteQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: caseID,
-            kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
-        ]
-        _ = SecItemDelete(deleteQuery as CFDictionary)
-
+        // Try the non-destructive path first. The old implementation deleted an
+        // existing item and only then attempted SecItemAdd. A transient add
+        // failure (locked keychain, entitlement drift, ENOSPC) therefore erased
+        // the only key capable of opening the case. SecItemUpdate is atomic in
+        // the keychain database: if replacement fails, the old DEK remains.
+        //
+        // kSecUseDataProtectionKeychain MUST be set on every SecItem match
+        // dictionary in this file. On macOS the default is the LEGACY file-based
+        // keychain; omitting it makes retrieve/delete/update query a different
+        // keychain from the access-controlled add.
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -102,12 +95,38 @@ public actor KeychainDEKVault: DEKVault {
             kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status != errSecSuccess {
+        if status == errSecSuccess { return }
+
+        if status == errSecDuplicateItem {
+            let updateQuery: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: service,
+                kSecAttrAccount: caseID,
+                kSecUseAuthenticationUI: kSecUseAuthenticationUIAllow,
+                kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
+            ]
+            let replacement: [CFString: Any] = [
+                kSecAttrAccessControl: access,
+                kSecValueData: dek,
+                kSecAttrSynchronizable: kCFBooleanFalse as Any,
+            ]
+            let updateStatus = SecItemUpdate(
+                updateQuery as CFDictionary,
+                replacement as CFDictionary
+            )
+            if updateStatus == errSecSuccess { return }
             throw DEKVaultError.osError(
-                status: status,
-                message: SecCopyErrorMessageString(status, nil) as String? ?? "SecItemAdd failed"
+                status: updateStatus,
+                message: SecCopyErrorMessageString(updateStatus, nil) as String?
+                    ?? "SecItemUpdate failed"
             )
         }
+
+        throw DEKVaultError.osError(
+            status: status,
+            message: SecCopyErrorMessageString(status, nil) as String?
+                ?? "SecItemAdd failed"
+        )
     }
 
     public func retrieve(for caseID: String) async throws -> Data {

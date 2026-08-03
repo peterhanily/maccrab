@@ -185,7 +185,7 @@ public actor ESClientMonitor {
 
     /// Check if a process is running by name using /usr/bin/pgrep (lightweight).
     ///
-    /// `try? proc.run()` followed by `waitUntilExit()` / `terminationStatus` is
+    /// `try? proc.run()` followed by a blocking wait / `terminationStatus` is
     /// not merely lossy — it ABORTS the process. `Process` is NSTask, and
     /// `-[NSConcreteTask terminationStatus]` raises NSInvalidArgumentException
     /// ("task not launched") when the spawn failed; an uncaught ObjC exception
@@ -201,19 +201,21 @@ public actor ESClientMonitor {
     /// alert. Returning `false` here would convert process-table pressure into a
     /// self-inflicted critical-alert storm.
     private nonisolated static func isProcessRunning(_ name: String) -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        proc.arguments = ["-x", name]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-        } catch {
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/pgrep",
+            arguments: ["-x", name],
+            timeout: 2,
+            maximumOutputBytes: nil
+        ) else {
             Logger(subsystem: "com.maccrab.detection", category: "es-monitor")
-                .error("pgrep spawn failed while probing \(name, privacy: .public): \(error.localizedDescription, privacy: .public) — reporting it as running (a failed spawn is no evidence either way)")
+                .error("bounded pgrep launch refused while probing \(name, privacy: .public) — reporting it as running (a failed spawn is no evidence either way)")
             return true
         }
-        proc.waitUntilExit()
-        return proc.terminationStatus == 0
+        guard !result.timedOut, result.terminationStatus != nil else {
+            Logger(subsystem: "com.maccrab.detection", category: "es-monitor")
+                .error("pgrep did not complete safely while probing \(name, privacy: .public) — reporting it as running")
+            return true
+        }
+        return result.terminationStatus == 0
     }
 }

@@ -20,6 +20,55 @@ struct HeartbeatSnapshotTests {
       "alerts_emitted": 12,
       "events_processed": 8377,
       "events_dropped": 4,
+      "event_pipeline": {
+        "offered_by_source": { "ESCollector": 100, "UnifiedLogCollector": 40 },
+        "offered_by_source_and_lane": {
+          "ESCollector": { "priority": 10, "file": 90 },
+          "UnifiedLogCollector": { "priority": 5, "file": 35 }
+        },
+        "dropped_by_source_and_lane": {
+          "ESCollector": { "priority": 0, "file": 1 },
+          "UnifiedLogCollector": { "priority": 1, "file": 0 }
+        },
+        "terminated_by_source_and_lane": {
+          "ESCollector": { "priority": 1, "file": 0 }
+        },
+        "collector_offered_by_source_and_lane": {
+          "ESCollector": { "priority": 11, "file": 91 }
+        },
+        "upstream_dropped_by_source_and_lane": {
+          "ESCollector": { "priority": 0, "file": 1 }
+        },
+        "upstream_terminated_by_source_and_lane": {
+          "ESCollector": { "priority": 1, "file": 0 }
+        },
+        "merged_dropped_by_source_and_lane": {
+          "UnifiedLogCollector": { "priority": 1, "file": 0 }
+        },
+        "merged_terminated_by_source_and_lane": {
+          "ESCollector": { "priority": 0, "file": 0 }
+        },
+        "offered_by_lane": { "priority": 90, "file": 50 },
+        "dequeued_by_lane": { "priority": 86, "file": 49 },
+        "completed_by_lane": { "priority": 85, "file": 49 },
+        "backlog_estimate_by_lane": { "priority": 3, "file": 0 },
+        "in_flight_by_lane": { "priority": 1, "file": 0 },
+        "processing_p99_us_by_lane": { "priority": 4000, "file": 1000 },
+        "latency_sample_count_by_lane": { "priority": 85, "file": 49 },
+        "upstream_dropped_by_lane": { "priority": 0, "file": 1 },
+        "upstream_terminated_by_lane": { "priority": 1, "file": 0 },
+        "merged_dropped_by_lane": { "priority": 1, "file": 1 },
+        "merged_terminated_by_lane": { "priority": 0, "file": 0 },
+        "collector_capacity_by_source": { "ESCollector": 100000 },
+        "pre_buffer_dropped_by_source": { "ESCollector": 7 },
+        "detection_input_dropped_total": 10,
+        "capacity_by_lane": { "priority": 100000, "file": 100000 },
+        "collector_buffer": {
+          "unified_log_normalized_total": 42,
+          "unified_log_stream_yield_dropped_total": 2,
+          "unified_log_capacity": 512
+        }
+      },
       "rules_loaded": 486,
       "rules_active": 98,
       "collector_health": [
@@ -38,6 +87,38 @@ struct HeartbeatSnapshotTests {
       },
       "trace_registry": { "enabled": true, "live_bindings": 5, "cap": 4096,
                           "pid_recycle_rejected": 1, "cap_evictions": 0, "ttl_evictions": 2 },
+      "tracegraph_storage_admission": {
+        "enabled": true, "blocked": true, "reason": "footprint_limit",
+        "store_available": true, "startup_blocked": false,
+        "shed_mutations_total": 73, "max_footprint_bytes": 262144000,
+        "admission_threshold_bytes": 195035136, "resume_below_bytes": 195035136,
+        "transaction_reserve_bytes": 67108864, "footprint_bytes": 224395952,
+        "free_space_bytes": 8589934592, "free_space_floor_bytes": 1073741824,
+        "pinned_reader": false, "recovering": false
+      },
+      "traces_storage_admission": {
+        "enabled": true, "blocked": true, "reason": "low_free_space",
+        "store_available": true, "startup_blocked": false,
+        "shed_mutations_total": 19, "max_footprint_bytes": 104857600,
+        "admission_threshold_bytes": 96468992,
+        "transaction_reserve_bytes": 8388608, "footprint_bytes": 95158272,
+        "free_space_bytes": 805306368, "free_space_floor_bytes": 1073741824,
+        "pinned_reader": false, "recovering": true
+      },
+      "browser_inventory": {
+        "coverage_known": true, "complete": false, "degraded": true,
+        "reason": "directory_budget_exhausted",
+        "last_scan_was_truncated": true,
+        "scans_total": 9, "truncated_scans_total": 2,
+        "inspected_directory_entries_total": 200123,
+        "truncated_directories_total": 2, "truncated_homes_total": 2,
+        "last_scan_completed_at_unix": 1785686400.5,
+        "last_scan_homes": 2,
+        "last_scan_inspected_directory_entries": 100123,
+        "last_scan_truncated_directory_count": 1,
+        "last_scan_truncated_home_count": 1,
+        "per_home_directory_entry_budget": 100000
+      },
       "es_kernel_dropped_total": 0,
       "es_kernel_dropped_by_type": { "exec": 0, "write": 3 },
       "es_processed_by_type": { "exec": 4000, "write": 4377 },
@@ -46,6 +127,8 @@ struct HeartbeatSnapshotTests {
       "eslogger_dropped_total": 0,
       "merged_priority_dropped_total": 0,
       "merged_file_dropped_total": 12,
+      "merged_priority_terminated_total": 1,
+      "merged_file_terminated_total": 2,
       "detection_input_dropped_total": 12,
       "events_storage_write_dropped_total": 3605,
       "payload_truncated_total": 1,
@@ -77,6 +160,20 @@ struct HeartbeatSnapshotTests {
         #expect(h.eventsDropped == 4)
         #expect(h.rulesLoaded == 486)
         #expect(h.rulesActive == 98)
+        #expect(h.eventPipeline?.offeredBySource?["ESCollector"] == 100)
+        #expect(h.eventPipeline?.offeredBySourceAndLane?["UnifiedLogCollector"]?["file"] == 35)
+        #expect(h.eventPipeline?.droppedBySourceAndLane?["ESCollector"]?["file"] == 1)
+        #expect(h.eventPipeline?.terminatedBySourceAndLane?["ESCollector"]?["priority"] == 1)
+        #expect(h.eventPipeline?.upstreamDroppedByLane?["file"] == 1)
+        #expect(h.eventPipeline?.mergedDroppedBySourceAndLane?["UnifiedLogCollector"]?["priority"] == 1)
+        #expect(h.eventPipeline?.collectorCapacityBySource?["ESCollector"] == 100_000)
+        #expect(h.eventPipeline?.preBufferDroppedBySource?["ESCollector"] == 7)
+        #expect(h.eventPipeline?.detectionInputDroppedTotal == 10)
+        #expect(h.eventPipeline?.backlogEstimateByLane?["priority"] == 3)
+        #expect(h.eventPipeline?.inFlightByLane?["priority"] == 1)
+        #expect(h.eventPipeline?.processingP99MicrosByLane?["priority"] == 4_000)
+        #expect(h.eventPipeline?.latencySampleCountByLane?["file"] == 49)
+        #expect(h.eventPipeline?.collectorBuffer?["unified_log_stream_yield_dropped_total"] == 2)
         // Drop-attribution gauges — the exact fields the app decoder omitted.
         #expect(h.esKernelDroppedTotal == 0)
         #expect(h.esKernelDroppedByType?["write"] == 3)
@@ -86,6 +183,8 @@ struct HeartbeatSnapshotTests {
         #expect(h.esloggerDroppedTotal == 0)
         #expect(h.mergedPriorityDroppedTotal == 0)
         #expect(h.mergedFileDroppedTotal == 12)
+        #expect(h.mergedPriorityTerminatedTotal == 1)
+        #expect(h.mergedFileTerminatedTotal == 2)
         #expect(h.detectionInputDroppedTotal == 12)
         #expect(h.eventsStorageWriteDroppedTotal == 3605)
         #expect(h.payloadTruncatedTotal == 1)
@@ -121,6 +220,54 @@ struct HeartbeatSnapshotTests {
         #expect(h.prevention?.networkBlocker?.count == 0)
         #expect(h.traceRegistry?.liveBindings == 5)
         #expect(h.traceRegistry?.ttlEvictions == 2)
+        #expect(h.traceGraphStorageAdmission?.enabled == true)
+        #expect(h.traceGraphStorageAdmission?.blocked == true)
+        #expect(h.traceGraphStorageAdmission?.storeAvailable == true)
+        #expect(h.traceGraphStorageAdmission?.startupBlocked == false)
+        #expect(h.traceGraphStorageAdmission?.reason == "footprint_limit")
+        #expect(h.traceGraphStorageAdmission?.shedMutationsTotal == 73)
+        #expect(h.traceGraphStorageAdmission?.maxFootprintBytes == 262_144_000)
+        #expect(h.traceGraphStorageAdmission?.transactionReserveBytes == 67_108_864)
+        #expect(h.traceGraphStorageAdmission?.pinnedReader == false)
+        #expect(h.traceStoreStorageAdmission?.enabled == true)
+        #expect(h.traceStoreStorageAdmission?.blocked == true)
+        #expect(h.traceStoreStorageAdmission?.reason == "low_free_space")
+        #expect(h.traceStoreStorageAdmission?.shedMutationsTotal == 19)
+        #expect(h.traceStoreStorageAdmission?.maxFootprintBytes == 104_857_600)
+        #expect(h.traceStoreStorageAdmission?.recovering == true)
+        #expect(h.browserInventory?.coverageKnown == true)
+        #expect(h.browserInventory?.complete == false)
+        #expect(h.browserInventory?.degraded == true)
+        #expect(h.browserInventory?.reason == "directory_budget_exhausted")
+        #expect(h.browserInventory?.lastScanWasTruncated == true)
+        #expect(h.browserInventory?.scansTotal == 9)
+        #expect(h.browserInventory?.truncatedScansTotal == 2)
+        #expect(h.browserInventory?.lastScanInspectedDirectoryEntries == 100_123)
+        #expect(h.browserInventory?.lastScanTruncatedHomeCount == 1)
+        #expect(h.browserInventory?.perHomeDirectoryEntryBudget == 100_000)
+    }
+
+    @Test("Startup admission remains distinct from a live blocked store")
+    func startupAdmissionDecode() throws {
+        let h = try decode("""
+        {
+          "schema_version": 5,
+          "tracegraph_storage_admission": {
+            "enabled": true,
+            "blocked": true,
+            "store_available": false,
+            "startup_blocked": true,
+            "reason": "low_free_space",
+            "free_space_bytes": 104857600,
+            "free_space_floor_bytes": 1073741824
+          }
+        }
+        """)
+        #expect(h.traceGraphStorageAdmission?.storeAvailable == false)
+        #expect(h.traceGraphStorageAdmission?.startupBlocked == true)
+        #expect(h.traceGraphStorageAdmission?.blocked == true)
+        #expect(h.traceGraphStorageAdmission?.reason == "low_free_space")
+        #expect(h.traceGraphStorageAdmission?.freeSpaceBytes == 104_857_600)
     }
 
     @Test("Missing drop-attribution keys decode as nil, never zero (honest-absent)")
@@ -136,8 +283,13 @@ struct HeartbeatSnapshotTests {
         // able to distinguish "no drops" from "this engine didn't report drops".
         #expect(h.esKernelDroppedTotal == nil)
         #expect(h.mergedPriorityDroppedTotal == nil)
+        #expect(h.mergedPriorityTerminatedTotal == nil)
         #expect(h.detectionInputDroppedTotal == nil)
         #expect(h.collectorHealth == nil)
+        #expect(h.eventPipeline == nil)
+        #expect(h.traceGraphStorageAdmission == nil)
+        #expect(h.traceStoreStorageAdmission == nil)
+        #expect(h.browserInventory == nil)
         #expect(h.sysextHasFDA == nil)
     }
 

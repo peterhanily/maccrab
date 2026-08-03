@@ -24,6 +24,7 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// alarm).
     public private(set) var alertsReadError: String? = nil
     public let dataDir: String?
+    public private(set) var browserInventoryCoverage: V2BrowserInventoryCoverage?
 
     private let alertStore: AlertStore?
     private let eventStore: EventStore?
@@ -1208,11 +1209,11 @@ public final class V2LiveDataProvider: V2DataProvider {
     }
 
     public func extensions() async -> [V2MockExtension] {
-        // Off-main: BrowserExtensionMonitor.snapshot does ~5
-        // contentsOfDirectory walks + N JSON parses (manifest reads)
-        // — synchronous file I/O. Don't run it on @MainActor.
-        await Task.detached(priority: .userInitiated) {
-            BrowserExtensionMonitor.snapshot().map { snap -> V2MockExtension in
+        // Off-main: the bounded/no-follow inventory performs synchronous
+        // directory reads + manifest JSON parses. Don't run it on @MainActor.
+        let result = await Task.detached(priority: .userInitiated) {
+            let inventory = BrowserExtensionMonitor.snapshotResult()
+            let rows = inventory.extensions.map { snap -> V2MockExtension in
                 // Pretty browser label.
                 let browserLabel: String = {
                     switch snap.browser.lowercased() {
@@ -1250,7 +1251,21 @@ public final class V2LiveDataProvider: V2DataProvider {
                     path: snap.extensionPath
                 )
             }
+            let coverage = inventory.coverage
+            return (
+                rows,
+                V2BrowserInventoryCoverage(
+                    complete: coverage.isComplete,
+                    inspectedDirectoryEntries: coverage.inspectedDirectoryEntries,
+                    truncatedDirectoryCount: coverage.truncatedDirectoryCount,
+                    truncatedHomeCount: coverage.truncatedHomeCount,
+                    homesScanned: coverage.homesScanned,
+                    perHomeDirectoryEntryBudget: coverage.perHomeDirectoryEntryBudget
+                )
+            )
         }.value
+        browserInventoryCoverage = result.1
+        return result.0
     }
 
     // MARK: - Mutations
@@ -1943,5 +1958,3 @@ private actor EnrichmentResultCache {
         inFlight.remove(info.id)
     }
 }
-
-

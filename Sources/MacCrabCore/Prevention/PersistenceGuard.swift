@@ -20,10 +20,11 @@ public actor PersistenceGuard {
 
     /// User-level paths (resolved at runtime)
     private static func userProtectedPaths() -> [String] {
-        let home = NSHomeDirectory()
-        return [
-            home + "/Library/LaunchAgents",
-        ]
+        userProtectedPaths(homes: RealUserHomeResolver.all())
+    }
+
+    static func userProtectedPaths(homes: [RealUserHome]) -> [String] {
+        homes.map { $0.appending("Library/LaunchAgents") }
     }
 
     private var isEnabled = false

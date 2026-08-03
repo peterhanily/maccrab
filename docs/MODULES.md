@@ -103,7 +103,7 @@ validators on each path.
 | DNS sinkhole | experimental | Block DNS resolution for known-bad domains via `/etc/hosts` overlay. |
 | Network blocker | experimental | Per-process or per-domain network blocking. |
 | Persistence guard | experimental | Blocks LaunchAgent / LaunchDaemon writes by suspicious processes. |
-| Honeyfile deception | opt-in | Plants canary credential files. Enable with `"deception_enabled": true` in `daemon_config.json` (`MACCRAB_DECEPTION=1` also works for a dev daemon). |
+| Honeyfile deception | opt-in | Run `maccrabctl deception deploy` as the console user to plant canary files, then enable matching with `"deception_enabled": true` in `daemon_config.json` (`MACCRAB_DECEPTION=1` also works for an unprivileged dev daemon). The root System Extension never writes into the user home. |
 
 ## Why module status matters
 

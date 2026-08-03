@@ -93,7 +93,7 @@ let package = Package(
         .target(
             name: "CSQLCipher",
             path: "Sources/CSQLCipher",
-            sources: ["sqlite3.c"],
+            sources: ["sqlite3.c", "MacCrabSQLiteControl.c"],
             publicHeadersPath: "include",
             cSettings: [
                 .define("SQLITE_HAS_CODEC"),
@@ -299,6 +299,8 @@ let package = Package(
             dependencies: [
                 "maccrabctl",
                 "maccrab-mcp",
+                "MacCrabCore",
+                "MacCrabForensics",
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),

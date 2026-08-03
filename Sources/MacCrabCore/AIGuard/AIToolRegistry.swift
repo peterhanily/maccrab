@@ -41,7 +41,7 @@ public enum AIToolType: String, Codable, Sendable, CaseIterable {
 /// tool touching ITS OWN store / backend (benign, down-weighted) apart from
 /// cross-tool / shared-credential access or beaconing to an unknown host
 /// (must-fire). Directory entries use a leading "~" expanded to the current
-/// user's home at lookup time.
+/// validated home containing the observed file path at lookup time.
 ///
 /// IMPORTANT (must-fire safety): `ownDirs` deliberately lists ONLY each tool's
 /// own config/state directories. Shared or system credential locations
@@ -64,6 +64,14 @@ public struct AIToolMetadata: Sendable {
 /// and process names. Extensible via custom patterns in config.
 public struct AIToolRegistry: Sendable {
 
+    /// Executable names whose identity is meaningful only as the final path
+    /// component. Keep these separate from substring patterns: a source tree
+    /// or build directory named after a tool does not make every executable
+    /// beneath it part of that tool.
+    private static let builtinExecutableNames: [(AIToolType, [String])] = [
+        (.codex, ["codex", "codex-cli"]),
+    ]
+
     /// Patterns for identifying AI tools. Each tuple: (tool type, path substrings to match).
     private static let builtinPatterns: [(AIToolType, [String])] = [
         // Claude Code
@@ -80,7 +88,6 @@ public struct AIToolRegistry: Sendable {
             // COMMAND-LINE fragment, not a path fragment. It is matched against
             // `executablePath` only, so it could never fire; it was dead weight
             // that made the Codex coverage look broader than it is.
-            "codex-cli",
         ]),
         // OpenClaw
         (.openClaw, [
@@ -182,11 +189,13 @@ public struct AIToolRegistry: Sendable {
     /// shared/system credential reads (~/.aws, ~/.ssh, ~/.npmrc, login.keychain-db,
     /// browser stores) never count as "own store" and are not down-weighted here.
     public static func isOwnedByTool(filePath: String, toolType: AIToolType) -> Bool {
-        guard let meta = toolMetadata[toolType], !meta.ownDirs.isEmpty else { return false }
-        let home = NSHomeDirectory()
+        guard let meta = toolMetadata[toolType], !meta.ownDirs.isEmpty,
+              let home = RealUserHomeResolver.home(containingPath: filePath) else {
+            return false
+        }
         let file = (filePath as NSString).standardizingPath
         for dir in meta.ownDirs {
-            let expanded = dir.hasPrefix("~") ? home + String(dir.dropFirst()) : dir
+            let expanded = dir.hasPrefix("~") ? home.path + String(dir.dropFirst()) : dir
             let normDir = (expanded as NSString).standardizingPath
             if file == normDir || file.hasPrefix(normDir + "/") {
                 return true
@@ -217,6 +226,16 @@ public struct AIToolRegistry: Sendable {
     public func isAITool(executablePath: String) -> AIToolType? {
         let path = executablePath.lowercased()
         let basename = (path as NSString).lastPathComponent
+
+        // Exact executable-name matches must never widen to a directory
+        // component. In particular, current standalone Codex releases live
+        // below ~/.codex/packages/standalone/.../bin/codex, while an unrelated
+        // build helper below a directory named `codex` is not Codex.
+        for (toolType, names) in Self.builtinExecutableNames {
+            if names.contains(basename) {
+                return toolType
+            }
+        }
 
         // Check builtin patterns
         for (toolType, patterns) in Self.builtinPatterns {
@@ -258,7 +277,7 @@ public struct AIToolRegistry: Sendable {
     private static func matches(path: String, basename: String, pattern: String) -> Bool {
         if pattern.hasPrefix("/"), !pattern.dropFirst().contains("/") {
             let name = String(pattern.dropFirst())
-            return basename == name || path.contains("/\\(name)/")
+            return basename == name || path.contains("/\(name)/")
         }
         return path.contains(pattern)
     }

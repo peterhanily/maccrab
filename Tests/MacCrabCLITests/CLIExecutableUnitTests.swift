@@ -28,6 +28,27 @@ import Foundation
 @Suite("maccrabctl: unit")
 struct MacCrabCtlUnitTests {
 
+    @Test("trace export treats --out as the documented parent directory")
+    func traceExportTargetUsesOutputDirectory() throws {
+        #expect(MacCrabCtl.traceExportStoreOpenFailureExitCode == 1)
+        let outputDirectory = URL(fileURLWithPath: "/private/tmp/trace-exports")
+        #expect(try MacCrabCtl.traceExportTarget(
+            traceId: "trace-123",
+            outputDirectory: outputDirectory
+        ).path == "/private/tmp/trace-exports/trace-123.maccrabtrace")
+        #expect(try MacCrabCtl.traceExportTarget(
+            traceId: "trace-123",
+            outputDirectory: nil,
+            currentDirectoryPath: "/private/tmp/cwd"
+        ).path == "/private/tmp/cwd/trace-123.maccrabtrace")
+        #expect(throws: MacCrabCtl.TraceExportTargetError.self) {
+            _ = try MacCrabCtl.traceExportTarget(
+                traceId: "../../redirected",
+                outputDirectory: outputDirectory
+            )
+        }
+    }
+
     /// The v1/v2 suppression-store discriminator. `suppressRule` /
     /// `unsuppressRule` encode a FLAT `[ruleId: [path]]` document over the very
     /// same suppressions.json the daemon rewrites in v2 shape
@@ -76,6 +97,105 @@ struct MacCrabCtlUnitTests {
             #expect(!advertised.contains(hidden),
                     "'\(hidden)' is a MACCRAB_DEV-only verb but appears as a documented command in `maccrabctl help`")
         }
+    }
+
+    @Test("status makes a TraceGraph startup-admission evidence gap explicit")
+    func traceGraphStartupAdmissionStatus() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-tracegraph-status-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fixture = """
+        {
+          "schema_version": 5,
+          "written_at_unix": 1700000000,
+          "tracegraph_storage_admission": {
+            "enabled": true,
+            "blocked": true,
+            "store_available": false,
+            "startup_blocked": true,
+            "reason": "low_free_space"
+          }
+        }
+        """
+        try fixture.write(
+            to: dir.appendingPathComponent("heartbeat_rich.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let lines = MacCrabCtl.traceGraphStorageStatusLines(supportDir: dir.path)
+        #expect(lines.first == "TraceGraph:      Paused at startup ⚠")
+        #expect(lines.joined(separator: "\n").contains("new causal evidence is not being recorded"))
+        #expect(lines.joined(separator: "\n").contains("low_free_space"))
+        #expect(lines.last?.contains("restart MacCrab") == true)
+    }
+
+    @Test("status reports a live admitted TraceGraph as active")
+    func traceGraphHealthyStatus() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-tracegraph-healthy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        {"schema_version":5,"written_at_unix":1700000000,
+         "tracegraph_storage_admission":{"enabled":true,"blocked":false,
+         "store_available":true,"startup_blocked":false,"reason":""}}
+        """.write(
+            to: dir.appendingPathComponent("heartbeat_rich.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        #expect(MacCrabCtl.traceGraphStorageStatusLines(supportDir: dir.path)
+            == ["TraceGraph:      Active ✓"])
+    }
+
+    @Test("status makes traces.db shedding and untrusted provenance explicit")
+    func traceStorePressureStatus() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-traces-status-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        {"schema_version":5,"written_at_unix":1700000000,
+         "traces_storage_admission":{"enabled":true,"blocked":true,
+         "store_available":true,"startup_blocked":false,"reason":"footprint_limit"}}
+        """.write(
+            to: dir.appendingPathComponent("heartbeat_rich.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let lines = MacCrabCtl.traceStoreStorageStatusLines(supportDir: dir.path)
+        #expect(lines.first == "Agent Trace DB:  Persistence paused ⚠")
+        #expect(lines.joined(separator: "\n").contains("Unauthenticated/self-reported OTLP spans"))
+        #expect(lines.joined(separator: "\n").contains("kernel detection continues"))
+        #expect(lines.joined(separator: "\n").contains("footprint_limit"))
+    }
+
+    @Test("status treats an intentionally disabled trace receiver as non-pressure")
+    func traceStoreDisabledStatus() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-traces-disabled-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        {"schema_version":5,"written_at_unix":1700000000,
+         "traces_storage_admission":{"enabled":false,"blocked":false,
+         "store_available":false,"reason":"receiver_disabled"}}
+        """.write(
+            to: dir.appendingPathComponent("heartbeat_rich.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        #expect(MacCrabCtl.traceStoreStorageStatusLines(supportDir: dir.path)
+            == ["Agent Trace DB:  Receiver disabled"])
     }
 }
 

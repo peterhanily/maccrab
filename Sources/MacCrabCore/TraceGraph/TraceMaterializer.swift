@@ -247,6 +247,12 @@ public actor TraceMaterializer {
 
         do {
             try await store.saveTrace(trace, members: members)
+        } catch let admission as CausalGraphStorageAdmissionError {
+            // Preserve the authoritative typed signal. Rolling ingestion uses
+            // it to shed quietly while the store's transition-only log and
+            // counter carry the operational signal; external-anchor callers
+            // can still distinguish storage pressure from a real store fault.
+            throw admission
         } catch {
             throw MaterializeError.storeError(error.localizedDescription)
         }
@@ -278,6 +284,10 @@ public actor TraceMaterializer {
                 publishedToUnifiedLog: false,
                 createdAt: now
             )
+        } catch is CausalGraphStorageAdmissionError {
+            // The store already counted the shed and logged the transition.
+            // Logging this best-effort append per anchor would flood unified
+            // logging while storage admission remains latched.
         } catch {
             logger.error("continuity-chain append failed for trace \(trace.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }

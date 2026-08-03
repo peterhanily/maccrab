@@ -78,28 +78,59 @@ public actor BlobVault {
 
     /// Load + decrypt a blob by sha256.
     public func load(sha256: String) throws -> Data {
+        try Self.validateSHA256(sha256)
         let path = layout.blobPath(for: sha256)
         let encrypted = try Data(contentsOf: path)
         let box = try AES.GCM.SealedBox(combined: encrypted)
-        return try AES.GCM.open(box, using: key)
+        let plaintext = try AES.GCM.open(box, using: key)
+        let actual = SHA256.hash(data: plaintext)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        guard actual.caseInsensitiveCompare(sha256) == .orderedSame else {
+            throw BlobVaultError.integrityMismatch(
+                expectedSha256: sha256.lowercased(),
+                actualSha256: actual
+            )
+        }
+        return plaintext
     }
 
     /// `true` iff a blob with this sha256 has been previously
     /// stored in this vault. Callers use this for dedup-skip
     /// optimization before calling `store(_:)`.
-    public func has(sha256: String) -> Bool {
-        FileManager.default.fileExists(atPath: layout.blobPath(for: sha256).path)
+    public func has(sha256: String) throws -> Bool {
+        try Self.validateSHA256(sha256)
+        return FileManager.default.fileExists(atPath: layout.blobPath(for: sha256).path)
     }
 
     /// Delete a blob if present. Idempotent: missing file is fine.
-    public func delete(sha256: String) {
+    public func delete(sha256: String) throws {
+        try Self.validateSHA256(sha256)
         try? FileManager.default.removeItem(at: layout.blobPath(for: sha256))
+    }
+
+    /// `blobPath(for:)` is deliberately a lightweight layout helper, not a
+    /// parser. Every API that accepts an externally sourced digest therefore
+    /// validates before resolving it. Without this gate a value such as
+    /// `../../manifest.json` escapes `vault/blobs/`; `delete` could unlink a
+    /// file outside the vault and `has` became a filesystem-existence oracle.
+    private static func validateSHA256(_ value: String) throws {
+        let bytes = value.utf8
+        guard bytes.count == 64,
+              bytes.allSatisfy({ byte in
+                  (byte >= 48 && byte <= 57) ||
+                  (byte >= 65 && byte <= 70) ||
+                  (byte >= 97 && byte <= 102)
+              }) else {
+            throw BlobVaultError.malformedSha256
+        }
     }
 }
 
 public enum BlobVaultError: Error, CustomStringConvertible {
     case malformedDEK(actualBytes: Int)
     case malformedSha256
+    case integrityMismatch(expectedSha256: String, actualSha256: String)
     case sealFailed
 
     public var description: String {
@@ -108,6 +139,8 @@ public enum BlobVaultError: Error, CustomStringConvertible {
             return "BlobVault: DEK must be 32 bytes; got \(n)"
         case .malformedSha256:
             return "BlobVault: sha256 not a 64-hex-char string"
+        case .integrityMismatch(let expected, let actual):
+            return "BlobVault: decrypted content hash \(actual) does not match requested \(expected)"
         case .sealFailed:
             return "BlobVault: AES-GCM.seal produced no combined output"
         }

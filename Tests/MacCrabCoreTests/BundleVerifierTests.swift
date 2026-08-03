@@ -66,7 +66,8 @@ struct BundleVerifierTests {
 
     private func buildSignedBundle(
         trustSubstrate: TrustSubstrate? = nil,
-        unifiedLogAnchor: UnifiedLogAnchor? = nil
+        unifiedLogAnchor: UnifiedLogAnchor? = nil,
+        bundleRoot requestedBundleRoot: URL? = nil
     ) async throws -> (URL, BundleExporter.Inputs, TrustSubstrate) {
         let (store, dbPath) = try await makeStore()
         let parent = try await upsert(store, makeProcess("parent", "/bin/zsh"))
@@ -82,7 +83,7 @@ struct BundleVerifierTests {
         await store.close()
         try? FileManager.default.removeItem(at: dbPath)
 
-        let bundleRoot = FileManager.default.temporaryDirectory
+        let bundleRoot = requestedBundleRoot ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("verbundle-\(UUID().uuidString)")
         let substrate = trustSubstrate ?? TrustSubstrate(
             storage: InMemoryTrustSubstrateStorage(),
@@ -105,6 +106,28 @@ struct BundleVerifierTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let outcome = await BundleVerifier.verify(at: dir)
         #expect(outcome.exitCode == 0, "Verifier rejected freshly-signed bundle: \(outcome.kind) \(outcome.messages)")
+    }
+
+    @Test("Resolved verification is pinned against same-uid temporary-tree mutation")
+    func resolvedVerifierUsesCapturedBytes() async throws {
+        let (dir, _, _) = try await buildSignedBundle()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let resolution = try SafeTraceBundleResolver.resolve(inputAt: dir)
+        defer { resolution.cleanup() }
+
+        try Data(#"{"same_uid_rewrite":true}"#.utf8).write(
+            to: resolution.bundleDirectory.appendingPathComponent("events.jsonl")
+        )
+        try Data("not-a-public-key".utf8).write(
+            to: resolution.bundleDirectory
+                .appendingPathComponent("integrity/trace-signing.pub")
+        )
+
+        let outcome = await BundleVerifier.verify(resolvedBundle: resolution)
+        #expect(
+            outcome.exitCode == 0,
+            "Verifier consumed the mutable path-backed copy: \(outcome.kind)"
+        )
     }
 
     @Test("UNSIGNED placeholder bundle fails with exit 3")
@@ -152,6 +175,67 @@ struct BundleVerifierTests {
             combined.contains("events.jsonl") || combined.contains("Merkle"),
             "Expected message mentioning events.jsonl or Merkle, got: \(combined)"
         )
+    }
+
+    @Test("An ancestor named integrity cannot empty the signed artifact set")
+    func integrityAncestorDoesNotDisableMerkleCoverage() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("merkle-ancestor-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let integrityAncestor = scratch.appendingPathComponent("integrity", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: integrityAncestor,
+            withIntermediateDirectories: true
+        )
+        let requestedBundle = integrityAncestor.appendingPathComponent(
+            "sample.maccrabtrace",
+            isDirectory: true
+        )
+
+        let (dir, _, _) = try await buildSignedBundle(bundleRoot: requestedBundle)
+        let signed = try BundleMerkle.compute(forBundleAt: dir)
+        #expect(!signed.artifacts.isEmpty)
+        #expect(signed.artifacts.contains { $0.path == "manifest.json" })
+        #expect(signed.artifacts.contains { $0.path == "events.jsonl" })
+
+        let clean = await BundleVerifier.verify(at: dir)
+        #expect(clean.exitCode == 0, "Fresh bundle under integrity ancestor did not verify")
+
+        try #"{"id":"ev-1","ts":1700000000,"ancestor_bypass":true}"#
+            .write(
+                to: dir.appendingPathComponent("events.jsonl"),
+                atomically: true,
+                encoding: .utf8
+            )
+        let tampered = await BundleVerifier.verify(at: dir)
+        #expect(tampered.exitCode == 2,
+                "Ancestor name must not leave payload mutations outside the signed root")
+    }
+
+    @Test("A nested payload directory named integrity remains signed")
+    func nestedIntegrityDirectoryIsNotExcluded() async throws {
+        let (dir, _, _) = try await buildSignedBundle()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nested = dir.appendingPathComponent(
+            "evidence/integrity",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: nested,
+            withIntermediateDirectories: true
+        )
+        let addedPath = "evidence/integrity/injected.json"
+        try #"{"injected":true}"#.write(
+            to: dir.appendingPathComponent(addedPath),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let recomputed = try BundleMerkle.compute(forBundleAt: dir)
+        #expect(recomputed.artifacts.contains { $0.path == addedPath })
+        let outcome = await BundleVerifier.verify(at: dir)
+        #expect(outcome.exitCode == 2,
+                "A nested directory name must not create an unsigned payload namespace")
     }
 
     @Test("Tampering with manifest.json also fails verify (exit 2)")
@@ -358,6 +442,18 @@ struct BundleMerkleReductionTests {
     func emptyReduction() {
         let root = BundleMerkle.reduce([])
         #expect(root == "e66367da073bd5b0047d9868f7e90312f0c5ae30a898d09e24ac86c72557496c")
+    }
+
+    @Test("Filesystem enumeration failure never becomes a signed empty tree")
+    func enumerationFailureIsNotEmptyBundle() throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "missing-merkle-bundle-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        #expect(!FileManager.default.fileExists(atPath: missing.path))
+        #expect(throws: BundleMerkle.ComputationError.self) {
+            _ = try BundleMerkle.compute(forBundleAt: missing)
+        }
     }
 
     @Test("Single leaf is hashed + count-bound, NOT returned bare (v2 golden)")

@@ -2,6 +2,133 @@ import Foundation
 import MacCrabCore
 import os.log
 
+/// Fail-visible snapshot of a TraceGraph store that could not open because the
+/// storage-admission gate fired during initialization.  The store actor does
+/// not exist in this state, so its live `storageAdmissionStatus()` cannot be
+/// queried by the heartbeat writer; retain the typed error's non-sensitive
+/// fields here instead of collapsing the evidence gap into `enabled: false`.
+struct TraceGraphStartupAdmissionStatus: Sendable, Equatable {
+    let reason: CausalGraphStorageBlockReason
+    let maxFootprintBytes: Int64?
+    let admissionThresholdBytes: Int64?
+    let transactionReserveBytes: Int64?
+    let footprintBytes: Int64?
+    let freeSpaceBytes: Int64?
+    let freeSpaceFloorBytes: Int64?
+
+    init(
+        error: CausalGraphStorageAdmissionError,
+        configuredMaxFootprintBytes: Int64?,
+        configuredFreeSpaceFloorBytes: Int64?
+    ) {
+        maxFootprintBytes = configuredMaxFootprintBytes
+        freeSpaceFloorBytes = configuredFreeSpaceFloorBytes
+
+        switch error {
+        case .footprintLimit(let footprint, let threshold, let cap):
+            reason = .footprintLimit
+            admissionThresholdBytes = threshold
+            transactionReserveBytes = max(0, cap - threshold)
+            footprintBytes = footprint
+            freeSpaceBytes = nil
+
+        case .lowFreeSpace(let free, let floor, let required):
+            reason = .lowFreeSpace
+            admissionThresholdBytes = nil
+            transactionReserveBytes = max(0, required - floor)
+            footprintBytes = nil
+            freeSpaceBytes = free
+
+        case .probeFailed:
+            reason = .probeFailure
+            admissionThresholdBytes = nil
+            transactionReserveBytes = nil
+            footprintBytes = nil
+            freeSpaceBytes = nil
+
+        case .mutationTooLarge(_, let reserve):
+            reason = .mutationTooLarge
+            admissionThresholdBytes = nil
+            transactionReserveBytes = reserve
+            footprintBytes = nil
+            freeSpaceBytes = nil
+
+        case .recoveryInProgress:
+            reason = .recoveryInProgress
+            admissionThresholdBytes = nil
+            transactionReserveBytes = nil
+            footprintBytes = nil
+            freeSpaceBytes = nil
+        }
+    }
+
+    /// Schema-5 heartbeat representation. `store_available` distinguishes a
+    /// boot-time refusal (no actor exists) from a live actor temporarily
+    /// shedding writes; `startup_blocked` makes that distinction explicit for
+    /// older consumers that only understand `blocked`.
+    var heartbeatDictionary: [String: Any] {
+        var result: [String: Any] = [
+            "enabled": true,
+            "blocked": true,
+            "store_available": false,
+            "startup_blocked": true,
+            "reason": reason.rawValue,
+            "shed_mutations_total": Int64(0),
+            "pinned_reader": false,
+            "recovering": false,
+        ]
+        if let maxFootprintBytes { result["max_footprint_bytes"] = maxFootprintBytes }
+        if let admissionThresholdBytes { result["admission_threshold_bytes"] = admissionThresholdBytes }
+        if let transactionReserveBytes { result["transaction_reserve_bytes"] = transactionReserveBytes }
+        if let footprintBytes { result["footprint_bytes"] = footprintBytes }
+        if let freeSpaceBytes { result["free_space_bytes"] = freeSpaceBytes }
+        if let freeSpaceFloorBytes { result["free_space_floor_bytes"] = freeSpaceFloorBytes }
+        return result
+    }
+}
+
+/// Typed traces.db pressure captured when the actor cannot be constructed.
+/// The receiver is disabled in this state, but the heartbeat must still say
+/// why advisory OTLP evidence is unavailable.
+struct TraceStoreStartupAdmissionStatus: Sendable, Equatable {
+    let reason: TraceStoreStorageBlockReason
+    let maxFootprintBytes: Int64?
+    let freeSpaceFloorBytes: Int64?
+
+    init(
+        error: TraceStoreStorageAdmissionError,
+        configuredMaxFootprintBytes: Int64?,
+        configuredFreeSpaceFloorBytes: Int64?
+    ) {
+        maxFootprintBytes = configuredMaxFootprintBytes
+        freeSpaceFloorBytes = configuredFreeSpaceFloorBytes
+        switch error {
+        case .footprintLimit: reason = .footprintLimit
+        case .lowFreeSpace: reason = .lowFreeSpace
+        case .probeFailed: reason = .probeFailure
+        case .mutationTooLarge: reason = .mutationTooLarge
+        case .sqliteFull: reason = .sqliteFull
+        case .filesystemFull: reason = .filesystemFull
+        }
+    }
+
+    var heartbeatDictionary: [String: Any] {
+        var value: [String: Any] = [
+            "enabled": true,
+            "blocked": true,
+            "store_available": false,
+            "startup_blocked": true,
+            "reason": reason.rawValue,
+            "shed_mutations_total": Int64(0),
+            "pinned_reader": false,
+            "recovering": false,
+        ]
+        if let maxFootprintBytes { value["max_footprint_bytes"] = maxFootprintBytes }
+        if let freeSpaceFloorBytes { value["free_space_floor_bytes"] = freeSpaceFloorBytes }
+        return value
+    }
+}
+
 /// Holds all engine and component references shared across the daemon.
 /// Created once during initialization and passed to all subsystems.
 final class DaemonState {
@@ -100,6 +227,7 @@ final class DaemonState {
     // toggle that SIGHUPs the daemon to start/stop the receiver
     // dynamically; PR-4 ships env-var-only auto-start.
     var traceStore: TraceStore?
+    var traceStoreStartupAdmission: TraceStoreStartupAdmissionStatus?
     var otlpReceiver: OTLPReceiver?
 
     // MARK: - Collector registry (v1.7.2)
@@ -212,6 +340,12 @@ final class DaemonState {
     /// pruneOldestTraces / databaseSizeBytes. nil whenever
     /// SQLiteCausalGraphStore init failed.
     let causalStore: SQLiteCausalGraphStore?
+
+    /// Typed storage pressure that prevented `causalStore` from opening. nil
+    /// for a live store and for non-admission initialization failures. Without
+    /// this retained snapshot, heartbeat/status consumers saw only a generic
+    /// disabled flag and could not tell that causal evidence was being shed.
+    let causalStoreStartupAdmission: TraceGraphStartupAdmissionStatus?
 
     /// Graph rule evaluator for v1.10.0 §23 multi-entity rules. Loaded
     /// once at daemon startup from `Rules/graph/*.json`. EventLoop runs
@@ -473,6 +607,7 @@ final class DaemonState {
         ruleGenerator: RuleGenerator,
         causalGraphBridge: EventToRollingCausalGraphBridge? = nil,
         causalStore: SQLiteCausalGraphStore? = nil,
+        causalStoreStartupAdmission: TraceGraphStartupAdmissionStatus? = nil,
         graphEvaluator: GraphRuleEvaluator? = nil,
         bayesianIntent: BayesianIntentEngine,
         intentClassifier: IntentClassifier,
@@ -609,6 +744,7 @@ final class DaemonState {
         self.ruleGenerator = ruleGenerator
         self.causalGraphBridge = causalGraphBridge
         self.causalStore = causalStore
+        self.causalStoreStartupAdmission = causalStoreStartupAdmission
         graphEvaluatorLock.withLock { $0 = graphEvaluator }
         self.bayesianIntent = bayesianIntent
         self.intentClassifier = intentClassifier
@@ -627,27 +763,16 @@ final class DaemonState {
 
     private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")
 
-    /// Count of events the merged stream dropped because `mergedStreamCap`
-    /// was reached — i.e. `.bufferingNewest` evicted the *oldest* queued
-    /// event to make room (see `mergedStreamCap` doc below). This is a real
-    /// detection gap under a storm, so it must be visible in the heartbeat.
-    /// A synchronous `LockedCounter` (not an actor) so the hot yield path
-    /// never pays an actor hop or spawns a Task per drop.
-    private let mergedStreamDrops = LockedCounter()
-
-    /// PRIORITY-stream drops since daemon start (v1.21.4 A2 split the merged
-    /// stream in two; `mergedStreamDrops` now counts the priority/non-file
-    /// stream). Folded into the heartbeat's `events_dropped` by `DaemonTimers`.
-    var mergedStreamDropCount: Int { mergedStreamDrops.get() }
-
     /// v1.21.4 (F2/A2): file-category events ride a SEPARATE bounded stream so a
     /// file-write flood can't evict high-value exec/network/tcc events from the
     /// priority stream. This is its own drop counter — folded into the
     /// heartbeat's detection-input `events_dropped` alongside the priority drops,
     /// but reported distinctly so operators can see that shed volume was
     /// low-value file noise, not a missed exec.
-    private let fileStreamDrops = LockedCounter()
-    var fileStreamDropCount: Int { fileStreamDrops.get() }
+    /// Fixed-cardinality causality counters around the two merged detection
+    /// lanes. Source identity is attached at each `driveSource` call, so this
+    /// distinguishes collector production from merged-buffer/consumer loss.
+    let eventPipelineTelemetry = EventPipelineTelemetry()
 
     /// Upper bound on in-flight events queued to the detection pipeline.
     /// Past this depth, AsyncStream's `.bufferingNewest` policy drops the
@@ -671,16 +796,33 @@ final class DaemonState {
     /// eviction. Explicit + testable so a future high-volume category isn't
     /// silently routed onto the priority stream (which would reopen the gap).
     static func ridesFileStream(_ category: EventCategory, action: String) -> Bool {
-        guard category == .file else { return false }
-        // Pre-GA review: keep the RARE, high-value file signals on the PRIORITY
-        // stream so a file-WRITE flood (the exact case A2's file stream is meant
-        // to absorb) can't shed them. Only the write-family flood rides the file
-        // stream; credential-read OPENs and BTM launch-item registrations (both
-        // low-volume, both persistence/credential-critical) go to priority.
-        switch action {
-        case "open", "btm_add": return false   // → priority stream
-        default: return true                    // write-family → file stream
+        EventPipelineLane.routesToFile(category, action: action)
+    }
+
+    /// One read of every collector-local delivery boundary. Every snapshot is
+    /// internally atomic and keyed by a compile-time source inventory; the
+    /// downstream telemetry merges these stage counters without counting an
+    /// upstream eviction again when its replacement reaches the merger.
+    func eventCollectorBufferSnapshots() -> [
+        EventPipelineSource: EventCollectorBufferSnapshot
+    ] {
+        var snapshots: [EventPipelineSource: EventCollectorBufferSnapshot] = [
+            .tcc: tccMonitor.deliveryCounters,
+            .network: networkCollector.deliveryCounters,
+        ]
+        if let collector {
+            snapshots[.endpointSecurity] = collector.deliveryCounters
         }
+        if let kdebugCollector {
+            snapshots[.kdebug] = kdebugCollector.deliveryCounters
+        }
+        if let esloggerCollector {
+            snapshots[.eslogger] = esloggerCollector.deliveryCounters
+        }
+        if let ulCollector {
+            snapshots[.unifiedLog] = ulCollector.deliveryCounters
+        }
+        return snapshots
     }
 
     /// Merges all event sources into TWO async streams, split by category so a
@@ -691,28 +833,33 @@ final class DaemonState {
     /// after a back-off so the source recovers without a daemon restart. A
     /// single source (e.g. ESCollector) emits BOTH families; the yield closure
     /// routes each event by `eventCategory` into the correct stream.
-    func mergedEventStreams() -> (priority: AsyncStream<Event>, file: AsyncStream<Event>) {
-        var priorityCont: AsyncStream<Event>.Continuation!
-        var fileCont: AsyncStream<Event>.Continuation!
-        let priorityStream = AsyncStream<Event>(
+    func mergedEventStreams() -> (
+        priority: AsyncStream<EventPipelineEnvelope>,
+        file: AsyncStream<EventPipelineEnvelope>
+    ) {
+        var priorityCont: AsyncStream<EventPipelineEnvelope>.Continuation!
+        var fileCont: AsyncStream<EventPipelineEnvelope>.Continuation!
+        let priorityStream = AsyncStream<EventPipelineEnvelope>(
             bufferingPolicy: .bufferingNewest(Self.priorityStreamCap)) { priorityCont = $0 }
-        let fileStream = AsyncStream<Event>(
+        let fileStream = AsyncStream<EventPipelineEnvelope>(
             bufferingPolicy: .bufferingNewest(Self.fileStreamCap)) { fileCont = $0 }
 
-        // Capture the continuations as `let` (Sendable) + the counters, so the
-        // @Sendable yield closure stays isolation-free. On `.dropped` the
-        // per-stream `.bufferingNewest` buffer was full and evicted the oldest
-        // queued event of THAT category — a real detection gap — so count it
-        // synchronously against the right counter.
+        // Capture the continuations as `let` (Sendable) so the @Sendable yield
+        // closure stays isolation-free. The telemetry operation owns each
+        // actual yield result and attributes `.dropped` to the OLD envelope.
         let pCont = priorityCont!
         let fCont = fileCont!
-        let pDrops = mergedStreamDrops
-        let fDrops = fileStreamDrops
-        let yield: @Sendable (Event) -> Void = { event in
-            if DaemonState.ridesFileStream(event.eventCategory, action: event.eventAction) {
-                if case .dropped = fCont.yield(event) { fDrops.increment() }
+        let pipelineTelemetry = eventPipelineTelemetry
+        let yield: @Sendable (EventPipelineSource, Event) -> Void = { source, event in
+            let lane: EventPipelineLane = DaemonState.ridesFileStream(
+                event.eventCategory,
+                action: event.eventAction
+            ) ? .file : .priority
+            let envelope = EventPipelineEnvelope(source: source, event: event)
+            if lane == .file {
+                pipelineTelemetry.yield(envelope, to: fCont, lane: lane)
             } else {
-                if case .dropped = pCont.yield(event) { pDrops.increment() }
+                pipelineTelemetry.yield(envelope, to: pCont, lane: lane)
             }
         }
         let continuationPair = (priorityStream, fileStream)
@@ -735,21 +882,21 @@ final class DaemonState {
             // yields a fresh process that re-runs es_new_client.
             let sd = supportDir
             if let es = collector {
-                Task { await driveSource("ESCollector", logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield) }
+                Task { await driveSource(.endpointSecurity, logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield) }
             }
             if let kdebug = kdebugCollector {
-                Task { await driveSource("KdebugCollector", logger: logger, events: { kdebug.events }, yield: yield) }
+                Task { await driveSource(.kdebug, logger: logger, events: { kdebug.events }, yield: yield) }
             }
             if let eslogger = esloggerCollector {
-                Task { await driveSource("EsloggerCollector", logger: logger, essential: true, supportDir: sd, events: { eslogger.events }, yield: yield) }
+                Task { await driveSource(.eslogger, logger: logger, essential: true, supportDir: sd, events: { eslogger.events }, yield: yield) }
             }
             if let ul = ulCollector {
-                Task { await driveSource("UnifiedLogCollector", logger: logger, events: { ul.events }, yield: yield) }
+                Task { await driveSource(.unifiedLog, logger: logger, events: { ul.events }, yield: yield) }
             }
             let tcc = tccMonitor
-            Task { await driveSource("TCCMonitor", logger: logger, events: { tcc.events }, yield: yield) }
+            Task { await driveSource(.tcc, logger: logger, events: { tcc.events }, yield: yield) }
             let net = networkCollector
-            Task { await driveSource("NetworkCollector", logger: logger, events: { net.events }, yield: yield) }
+            Task { await driveSource(.network, logger: logger, events: { net.events }, yield: yield) }
         return continuationPair
     }
 }
@@ -760,20 +907,21 @@ final class DaemonState {
 /// re-attaches back off (capped) and, past the threshold, escalate once to a
 /// CRITICAL fault so a permanently-dead source can't go unnoticed.
 private func driveSource(
-    _ name: String,
+    _ source: EventPipelineSource,
     logger: Logger,
     policy: SourceRestartPolicy = SourceRestartPolicy(),
     essential: Bool = false,
     supportDir: String? = nil,
     events: @escaping @Sendable () -> AsyncStream<Event>,
-    yield: @escaping @Sendable (Event) -> Void
+    yield: @escaping @Sendable (EventPipelineSource, Event) -> Void
 ) async {
+    let name = source.key
     var state = SourceRestartState(policy: policy)
     while !Task.isCancelled {
         var produced = false
         for await event in events() {
             produced = true
-            yield(event)
+            yield(source, event)
         }
         let delay: TimeInterval
         switch state.record(produced: produced) {

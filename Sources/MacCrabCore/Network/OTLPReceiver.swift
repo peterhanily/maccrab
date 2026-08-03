@@ -87,6 +87,101 @@ public struct OTLPReceiverMetrics: Sendable, Codable, Equatable {
     }
 }
 
+/// Result of one fully buffered OTLP request. Public solely to make the exact
+/// pre-decode/pre-persist behavior adversarially testable without binding a
+/// real port in CI.
+public struct OTLPReceiverIngestResult: Sendable, Equatable {
+    public let status: Int
+    public let body: String
+
+    public init(status: Int, body: String) {
+        self.status = status
+        self.body = body
+    }
+}
+
+/// Thread-safe bridge from Network.framework's callback-driven listener state
+/// to `OTLPReceiver.start()`'s async readiness contract. Construction success
+/// is not bind success: `NWListener.start(queue:)` returns before the socket is
+/// ready, and address-in-use/permission failures arrive later through
+/// `stateUpdateHandler`. The first terminal startup state wins exactly once.
+///
+/// Internal so the callback/timeout races can be tested deterministically
+/// without requiring a real listener in a sandboxed test process.
+final class OTLPListenerStartupGate: @unchecked Sendable {
+    enum Outcome: Sendable, Equatable {
+        case ready
+        case failed(String)
+        case cancelled
+        case timedOut
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var continuation: CheckedContinuation<Outcome, Never>?
+    private var timeoutWorkItem: DispatchWorkItem?
+
+    func wait(
+        timeoutSeconds: Double,
+        start: () -> Void
+    ) async -> Outcome {
+        await withCheckedContinuation { continuation in
+            let timeout = DispatchWorkItem { [weak self] in
+                self?.resolve(.timedOut)
+            }
+
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(returning: outcome)
+                return
+            }
+            self.continuation = continuation
+            timeoutWorkItem = timeout
+            lock.unlock()
+
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + timeoutSeconds,
+                execute: timeout
+            )
+            start()
+        }
+    }
+
+    func observe(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            resolve(.ready)
+        case .failed(let error):
+            resolve(.failed(error.localizedDescription))
+        case .cancelled:
+            resolve(.cancelled)
+        default:
+            break
+        }
+    }
+
+    private func resolve(_ newOutcome: Outcome) {
+        let continuation: CheckedContinuation<Outcome, Never>?
+        let timeout: DispatchWorkItem?
+
+        lock.lock()
+        guard outcome == nil else {
+            lock.unlock()
+            return
+        }
+        outcome = newOutcome
+        continuation = self.continuation
+        self.continuation = nil
+        timeout = timeoutWorkItem
+        timeoutWorkItem = nil
+        lock.unlock()
+
+        timeout?.cancel()
+        continuation?.resume(returning: newOutcome)
+    }
+}
+
 public actor OTLPReceiver {
 
     // MARK: - Configuration
@@ -110,10 +205,18 @@ public actor OTLPReceiver {
     /// burst (Claude Code spans rarely exceed ~10 simultaneous) with
     /// headroom; excess connections close immediately with 503.
     public static let maxConcurrentConnections: Int = 64
+    /// `NWListener.start(queue:)` is asynchronous. Refuse to advertise the
+    /// receiver as running unless Network.framework reaches `.ready` within a
+    /// bounded interval.
+    public static let startupTimeoutSeconds: Double = 5.0
 
     // MARK: - State
 
     private var listener: NWListener?
+    /// Listener whose asynchronous bind has started but has not reached
+    /// `.ready`. Kept separate so `isRunning` cannot lie during startup and so
+    /// `stop()` can cancel a concurrent start while the actor is re-entrant.
+    private var startingListener: NWListener?
     private let port: UInt16
     private var metrics = OTLPReceiverMetrics()
     private let logger = Logger(subsystem: "com.maccrab.network", category: "otlp-receiver")
@@ -127,6 +230,17 @@ public actor OTLPReceiver {
     /// extracts → inserts. Nil-default keeps the type cheap to construct
     /// in tests and on hosts that haven't opted in to span persistence.
     private let traceStore: TraceStore?
+    /// Called by the receiver actor immediately after it takes ownership of a
+    /// listener that reached `.ready`. Keeping ready and terminal publication
+    /// on this actor prevents an immediate post-ready failure from racing a
+    /// caller that would otherwise persist `running: true` after the failure.
+    private let onReady: (@Sendable () -> Void)?
+    /// Called only when a listener that previously reached `.ready` later
+    /// fails or is unexpectedly cancelled. Startup failures are returned
+    /// directly from `start()` instead.
+    /// AgentKit uses this to replace its persisted `running: true` snapshot;
+    /// without it the dashboard can advertise a dead receiver indefinitely.
+    private let onTerminalFailure: (@Sendable (String) -> Void)?
 
     /// v1.21.5 (audit S-04): rolling-window ingest budget. The receiver has NO
     /// caller authentication — the only admission control is "peer endpoint is
@@ -167,9 +281,16 @@ public actor OTLPReceiver {
         return true
     }
 
-    public init(port: UInt16 = defaultPort, traceStore: TraceStore? = nil) {
+    public init(
+        port: UInt16 = defaultPort,
+        traceStore: TraceStore? = nil,
+        onReady: (@Sendable () -> Void)? = nil,
+        onTerminalFailure: (@Sendable (String) -> Void)? = nil
+    ) {
         self.port = port
         self.traceStore = traceStore
+        self.onReady = onReady
+        self.onTerminalFailure = onTerminalFailure
     }
 
     public var isRunning: Bool { listener != nil }
@@ -186,10 +307,13 @@ public actor OTLPReceiver {
 
     // MARK: - Lifecycle
 
-    /// Bind and start the listener. Throws on bind failure (don't silently
-    /// fall back — see file header).
-    public func start() throws {
-        guard listener == nil else { throw OTLPReceiverError.alreadyRunning }
+    /// Bind and start the listener. Returns only after Network.framework emits
+    /// `.ready`; asynchronous bind failure/cancellation/timeout throws instead
+    /// of letting DaemonSetup persist a false `running: true` status.
+    public func start() async throws {
+        guard listener == nil, startingListener == nil else {
+            throw OTLPReceiverError.alreadyRunning
+        }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw OTLPReceiverError.invalidPort(Int(port))
         }
@@ -228,28 +352,75 @@ public actor OTLPReceiver {
             guard let self else { conn.cancel(); return }
             Task { await self.handleNewConnection(conn) }
         }
-        listener.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            Task { await self.handleListenerState(state) }
+        let startupGate = OTLPListenerStartupGate()
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            startupGate.observe(state)
+            guard let self, let listener else { return }
+            Task { await self.handleListenerState(state, source: listener) }
         }
-        listener.start(queue: .global(qos: .utility))
-        self.listener = listener
+        startingListener = listener
+        let outcome = await startupGate.wait(
+            timeoutSeconds: Self.startupTimeoutSeconds
+        ) {
+            listener.start(queue: .global(qos: .utility))
+        }
+
+        switch outcome {
+        case .ready:
+            // `stop()` can run while this actor is suspended in `wait`.
+            // Never resurrect a listener that was cancelled during startup.
+            guard startingListener === listener else {
+                listener.cancel()
+                throw OTLPReceiverError.bindFailed("listener cancelled before readiness")
+            }
+            startingListener = nil
+            self.listener = listener
+            onReady?()
+        case .failed(let message):
+            if startingListener === listener { startingListener = nil }
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(message)
+        case .cancelled:
+            if startingListener === listener { startingListener = nil }
+            throw OTLPReceiverError.bindFailed("listener cancelled before readiness")
+        case .timedOut:
+            if startingListener === listener { startingListener = nil }
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(
+                "listener did not reach ready within \(Self.startupTimeoutSeconds) seconds"
+            )
+        }
         logger.notice("OTLPReceiver started on 127.0.0.1:\(self.port, privacy: .public)")
     }
 
     public func stop() {
+        startingListener?.cancel()
+        startingListener = nil
         listener?.cancel()
         listener = nil
         logger.notice("OTLPReceiver stopped")
     }
 
-    private func handleListenerState(_ state: NWListener.State) {
+    private func handleListenerState(_ state: NWListener.State, source: NWListener) {
         switch state {
         case .failed(let err):
             logger.error("OTLPReceiver listener failed: \(err.localizedDescription, privacy: .public)")
-            listener = nil
+            // A cancelled old listener can deliver its terminal callback after
+            // a replacement has reached `.ready`. Clear only the listener that
+            // emitted this state; never erase the replacement's ownership.
+            let failedAfterReadiness = listener === source
+            if failedAfterReadiness { listener = nil }
+            if startingListener === source { startingListener = nil }
+            if failedAfterReadiness {
+                onTerminalFailure?(err.localizedDescription)
+            }
         case .cancelled:
-            listener = nil
+            let cancelledAfterReadiness = listener === source
+            if cancelledAfterReadiness { listener = nil }
+            if startingListener === source { startingListener = nil }
+            if cancelledAfterReadiness {
+                onTerminalFailure?("listener cancelled after readiness")
+            }
         default:
             break
         }
@@ -577,77 +748,95 @@ public actor OTLPReceiver {
         receiver: OTLPReceiver
     ) {
         Task {
-            await receiver.recordBody(body)
-            // v1.21.5 (audit S-04): charge the body against the rolling ingest
-            // budget BEFORE decode + persist. Because the receiver is
-            // unauthenticated, this is what stops an unprivileged local flood
-            // from pushing genuine agent traces out of traces.db via the
-            // retention size cap. Checked here rather than at the Content-Length
-            // parse because this is the only async context on the path — the
-            // header parser is `nonisolated static` and cannot reach actor state
-            // without restructuring its conn/buffer capture pattern, which is
-            // exactly the kind of concurrency churn this fix should not require.
-            guard await receiver.admitIngest(bytes: body.count) else {
-                Self.respond(conn, status: 429, body: "ingest budget exceeded")
-                return
-            }
-            // PR-3b: full nested decode → sanitise → extract → persist.
-            // PR-3a's decode-and-count remains the fallback when no
-            // TraceStore is configured (logging-only mode).
-            //
-            // v1.9 audit Phase-1.3: wrap the synchronous decode + extract
-            // block in `autoreleasepool`. The decoder produces many
-            // String(decoding:as:) and JSONSerialization-bound objects
-            // (sanitiser); without the pool they accumulate until the
-            // Task suspends or completes. Pass-9 invariant for receiver
-            // hot loops.
+            let result = await receiver.processBody(body)
+            Self.respond(conn, status: result.status, body: result.body)
+        }
+    }
+
+    /// Full buffered-body pipeline shared by the live socket and deterministic
+    /// tests. Storage admission runs once before protobuf decode and again with
+    /// the exact decoded records before persistence; TraceStore repeats the
+    /// latter centrally inside `insertSpans`.
+    public func ingestBodyForTesting(_ body: Data) async -> OTLPReceiverIngestResult {
+        await processBody(body)
+    }
+
+    private func processBody(_ body: Data) async -> OTLPReceiverIngestResult {
+        recordBody(body)
+        // v1.21.5 (audit S-04): bound unauthenticated local traffic by rate.
+        guard admitIngest(bytes: body.count) else {
+            return OTLPReceiverIngestResult(status: 429, body: "ingest budget exceeded")
+        }
+
+        // Ask the actor-owned store BEFORE allocating the decoded protobuf
+        // graph. A pressure-blocked store rejects even malformed input as 507,
+        // proving decode cannot become a pressure-side CPU/memory bypass.
+        if let traceStore {
             do {
-                let (summary, extraction): (OTLPTracesSummary, OTLPSpanExtractionResult)
-                    = try autoreleasepool {
-                    let groups = try OTLPNestedDecoder.decodeRequest(body)
-                    let s = OTLPTracesSummary(
+                try await traceStore.preflightStorageAdmission(
+                    estimatedGrowthBytes: Int64(body.count)
+                )
+            } catch let pressure as TraceStoreStorageAdmissionError {
+                recordSpanInsertError(pressure.localizedDescription)
+                return OTLPReceiverIngestResult(status: 507, body: "storage pressure")
+            } catch {
+                recordSpanInsertError("storage preflight: \(error)")
+                return OTLPReceiverIngestResult(status: 500, body: "storage unavailable")
+            }
+        }
+
+        let decoded: (OTLPTracesSummary, OTLPSpanExtractionResult)
+        do {
+            // v1.9 audit Phase-1.3: promptly release decoder/sanitizer
+            // temporaries for bursty requests.
+            decoded = try autoreleasepool {
+                let groups = try OTLPNestedDecoder.decodeRequest(body)
+                return (
+                    OTLPTracesSummary(
                         resourceSpansCount: groups.count,
                         bytesParsed: body.count
-                    )
-                    let e = OTLPSpanExtractor.extract(from: groups)
-                    return (s, e)
-                }
-                await receiver.recordAccept(summary)
-                await receiver.recordSanitisation(
-                    keyRedacted: extraction.totalAttributesKeyRedacted,
-                    valueRedacted: extraction.totalAttributesValueRedacted
+                    ),
+                    OTLPSpanExtractor.extract(from: groups)
                 )
-                if let store = await receiver.storeRef() {
-                    // v1.11.1 (audit perf HIGH): batch the inserts in
-                    // one BEGIN/COMMIT transaction. Pre-fix every span
-                    // hit its own implicit COMMIT + fsync — at 500-1000
-                    // spans per request body that was 500-1000 syncs.
-                    let valid = extraction.spans.filter { span in
-                        // Skip spans missing identity — protobuf could
-                        // have emitted truncated/garbage IDs. Better to
-                        // drop than to write a row that breaks the
-                        // index assumptions.
-                        span.traceId.count == 32 && span.spanId.count == 16
-                    }
-                    do {
-                        let result = try await store.insertSpans(valid)
-                        for _ in 0..<result.succeeded { await receiver.recordSpanPersisted() }
-                        for _ in 0..<result.failed {
-                            await receiver.recordSpanInsertError("batch insert: row failed")
-                        }
-                    } catch {
-                        // Fail the whole batch's count visibility — rare
-                        // (transaction-level error like DB closed).
-                        for _ in 0..<valid.count {
-                            await receiver.recordSpanInsertError("\(error)")
-                        }
-                    }
-                }
-                Self.respond(conn, status: 200, body: "")
-            } catch {
-                await receiver.bumpDecodeError("\(error)")
-                Self.respond(conn, status: 400, body: "bad protobuf")
             }
+        } catch {
+            bumpDecodeError("\(error)")
+            return OTLPReceiverIngestResult(status: 400, body: "bad protobuf")
+        }
+
+        let (summary, extraction) = decoded
+        recordAccept(summary)
+        recordSanitisation(
+            keyRedacted: extraction.totalAttributesKeyRedacted,
+            valueRedacted: extraction.totalAttributesValueRedacted
+        )
+        guard let traceStore else {
+            return OTLPReceiverIngestResult(status: 200, body: "")
+        }
+
+        let valid = extraction.spans.filter {
+            $0.traceId.count == 32 && $0.spanId.count == 16
+        }
+        do {
+            // Receiver-level exact decoded-batch gate, then the store repeats
+            // it immediately before BEGIN so no alternate writer can bypass it.
+            try await traceStore.preflightInsertSpans(valid)
+            let result = try await traceStore.insertSpans(valid)
+            for _ in 0..<result.succeeded { recordSpanPersisted() }
+            for _ in 0..<result.failed {
+                recordSpanInsertError("batch insert: row failed")
+            }
+            return OTLPReceiverIngestResult(status: 200, body: "")
+        } catch let pressure as TraceStoreStorageAdmissionError {
+            for _ in 0..<max(1, valid.count) {
+                recordSpanInsertError(pressure.localizedDescription)
+            }
+            return OTLPReceiverIngestResult(status: 507, body: "storage pressure")
+        } catch {
+            for _ in 0..<max(1, valid.count) {
+                recordSpanInsertError("\(error)")
+            }
+            return OTLPReceiverIngestResult(status: 500, body: "storage unavailable")
         }
     }
 
@@ -713,7 +902,9 @@ public actor OTLPReceiver {
         case 413: reason = "Payload Too Large"
         case 415: reason = "Unsupported Media Type"
         case 429: reason = "Too Many Requests"
+        case 500: reason = "Internal Server Error"
         case 503: reason = "Service Unavailable"
+        case 507: reason = "Insufficient Storage"
         default:  reason = "Error"
         }
         let bodyBytes = Array(body.utf8)

@@ -266,7 +266,12 @@ public actor BaselineEngine {
     ///     eviction cheaply.
     ///   - maxNovelEdges: Hard cap on the retained novel-edge record list.
     ///     Default 5 000.
-    public init(config: Config? = nil, maxEdges: Int = 50_000, maxNovelEdges: Int = 5_000) {
+    public init(
+        config: Config? = nil,
+        persistPath: String? = nil,
+        maxEdges: Int = 50_000,
+        maxNovelEdges: Int = 5_000
+    ) {
         let cfg = config ?? Config()
         self.config = cfg
         self.state = cfg.enabled ? .learning : .disabled
@@ -280,16 +285,34 @@ public actor BaselineEngine {
         self.edgeEvictionLowWater = max(1, Int(Double(flooredMaxEdges) * 0.9))
         self.maxNovelEdges = max(1, maxNovelEdges)
 
-        // Build persistence path: ~/Library/Application Support/MacCrab/baseline.json
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let maccrabDir = appSupport.appendingPathComponent("MacCrab")
-        self.persistPath = maccrabDir.appendingPathComponent("baseline.json").path
+        if let persistPath {
+            self.persistPath = persistPath
+        } else if geteuid() == 0 {
+            // A root System Extension's user domain is /var/root. Persistent
+            // engine state belongs beside the other system stores instead.
+            self.persistPath = "/Library/Application Support/MacCrab/baseline.json"
+        } else {
+            let appSupport = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
+            let maccrabDir = appSupport.appendingPathComponent("MacCrab")
+            self.persistPath = maccrabDir.appendingPathComponent("baseline.json").path
+        }
     }
 
     // MARK: - Public API
+
+    /// Canonical production predicate for events that represent a process
+    /// creation. Endpoint Security emits execs as `.start` + `"exec"`; older
+    /// fixtures and imported events may use `.creation`. Keep this shared with
+    /// EventLoop's actor-hop fast path so the outer and inner gates cannot
+    /// silently drift apart again.
+    public nonisolated static func isProcessCreationEvent(_ event: Event) -> Bool {
+        guard event.eventCategory == .process else { return false }
+        if event.eventType == .creation { return true }
+        return event.eventType == .start && event.eventAction == "exec"
+    }
 
     /// Evaluate a process-creation event against the baseline.
     ///
@@ -301,9 +324,8 @@ public actor BaselineEngine {
     public func evaluate(_ event: Event) async -> RuleMatch? {
         guard config.enabled, state != .disabled else { return nil }
 
-        // Only evaluate process creation events.
-        guard event.eventCategory == .process,
-              event.eventType == .creation else {
+        // Only evaluate the canonical process-creation shapes.
+        guard Self.isProcessCreationEvent(event) else {
             return nil
         }
 

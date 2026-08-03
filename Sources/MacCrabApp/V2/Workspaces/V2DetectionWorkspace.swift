@@ -1297,6 +1297,10 @@ public struct V2DetectionWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Browser extensions across Chrome, Firefox, Brave, Edge, and Arc. Risk score factors permission breadth, dangerous APIs, and dev-mode/unpacked status. Click a row for the full permission set and a risk-score breakdown.")
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                if let coverage = state.provider.browserInventoryCoverage,
+                   !coverage.complete {
+                    browserInventoryCoverageWarning(coverage)
+                }
                 browserSummaryRow
                 HStack(alignment: .top, spacing: 0) {
                     V2DataTable(
@@ -1341,6 +1345,36 @@ public struct V2DetectionWorkspace: View {
             }
             .padding(16)
         }
+    }
+
+    private func browserInventoryCoverageWarning(
+        _ coverage: V2BrowserInventoryCoverage
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(V2Theme.high)
+                .scaledSystem(14, weight: .semibold)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(String(
+                    localized: "detection.browserInventoryIncompleteTitle",
+                    defaultValue: "Inventory incomplete — displayed counts are partial"
+                ))
+                    .scaledSystem(12, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                Text(coverage.operatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(V2Theme.high.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
+                .stroke(V2Theme.high.opacity(0.35), lineWidth: 1)
+        )
     }
 
     /// 4-card summary above the extensions table. Pre-fix the

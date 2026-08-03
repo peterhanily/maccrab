@@ -51,6 +51,20 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// nil when the heartbeat predates this field (older daemon) → the
     /// Prevention tab shows "status unavailable" rather than a false reading.
     public let prevention: Prevention?
+    /// TraceGraph persistence health. A present blocked/unavailable value is a
+    /// forensic-evidence gap even while event detection continues normally.
+    /// nil means the running daemon predates this heartbeat block.
+    public let traceGraphStorageAdmission: TraceGraphStorageAdmission?
+    /// traces.db persistence health. These OTLP spans are always
+    /// unauthenticated/self-reported and advisory, but a blocked store still
+    /// needs to be visible so an empty trace panel is not read as "no spans".
+    public let traceStoreStorageAdmission: TraceGraphStorageAdmission?
+    /// Fixed-cardinality event-flow diagnostics. Nil means the running engine
+    /// predates the causality block; absence must not be read as zero drops.
+    public let eventPipeline: EventPipeline?
+    /// Bounded browser inventory coverage. A degraded value means rows shown in
+    /// Detection > Browser are partial, not a clean inventory.
+    public let browserInventory: BrowserInventory?
 
     public struct Collector: Sendable, Equatable, Hashable {
         public let name: String
@@ -100,6 +114,287 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             sinkhole = module("sinkhole")
             networkBlocker = module("network_blocker")
             persistenceGuard = module("persistence_guard")
+        }
+    }
+
+    public struct TraceGraphStorageAdmission: Sendable, Equatable {
+        public let enabled: Bool
+        public let blocked: Bool
+        public let storeAvailable: Bool?
+        public let startupBlocked: Bool
+        public let reason: String?
+        public let footprintBytes: Int64?
+        public let freeSpaceBytes: Int64?
+        public let maxFootprintBytes: Int64?
+        public let freeSpaceFloorBytes: Int64?
+
+        init?(from raw: [String: Any]?) {
+            guard let raw else { return nil }
+            enabled = raw["enabled"] as? Bool ?? false
+            blocked = raw["blocked"] as? Bool ?? false
+            storeAvailable = raw["store_available"] as? Bool
+            startupBlocked = raw["startup_blocked"] as? Bool ?? false
+            reason = (raw["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            footprintBytes = Self.int64(raw["footprint_bytes"])
+            freeSpaceBytes = Self.int64(raw["free_space_bytes"])
+            maxFootprintBytes = Self.int64(raw["max_footprint_bytes"])
+            freeSpaceFloorBytes = Self.int64(raw["free_space_floor_bytes"])
+        }
+
+        public var evidenceUnavailable: Bool {
+            blocked || storeAvailable == false
+        }
+
+        public var operatorDetail: String {
+            let rawReason = reason ?? "unknown reason"
+            let readableReason = rawReason.replacingOccurrences(of: "_", with: " ")
+            if startupBlocked {
+                return "The TraceGraph store was paused at startup (\(readableReason)). Detection continues, but new causal evidence is not being recorded. Free disk space or adjust the TraceGraph storage limit, then restart MacCrab."
+            }
+            if storeAvailable == false {
+                return "The TraceGraph store is unavailable (\(readableReason)). Detection continues, but new causal evidence is not being recorded."
+            }
+            return "TraceGraph persistence is paused (\(readableReason)). Detection continues, but new causal evidence is currently being shed while bounded recovery runs."
+        }
+
+        private static func int64(_ value: Any?) -> Int64? {
+            if let value = value as? Int64 { return value }
+            if let value = value as? Int { return Int64(value) }
+            if let value = value as? NSNumber { return value.int64Value }
+            return nil
+        }
+    }
+
+    public struct EventPipeline: Sendable, Equatable {
+        public let offeredBySource: [String: UInt64]
+        public let offeredBySourceAndLane: [String: [String: UInt64]]
+        public let droppedBySourceAndLane: [String: [String: UInt64]]
+        public let terminatedBySourceAndLane: [String: [String: UInt64]]
+        public let collectorOfferedBySourceAndLane: [String: [String: UInt64]]
+        public let upstreamDroppedBySourceAndLane: [String: [String: UInt64]]
+        public let upstreamTerminatedBySourceAndLane: [String: [String: UInt64]]
+        public let mergedDroppedBySourceAndLane: [String: [String: UInt64]]
+        public let mergedTerminatedBySourceAndLane: [String: [String: UInt64]]
+        public let offeredByLane: [String: UInt64]
+        public let dequeuedByLane: [String: UInt64]
+        public let completedByLane: [String: UInt64]
+        public let backlogEstimateByLane: [String: UInt64]
+        public let inFlightByLane: [String: UInt64]
+        public let processingP99MicrosByLane: [String: UInt64]
+        public let latencySampleCountByLane: [String: UInt64]
+        public let upstreamDroppedByLane: [String: UInt64]
+        public let upstreamTerminatedByLane: [String: UInt64]
+        public let mergedDroppedByLane: [String: UInt64]
+        public let mergedTerminatedByLane: [String: UInt64]
+        public let collectorCapacityBySource: [String: UInt64]
+        public let preBufferDroppedBySource: [String: UInt64]
+        public let detectionInputDroppedTotal: UInt64
+        public let capacityByLane: [String: UInt64]
+        public let collectorBuffer: [String: UInt64]
+
+        init?(from raw: [String: Any]?) {
+            guard let raw else { return nil }
+            offeredBySource = Self.counterMap(raw["offered_by_source"])
+            offeredBySourceAndLane = Self.nestedCounterMap(
+                raw["offered_by_source_and_lane"]
+            )
+            droppedBySourceAndLane = Self.nestedCounterMap(
+                raw["dropped_by_source_and_lane"]
+            )
+            terminatedBySourceAndLane = Self.nestedCounterMap(
+                raw["terminated_by_source_and_lane"]
+            )
+            collectorOfferedBySourceAndLane = Self.nestedCounterMap(
+                raw["collector_offered_by_source_and_lane"]
+            )
+            upstreamDroppedBySourceAndLane = Self.nestedCounterMap(
+                raw["upstream_dropped_by_source_and_lane"]
+            )
+            upstreamTerminatedBySourceAndLane = Self.nestedCounterMap(
+                raw["upstream_terminated_by_source_and_lane"]
+            )
+            mergedDroppedBySourceAndLane = Self.nestedCounterMap(
+                raw["merged_dropped_by_source_and_lane"]
+            )
+            mergedTerminatedBySourceAndLane = Self.nestedCounterMap(
+                raw["merged_terminated_by_source_and_lane"]
+            )
+            offeredByLane = Self.counterMap(raw["offered_by_lane"])
+            dequeuedByLane = Self.counterMap(raw["dequeued_by_lane"])
+            completedByLane = Self.counterMap(raw["completed_by_lane"])
+            backlogEstimateByLane = Self.counterMap(raw["backlog_estimate_by_lane"])
+            inFlightByLane = Self.counterMap(raw["in_flight_by_lane"])
+            processingP99MicrosByLane = Self.counterMap(raw["processing_p99_us_by_lane"])
+            latencySampleCountByLane = Self.counterMap(raw["latency_sample_count_by_lane"])
+            upstreamDroppedByLane = Self.counterMap(raw["upstream_dropped_by_lane"])
+            upstreamTerminatedByLane = Self.counterMap(raw["upstream_terminated_by_lane"])
+            mergedDroppedByLane = Self.counterMap(raw["merged_dropped_by_lane"])
+            mergedTerminatedByLane = Self.counterMap(raw["merged_terminated_by_lane"])
+            collectorCapacityBySource = Self.counterMap(raw["collector_capacity_by_source"])
+            preBufferDroppedBySource = Self.counterMap(raw["pre_buffer_dropped_by_source"])
+            detectionInputDroppedTotal = Self.counter(raw["detection_input_dropped_total"])
+            capacityByLane = Self.counterMap(raw["capacity_by_lane"])
+            collectorBuffer = Self.counterMap(raw["collector_buffer"])
+        }
+
+        private static func counterMap(_ value: Any?) -> [String: UInt64] {
+            guard let raw = value as? [String: Any] else { return [:] }
+            return raw.compactMapValues { value in
+                if let value = value as? UInt64 { return value }
+                if let value = value as? Int, value >= 0 { return UInt64(value) }
+                if let value = value as? NSNumber {
+                    return UInt64(value.stringValue)
+                }
+                return nil
+            }
+        }
+
+        private static func nestedCounterMap(
+            _ value: Any?
+        ) -> [String: [String: UInt64]] {
+            guard let raw = value as? [String: Any] else { return [:] }
+            return raw.mapValues(counterMap)
+        }
+
+        private static func counter(_ value: Any?) -> UInt64 {
+            if let value = value as? UInt64 { return value }
+            if let value = value as? Int, value >= 0 { return UInt64(value) }
+            if let value = value as? NSNumber {
+                return UInt64(value.stringValue) ?? 0
+            }
+            return 0
+        }
+
+        /// Complete operator-facing wire representation used by diagnostics
+        /// export. Keeping this beside decoding prevents new fields from being
+        /// silently parsed and then discarded by the System workspace.
+        var diagnosticDictionary: [String: Any] {
+            [
+                "offered_by_source": offeredBySource,
+                "offered_by_source_and_lane": offeredBySourceAndLane,
+                "dropped_by_source_and_lane": droppedBySourceAndLane,
+                "terminated_by_source_and_lane": terminatedBySourceAndLane,
+                "collector_offered_by_source_and_lane": collectorOfferedBySourceAndLane,
+                "upstream_dropped_by_source_and_lane": upstreamDroppedBySourceAndLane,
+                "upstream_terminated_by_source_and_lane": upstreamTerminatedBySourceAndLane,
+                "merged_dropped_by_source_and_lane": mergedDroppedBySourceAndLane,
+                "merged_terminated_by_source_and_lane": mergedTerminatedBySourceAndLane,
+                "offered_by_lane": offeredByLane,
+                "dequeued_by_lane": dequeuedByLane,
+                "completed_by_lane": completedByLane,
+                "backlog_estimate_by_lane": backlogEstimateByLane,
+                "in_flight_by_lane": inFlightByLane,
+                "processing_p99_us_by_lane": processingP99MicrosByLane,
+                "latency_sample_count_by_lane": latencySampleCountByLane,
+                "upstream_dropped_by_lane": upstreamDroppedByLane,
+                "upstream_terminated_by_lane": upstreamTerminatedByLane,
+                "merged_dropped_by_lane": mergedDroppedByLane,
+                "merged_terminated_by_lane": mergedTerminatedByLane,
+                "collector_capacity_by_source": collectorCapacityBySource,
+                "pre_buffer_dropped_by_source": preBufferDroppedBySource,
+                "detection_input_dropped_total": detectionInputDroppedTotal,
+                "capacity_by_lane": capacityByLane,
+                "collector_buffer": collectorBuffer,
+            ]
+        }
+    }
+
+    public struct BrowserInventory: Sendable, Equatable {
+        public let coverageKnown: Bool
+        public let complete: Bool
+        public let degraded: Bool
+        public let reason: String?
+        public let lastScanWasTruncated: Bool
+        public let scansTotal: UInt64
+        public let truncatedScansTotal: UInt64
+        public let inspectedDirectoryEntriesTotal: UInt64
+        public let truncatedDirectoriesTotal: UInt64
+        public let truncatedHomesTotal: UInt64
+        public let lastScanCompletedAtUnix: Double?
+        public let lastScanHomes: Int
+        public let lastScanInspectedDirectoryEntries: UInt64
+        public let lastScanTruncatedDirectoryCount: UInt64
+        public let lastScanTruncatedHomeCount: UInt64
+        public let perHomeDirectoryEntryBudget: Int
+
+        init?(from raw: [String: Any]?) {
+            guard let raw else { return nil }
+            coverageKnown = raw["coverage_known"] as? Bool ?? false
+            complete = raw["complete"] as? Bool ?? false
+            reason = (raw["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            lastScanWasTruncated = raw["last_scan_was_truncated"] as? Bool ?? false
+            degraded = (raw["degraded"] as? Bool ?? false)
+                || !coverageKnown
+                || !complete
+                || lastScanWasTruncated
+            scansTotal = Self.counter(raw["scans_total"])
+            truncatedScansTotal = Self.counter(raw["truncated_scans_total"])
+            inspectedDirectoryEntriesTotal = Self.counter(raw["inspected_directory_entries_total"])
+            truncatedDirectoriesTotal = Self.counter(raw["truncated_directories_total"])
+            truncatedHomesTotal = Self.counter(raw["truncated_homes_total"])
+            lastScanCompletedAtUnix = raw["last_scan_completed_at_unix"] as? Double
+            lastScanHomes = Self.integer(raw["last_scan_homes"])
+            lastScanInspectedDirectoryEntries = Self.counter(
+                raw["last_scan_inspected_directory_entries"]
+            )
+            lastScanTruncatedDirectoryCount = Self.counter(
+                raw["last_scan_truncated_directory_count"]
+            )
+            lastScanTruncatedHomeCount = Self.counter(
+                raw["last_scan_truncated_home_count"]
+            )
+            perHomeDirectoryEntryBudget = Self.integer(
+                raw["per_home_directory_entry_budget"]
+            )
+        }
+
+        public var operatorDetail: String {
+            if !coverageKnown {
+                return "The browser-extension inventory has not completed its first bounded scan. Extension counts are not yet complete."
+            }
+            if lastScanWasTruncated || degraded || !complete {
+                return "The latest browser-extension inventory exhausted its bounded directory budget. Displayed rows are partial and absence of an extension is not evidence that it is not installed."
+            }
+            return "The latest bounded browser-extension inventory completed."
+        }
+
+        var diagnosticDictionary: [String: Any] {
+            var value: [String: Any] = [
+                "coverage_known": coverageKnown,
+                "complete": complete,
+                "degraded": degraded,
+                "reason": reason ?? "",
+                "last_scan_was_truncated": lastScanWasTruncated,
+                "scans_total": scansTotal,
+                "truncated_scans_total": truncatedScansTotal,
+                "inspected_directory_entries_total": inspectedDirectoryEntriesTotal,
+                "truncated_directories_total": truncatedDirectoriesTotal,
+                "truncated_homes_total": truncatedHomesTotal,
+                "last_scan_homes": lastScanHomes,
+                "last_scan_inspected_directory_entries": lastScanInspectedDirectoryEntries,
+                "last_scan_truncated_directory_count": lastScanTruncatedDirectoryCount,
+                "last_scan_truncated_home_count": lastScanTruncatedHomeCount,
+                "per_home_directory_entry_budget": perHomeDirectoryEntryBudget,
+            ]
+            if let lastScanCompletedAtUnix {
+                value["last_scan_completed_at_unix"] = lastScanCompletedAtUnix
+            }
+            return value
+        }
+
+        private static func counter(_ value: Any?) -> UInt64 {
+            if let value = value as? UInt64 { return value }
+            if let value = value as? Int, value >= 0 { return UInt64(value) }
+            if let value = value as? NSNumber {
+                return UInt64(value.stringValue) ?? 0
+            }
+            return 0
+        }
+
+        private static func integer(_ value: Any?) -> Int {
+            if let value = value as? Int { return max(0, value) }
+            if let value = value as? NSNumber { return max(0, value.intValue) }
+            return 0
         }
     }
 
@@ -183,6 +478,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             .compactMapValues { $0 as? Int } ?? [:]
         let llm = (raw["llm"] as? [String: Any]).map(LLMHealth.init(from:))
         let prevention = Prevention(from: raw["prevention"] as? [String: Any])
+        let traceGraphStorageAdmission = TraceGraphStorageAdmission(
+            from: raw["tracegraph_storage_admission"] as? [String: Any]
+        )
+        let traceStoreStorageAdmission = TraceGraphStorageAdmission(
+            from: raw["traces_storage_admission"] as? [String: Any]
+        )
+        let eventPipeline = EventPipeline(
+            from: raw["event_pipeline"] as? [String: Any]
+        )
+        let browserInventory = BrowserInventory(
+            from: raw["browser_inventory"] as? [String: Any]
+        )
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
             uptimeSeconds: raw["uptime_seconds"] as? Int ?? 0,
@@ -205,7 +512,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             esSensorDegradedDetail: (raw["es_sensor_degraded_detail"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             esSensorDegradedSeverity: (raw["es_sensor_degraded_severity"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             llm: llm,
-            prevention: prevention
+            prevention: prevention,
+            traceGraphStorageAdmission: traceGraphStorageAdmission,
+            traceStoreStorageAdmission: traceStoreStorageAdmission,
+            eventPipeline: eventPipeline,
+            browserInventory: browserInventory
         )
     }
 }

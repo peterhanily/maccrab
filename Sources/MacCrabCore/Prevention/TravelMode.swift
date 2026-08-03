@@ -53,16 +53,13 @@ public actor TravelMode {
         isActive = false
 
         // Remove strict firewall rules
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        proc.arguments = ["-a", "com.maccrab.travel", "-F", "all"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
-            logger.error("Failed to remove travel mode firewall rules: \(error.localizedDescription)")
+        if BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", "com.maccrab.travel", "-F", "all"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        ) == nil {
+            logger.error("Failed to remove travel mode firewall rules: trusted pfctl could not be launched")
         }
 
         logger.info("Travel mode deactivated")
@@ -88,35 +85,36 @@ public actor TravelMode {
         block drop out quick proto tcp to port 80   # Block HTTP
         block drop out quick proto tcp to port 8080 # Block alt HTTP
         """
-        let path = "/tmp/maccrab_travel.conf"
-        do {
-            try rules.write(toFile: path, atomically: true, encoding: .utf8)
-        } catch {
+        guard let commandFile = PrivatePrivilegedCommandFile.create(
+            contents: Data(rules.utf8)
+        ) else {
             Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
-                .error("Failed to write travel mode firewall rules to \(path): \(error.localizedDescription)")
+                .error("Failed to create private travel mode firewall rules")
             return
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
-        proc.arguments = ["-a", "com.maccrab.travel", "-f", path]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
+        defer { commandFile.cleanup() }
+        guard commandFile.hasStableIdentity() else {
             Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
-                .error("Failed to load travel mode firewall rules: \(error.localizedDescription)")
+                .error("Travel mode firewall command file identity changed before pfctl")
+            return
+        }
+        if BoundedPrivilegedProcessRunner.run(
+            executable: "/sbin/pfctl",
+            arguments: ["-a", "com.maccrab.travel", "-f", commandFile.path],
+            timeout: 10,
+            maximumOutputBytes: nil
+        ) == nil {
+            Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
+                .error("Failed to load travel mode firewall rules: trusted pfctl could not be launched")
         }
     }
 
     private nonisolated func flushDNS() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-        proc.arguments = ["-flushcache"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+        _ = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/dscacheutil",
+            arguments: ["-flushcache"],
+            timeout: 10,
+            maximumOutputBytes: nil
+        )
     }
 }

@@ -68,15 +68,15 @@ struct BlobVaultTests {
         let payload = Data("has-test".utf8)
         let sha = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
 
-        let before = await vault.has(sha256: sha)
+        let before = try await vault.has(sha256: sha)
         #expect(before == false)
 
         _ = try await vault.store(payload)
-        let mid = await vault.has(sha256: sha)
+        let mid = try await vault.has(sha256: sha)
         #expect(mid == true)
 
-        await vault.delete(sha256: sha)
-        let after = await vault.has(sha256: sha)
+        try await vault.delete(sha256: sha)
+        let after = try await vault.has(sha256: sha)
         #expect(after == false)
     }
 
@@ -97,7 +97,7 @@ struct BlobVaultTests {
         // under one per-case key, which leaks the GHASH subkey and enables
         // tag forgery in the evidence vault. Dedup still works because it is
         // keyed on the blob FILENAME, not on the ciphertext bytes.
-        await vault1.delete(sha256: sha)
+        try await vault1.delete(sha256: sha)
         let vault2 = try BlobVault(layout: layout, dek: key)
         _ = try await vault2.store(payload)
         let secondBytes = try Data(contentsOf: layout.blobPath(for: sha))
@@ -119,6 +119,60 @@ struct BlobVaultTests {
         let vault2 = try BlobVault(layout: layout, dek: key2)
         await #expect(throws: (any Error).self) {
             _ = try await vault2.load(sha256: sha)
+        }
+    }
+
+    @Test("Ciphertext swapped between valid digest paths fails content-address integrity")
+    func swappedCiphertextIsRejected() async throws {
+        let layout = tempLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let vault = try BlobVault(layout: layout, dek: freshKey())
+        let (firstSHA, _) = try await vault.store(Data("first evidence".utf8))
+        let (secondSHA, _) = try await vault.store(Data("second evidence".utf8))
+        let secondCiphertext = try Data(contentsOf: layout.blobPath(for: secondSHA))
+        try secondCiphertext.write(
+            to: layout.blobPath(for: firstSHA),
+            options: .atomic
+        )
+
+        await #expect(throws: BlobVaultError.self) {
+            _ = try await vault.load(sha256: firstSHA)
+        }
+    }
+
+    @Test("All digest-taking APIs reject traversal and non-hex input")
+    func malformedDigestCannotEscapeVault() async throws {
+        let layout = tempLayout()
+        defer { try? FileManager.default.removeItem(at: layout.casesRoot) }
+        let vault = try BlobVault(layout: layout, dek: freshKey())
+
+        // Before the fix this resolves outside vault/blobs and delete() can
+        // unlink the target. Keep a sentinel in place to prove the operation
+        // is rejected before any filesystem access occurs.
+        let traversal = "../../manifest.json"
+        let escaped = layout.blobPath(for: traversal).standardizedFileURL
+        try FileManager.default.createDirectory(
+            at: escaped.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("sentinel".utf8).write(to: escaped)
+
+        await #expect(throws: BlobVaultError.self) {
+            _ = try await vault.has(sha256: traversal)
+        }
+        await #expect(throws: BlobVaultError.self) {
+            _ = try await vault.load(sha256: traversal)
+        }
+        await #expect(throws: BlobVaultError.self) {
+            try await vault.delete(sha256: traversal)
+        }
+        #expect(try Data(contentsOf: escaped) == Data("sentinel".utf8))
+
+        await #expect(throws: BlobVaultError.self) {
+            _ = try await vault.has(sha256: String(repeating: "g", count: 64))
+        }
+        await #expect(throws: BlobVaultError.self) {
+            _ = try await vault.load(sha256: "abc")
         }
     }
 }

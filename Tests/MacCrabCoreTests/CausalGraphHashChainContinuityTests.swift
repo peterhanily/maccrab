@@ -9,6 +9,7 @@
 
 import Testing
 import Foundation
+import Darwin
 import CSQLCipher
 @testable import MacCrabCore
 
@@ -50,6 +51,90 @@ struct CausalGraphHashChainContinuityTests {
         return out
     }
 
+    private func createLegacyContinuityDatabase(
+        at path: URL,
+        duplicateHead: Bool
+    ) async throws {
+        // Start from the complete production schema. SchemaMigrator
+        // intentionally replays every idempotent migration even when
+        // user_version is current, so a partial hand-written fixture would
+        // test an impossible database rather than the v2 continuity shape.
+        let bootstrap = try await SQLiteCausalGraphStore(databasePath: path.path)
+        await bootstrap.close()
+
+        var db: OpaquePointer?
+        defer { if let db { sqlite3_close(db) } }
+        try #require(sqlite3_open_v2(
+            path.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil
+        ) == SQLITE_OK)
+        let duplicateSQL = duplicateHead ? """
+        INSERT INTO trace_hash_chain
+            (id, trace_id, sequence_number, previous_hash, current_hash,
+             event_id, edge_id, chain_head_signature,
+             chain_head_published_to_unified_log, created_at)
+        VALUES
+            ('fork-a', 'trace-a', 7, NULL, 'hash-a', NULL, NULL, NULL, 0, 1),
+            ('fork-b', 'trace-b', 7, NULL, 'hash-b', NULL, NULL, NULL, 0, 2);
+        """ : ""
+        let sql = """
+        DROP TRIGGER IF EXISTS trg_hash_chain_global_sequence_unique;
+        DROP INDEX IF EXISTS idx_hash_chain_global_seq;
+        DROP INDEX IF EXISTS idx_hash_chain_trace_seq;
+        ALTER TABLE trace_hash_chain RENAME TO trace_hash_chain_v3_fixture;
+        CREATE TABLE trace_hash_chain (
+            id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL,
+            previous_hash TEXT,
+            current_hash TEXT NOT NULL,
+            event_id TEXT,
+            edge_id TEXT,
+            chain_head_signature TEXT,
+            chain_head_published_to_unified_log INTEGER DEFAULT 0,
+            created_at REAL NOT NULL,
+            UNIQUE(trace_id, sequence_number)
+        );
+        CREATE INDEX idx_hash_chain_trace_seq
+            ON trace_hash_chain(trace_id, sequence_number);
+        \(duplicateSQL)
+        DROP TABLE trace_hash_chain_v3_fixture;
+        PRAGMA user_version = 2;
+        """
+        var errmsg: UnsafeMutablePointer<CChar>?
+        let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
+        if rc != SQLITE_OK {
+            let message = errmsg.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(errmsg)
+            throw CausalGraphStoreError.schemaFailed(
+                "legacy continuity fixture failed: \(message)")
+        }
+        if let db {
+            sqlite3_close(db)
+        }
+        db = nil
+        #expect(chmod(path.path, 0o600) == 0)
+    }
+
+    private func queryPlan(at path: URL, sql: String) -> [String] {
+        var db: OpaquePointer?
+        defer { if let db { sqlite3_close(db) } }
+        #expect(sqlite3_open_v2(
+            path.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil
+        ) == SQLITE_OK)
+        var stmt: OpaquePointer?
+        #expect(sqlite3_prepare_v2(
+            db, "EXPLAIN QUERY PLAN \(sql)", -1, &stmt, nil
+        ) == SQLITE_OK)
+        defer { sqlite3_finalize(stmt) }
+        var details: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let raw = sqlite3_column_text(stmt, 3) {
+                details.append(String(cString: raw))
+            }
+        }
+        return details
+    }
+
     // MARK: - Clean chain
 
     @Test("A clean continuity chain verifies; entries are linked in append order")
@@ -86,6 +171,109 @@ struct CausalGraphHashChainContinuityTests {
         let result = try await store.verifyHashChain()
         #expect(result.status == .ok)
         #expect(result.entriesChecked == 0)
+        await store.close()
+    }
+
+    @Test("Two store connections cannot fork the global continuity sequence")
+    func concurrentConnectionsSerializeHeadAndInsert() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-chain-race-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let first = try await SQLiteCausalGraphStore(databasePath: path.path)
+        let second = try await SQLiteCausalGraphStore(databasePath: path.path)
+
+        @Sendable func appendRange(
+            _ store: SQLiteCausalGraphStore,
+            prefix: String
+        ) async throws -> [TraceHashChainEntry] {
+            var entries: [TraceHashChainEntry] = []
+            for index in 0..<25 {
+                entries.append(try await store.appendTraceContinuity(
+                    traceId: "\(prefix)-\(index)",
+                    eventId: "event-\(prefix)-\(index)",
+                    edgeId: nil,
+                    signature: nil,
+                    publishedToUnifiedLog: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_100_000 + Double(index))
+                ))
+            }
+            return entries
+        }
+
+        async let left = appendRange(first, prefix: "left")
+        async let right = appendRange(second, prefix: "right")
+        let (leftEntries, rightEntries) = try await (left, right)
+        let all = leftEntries + rightEntries
+        let sequences = all.map(\.sequenceNumber).sorted()
+        #expect(sequences == Array(1...50))
+        #expect(Set(sequences).count == 50)
+        let verification = try await first.verifyHashChain()
+        #expect(verification.status == .ok)
+        #expect(verification.entriesChecked == 50)
+        await first.close()
+        await second.close()
+    }
+
+    @Test("Legacy v2 continuity queries gain a global sequence seek index")
+    func legacyMigrationIndexesGlobalSequenceQueries() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-chain-legacy-plan-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        try await createLegacyContinuityDatabase(at: path, duplicateHead: false)
+        let store = try await SQLiteCausalGraphStore(databasePath: path.path)
+
+        let duplicateLookup = queryPlan(
+            at: path,
+            sql: "SELECT 1 FROM trace_hash_chain WHERE sequence_number = 42 LIMIT 1"
+        ).joined(separator: " | ")
+        let globalHead = queryPlan(
+            at: path,
+            sql: "SELECT id FROM trace_hash_chain ORDER BY sequence_number DESC LIMIT 1"
+        ).joined(separator: " | ")
+        #expect(duplicateLookup.contains("idx_hash_chain_global_seq"),
+                "legacy duplicate guard still scans: \(duplicateLookup)")
+        #expect(globalHead.contains("idx_hash_chain_global_seq"),
+                "legacy global-head lookup still scans: \(globalHead)")
+        #expect(!globalHead.lowercased().contains("temp b-tree"))
+        await store.close()
+    }
+
+    @Test("A duplicated inherited global head latches continuity appends fail-closed")
+    func duplicateGlobalHeadLatchesAppend() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-chain-duplicate-head-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        try await createLegacyContinuityDatabase(at: path, duplicateHead: true)
+        let store = try await SQLiteCausalGraphStore(databasePath: path.path)
+
+        await #expect(throws: CausalGraphStoreError.self) {
+            _ = try await store.appendTraceContinuity(
+                traceId: "new", eventId: "event", edgeId: nil,
+                signature: nil, publishedToUnifiedLog: false
+            )
+        }
+        // Remove one fork out-of-band. This handle must remain latched rather
+        // than silently resuming after an integrity failure it already saw.
+        tamper(path, "DELETE FROM trace_hash_chain WHERE id = 'fork-b'")
+        await #expect(throws: CausalGraphStoreError.self) {
+            _ = try await store.appendTraceContinuity(
+                traceId: "still-blocked", eventId: "event-2", edgeId: nil,
+                signature: nil, publishedToUnifiedLog: false
+            )
+        }
+        #expect(try await store.globalChainHead()?.sequenceNumber == 7)
         await store.close()
     }
 

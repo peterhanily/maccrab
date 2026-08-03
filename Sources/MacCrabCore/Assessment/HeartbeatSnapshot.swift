@@ -48,8 +48,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     // MARK: Throughput counters
     public let alertsEmitted: Int?
     public let eventsProcessed: Int?
-    /// Total userspace-eviction drops folded by the collector registry
-    /// (a SUPERSET of the merged-stream detection-input drops below).
+    /// Every known detection-input loss plus non-pipeline CollectorRegistry
+    /// loss. Storage-writer drops remain separate because detection completed.
     public let eventsDropped: Int?
 
     // MARK: Rule coverage
@@ -61,6 +61,18 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let llm: LLMHealth?
     public let prevention: Prevention?
     public let traceRegistry: TraceRegistry?
+    public let traceGraphStorageAdmission: TraceGraphStorageAdmission?
+    /// OTLP `traces.db` admission. Separate from TraceGraph: this store holds
+    /// unauthenticated/self-reported spans, and a block means those advisory
+    /// records are being shed while kernel detection continues.
+    public let traceStoreStorageAdmission: TraceStoreStorageAdmission?
+    /// Causality counters around the bounded collector and merged-stream
+    /// stages. Missing on pre-instrumentation engines means unknown, not zero.
+    public let eventPipeline: EventPipeline?
+    /// Completeness of the privileged, bounded browser-extension inventory.
+    /// Missing on older engines means unknown. A present degraded block means
+    /// returned rows are partial and must not be interpreted as a clean census.
+    public let browserInventory: BrowserInventory?
 
     // MARK: Drop attribution (the gauges the app decoder omitted)
     /// Native ES per-client kernel ingest-drops. Distinct from `eventsDropped`
@@ -76,8 +88,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let mergedPriorityDroppedTotal: Int?
     /// Merged file-stream detection-input drops (file-noise flood).
     public let mergedFileDroppedTotal: Int?
-    /// Aggregate detection-input loss (priority + file). A SUBSET of
-    /// `eventsDropped`; the single "did the engine lose detection input" gauge.
+    public let mergedPriorityTerminatedTotal: Int?
+    public let mergedFileTerminatedTotal: Int?
+    /// Aggregate pre-buffer, collector-buffer and merged-buffer input loss.
+    /// A subset of `eventsDropped`, which also includes registry-only losses.
     public let detectionInputDroppedTotal: Int?
     /// Batched-writer storage-layer drop — a storage loss, NOT a detection gap.
     public let eventsStorageWriteDroppedTotal: Int?
@@ -97,7 +111,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let esClientSplitDegraded: Bool?
 
     // MARK: Self-defense
-    /// AES-GCM authenticated-decrypt failures — non-zero means DB tamper.
+    /// Invalid ENC2 envelopes / AES-GCM authentication failures — non-zero
+    /// means encrypted database corruption or tamper.
     public let dbTamperDecryptFailures: Int?
 
     // MARK: Full Disk Access probe
@@ -118,6 +133,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case llm
         case prevention
         case traceRegistry = "trace_registry"
+        case traceGraphStorageAdmission = "tracegraph_storage_admission"
+        case traceStoreStorageAdmission = "traces_storage_admission"
+        case eventPipeline = "event_pipeline"
+        case browserInventory = "browser_inventory"
         case esKernelDroppedTotal = "es_kernel_dropped_total"
         case esKernelDroppedByType = "es_kernel_dropped_by_type"
         case esProcessedByType = "es_processed_by_type"
@@ -126,6 +145,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case esloggerDroppedTotal = "eslogger_dropped_total"
         case mergedPriorityDroppedTotal = "merged_priority_dropped_total"
         case mergedFileDroppedTotal = "merged_file_dropped_total"
+        case mergedPriorityTerminatedTotal = "merged_priority_terminated_total"
+        case mergedFileTerminatedTotal = "merged_file_terminated_total"
         case detectionInputDroppedTotal = "detection_input_dropped_total"
         case eventsStorageWriteDroppedTotal = "events_storage_write_dropped_total"
         case payloadTruncatedTotal = "payload_truncated_total"
@@ -164,6 +185,102 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case eventCount = "event_count"
             case errorCount = "error_count"
             case lastError = "last_error"
+        }
+    }
+
+    /// Fixed-cardinality event-flow telemetry. Maps are keyed only by the
+    /// daemon's compile-time source/lane names.
+    public struct EventPipeline: Codable, Sendable, Equatable {
+        public let offeredBySource: [String: UInt64]?
+        public let offeredBySourceAndLane: [String: [String: UInt64]]?
+        public let droppedBySourceAndLane: [String: [String: UInt64]]?
+        public let terminatedBySourceAndLane: [String: [String: UInt64]]?
+        public let collectorOfferedBySourceAndLane: [String: [String: UInt64]]?
+        public let upstreamDroppedBySourceAndLane: [String: [String: UInt64]]?
+        public let upstreamTerminatedBySourceAndLane: [String: [String: UInt64]]?
+        public let mergedDroppedBySourceAndLane: [String: [String: UInt64]]?
+        public let mergedTerminatedBySourceAndLane: [String: [String: UInt64]]?
+        public let offeredByLane: [String: UInt64]?
+        public let dequeuedByLane: [String: UInt64]?
+        public let completedByLane: [String: UInt64]?
+        public let backlogEstimateByLane: [String: UInt64]?
+        public let inFlightByLane: [String: UInt64]?
+        public let processingP99MicrosByLane: [String: UInt64]?
+        public let latencySampleCountByLane: [String: UInt64]?
+        public let upstreamDroppedByLane: [String: UInt64]?
+        public let upstreamTerminatedByLane: [String: UInt64]?
+        public let mergedDroppedByLane: [String: UInt64]?
+        public let mergedTerminatedByLane: [String: UInt64]?
+        public let collectorCapacityBySource: [String: UInt64]?
+        public let preBufferDroppedBySource: [String: UInt64]?
+        public let detectionInputDroppedTotal: UInt64?
+        public let capacityByLane: [String: UInt64]?
+        public let collectorBuffer: [String: UInt64]?
+
+        private enum CodingKeys: String, CodingKey {
+            case offeredBySource = "offered_by_source"
+            case offeredBySourceAndLane = "offered_by_source_and_lane"
+            case droppedBySourceAndLane = "dropped_by_source_and_lane"
+            case terminatedBySourceAndLane = "terminated_by_source_and_lane"
+            case collectorOfferedBySourceAndLane = "collector_offered_by_source_and_lane"
+            case upstreamDroppedBySourceAndLane = "upstream_dropped_by_source_and_lane"
+            case upstreamTerminatedBySourceAndLane = "upstream_terminated_by_source_and_lane"
+            case mergedDroppedBySourceAndLane = "merged_dropped_by_source_and_lane"
+            case mergedTerminatedBySourceAndLane = "merged_terminated_by_source_and_lane"
+            case offeredByLane = "offered_by_lane"
+            case dequeuedByLane = "dequeued_by_lane"
+            case completedByLane = "completed_by_lane"
+            case backlogEstimateByLane = "backlog_estimate_by_lane"
+            case inFlightByLane = "in_flight_by_lane"
+            case processingP99MicrosByLane = "processing_p99_us_by_lane"
+            case latencySampleCountByLane = "latency_sample_count_by_lane"
+            case upstreamDroppedByLane = "upstream_dropped_by_lane"
+            case upstreamTerminatedByLane = "upstream_terminated_by_lane"
+            case mergedDroppedByLane = "merged_dropped_by_lane"
+            case mergedTerminatedByLane = "merged_terminated_by_lane"
+            case collectorCapacityBySource = "collector_capacity_by_source"
+            case preBufferDroppedBySource = "pre_buffer_dropped_by_source"
+            case detectionInputDroppedTotal = "detection_input_dropped_total"
+            case capacityByLane = "capacity_by_lane"
+            case collectorBuffer = "collector_buffer"
+        }
+    }
+
+    public struct BrowserInventory: Codable, Sendable, Equatable {
+        public let coverageKnown: Bool?
+        public let complete: Bool?
+        public let degraded: Bool?
+        public let reason: String?
+        public let lastScanWasTruncated: Bool?
+        public let scansTotal: UInt64?
+        public let truncatedScansTotal: UInt64?
+        public let inspectedDirectoryEntriesTotal: UInt64?
+        public let truncatedDirectoriesTotal: UInt64?
+        public let truncatedHomesTotal: UInt64?
+        public let lastScanCompletedAtUnix: Double?
+        public let lastScanHomes: Int?
+        public let lastScanInspectedDirectoryEntries: UInt64?
+        public let lastScanTruncatedDirectoryCount: UInt64?
+        public let lastScanTruncatedHomeCount: UInt64?
+        public let perHomeDirectoryEntryBudget: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case coverageKnown = "coverage_known"
+            case complete
+            case degraded
+            case reason
+            case lastScanWasTruncated = "last_scan_was_truncated"
+            case scansTotal = "scans_total"
+            case truncatedScansTotal = "truncated_scans_total"
+            case inspectedDirectoryEntriesTotal = "inspected_directory_entries_total"
+            case truncatedDirectoriesTotal = "truncated_directories_total"
+            case truncatedHomesTotal = "truncated_homes_total"
+            case lastScanCompletedAtUnix = "last_scan_completed_at_unix"
+            case lastScanHomes = "last_scan_homes"
+            case lastScanInspectedDirectoryEntries = "last_scan_inspected_directory_entries"
+            case lastScanTruncatedDirectoryCount = "last_scan_truncated_directory_count"
+            case lastScanTruncatedHomeCount = "last_scan_truncated_home_count"
+            case perHomeDirectoryEntryBudget = "per_home_directory_entry_budget"
         }
     }
 
@@ -229,6 +346,51 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case ttlEvictions = "ttl_evictions"
         }
     }
+
+    /// Authoritative SQLite actor admission state. A blocked store represents a
+    /// deliberate forensic-evidence gap while detection continues in memory.
+    public struct TraceGraphStorageAdmission: Codable, Sendable, Equatable {
+        public let enabled: Bool?
+        public let blocked: Bool?
+        /// False when the daemon could not construct the TraceGraph store at
+        /// boot. Missing means the heartbeat predates this fail-visible field.
+        public let storeAvailable: Bool?
+        /// True only when a typed storage-admission refusal happened before the
+        /// store actor existed (distinct from a live actor shedding mutations).
+        public let startupBlocked: Bool?
+        public let reason: String?
+        public let shedMutationsTotal: Int64?
+        public let maxFootprintBytes: Int64?
+        public let admissionThresholdBytes: Int64?
+        public let resumeBelowBytes: Int64?
+        public let transactionReserveBytes: Int64?
+        public let footprintBytes: Int64?
+        public let freeSpaceBytes: Int64?
+        public let freeSpaceFloorBytes: Int64?
+        public let pinnedReader: Bool?
+        public let recovering: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case enabled
+            case blocked
+            case storeAvailable = "store_available"
+            case startupBlocked = "startup_blocked"
+            case reason
+            case shedMutationsTotal = "shed_mutations_total"
+            case maxFootprintBytes = "max_footprint_bytes"
+            case admissionThresholdBytes = "admission_threshold_bytes"
+            case resumeBelowBytes = "resume_below_bytes"
+            case transactionReserveBytes = "transaction_reserve_bytes"
+            case footprintBytes = "footprint_bytes"
+            case freeSpaceBytes = "free_space_bytes"
+            case freeSpaceFloorBytes = "free_space_floor_bytes"
+            case pinnedReader = "pinned_reader"
+            case recovering
+        }
+    }
+
+    /// Same wire shape as TraceGraph admission, emitted under a distinct key.
+    public typealias TraceStoreStorageAdmission = TraceGraphStorageAdmission
 
     // MARK: - Reading / freshness
 

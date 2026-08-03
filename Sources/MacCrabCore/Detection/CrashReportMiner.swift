@@ -47,42 +47,108 @@ public actor CrashReportMiner {
     /// Already-processed file paths to avoid duplicate alerts.
     private var knownReports: Set<String> = []
 
-    /// Directories where macOS stores diagnostic crash reports.
-    private static let reportDirs: [String] = [
-        "/Library/Logs/DiagnosticReports/",
-        NSHomeDirectory() + "/Library/Logs/DiagnosticReports/",
-    ]
+    private struct ReportDirectory: Sendable {
+        let path: String
+        let directoryOwnerUID: UInt32?
+        let requiredEntryOwnerUID: UInt32?
+    }
+    private let reportDirectories: [ReportDirectory]
 
     /// Maximum age of crash reports to scan (24 hours).
     private let maxAge: TimeInterval = 86_400
 
-    public init() {}
+    /// Apple crash/Jetsam reports can be substantially larger than ordinary
+    /// config files, but they must never be allowed to consume memory without
+    /// a ceiling in the root daemon's five-minute forensic task.
+    static let maxReportBytes = 32 * 1024 * 1024
+
+    public init() {
+        let homes = RealUserHomeResolver.all()
+        self.reportDirectories = [ReportDirectory(
+            path: "/Library/Logs/DiagnosticReports/",
+            directoryOwnerUID: 0,
+            requiredEntryOwnerUID: nil
+        )] + homes.map {
+            ReportDirectory(
+                path: $0.appending("Library/Logs/DiagnosticReports") + "/",
+                directoryOwnerUID: $0.userID,
+                requiredEntryOwnerUID: $0.userID
+            )
+        }
+    }
+
+    static func defaultReportDirectories(homes: [RealUserHome]) -> [String] {
+        ["/Library/Logs/DiagnosticReports/"]
+            + homes.map { $0.appending("Library/Logs/DiagnosticReports") + "/" }
+    }
+
+    /// Internal runtime seam for carrier-boundary tests. Production always
+    /// uses Apple's two DiagnosticReports locations above.
+    init(reportDirectories: [String]) {
+        self.reportDirectories = reportDirectories.map {
+            ReportDirectory(
+                path: $0,
+                directoryOwnerUID: nil,
+                requiredEntryOwnerUID: nil
+            )
+        }
+    }
 
     /// Scan for new crash reports with exploitation indicators.
     public func scan() -> [ExploitIndicator] {
         var results: [ExploitIndicator] = []
         let fm = FileManager.default
 
-        for dir in Self.reportDirs {
-            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+        for scope in reportDirectories {
+            guard let snapshot = BoundedDirectoryLister.list(
+                at: scope.path,
+                maximumEntries: 65_536,
+                expectedOwnerUID: scope.directoryOwnerUID
+            ) else { continue }
+            // Consume a bounded partial inventory when truncated; this miner
+            // never publishes a "clean directory" state. System crash reports
+            // can be user-owned; per-home reports remain uid-bound.
+            let files = snapshot.entries.compactMap { entry -> String? in
+                guard entry.kind == .regularFile,
+                      scope.requiredEntryOwnerUID.map({ entry.ownerUID == $0 }) ?? true else {
+                    return nil
+                }
+                return entry.name
+            }
 
             for file in files {
                 guard file.hasSuffix(".crash") || file.hasSuffix(".ips") || file.hasSuffix(".panic") else {
                     continue
                 }
-                let path = dir + file
+                let path = scope.path + file
 
                 // Skip already processed
                 guard !knownReports.contains(path) else { continue }
-                knownReports.insert(path)
 
-                // Only scan recent reports
+                // Cheap prefilter only. The pathname may be replaced after
+                // this stat, so the security decision below uses metadata from
+                // the same descriptor that supplied the stable bytes.
                 guard let attrs = try? fm.attributesOfItem(atPath: path),
                       let modDate = attrs[.modificationDate] as? Date,
                       Date().timeIntervalSince(modDate) < maxAge else { continue }
 
-                // Read and scan
-                guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+                // Read and scan. DiagnosticReports is external input to the
+                // daemon; reject links, FIFOs/devices, hard links, oversized
+                // reports, and concurrent replacement/mutation.
+                guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+                    at: path,
+                    maximumBytes: Self.maxReportBytes
+                ), Date().timeIntervalSince(snapshot.modificationDate) < maxAge else {
+                    continue
+                }
+
+                // Cache only after a successful stable read. A rejected FIFO,
+                // link, oversize file, or concurrent mutation may later be
+                // replaced at the same path by a legitimate report.
+                knownReports.insert(path)
+                guard let content = String(data: snapshot.data, encoding: .utf8) else {
+                    continue
+                }
 
                 // Extract process name from crash report
                 let processName = extractProcessName(from: content) ?? file
@@ -95,7 +161,7 @@ public actor CrashReportMiner {
                             processName: processName,
                             indicator: name,
                             excerpt: excerpt,
-                            timestamp: modDate,
+                            timestamp: snapshot.modificationDate,
                             severity: severity
                         ))
                     }

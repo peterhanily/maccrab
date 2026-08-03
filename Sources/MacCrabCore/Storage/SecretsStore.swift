@@ -19,25 +19,20 @@
 // only processes with a matching code-signing identity + access group can
 // read them.
 //
-// # Sysext sharing (status as of v1.18 — corrected)
+// # Sysext sharing
 //
 // The dashboard (.app) uses this keychain store for cloud API keys, and the
 // System Extension (sysextd, root) declares the same
-// `79S425CW99.com.maccrab.shared` keychain-access-group entitlement. BUT —
-// despite the entitlement — the ENGINE does NOT currently read the keychain:
-// it sources LLM config from `<root>/llm_config.json` + `MACCRAB_LLM_*` env
-// vars only (verified: no SecretsStore / Security import anywhere in
-// MacCrabAgentKit / MacCrabAgent). The v1.17.4 privileged-inbox bridge
-// (V2DaemonControl.sendLLMConfig → DaemonTimers.handleLLMConfigRequests)
-// carries NON-SECRET config (provider / URL / model) to the root config file;
-// cloud API KEYS are deliberately NOT sent over that channel. Net effect:
-// Ollama-LOCAL engine LLM works fully; engine-side CLOUD LLM is not yet
-// wired. Reading cloud keys from the root engine (a root process holding +
-// transmitting cloud credentials) is a deferred, security-sensitive item —
-// it needs the same scrutiny as the non-loopback-endpoint policy, not a
-// silent enablement.
+// `79S425CW99.com.maccrab.shared` keychain-access-group entitlement. The app,
+// CLI, MCP server, and engine therefore resolve persistent LLM credentials
+// here; `llm_config.json` carries non-secret provider/model/URL settings only.
+// The v1.17.4 privileged-inbox bridge
+// (V2DaemonControl.sendLLMConfig → DaemonTimers.handleLLMConfigRequests) also
+// carries NON-SECRET config only. Engine/MCP reads use the non-interactive API
+// below so a background process never raises a Keychain authorization prompt.
 
 import Foundation
+import LocalAuthentication
 import Security
 
 // MARK: - SecretKey
@@ -127,9 +122,9 @@ public struct SecretsStore: Sendable {
     /// Namespaced so the db-encryption and future features don't collide.
     public static let service = "com.maccrab.secrets"
 
-    /// Default shared keychain access group. v1.8.1: both bundles
-    /// (.app + sysext) declare this group in their entitlements, so
-    /// either side can read items the other wrote.
+    /// Default shared keychain access group. The app, sysext, CLI, and MCP
+    /// tool signatures declare this group, so each principal can resolve the
+    /// persistent item written by Settings.
     public static let defaultAccessGroup = "79S425CW99.com.maccrab.shared"
 
     /// `kSecAttrAccessGroup` to claim. Defaults to `defaultAccessGroup`;
@@ -164,9 +159,31 @@ public struct SecretsStore: Sendable {
     /// it through the fast path. After one release cycle the without-
     /// group fallback is empty and this branch becomes dead code.
     public func get(_ key: SecretKey) throws -> String? {
+        try get(key, migrateLegacy: true)
+    }
+
+    /// Read without allowing Keychain Services to display authentication UI.
+    /// Background engine and MCP processes use this path: a locked/denied item
+    /// degrades to the caller's fallback rather than hanging on a prompt. The
+    /// pre-access-group migration is intentionally skipped because it performs
+    /// a write and is owned by the interactive dashboard/CLI path.
+    public func getNonInteractive(_ key: SecretKey) throws -> String? {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return try get(key, authenticationContext: context, migrateLegacy: false)
+    }
+
+    private func get(
+        _ key: SecretKey,
+        authenticationContext: LAContext? = nil,
+        migrateLegacy: Bool
+    ) throws -> String? {
         var q = baseQuery(for: key)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
+        if let authenticationContext {
+            q[kSecUseAuthenticationContext as String] = authenticationContext
+        }
 
         var result: AnyObject?
         let status = SecItemCopyMatching(q as CFDictionary, &result)
@@ -182,7 +199,7 @@ public struct SecretsStore: Sendable {
             // an item written pre-v1.8.1 (without the group) won't match
             // the with-group query. Try the without-group lookup and
             // rewrite if found.
-            if accessGroup != nil {
+            if migrateLegacy, accessGroup != nil {
                 if let migrated = try migrateLegacyItem(for: key) {
                     return migrated
                 }
@@ -227,8 +244,27 @@ public struct SecretsStore: Sendable {
     /// is the behaviour every UI callsite wants and matches how the
     /// SecureField onChange handler typically fires.
     public func set(_ key: SecretKey, value: String) throws {
+        try set(key, value: value, authenticationContext: nil)
+    }
+
+    /// Write without allowing Keychain Services to display authentication UI.
+    /// Root-engine and MCP legacy-file migrations use this path: if the item
+    /// requires user presence, the operation fails with
+    /// `errSecInteractionNotAllowed` and the plaintext source file remains
+    /// byte-for-byte intact for a later interactive migration.
+    public func setNonInteractive(_ key: SecretKey, value: String) throws {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        try set(key, value: value, authenticationContext: context)
+    }
+
+    private func set(
+        _ key: SecretKey,
+        value: String,
+        authenticationContext: LAContext?
+    ) throws {
         if value.isEmpty {
-            try delete(key)
+            try delete(key, authenticationContext: authenticationContext)
             return
         }
         guard let data = value.data(using: .utf8) else {
@@ -244,8 +280,12 @@ public struct SecretsStore: Sendable {
         // …AfterFirstUnlockThisDeviceOnly) gets tightened on next write.
         // Without this, accessibility tightening only happens on add and a
         // stale weak-acl item could persist indefinitely on the user's machine.
+        var updateQuery = baseQuery(for: key)
+        if let authenticationContext {
+            updateQuery[kSecUseAuthenticationContext as String] = authenticationContext
+        }
         let updateStatus = SecItemUpdate(
-            baseQuery(for: key) as CFDictionary,
+            updateQuery as CFDictionary,
             [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -258,6 +298,9 @@ public struct SecretsStore: Sendable {
             var q = baseQuery(for: key)
             q[kSecValueData as String] = data
             q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            if let authenticationContext {
+                q[kSecUseAuthenticationContext as String] = authenticationContext
+            }
 
             let addStatus = SecItemAdd(q as CFDictionary, nil)
             if addStatus == errSecSuccess { return }
@@ -269,7 +312,18 @@ public struct SecretsStore: Sendable {
 
     /// Delete any existing item for `key`. No-op if the item doesn't exist.
     public func delete(_ key: SecretKey) throws {
-        let status = SecItemDelete(baseQuery(for: key) as CFDictionary)
+        try delete(key, authenticationContext: nil)
+    }
+
+    private func delete(
+        _ key: SecretKey,
+        authenticationContext: LAContext?
+    ) throws {
+        var query = baseQuery(for: key)
+        if let authenticationContext {
+            query[kSecUseAuthenticationContext as String] = authenticationContext
+        }
+        let status = SecItemDelete(query as CFDictionary)
         switch status {
         case errSecSuccess, errSecItemNotFound:
             return

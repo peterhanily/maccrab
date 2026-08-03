@@ -80,23 +80,19 @@ public actor TCCRevocation {
     public func revoke(service: String, bundleId: String, reason: String) -> Bool {
         guard isEnabled else { return false }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        proc.arguments = ["reset", service, bundleId]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
-            logger.error("Failed to revoke TCC: \(error.localizedDescription)")
+        guard let result = BoundedPrivilegedProcessRunner.run(
+            executable: "/usr/bin/tccutil",
+            arguments: ["reset", service, bundleId],
+            timeout: 10,
+            maximumOutputBytes: nil
+        ) else {
+            logger.error("Failed to revoke TCC: trusted tccutil could not be launched")
             let event = RevocationEvent(service: service, bundleId: bundleId, reason: reason, timestamp: Date(), success: false)
             revocationHistory.append(event)
             return false
         }
 
-        let success = proc.terminationStatus == 0
+        let success = result.succeeded
         let event = RevocationEvent(service: service, bundleId: bundleId, reason: reason, timestamp: Date(), success: success)
         revocationHistory.append(event)
 

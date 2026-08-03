@@ -11,6 +11,20 @@
 
 import Foundation
 
+public enum RevocationReverifyServiceError: Error, LocalizedError, Sendable, Equatable {
+    case rollback(stored: Int, incoming: Int)
+    case serialMissing(lastAccepted: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .rollback(let stored, let incoming):
+            return "Revocation reconcile rejected rollback serial \(incoming); last accepted serial is \(stored)"
+        case .serialMissing(let lastAccepted):
+            return "Revocation reconcile rejected a serial-less list after accepting serial \(lastAccepted)"
+        }
+    }
+}
+
 public enum RevocationReverifyService {
 
     /// Reconcile installed Tier-B plugins against the revocation state and apply
@@ -26,13 +40,6 @@ public enum RevocationReverifyService {
         receiptsDir: URL,
         now: Date = Date()
     ) async throws -> [PluginInstaller.QuarantineRecord] {
-        // A freshly-verified list refreshes the staleness clock (and advances the
-        // monotonic serial high-water mark; recordRevocations never lowers it).
-        if let list = verifiedList {
-            try? trustStateStore.recordRevocations(serial: list.serial ?? 0, verifiedAt: now)
-        }
-        let freshness = trustStateStore.revocationFreshness(now: now)
-
         let installed = try await installer.list()
         var refs: [(ref: RevocationEnforcer.InstalledRef, provenance: PluginProvenance)] = []
         refs.reserveCapacity(installed.count)
@@ -42,12 +49,52 @@ public enum RevocationReverifyService {
             refs.append((RevocationEnforcer.InstalledRef(pluginID: p.pluginID, version: version), provenance))
         }
 
-        // Offline → an empty list (no explicit revocations), so only the staleness
-        // escalation fires; online → the verified list drives explicit revocations.
-        let list = verifiedList ?? RaveRevocationList(formatVersion: "1", serial: nil, updatedAt: nil, revocations: [])
-        let records = RevocationReverify.runtimeQuarantine(
-            installed: refs, against: list, freshness: freshness, now: now)
-        _ = try await installer.applyQuarantine(records)
+        let records: [PluginInstaller.QuarantineRecord]
+        if let list = verifiedList {
+            if let serial = list.serial {
+                if case .rollback(let stored, let incoming) =
+                    trustStateStore.evaluateRevocations(incoming: serial) {
+                    throw RevocationReverifyServiceError.rollback(
+                        stored: stored, incoming: incoming)
+                }
+            } else if let stored = trustStateStore.currentRevocationsSerial() {
+                throw RevocationReverifyServiceError.serialMissing(lastAccepted: stored)
+            }
+            // A caller-supplied list is freshly signature-verified, so evaluate
+            // it as fresh even before the durability write below. Applying the
+            // quarantine MUST precede advancing the freshness/high-water mark:
+            // otherwise a crash or write failure between those operations makes
+            // the next throttled sweep believe revocation enforcement landed
+            // when it did not.
+            records = RevocationReverify.runtimeQuarantine(
+                installed: refs, against: list, freshness: .fresh(age: 0), now: now)
+            _ = try await installer.applyQuarantine(records)
+            if let serial = list.serial {
+                try trustStateStore.recordRevocations(serial: serial, verifiedAt: now)
+            }
+        } else {
+            // An offline/periodic sweep has no authenticated statement that a
+            // prior explicit revocation was withdrawn. Treating nil as an
+            // authoritative empty list erased MALWARE quarantines immediately
+            // before execution. Preserve every existing record for an installed
+            // plugin and add any newly-triggered staleness quarantine. Only a
+            // freshly verified list may authoritatively un-quarantine.
+            let emptyList = RaveRevocationList(
+                formatVersion: "1", serial: nil, updatedAt: nil, revocations: [])
+            let staleRecords = RevocationReverify.runtimeQuarantine(
+                installed: refs,
+                against: emptyList,
+                freshness: trustStateStore.revocationFreshness(now: now),
+                now: now)
+            let installedIDs = Set(refs.map { $0.ref.pluginID })
+            var merged = await installer.currentQuarantine()
+                .filter { installedIDs.contains($0.key) }
+            for record in staleRecords where merged[record.pluginID] == nil {
+                merged[record.pluginID] = record
+            }
+            records = Array(merged.values)
+            _ = try await installer.applyQuarantine(records)
+        }
         return records
     }
 

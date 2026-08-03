@@ -11,16 +11,16 @@ struct MacCrabCtl {
         // want graceful EPIPE handling via try? instead.
         signal(SIGPIPE, SIG_IGN)
 
-        // maccrabctl is designed to run as the logged-in user; it never needs
-        // root. Warn (do NOT refuse — refusing could break an unforeseen
-        // flow) when run as euid 0, since running a user-writable bundled
-        // binary as root is an unnecessary privilege-escalation surface.
-        if geteuid() == 0 {
+        let args = CommandLine.arguments
+
+        // Most commands are designed for the logged-in user. The one explicit
+        // exception is `agent-capabilities`: a root-owned inbox request is its
+        // authorization boundary, so its grant path intentionally requires
+        // sudo. Keep warning for every other root invocation.
+        if geteuid() == 0 && args.dropFirst().first != "agent-capabilities" {
             FileHandle.standardError.write(Data(
                 "warning: maccrabctl is running as root (euid 0); it is meant to run as the logged-in user. This is unnecessary and, if the app bundle is user-writable, a privilege-escalation risk. Continuing.\n".utf8))
         }
-
-        let args = CommandLine.arguments
 
         guard args.count >= 2 else {
             printUsage()
@@ -413,6 +413,8 @@ struct MacCrabCtl {
         case "config":
             // PARITY-05: daemon-config get/set against the safe-key allow-list.
             dispatchConfig(args: Array(args.dropFirst(2)))
+        case "agent-capabilities":
+            dispatchAgentCapabilities(args: Array(args.dropFirst(2)))
         case "audit":
             // Human-side mirror of the MCP `get_audit_log` tool: the record of
             // what an agent changed must not be readable only by the agent.
@@ -481,7 +483,7 @@ struct MacCrabCtl {
             await traceReattribute(eventId: rest[0], verdictRaw: rest[1], note: overrideNote)
         case "export":
             guard let id = rest.first else {
-                print("Usage: maccrabctl trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]")
+                print("Usage: maccrabctl trace export <trace-id> [--out <existing-dir>] [--include-raw-paths] [--include-hostname]")
                 exit(1)
             }
             let includeRawPaths = rest.contains("--include-raw-paths")
@@ -632,7 +634,7 @@ struct MacCrabCtl {
                                                    `maccrabctl status` and the dashboard.
 
         Bundle pipeline (.maccrabtrace files):
-          trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]
+          trace export <trace-id> [--out <existing-dir>] [--include-raw-paths] [--include-hostname]
                                                    Export trace as a .maccrabtrace bundle.
                                                    Daemon-signed only when run as root: the
                                                    signing key in <supportDir>/keys/ is

@@ -88,10 +88,32 @@ struct AgentTracesView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            // v1.9 Phase-6.2 final ship copy. Phase-2.2 wired
-            // column-level AES-GCM, Phase-3 added the in-panel toggle,
-            // Phase-5 hardened the threat-intel pathway. No
-            // experimental caveats remain.
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(
+                        localized: "agentTraces.trustTitle",
+                        defaultValue: "Unauthenticated · self-reported"
+                    ))
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    Text(String(
+                        localized: "agentTraces.trustBody",
+                        defaultValue: "Loopback is not authentication. Any local process can submit or forge these OTLP spans. Treat them as advisory and corroborate them with Endpoint Security or other kernel-backed evidence."
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            // At-rest protection and source authenticity are separate claims:
+            // encryption protects the stored value, not who submitted it.
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "lock.shield.fill")
                     .font(.caption2)
@@ -102,7 +124,7 @@ struct AgentTracesView: View {
                         .font(.caption2)
                         .fontWeight(.semibold)
                     Text(String(localized: "agentTraces.privacyBody",
-                                 defaultValue: "Span attribute values pass through the secret-shape sanitiser, then AES-GCM-encrypted under the same shared key as events.db. Tamper detection is built in. Spans only ever leave your Mac if you configure your AI tool to export to this receiver."))
+                                 defaultValue: "Span attribute values pass through the secret-shape sanitiser, then are AES-GCM-encrypted with the installation's trace database key. This protects at-rest ciphertext, not source authenticity. Spans only ever leave your Mac if you configure your AI tool to export to this receiver."))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -489,6 +511,14 @@ struct AgentTracesView: View {
                             .background(Color.accentColor.opacity(0.1))
                             .clipShape(Capsule())
                     }
+                    Text(span.trust.displayLabel)
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.1))
+                        .clipShape(Capsule())
                 }
                 HStack(spacing: 12) {
                     Text("span_id: \(span.spanId)")

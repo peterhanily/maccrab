@@ -244,11 +244,53 @@ enum SensorDegradationEvaluator {
     }
 }
 
+/// Exact events.db maintenance boundaries derived from the same binary-MiB cap
+/// and transaction reserve as the EventStore hard-admission policy.
+///
+/// Admission permits a write only while `footprint + reserve <= cap`. Waiting
+/// until the nominal cap to start maintenance therefore deadlocks recovery: the
+/// writer is already paused one reserve earlier. Maintenance starts one further
+/// reserve below that line, leaving room for the cleanup transaction itself.
+/// The sweep target retains the historical 80% target where it is lower, but
+/// never lands above the proactive boundary on smaller configured caps.
+struct EventsSizeCapBoundary: Sendable, Equatable {
+    let nominalCapBytes: Int64
+    let hardAdmissionBoundaryBytes: Int64
+    let proactiveSweepBoundaryBytes: Int64
+    let targetBytes: Int64
+
+    init(maxSizeMiB: Int) {
+        let safeCapMiB = min(
+            DaemonConfig.StorageConfig.maximumSizeMiB,
+            max(DaemonConfig.StorageConfig.minimumEventsSizeMiB, maxSizeMiB)
+        )
+        let cap = SQLitePersistentStorePolicy.capBytes(
+            maxSizeMiB: safeCapMiB
+        )
+        let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
+        let hardBoundary = max(0, cap - reserve)
+        let proactiveBoundary = max(0, hardBoundary - reserve)
+        // Overflow-safe exact 4/5 calculation (the historical 80% target).
+        let eightyPercent = (cap / 5) * 4 + ((cap % 5) * 4) / 5
+
+        nominalCapBytes = cap
+        hardAdmissionBoundaryBytes = hardBoundary
+        proactiveSweepBoundaryBytes = proactiveBoundary
+        targetBytes = min(eightyPercent, proactiveBoundary)
+    }
+
+    /// Strict comparison lets a sweep that lands exactly on the proactive
+    /// watermark converge instead of immediately re-arming the watchdog.
+    func requiresMaintenance(footprintBytes: Int64) -> Bool {
+        footprintBytes > proactiveSweepBoundaryBytes
+    }
+}
+
 /// v1.21.6 (audit DL-03): back-off state for the early-fire size-cap watchdog.
 ///
 /// The watchdog is a BURST catcher, not a second scheduler: it exists to react
-/// when events.db blows past 1.5x the cap BETWEEN the (hourly by default)
-/// scheduled sweeps. On a host whose irreducible content (alert_evidence + the
+/// when events.db crosses its proactive reserve boundary BETWEEN the (hourly
+/// by default) scheduled sweeps. On a host whose irreducible content (alert_evidence + the
 /// events_fts index + schema) already exceeds the 0.8x-cap sweep target it can
 /// never clear the threshold, and the unconditional 60 s cadence turned it into
 /// a permanent full-FTS-optimize + incremental_vacuum loop — field-observed 59
@@ -366,8 +408,9 @@ final class SensorDegradationState: @unchecked Sendable {
 /// Rising-edge latch for the DB-tamper meta-alert — LOCAL to `DaemonTimers.start`
 /// (captured by the heartbeat closure) so overlapping ticks can't race the
 /// read-modify-write. `DatabaseEncryption.authenticatedDecryptFailures` is a
-/// monotonic count of AES-GCM authentication failures (a tampered encrypted DB
-/// column/row). `shouldAlert(current:)` returns true only when the count grew
+/// monotonic count of malformed authenticated-encryption envelopes or AES-GCM
+/// authentication failures (a corrupted/tampered encrypted DB column/row).
+/// `shouldAlert(current:)` returns true only when the count grew
 /// since the last observation, so a new alert is raised per fresh tamper burst
 /// rather than every 30 s tick; the AlertSink's dedup/suppression backstops the
 /// rate limit if failures keep climbing tick-over-tick.
@@ -504,6 +547,147 @@ enum SizeCapConvergence {
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
 enum DaemonTimers {
+    /// Stateful, non-recursive POSIX directory stream for the privileged inbox.
+    ///
+    /// Keeping the stream open across ticks is intentional. A fresh `readdir`
+    /// from offset zero on every tick lets a flood of dot-prefixed atomic-temp
+    /// names permanently hide a legitimate request behind the fixed per-tick
+    /// cap. Resuming the same stream guarantees that every entry in the current
+    /// directory generation is eventually visited while still doing at most
+    /// `limit` entry reads (and allocations) per tick.
+    final class InboxDirectoryScanner: @unchecked Sendable {
+        private let path: String
+        private let lock = NSLock()
+        private var stream: UnsafeMutablePointer<DIR>?
+
+        init(path: String) {
+            self.path = path
+        }
+
+        deinit {
+            if let stream { closedir(stream) }
+        }
+
+        /// Return at most `limit` immediate child names. This never recursively
+        /// walks attacker-created directories and never materializes the whole
+        /// inbox. Reaching EOF closes the generation; the next tick opens a new
+        /// stream so requests created during/after the prior scan are observed.
+        func nextBatch(limit: Int) -> [String] {
+            guard limit > 0 else { return [] }
+            lock.lock()
+            defer { lock.unlock() }
+
+            if stream == nil { stream = opendir(path) }
+            guard let stream else { return [] }
+
+            var names: [String] = []
+            names.reserveCapacity(limit)
+            while names.count < limit {
+                guard let entry = readdir(stream) else {
+                    closedir(stream)
+                    self.stream = nil
+                    break
+                }
+                let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                    pointer.withMemoryRebound(
+                        to: CChar.self,
+                        capacity: MemoryLayout.size(ofValue: entry.pointee.d_name)
+                    ) { String(cString: $0) }
+                }
+                if name == "." || name == ".." { continue }
+                names.append(name)
+            }
+            return names
+        }
+    }
+
+    struct InboxScanBatch: Equatable {
+        let requestNames: [String]
+        let examinedEntryCount: Int
+    }
+
+    /// One source of truth for the names the poller will claim. The read-cap
+    /// policy below and the partitioning in the timer both derive from this
+    /// list, preventing a newly added request shape from silently bypassing the
+    /// hardened reader.
+    static let knownInboxRequestPrefixes = [
+        "suppress-alert-", "unsuppress-alert-", "delete-alert-",
+        "suppress-campaign-", "refresh-intel-", "reload-rules-",
+        "llm-config-", "flush-request-", "record-clipboard-",
+        "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
+        "remove-rule-", "set-agent-capabilities-", "prune-alerts-",
+        "apply-agent-traces-", "prevention-config-",
+    ]
+
+    static func isClaimedInboxRequestName(_ name: String) -> Bool {
+        name.hasSuffix(".json")
+            && knownInboxRequestPrefixes.contains(where: { name.hasPrefix($0) })
+    }
+
+    /// Safely remove one immediate inbox entry without recursively traversing
+    /// an attacker-created directory. `unlink` handles files, FIFOs, sockets and
+    /// symlinks; `rmdir` is attempted only for an empty directory.
+    static func removeInboxEntry(at path: String) {
+        if unlink(path) != 0, errno == EISDIR || errno == EPERM {
+            _ = rmdir(path)
+        }
+    }
+
+    /// Stream one bounded poller batch and discard entries no handler can ever
+    /// claim. Recent dotfiles receive a grace window because legitimate writers
+    /// use `.<verb>-<uuid>.tmp` followed by atomic rename. The retained scanner
+    /// advances past them, so even more than one tick's worth cannot starve a
+    /// valid request; stale temp files are eventually unlinked.
+    static func inboxScanBatch(
+        scanner: InboxDirectoryScanner,
+        inboxDir: String,
+        maxEntries: Int = 512,
+        temporaryFileGrace: TimeInterval = 60,
+        now: Date = Date()
+    ) -> InboxScanBatch {
+        let names = scanner.nextBatch(limit: maxEntries)
+        var requests: [String] = []
+        requests.reserveCapacity(names.count)
+
+        for name in names {
+            if isClaimedInboxRequestName(name) {
+                requests.append(name)
+                continue
+            }
+
+            let path = inboxDir + "/" + name
+            guard name.hasPrefix(".") else {
+                removeInboxEntry(at: path)
+                continue
+            }
+
+            // lstat never follows a planted symlink and never opens a FIFO.
+            // Only a recent REGULAR dotfile can be a legitimate atomic writer.
+            var st = stat()
+            guard lstat(path, &st) == 0 else { continue }
+            let type = st.st_mode & S_IFMT
+            guard type == S_IFREG else {
+                removeInboxEntry(at: path)
+                continue
+            }
+            let modified = Date(
+                timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec)
+                    + TimeInterval(st.st_mtimespec.tv_nsec) / 1_000_000_000
+            )
+            let age = now.timeIntervalSince(modified)
+            // A far-future mtime is attacker-controlled, not an indefinite
+            // lease. Allow one grace interval for ordinary clock adjustment.
+            if age >= temporaryFileGrace || age < -temporaryFileGrace {
+                removeInboxEntry(at: path)
+            }
+        }
+
+        return InboxScanBatch(
+            requestNames: requests,
+            examinedEntryCount: names.count
+        )
+    }
+
     struct Handles {
         let forensicTimer: DispatchSourceTimer
         let hourlyTimer: DispatchSourceTimer
@@ -517,7 +701,7 @@ enum DaemonTimers {
         let sizeCapTimer: DispatchSourceTimer
         /// v1.12.6: early-fire watchdog (60 s cadence) for the events.db
         /// size cap. Defense-in-depth for the configurable scheduled
-        /// `sizeCapTimer` — catches sudden growth bursts (DB > 1.5× cap)
+        /// `sizeCapTimer` — catches growth before hard admission pauses writes
         /// between scheduled sweeps. Retained here so the DispatchSourceTimer
         /// isn't ARC-deallocated on return from `start()` (mirrors the
         /// v1.10.0 fix for the trace/tracegraph prune timers).
@@ -897,156 +1081,49 @@ enum DaemonTimers {
         // in v1.9/v1.10 with no retention. On a dev machine running
         // Claude Code daily this grew several GB / month indefinitely.
         // Default 90d retention + size cap (250 MB tracegraph, 100 MB
-        // traces). One daily timer drives both stores; size-cap
-        // fallback applies pruneOldest if a 90d cut alone can't fit
-        // the budget.
+        // traces). Size-cap fallback applies pruneOldest if a 90d cut alone
+        // can't fit the budget.
         let tracegraphPruneTimer: DispatchSourceTimer?
         if let causalStore = state.causalStore {
             let t = DispatchSource.makeTimerSource(queue: .global())
-            // v1.18: first sweep at +180 s (not +3600), then hourly (not daily).
+            // First sweep at +30 s, then every 5 minutes. rc.1/rc.2 proved an
+            // hourly repair loop cannot govern a store fed by every ES event:
+            // even with trace dedup a fresh DB reached 200 MB in 21 minutes.
+            // The hot-path admission gate now PAUSES writes before the configured
+            // DB+WAL+SHM cap; this timer prunes incrementally below its hysteresis
+            // resume watermark. It is recovery, not the primary safety bound.
             // tracegraph.db is the per-event-growing "worst offender" and was the
             // only size-capped store still on a 1h-first / daily cadence — so a
             // sysext that inherited an over-cap substrate from the previous
             // session sat at 438 MB+ for a full hour every boot, and on a busy
             // host drifted back over the 250 MB cap between daily sweeps. Match
-            // the events.db size-cap philosophy (+60 s / hourly). Now cheap:
-            // auto_vacuum=INCREMENTAL (set in openDatabase) makes the post-prune
-            // incremental_vacuum a real freelist reclaim, so full VACUUM only
-            // runs on the rare occasion incremental can't fit the budget.
-            t.schedule(deadline: .now() + 180, repeating: 3600)
+            // the events.db size-cap philosophy. Recovery is deliberately small
+            // and incremental: no online full-file VACUUM rewrite.
+            t.schedule(deadline: .now() + 30, repeating: 300)
             t.setEventHandler {
                 Task {
-                    // v1.18: retention + size cap are now operator-tunable
-                    // (storage.tracegraphRetentionDays / tracegraphMaxSizeMB),
-                    // replacing the hardcoded 90d / 250 MB.
                     let days = max(1, min(state.storage.tracegraphRetentionDays, 3650))
-                    let capBytes = Int64(max(50, state.storage.tracegraphMaxSizeMB)) * 1024 * 1024
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
-                    let pruned = (try? await causalStore.pruneTraces(olderThan: cutoff)) ?? 0
-                    if pruned > 0 {
-                        logger.info("TraceGraph retention sweep: \(pruned) traces older than \(days)d pruned")
-                    }
-                    // v1.18: bound the global entity/edge substrate — the
-                    // dominant (and, pre-v1.18, never-reclaimed) tenant of
-                    // tracegraph.db. Orphan-guarded so surviving traces are
-                    // never corrupted.
-                    //
-                    // The substrate is NOT subject to the 90-day TRACE retention:
-                    // an entity/edge that hasn't joined a trace within the ±300s
-                    // materialization window is dead and never will, so pruning it
-                    // by the trace cutoff (90d) let orphans pile up to 91%+ of the
-                    // file on a young DB (audit: 207k orphan entities / 7 traces,
-                    // ~179 MB). Reclaim orphans older than a short window instead;
-                    // the orphan guard keeps surviving traces safe at any window.
                     let orphanCutoff = Date().addingTimeInterval(-3600)  // 1h ≫ the 5-min trace window
-                    let orphans = (try? await causalStore.pruneOrphanedGraph(olderThan: orphanCutoff)) ?? (edges: 0, entities: 0)
-                    if orphans.edges > 0 || orphans.entities > 0 {
-                        logger.info("TraceGraph substrate sweep: pruned \(orphans.edges) orphan edges + \(orphans.entities) orphan entities (>1h, unreferenced)")
-                    }
-                    // v1.19: TRUNCATE the WAL every tick so tracegraph.db-wal
-                    // can't sit pinned at the 64 MiB journal_size_limit ceiling.
-                    // RESTART (the old walCheckpoint) drains the WAL but leaves
-                    // the sidecar file at its high-water mark; under a busy
-                    // upsert stream that's a steady 64 MiB of invisible footprint.
-                    _ = await causalStore.walCheckpointTruncate()
-                    // v1.19: trip on the FOOTPRINT (db + WAL + shm), not the
-                    // bare db file. databaseSizeBytes() saw only the .db file, so
-                    // a 213 MB db + a 64 MiB WAL (= 281 MB real footprint) never
-                    // tripped the 250 MB cap and the freelist was never reclaimed
-                    // — matching the events/alerts/campaigns gates that already
-                    // measure footprint via measureDatabaseFootprintMB (MB == 10^6).
-                    let cgPath = state.supportDir + "/tracegraph.db"
-                    let capMB = Int(capBytes / (1024 * 1024))
-                    let footprintMB = measureDatabaseFootprintMB(dbPath: cgPath)
-                    // Reader-pinned-WAL guard (mirrors the events.db probe in
-                    // runAdaptiveRollupSweep). A reader holding a read transaction —
-                    // the dashboard's read-only connection, an MCP get_traces call, a
-                    // forensic scan, `sqlite3 mode=ro`, or malware — stops the
-                    // TRUNCATE above from reclaiming anything. The pinned WAL then
-                    // inflates the FOOTPRINT past the cap, which triggers the prune
-                    // loop below, whose DELETEs land in the very WAL that cannot be
-                    // truncated. Enforcement becomes the amplifier: measured 5 MB →
-                    // 6.68 GB in 9.5 minutes, an unprivileged disk-exhaustion DoS.
-                    // While pinned, skip enforcement entirely and wait for release.
-                    let cgWalMB = measureWalMB(dbPath: cgPath)
-                    let cgWalPinned = cgWalMB > 64
-                    if cgWalPinned {
-                        logger.warning("TraceGraph sweep: tracegraph.db-wal pinned at \(cgWalMB) MB — a reader holds a read transaction. Size-cap prune, incremental_vacuum and full VACUUM are SKIPPED this tick (they cannot reclaim a reader-pinned WAL and their writes would only grow it); they resume once the reader releases.")
-                    }
-                    if footprintMB > capMB && !cgWalPinned {
-                        // Over cap: drop oldest traces AND evict the oldest
-                        // unreferenced substrate (the bulk). Keep looping
-                        // until under cap or nothing more can be pruned.
-                        for _ in 0..<5 {
-                            let count = (try? await causalStore.traceCount()) ?? 0
-                            let dropTarget = max(50, count / 10)
-                            let droppedTraces = (try? await causalStore.pruneOldestTraces(count: dropTarget)) ?? 0
-                            let droppedGraph = (try? await causalStore.pruneOldestGraph(count: 50_000)) ?? (edges: 0, entities: 0)
-                            if droppedTraces == 0 && droppedGraph.edges == 0 && droppedGraph.entities == 0 { break }
-                            // Break on LIVE data size (page_count − freelist), NOT the
-                            // file footprint: DELETEs free pages onto the freelist but
-                            // the file doesn't shrink until the post-loop
-                            // incremental_vacuum, so a databaseSizeBytes() check never
-                            // tripped and this loop over-pruned ~10× past the cap
-                            // (field-observed 476 MB → 36 MB at a 250 MB cap). liveSize
-                            // tracks the prune in real time, so we stop near the cap and
-                            // let the vacuum below shrink the file to match.
-                            let liveSize = await causalStore.liveDataSizeBytes()
-                            logger.warning("TraceGraph size cap: pruned \(droppedTraces) oldest traces + \(droppedGraph.edges) edges + \(droppedGraph.entities) entities (live \(liveSize / 1024 / 1024) MB vs \(capBytes / 1024 / 1024) MB cap)")
-                            if liveSize < capBytes { break }
+                    do {
+                        let result = try await causalStore.recoverStorageBudget(
+                            retentionCutoff: cutoff,
+                            orphanCutoff: orphanCutoff
+                        )
+                        if result.pinnedReader {
+                            logger.warning("TraceGraph bounded recovery paused by a reader-pinned WAL; no further delete/vacuum work issued this tick")
+                        } else if result.tracesDeleted > 0
+                                    || result.edgesDeleted > 0
+                                    || result.entitiesDeleted > 0
+                                    || result.vacuumPagesReclaimed > 0 {
+                            logger.info("TraceGraph bounded recovery: \(result.tracesDeleted) traces + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed")
                         }
-
-                        // Wave 9B (v1.12.6): tracegraph.db is the
-                        // worst offender — field-observed 11 GB on a
-                        // long-running install. Try incremental_vacuum
-                        // first (no scratch disk needed), then full
-                        // VACUUM only if disk has 1.3× headroom.
-                        //
-                        // auto_vacuum=INCREMENTAL is set in openDatabase
-                        // (Wave 9B.1), so incremental_vacuum is a real
-                        // freelist reclaim here; full VACUUM below is the
-                        // rare fallback for when incremental can't fit the
-                        // budget (or a pre-Wave-9B.1 mode-0 file).
-                        let postPruneMB = measureDatabaseFootprintMB(dbPath: cgPath)
-                        let mode = await causalStore.autoVacuumMode()
-                        let reclaimed = (try? await causalStore.incrementalVacuum(maxPages: 200_000)) ?? 0
-                        let postIncrementalMB = measureDatabaseFootprintMB(dbPath: cgPath)
-                        if reclaimed > 0 {
-                            logger.notice("TraceGraph size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
-                        } else if mode != 2 {
-                            logger.warning("TraceGraph size cap: incremental_vacuum unavailable (auto_vacuum mode=\(mode), need 2/INCREMENTAL). Run `maccrabctl maintenance vacuum tracegraph` once to convert.")
+                        let admission = await causalStore.storageAdmissionStatus()
+                        if admission.blocked, result.autoVacuumMode != 2 {
+                            logger.warning("TraceGraph remains storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. Stop the engine before performing an offline full-VACUUM conversion; online full VACUUM recovery is intentionally disabled.")
                         }
-
-                        let freeMB = freeDiskMB(forPath: cgPath)
-                        let needMB = Int(Double(postIncrementalMB) * 1.3)
-                        if freeMB >= needMB {
-                            do {
-                                try await causalStore.vacuum()
-                                // v1.21.6 (audit DL-06): TRUNCATE the WAL before
-                                // measuring. SQLiteCausalGraphStore.vacuum() runs
-                                // a bare `VACUUM` with no checkpoint, and VACUUM
-                                // in WAL mode writes the ENTIRE rebuilt database
-                                // through tracegraph.db-wal — so the instant it
-                                // returns the sidecar holds a full second copy
-                                // and measureDatabaseFootprintMB (db + -wal +
-                                // -shm) reports roughly double. Field log:
-                                // "full VACUUM complete — 138 MB → 268 MB", i.e.
-                                // the most expensive maintenance op in the system
-                                // reporting the opposite of what it achieved, and
-                                // leaving the store at ~2x its intended footprint
-                                // until some unrelated later checkpoint drained
-                                // it — which also re-trips this same gate on the
-                                // next tick. Mirrors the events.db path, which
-                                // already checkpoints before its endMB read.
-                                _ = await causalStore.walCheckpointTruncate()
-                                let finalMB = measureDatabaseFootprintMB(dbPath: cgPath)
-                                logger.notice("TraceGraph size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
-                            } catch {
-                                logger.warning("TraceGraph size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
-                            }
-                        } else {
-                            logger.warning("TraceGraph size cap: full VACUUM skipped — need \(needMB) MB free, have \(freeMB) MB. incremental_vacuum reclaimed \(reclaimed) pages.")
-                        }
+                    } catch {
+                        logger.warning("TraceGraph bounded recovery failed: \(error.localizedDescription, privacy: .public)")
                     }
                 }
             }
@@ -1057,108 +1134,41 @@ enum DaemonTimers {
         }
 
         let tracesPruneTimer: DispatchSourceTimer?
-        if let traceStore = state.traceStore {
-            let t = DispatchSource.makeTimerSource(queue: .global())
-            // v1.18: first sweep at +180 s so an inherited over-cap traces.db
-            // reconciles shortly after boot instead of an hour in. OTLP spans
-            // aren't a per-event offender like the graph substrate, so the
-            // steady cadence stays daily.
-            t.schedule(deadline: .now() + 180, repeating: 86400)
-            t.setEventHandler {
-                Task {
-                    // v1.18: operator-tunable (storage.tracesRetentionDays /
-                    // tracesMaxSizeMB), replacing the hardcoded 90d / 100 MB.
-                    let days = max(1, min(state.storage.tracesRetentionDays, 3650))
-                    let capBytes = Int64(max(50, state.storage.tracesMaxSizeMB)) * 1024 * 1024
-                    let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
-                    let pruned = (try? await traceStore.prune(olderThan: cutoff)) ?? 0
-                    if pruned > 0 {
-                        logger.info("OTLP traces retention sweep: \(pruned) spans older than \(days)d pruned")
+        let t = DispatchSource.makeTimerSource(queue: .global())
+        // First bounded recovery shortly after boot; then daily. The timer is
+        // retained even when the receiver is disabled at boot and resolves the
+        // current actor only when it fires. This keeps SIGHUP enable/disable and
+        // port changes from leaving a timer pinned to a stale TraceStore handle.
+        // All checkpoint/delete/vacuum decisions live inside TraceStore so a
+        // maintenance call cannot bypass the same cap/floor contract as an
+        // OTLP insert.
+        t.schedule(deadline: .now() + 180, repeating: 86400)
+        t.setEventHandler {
+            Task {
+                guard let traceStore = state.traceStore else { return }
+                let days = max(1, min(state.storage.tracesRetentionDays, 3650))
+                let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+                do {
+                    let result = try await traceStore.recoverStorageBudget(
+                        retentionCutoff: cutoff
+                    )
+                    if result.pinnedReader {
+                        logger.warning("OTLP traces bounded recovery aborted: a reader pins traces.db-wal; no DELETE or vacuum was issued")
+                    } else if result.spansDeleted > 0
+                                || result.vacuumPagesReclaimed > 0 {
+                        logger.notice("OTLP traces bounded recovery: \(result.spansDeleted) spans deleted, \(result.vacuumPagesReclaimed) pages reclaimed; footprint=\(result.footprintBytes ?? -1) bytes, free=\(result.freeSpaceBytes ?? -1) bytes")
                     }
-                    // v1.19: TRUNCATE the WAL every tick so traces.db-wal can't
-                    // sit pinned at the 64 MiB journal_size_limit ceiling.
-                    _ = await traceStore.walCheckpointTruncate()
-                    // v1.19: TRIP on the FOOTPRINT (db + WAL + shm), not the live
-                    // data size. The prior trip used liveDataSizeBytes() — correct
-                    // for the loop BREAK (avoids over-prune; see comment in loop),
-                    // but as the trip GATE it ignored a 64 MiB pinned WAL, so a
-                    // live-data-just-under-cap + full-WAL footprint never tripped
-                    // and the freelist/WAL were never reclaimed. Mirrors the
-                    // events/alerts/campaigns gates (measureDatabaseFootprintMB).
-                    let tsPath = state.supportDir + "/traces.db"
-                    let capMB = Int(capBytes / (1024 * 1024))
-                    let footprintMB = measureDatabaseFootprintMB(dbPath: tsPath)
-                    // Reader-pinned-WAL guard — same failure mode as the tracegraph
-                    // sweep above: a held read transaction blocks the TRUNCATE, the
-                    // pinned WAL inflates the footprint past the cap, and the prune's
-                    // own DELETEs land in the WAL that cannot be reclaimed. Skip
-                    // enforcement while pinned rather than amplifying it.
-                    let tsWalMB = measureWalMB(dbPath: tsPath)
-                    let tsWalPinned = tsWalMB > 64
-                    if tsWalPinned {
-                        logger.warning("OTLP traces sweep: traces.db-wal pinned at \(tsWalMB) MB — a reader holds a read transaction. Size-cap prune and vacuum are SKIPPED this tick; they resume once the reader releases.")
+                    let admission = await traceStore.storageAdmissionStatus()
+                    if admission.blocked, result.autoVacuumMode != 2 {
+                        logger.warning("OTLP traces remain storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. Stop the engine before any offline conversion; online full VACUUM is intentionally disabled.")
                     }
-                    if footprintMB > capMB && !tsWalPinned {
-                        // Loop BREAK still keys on LIVE data size, not the file
-                        // footprint. traces.db is auto_vacuum=INCREMENTAL, so
-                        // DELETEs go to the freelist and the file doesn't shrink
-                        // until the post-loop vacuum — keying the break on file
-                        // size ran all 5 iterations and over-pruned ~41% of spans.
-                        for _ in 0..<5 {
-                            let count = (try? await traceStore.count()) ?? 0
-                            let dropTarget = max(500, count / 10)
-                            let dropped = (try? await traceStore.pruneOldest(count: dropTarget)) ?? 0
-                            let liveMB = await traceStore.liveDataSizeBytes() / 1024 / 1024
-                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (footprint \(footprintMB) MB > \(capMB) MB cap, live \(liveMB) MB)")
-                            if dropped == 0 { break }
-                            let nowSize = await traceStore.liveDataSizeBytes()
-                            if nowSize < capBytes { break }
-                        }
-
-                        // Wave 9B (v1.12.6): incremental_vacuum +
-                        // low-disk-safe full VACUUM. Same pattern as
-                        // the tracegraph.db enforcer above. traces.db
-                        // is auto_vacuum=INCREMENTAL (since v1.12.6 RC2),
-                        // so incrementalVacuum reclaims freed pages.
-                        let postPruneMB = measureDatabaseFootprintMB(dbPath: tsPath)
-                        let mode = await traceStore.autoVacuumMode()
-                        let reclaimed = (try? await traceStore.incrementalVacuum(maxPages: 200_000)) ?? 0
-                        let postIncrementalMB = measureDatabaseFootprintMB(dbPath: tsPath)
-                        if reclaimed > 0 {
-                            logger.notice("OTLP traces size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
-                        } else if mode != 2 {
-                            logger.warning("OTLP traces size cap: incremental_vacuum unavailable (auto_vacuum mode=\(mode), need 2/INCREMENTAL). Run `maccrabctl maintenance vacuum traces` once to convert.")
-                        }
-
-                        let freeMB = freeDiskMB(forPath: tsPath)
-                        let needMB = Int(Double(postIncrementalMB) * 1.3)
-                        if freeMB >= needMB {
-                            do {
-                                try await traceStore.vacuum()
-                                // v1.21.6 (audit DL-06): checkpoint before
-                                // measuring — identical defect to the tracegraph
-                                // path above. VACUUM rewrites the whole database
-                                // through traces.db-wal, so an unchecked
-                                // footprint read right afterwards double-counts
-                                // the rebuild and reports growth for an op that
-                                // shrank the file.
-                                _ = await traceStore.walCheckpointTruncate()
-                                let finalMB = measureDatabaseFootprintMB(dbPath: tsPath)
-                                logger.notice("OTLP traces size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
-                            } catch {
-                                logger.warning("OTLP traces size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
-                            }
-                        } else {
-                            logger.warning("OTLP traces size cap: full VACUUM skipped — need \(needMB) MB free, have \(freeMB) MB. incremental_vacuum reclaimed \(reclaimed) pages.")
-                        }
-                    }
+                } catch {
+                    logger.warning("OTLP traces bounded recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
-            t.resume()
-            tracesPruneTimer = t
-        } else {
-            tracesPruneTimer = nil
         }
+        t.resume()
+        tracesPruneTimer = t
 
         // v1.18.0: generated-artifact retention. Daily, cheap, independent
         // of the DB stores. reports/ pruned by age (storage.reportsRetentionDays);
@@ -1220,7 +1230,7 @@ enum DaemonTimers {
         //   - Layer 1 (EventInsertFilter): drop self-monitoring + dev-tool
         //     scratch at insert time. Closes ~17%+ of volume.
         //   - Layer 2 (this code): adaptive retention. Default cutoff =
-        //     state.storage.eventsHotTierHours (1h); if DB > targetSizeMB,
+        //     state.storage.eventsHotTierHours (1h); if DB > targetSizeBytes,
         //     tighten progressively (h, h/2, h/4, h/8) until it fits.
         //   - Layer 3 (this code): hard cap fallback. If even the tightest
         //     cutoff can't bring the DB under cap, force pruneOldest() so
@@ -1230,7 +1240,11 @@ enum DaemonTimers {
         // Defaults: 1h / 200 MB. Target = 80% of cap.
         let dbFilePath = state.supportDir + "/events.db"
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-        let startupCapMB = max(100, state.storage.eventsMaxSizeMB)
+        let startupBoundary = EventsSizeCapBoundary(
+            maxSizeMiB: state.storage.eventsMaxSizeMB
+        )
+        let startupCapMiB = startupBoundary.nominalCapBytes
+            / SQLitePersistentStorePolicy.bytesPerMiB
         let startupHotMinutes = max(15, state.storage.eventsHotTierMinutes)
         // v1.12.6: cadence is now user-configurable via
         // storage.eventsSizeCapIntervalMinutes. The default (60 min)
@@ -1246,7 +1260,7 @@ enum DaemonTimers {
             sweepIntervalMinutes = 60
             logger.warning("eventsSizeCapIntervalMinutes=\(configuredSweepMinutes) is non-positive — falling back to default 60 min cadence.")
         }
-        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMB) MB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
+        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMiB) MiB, proactive boundary=\(startupBoundary.proactiveSweepBoundaryBytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
 
         // v1.10.0 audit fix: first sweep at .now() + 60 s instead of
         // + 900 s. If the user is booting into a sysext that
@@ -1269,8 +1283,9 @@ enum DaemonTimers {
         )
         sizeCapTimer.setEventHandler {
             Task {
-                let capMB = max(100, state.storage.eventsMaxSizeMB)
-                let targetMB = Int(Double(capMB) * 0.8)
+                let boundary = EventsSizeCapBoundary(
+                    maxSizeMiB: state.storage.eventsMaxSizeMB
+                )
                 let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
@@ -1288,8 +1303,8 @@ enum DaemonTimers {
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
-                    targetSizeMB: targetMB,
-                    capSizeMB: capMB,
+                    targetSizeBytes: boundary.targetBytes,
+                    capSizeBytes: boundary.proactiveSweepBoundaryBytes,
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
                     alertsRetentionDays: alertsRetention,
@@ -1301,10 +1316,10 @@ enum DaemonTimers {
         sizeCapTimer.resume()
 
         // v1.12.6: early-fire size-cap watchdog. Defense-in-depth for the
-        // configurable scheduled cadence above — if the DB blows past
-        // 1.5× the cap between scheduled sweeps (sustained event-firehose
-        // burst, runaway rule write-amplification, etc.), fire a sweep
-        // immediately rather than letting growth continue unchecked.
+        // configurable scheduled cadence above — if the DB crosses the
+        // proactive reserve boundary between scheduled sweeps (sustained
+        // event-firehose burst, runaway rule write-amplification, etc.), fire a
+        // sweep before hard admission has to pause writes.
         //
         // Cadence: 60 s. Cheap — three stat() calls (db + wal + shm)
         // and a numeric compare; only schedules a sweep on the cold
@@ -1321,16 +1336,17 @@ enum DaemonTimers {
         let watchdogBackoff = SizeCapWatchdogBackoff()
         sizeCapWatchdogTimer.setEventHandler {
             Task {
-                let capMB = max(100, state.storage.eventsMaxSizeMB)
-                let nowMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-                // 1.5× cap is the "this should never happen on a healthy
-                // host" line. Picked so normal jitter around the cap
-                // (the scheduled sweep prunes to 80% of cap, then the
-                // hot tier refills) doesn't trip the watchdog every
-                // minute. The 0.5× margin gives the scheduled sweep
-                // headroom to do its job.
-                let watchdogThresholdMB = Int(Double(capMB) * 1.5)
-                guard nowMB > watchdogThresholdMB else {
+                let boundary = EventsSizeCapBoundary(
+                    maxSizeMiB: state.storage.eventsMaxSizeMB
+                )
+                let nowBytes: Int64
+                do {
+                    nowBytes = try measureDatabaseFootprintBytes(dbPath: dbFilePath)
+                } catch {
+                    logger.fault("Tier-rollup early-fire watchdog: authoritative events.db family probe failed; refusing maintenance: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                guard boundary.requiresMaintenance(footprintBytes: nowBytes) else {
                     // Under threshold: the previous sweep (or ordinary decay)
                     // worked — clear any accumulated back-off so the next real
                     // burst still gets a 60 s response.
@@ -1351,16 +1367,15 @@ enum DaemonTimers {
                     return
                 }
                 defer { Task { await state.eventStore.endSizeCapPrune() } }
-                let targetMB = Int(Double(capMB) * 0.8)
                 let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
-                logger.warning("Tier-rollup early-fire watchdog: DB \(nowMB) MB exceeds 1.5× cap (\(watchdogThresholdMB) MB) — running sweep now.")
+                logger.warning("Tier-rollup early-fire watchdog: events.db family \(nowBytes) bytes exceeds proactive boundary \(boundary.proactiveSweepBoundaryBytes) bytes (hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)) — running sweep now.")
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
-                    targetSizeMB: targetMB,
-                    capSizeMB: capMB,
+                    targetSizeBytes: boundary.targetBytes,
+                    capSizeBytes: boundary.proactiveSweepBoundaryBytes,
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
                     alertsRetentionDays: alertsRetention,
@@ -1374,11 +1389,20 @@ enum DaemonTimers {
                 // said 'running sweep now' every minute for hours and never a
                 // single line explaining that the configured budget is not
                 // reachable on this host.
-                let afterMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-                let stillOver = afterMB > watchdogThresholdMB
+                let afterBytes: Int64
+                do {
+                    afterBytes = try measureDatabaseFootprintBytes(dbPath: dbFilePath)
+                } catch {
+                    let backoffSeconds = watchdogBackoff.recordSweep(stillOver: true)
+                    logger.fault("Tier-rollup early-fire watchdog: post-sweep events.db family probe failed; treating the sweep as ineffective and backing off to \(backoffSeconds)s: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                let stillOver = boundary.requiresMaintenance(
+                    footprintBytes: afterBytes
+                )
                 let backoffSeconds = watchdogBackoff.recordSweep(stillOver: stillOver)
                 if stillOver {
-                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterMB) MB — still over 1.5x cap (\(watchdogThresholdMB) MB). The configured disk budget is NOT reachable on this host: alert_evidence plus the events_fts index alone can exceed it regardless of how few events are retained. Raise storage.eventsMaxSizeMB, and/or lower storage.evidenceMaxSizeMB / storage.eventsHotTierMinutes. Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
+                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterBytes) bytes — still over the proactive \(boundary.proactiveSweepBoundaryBytes)-byte boundary. The configured disk budget is NOT reachable on this host: alert_evidence plus the events_fts index alone can exceed it regardless of how few events are retained. Raise storage.eventsMaxSizeMB, and/or lower storage.evidenceMaxSizeMB / storage.eventsHotTierMinutes. Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
                 }
             }
         }
@@ -1392,7 +1416,7 @@ enum DaemonTimers {
         // Wave 9B (v1.12.6): on a low-disk host the post-prune VACUUM
         // would skip silently. We now run incremental_vacuum first
         // (free, in-place truncate) and only fall through to full
-        // VACUUM if the volume has 1.3× headroom.
+        // VACUUM if the shared floor + 2x-main-file headroom gate passes.
         let alertsSizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         alertsSizeCapTimer.schedule(deadline: .now() + 1800, repeating: 3600)
         alertsSizeCapTimer.setEventHandler {
@@ -1417,10 +1441,12 @@ enum DaemonTimers {
                     logger.notice("Alerts size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
                 }
 
-                // Phase 2b: full VACUUM only if 1.3× headroom available.
-                let freeMB = freeDiskMB(forPath: alertsPath)
-                let needMB = Int(Double(postIncrementalMB) * 1.3)
-                if freeMB >= needMB {
+                // Phase 2b: caller-side selection uses the same exact-byte
+                // requirement as the operation-time gate inside AlertStore.
+                let headroom = fullVacuumHeadroom(dbPath: alertsPath)
+                let freeMB = Int((headroom?.freeSpaceBytes ?? 0) / 1_000_000)
+                let needMB = Int((headroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
+                if headroom?.admitted == true {
                     do {
                         try await state.alertStore.vacuum()
                         let finalMB = measureDatabaseFootprintMB(dbPath: alertsPath)
@@ -1467,9 +1493,10 @@ enum DaemonTimers {
                         logger.notice("Campaigns size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
                     }
 
-                    let freeMB = freeDiskMB(forPath: cPath)
-                    let needMB = Int(Double(postIncrementalMB) * 1.3)
-                    if freeMB >= needMB {
+                    let headroom = fullVacuumHeadroom(dbPath: cPath)
+                    let freeMB = Int((headroom?.freeSpaceBytes ?? 0) / 1_000_000)
+                    let needMB = Int((headroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
+                    if headroom?.admitted == true {
                         do {
                             try await campaignStore.vacuum()
                             let finalMB = measureDatabaseFootprintMB(dbPath: cPath)
@@ -1719,19 +1746,28 @@ enum DaemonTimers {
 
             // v1.7.2: collector liveness + drop counter.
             let collectorStatuses = await state.collectorRegistry.snapshot()
-            // Fold the merged-stream buffer drops (bufferingNewest cap →
-            // oldest evicted) into the registry total. recordDrop keeps its
-            // other callers; the merged-stream yield path is a separate drop
-            // source that must also show up in the heartbeat. v1.21.4 (A2): the
-            // merged stream is split priority/file, so BOTH detection-input drop
-            // counters are folded here. The batched writer's storage-write drops
-            // are NOT folded — they are a storage-layer loss, not a detection
-            // gap (the event was fully processed), surfaced under their own key.
-            let priorityDropped = UInt64(state.mergedStreamDropCount)
-            let fileDropped = UInt64(state.fileStreamDropCount)
+            // Snapshot each collector-local bounded stream, then merge those
+            // stage counters with the downstream pair under the pipeline's one
+            // atomic lock. Terminal yields are rejected input and are included
+            // without being left behind as phantom backlog.
+            let upstreamCollectorBuffers = state.eventCollectorBufferSnapshots()
+            let eventPipeline = state.eventPipelineTelemetry.snapshot(
+                upstreamBuffers: upstreamCollectorBuffers
+            )
+            let priorityDropped = eventPipeline.mergedDroppedByLane["priority"] ?? 0
+            let fileDropped = eventPipeline.mergedDroppedByLane["file"] ?? 0
+            let priorityTerminated = eventPipeline.mergedTerminatedByLane["priority"] ?? 0
+            let fileTerminated = eventPipeline.mergedTerminatedByLane["file"] ?? 0
             let eventWriterDropped = UInt64(state.eventWriter.droppedCount)
-            let droppedTotal = await state.collectorRegistry.droppedEventsTotal()
-                &+ priorityDropped &+ fileDropped
+            let unifiedLogDelivery = upstreamCollectorBuffers[.unifiedLog]
+            let registryDroppedTotal = await state.collectorRegistry.droppedEventsTotal()
+            let addSaturating: (UInt64, UInt64) -> UInt64 = { lhs, rhs in
+                let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+                return overflow ? UInt64.max : sum
+            }
+            let unifiedLogNormalizedTotal = unifiedLogDelivery.map {
+                $0.offeredByLane.values.reduce(UInt64(0), addSaturating)
+            } ?? 0
             // Encode collectors as plain dicts for JSONSerialization
             // compatibility (it can't take a [Codable] directly).
             let collectorDicts: [[String: Any]] = collectorStatuses.map { s in
@@ -1776,10 +1812,9 @@ enum DaemonTimers {
             // hot-path gauges, read straight off the ESCollector (synchronous,
             // lock-guarded — no actor hop). nil collector (dev eslogger/kdebug
             // fallback path, no ES entitlement) → zeros, so the keys are always
-            // present. `events_dropped` is deliberately NOT folded with these —
-            // the kernel ingest-drop vs userspace-eviction distinction is the
-            // whole point of the D1 methodology correction. By-type maps are
-            // re-keyed to readable event-type names for the heartbeat surface.
+            // present. The aggregate now includes these as a distinct pre-buffer
+            // stage while the named counters preserve stage diagnosis. By-type
+            // maps are re-keyed to readable event-type names for the heartbeat.
             let esGlobalDropped = state.collector?.esGlobalDropped() ?? 0
             let esKernelDroppedByType: [String: UInt64] =
                 (state.collector?.esKernelDroppedByType() ?? [:])
@@ -1798,6 +1833,34 @@ enum DaemonTimers {
                 (state.collector?.esCopyBackpressureDroppedByType() ?? [:])
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esClientSplitDegraded = state.collector?.esClientSplitDegraded() ?? false
+
+            // Loss before a collector's AsyncStream has no normalized Event and
+            // therefore no honest final-lane attribution. Keep it source-only,
+            // but include it exactly once in the detection-input aggregate.
+            let esPreBufferDropped = addSaturating(
+                esGlobalDropped,
+                esCopyBackpressureDropped
+            )
+            let preBufferDroppedBySource: [String: UInt64] = [
+                EventPipelineSource.endpointSecurity.key: state.collector == nil
+                    ? 0 : esPreBufferDropped,
+                EventPipelineSource.eslogger.key: state.collector == nil
+                    ? esloggerDroppedTotal : 0,
+            ]
+            let preBufferDroppedTotal = preBufferDroppedBySource.values.reduce(UInt64(0)) {
+                addSaturating($0, $1)
+            }
+            let detectionInputDroppedTotal = addSaturating(
+                preBufferDroppedTotal,
+                eventPipeline.detectionInputDroppedTotal
+            )
+            // CollectorRegistry is reserved for losses outside the six fixed
+            // merged sources. It currently has no overlapping production caller;
+            // keep it a separate summand so a future caller cannot silently hide.
+            let droppedTotal = addSaturating(
+                registryDroppedTotal,
+                detectionInputDroppedTotal
+            )
 
             // Sequence-engine partial-match state. The 10K cap evicts
             // oldest-first from ONE global queue shared by all 41 sequence
@@ -1839,8 +1902,25 @@ enum DaemonTimers {
                 // was folded in). These are already in `events_dropped`; D2 now
                 // sees them too so it fires when enrichment/detection is the
                 // bottleneck, not just the ES stage.
-                collectorDropCumulative: esCopyBackpressureDropped &+ esStreamYieldDropped
-                    &+ UInt64(state.mergedStreamDropCount) &+ UInt64(state.fileStreamDropCount),
+                collectorDropCumulative: {
+                    let source = EventPipelineSource.endpointSecurity.key
+                    let upstreamTerminated = eventPipeline
+                        .upstreamTerminatedBySourceAndLane[source]?
+                        .values.reduce(UInt64(0), addSaturating) ?? 0
+                    let mergedDropped = eventPipeline
+                        .mergedDroppedBySourceAndLane[source]?
+                        .values.reduce(UInt64(0), addSaturating) ?? 0
+                    let mergedTerminated = eventPipeline
+                        .mergedTerminatedBySourceAndLane[source]?
+                        .values.reduce(UInt64(0), addSaturating) ?? 0
+                    return [
+                        esCopyBackpressureDropped,
+                        esStreamYieldDropped,
+                        upstreamTerminated,
+                        mergedDropped,
+                        mergedTerminated,
+                    ].reduce(UInt64(0), addSaturating)
+                }(),
                 benignHighIOSigner: benignHighIOSigner
             )
             var esSensorDegraded = false
@@ -1931,6 +2011,34 @@ enum DaemonTimers {
                 "persistence_guard": ["enabled": guardStats.enabled, "count": guardStats.protectedCount],
             ]
 
+            // RA-041: a same-UID adversary can pad browser profile/version
+            // directories. Enumeration remains bounded, but a bounded partial
+            // result is an evidence gap, never a clean inventory. Publish both
+            // the latest outcome and saturating lifetime counters so every
+            // operator surface can distinguish "none found" from "not all
+            // entries were inspected".
+            let browserCoverage = await state.browserExtMonitor.coverageDiagnostics()
+            var browserInventoryDict: [String: Any] = [
+                "coverage_known": browserCoverage.coverageKnown,
+                "complete": browserCoverage.lastScanComplete,
+                "degraded": browserCoverage.degraded,
+                "reason": browserCoverage.reason,
+                "last_scan_was_truncated": browserCoverage.lastScanWasTruncated,
+                "scans_total": Int64(clamping: browserCoverage.scansTotal),
+                "truncated_scans_total": Int64(clamping: browserCoverage.truncatedScansTotal),
+                "inspected_directory_entries_total": Int64(clamping: browserCoverage.inspectedDirectoryEntriesTotal),
+                "truncated_directories_total": Int64(clamping: browserCoverage.truncatedDirectoriesTotal),
+                "truncated_homes_total": Int64(clamping: browserCoverage.truncatedHomesTotal),
+                "last_scan_homes": browserCoverage.lastScanHomes,
+                "last_scan_inspected_directory_entries": Int64(clamping: browserCoverage.lastScanInspectedDirectoryEntries),
+                "last_scan_truncated_directory_count": Int64(clamping: browserCoverage.lastScanTruncatedDirectoryCount),
+                "last_scan_truncated_home_count": Int64(clamping: browserCoverage.lastScanTruncatedHomeCount),
+                "per_home_directory_entry_budget": browserCoverage.perHomeDirectoryEntryBudget,
+            ]
+            if let completedAt = browserCoverage.lastScanCompletedAtUnix {
+                browserInventoryDict["last_scan_completed_at_unix"] = completedAt
+            }
+
             // v1.21.4 (#260): TraceRegistry telemetry — surfaced only when the
             // agent-trace binding is active (MACCRAB_AGENT_TRACES; the registry
             // is nil otherwise). `ttlEvictions` (bindings aged out) and
@@ -1953,6 +2061,92 @@ enum DaemonTimers {
                 traceRegistryDict = ["enabled": false]
             }
 
+            // TraceGraph storage shedding is a deliberate evidence gap, not a
+            // healthy empty graph. Surface the hot-path admission latch and its
+            // cumulative shed count so CLI/dashboard/audit probes can tell the
+            // difference and verify the DB+WAL+SHM cap on the running host.
+            let traceGraphStorageDict: [String: Any]
+            if let causalStore = state.causalStore {
+                let s = await causalStore.storageAdmissionStatus()
+                var d: [String: Any] = [
+                    "enabled": s.enabled,
+                    "blocked": s.blocked,
+                    "store_available": true,
+                    "startup_blocked": false,
+                    "reason": s.reason?.rawValue ?? "",
+                    "shed_mutations_total": Int64(clamping: s.shedMutationsTotal),
+                    "pinned_reader": s.pinnedReader,
+                    "recovering": s.recovering,
+                ]
+                if let value = s.maxFootprintBytes { d["max_footprint_bytes"] = value }
+                if let value = s.admissionThresholdBytes { d["admission_threshold_bytes"] = value }
+                if let value = s.resumeBelowBytes { d["resume_below_bytes"] = value }
+                if let value = s.transactionReserveBytes { d["transaction_reserve_bytes"] = value }
+                if let value = s.footprintBytes { d["footprint_bytes"] = value }
+                if let value = s.freeSpaceBytes { d["free_space_bytes"] = value }
+                if let value = s.freeSpaceFloorBytes { d["free_space_floor_bytes"] = value }
+                traceGraphStorageDict = d
+            } else if let startupAdmission = state.causalStoreStartupAdmission {
+                traceGraphStorageDict = startupAdmission.heartbeatDictionary
+            } else {
+                // A nil store is never a healthy/intentional configuration in
+                // the daemon. Keep generic initialization failures visible even
+                // when they were not one of the typed admission errors above.
+                traceGraphStorageDict = [
+                    "enabled": false,
+                    "blocked": true,
+                    "store_available": false,
+                    "startup_blocked": false,
+                    "reason": "initialization_failed",
+                    "shed_mutations_total": Int64(0),
+                    "pinned_reader": false,
+                    "recovering": false,
+                ]
+            }
+
+            // traces.db holds loopback OTLP input supplied by local tools. It
+            // is explicitly unauthenticated/self-reported, but silently losing
+            // even advisory evidence would still make an empty trace view
+            // misleading. Publish its independent admission state so every
+            // operator surface can distinguish "no spans" from "spans shed".
+            let traceStoreStorageDict: [String: Any]
+            if let traceStore = state.traceStore {
+                let s = await traceStore.storageAdmissionStatus()
+                var d: [String: Any] = [
+                    "enabled": s.enabled,
+                    "blocked": s.blocked,
+                    "store_available": true,
+                    "startup_blocked": false,
+                    "reason": s.reason?.rawValue ?? "",
+                    "shed_mutations_total": Int64(clamping: s.shedMutationsTotal),
+                    "pinned_reader": s.pinnedReader,
+                    "recovering": s.recovering,
+                ]
+                if let value = s.maxFootprintBytes { d["max_footprint_bytes"] = value }
+                if let value = s.admissionThresholdBytes { d["admission_threshold_bytes"] = value }
+                if let value = s.transactionReserveBytes { d["transaction_reserve_bytes"] = value }
+                if let value = s.footprintBytes { d["footprint_bytes"] = value }
+                if let value = s.freeSpaceBytes { d["free_space_bytes"] = value }
+                if let value = s.freeSpaceFloorBytes { d["free_space_floor_bytes"] = value }
+                traceStoreStorageDict = d
+            } else if let startupAdmission = state.traceStoreStartupAdmission {
+                traceStoreStorageDict = startupAdmission.heartbeatDictionary
+            } else {
+                // A disabled receiver is intentional and is not itself a
+                // storage failure. Keep it distinguishable from an enabled
+                // receiver whose TraceStore failed to initialize.
+                traceStoreStorageDict = [
+                    "enabled": false,
+                    "blocked": false,
+                    "store_available": false,
+                    "startup_blocked": false,
+                    "reason": "receiver_disabled",
+                    "shed_mutations_total": Int64(0),
+                    "pinned_reader": false,
+                    "recovering": false,
+                ]
+            }
+
             // v1.21.4 (F3): honest single-event rule coverage. `rules_loaded` =
             // every rule the engine loaded from disk; `rules_active` = the subset
             // that will actually EVALUATE (enabled). Under the F-04 stable rule
@@ -1961,15 +2155,15 @@ enum DaemonTimers {
             // rather than the on-disk file count that overstates protection.
             // Cheap actor reads, off the hot path (30 s cadence).
             let rulesLoaded = await state.ruleEngine.ruleCount
-            // v1.21.4 (audit): surface DB tamper-evidence — an AES-GCM
-            // authenticated-decrypt failure means an encrypted DB column/row was
-            // modified. Previously only fault-logged; now visible so the operator
+            // v1.21.4 (audit): surface DB tamper-evidence — a malformed ENC2
+            // envelope or AES-GCM authentication failure means an encrypted DB
+            // column/row was corrupted or modified. Previously only fault-logged; now visible so the operator
             // (and the dashboard) can see + act on it. Monotonic since boot.
             let dbTamperFailures = state.dbEncryption.authenticatedDecryptFailures
             // v1.21.4 (audit): the counter above is surfaced in the heartbeat,
             // but a non-zero value is a security event that must actively page —
-            // an encrypted DB column failed AES-GCM authentication (its stored
-            // ciphertext/tag was modified at rest). On a fresh failure since the
+            // an encrypted DB column had an invalid envelope or failed AES-GCM
+            // authentication. On a fresh failure since the
             // last tick, raise a structured tamper Alert. Routed through
             // AlertSink so it inherits dedup/suppression (the rate limiter if
             // failures keep climbing tick-over-tick) — the same pattern the D2
@@ -1977,12 +2171,12 @@ enum DaemonTimers {
             if tamperAlertState.shouldAlert(current: dbTamperFailures) {
                 let tamperAlert = Alert(
                     ruleId: "maccrab.self-defense.db-tamper",
-                    ruleTitle: "Database Tamper Detected: AES-GCM authentication failure",
+                    ruleTitle: "Database Tamper Detected: authenticated envelope failure",
                     severity: .critical,
                     eventId: UUID().uuidString,
                     processPath: nil,
                     processName: "maccrabd",
-                    description: "An encrypted database column failed AES-GCM authentication (tamper_count=\(dbTamperFailures)) — the stored ciphertext or authentication tag of an encrypted event/trace field was modified at rest. AES-GCM is authenticated, so this is unambiguous tamper, not a benign decode miss. (A plaintext value in an encryption-enabled column — a possible substitution but also a legacy pre-encryption row — is tracked separately as a lower-confidence advisory, not here.) This is best-effort at-rest integrity, not a full MAC over the database — investigate for unauthorized access to the MacCrab databases.",
+                    description: "An encrypted database column had a malformed ENC2 envelope or failed AES-GCM authentication (tamper_count=\(dbTamperFailures)) — the stored authenticated-encryption value of an event/trace field was corrupted or modified at rest. Values emitted by MacCrab always have a valid base64 AES-GCM envelope, so this is not a benign decode miss. (A plaintext value in an encryption-enabled column — a possible substitution but also a legacy pre-encryption row — is tracked separately as a lower-confidence advisory, not here.) This is best-effort at-rest integrity, not a full MAC over the database — investigate for unauthorized access to the MacCrab databases.",
                     mitreTactics: "attack.defense_evasion",
                     mitreTechniques: "attack.t1565.001",
                     suppressed: false
@@ -1995,6 +2189,7 @@ enum DaemonTimers {
                 "written_at_unix": nowUnix,
                 "llm": llmHealthDict,
                 "prevention": preventionDict,
+                "browser_inventory": browserInventoryDict,
                 "uptime_seconds": uptime,
                 "events_processed": events,
                 "alerts_emitted": alerts,
@@ -2009,6 +2204,51 @@ enum DaemonTimers {
                 "events_retention_below_sequence_floor": starvedCategories,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,
+                // v1.21.6 (DET event-loss re-audit): cumulative causality
+                // counters at each bounded stage. The source×lane upstream maps
+                // cover all six collector-local AsyncStreams; `collector_buffer`
+                // retains the legacy Unified Log scalar view. The merged maps
+                // describe the later pair of 100K detection inputs.
+                // `dropped_by_source_and_lane` uses the actual OLD value returned
+                // by bufferingNewest, not an inference from offered proportions.
+                // Source labels are a fixed compile-time enum, never
+                // event-controlled. Histogram sample counts must equal the
+                // corresponding completed counts.
+                "event_pipeline": [
+                    "offered_by_source": eventPipeline.offeredBySource,
+                    "offered_by_source_and_lane": eventPipeline.offeredBySourceAndLane,
+                    "dropped_by_source_and_lane": eventPipeline.droppedBySourceAndLane,
+                    "terminated_by_source_and_lane": eventPipeline.terminatedBySourceAndLane,
+                    "collector_offered_by_source_and_lane": eventPipeline.collectorOfferedBySourceAndLane,
+                    "upstream_dropped_by_source_and_lane": eventPipeline.upstreamDroppedBySourceAndLane,
+                    "upstream_terminated_by_source_and_lane": eventPipeline.upstreamTerminatedBySourceAndLane,
+                    "merged_dropped_by_source_and_lane": eventPipeline.mergedDroppedBySourceAndLane,
+                    "merged_terminated_by_source_and_lane": eventPipeline.mergedTerminatedBySourceAndLane,
+                    "offered_by_lane": eventPipeline.offeredByLane,
+                    "dequeued_by_lane": eventPipeline.dequeuedByLane,
+                    "completed_by_lane": eventPipeline.completedByLane,
+                    "backlog_estimate_by_lane": eventPipeline.backlogEstimateByLane,
+                    "in_flight_by_lane": eventPipeline.inFlightByLane,
+                    "processing_p99_us_by_lane": eventPipeline.processingP99MicrosByLane,
+                    "latency_sample_count_by_lane": eventPipeline.latencySampleCountByLane,
+                    "upstream_dropped_by_lane": eventPipeline.upstreamDroppedByLane,
+                    "upstream_terminated_by_lane": eventPipeline.upstreamTerminatedByLane,
+                    "merged_dropped_by_lane": eventPipeline.mergedDroppedByLane,
+                    "merged_terminated_by_lane": eventPipeline.mergedTerminatedByLane,
+                    "collector_capacity_by_source": eventPipeline.collectorCapacityBySource,
+                    "pre_buffer_dropped_by_source": preBufferDroppedBySource,
+                    "detection_input_dropped_total": detectionInputDroppedTotal,
+                    "capacity_by_lane": [
+                        "priority": UInt64(DaemonState.priorityStreamCap),
+                        "file": UInt64(DaemonState.fileStreamCap),
+                    ],
+                    "collector_buffer": [
+                        "unified_log_normalized_total": unifiedLogNormalizedTotal,
+                        "unified_log_stream_yield_dropped_total": unifiedLogDelivery?.droppedTotal ?? 0,
+                        "unified_log_stream_yield_terminated_total": unifiedLogDelivery?.terminatedTotal ?? 0,
+                        "unified_log_capacity": UInt64(UnifiedLogCollector.streamCapacity),
+                    ],
+                ],
                 // v1.21.4 Phase-0 D1: honest kernel-drop counters (per-client
                 // global + per-event-type), separate from `events_dropped`
                 // (userspace AsyncStream eviction). Names via ESCollector.eventTypeName.
@@ -2089,15 +2329,16 @@ enum DaemonTimers {
                 // batched writer's storage-layer drop — NOT a detection gap.
                 "merged_priority_dropped_total": priorityDropped,
                 "merged_file_dropped_total": fileDropped,
-                // v1.21.4 (#260): single aggregate of the two merged-stream
-                // detection-input drop counters (priority + file). Previously only
-                // surfaced split; this is the total detection-input loss — a
-                // SUBSET of `events_dropped`, which additionally folds in the
-                // collector-registry drops. Surfaced so a consumer can read
-                // "did the engine lose detection input" without summing two keys.
-                "detection_input_dropped_total": priorityDropped &+ fileDropped,
+                "merged_priority_terminated_total": priorityTerminated,
+                "merged_file_terminated_total": fileTerminated,
+                // Every known pre-buffer, collector-buffer and merged-buffer
+                // input loss, once. `events_dropped` additionally folds in the
+                // CollectorRegistry's non-pipeline loss counter.
+                "detection_input_dropped_total": detectionInputDroppedTotal,
                 "events_storage_write_dropped_total": eventWriterDropped,
                 "trace_registry": traceRegistryDict,
+                "tracegraph_storage_admission": traceGraphStorageDict,
+                "traces_storage_admission": traceStoreStorageDict,
                 "schema_version": 5,
             ]
 
@@ -2129,6 +2370,7 @@ enum DaemonTimers {
                 "events_total": events,
                 "alerts_total": alerts,
                 "events_dropped_total": droppedTotal,
+                "detection_input_dropped_total": detectionInputDroppedTotal,
                 // v1.21.4 Phase-0 D1/D4 scalar counters (Prometheus-style; the
                 // per-type maps live in heartbeat_rich.json only).
                 "es_kernel_dropped_total": esGlobalDropped,
@@ -2238,6 +2480,7 @@ enum DaemonTimers {
             print("[inbox] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
         }
 
+        let inboxScanner = InboxDirectoryScanner(path: inboxDir)
         let inboxPoller = DispatchSource.makeTimerSource(queue: .global())
         // 5 s tick: a directory listing of an empty dir is cheap, and
         // dashboard users expect a suppress click to settle quickly.
@@ -2260,7 +2503,6 @@ enum DaemonTimers {
                 guard acquired else { return }
                 defer { state.inboxPollerLock.withLock { $0 = false } }
 
-                let fm = FileManager.default
                 // v1.21.5 (audit S-08): the inbox is mode 1777, so ANY local uid can
                 // drop files into it — isAuthorizedInboxRequest rejects their
                 // REQUESTS, but only after root has already paid for the directory
@@ -2275,40 +2517,18 @@ enum DaemonTimers {
                 // backlog still drains; a flood now costs a bounded delay rather than
                 // an unbounded stall. 512 is above any legitimate burst — the largest
                 // is a dashboard bulk-suppress, one file per selected alert.
-                // RESIDUAL (deliberate): a large flood still delays legitimate
-                // requests by up to ceil(N / 512) ticks. The per-uid drop-rate
-                // throttle keyed on requestOwnerUID is the follow-up; it cannot be
-                // done here without paying the very lstat this cap is bounding.
+                // The retained POSIX scanner resumes at its prior directory
+                // offset on the next tick. That makes the delay bounded by
+                // ceil(N / 512) ticks even when the leading entries are recent
+                // dot-prefixed atomic temp files that must not yet be deleted.
                 let maxInboxDrainPerTick = 512
-                guard let allFiles = try? fm.contentsOfDirectory(atPath: inboxDir),
-                      !allFiles.isEmpty else { return }
-                let files = allFiles.count > maxInboxDrainPerTick
-                    ? Array(allFiles.prefix(maxInboxDrainPerTick))
-                    : allFiles
-                // Sweep entries no handler will EVER consume. Without this the cap
-                // above would itself be a starvation bug: files matching no verb
-                // prefix (or a verb prefix without the .json suffix) were never
-                // unlinked, so they would permanently occupy the head of the capped
-                // window and legitimate requests behind them would never be reached.
-                // Dot-prefixed names are skipped — those are the temp files the
-                // atomic droppers rename FROM (dropCtlInboxRequest's
-                // `.<verb>-<uuid>.tmp`, Foundation's `.atomic` sidecars); deleting
-                // one mid-write would corrupt a legitimate request. removeItem does
-                // not follow symlinks, so a planted link to a root file unlinks the
-                // link, not the target.
-                let knownInboxPrefixes = [
-                    "suppress-alert-", "unsuppress-alert-", "delete-alert-",
-                    "suppress-campaign-", "refresh-intel-", "reload-rules-",
-                    "llm-config-", "flush-request-", "record-clipboard-",
-                    "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
-                    "remove-rule-", "set-agent-capabilities-", "prune-alerts-",
-                    "apply-agent-traces-", "prevention-config-",
-                ]
-                for name in files where !name.hasPrefix(".") {
-                    let claimed = name.hasSuffix(".json")
-                        && knownInboxPrefixes.contains(where: { name.hasPrefix($0) })
-                    if !claimed { try? fm.removeItem(atPath: inboxDir + "/" + name) }
-                }
+                let scan = inboxScanBatch(
+                    scanner: inboxScanner,
+                    inboxDir: inboxDir,
+                    maxEntries: maxInboxDrainPerTick
+                )
+                let files = scan.requestNames
+                guard !files.isEmpty else { return }
 
                 // Partition by request type so we drain in a defined order
                 // (mutations first, flush last — flush can take seconds).
@@ -2332,9 +2552,11 @@ enum DaemonTimers {
                 let setDaemonConfigReqs = files.filter { $0.hasPrefix("set-daemon-config-") && $0.hasSuffix(".json") }
                 let installRuleReqs = files.filter { $0.hasPrefix("install-rule-") && $0.hasSuffix(".json") }
                 let removeRuleReqs = files.filter { $0.hasPrefix("remove-rule-") && $0.hasSuffix(".json") }
-                // v1.18: the human's agent-control grants. The root engine owns
-                // mcp_capabilities.json so an agent (console user) can't grant
-                // itself power; the dashboard routes the human's choice here.
+                // Agent-control state changes. Root owns
+                // mcp_capabilities.json, but ownership of a file in this 1777
+                // inbox does not prove dashboard use or human presence. The
+                // handler therefore permits non-root revokes only; grants
+                // require a root-owned request.
                 let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
                 // v1.21.4 (audit): the dashboard's "Clear Now" retention button
                 // and the Agent-Traces receiver toggle drop these — the app
@@ -2626,7 +2848,6 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         // Authorization gate (parity with every other inbox verb). The inbox dir
         // is mode 1777 — any local user can drop a file — and a flush DELETES the
         // oldest events (anti-forensics value to an attacker erasing early-
@@ -2645,7 +2866,7 @@ enum DaemonTimers {
                 print("[inbox] flush \(name) REJECTED uid=\(uid) (not console-user or root)")
                 auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "rejected_uid")
             }
-            try? fm.removeItem(atPath: path)
+            removeInboxEntry(at: path)
         }
         guard anyAuthorized else {
             print("[inbox] flush: no authorized request — sweep skipped")
@@ -2677,10 +2898,9 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)   // lstat — rejects symlink/hardlink forgery
             guard isAuthorizedInboxRequest(uid: uid) else {
                 print("[inbox] record-clipboard REJECTED uid=\(uid) (not console-user or root)")
@@ -2697,7 +2917,7 @@ enum DaemonTimers {
             // cap carries no new OOM exposure a privileged user couldn't already
             // cause; 4 MB comfortably covers 8192 graphemes of any realistic
             // clipboard while staying bounded.
-            guard let data = safeReadInboxData(at: path, maxBytes: 4 * 1024 * 1024),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = json["payload"] as? String, !payload.isEmpty else {
                 print("[inbox] record-clipboard \(name): malformed payload")
@@ -2723,17 +2943,16 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 print("[inbox] builtin-rule-setting REJECTED uid=\(uid)")
                 auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = safeReadInboxData(at: path),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let ruleId = json["ruleId"] as? String, ruleId.hasPrefix("maccrab.") else {
                 print("[inbox] builtin-rule-setting \(name): malformed")
@@ -2823,13 +3042,13 @@ enum DaemonTimers {
         let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let key = json["key"] as? String,
                   let kind = agentSettableConfigKeys[key] else {
@@ -2940,9 +3159,10 @@ enum DaemonTimers {
     /// v1.18 security hardening (self-protection): record an alert when an
     /// inbox request makes a high-impact change to MacCrab's OWN detection
     /// posture — granting an MCP capability tier, disabling an ES event
-    /// subscription, or enabling a remote LLM endpoint. Post-compromise,
-    /// malware running as the console user can drive these (uid-gated) verbs;
-    /// we cannot PREVENT that without user-presence, but we can make it LOUD.
+    /// subscription, or enabling a remote LLM endpoint. Capability grants now
+    /// require a root-owned request; other permitted changes may still be
+    /// driven by an authorized console-admin process, so make every accepted
+    /// high-impact transition loud.
     /// Inserted directly into the alert store (recorded, dashboard/CLI/MCP-
     /// visible, bypasses the noise filter); NOT OS-notified, to avoid spamming
     /// the operator on their own legitimate changes. Observe-only — the verb
@@ -2955,7 +3175,7 @@ enum DaemonTimers {
             eventId: UUID().uuidString,
             processPath: nil,
             processName: "maccrabd",
-            description: "\(detail) via the privileged inbox. If you did not just make this change in the MacCrab dashboard, a process running as your user may be weakening MacCrab — investigate.",
+            description: "\(detail) via the privileged inbox. If you did not authorize this change, a local process may be weakening MacCrab — investigate.",
             mitreTactics: "attack.defense_evasion",
             mitreTechniques: "attack.t1562.001",
             suppressed: false
@@ -2964,11 +3184,48 @@ enum DaemonTimers {
         catch { print("[self-protection] failed to record '\(action)' alert: \(error)") }
     }
 
-    /// v1.18: write the human's agent-control capability grants to a ROOT-owned
-    /// mcp_capabilities.json. This is the ONLY writer of that file — the MCP
-    /// server trusts it solely because it's root-owned, so an agent (console
-    /// user) can never grant itself a tier. The dashboard (uid 501) drops the
-    /// request here; only the console user / root may (the standard inbox gate).
+    /// Decision returned by the capability-inbox policy gate. Keeping the
+    /// rejected case separate from the candidate grants makes the all-or-nothing
+    /// rule explicit: callers must not write any subset of a rejected request.
+    enum AgentCapabilityRequestDecision: Equatable {
+        case apply(grants: [String: Bool], newlyGranted: [String])
+        case rejectNonRootGrant(attempted: [String])
+    }
+
+    /// Evaluate a request that already passed the generic inbox owner gate.
+    ///
+    /// The inbox is mode 1777 and a console-admin process has no authenticated
+    /// user-presence signal: malware running as that same uid can write the same
+    /// request as the app. Until an authenticated authorization channel exists,
+    /// only an lstat-verified root-owned request may create a false -> true
+    /// capability grant. An authorized non-root owner may preserve an existing
+    /// true value or revoke it, but a mixed revoke+grant request is rejected as a
+    /// whole. Payload fields such as `requester` are deliberately ignored; the
+    /// caller must pass the request file's owner uid, never a claimed identity.
+    static func evaluateAgentCapabilityRequest(
+        fileOwnerUID: Int,
+        payload: [String: Any],
+        previousGrants: [String: Bool]
+    ) -> AgentCapabilityRequestDecision {
+        let names = ["config", "authoring", "response"]
+        let grants = Dictionary(uniqueKeysWithValues: names.map {
+            ($0, (payload[$0] as? Bool) ?? false)
+        })
+        let newlyGranted = names.filter {
+            (grants[$0] ?? false) && !(previousGrants[$0] ?? false)
+        }
+
+        guard fileOwnerUID == 0 || newlyGranted.isEmpty else {
+            return .rejectNonRootGrant(attempted: newlyGranted)
+        }
+        return .apply(grants: grants, newlyGranted: newlyGranted)
+    }
+
+    /// Write agent-control capability state to root-owned
+    /// mcp_capabilities.json. This is the only writer of that file. Requests
+    /// arrive through a 1777 inbox, so the standard console-admin owner gate is
+    /// necessary but is not authorization to GRANT a capability; the policy
+    /// above restricts false -> true transitions to root-owned requests.
     private static func handleSetAgentCapabilitiesRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
@@ -2976,27 +3233,35 @@ enum DaemonTimers {
         let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_malformed")
                 continue
             }
-            let grants: [String: Bool] = [
-                "config": (json["config"] as? Bool) ?? false,
-                "authoring": (json["authoring"] as? Bool) ?? false,
-                "response": (json["response"] as? Bool) ?? false,
-            ]
             let capPath = state.supportDir + "/mcp_capabilities.json"
-            // Read the prior grants so a tier going false->true (a GRANT) can
-            // raise a self-protection alert below.
             let prevGrants: [String: Bool] = (try? Data(contentsOf: URL(fileURLWithPath: capPath)))
                 .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Bool] } ?? [:]
+            let decision = evaluateAgentCapabilityRequest(
+                fileOwnerUID: uid, payload: json, previousGrants: prevGrants
+            )
+            guard case let .apply(grants, newlyGranted) = decision else {
+                if case let .rejectNonRootGrant(attempted) = decision {
+                    auditLogInbox(
+                        state: state,
+                        prefix: "set-agent-capabilities",
+                        id: "-",
+                        uid: uid,
+                        result: "rejected_grant_requires_root:\(attempted.joined(separator: ","))"
+                    )
+                }
+                continue
+            }
             do {
                 let out = try JSONSerialization.data(withJSONObject: grants, options: [.prettyPrinted, .sortedKeys])
                 let tmp = capPath + ".tmp"
@@ -3008,12 +3273,8 @@ enum DaemonTimers {
                 try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: capPath)
                 auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid,
                               result: "config=\(grants["config"]!) authoring=\(grants["authoring"]!) response=\(grants["response"]!)")
-                // Self-protection: a tier going false->true is a capability GRANT
-                // (the sharpest edge in the security review — this verb is gated
-                // only by uid). Fire only on a NEW grant, so re-writes/revokes
-                // stay quiet.
-                let newlyGranted = grants.filter { $0.value && !(prevGrants[$0.key] ?? false) }
-                    .keys.sorted()
+                // Only root reaches this branch with a NEW grant. Keep the
+                // self-protection breadcrumb even though the grant is allowed.
                 if !newlyGranted.isEmpty {
                     await emitSelfProtectionAlert(
                         state: state, action: "MCP agent capability granted",
@@ -3041,13 +3302,13 @@ enum DaemonTimers {
         let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let rawId = json["ruleId"] as? String, let ruleId = safeRuleBasename(rawId),
                   let jsonText = json["json"] as? String,
@@ -3091,13 +3352,13 @@ enum DaemonTimers {
         let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let rawId = json["ruleId"] as? String, let ruleId = safeRuleBasename(rawId) else {
                 auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_malformed")
@@ -3115,10 +3376,9 @@ enum DaemonTimers {
     private static func handleSuppressAlertRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             // v1.21.4 (audit HIGH, local-DoS): authorize BEFORE reading the
             // payload. The inbox is mode 1777, so any local user can plant a
             // FIFO or multi-GB file named suppress-alert-*.json; reading it first
@@ -3150,10 +3410,9 @@ enum DaemonTimers {
     private static func handleUnsuppressAlertRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
@@ -3181,10 +3440,9 @@ enum DaemonTimers {
     private static func handleDeleteAlertRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
@@ -3231,12 +3489,11 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         var chosenDays: Int?
         var chosenUID = -1
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "rejected_uid")
@@ -3250,7 +3507,7 @@ enum DaemonTimers {
             // 365, and there is no other caller. A genuine "wipe everything"
             // operation, if we ever want one, needs its own explicit verb with
             // operator presence — not a silent edge case of the retention window.
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let days = json["olderThanDays"] as? Int, days >= 1 else {
                 auditLogInbox(state: state, prefix: "prune-alerts", id: "-", uid: uid, result: "malformed")
@@ -3299,13 +3556,13 @@ enum DaemonTimers {
         var newest: (mtime: Date, payload: [String: Any], uid: Int)?
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: uid, result: "malformed")
                 continue
@@ -3371,13 +3628,13 @@ enum DaemonTimers {
         var requests: [(mtime: Date, payload: [String: Any], uid: Int)] = []
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 auditLogInbox(state: state, prefix: "prevention-config", id: "-", uid: uid, result: "malformed")
                 continue
@@ -3480,11 +3737,10 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         var anyAuthorized = false
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 print("[inbox] refresh-intel \(name) REJECTED uid=\(uid) (not console-user or root)")
@@ -3512,11 +3768,10 @@ enum DaemonTimers {
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
         guard !names.isEmpty else { return }
-        let fm = FileManager.default
         var anyAuthorized = false
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 print("[inbox] reload-rules \(name) REJECTED uid=\(uid) (not console-user or root)")
@@ -3549,13 +3804,13 @@ enum DaemonTimers {
         var newest: (mtime: Date, payload: [String: Any], uid: Int)?
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             let uid = requestOwnerUID(at: path)
             guard isAuthorizedInboxRequest(uid: uid) else {
                 auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "rejected_uid")
                 continue
             }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            guard let data = safeReadInboxRequestData(at: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "malformed")
                 continue
@@ -3590,16 +3845,17 @@ enum DaemonTimers {
         }
         guard !sanitized.isEmpty else { return }
 
-        // Merge onto the existing root config (preserve fields/keys not in
-        // this payload), write 0600 root-owned.
+        // Merge onto the existing root config while preserving unknown
+        // NON-SECRET fields. The shared loader actively scrubs plaintext keys
+        // left by old releases and refuses config-file symlinks.
         let rootPath = state.supportDir + "/llm_config.json"
-        var merged: [String: Any] = {
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: rootPath)),
-               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                return existing
+        var merged = (try? LLMConfigFile.loadAndScrub(
+            atPath: rootPath,
+            legacySecretMigration: .sharedKeychain(interaction: .disallowed),
+            onScrubFailure: { error in
+                print("[inbox] llm-config: legacy-secret scrub failed: \(error)")
             }
-            return [:]
-        }()
+        )) ?? [:]
         // v1.21.5 (audit S-02): note whether this request actually CHANGES the
         // provider, an endpoint or the master enable (vs. an idempotent rewrite of
         // the same values), so the self-protection alert below fires on real
@@ -3611,9 +3867,12 @@ enum DaemonTimers {
             return "\(merged[key] ?? "")" != "\(updated)"
         }
         for (k, v) in sanitized { merged[k] = v }
-        if let out = try? JSONSerialization.data(withJSONObject: merged, options: [.sortedKeys, .prettyPrinted]) {
-            try? out.write(to: URL(fileURLWithPath: rootPath), options: .atomic)
-            try? fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: rootPath)
+        do {
+            try LLMConfigFile.writeNonSecretJSON(
+                merged,
+                toPath: rootPath,
+                legacySecretMigration: .sharedKeychain(interaction: .disallowed)
+            )
             print("[inbox] llm-config: applied \(sanitized.count) field(s) → \(rootPath) (effective next engine restart)")
             // Self-protection: a non-loopback endpoint accepted under
             // allow_remote_endpoint=true means future engine LLM prompt traffic
@@ -3642,6 +3901,8 @@ enum DaemonTimers {
                     state: state, action: "LLM endpoint or provider changed",
                     detail: "The engine's LLM provider/endpoint was reconfigured over the privileged inbox — engine analysis prompts (process paths, command lines, user names) will be sent to the newly configured endpoint")
             }
+        } catch {
+            print("[inbox] llm-config: secure write failed: \(error)")
         }
     }
 
@@ -3657,10 +3918,9 @@ enum DaemonTimers {
     private static func handleSuppressCampaignRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {
-        let fm = FileManager.default
         for name in names {
             let path = inboxDir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
+            defer { removeInboxEntry(at: path) }
             // v1.21.4 (audit HIGH, local-DoS): authorize before reading — see
             // handleSuppressAlertRequests. A 1777-inbox FIFO / oversized file
             // must never reach readIdRequest on an unauthorized request.
@@ -3713,24 +3973,28 @@ enum DaemonTimers {
         }
     }
 
-    /// Read a `{"id":"…"}` request file. Returns nil for missing /
-    /// malformed / empty-id payloads so the caller can log + skip.
-    ///
-    /// **v1.21.4 (audit HIGH, local-DoS defense-in-depth):** the inbox dir is
-    /// mode 1777, so any local user can plant a hostile dir entry under a
-    /// correctly-named request file. A plain `Data(contentsOf:)` would (a) block
-    /// the poller forever on a FIFO — wedging the ENTIRE privileged control
-    /// plane, since every subsequent 5 s tick bails while `inboxPollerLock`'s
-    /// inFlight is held — and (b) read a multi-GB regular file wholesale, OOMing
-    /// the root daemon. The four id-based callers now authorize by file-owner
-    /// uid BEFORE calling this, but we ALSO gate here so no future caller can
-    /// re-introduce the block/OOM:
-    ///   - `O_NONBLOCK`: opening a FIFO returns immediately (never blocks on a
-    ///     writer) instead of hanging.
-    ///   - `O_NOFOLLOW`: a symlink dir entry is refused at open (ELOOP).
-    ///   - `fstat` the OPENED fd (no lstat→open TOCTOU) and accept only a
-    ///     regular file whose size is within a tiny cap — an id JSON is a few
-    ///     dozen bytes; 64 KB is already absurdly generous.
+    /// Byte caps by request shape. Rule-install envelopes legitimately contain
+    /// a compiled rule plus source YAML, and clipboard records may contain large
+    /// Unicode grapheme clusters; both remain finite and substantially below an
+    /// OOM-relevant allocation. Every other request is tiny control JSON.
+    static let maximumInboxRequestBytes: off_t = 4 * 1024 * 1024
+
+    static func inboxRequestMaxBytes(for name: String) -> off_t? {
+        guard isClaimedInboxRequestName(name) else { return nil }
+        if name.hasPrefix("record-clipboard-") { return maximumInboxRequestBytes }
+        if name.hasPrefix("install-rule-") { return 2 * 1024 * 1024 }
+        return 64 * 1024
+    }
+
+    /// Safely read a claimed inbox request using the cap for its request shape.
+    /// Unknown names are refused so callers cannot accidentally turn this into
+    /// a general root-context file reader.
+    static func safeReadInboxRequestData(at path: String) -> Data? {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard let maxBytes = inboxRequestMaxBytes(for: name) else { return nil }
+        return safeReadInboxData(at: path, maxBytes: maxBytes)
+    }
+
     /// Safely read an inbox request file's bytes. The single hardened read path
     /// shared by EVERY inbox reader (id-based and arbitrary-JSON alike), so the
     /// 1777-inbox FIFO-wedge / OOM defense can never be reintroduced by a future
@@ -3744,25 +4008,46 @@ enum DaemonTimers {
     ///     multi-GB wholesale read into memory.
     /// Returns nil on any rejection. `internal` for unit-testing.
     static func safeReadInboxData(at path: String, maxBytes: off_t = 64 * 1024) -> Data? {
-        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
+        guard maxBytes >= 0, maxBytes <= maximumInboxRequestBytes else { return nil }
+        // O_CLOEXEC keeps a privileged inbox descriptor out of any helper or
+        // sandbox-host process spawned concurrently by the daemon.
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFREG,   // regular file only — no FIFO/socket/dir
+              st.st_size >= 0,
               st.st_size <= maxBytes
         else { return nil }
-        // O_NONBLOCK is a no-op for regular-file reads (always ready), and we
-        // hold the validated fd, so this cannot block. closeOnDealloc:false —
-        // the defer above owns the fd.
-        let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-        return try? fh.readToEnd()
+        // Do not rely on the pre-read fstat alone: an authorized writer can
+        // append after it. Read at most cap+1 bytes and reject growth past the
+        // cap instead of letting `readToEnd()` allocate without a hard ceiling.
+        var data = Data()
+        data.reserveCapacity(Int(st.st_size))
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let remainingWithSentinel = Int(maxBytes) - data.count + 1
+            guard remainingWithSentinel > 0 else { return nil }
+            let requested = min(buffer.count, remainingWithSentinel)
+            let count = buffer.withUnsafeMutableBytes { rawBuffer in
+                read(fd, rawBuffer.baseAddress, requested)
+            }
+            if count == 0 { return data }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            data.append(contentsOf: buffer[0..<count])
+            if data.count > Int(maxBytes) { return nil }
+        }
     }
 
-    // `internal` (not private) so the DoS hardening is unit-testable against
-    // real FIFO / oversized on-disk files.
+    /// Read a `{"id":"…"}` request file. Returns nil for missing, malformed,
+    /// empty-id, non-regular, symlinked, or oversized payloads.
+    /// `internal` so the DoS hardening is testable against real hostile files.
     static func readIdRequest(at path: String) -> String? {
-        guard let data = safeReadInboxData(at: path),
+        guard let data = safeReadInboxRequestData(at: path),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = json["id"] as? String,
               !id.isEmpty
@@ -3779,8 +4064,8 @@ enum DaemonTimers {
     /// could symlink `suppress-alert-X.json → /Library/Application
     /// Support/MacCrab/agent_lineage.json` (root-owned) and the gate
     /// authorised the request as root. Now: lstat returns the symlink
-    /// owner (the attacker's uid), and the additional S_IFLNK check
-    /// rejects symlinks outright before the request is processed.
+    /// owner (the attacker's uid), and the regular-file-only check rejects
+    /// symlinks and every other non-regular carrier before processing.
     /// Hardlinks are also rejected (st_nlink > 1) so an attacker can't
     /// hardlink a root-owned file into the inbox either.
     /// Returns -1 on stat failure or any rejection condition — that
@@ -3791,8 +4076,11 @@ enum DaemonTimers {
     static func requestOwnerUID(at path: String) -> Int {
         var st = stat()
         guard lstat(path, &st) == 0 else { return -1 }
-        // Refuse symlinks outright — too easy to forge root ownership.
-        if (st.st_mode & S_IFMT) == S_IFLNK { return -1 }
+        // Refuse every non-regular object. In particular, a FIFO owned by an
+        // otherwise authorized uid must not pass the owner gate and reach a
+        // handler read; sockets/devices/directories are equally invalid request
+        // carriers. The opened-fd reader repeats this check after open.
+        if (st.st_mode & S_IFMT) != S_IFREG { return -1 }
         // Refuse hardlinked files: st_nlink > 1 means the inode also
         // exists elsewhere in the filesystem; the attacker may have
         // hardlinked a root-owned file into the world-writable inbox.
@@ -3959,8 +4247,16 @@ enum DaemonTimers {
 
 // MARK: - DB footprint measurement (v1.6.14)
 
-/// Return the SQLite database footprint in MB, summing the main
-/// `.db` file plus its `-wal` and `-shm` sidecars. v1.6.14: earlier
+/// Return the authoritative SQLite database-family footprint in bytes. This is
+/// deliberately the same hardened `db + wal + shm + journal` probe used by the
+/// hot write-admission gate: unsafe/partial families and probe failures throw
+/// instead of being misreported as a zero-byte healthy store.
+func measureDatabaseFootprintBytes(dbPath: String) throws -> Int64 {
+    try SQLitePersistentStoreAdmission.measureFamily(dbPath)
+}
+
+/// Return the SQLite database footprint in decimal MB, summing the main
+/// `.db` file plus its `-wal`, `-shm`, and rollback-journal sidecars. v1.6.14: earlier
 /// releases measured only the main `.db`, so a 480 MB main file
 /// plus a 40 MB WAL presented as "under cap" despite consuming
 /// 520 MB on disk. Operators setting a tight cap were surprised
@@ -3969,14 +4265,10 @@ enum DaemonTimers {
 /// Returns 0 on stat failure — downstream callers already treat
 /// 0 as "skip enforcement" via the `> maxSizeMB` guard.
 func measureDatabaseFootprintMB(dbPath: String) -> Int {
-    let fm = FileManager.default
-    func size(_ p: String) -> UInt64 {
-        guard let attrs = try? fm.attributesOfItem(atPath: p),
-              let b = attrs[.size] as? UInt64 else { return 0 }
-        return b
+    guard let bytes = try? measureDatabaseFootprintBytes(dbPath: dbPath) else {
+        return 0
     }
-    let total = size(dbPath) + size(dbPath + "-wal") + size(dbPath + "-shm")
-    return Int(total / 1_000_000)
+    return Int(bytes / 1_000_000)
 }
 
 /// The `-wal` sidecar size alone, in MB. Used by the size-cap sweep to tell a
@@ -3995,21 +4287,22 @@ func measureWalMB(dbPath: String) -> Int {
 /// here, Layer 3).
 ///
 /// Tries the configured `hotTierMinutes` cutoff first. If the DB is still
-/// over `targetSizeMB` afterwards, tightens the cutoff progressively
+/// over `targetSizeBytes` afterwards, tightens the cutoff progressively
 /// (hotTier, /2, /4) — but never below 15 minutes (the SequenceEngine
 /// rebuild floor; the longest sequence rule has a 10-minute window).
 ///
-/// If after the tightest cutoff the DB STILL exceeds `capSizeMB`, Layer 3
-/// kicks in: pruneOldest() to bring file size under cap by sheer row
-/// count, followed by VACUUM if disk has the headroom.
+/// If after the tightest cutoff the DB STILL exceeds `capSizeBytes` (the
+/// proactive reserve boundary, before hard admission pauses ingestion), Layer
+/// 3 kicks in: pruneOldest() to bring file size under cap by sheer row count,
+/// followed by VACUUM if disk has the headroom.
 ///
 /// All steps are best-effort; failures log + continue. The next 6-hourly
 /// tick retries the same logic from scratch — idempotent by design.
 func runAdaptiveRollupSweep(
     eventStore: EventStore,
     dbPath: String,
-    targetSizeMB: Int,
-    capSizeMB: Int,
+    targetSizeBytes: Int64,
+    capSizeBytes: Int64,
     hotTierMinutes: Int = 30,
     aggregateDays: Int = 90,
     alertsRetentionDays: Int = 365,
@@ -4027,6 +4320,17 @@ func runAdaptiveRollupSweep(
     let processFloorCutoff: Date? = processFloorMinutes > 0
         ? Date().addingTimeInterval(-Double(processFloorMinutes) * 60)
         : nil
+    func currentFootprint(_ phase: String) -> Int64? {
+        do {
+            return try measureDatabaseFootprintBytes(dbPath: dbPath)
+        } catch {
+            logger.fault("Tier-rollup \(phase, privacy: .public): authoritative SQLite family probe failed; refusing further maintenance: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+    // Probe before the first DELETE. Unsafe/partial families and stat failures
+    // must never be converted into a zero-byte reading that authorizes mutation.
+    guard let startSizeBytes = currentFootprint("start") else { return }
     // v1.8.0-rc6: Prune oversized alert_evidence FIRST. On the field test
     // host, a single sweep found 802K evidence rows / 2.4 GB — the storage
     // split decoupled evidence (in events.db) from its parent alerts (now
@@ -4039,7 +4343,9 @@ func runAdaptiveRollupSweep(
         let evictedByCap = (try? await eventStore.pruneAlertEvidenceCap(perAlertMax: evidencePerAlertCap)) ?? 0
         // RC H2: total-size cap. Age + per-alert-cap don't bound total size,
         // so on a busy host alert_evidence outgrew the events cap (194 MB).
-        let evidenceCapBytes = Int64(max(10, evidenceMaxSizeMB)) * 1_048_576
+        let evidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
+            maxSizeMiB: max(10, evidenceMaxSizeMB)
+        )
         let evictedBySize = (try? await eventStore.pruneAlertEvidenceBySize(maxBytes: evidenceCapBytes)) ?? 0
         if evictedByAge > 0 || evictedByCap > 0 || evictedBySize > 0 {
             logger.notice("alert_evidence prune: \(evictedByAge) by age (>\(alertsRetentionDays)d), \(evictedByCap) by per-alert cap (>\(evidencePerAlertCap) rows), \(evictedBySize) by size (>\(evidenceMaxSizeMB) MB)")
@@ -4079,12 +4385,13 @@ func runAdaptiveRollupSweep(
     let cutoffsMinutes: [Double] = rawLadder
         .filter { $0 > 0 }
         .map(Double.init)
-    let startSizeMB = measureDatabaseFootprintMB(dbPath: dbPath)
     var totalPruned = 0
 
     for minutes in cutoffsMinutes {
-        let beforeMB = measureDatabaseFootprintMB(dbPath: dbPath)
-        if beforeMB <= targetSizeMB && minutes != cutoffsMinutes.first {
+        guard let beforeBytes = currentFootprint("before adaptive cutoff") else {
+            return
+        }
+        if beforeBytes <= targetSizeBytes && minutes != cutoffsMinutes.first {
             // Don't tighten further than needed. Only the first cutoff
             // (the configured hot tier) always runs; tighter cutoffs only
             // kick in if the DB is still over target.
@@ -4106,9 +4413,11 @@ func runAdaptiveRollupSweep(
                 continue   // always do the configured pass; the loop's guard checks AFTER
             }
             // Re-check size after each tighter pass.
-            let afterMB = measureDatabaseFootprintMB(dbPath: dbPath)
-            if afterMB <= targetSizeMB {
-                logger.notice("Adaptive rollup: DB \(beforeMB) MB → \(afterMB) MB at \(Int(minutes))m cutoff (target \(targetSizeMB) MB) — done.")
+            guard let afterBytes = currentFootprint("after adaptive cutoff") else {
+                return
+            }
+            if afterBytes <= targetSizeBytes {
+                logger.notice("Adaptive rollup: DB \(beforeBytes) bytes → \(afterBytes) bytes at \(Int(minutes))m cutoff (target \(targetSizeBytes) bytes) — done.")
                 break
             }
         } catch {
@@ -4119,13 +4428,16 @@ func runAdaptiveRollupSweep(
     // Layer 3: defense-in-depth cap. After all the time-based cutoffs, if
     // the DB still exceeds the hard ceiling, prune by row count until it
     // fits. Last-resort guarantee that the user's disk-budget is honored.
-    let sizeAfterAdaptiveMB = measureDatabaseFootprintMB(dbPath: dbPath)
-    if sizeAfterAdaptiveMB > capSizeMB {
-        logger.warning("Adaptive rollup left DB at \(sizeAfterAdaptiveMB) MB (cap \(capSizeMB) MB) — engaging Layer 3 row-count cap.")
+    guard let sizeAfterAdaptiveBytes = currentFootprint("after adaptive passes") else {
+        return
+    }
+    if sizeAfterAdaptiveBytes > capSizeBytes {
+        logger.warning("Adaptive rollup left DB at \(sizeAfterAdaptiveBytes) bytes (proactive boundary \(capSizeBytes) bytes) — engaging Layer 3 row-count cap.")
         do {
             // Estimate how many rows to drop: the over-cap fraction × row count.
             let total = (try? await eventStore.count()) ?? 0
-            let overFraction = Double(sizeAfterAdaptiveMB - capSizeMB) / Double(sizeAfterAdaptiveMB)
+            let overFraction = Double(sizeAfterAdaptiveBytes - capSizeBytes)
+                / Double(sizeAfterAdaptiveBytes)
             let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
             let dropped = (try? await eventStore.pruneOldest(
                 count: dropTarget,
@@ -4161,8 +4473,8 @@ func runAdaptiveRollupSweep(
     // pre-truncating end-of-file freelist pages.
     //
     // Full VACUUM skipped if no rows were pruned, if free disk is too
-    // tight (VACUUM rebuilds into a parallel temp file ≈ DB size;
-    // needs at least 1.3× headroom), or both. On skip we still run a
+    // tight (the shared boundary preserves the floor plus 2x the
+    // authoritative main-file size), or both. On skip we still run a
     // wal_checkpoint(TRUNCATE) so any drained pages migrate from the
     // WAL into the main file — a cheap partial cleanup.
     //
@@ -4195,25 +4507,33 @@ func runAdaptiveRollupSweep(
     // gate never reclaimed that — nothing was being pruned. Compact the FTS with a
     // full `optimize` (frees its pages to the freelist), then let the
     // incremental_vacuum / VACUUM below return them to the OS.
-    let footprintBeforeReclaimMB = measureDatabaseFootprintMB(dbPath: dbPath)
-    let overCap = footprintBeforeReclaimMB > targetSizeMB
+    guard let footprintBeforeReclaimBytes = currentFootprint("before reclaim") else {
+        return
+    }
+    let overCap = footprintBeforeReclaimBytes > targetSizeBytes
     if overCap && !walPinned && !underPowerPressure {
-        let ftsStart = measureDatabaseFootprintMB(dbPath: dbPath)
+        guard let ftsStart = currentFootprint("before FTS optimize") else {
+            return
+        }
         if await eventStore.optimizeFTS() {
             _ = await eventStore.walCheckpoint()   // move optimize's freed pages out of the WAL
-            logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) MB footprint over \(targetSizeMB) MB target) — pages freed for reclamation")
+            logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) byte footprint over \(targetSizeBytes)-byte target) — pages freed for reclamation")
         }
     }
 
     if (totalPruned > 0 || overCap) && !walPinned {
-        let dbSizeBeforePrune = measureDatabaseFootprintMB(dbPath: dbPath)
+        guard let dbSizeBeforePrune = currentFootprint("before incremental vacuum") else {
+            return
+        }
         let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
-        let dbSizeAfterIncremental = measureDatabaseFootprintMB(dbPath: dbPath)
+        guard let dbSizeAfterIncremental = currentFootprint("after incremental vacuum") else {
+            return
+        }
         if reclaimed > 0 {
-            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) MB → \(dbSizeAfterIncremental) MB")
+            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) bytes → \(dbSizeAfterIncremental) bytes")
         }
 
-        let freeMB = freeDiskMB(forPath: dbPath)
+        let vacuumHeadroom = fullVacuumHeadroom(dbPath: dbPath)
         // v1.18 (audit): incremental_vacuum (above) already returns freed pages to
         // the OS, so a DB that is now under target needs no full-file rebuild.
         // Reserve the expensive full VACUUM (whole-file copy — ~3 min + a pinned
@@ -4234,34 +4554,46 @@ func runAdaptiveRollupSweep(
         // WAL; the up-front `walPinned` probe already gated this whole block on
         // that (a reader-pinned WAL is skipped entirely), so here we only choose
         // between the full rebuild and a cheap checkpoint.
-        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) && !underPowerPressure {
+        if dbSizeAfterIncremental > targetSizeBytes
+            && vacuumHeadroom?.admitted == true
+            && !underPowerPressure {
             // Only rebuild while rebuilding is actually converging. When the
-            // configured cap puts `targetSizeMB` below the events.db footprint
+            // configured cap puts `targetSizeBytes` below the events.db footprint
             // floor, this branch is true on EVERY sweep forever and the
             // whole-file VACUUM becomes perpetual write amplification. See
             // SizeCapConvergence for the measurement and why a load-time clamp
             // can't substitute for it.
             if SizeCapConvergence.shouldFullVacuum() {
                 do {
-                    // B-03: dedicated connection, off the actor — see the phase-2b
-                    // caller. Keeps the multi-minute rewrite off the ingestion path.
-                    try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
+                    // Serialize checkpoint -> operation-boundary headroom probe
+                    // -> VACUUM on the writer actor. A detached connection could
+                    // race arbitrarily many ingestion commits between its stat
+                    // and SQLite acquiring the writer lock, invalidating the
+                    // disk-safety proof.
+                    try await eventStore.vacuum()
                 } catch {
                     logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
                 }
-                let afterVacuumMB = measureDatabaseFootprintMB(dbPath: dbPath)
-                if SizeCapConvergence.record(converged: afterVacuumMB <= targetSizeMB) {
-                    logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumMB) MB against a \(targetSizeMB) MB target (0.8 × the configured storage.events_max_size_mb). The measured floor (schema + alert_evidence + events_fts + the WAL sidecar) exceeds the target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Raise storage.events_max_size_mb (shipped default 420) or lower storage.evidence_max_size_mb.")
+                guard let afterVacuumBytes = currentFootprint("after full vacuum") else {
+                    return
+                }
+                if SizeCapConvergence.record(converged: afterVacuumBytes <= targetSizeBytes) {
+                    logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumBytes) bytes against a \(targetSizeBytes)-byte target. The measured floor (schema + alert_evidence + events_fts + the WAL sidecar) exceeds the target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Raise storage.events_max_size_mb (shipped default 420) or lower storage.evidence_max_size_mb.")
                 }
             } else {
                 logger.notice("Tier-rollup: full VACUUM suppressed — the size cap was measured unreachable (see the cap-unreachable error). Checkpointing the WAL instead; prune + incremental_vacuum still ran, so the working set stays bounded.")
                 await eventStore.walCheckpoint()
             }
-        } else if dbSizeAfterIncremental > targetSizeMB && underPowerPressure {
-            logger.notice("Tier-rollup: deferring full VACUUM under power/thermal pressure (poll-multiplier \(PowerGate.pollIntervalMultiplier)); incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB. Checkpointing WAL; full rebuild will run on AC / nominal thermal.")
+        } else if dbSizeAfterIncremental > targetSizeBytes && underPowerPressure {
+            logger.notice("Tier-rollup: deferring full VACUUM under power/thermal pressure (poll-multiplier \(PowerGate.pollIntervalMultiplier)); incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) bytes. Checkpointing WAL; full rebuild will run on AC / nominal thermal.")
+            await eventStore.walCheckpoint()
+        } else if dbSizeAfterIncremental > targetSizeBytes {
+            let freeMB = Int((vacuumHeadroom?.freeSpaceBytes ?? 0) / 1_000_000)
+            let needMB = Int((vacuumHeadroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
+            logger.warning("Tier-rollup: full VACUUM skipped by shared headroom gate (need \(needMB) MB free, have \(freeMB) MB); incremental_vacuum remains the low-space recovery path.")
             await eventStore.walCheckpoint()
         } else {
-            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB (target \(targetSizeMB) MB); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.")
+            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) bytes (target \(targetSizeBytes) bytes); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.")
             await eventStore.walCheckpoint()
         }
     }
@@ -4292,9 +4624,9 @@ func runAdaptiveRollupSweep(
     // degrades to RESTART-like progress under an active reader.
     await eventStore.walCheckpointTruncate()
 
-    let endMB = measureDatabaseFootprintMB(dbPath: dbPath)
-    if startSizeMB != endMB || totalPruned > 0 {
-        logger.notice("Tier-rollup sweep complete: DB \(startSizeMB) MB → \(endMB) MB, pruned \(totalPruned) events total.")
+    guard let endBytes = currentFootprint("finish") else { return }
+    if startSizeBytes != endBytes || totalPruned > 0 {
+        logger.notice("Tier-rollup sweep complete: DB \(startSizeBytes) bytes → \(endBytes) bytes, pruned \(totalPruned) events total.")
     }
 }
 
@@ -4308,6 +4640,19 @@ func freeDiskMB(forPath path: String) -> Int {
     guard statvfs((path as NSString).utf8String, &stat) == 0 else { return 0 }
     let bytes = UInt64(stat.f_bavail) * UInt64(stat.f_frsize)
     return Int(bytes / 1_000_000)
+}
+
+/// Exact-byte advisory preflight for whole-file VACUUM branch selection.
+/// Store methods repeat the same shared probe immediately before executing
+/// VACUUM so a caller-side success can never authorize a raced low-space run.
+func fullVacuumHeadroom(
+    dbPath: String
+) -> SQLiteFullVacuumAdmissionSnapshot? {
+    try? SQLitePersistentStoreAdmission.inspectFullVacuumHeadroom(
+        databasePath: dbPath,
+        storageVolumePath: (dbPath as NSString).deletingLastPathComponent,
+        freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes
+    )
 }
 
 // MARK: - On-demand sweep entry point (v1.6.14)
@@ -4326,13 +4671,13 @@ func freeDiskMB(forPath path: String) -> Int {
 /// stale "after" measurement.
 @discardableResult
 func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
-    let maxSizeMB = max(50, state.storage.eventsMaxSizeMB)
-    let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
+    let boundary = EventsSizeCapBoundary(
+        maxSizeMiB: state.storage.eventsMaxSizeMB
+    )
     let dbFilePath = state.supportDir + "/events.db"
     return await enforceDatabaseSizeCap(
         dbPath: dbFilePath,
-        maxSizeMB: maxSizeMB,
-        targetSizeMB: targetSizeMB,
+        boundary: boundary,
         eventStore: state.eventStore,
         processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
     )
@@ -4346,10 +4691,10 @@ func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
 /// - **Bounded blast radius.** Delete at most 50% of rows per sweep;
 ///   if still over cap, next tick does another 50%. Converges to the
 ///   target across a few hours instead of wiping in one pass.
-/// - **Never crash on out-of-disk.** VACUUM needs ~= DB size of
-///   scratch space. Pre-flight statvfs check; skip VACUUM if free <
-///   1.3× current DB size. The row deletion still happened (pages
-///   are freed internally), so the cap will close over subsequent
+/// - **Never crash on out-of-disk.** VACUUM may require two copies of the
+///   main DB in free scratch space. The shared exact-byte preflight preserves
+///   the configured floor and skips VACUUM below that threshold. Row deletion
+///   still happened (pages are freed internally), so the cap closes over later
 ///   ticks as disk frees up.
 /// - **Single VACUUM per sweep.** Prune everything first, then
 ///   VACUUM once at the end. Previous v1.6.12 code called VACUUM
@@ -4366,8 +4711,7 @@ func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
 ///   did.
 private func enforceDatabaseSizeCap(
     dbPath: String,
-    maxSizeMB: Int,
-    targetSizeMB: Int,
+    boundary: EventsSizeCapBoundary,
     eventStore: EventStore,
     processFloorMinutes: Int = 0
 ) async -> Bool {
@@ -4382,34 +4726,24 @@ private func enforceDatabaseSizeCap(
     }
     defer { Task { await eventStore.endSizeCapPrune() } }
 
-    func currentSizeMB() -> Int {
-        // v1.6.14: sum db + wal + shm so the cap reflects total
-        // on-disk footprint, not just the main file.
-        return measureDatabaseFootprintMB(dbPath: dbPath)
-    }
-
-    /// Free space on the volume holding the DB, in MB. Returns
-    /// UInt64.max on error so that a statvfs failure doesn't
-    /// mistakenly skip VACUUM (we fall back to "try it and let
-    /// SQLite fail gracefully").
-    func freeDiskMB() -> Int {
-        let url = URL(fileURLWithPath: dbPath).deletingLastPathComponent()
-        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        if let bytes = values?.volumeAvailableCapacityForImportantUsage, bytes > 0 {
-            return Int(bytes / 1_000_000)
+    func currentSizeBytes(_ phase: String) -> Int64? {
+        do {
+            return try measureDatabaseFootprintBytes(dbPath: dbPath)
+        } catch {
+            logger.fault("Size-cap \(phase, privacy: .public): authoritative SQLite family probe failed; refusing further maintenance: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
-        return Int.max
     }
 
-    let initialMB = currentSizeMB()
-    guard initialMB > maxSizeMB else {
+    guard let initialBytes = currentSizeBytes("start") else { return false }
+    guard boundary.requiresMaintenance(footprintBytes: initialBytes) else {
         // Quiet no-op. Normal hourly tick on a well-sized DB. We did
         // acquire the lock — that counts as "ran" for SIGUSR2's
         // purposes (the dashboard sees the under-cap measurement).
         return true
     }
 
-    logger.warning("Size-cap enforcer armed: DB \(initialMB) MB exceeds cap \(maxSizeMB) MB; target \(targetSizeMB) MB.")
+    logger.warning("Size-cap enforcer armed: events.db family \(initialBytes) bytes exceeds proactive boundary \(boundary.proactiveSweepBoundaryBytes) bytes (hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)); target \(boundary.targetBytes) bytes.")
 
     // --- Phase 1: prune rows (bounded at 50% of total per sweep) ---
     //
@@ -4420,7 +4754,8 @@ private func enforceDatabaseSizeCap(
 
     let totalEventsBefore = (try? await eventStore.count()) ?? 0
     let maxPerSweep = totalEventsBefore / 2
-    let overageFraction = Double(initialMB - targetSizeMB) / Double(initialMB)
+    let overageFraction = Double(initialBytes - boundary.targetBytes)
+        / Double(initialBytes)
     let estimatedPrune = max(10_000, Int(Double(totalEventsBefore) * min(0.6, overageFraction + 0.1)))
     let pruneCount = min(estimatedPrune, maxPerSweep)
 
@@ -4435,8 +4770,10 @@ private func enforceDatabaseSizeCap(
         protecting: processFloorMinutes > 0 ? .process : nil,
         newerThan: processFloorCutoff
     )) ?? 0
-    let sizeAfterPruneMB = currentSizeMB()
-    logger.notice("Size-cap phase 1: pruned \(pruned) rows (estimated \(estimatedPrune), cap \(maxPerSweep)); logical size now \(sizeAfterPruneMB) MB")
+    guard let sizeAfterPruneBytes = currentSizeBytes("after row prune") else {
+        return true
+    }
+    logger.notice("Size-cap phase 1: pruned \(pruned) rows (estimated \(estimatedPrune), cap \(maxPerSweep)); logical size now \(sizeAfterPruneBytes) bytes")
 
     // --- Phase 2a: incremental_vacuum pre-flight (Wave 9B, v1.12.6) ---
     //
@@ -4457,7 +4794,7 @@ private func enforceDatabaseSizeCap(
     // to ~800 MB of file truncation per call, which on commodity SSDs
     // takes ~5-30 s. The next scheduled sweep continues if more
     // pages remain.
-    let preVacuumMB = sizeAfterPruneMB
+    let preVacuumBytes = sizeAfterPruneBytes
     let preReclaimed: Int
     do {
         preReclaimed = try await eventStore.incrementalVacuum(maxPages: 200_000)
@@ -4465,9 +4802,11 @@ private func enforceDatabaseSizeCap(
         logger.warning("Size-cap phase 2a: incremental_vacuum threw \(error.localizedDescription) — continuing")
         preReclaimed = 0
     }
-    let sizeAfterIncrementalMB = currentSizeMB()
+    guard let sizeAfterIncrementalBytes = currentSizeBytes("after incremental vacuum") else {
+        return true
+    }
     if preReclaimed > 0 {
-        logger.notice("Size-cap phase 2a: incremental_vacuum reclaimed \(preReclaimed) pages, \(preVacuumMB) MB → \(sizeAfterIncrementalMB) MB")
+        logger.notice("Size-cap phase 2a: incremental_vacuum reclaimed \(preReclaimed) pages, \(preVacuumBytes) bytes → \(sizeAfterIncrementalBytes) bytes")
     } else {
         let mode = await eventStore.autoVacuumMode()
         if mode != 2 {
@@ -4477,21 +4816,24 @@ private func enforceDatabaseSizeCap(
 
     // --- Phase 2b: full VACUUM if we have the disk headroom ---
     //
-    // VACUUM needs ~= current DB size of scratch space. We require
-    // 1.3× as buffer, recomputed AFTER phase 2a so the incremental
-    // truncate shrinks our headroom requirement. If the volume is
+    // The shared boundary requires the configured floor plus 2x the
+    // authoritative main-file size, recomputed AFTER phase 2a so the
+    // incremental truncate shrinks our headroom requirement. If the volume is
     // still tight, we skip VACUUM entirely — the file has been
     // partially shrunk by phase 2a (or by no-op if INCREMENTAL is
     // off), and the next hourly tick (or once disk frees) revisits.
 
-    let needMB = Int(Double(sizeAfterIncrementalMB) * 1.3)
-    let freeMB = freeDiskMB()
-    let canVacuum = freeMB >= needMB
+    let headroom = fullVacuumHeadroom(dbPath: dbPath)
+    let needMB = Int((headroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
+    let freeMB = Int((headroom?.freeSpaceBytes ?? 0) / 1_000_000)
+    let canVacuum = headroom?.admitted == true
 
     if !canVacuum {
         logger.warning("Size-cap phase 2b: skipping full VACUUM — need \(needMB) MB free, have \(freeMB) MB. Phase 2a reclaimed \(preReclaimed) pages; will retry next tick.")
-        let endMB = currentSizeMB()
-        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: skipped)")
+        guard let endBytes = currentSizeBytes("finish after skipped vacuum") else {
+            return true
+        }
+        logger.notice("Size-cap sweep complete: \(initialBytes) bytes → \(endBytes) bytes (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: skipped)")
         return true
     }
 
@@ -4499,21 +4841,25 @@ private func enforceDatabaseSizeCap(
     // consolidated in the main file.
     let checkpointBefore = await eventStore.walCheckpoint()
     do {
-        // B-03: run the full VACUUM on a dedicated connection off the actor so
-        // it can't head-of-line-block event ingestion for the rewrite's duration.
-        try await EventStore.vacuumOnDedicatedConnection(at: dbPath)
+        // Keep the whole checkpoint/gate/rewrite sequence actor-serialized;
+        // see the corresponding hourly roll-up path above.
+        try await eventStore.vacuum()
     } catch {
         logger.error("Size-cap phase 2b: VACUUM failed (\(error.localizedDescription)). Phase 2a reclaimed \(preReclaimed) pages; will retry next tick.")
-        let endMB = currentSizeMB()
-        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: failed)")
+        guard let endBytes = currentSizeBytes("finish after failed vacuum") else {
+            return true
+        }
+        logger.notice("Size-cap sweep complete: \(initialBytes) bytes → \(endBytes) bytes (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: failed)")
         return true
     }
 
     // Second checkpoint drains any WAL left by the VACUUM itself.
     _ = await eventStore.walCheckpoint()
 
-    let finalMB = currentSizeMB()
-    logger.notice("Size-cap sweep complete: \(initialMB) MB → \(finalMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
+    guard let finalBytes = currentSizeBytes("finish after full vacuum") else {
+        return true
+    }
+    logger.notice("Size-cap sweep complete: \(initialBytes) bytes → \(finalBytes) bytes (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
     return true
 }
 
@@ -4536,11 +4882,10 @@ private func probeSysextFDA() -> Bool {
     let systemTCC = "/Library/Application Support/com.apple.TCC/TCC.db"
     guard FileManager.default.fileExists(atPath: systemTCC) else { return false }
     var db: OpaquePointer?
-    guard sqlite3_open_v2(
+    guard SQLiteOpenPathPolicy.open(
         systemTCC,
-        &db,
-        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
-        nil
+        database: &db,
+        flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
     ) == SQLITE_OK else { return false }
     defer { sqlite3_close(db) }
     // A bare SELECT on the access table confirms real read access —

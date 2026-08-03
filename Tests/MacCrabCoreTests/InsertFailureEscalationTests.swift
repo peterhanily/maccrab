@@ -224,6 +224,37 @@ struct InsertFailureEscalationTests {
         // back to `step_other` rather than the catch-all `other` —
         // this preserves a useful distinction in the dashboard.
         #expect(StorageErrorTracker.classifyEventInsertError(EventStoreError.stepFailed("unknown_sqlite_state_9999")) == "step_other")
+
+        // The authoritative event-store admission layer reports typed errors.
+        // Do not regress to parsing their user-facing prose: the RC.3 runtime
+        // probe observed `.footprintLimit` mislabeled as `other` in heartbeat.
+        #expect(StorageErrorTracker.classifyEventInsertError(
+            SQLitePersistentStoreAdmissionError.footprintLimit(
+                footprintBytes: 282_000_000,
+                reserveBytes: 33_554_432,
+                maxFootprintBytes: 314_572_800
+            )
+        ) == "footprint_limit")
+        #expect(StorageErrorTracker.classifyEventInsertError(
+            SQLitePersistentStoreAdmissionError.lowFreeSpace(
+                freeBytes: 100,
+                floorBytes: 200,
+                reserveBytes: 50,
+                requiredFreeBytes: 250
+            )
+        ) == "low_free_space")
+        #expect(StorageErrorTracker.classifyEventInsertError(
+            SQLitePersistentStoreAdmissionError.transactionEstimateExceedsReserve(
+                estimatedBytes: 65,
+                reserveBytes: 64
+            )
+        ) == "transaction_reserve")
+        #expect(StorageErrorTracker.classifyEventInsertError(
+            SQLitePersistentStoreAdmissionError.pageLimitDeferred(
+                currentPages: 11,
+                maximumPages: 10
+            )
+        ) == "page_limit")
     }
 
     @Test("Legacy snapshot file is still written after Wave 9D escalation runs")

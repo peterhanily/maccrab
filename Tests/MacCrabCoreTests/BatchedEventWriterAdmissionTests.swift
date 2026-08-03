@@ -26,7 +26,15 @@ struct BatchedEventWriterAdmissionTests {
 
     private actor CountingInserter: EventBatchInserting {
         private(set) var inserted = 0
-        func insert(events: [Event]) throws { inserted += events.count }
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
+            inserted += events.count
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
+        }
         var total: Int { inserted }
     }
 

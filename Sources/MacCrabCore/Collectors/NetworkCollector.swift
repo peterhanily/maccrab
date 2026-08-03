@@ -44,10 +44,18 @@ struct ConnectionKey: Hashable, Sendable {
 /// ```
 public actor NetworkCollector {
 
+    public nonisolated static let eventStreamCapacity = 512
+
     // MARK: - Properties
 
     /// The asynchronous stream of normalised network events.
     public nonisolated let events: AsyncStream<Event>
+    private nonisolated let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: eventStreamCapacity
+    )
+    public nonisolated var deliveryCounters: EventCollectorBufferSnapshot {
+        deliveryTelemetry.snapshot()
+    }
 
     /// Poll interval in seconds between socket enumeration sweeps.
     private let pollInterval: TimeInterval
@@ -90,7 +98,9 @@ public actor NetworkCollector {
         self.pollInterval = pollInterval
 
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(512)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -152,7 +162,10 @@ public actor NetworkCollector {
             // previous sweep.
             if !knownConnections.contains(key) {
                 let event = buildEvent(from: info)
-                continuation?.yield(event)
+                if let continuation {
+                    let result = continuation.yield(event)
+                    deliveryTelemetry.recordYield(offered: event, result: result)
+                }
             }
         }
 

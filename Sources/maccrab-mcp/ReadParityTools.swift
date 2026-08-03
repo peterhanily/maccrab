@@ -272,8 +272,9 @@ func handleGetPrivacyAlerts(_ args: [String: Any]) async -> Any {
 
 /// Mirror of `maccrabctl extensions`.
 ///
-/// Calls `BrowserExtensionMonitor.snapshot()` — the same live scan the dashboard
-/// uses — rather than reading a persisted inventory, because the monitor does
+/// Calls `BrowserExtensionMonitor.snapshotResult()` — the same live scan the
+/// dashboard uses, including its completeness diagnostics — rather than reading
+/// a persisted inventory, because the monitor does
 /// not persist one: it emits events into the store and the UI re-scans on
 /// demand. The scan walks THIS process's `NSHomeDirectory()`, so it reports the
 /// extensions of the account the MCP server runs as, which is the same scope
@@ -286,13 +287,24 @@ func handleGetBrowserExtensions(_ args: [String: Any]) -> Any {
     // 40 is the CLI's own "worth a look" line; keep the two surfaces answering
     // the same question the same way.
     let riskyFloor = 40
-    let all = BrowserExtensionMonitor.snapshot()
+    let inventory = BrowserExtensionMonitor.snapshotResult()
+    let all = inventory.extensions
     let flagged = all.filter { $0.riskScore >= riskyFloor || !$0.dangerousPermissions.isEmpty }
 
     var shown = suspiciousOnly ? flagged : all
     var lines = ["\(all.count) installed browser extension(s); \(flagged.count) at or above risk \(riskyFloor) (or holding a dangerous permission)."]
+    if inventory.coverage.wasTruncated {
+        lines.insert(
+            "WARNING: browser inventory is PARTIAL — the bounded scan exhausted its directory-entry budget in \(inventory.coverage.truncatedHomeCount) home(s). Absence from this output is not evidence that an extension is not installed.",
+            at: 0
+        )
+    }
     if all.isEmpty {
-        lines.append("No extension directories were readable. On a release install the MCP server runs as your user, so this reflects your own browser profiles; a sandboxed or headless context may see none.")
+        if inventory.coverage.wasTruncated {
+            lines.append("No extension rows were discovered before bounded coverage ended; this is not a clean empty result.")
+        } else {
+            lines.append("No extension directories were readable. On a release install the MCP server runs as your user, so this reflects your own browser profiles; a sandboxed or headless context may see none.")
+        }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     }
     if shown.count > limit {

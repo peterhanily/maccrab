@@ -97,11 +97,22 @@ public enum ESCollectorError: Error, CustomStringConvertible {
 /// ```
 public final class ESCollector: @unchecked Sendable {
 
+    /// Collector-local delivery boundary. Kept public for heartbeat diagnostics
+    /// and inventory tests so the reported capacity cannot drift from runtime.
+    public static let eventStreamCapacity = 100_000
+
     // MARK: Properties
 
     private var continuation: AsyncStream<Event>.Continuation?
     private var traceBindingContinuation: AsyncStream<TraceBindingSignal>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "ESCollector")
+    private let deliveryTelemetry = EventCollectorBufferTelemetry(
+        capacity: eventStreamCapacity
+    )
+
+    public var deliveryCounters: EventCollectorBufferSnapshot {
+        deliveryTelemetry.snapshot()
+    }
 
     /// v1.21.4 Phase-4 (Mitigation C): the split ES clients. Normally TWO
     /// `ESClientContext`s — a FILE client (write-family + OPEN) and an
@@ -422,8 +433,8 @@ public final class ESCollector: @unchecked Sendable {
     /// TARGET-path prefixes whose write-family file events are muted: the
     /// root support dir (root daemon's DB + broker host-owned snapshot dirs +
     /// root-side Cases). Per-user home Cases roots (where the dashboard writes
-    /// forensic snapshots) are added dynamically in `muteNoisyPaths()` by
-    /// walking `/Users/*`, mirroring `AgentTracesConfig.findUserHomeConfigPath`.
+    /// forensic snapshots) are added dynamically in `muteNoisyPaths()` through
+    /// the shared home resolver, mirroring `AgentTracesConfig.findUserHomeConfigPath`.
     private static let mutedTargetPrefixes: [String] = [
         "/Library/Application Support/MacCrab/",
     ]
@@ -453,15 +464,11 @@ public final class ESCollector: @unchecked Sendable {
         return prefixes
     }
 
-    /// Real user home dirs under `/Users` (skips `Shared` + dotdirs), used to
-    /// reach the per-user forensic Cases snapshot roots from the root sysext.
+    /// Resolver-validated real-user homes used to reach per-user forensic Cases
+    /// snapshot roots from the root sysext. Keeping mute scope on the shared
+    /// home contract prevents a forged/symlink home from suppressing telemetry.
     private static func realUserHomes() -> [String] {
-        let fm = FileManager.default
-        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return [] }
-        return users
-            .filter { $0 != "Shared" && !$0.hasPrefix(".") }
-            .map { "/Users/\($0)" }
-            .filter { var isDir: ObjCBool = false; return fm.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue }
+        RealUserHomeResolver.all().map(\.path)
     }
 
     // MARK: - Log-sink write firehose kernel mute (v1.21.4, post-rc.8 perf)
@@ -545,10 +552,29 @@ public final class ESCollector: @unchecked Sendable {
         "/.ssh/",
         "/.aws/credentials", "/.aws/config",
         "/.config/gcloud/credentials", "/.config/gcloud/access_tokens",
+        "/.config/gcloud/application_default_credentials.json",
         "/.azure/accessTokens", "/.azure/msal_token_cache",
+        "/.azure/azureProfile.json",
         "/.kube/config", "/.docker/config.json",
         "/.terraform.d/credentials", "/.config/gh/hosts.yml",
         "/.npmrc", "/.pypirc", "/.netrc", "/.gnupg/",
+        // Stable HIGH sequence/single-event read rules. These rules used to
+        // select `FileAction: close`, but ESCollector deliberately discards
+        // unmodified CLOSE and therefore could only observe credential WRITES.
+        // They now select the actual read signal (`open`), so every narrow
+        // credential location they name must be admitted here.
+        "/.gem/credentials", "/.cargo/credentials", "/.git-credentials",
+        "/Library/Application Support/Firefox/Profiles/",
+        "/Library/Application Support/Cookies/",
+        "/MetaMask/", "/Phantom/", "/Coinbase Wallet/",
+        // Exact default honeyfile names that do not otherwise resemble a
+        // canonical credential path. Without these, EventEnricher never sees
+        // their READ and cannot attach IsHoneyfile for the stable must-fire
+        // deception rule. Deliberately filenames, not broad directories.
+        "/Library/Application Support/Passwords.backup",
+        "/Documents/passwords_backup.csv",
+        "/.gcp-service-account.json.bak",
+        "/.gitconfig.bak",
         "/Library/Keychains/",
         // v1.18 read-detection: the credential-read rules (safari/notes/password-
         // manager/shadow-hash) target these, so ES must emit NOTIFY_OPEN for them.
@@ -588,11 +614,37 @@ public final class ESCollector: @unchecked Sendable {
         "/Local Extension Settings/efbglgofoippbgcjepnhiblaibcnclgk",  // MetaMask Flask (dev)
     ]
 
+    /// Sensitive filenames whose parent is not safely expressible as one broad
+    /// substring. Suffix matching keeps the OPEN admission surface narrow:
+    /// `.env` secrets are intentional stable coverage, while Messages/TCC use
+    /// their full canonical suffixes. Chrome Login Data additionally requires
+    /// its browser-profile parent in `isCredentialReadPath` below.
+    static let credentialReadPathSuffixes: [String] = [
+        "/.env", "/.env.local", "/.env.production", "/.env.staging",
+        "/TCC.db",
+        "/Library/Messages/chat.db",
+        "/Library/Messages/chat.db-shm",
+        "/Library/Messages/chat.db-wal",
+        "/.gitconfig",
+    ]
+
+    private static let chromeLoginDataSuffixes: [String] = [
+        "/Login Data", "/Login Data-journal", "/Login Data For Account",
+    ]
+
     /// True iff `path` is a credential/secret location worth emitting an OPEN
     /// (read) event for. The hot-path early-out for NOTIFY_OPEN.
     static func isCredentialReadPath(_ path: String) -> Bool {
         for substring in credentialReadPathSubstrings where path.contains(substring) {
             return true
+        }
+        for suffix in credentialReadPathSuffixes where path.hasSuffix(suffix) {
+            return true
+        }
+        if path.contains("/Google/Chrome/") {
+            for suffix in chromeLoginDataSuffixes where path.hasSuffix(suffix) {
+                return true
+            }
         }
         return false
     }
@@ -626,6 +678,7 @@ public final class ESCollector: @unchecked Sendable {
     /// settings config the agent reads). Mirrors FileContentEnricher.agentConfigFiles.
     static let agentConfigReadFileSuffixes: [String] = [
         "/.claude/claude_desktop_config.json", "/.claude.json", "/.cursor/mcp.json",
+        "/.continue/config.json", "/.vscode/mcp.json", "/.windsurf/mcp.json",
         "/.claude/settings.json", "/.claude/project.json", "/.claude/local.json",
     ]
 
@@ -758,6 +811,122 @@ public final class ESCollector: @unchecked Sendable {
         return true                                            // provable log noise ⇒ DROP
     }
 
+    // MARK: - Callback-to-worker admission
+
+    /// Decide whether an ES message that the normaliser would discard can be
+    /// discarded *before* it consumes one of the bounded worker's in-flight
+    /// slots. This is the same set of cheap, detection-preserving predicates
+    /// enforced again in `normalise(message:)` as defence in depth.
+    ///
+    /// This placement matters: filtering only inside the serial worker still
+    /// lets the system-wide OPEN and unmodified-CLOSE firehoses fill all 4,096
+    /// retained-message slots. Live rc.2 telemetry reproduced exactly that
+    /// failure: 23,097 callback-to-worker drops in 65 seconds, of which 22,960
+    /// were OPEN/CLOSE, while both downstream merged-stream drop counters were
+    /// zero. Those discarded messages never reached any detection engine.
+    ///
+    /// Pure and internal so tests can pin callback admission to the normaliser's
+    /// allowlists without constructing an `es_message_t`.
+    static func shouldDropBeforeWorker(
+        eventType: UInt32,
+        path: String? = nil,
+        closeModified: Bool = true,
+        isPlatformBinary: Bool = false,
+        protection: Int32 = 0
+    ) -> Bool {
+        switch eventType {
+        case ES_EVENT_TYPE_NOTIFY_OPEN.rawValue:
+            guard let path else { return true }
+            guard isCredentialReadPath(path) || isAgentContentReadPath(path) else {
+                return true
+            }
+            return isPlatformBinary && isKeychainPath(path)
+
+        case ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue:
+            guard closeModified else { return true }
+            return path.map(shouldDropNoisyWrite(path:)) ?? false
+
+        case ES_EVENT_TYPE_NOTIFY_WRITE.rawValue:
+            return path.map(shouldDropNoisyWrite(path:)) ?? false
+
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ.rawValue,
+             ES_EVENT_TYPE_NOTIFY_TRACE.rawValue,
+             ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE.rawValue,
+             ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED.rawValue:
+            return isPlatformBinary
+
+        case ES_EVENT_TYPE_NOTIFY_MMAP.rawValue,
+             ES_EVENT_TYPE_NOTIFY_MPROTECT.rawValue:
+            return (protection & PROT_WRITE) == 0 || (protection & PROT_EXEC) == 0
+
+        default:
+            return false
+        }
+    }
+
+    /// Extract only the fields required by `shouldDropBeforeWorker` while the
+    /// borrowed ES message is valid on the callback boundary. Kept messages are
+    /// still normalised on the worker; high-volume rejected messages are never
+    /// retained or enqueued.
+    private static func shouldDropBeforeWorker(
+        message: UnsafePointer<es_message_t>
+    ) -> Bool {
+        let msg = message.pointee
+        let eventType = msg.event_type.rawValue
+
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_OPEN:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                path: esFileToPath(msg.event.open.file),
+                isPlatformBinary: msg.process.pointee.is_platform_binary
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_CLOSE:
+            guard msg.event.close.modified else {
+                return shouldDropBeforeWorker(
+                    eventType: eventType,
+                    closeModified: false
+                )
+            }
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                path: esFileToPath(msg.event.close.target),
+                closeModified: true
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_WRITE:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                path: esFileToPath(msg.event.write.target)
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
+             ES_EVENT_TYPE_NOTIFY_TRACE,
+             ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
+             ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                isPlatformBinary: msg.process.pointee.is_platform_binary
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_MMAP:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                protection: msg.event.mmap.protection
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_MPROTECT:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                protection: msg.event.mprotect.protection
+            )
+
+        default:
+            return false
+        }
+    }
+
     /// Enrichment keys describing the TARGET of an actor->target introspection
     /// event (get_task_read / trace / remote_thread_create). Keys are the exact
     /// Sigma field names so RuleEngine.resolveField resolves them via its
@@ -851,7 +1020,9 @@ public final class ESCollector: @unchecked Sendable {
         // DaemonState already guard against). Newest-wins eviction at 100K
         // drops the OLDEST events under extreme flood rather than the host.
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(100_000)) { continuation in
+        self.events = AsyncStream<Event>(
+            bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
+        ) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation
@@ -1026,6 +1197,7 @@ public final class ESCollector: @unchecked Sendable {
         canary: ESCanaryRegistry?,
         continuation: AsyncStream<Event>.Continuation,
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
+        deliveryTelemetry: EventCollectorBufferTelemetry,
         logger: Logger,
         maxInFlight: Int
     ) -> ESClientContext {
@@ -1041,6 +1213,7 @@ public final class ESCollector: @unchecked Sendable {
                     box,
                     continuation: continuation,
                     traceContinuation: traceContinuation,
+                    deliveryTelemetry: deliveryTelemetry,
                     tracker: tracker,
                     logger: logger
                 )
@@ -1064,6 +1237,7 @@ public final class ESCollector: @unchecked Sendable {
             canary: canary,
             continuation: continuation!,
             traceContinuation: traceBindingContinuation!,
+            deliveryTelemetry: deliveryTelemetry,
             logger: logger,
             maxInFlight: workerMaxInFlight
         )
@@ -1124,8 +1298,26 @@ public final class ESCollector: @unchecked Sendable {
                 canaryNonces = canary.noteExecIfCanary(commandLine: args.joined(separator: " "))
             }
             // D4 handler-entry timestamp — the worker measures end-to-end latency
-            // (arrival → normalise-done, including queue wait) against it.
+            // (arrival → normalise-done, including queue wait) against it. Run
+            // the normaliser-equivalent admission guard BEFORE retaining/enqueueing:
+            // otherwise messages that can only be discarded still consume the
+            // bounded worker and shed unrelated detection input under ordinary load.
             let startNanos = DispatchTime.now().uptimeNanoseconds
+            // OPEN/WRITE admission decodes one borrowed path token. Drain that
+            // temporary at the callback boundary; the worker's autorelease pool
+            // is never entered for messages intentionally rejected here.
+            let rejectedBeforeWorker = autoreleasepool {
+                ESCollector.shouldDropBeforeWorker(message: message)
+            }
+            if rejectedBeforeWorker {
+                // Preserve the `es_processed_by_type` denominator, but do not
+                // flood the callback→worker latency histogram with near-zero
+                // samples from messages that intentionally never entered that
+                // worker. Otherwise the OPEN/CLOSE majority would mask p99
+                // backlog on the smaller detection-relevant retained set.
+                tracker.recordFilteredBeforeWorker(eventType: evType)
+                return
+            }
             es_retain_message(message)
             let box = ESPendingMessage(message: message, startNanos: startNanos, eventType: evType)
             // The sighting above proves KERNEL DELIVERY only. If the worker then
@@ -1609,6 +1801,7 @@ public final class ESCollector: @unchecked Sendable {
         _ box: ESPendingMessage,
         continuation: AsyncStream<Event>.Continuation,
         traceContinuation: AsyncStream<TraceBindingSignal>.Continuation,
+        deliveryTelemetry: EventCollectorBufferTelemetry,
         tracker: ESSeqTracker,
         logger: Logger
     ) {
@@ -1648,7 +1841,9 @@ public final class ESCollector: @unchecked Sendable {
             var yieldDropped = false
             if let event = event {
                 yielded = true
-                if case .dropped = continuation.yield(event) { yieldDropped = true }
+                let result = continuation.yield(event)
+                deliveryTelemetry.recordYield(offered: event, result: result)
+                if case .dropped = result { yieldDropped = true }
                 // v1.21.4 Phase-2 (D3) NOTE: the coverage-canary recognizer no
                 // longer runs here. It was moved ONTO the ES callback boundary
                 // (see `openClient`) so "seen at callback" measures kernel

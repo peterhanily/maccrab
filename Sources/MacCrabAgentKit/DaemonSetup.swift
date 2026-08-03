@@ -3,10 +3,22 @@ import Darwin
 import MacCrabCore
 import os.log
 
+/// OS-notification toggle records contain only two scalar fields. This is an
+/// internal constant so tests can pin the root/user read boundary without
+/// exposing it as product API.
+let maximumAlertNotificationConfigBytes = 64 * 1024
+
 /// Creates and initializes all daemon components, returning a fully configured DaemonState.
 enum DaemonSetup {
 
     private static let setupLogger = Logger(subsystem: "com.maccrab.agentkit", category: "daemon-setup")
+
+    /// Decoy files belong to the console user. A privileged engine may load
+    /// their bounded manifest for matching, but must never mutate that user's
+    /// namespace. Kept as a pure policy seam for the root-boundary guard test.
+    static func shouldAutoDeployDeception(effectiveUID: uid_t = geteuid()) -> Bool {
+        effectiveUID != 0
+    }
 
     /// v1.7.6: write a startup marker to `<supportDir>/sysext_started.json`
     /// BEFORE any storage init runs. Synchronous, no actor hops, no
@@ -52,15 +64,53 @@ enum DaemonSetup {
         try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
     }
 
-    /// Backup events.db / .wal / .shm to .corrupt-<timestamp> sibling files.
-    /// Allows a fresh init to succeed; preserves the corrupted DB for forensics.
-    ///
-    /// v1.21.4 (C-04): the move-aside + bounded-prune logic now lives in the
-    /// shared `MacCrabCore.CorruptDBBackup` so the EventStore mid-run self-heal
-    /// reuses the identical naming scheme + retention budget. This is a thin
-    /// forwarder preserving the init-time call sites (and the C-03 test symbols).
-    private static func backupCorruptDatabase(directory: String, base: String) {
-        CorruptDBBackup.backup(directory: directory, base: base, keep: corruptBackupRetention)
+    enum DatabaseQuarantineAuthorizationError: Error, LocalizedError {
+        case missingSQLiteFailureDetails(database: String)
+        case notExplicitCorruption(database: String, details: SQLiteFailureDetails)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingSQLiteFailureDetails(let database):
+                return "Refusing to quarantine \(database): the failure has no structured SQLite result codes"
+            case .notExplicitCorruption(let database, let details):
+                return "Refusing to quarantine \(database): SQLite rc=\(details.resultCode), extended=\(details.extendedResultCode), system_errno=\(details.systemErrno) is not explicit CORRUPT/NOTADB"
+            }
+        }
+    }
+
+    /// The sole startup authorization boundary for moving a SQLite evidence
+    /// family aside. Error strings are never classification input: only typed
+    /// SQLITE_CORRUPT / SQLITE_NOTADB metadata permits quarantine. The shared
+    /// helper moves DB/WAL/SHM/journal as one rollback-capable operation and
+    /// throws before a fresh database can be created if any move fails.
+    @discardableResult
+    static func quarantineExplicitSQLiteCorruption(
+        directory: String,
+        base: String,
+        error: Error,
+        timestamp: Int? = nil,
+        moveOperation: CorruptDBBackup.MoveOperation? = nil
+    ) throws -> CorruptDBBackupResult {
+        guard let details = SQLiteFailureClassifier.details(from: error) else {
+            throw DatabaseQuarantineAuthorizationError
+                .missingSQLiteFailureDetails(database: base)
+        }
+        guard SQLiteFailureClassifier.disposition(
+            resultCode: details.resultCode,
+            extendedResultCode: details.extendedResultCode
+        ) == .quarantineExplicitCorruption else {
+            throw DatabaseQuarantineAuthorizationError.notExplicitCorruption(
+                database: base,
+                details: details
+            )
+        }
+        return try CorruptDBBackup.quarantineAtomically(
+            directory: directory,
+            base: base,
+            keep: corruptBackupRetention,
+            timestamp: timestamp,
+            moveOperation: moveOperation
+        )
     }
 
     /// How many distinct corruption events to retain per database. Each event
@@ -69,7 +119,7 @@ enum DaemonSetup {
     static let corruptBackupRetention = CorruptDBBackup.defaultRetention
 
     /// v1.21.4 (C-03): bound the `*.corrupt-<ts>` quarantine backups that
-    /// `backupCorruptDatabase` and the tracegraph-quarantine path leave behind.
+    /// startup and mid-run corruption-quarantine paths leave behind.
     /// Nothing pruned them, so a machine that repeatedly boots against a corrupt
     /// DB accumulated them without bound. Thin forwarder to the shared
     /// `CorruptDBBackup.prune` (see C-04); kept so the tracegraph-quarantine
@@ -79,11 +129,34 @@ enum DaemonSetup {
         CorruptDBBackup.prune(directory: directory, base: base, keep: keep)
     }
 
+    private static func failRequiredStoreRecovery(
+        supportDir: String,
+        database: String,
+        originalError: String,
+        action: String,
+        logger: Logger
+    ) -> Never {
+        let message = "\(database) recovery stopped: \(action)"
+        logger.fault("\(message, privacy: .public). Existing database family was not replaced.")
+        writeCrashReport(
+            supportDir: supportDir,
+            error: originalError,
+            action: action
+        )
+        fputs("FATAL: \(message)\n", stderr)
+        exit(1)
+    }
+
     /// Recover from EventStore init failure. Captures the original error,
     /// backs up the corrupt files, retries init from a clean slate. If the
     /// recovery itself fails, writes last_crash.json and exits — but
     /// only after giving the dashboard a chance to surface the failure.
-    static func recoverEventStore(supportDir: String, logger: Logger) -> EventStore {
+    static func recoverEventStore(
+        supportDir: String,
+        storagePolicy: SQLitePersistentStorePolicy,
+        logger: Logger,
+        initialFailure: Error
+    ) -> EventStore {
         // First, capture the original error with public privacy so the
         // log shows what's wrong instead of "<private>".
         // v1.12.0 RC27 audit fix (Stab-B1): replace the `try!` second-
@@ -92,20 +165,49 @@ enum DaemonSetup {
         // the first failure and the second probe would crash the
         // daemon hard instead of running through the backup-and-retry
         // recovery path below.
-        let originalError: String
+        let retryFailure: Error
         do {
-            let store = try EventStore(directory: supportDir)
+            let store = try EventStore(
+                directory: supportDir,
+                storagePolicy: storagePolicy
+            )
             // First attempt actually succeeded (transient failure
             // resolved itself). Return immediately; skip backup.
             logger.warning("EventStore: first init failed but a probe re-init succeeded — transient error; skipping backup")
             return store
         } catch {
-            originalError = "\(error.localizedDescription) — \(error)"
+            retryFailure = error
         }
-        logger.error("EventStore init failed: \(originalError, privacy: .public). Backing up corrupt files and retrying with a fresh database.")
-        backupCorruptDatabase(directory: supportDir, base: "events.db")
+        let originalError = "initial: \(initialFailure.localizedDescription) — \(initialFailure); retry: \(retryFailure.localizedDescription) — \(retryFailure)"
         do {
-            return try EventStore(directory: supportDir)
+            try quarantineExplicitSQLiteCorruption(
+                directory: supportDir,
+                base: "events.db",
+                error: retryFailure
+            )
+        } catch let authorization as DatabaseQuarantineAuthorizationError {
+            failRequiredStoreRecovery(
+                supportDir: supportDir,
+                database: "EventStore",
+                originalError: originalError,
+                action: authorization.localizedDescription,
+                logger: logger
+            )
+        } catch {
+            failRequiredStoreRecovery(
+                supportDir: supportDir,
+                database: "EventStore",
+                originalError: originalError,
+                action: "atomic corruption quarantine failed: \(error.localizedDescription)",
+                logger: logger
+            )
+        }
+        logger.error("EventStore init failed with explicit SQLite corruption: \(originalError, privacy: .public). Atomic database-family quarantine succeeded; retrying with a fresh database.")
+        do {
+            return try EventStore(
+                directory: supportDir,
+                storagePolicy: storagePolicy
+            )
         } catch {
             let msg = "EventStore recovery failed: \(error.localizedDescription)"
             logger.error("\(msg, privacy: .public)")
@@ -119,20 +221,54 @@ enum DaemonSetup {
     /// `alerts.db` file, so EventStore recovery (which only touches
     /// events.db) doesn't help an AlertStore failure. If init fails,
     /// back up the corrupt alerts.db and retry once.
-    static func recoverAlertStore(supportDir: String, logger: Logger) -> AlertStore {
+    static func recoverAlertStore(
+        supportDir: String,
+        storagePolicy: SQLitePersistentStorePolicy,
+        logger: Logger,
+        initialFailure: Error
+    ) -> AlertStore {
         // v1.12.0 RC27 audit fix (Stab-B1): same pattern as recoverEventStore.
-        let originalError: String
+        let retryFailure: Error
         do {
-            let store = try AlertStore(directory: supportDir)
+            let store = try AlertStore(
+                directory: supportDir,
+                storagePolicy: storagePolicy
+            )
             logger.warning("AlertStore: first init failed but a probe re-init succeeded — transient error; skipping backup")
             return store
         } catch {
-            originalError = "\(error.localizedDescription) — \(error)"
+            retryFailure = error
         }
-        logger.error("AlertStore init failed: \(originalError, privacy: .public). Backing up corrupt alerts.db and retrying with a fresh database.")
-        backupCorruptDatabase(directory: supportDir, base: "alerts.db")
+        let originalError = "initial: \(initialFailure.localizedDescription) — \(initialFailure); retry: \(retryFailure.localizedDescription) — \(retryFailure)"
         do {
-            return try AlertStore(directory: supportDir)
+            try quarantineExplicitSQLiteCorruption(
+                directory: supportDir,
+                base: "alerts.db",
+                error: retryFailure
+            )
+        } catch let authorization as DatabaseQuarantineAuthorizationError {
+            failRequiredStoreRecovery(
+                supportDir: supportDir,
+                database: "AlertStore",
+                originalError: originalError,
+                action: authorization.localizedDescription,
+                logger: logger
+            )
+        } catch {
+            failRequiredStoreRecovery(
+                supportDir: supportDir,
+                database: "AlertStore",
+                originalError: originalError,
+                action: "atomic corruption quarantine failed: \(error.localizedDescription)",
+                logger: logger
+            )
+        }
+        logger.error("AlertStore init failed with explicit SQLite corruption: \(originalError, privacy: .public). Atomic database-family quarantine succeeded; retrying with a fresh database.")
+        do {
+            return try AlertStore(
+                directory: supportDir,
+                storagePolicy: storagePolicy
+            )
         } catch {
             let msg = "AlertStore recovery failed: \(error.localizedDescription)"
             logger.error("\(msg, privacy: .public)")
@@ -314,21 +450,45 @@ enum DaemonSetup {
         logger.info("Rules directory: \(rulesDir)")
         logger.info("Support directory: \(supportDir)")
 
-        // v1.6.14: quarantine orphan user-domain DBs left behind by a
-        // pre-sysext dev daemon. Before the sysext ships, `swift run
-        // maccrabd` writes to `~/<user>/Library/Application Support/
-        // MacCrab/events.db`. After install, the sysext writes to
-        // `/Library/Application Support/MacCrab/events.db`, but the
-        // user-domain DB lingers — sometimes 100s of MB of stale data
-        // the dashboard's most-recent-mtime picker confusingly
-        // selects. Rename (don't delete) any such orphan that's been
-        // idle >24h so the operator can inspect or purge it.
-        if isRoot {
-            reapOrphanUserDomainDBs(logger: logger)
-        }
+        // v1.21.6 re-audit: automatic root cleanup of a user-domain DB is
+        // retired. A user controls every ancestor below their home and could
+        // replace the MacCrab directory with a symlink to the authoritative
+        // system support directory; a path-based root rename would then move
+        // live evidence. Cleanup must be an explicit user-context operation.
 
         // Load daemon configuration (optional JSON file with tuning overrides)
         let config = DaemonConfig.load(from: supportDir)
+        // One clamped boot snapshot feeds BOTH buffer construction and the
+        // TraceGraph hot-path storage admission below. Re-deriving selected
+        // fields at each reader is how prior config fixes drifted.
+        let bootStorage = config.storage.clampedToSafeFloors()
+        // One policy value per persistent SQLite family. These exact values
+        // must flow through startup migration, primary open, recovery probes,
+        // and retry opens; falling back to store defaults at any one of those
+        // sites silently defeats the operator's configured hard cap.
+        let eventStoragePolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: bootStorage.eventsMaxSizeMB
+            ),
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            transactionReserveBytes: SQLitePersistentStorePolicy
+                .eventTransactionReserveBytes,
+            storageVolumePath: supportDir
+        )
+        let alertStoragePolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: bootStorage.alertsMaxSizeMB
+            ),
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            storageVolumePath: supportDir
+        )
+        let campaignStoragePolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: bootStorage.campaignsMaxSizeMB
+            ),
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
+            storageVolumePath: supportDir
+        )
 
         // v1.19 (S1-T6): apply the self-test honeyfile-noise suppression flag
         // once at startup (config OR env). OFF in prod; the must-fire
@@ -339,8 +499,8 @@ enum DaemonSetup {
         // v1.21.4 (F2/A3): apply the split merged-stream buffer depths from
         // config before the streams are built in runEventLoop. Floored at 1000
         // so a fat-fingered tiny value can't make the pipeline drop everything.
-        DaemonState.priorityStreamCap = max(1000, config.storage.mergedPriorityStreamCap)
-        DaemonState.fileStreamCap = max(1000, config.storage.mergedFileStreamCap)
+        DaemonState.priorityStreamCap = bootStorage.mergedPriorityStreamCap
+        DaemonState.fileStreamCap = bootStorage.mergedFileStreamCap
 
         // Create support directories with restrictive permissions
         try? fm.createDirectory(
@@ -387,17 +547,44 @@ enum DaemonSetup {
         // keeps running. Three retries max before exiting (and even
         // then we write last_crash.json so the dashboard can show a
         // specific "click to Recover" banner).
-        eventStore = (try? EventStore(directory: supportDir))
-            ?? Self.recoverEventStore(supportDir: supportDir, logger: logger)
-
         // v1.8.0 storage split: relocate `alerts` from events.db -> alerts.db
-        // before AlertStore opens. Idempotent — no-op once migrated.
-        // Best-effort: failure leaves both states present and AlertStore
-        // initializes against an empty alerts.db. The next start retries.
-        AlertsTableRelocator.relocate(directory: supportDir, logger: logger)
+        // before either long-lived store opens. Idempotent — no-op once
+        // migrated. Both raw migration connections use the same configured
+        // family policies as the stores they precede.
+        AlertsTableRelocator.relocate(
+            directory: supportDir,
+            eventStoragePolicy: eventStoragePolicy,
+            alertStoragePolicy: alertStoragePolicy,
+            logger: logger
+        )
 
-        alertStore = (try? AlertStore(directory: supportDir))
-            ?? Self.recoverAlertStore(supportDir: supportDir, logger: logger)
+        do {
+            eventStore = try EventStore(
+                directory: supportDir,
+                storagePolicy: eventStoragePolicy
+            )
+        } catch {
+            eventStore = Self.recoverEventStore(
+                supportDir: supportDir,
+                storagePolicy: eventStoragePolicy,
+                logger: logger,
+                initialFailure: error
+            )
+        }
+
+        do {
+            alertStore = try AlertStore(
+                directory: supportDir,
+                storagePolicy: alertStoragePolicy
+            )
+        } catch {
+            alertStore = Self.recoverAlertStore(
+                supportDir: supportDir,
+                storagePolicy: alertStoragePolicy,
+                logger: logger,
+                initialFailure: error
+            )
+        }
 
         Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
         Self.logBootStep(label: "stores_ready", startedAt: startedAt)
@@ -434,9 +621,9 @@ enum DaemonSetup {
         // Shared state across the daemon lifetime for cache reuse.
         let processHasher = ProcessHasher()
 
-        // Deception tier (opt-in). Plants canary credential files and exposes an
-        // isHoneyfile() lookup the enricher uses to tag file events touching a
-        // canary.
+        // Deception tier (opt-in). User-run maccrabctl plants the canaries; the
+        // engine loads their bounded manifests and exposes an isHoneyfile()
+        // lookup the enricher uses to tag file events touching a canary.
         //
         // v1.21.6 (audit DET-02): the gate was env-var-ONLY. sysextd launches the
         // System Extension, so an operator has no supported way to set that
@@ -454,18 +641,30 @@ enum DaemonSetup {
             // "deception on" / "deception off".
             let promptMgr = HoneyPromptManager()
             honeyPromptManager = promptMgr
-            Task {
-                do {
-                    let deployed = try await mgr.deploy()
-                    logger.info("Deployed \(deployed.count) honeyfiles (deception tier enabled)")
-                } catch {
-                    logger.warning("Honeyfile deploy failed: \(error.localizedDescription)")
-                }
-                do {
-                    let deployedPrompts = try await promptMgr.deploy()
-                    logger.info("Deployed \(deployedPrompts.count) honey-prompts (AI-agent context bait)")
-                } catch {
-                    logger.warning("Honey-prompt deploy failed: \(error.localizedDescription)")
+            if !Self.shouldAutoDeployDeception() {
+                // The System Extension runs as root while these decoys and
+                // their manifests live below a user-controlled home. Root must
+                // never create directories, age files, replace manifests, or
+                // remove entries through that namespace: even no-follow leaf
+                // opens leave intermediate-parent and follow-up path races.
+                // Deployment/removal is therefore an explicit maccrabctl action
+                // performed as the owning console user. The root engine only
+                // loads the bounded manifest and activates event enrichment.
+                logger.info("Deception detection enabled; decoy deployment is delegated to user-run maccrabctl")
+            } else {
+                Task {
+                    do {
+                        let deployed = try await mgr.deploy()
+                        logger.info("Deployed \(deployed.count) honeyfiles (deception tier enabled)")
+                    } catch {
+                        logger.warning("Honeyfile deploy failed: \(error.localizedDescription)")
+                    }
+                    do {
+                        let deployedPrompts = try await promptMgr.deploy()
+                        logger.info("Deployed \(deployedPrompts.count) honey-prompts (AI-agent context bait)")
+                    } catch {
+                        logger.warning("Honey-prompt deploy failed: \(error.localizedDescription)")
+                    }
                 }
             }
         } else {
@@ -511,7 +710,7 @@ enum DaemonSetup {
         let notifConfig = loadAlertNotificationConfig(supportDir: supportDir)
         let notifier = NotificationOutput(minimumSeverity: notifConfig.minSeverity)
         await notifier.setEnabled(notifConfig.enabled)
-        let responseEngine = ResponseEngine()
+        let responseEngine = ResponseEngine(supportDirectory: supportDir)
 
         Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
         // Self-defense: tamper detection.
@@ -654,7 +853,10 @@ enum DaemonSetup {
         // the error rather than crashing.
         let campaignStore: CampaignStore?
         do {
-            campaignStore = try CampaignStore(directory: supportDir)
+            campaignStore = try CampaignStore(
+                directory: supportDir,
+                storagePolicy: campaignStoragePolicy
+            )
         } catch {
             logger.warning("CampaignStore failed to open: \(error.localizedDescription) — campaigns will not persist across restarts")
             campaignStore = nil
@@ -669,19 +871,21 @@ enum DaemonSetup {
         // when AnchorDetector decides the event is anchor-worthy.
         // Non-fatal on store failure (the rest of the daemon keeps
         // running without trace materialization).
-        // v1.10.0 audit fix: build DatabaseEncryption here so it can
+        // Build the ONE process-wide DatabaseEncryption here so it can
         // be passed into SQLiteCausalGraphStore. Pre-fix the store
         // was instantiated without the encryption param, and the
-        // canonical `dbEncryption` was only constructed ~130 lines
-        // below — tracegraph.db's `attributes_json`, `evidence_json`,
+        // encryption object used to be constructed again below —
+        // tracegraph.db's `attributes_json`, `evidence_json`,
         // `summary_json`, `attack_json`, `policy_snapshot_json`
         // were written plaintext on disk despite the v1.9
-        // "AES-GCM at rest" invariant. The canonical `dbEncryption`
-        // below uses the same env-var gate so behaviour is identical;
-        // this early instance just gates plumbing for stores that
-        // need it before the canonical construction site.
-        let earlyEncryptDbEnv = Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"]
-        let earlyDbEncryption = DatabaseEncryption(enabled: earlyEncryptDbEnv != "0")
+        // "AES-GCM at rest" invariant. A single instance is also
+        // security-critical: if Keychain access changes during boot,
+        // constructing twice could give two stores different keys. An
+        // unavailable persistent key disables encrypted evidence stores;
+        // no ephemeral-key ciphertext is ever written.
+        let encryptDbEnv = Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"]
+        let dbEncryptionEnabled = (encryptDbEnv != "0")
+        let dbEncryption = DatabaseEncryption(enabled: dbEncryptionEnabled)
 
         let causalGraphBridge: EventToRollingCausalGraphBridge?
         // Hoisted out of the do-block so the daily retention timer in
@@ -693,46 +897,88 @@ enum DaemonSetup {
         // With this fix a 7GB corrupt tracegraph gets quarantined and
         // the daemon continues with a fresh empty store — the rest of
         // detection keeps working.
-        func openCausalStore() async -> SQLiteCausalGraphStore? {
+        func openCausalStore() async -> (
+            store: SQLiteCausalGraphStore?,
+            startupAdmission: TraceGraphStartupAdmissionStatus?
+        ) {
             let dbPath = supportDir + "/tracegraph.db"
+            let tracegraphCapBytes = TraceGraphStoragePolicy.capBytes(
+                maxSizeMiB: bootStorage.tracegraphMaxSizeMB)
+            guard !dbEncryption.encryptionWasRequested || dbEncryption.isEnabled else {
+                logger.fault("TraceGraph disabled: persistent DB-encryption key is unavailable (OSStatus \(dbEncryption.keyPersistenceFailureStatus ?? -1, privacy: .public)); preserving the existing store and refusing plaintext/ephemeral-key writes")
+                return (nil, nil)
+            }
+            let storeEncryption = dbEncryption.isEnabled ? dbEncryption : nil
             do {
-                return try await SQLiteCausalGraphStore(
-                    databasePath: dbPath, encryption: earlyDbEncryption
+                let store = try await SQLiteCausalGraphStore(
+                    databasePath: dbPath,
+                    encryption: storeEncryption,
+                    maxFootprintBytes: tracegraphCapBytes,
+                    freeSpaceFloorBytes: TraceGraphStoragePolicy.freeSpaceFloorBytes,
+                    storageVolumePath: supportDir
+                )
+                return (store, nil)
+            } catch let admission as CausalGraphStorageAdmissionError {
+                // A pre-migration max_page_count/low-disk failure is storage
+                // pressure, not corruption. Never quarantine evidence for it;
+                // keep the rest of detection online. Retain the typed reason so
+                // the heartbeat/status/dashboard report a forensic-evidence gap
+                // instead of the misleading generic `enabled: false` state.
+                logger.fault("TraceGraph init paused by storage admission: \(admission.localizedDescription, privacy: .public). Existing tracegraph.db is preserved; trace materialization is disabled this run.")
+                return (
+                    nil,
+                    TraceGraphStartupAdmissionStatus(
+                        error: admission,
+                        configuredMaxFootprintBytes: tracegraphCapBytes,
+                        configuredFreeSpaceFloorBytes: TraceGraphStoragePolicy.freeSpaceFloorBytes
+                    )
                 )
             } catch {
-                logger.error("TraceGraph init failed: \(error.localizedDescription, privacy: .public) — quarantining and retrying")
-                let ts = Int(Date().timeIntervalSince1970)
-                let quarantineDir = supportDir + "/quarantine"
-                // v1.12.0 RC28 audit fix (Sec-M2): refuse to use a
-                // symlinked quarantine dir. Without this an attacker
-                // who can pre-create supportDir/quarantine as a link
-                // to /Users/<them>/ would have us land sensitive
-                // tracegraph.db content under their control on next
-                // crash. lstat refuses to follow; URL resource-keys
-                // .isSymbolicLink is the same check.
-                let qURL = URL(fileURLWithPath: quarantineDir)
-                let qIsSymlink = (try? qURL.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-                if qIsSymlink {
-                    logger.error("TraceGraph quarantine refused: \(quarantineDir, privacy: .public) is a symlink")
-                    return nil
+                do {
+                    try quarantineExplicitSQLiteCorruption(
+                        directory: supportDir,
+                        base: "tracegraph.db",
+                        error: error
+                    )
+                } catch let authorization as DatabaseQuarantineAuthorizationError {
+                    logger.fault("TraceGraph init failed without explicit SQLite corruption: \(authorization.localizedDescription, privacy: .public). Existing DB/WAL/SHM are preserved; trace materialization is disabled this run.")
+                    return (nil, nil)
+                } catch {
+                    // Family-level rollback is attempted inside
+                    // quarantineAtomically. Never retry against a newly-created
+                    // database after a partial/failed evidence move.
+                    logger.fault("TraceGraph atomic corruption quarantine failed: \(error.localizedDescription, privacy: .public). Existing DB/WAL/SHM were not deliberately replaced; trace materialization is disabled this run.")
+                    return (nil, nil)
                 }
-                try? FileManager.default.createDirectory(
-                    atPath: quarantineDir, withIntermediateDirectories: true
-                )
-                for ext in ["", "-wal", "-shm", "-journal"] {
-                    let src = dbPath + ext
-                    if FileManager.default.fileExists(atPath: src) {
-                        let dst = "\(quarantineDir)/tracegraph.db.corrupt-\(ts)\(ext)"
-                        try? FileManager.default.moveItem(atPath: src, toPath: dst)
-                    }
+                logger.error("TraceGraph init reported explicit SQLite corruption. Atomic database-family quarantine succeeded; retrying with a fresh tracegraph.db.")
+                do {
+                    let store = try await SQLiteCausalGraphStore(
+                        databasePath: dbPath,
+                        encryption: storeEncryption,
+                        maxFootprintBytes: tracegraphCapBytes,
+                        freeSpaceFloorBytes: TraceGraphStoragePolicy.freeSpaceFloorBytes,
+                        storageVolumePath: supportDir
+                    )
+                    return (store, nil)
+                } catch let admission as CausalGraphStorageAdmissionError {
+                    logger.fault("TraceGraph retry paused by storage admission: \(admission.localizedDescription, privacy: .public). Trace materialization is disabled this run.")
+                    return (
+                        nil,
+                        TraceGraphStartupAdmissionStatus(
+                            error: admission,
+                            configuredMaxFootprintBytes: tracegraphCapBytes,
+                            configuredFreeSpaceFloorBytes: TraceGraphStoragePolicy.freeSpaceFloorBytes
+                        )
+                    )
+                } catch {
+                    logger.error("TraceGraph retry failed: \(error.localizedDescription, privacy: .public) — trace materialization is disabled this run")
+                    return (nil, nil)
                 }
-                pruneCorruptBackups(directory: quarantineDir, base: "tracegraph.db")
-                return try? await SQLiteCausalGraphStore(
-                    databasePath: dbPath, encryption: earlyDbEncryption
-                )
             }
         }
-        if let causalStore = await openCausalStore() {
+        let causalStoreOpen = await openCausalStore()
+        let causalStoreStartupAdmission = causalStoreOpen.startupAdmission
+        if let causalStore = causalStoreOpen.store {
             let materializer = TraceMaterializer(
                 store: causalStore,
                 daemonVersion: MacCrabVersion.current,
@@ -740,13 +986,7 @@ enum DaemonSetup {
             )
             let rollingGraph = RollingCausalGraph(
                 store: causalStore,
-                materializer: materializer,
-                // Wire the free-space floor the events writer already had. This
-                // store did not, and on an AI-coding-tool host it grew 1-2 GB/h
-                // and took the boot volume to 103 MB free — at which point the
-                // trace hash chain broke with SQLITE_FULL, so the tamper-evidence
-                // guarantee failed exactly when the evidence mattered.
-                volumePath: supportDir
+                materializer: materializer
             )
             // v1.17.4 (perf): gate graph ingest on the same default noise
             // filter the EventStore insert path uses (own instance — keeps
@@ -759,7 +999,7 @@ enum DaemonSetup {
             causalStoreOuter = causalStore
             logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
         } else {
-            logger.warning("TraceGraph init failed twice; trace materialization disabled this run")
+            logger.warning("TraceGraph store unavailable; trace materialization disabled this run")
             causalGraphBridge = nil
             causalStoreOuter = nil
         }
@@ -931,9 +1171,6 @@ enum DaemonSetup {
         // claim was conditionally true; now it's unconditional.
         // `MACCRAB_ENCRYPT_DB=0` remains as an explicit escape hatch
         // for tests and bisects.
-        let encryptDbEnv = Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"]
-        let dbEncryptionEnabled = (encryptDbEnv != "0")
-        let dbEncryption = DatabaseEncryption(enabled: dbEncryptionEnabled)
         if dbEncryption.isEnabled {
             // v1.21.4 (audit A4-01): be precise about scope. This AES-GCM key
             // (in Keychain) column-encrypts only the trace + causal-graph stores
@@ -941,6 +1178,8 @@ enum DaemonSetup {
             // campaign stores (incl. alert_evidence) are NOT yet encrypted at
             // rest — that work is scheduled, not shipped.
             print("Database encryption: trace + causal-graph stores column-encrypted (AES-GCM, key in Keychain); event/alert/campaign stores not yet encrypted at rest (scheduled)")
+        } else if dbEncryption.encryptionWasRequested {
+            print("Database encryption: persistent Keychain key UNAVAILABLE (OSStatus \(dbEncryption.keyPersistenceFailureStatus ?? -1)); trace + causal-graph stores are disabled to prevent plaintext or ephemeral-key writes")
         } else {
             print("Database encryption: disabled via MACCRAB_ENCRYPT_DB=0 (trace + causal-graph stores plaintext; event/alert/campaign stores are not encrypted at rest either)")
         }
@@ -1071,7 +1310,10 @@ enum DaemonSetup {
             if Foundation.ProcessInfo.processInfo.environment["MACCRAB_PREVENTION"] == "1" { return true }
             // Check config file written by the dashboard app
             let configPath = supportDir + "/prevention_config.json"
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+            if let data = BoundedRegularFileReader.read(
+                   at: configPath,
+                   maximumBytes: DaemonConfig.maximumConfigurationBytes
+               ),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let enabled = json["enabled"] as? Bool {
                 return enabled
@@ -1091,7 +1333,8 @@ enum DaemonSetup {
         // Sandbox Analyzer -- sandbox-exec suspicious binaries
         let sandboxAnalyzer = SandboxAnalyzer()
 
-        // AI Containment -- lock credential files from AI tools
+        // Retired API shell retained for state/source compatibility. Credential
+        // reads remain detected; same-uid process blocking is not available.
         let aiContainment = AIContainment()
 
         // Supply Chain Gate -- kill installers of fresh packages
@@ -1164,16 +1407,13 @@ enum DaemonSetup {
             // Lock persistence directories
             await persistenceGuard.enable()
 
-            // Lock credential files from AI tools
-            await aiContainment.enable()
-
             // Enable supply chain gate
             await supplyChainGate.enable()
 
             // Enable TCC auto-revocation
             await tccRevocation.enable()
 
-            print("Prevention layer: ACTIVE (DNS sinkhole, PF blocker, persistence guard, AI containment, supply chain gate, TCC revocation)")
+            print("Prevention layer: ACTIVE (DNS sinkhole, PF blocker, persistence guard, supply chain gate, TCC revocation)")
         } else {
             print("Prevention layer: STANDBY (set MACCRAB_PREVENTION=1 to enable)")
         }
@@ -1309,76 +1549,54 @@ enum DaemonSetup {
         }
 
         // === LLM REASONING BACKEND (optional) ===
-        // Config sources (in priority order): env vars > llm_config.json > daemon_config.json
+        // Config sources (in priority order): explicit env override > shared
+        // Keychain secrets > non-secret llm_config.json > daemon_config.json.
         let llmService: LLMService? = await {
             var llmConfig = config.llm
 
-            // Read dashboard-written llm_config.json (written by Settings > AI Backend)
+            // Read and upgrade-scrub the root-owned, dashboard-bridged JSON.
+            // API keys are never accepted from this file; old plaintext fields
+            // are removed through a verified no-follow file descriptor at this
+            // owner-context startup boundary.
             let llmConfigPath = supportDir + "/llm_config.json"
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: llmConfigPath)),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                // Migration for the v1.21.6 default flip (LLMConfig.enabled
-                // true -> false). The mere PRESENCE of this file means someone
-                // configured a backend through Settings > AI Backend, so treat it
-                // as opt-in — otherwise an existing user whose file names a
-                // provider but carries no explicit `enabled` key would silently
-                // lose LLM analysis on upgrade. An explicit `"enabled": false`
-                // still wins; this only supplies the missing default.
-                llmConfig.enabled = true
-                if let enabled = json["enabled"] as? Bool { llmConfig.enabled = enabled }
-                if let provider = json["provider"] as? String {
-                    llmConfig.provider = LLMProvider(rawValue: provider) ?? llmConfig.provider
+            if let json = try? LLMConfigFile.loadAndScrub(
+                atPath: llmConfigPath,
+                legacySecretMigration: .sharedKeychain(interaction: .disallowed),
+                onScrubFailure: { error in
+                    print("LLM config: legacy-secret scrub failed: \(error)")
                 }
-                if let v = json["ollama_url"] as? String {
-                    // v1.21.5 (audit S-02): llm_config.json is writable from the
-                    // 1777 inbox control plane — DaemonTimers.handleLLMConfigRequests
-                    // whitelists `ollama_url` and its default-deny gate only rejects
-                    // NON-loopback URLs, so a uid-501 process can point the ROOT
-                    // engine at http://127.0.0.1:<its own listener> silently. A
-                    // loopback URL is precisely what LLMService.shouldSanitize reads
-                    // as "local Ollama — nothing leaves the host", so the sanitizer
-                    // would be switched OFF and every campaign / alert / behavioral /
-                    // sequence / baseline prompt (usernames, paths, command lines,
-                    // private IPs) handed to that listener verbatim after the next
-                    // restart. An endpoint arriving on this path is therefore NOT
-                    // trusted-local: it still works, the sanitizer just stays on.
-                    // Only a value that DIFFERS from the root-owned baseline
-                    // (daemon_config.json `llm.ollamaURL`, else the compiled default)
-                    // downgrades trust, so the ordinary dashboard write of the
-                    // default URL changes nothing.
-                    if v != llmConfig.ollamaURL { llmConfig.trustLocalEndpoint = false }
-                    llmConfig.ollamaURL = v
+            ) {
+                let trustedOllamaBaseline = llmConfig.ollamaURL
+                LLMConfigFile.applyNonSecretValues(json, to: &llmConfig)
+                // A URL that arrived over the uid-501 inbox is not a trusted
+                // local endpoint. Keep sanitization enabled unless it exactly
+                // matches the root-owned daemon-config baseline.
+                if let value = json["ollama_url"] as? String,
+                   value != trustedOllamaBaseline {
+                    llmConfig.trustLocalEndpoint = false
                 }
-                if let v = json["ollama_model"] as? String { llmConfig.ollamaModel = v }
-                if let v = json["ollama_api_key"] as? String { llmConfig.ollamaAPIKey = v }
-                if let v = json["claude_api_key"] as? String { llmConfig.claudeAPIKey = v }
-                if let v = json["claude_model"] as? String { llmConfig.claudeModel = v }
-                if let v = json["openai_url"] as? String { llmConfig.openaiURL = v }
-                if let v = json["openai_api_key"] as? String { llmConfig.openaiAPIKey = v }
-                if let v = json["openai_model"] as? String { llmConfig.openaiModel = v }
-                if let v = json["mistral_api_key"] as? String { llmConfig.mistralAPIKey = v }
-                if let v = json["mistral_model"] as? String { llmConfig.mistralModel = v }
-                if let v = json["gemini_api_key"] as? String { llmConfig.geminiAPIKey = v }
-                if let v = json["gemini_model"] as? String { llmConfig.geminiModel = v }
             }
 
-            // Env vars override everything (backward compat)
+            // Persistent provider credentials come only from the shared
+            // Keychain. The sysext is background/root, so never allow an
+            // authentication prompt; a denied/locked slot leaves that provider
+            // unavailable without blocking engine startup.
+            LLMSecretLoader.applyKeychainSecrets(
+                to: &llmConfig,
+                interaction: .disallowed,
+                onError: { key, error in
+                    print("LLM Keychain: \(key.displayName) unavailable: \(error)")
+                }
+            )
+
+            // Env vars override everything (backward compatibility and an
+            // explicit operator-controlled ephemeral override).
             let env = ProcessInfo.processInfo.environment
-            if let p = env["MACCRAB_LLM_PROVIDER"] { llmConfig.provider = LLMProvider(rawValue: p) ?? llmConfig.provider }
-            // v1.21.5 (audit S-02): the env var is an operator channel uid 501
-            // cannot write (it lives in the daemon's launch environment), so an
-            // endpoint set here re-establishes trusted-local and overrides any
-            // downgrade the file path above applied.
-            if let v = env["MACCRAB_LLM_OLLAMA_URL"] {
-                llmConfig.ollamaURL = v
-                llmConfig.trustLocalEndpoint = true
-            }
-            if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { llmConfig.ollamaModel = v }
-            if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { llmConfig.claudeAPIKey = v }
-            if let v = env["MACCRAB_LLM_CLAUDE_MODEL"] { llmConfig.claudeModel = v }
-            if let v = env["MACCRAB_LLM_OPENAI_URL"] { llmConfig.openaiURL = v }
-            if let v = env["MACCRAB_LLM_OPENAI_KEY"] { llmConfig.openaiAPIKey = v }
-            if let v = env["MACCRAB_LLM_OPENAI_MODEL"] { llmConfig.openaiModel = v }
+            LLMSecretLoader.applyEnvironmentOverrides(
+                env,
+                to: &llmConfig,
+                trustEnvironmentOllamaURL: true
+            )
 
             guard llmConfig.enabled else { return nil }
 
@@ -1512,7 +1730,9 @@ enum DaemonSetup {
         // see the engine in an "empty" state — equivalent to a fresh
         // learning period — which is benign: anomaly detection is
         // additive on top of the rule layer.
-        let baselineEngine = BaselineEngine()
+        let baselineEngine = BaselineEngine(
+            persistPath: supportDir + "/baseline.json"
+        )
         Task.detached(priority: .utility) {
             do {
                 try await baselineEngine.load()
@@ -1686,17 +1906,11 @@ enum DaemonSetup {
             }
         }
 
-        // Rule-update channel (v1.20): load DETECTION-ONLY rules pushed out-of-band
-        // into <rules>/pushed. Loaded LAST so they can only ADD detections (a
-        // pushed rule whose id already exists is ignored), and the response engine
-        // is told to never arm an action for them. See RuleEngine.loadPushedRules.
-        let pushedRulesURL = URL(fileURLWithPath: effectiveRulesDir + "/pushed")
-        if let pushedCount = try? await ruleEngine.loadPushedRules(from: pushedRulesURL), pushedCount > 0 {
-            logger.info("Loaded \(pushedCount) pushed (detection-only) rule(s) from \(pushedRulesURL.path)")
-            print("Loaded \(pushedCount) pushed (detection-only) rule(s)")
-        }
-        let bootPushedIDs = await ruleEngine.pushedRuleIDs
-        await responseEngine.setDetectionOnlyRuleIDs(bootPushedIDs)
+        // The out-of-band rule channel is release-disabled pending an
+        // owner-approved offline key rotation and custody record. Preserve any
+        // on-disk pushed corpus, but never read or evaluate it. Keep the response
+        // gate empty because no `.pushed` rules can enter the live ruleset.
+        await responseEngine.setDetectionOnlyRuleIDs([])
 
         // A boot with ZERO rules is total loss of tier 1, and it used to be a
         // `logger.warning` plus a stdout line — stdout being discarded for a
@@ -1708,8 +1922,8 @@ enum DaemonSetup {
         // dashboard does catch it (AppState.isProtectionDegraded) but only if
         // the GUI is running. Raise it on the one channel every surface reads:
         // alerts.db → dashboard, `maccrabctl alerts`, MCP get_alerts.
-        // Checked AFTER the bundled + user-override + pushed loads so a boot
-        // that got its rules from any source is not falsely flagged.
+        // Checked AFTER bundled + user-override loads. The release-disabled
+        // pushed-rule channel is intentionally not a boot-time rule source.
         let bootRuleCount = await ruleEngine.ruleCount
         if bootRuleCount == 0 {
             logger.critical("No detection rules loaded from \(effectiveRulesDir) — tier-1 detection is INACTIVE")
@@ -1786,16 +2000,9 @@ enum DaemonSetup {
                             total += overlayed
                         }
                     }
-                    // v1.20 audit fix: re-apply pushed (detection-only) rules and
-                    // refresh the response-engine gate. reloadRules cleared the
-                    // pushed set, so without this a user-rules edit (every ~5s tick)
-                    // silently dropped every pushed rule + left the detection-only
-                    // gate stale until SIGHUP/restart. Mirrors boot + SIGHUP.
-                    if let pushed = try? await ruleEngine.loadPushedRules(from: liveCompiledRulesURL.appendingPathComponent("pushed")), pushed > 0 {
-                        total += pushed
-                    }
-                    let tickPushedIDs = await ruleEngine.pushedRuleIDs
-                    await responseEngine.setDetectionOnlyRuleIDs(tickPushedIDs)
+                    // The release-disabled out-of-band channel leaves any pushed
+                    // corpus on disk but never re-applies it after this base reload.
+                    await responseEngine.setDetectionOnlyRuleIDs([])
                     // v1.21.6 (PERF-02) KNOWN GAP, documented not hidden: this
                     // detached watcher has no handle on the ESCollector (it is
                     // constructed later in this function), so it cannot re-run the
@@ -2019,6 +2226,7 @@ enum DaemonSetup {
             ruleGenerator: ruleGenerator,
             causalGraphBridge: causalGraphBridge,
             causalStore: causalStoreOuter,
+            causalStoreStartupAdmission: causalStoreStartupAdmission,
             graphEvaluator: graphEvaluator,
             bayesianIntent: bayesianIntent,
             intentClassifier: intentClassifier,
@@ -2051,7 +2259,7 @@ enum DaemonSetup {
         // (StorageConfig.clampedToSafeFloors) so this boot path and the SIGHUP
         // reload path cannot drift apart — they did, and eight tiers ended up
         // clamped at neither.
-        state.storage = config.storage.clampedToSafeFloors()
+        state.storage = bootStorage
 
         // v1.19.1: seed the opt-in network-enrichment switches (off by default).
         // DaemonTimers (vuln scan) and EventLoop (package freshness) read these
@@ -2129,14 +2337,23 @@ enum DaemonSetup {
 
         if ESCollector.isAgentTracesEnabled, otlpEnabled {
             do {
+                guard !dbEncryption.encryptionWasRequested || dbEncryption.isEnabled else {
+                    throw DatabaseEncryptionAvailabilityError.persistentKeyUnavailable(
+                        dbEncryption.keyPersistenceFailureStatus)
+                }
                 // v1.9 Phase-2.3: pass the daemon's DatabaseEncryption
-                // through so attributes_json is encrypted at rest with
-                // the same shared key as events.db / alerts.db.
+                // through so attributes_json is encrypted at rest with the
+                // installation's Keychain-backed database-encryption key.
                 let traceStore = try TraceStore(
                     directory: supportDir,
-                    encryption: dbEncryption
+                    encryption: dbEncryption.isEnabled ? dbEncryption : nil,
+                    maxFootprintBytes: TraceStoreStoragePolicy.capBytes(
+                        maxSizeMiB: bootStorage.tracesMaxSizeMB),
+                    freeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes,
+                    storageVolumePath: supportDir
                 )
                 state.traceStore = traceStore
+                state.traceStoreStartupAdmission = nil
                 // v1.21.6: rows written before the search-projection migration
                 // carry a NULL `search_text` and would never be findable. The
                 // migration is pure SQL and cannot decrypt, so backfill here.
@@ -2144,19 +2361,36 @@ enum DaemonSetup {
                     Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
                         .notice("Backfilled search projection for \(filled, privacy: .public) pre-existing spans")
                 }
-                let receiver = OTLPReceiver(
+                let receiver = makeOTLPReceiver(
                     port: cfg.port,
-                    traceStore: traceStore
+                    traceStore: traceStore,
+                    supportDir: supportDir
                 )
                 try await receiver.start()
                 state.otlpReceiver = receiver
-                AgentTracesStatusStore.write(
-                    AgentTracesStatus(running: true, port: cfg.port),
-                    to: supportDir
-                )
                 Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
                     .notice("OTLPReceiver started on 127.0.0.1:\(cfg.port, privacy: .public) — traces.db at \(supportDir, privacy: .public)/traces.db")
                 print("[agent-traces] OTLPReceiver listening on 127.0.0.1:\(cfg.port) — traces.db at \(supportDir)/traces.db")
+            } catch let pressure as TraceStoreStorageAdmissionError {
+                let cap = TraceStoreStoragePolicy.capBytes(
+                    maxSizeMiB: bootStorage.tracesMaxSizeMB)
+                state.traceStoreStartupAdmission = TraceStoreStartupAdmissionStatus(
+                    error: pressure,
+                    configuredMaxFootprintBytes: cap,
+                    configuredFreeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes
+                )
+                Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+                    .fault("OTLP TraceStore startup blocked by storage pressure: \(pressure.localizedDescription, privacy: .public)")
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(
+                        running: false,
+                        port: cfg.port,
+                        lastError: pressure.localizedDescription,
+                        lastErrorAt: Date()
+                    ),
+                    to: supportDir
+                )
+                state.traceStore = nil
             } catch {
                 Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
                     .error("OTLPReceiver failed to start: \(String(describing: error), privacy: .public)")
@@ -2171,6 +2405,7 @@ enum DaemonSetup {
                     to: supportDir
                 )
                 state.traceStore = nil
+                state.traceStoreStartupAdmission = nil
             }
         } else {
             // v1.21.4 Phase-6 6A: the master is now config-reachable
@@ -2198,6 +2433,38 @@ enum DaemonSetup {
 
     // MARK: - Phase-3.4: SIGHUP receiver lifecycle
 
+    /// Both boot and SIGHUP must publish the same post-readiness failure state.
+    /// `NWListener` can fail after a successful bind; without this callback the
+    /// last on-disk snapshot remains `running: true` and a same-port reload used
+    /// to return early without recreating the dead listener.
+    private static func makeOTLPReceiver(
+        port: UInt16,
+        traceStore: TraceStore,
+        supportDir: String
+    ) -> OTLPReceiver {
+        OTLPReceiver(
+            port: port,
+            traceStore: traceStore,
+            onReady: {
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(running: true, port: port),
+                    to: supportDir
+                )
+            },
+            onTerminalFailure: { message in
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(
+                        running: false,
+                        port: port,
+                        lastError: "listener failed after readiness: \(message)",
+                        lastErrorAt: Date()
+                    ),
+                    to: supportDir
+                )
+            }
+        )
+    }
+
     /// Apply the latest agent_traces_config.json to a running daemon.
     /// Called from SignalHandlers' SIGHUP handler. Idempotent: a
     /// no-op transition (already-running with the same port) does
@@ -2224,14 +2491,23 @@ enum DaemonSetup {
         let master = ESCollector.agentTracesMasterEnabled(env: envMaster, config: cfg.enabled)
         let shouldRun = master && (cfg.receiverEnabled || envFlag)
         let logger = Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+        // `state.storage` is the one clamped snapshot installed by boot/SIGHUP.
+        // Do not re-read raw daemon config here: that is how cap readers drift.
+        let tracesCapBytes = TraceStoreStoragePolicy.capBytes(
+            maxSizeMiB: state.storage.tracesMaxSizeMB)
 
-        // Already running — stop and restart only if port changed.
+        // Already running — stop and restart only if port changed. Preserve
+        // the actor-owned TraceStore across a port-only restart: the bounded
+        // maintenance timer also resolves this same actor, so opening a second
+        // writer handle here would break the single-writer lifecycle.
+        var reusableTraceStore: TraceStore?
         if let existing = state.otlpReceiver {
             let existingPort = await existing.currentPort()
             if !shouldRun {
                 await existing.stop()
                 state.otlpReceiver = nil
                 state.traceStore = nil
+                state.traceStoreStartupAdmission = nil
                 AgentTracesStatusStore.write(
                     AgentTracesStatus(running: false, port: existingPort),
                     to: supportDir
@@ -2240,30 +2516,107 @@ enum DaemonSetup {
                 print("[agent-traces] OTLPReceiver stopped (SIGHUP)")
                 return
             }
-            if existingPort == cfg.port {
-                return // no change
+            if let traceStore = state.traceStore {
+                do {
+                    let admission = try await traceStore.updateStorageAdmission(
+                        maxFootprintBytes: tracesCapBytes,
+                        freeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes
+                    )
+                    if admission.blocked {
+                        logger.warning("OTLP TraceStore remains pressure-blocked after SIGHUP: \(admission.reason?.rawValue ?? "unknown", privacy: .public)")
+                    }
+                    reusableTraceStore = traceStore
+                } catch {
+                    logger.error("OTLP TraceStore admission reload failed: \(error.localizedDescription, privacy: .public)")
+                    // A same-port reload must not leave the receiver accepting
+                    // after its cap/page backstop failed to reconfigure.
+                    await existing.stop()
+                    state.otlpReceiver = nil
+                    state.traceStore = nil
+                    if let pressure = error as? TraceStoreStorageAdmissionError {
+                        state.traceStoreStartupAdmission = TraceStoreStartupAdmissionStatus(
+                            error: pressure,
+                            configuredMaxFootprintBytes: tracesCapBytes,
+                            configuredFreeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes
+                        )
+                    } else {
+                        state.traceStoreStartupAdmission = nil
+                    }
+                    AgentTracesStatusStore.write(
+                        AgentTracesStatus(
+                            running: false,
+                            port: existingPort,
+                            lastError: "storage admission reload failed: \(error.localizedDescription)",
+                            lastErrorAt: Date()
+                        ),
+                        to: supportDir
+                    )
+                    return
+                }
             }
-            await existing.stop()
-            state.otlpReceiver = nil
+            if existingPort == cfg.port {
+                if await existing.isRunning {
+                    return // healthy listener, no port change
+                }
+                // A post-readiness NWListener failure clears the receiver's
+                // live listener and publishes running:false, but the owner
+                // object remains in DaemonState. Drop that stale owner and
+                // fall through so SIGHUP can recover on the same port.
+                state.otlpReceiver = nil
+                logger.warning("OTLPReceiver is no longer running; retrying the same port via SIGHUP")
+            } else {
+                await existing.stop()
+                state.otlpReceiver = nil
+            }
             // fall through to start on new port
         }
 
         guard shouldRun else { return }
         do {
-            let traceStore = try TraceStore(
-                directory: supportDir,
-                encryption: dbEncryption
-            )
+            guard !dbEncryption.encryptionWasRequested || dbEncryption.isEnabled else {
+                throw DatabaseEncryptionAvailabilityError.persistentKeyUnavailable(
+                    dbEncryption.keyPersistenceFailureStatus)
+            }
+            let traceStore: TraceStore
+            if let reusableTraceStore {
+                traceStore = reusableTraceStore
+            } else {
+                traceStore = try TraceStore(
+                    directory: supportDir,
+                    encryption: dbEncryption.isEnabled ? dbEncryption : nil,
+                    maxFootprintBytes: tracesCapBytes,
+                    freeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes,
+                    storageVolumePath: supportDir
+                )
+            }
             state.traceStore = traceStore
-            let receiver = OTLPReceiver(port: cfg.port, traceStore: traceStore)
+            state.traceStoreStartupAdmission = nil
+            let receiver = makeOTLPReceiver(
+                port: cfg.port,
+                traceStore: traceStore,
+                supportDir: supportDir
+            )
             try await receiver.start()
             state.otlpReceiver = receiver
-            AgentTracesStatusStore.write(
-                AgentTracesStatus(running: true, port: cfg.port),
-                to: supportDir
-            )
             logger.notice("OTLPReceiver started via SIGHUP on 127.0.0.1:\(cfg.port, privacy: .public)")
             print("[agent-traces] OTLPReceiver started (SIGHUP) on 127.0.0.1:\(cfg.port)")
+        } catch let pressure as TraceStoreStorageAdmissionError {
+            state.traceStoreStartupAdmission = TraceStoreStartupAdmissionStatus(
+                error: pressure,
+                configuredMaxFootprintBytes: tracesCapBytes,
+                configuredFreeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes
+            )
+            AgentTracesStatusStore.write(
+                AgentTracesStatus(
+                    running: false,
+                    port: cfg.port,
+                    lastError: pressure.localizedDescription,
+                    lastErrorAt: Date()
+                ),
+                to: supportDir
+            )
+            logger.error("OTLP TraceStore SIGHUP start blocked: \(pressure.localizedDescription, privacy: .public)")
+            state.traceStore = nil
         } catch {
             AgentTracesStatusStore.write(
                 AgentTracesStatus(
@@ -2277,6 +2630,7 @@ enum DaemonSetup {
             logger.error("OTLPReceiver SIGHUP start failed: \(String(describing: error), privacy: .public)")
             print("[agent-traces] OTLPReceiver SIGHUP start FAILED: \(error)")
             state.traceStore = nil
+            state.traceStoreStartupAdmission = nil
         }
     }
 
@@ -2387,20 +2741,6 @@ enum DaemonSetup {
 
 // MARK: - Orphan user-domain DB reaper (v1.6.14)
 
-/// Rename any stale `~<user>/Library/Application Support/MacCrab/events.db*`
-/// files left over from a pre-sysext dev daemon. Preserves forensic
-/// evidence (no delete) and stops the dashboard's most-recent-mtime
-/// picker from selecting the orphan over the authoritative sysext DB.
-///
-/// Only invoked when the sysext runs as root. A user-space dev daemon
-/// legitimately writes to this path and must not reap its own DB.
-///
-/// Criteria for quarantine:
-///   • `events.db` exists
-///   • Not modified in the last 24h (live dev DB is untouched)
-///   • Rename to `events.db.orphan-<YYYYMMDD-HHMMSS>` so a later sweep
-///     can distinguish repeated quarantines.
-///
 /// v1.11.0 (audit functionality HIGH): read OS-notification config
 /// from `alert_notifications.json`. SettingsView writes the file
 /// from the dashboard's notification toggle + severity picker.
@@ -2413,8 +2753,8 @@ enum DaemonSetup {
 /// `/Library/Application Support/MacCrab/`. Pre-fix the dashboard's
 /// writes never reached the daemon's reads in production deployments
 /// (RC1 audit BLOCKER). Mirrors the `NotificationIntegrations`
-/// system+user-walker pattern (`loadEffectiveConfig`): system path
-/// first, then walk `/Users/*` for a UID-validated user-home copy,
+/// system+user pattern (`loadEffectiveConfig`): system path first,
+/// then inspect resolver-validated homes for a UID-bound user copy,
 /// pick the most-recently-modified non-nil candidate. Same UID-
 /// validation discipline (the file's owner must match the home dir's
 /// owner) so a rogue process running as a different user can't
@@ -2427,17 +2767,21 @@ enum DaemonSetup {
 /// always notify at critical severity now.)
 func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity) {
     let systemPath = supportDir + "/alert_notifications.json"
-    let userPath = _findUserHomeAlertNotificationConfigPath()
+    let systemSnapshot: BoundedRegularFileReader.Snapshot? = {
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+            at: systemPath,
+            maximumBytes: maximumAlertNotificationConfigBytes
+        ) else { return nil }
+        return snapshot
+    }()
+    let userSnapshot = _findUserHomeAlertNotificationConfigSnapshot()
 
-    let fm = FileManager.default
-    let systemMtime = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
-    let userMtime = userPath.flatMap {
-        (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
-    }
-
-    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity)? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    func decode(
+        _ snapshot: BoundedRegularFileReader.Snapshot
+    ) -> (enabled: Bool, minSeverity: Severity)? {
+        guard let json = try? JSONSerialization.jsonObject(
+            with: snapshot.data
+        ) as? [String: Any]
         else { return nil }
         let enabled = json["enabled"] as? Bool ?? true
         let raw = (json["min_severity"] as? String ?? "critical").lowercased()
@@ -2454,8 +2798,8 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
         return (enabled, sev)
     }
 
-    let systemConfig = decode(at: systemPath)
-    let userConfig = userPath.flatMap(decode)
+    let systemConfig = systemSnapshot.flatMap(decode)
+    let userConfig = userSnapshot.flatMap(decode)
 
     switch (systemConfig, userConfig) {
     case (nil, nil):
@@ -2465,136 +2809,47 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
     case (nil, let uc?):
         return uc
     case (let sc?, let uc?):
-        let sm = systemMtime ?? .distantPast
-        let um = userMtime ?? .distantPast
+        let sm = systemSnapshot?.modificationDate ?? .distantPast
+        let um = userSnapshot?.modificationDate ?? .distantPast
         return um > sm ? uc : sc
     }
 }
 
-/// Walk `/Users/*` for an `alert_notifications.json` owned by the
-/// home's uid. Returns the most-recently-modified validated
-/// candidate's path, or nil. Same shape as
-/// `NotificationIntegrations.findUserHomeConfigPath` — kept as a
+/// Inspect resolver-validated homes for an `alert_notifications.json` owned
+/// by the home's uid. Returns the most-recently-modified descriptor snapshot,
+/// or nil. Same shape as
+/// `NotificationIntegrations.findUserHomeConfigSnapshot` — kept as a
 /// sibling helper rather than generalising because the cross-target
-/// abstraction would have to thread through MacCrabCore and the
-/// path string is the only difference.
-private func _findUserHomeAlertNotificationConfigPath() -> String? {
-    let fm = FileManager.default
-    guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
-    struct Candidate { let path: String; let mtime: Date }
-    var candidates: [Candidate] = []
-    for user in users where user != "Shared" && !user.hasPrefix(".") {
-        let home = "/Users/\(user)"
-        let path = home + "/Library/Application Support/MacCrab/alert_notifications.json"
-        guard fm.fileExists(atPath: path) else { continue }
-        guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
-              let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
-        let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-        let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
-        guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+/// abstraction would have to thread through MacCrabCore.
+private func _findUserHomeAlertNotificationConfigSnapshot()
+    -> BoundedRegularFileReader.Snapshot? {
+    var candidates: [BoundedRegularFileReader.Snapshot] = []
+    for home in RealUserHomeResolver.all() {
+        let path = home.appending(
+            "Library/Application Support/MacCrab/alert_notifications.json"
+        )
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+                  at: path,
+                  maximumBytes: maximumAlertNotificationConfigBytes
+              ) else { continue }
+        guard home.userID == snapshot.ownerUID else { continue }
         // v1.21.4 (audit A2-02): this file toggles the operator's OS alert
         // notifications (enabled=false blinds them). Mirror the
         // ResponseAction.findUserHomeActionsPath gate — only honor a user-home
         // config owned by an ADMIN user, so a non-admin on a shared / managed
         // Mac can't suppress alerting via a self-owned file.
-        guard DaemonTimers.isAdminUID(homeUID) else { continue }
-        let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
-        candidates.append(Candidate(path: path, mtime: mtime))
+        guard DaemonTimers.isAdminUID(home.userID) else { continue }
+        candidates.append(snapshot)
     }
-    return candidates.max(by: { $0.mtime < $1.mtime })?.path
+    return candidates.max(by: { $0.modificationDate < $1.modificationDate })
 }
 
-/// WAL/SHM sidecars are renamed alongside the main file. Failures
-/// are logged but don't abort daemon startup — a leftover orphan is
-/// cosmetic, not a safety issue.
+/// Retired compatibility entry point. Root must never mutate a DB below a
+/// user-controlled ancestor. Orphan cleanup is deliberately left to explicit
+/// user-context tooling where the target is the caller's own data.
+@available(*, deprecated, message: "Automatic root orphan-DB mutation is retired")
 func reapOrphanUserDomainDBs(logger: os.Logger) {
-    let fm = FileManager.default
-    // Enumerate each real (non-system) user's home directory and
-    // check for the MacCrab support dir. In a single-user setup this
-    // is usually just the console user, but on a multi-user box the
-    // orphan could live in any home — /Users/* excluding Shared.
-    guard let homes = try? fm.contentsOfDirectory(atPath: "/Users") else { return }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyyMMdd-HHmmss"
-    let stamp = formatter.string(from: Date())
-
-    for user in homes where user != "Shared" && !user.hasPrefix(".") {
-        let dbPath = "/Users/\(user)/Library/Application Support/MacCrab/events.db"
-        guard fm.fileExists(atPath: dbPath) else { continue }
-        let attrs = try? fm.attributesOfItem(atPath: dbPath)
-        guard let mtime = attrs?[.modificationDate] as? Date else { continue }
-        let ageSeconds = Date().timeIntervalSince(mtime)
-        guard ageSeconds > 86_400 else {
-            logger.info("Orphan-DB check: /Users/\(user) events.db modified <24h ago, leaving alone")
-            continue
-        }
-        let size = (attrs?[.size] as? UInt64) ?? 0
-        let sizeMB = Int(size / 1_000_000)
-        logger.warning("Orphan-DB reaper: quarantining /Users/\(user)/Library/Application Support/MacCrab/events.db (\(sizeMB) MB, \(Int(ageSeconds / 86400))d stale)")
-        // v1.21.6 (audit DL-09): `-journal` joins the sidecar list. A dev daemon
-        // that crashed out of WAL mode leaves an events.db-journal behind;
-        // moving only db/-wal/-shm stranded it beside the fresh DB. Matches the
-        // four-suffix list CorruptDBBackup already uses.
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let src = dbPath + suffix
-            let dst = dbPath + ".orphan-" + stamp + suffix
-            guard fm.fileExists(atPath: src) else { continue }
-            do {
-                try fm.moveItem(atPath: src, toPath: dst)
-            } catch {
-                logger.warning("Orphan-DB reaper: rename \(src) → \(dst) failed: \(error.localizedDescription)")
-            }
-        }
-        // v1.21.6 (audit DL-09): bound the quarantine. The doc comment above has
-        // promised "so a later sweep can distinguish repeated quarantines" since
-        // v1.6.14, but no sweep was ever written — the reaper renamed and never
-        // deleted. Every dev-daemon session that left an events.db stale for 24 h
-        // permanently stranded a full copy (up to storage.eventsMaxSizeMB — 420
-        // MB by default — plus its WAL) in the user's home, with no retention
-        // policy of any kind. The sibling helper CorruptDBBackup bounds itself at
-        // 3 events; do the same here.
-        pruneOrphanQuarantines(dbPath: dbPath, keep: 2, logger: logger)
-    }
-}
-
-/// Keep only the `keep` most-recent `events.db.orphan-<stamp>` quarantine events
-/// (grouped by stamp) beside `dbPath`; delete every older file.
-///
-/// Deliberately the same shape as `CorruptDBBackup.prune`, including its symlink
-/// stance — this runs as ROOT inside a user-WRITABLE directory, so neither guard
-/// is optional: we only ever `removeItem` an entry whose name matches the
-/// `<base>.orphan-<yyyyMMdd-HHmmss>` form we generate ourselves, `removeItem`
-/// unlinks the final path component without following it, and any matched entry
-/// that is itself a symlink is skipped rather than removed.
-private func pruneOrphanQuarantines(dbPath: String, keep: Int, logger: os.Logger) {
-    let fm = FileManager.default
-    let directory = (dbPath as NSString).deletingLastPathComponent
-    let base = (dbPath as NSString).lastPathComponent          // "events.db"
-    let marker = base + ".orphan-"
-    guard keep >= 0, let entries = try? fm.contentsOfDirectory(atPath: directory) else { return }
-    // Names are `events.db.orphan-<stamp>` and `events.db.orphan-<stamp>-wal`
-    // etc., so take the fixed-width run after the marker. The stamp is
-    // `yyyyMMdd-HHmmss` (15 chars), which sorts chronologically as TEXT — no
-    // date parsing, and an unparseable name is simply left alone.
-    var stamped: [(name: String, stamp: String)] = []
-    for name in entries where name.hasPrefix(marker) {
-        let stamp = String(name.dropFirst(marker.count).prefix(15))
-        guard stamp.count == 15 else { continue }
-        stamped.append((name, stamp))
-    }
-    let keepStamps = Set(Set(stamped.map { $0.stamp }).sorted(by: >).prefix(keep))
-    for entry in stamped where !keepStamps.contains(entry.stamp) {
-        let path = directory + "/" + entry.name
-        let isSymlink = (try? URL(fileURLWithPath: path)
-            .resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-        if isSymlink { continue }
-        do {
-            try fm.removeItem(atPath: path)
-            logger.notice("Orphan-DB reaper: pruned stale quarantine \(entry.name) (keeping newest \(keep))")
-        } catch {
-            logger.warning("Orphan-DB reaper: prune \(path) failed: \(error.localizedDescription)")
-        }
-    }
+    logger.notice("Automatic orphan user-domain DB mutation is retired; no files changed")
 }
 
 /// Secure-directory check for the user_rules override overlay, usable from
@@ -2602,8 +2857,8 @@ private func pruneOrphanQuarantines(dbPath: String, keep: Int, logger: os.Logger
 /// scope). Rejects symlinks and any group- or world-writable dir; requires
 /// owner uid 0 or the current uid. Mirrors the inline gate in `start()`.
 /// A rule-override overlay can DISABLE detection, so it must not be writable
-/// by a non-root admin. Top-level free function (like the orphan reaper above)
-/// so detached Tasks can call it without capturing the per-setup closure.
+/// by a non-root admin. A top-level free function lets detached Tasks call it
+/// without capturing the per-setup closure.
 func isOverlayDirSecure(_ path: String) -> Bool {
     let fm = FileManager.default
     let url = URL(fileURLWithPath: path)

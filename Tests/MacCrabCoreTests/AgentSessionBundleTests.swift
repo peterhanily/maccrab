@@ -42,6 +42,9 @@ struct AgentSessionBundleTests {
         let v = try await AgentSessionBundle.verify(at: dir, trustSubstrate: ts)
         #expect(v.merkleOk)
         #expect(v.signatureOk)
+        #expect(v.signerIsLocalInstall)
+        #expect(v.signerTrusted)
+        #expect(v.authenticated)
 
         // Tamper a content file → the recomputed Merkle no longer matches
         // the signed root.
@@ -78,6 +81,116 @@ struct AgentSessionBundleTests {
         let v = try await AgentSessionBundle.verify(at: dir, trustSubstrate: ts)
         #expect(v.merkleOk)          // attacker matched content↔root...
         #expect(!v.signatureOk)      // ...but the signature over the ORIGINAL root no longer verifies
+        #expect(!v.authenticated)
+    }
+
+    @Test("foreign self-signer is self-consistent but untrusted unless explicitly pinned")
+    func foreignSignerNeedsExternalTrustAnchor() async throws {
+        let dir = tmp("sess-bundle-foreign")
+        let foreignKeys = tmp("sess-foreign-keys")
+        let localKeys = tmp("sess-local-keys")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: foreignKeys)
+            try? FileManager.default.removeItem(at: localKeys)
+        }
+        let foreign = TrustSubstrate(
+            storage: FilesystemTrustSubstrateStorage(baseDirectory: foreignKeys),
+            modeOverride: .filesystemDegraded
+        )
+        let local = TrustSubstrate(
+            storage: FilesystemTrustSubstrateStorage(baseDirectory: localKeys),
+            modeOverride: .filesystemDegraded
+        )
+
+        let exported = try await AgentSessionBundle.export(
+            sessionId: "S-foreign", eventsJsonl: ["{\"seq\":1}"], alertsJson: "[]",
+            mutationsJson: "[]", metadataJson: "{}", to: dir, trustSubstrate: foreign
+        )
+        #expect(exported.signed)
+
+        let unpinned = try await AgentSessionBundle.verify(at: dir, trustSubstrate: local)
+        #expect(unpinned.merkleOk)
+        #expect(unpinned.signatureOk, "the foreign signature is cryptographically valid")
+        #expect(!unpinned.signerIsLocalInstall)
+        #expect(!unpinned.signerTrusted, "a bundle-provided key is not its own trust anchor")
+        #expect(!unpinned.authenticated)
+
+        let foreignFingerprint = try await foreign.publicKeyFingerprint()
+        let pinned = try await AgentSessionBundle.verify(
+            at: dir,
+            trustSubstrate: local,
+            options: .init(pinnedKeyFingerprint: foreignFingerprint)
+        )
+        #expect(!pinned.signerIsLocalInstall)
+        #expect(pinned.signerTrusted)
+        #expect(pinned.authenticated, "an out-of-band expected fingerprint authenticates a foreign signer")
+
+        let wrongPin = String(repeating: "0", count: 64)
+        let rejected = try await AgentSessionBundle.verify(
+            at: dir,
+            trustSubstrate: local,
+            options: .init(pinnedKeyFingerprint: wrongPin)
+        )
+        #expect(rejected.signatureOk)
+        #expect(!rejected.signerTrusted)
+        #expect(!rejected.authenticated)
+    }
+
+    @Test("rewrite + re-sign with an attacker key preserves integrity but fails authentication")
+    func rewriteAndResignIsUntrusted() async throws {
+        let dir = tmp("sess-bundle-resign")
+        let legitimateKeys = tmp("sess-legitimate-keys")
+        let attackerKeys = tmp("sess-attacker-keys")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: legitimateKeys)
+            try? FileManager.default.removeItem(at: attackerKeys)
+        }
+        let legitimate = TrustSubstrate(
+            storage: FilesystemTrustSubstrateStorage(baseDirectory: legitimateKeys),
+            modeOverride: .filesystemDegraded
+        )
+        let attacker = TrustSubstrate(
+            storage: FilesystemTrustSubstrateStorage(baseDirectory: attackerKeys),
+            modeOverride: .filesystemDegraded
+        )
+
+        _ = try await AgentSessionBundle.export(
+            sessionId: "S-resign", eventsJsonl: ["{\"seq\":1,\"command\":\"safe\"}"],
+            alertsJson: "[]", mutationsJson: "[]", metadataJson: "{}",
+            to: dir, trustSubstrate: legitimate
+        )
+
+        // The attacker replaces evidence, recomputes the root, and replaces
+        // every signer-controlled integrity field with a fresh key/signature.
+        try Data("{\"seq\":1,\"command\":\"attacker-rewrite\"}\n".utf8)
+            .write(to: dir.appendingPathComponent("events.jsonl"))
+        let forgedRoot = try BundleMerkle.compute(forBundleAt: dir).merkleRoot
+        let forgedSignature = try await attacker.sign(Data(forgedRoot.utf8))
+        let attackerPublicKey = try await attacker.publicKey()
+
+        let signatureURL = dir.appendingPathComponent("integrity/signature.json")
+        var signatureObject = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: signatureURL)
+        ) as! [String: Any]
+        signatureObject["merkle_root"] = forgedRoot
+        signatureObject["signature_hex"] = forgedSignature
+            .map { String(format: "%02x", $0) }.joined()
+        signatureObject["public_key_fingerprint"] = attackerPublicKey.fingerprint
+        try JSONSerialization.data(withJSONObject: signatureObject, options: [.sortedKeys])
+            .write(to: signatureURL)
+        try attackerPublicKey.derBytes.write(
+            to: dir.appendingPathComponent("integrity/session-signing.pub")
+        )
+
+        let result = try await AgentSessionBundle.verify(at: dir, trustSubstrate: legitimate)
+        #expect(result.merkleOk, "the attacker made content and Merkle root agree")
+        #expect(result.signatureOk, "the attacker produced a valid signature with their own key")
+        #expect(result.signerFingerprint == attackerPublicKey.fingerprint)
+        #expect(!result.signerIsLocalInstall)
+        #expect(!result.signerTrusted)
+        #expect(!result.authenticated, "self-signed rewrite must never become authenticated evidence")
     }
 
     @Test("unsigned export still produces a valid, verifiable Merkle bundle")
@@ -94,6 +207,28 @@ struct AgentSessionBundleTests {
         let v = try await AgentSessionBundle.verify(at: dir, trustSubstrate: nil)
         #expect(v.merkleOk)
         #expect(!v.signed)
+        #expect(!v.signerTrusted)
+        #expect(!v.authenticated)
+    }
+
+    @Test("verification rejects symlinked evidence before reading it")
+    func rejectsSymlinkedEvidence() async throws {
+        let dir = tmp("sess-bundle-symlink")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try await AgentSessionBundle.export(
+            sessionId: "S-link", eventsJsonl: ["{\"seq\":1}"], alertsJson: "[]",
+            mutationsJson: "[]", metadataJson: "{}", to: dir, trustSubstrate: nil
+        )
+        let events = dir.appendingPathComponent("events.jsonl")
+        try FileManager.default.removeItem(at: events)
+        try FileManager.default.createSymbolicLink(
+            atPath: events.path,
+            withDestinationPath: "/dev/zero"
+        )
+
+        await #expect(throws: SafeTraceArchiveExtractor.ExtractionError.self) {
+            _ = try await AgentSessionBundle.verify(at: dir, trustSubstrate: nil)
+        }
     }
 
     @Test("export refuses to overwrite an existing directory")
@@ -107,5 +242,39 @@ struct AgentSessionBundleTests {
                 mutationsJson: "[]", metadataJson: "{}", to: dir, trustSubstrate: nil
             )
         }
+    }
+
+    @Test("export refuses a preplanted bundle-root symlink without touching its target")
+    func refusesRootSymlink() async throws {
+        let root = tmp("sess-bundle-root-link")
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        let target = root.appendingPathComponent("session.maccrabsession")
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("unchanged".utf8).write(to: sentinel)
+        try FileManager.default.createSymbolicLink(
+            atPath: target.path,
+            withDestinationPath: outside.path
+        )
+
+        await #expect(throws: (any Error).self) {
+            _ = try await AgentSessionBundle.export(
+                sessionId: "S-link-root",
+                eventsJsonl: ["{\"seq\":1}"],
+                alertsJson: "[]",
+                mutationsJson: "[]",
+                metadataJson: "{}",
+                to: target,
+                trustSubstrate: nil
+            )
+        }
+        #expect(try String(contentsOf: sentinel, encoding: .utf8) == "unchanged")
+        #expect(!FileManager.default.fileExists(
+            atPath: outside.appendingPathComponent("manifest.json").path
+        ))
     }
 }

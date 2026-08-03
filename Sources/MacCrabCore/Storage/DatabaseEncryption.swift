@@ -31,6 +31,20 @@ import CryptoKit
 import os.log
 import Security
 
+public enum DatabaseEncryptionAvailabilityError: Error, LocalizedError, Equatable {
+    case persistentKeyUnavailable(OSStatus?)
+
+    public var errorDescription: String? {
+        switch self {
+        case .persistentKeyUnavailable(let status):
+            if let status {
+                return "persistent database-encryption key unavailable (OSStatus \(status))"
+            }
+            return "persistent database-encryption key unavailable"
+        }
+    }
+}
+
 /// Provides field-level encryption for sensitive database columns.
 ///
 /// Key management:
@@ -58,16 +72,28 @@ public final class DatabaseEncryption: Sendable {
     /// Whether encryption is enabled.
     public let isEnabled: Bool
 
-    /// Count of AES-GCM authenticated-decryption failures since process
-    /// start. For GCM an authentication failure means the stored ciphertext
-    /// or tag was modified — i.e. tamper against an encrypted DB column — so
-    /// a non-zero value is a tamper signal, not a benign decode miss.
+    /// True when the caller requested encryption (as opposed to the explicit
+    /// MACCRAB_ENCRYPT_DB=0/test passthrough mode). If this is true while
+    /// `isEnabled` is false, no persistent Keychain key was available and
+    /// encrypted writers must remain offline rather than write plaintext or
+    /// ciphertext under an ephemeral key.
+    public let encryptionWasRequested: Bool
+
+    /// Keychain status from a failed persist attempt. Nil for a healthy loaded
+    /// or newly-persisted key and for explicitly disabled encryption.
+    public let keyPersistenceFailureStatus: OSStatus?
+
+    /// Count of invalid authenticated-encryption envelopes since process
+    /// start. This includes both malformed `ENC2:` encodings that cannot reach
+    /// CryptoKit and AES-GCM authentication failures. Every value written by
+    /// `encrypt(_:)` is a valid base64 AES-GCM sealed box, so either condition
+    /// means the stored encrypted value was corrupted or modified.
     private let tamperCounter = LockedCounter()
 
-    /// Number of authenticated-decryption (tamper) failures observed so far.
-    /// 0 under normal operation; any increase means a modified ciphertext /
-    /// tag in one of the encrypted DB columns. The daemon should poll this
-    /// to raise a (rate-limited) tamper alert.
+    /// Number of authenticated-envelope (tamper) failures observed so far.
+    /// The legacy name is retained because it is already published in the
+    /// heartbeat schema. 0 is normal; any increase means a malformed envelope
+    /// or failed GCM authentication in an encrypted DB column.
     public var authenticatedDecryptFailures: Int { tamperCounter.get() }
 
     /// Count of UNENCRYPTED values seen in an encryption-enabled column (#19).
@@ -96,41 +122,68 @@ public final class DatabaseEncryption: Sendable {
 
     /// Initialize with auto-generated or Keychain-stored key.
     /// If `enabled` is false, encrypt/decrypt are no-ops (passthrough).
-    public init(enabled: Bool = true) {
+    public convenience init(enabled: Bool = true) {
+        self.init(
+            enabled: enabled,
+            keyLoader: Self.loadKeyFromKeychain,
+            keySaver: Self.saveKeyToKeychain,
+            keyGenerator: Self.generateKey
+        )
+    }
+
+    /// Injectable Keychain seam for persistence/restart tests. Production uses
+    /// the public convenience initializer above.
+    init(
+        enabled: Bool,
+        keyLoader: () -> Data?,
+        keySaver: (Data) -> OSStatus,
+        keyGenerator: () -> Data
+    ) {
         guard enabled else {
             self.key = Data()
             self.isEnabled = false
+            self.encryptionWasRequested = false
+            self.keyPersistenceFailureStatus = nil
             return
         }
 
-        if let existingKey = Self.loadKeyFromKeychain() {
+        self.encryptionWasRequested = true
+        if let existingKey = keyLoader() {
             self.key = existingKey
+            self.isEnabled = true
+            self.keyPersistenceFailureStatus = nil
         } else {
-            let newKey = Self.generateKey()
-            let saveStatus = Self.saveKeyToKeychain(newKey)
+            let newKey = keyGenerator()
+            guard newKey.count == kCCKeySizeAES256 else {
+                Self.failClosed("injected/generated DB key was \(newKey.count) bytes, expected \(kCCKeySizeAES256)")
+            }
+            let saveStatus = keySaver(newKey)
             if saveStatus == errSecSuccess {
                 self.key = newKey
-            } else if let raced = Self.loadKeyFromKeychain() {
+                self.isEnabled = true
+                self.keyPersistenceFailureStatus = nil
+            } else if let raced = keyLoader() {
                 // A concurrent writer (the other bundle — the .app and the
                 // sysext share this item) persisted first. Adopt the PERSISTED
                 // key, never our ephemeral one, or the two processes encrypt
                 // the same events.db under two different keys.
                 self.key = raced
+                self.isEnabled = true
+                self.keyPersistenceFailureStatus = nil
             } else {
-                // The key could not be persisted AND none is readable. Do NOT
-                // failClosed here: this initializer runs in the dashboard, the
-                // sysext, and ~15 unit tests, so terminating on a transient
-                // keychain error (locked at boot, no entitlement in an unsigned
-                // dev/test binary) would take down the whole engine. Continue on
-                // the ephemeral key but be LOUD about it — rows written this
-                // session cannot be decrypted after restart and will read back
-                // as AES-GCM authentication failures, i.e. a false tamper signal.
+                // Never encrypt with an in-memory-only key. That ciphertext is
+                // guaranteed to become unreadable on restart and was previously
+                // misreported as tampering. Keep an unavailable sentinel; the
+                // daemon refuses the encrypted stores while the rest of
+                // detection remains online. encrypt(_:) also fails closed if a
+                // caller violates that wiring contract.
                 Logger(subsystem: "com.maccrab.storage", category: "encryption")
-                    .fault("DB encryption key could NOT be persisted to the Keychain (OSStatus \(saveStatus, privacy: .public)) — continuing with an EPHEMERAL key; values written this session will not decrypt after restart")
-                self.key = newKey
+                    .fault("DB encryption key could NOT be persisted to or reloaded from the Keychain (OSStatus \(saveStatus, privacy: .public)) — encrypted stores are UNAVAILABLE; refusing ephemeral-key writes")
+                self.key = Data()
+                self.isEnabled = false
+                self.keyPersistenceFailureStatus = saveStatus
             }
         }
-        self.isEnabled = true
     }
 
     // MARK: - Encrypt / Decrypt
@@ -141,7 +194,11 @@ public final class DatabaseEncryption: Sendable {
     /// Returns the original string if encryption is disabled or the
     /// input is empty.
     public func encrypt(_ plaintext: String) -> String {
-        guard isEnabled, !plaintext.isEmpty else { return plaintext }
+        guard encryptionWasRequested else { return plaintext }
+        guard isEnabled else {
+            Self.failClosed("encrypted write attempted without a persistent Keychain key")
+        }
+        guard !plaintext.isEmpty else { return plaintext }
         // Fail CLOSED past this point: with encryption enabled we must never
         // return plaintext on a crypto failure, or the caller would persist
         // sensitive columns unencrypted while believing they are encrypted.
@@ -198,9 +255,9 @@ public final class DatabaseEncryption: Sendable {
         return encrypted
     }
 
-    /// AES-GCM decrypt. Tamper detection lives here: a modified ciphertext
-    /// / tag fails authentication, which increments `tamperCounter` and logs
-    /// at fault level (distinct from a benign non-encrypted value) so the
+    /// AES-GCM decrypt. Tamper detection lives here: a malformed `ENC2:`
+    /// envelope or a modified ciphertext/tag increments `tamperCounter` and
+    /// logs at fault level (distinct from a benign non-encrypted value) so the
     /// daemon can raise a tamper alert; the value then falls through to the
     /// passthrough return (visible as garbage in the UI).
     ///
@@ -209,21 +266,28 @@ public final class DatabaseEncryption: Sendable {
     /// structured, rate-limited tamper Alert/Event.
     private func decryptV2(_ encrypted: String) -> String {
         let base64 = String(encrypted.dropFirst(Self.encryptedPrefixV2.count))
-        guard let combined = Data(base64Encoded: base64) else { return encrypted }
+        guard let combined = Data(base64Encoded: base64) else {
+            recordTamperFailure("malformed ENC2 base64 envelope")
+            return encrypted
+        }
         let symKey = SymmetricKey(data: key)
         do {
             let sealed = try AES.GCM.SealedBox(combined: combined)
             let plain = try AES.GCM.open(sealed, using: symKey)
             return String(data: plain, encoding: .utf8) ?? encrypted
         } catch {
-            // AES-GCM authentication failure == tamper: the stored ciphertext
-            // or tag was modified. Record it distinctly (tamper counter +
-            // fault log) so it surfaces as a security signal the daemon can
-            // alert on, rather than being swallowed as a benign warning.
-            let count = tamperCounter.increment()
-            logger.fault("DB tamper detected: AES-GCM authentication failed (tamper_count=\(count, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+            recordTamperFailure("AES-GCM envelope/authentication failed: \(error.localizedDescription)")
             return encrypted
         }
+    }
+
+    /// One accounting path for every invalid `ENC2:` representation. Keeping
+    /// malformed base64 on the same monotonic counter is load-bearing: an
+    /// attacker must not evade the daemon's rising-edge alert merely by making
+    /// the ciphertext fail before `AES.GCM.open` is reached.
+    private func recordTamperFailure(_ reason: String) {
+        let count = tamperCounter.increment()
+        logger.fault("DB tamper detected: authenticated encryption envelope invalid (tamper_count=\(count, privacy: .public)): \(reason, privacy: .public)")
     }
 
     /// AES-CBC + PKCS7 decrypt for v1 ciphertexts written before v1.8.1.
