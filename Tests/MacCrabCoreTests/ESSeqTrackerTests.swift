@@ -130,6 +130,10 @@ struct ESSeqTrackerD4Tests {
         t.recordFilteredBeforeWorker(eventType: WRITE)
         #expect(t.processedByType()[EXEC] == 2)
         #expect(t.processedByType()[WRITE] == 2)
+        #expect(t.intentionallyFilteredBeforeWorkerByType()[EXEC] == nil)
+        #expect(t.intentionallyFilteredBeforeWorkerByType()[WRITE] == 1)
+        #expect(t.normalizedYieldedByType()[EXEC] == 1)
+        #expect(t.normalizedYieldedByType()[WRITE] == 1)
     }
 
     @Test("callback-filtered volume cannot mask retained-worker p99")
@@ -158,6 +162,8 @@ struct ESSeqTrackerD4Tests {
         t.recordProcessed(eventType: EXEC, elapsedNanos: 1_000, yielded: false, yieldDropped: false) // no yield
         #expect(t.yieldDroppedTotal() == 2)
         #expect(t.yieldEnqueuedTotal() == 1)
+        #expect(t.normalizedYieldedByType()[EXEC] == 3,
+                "normalizer rejects are excluded; bounded-stream drops remain offers")
     }
 
     @Test("p99 is 0 with no samples")
@@ -204,6 +210,8 @@ struct ESSeqTrackerD4Tests {
 
         t.reset()
         #expect(t.processedByType().isEmpty)
+        #expect(t.intentionallyFilteredBeforeWorkerByType().isEmpty)
+        #expect(t.normalizedYieldedByType().isEmpty)
         #expect(t.yieldDroppedTotal() == 0)
         #expect(t.yieldEnqueuedTotal() == 0)
         #expect(t.handlerP99Micros() == 0)

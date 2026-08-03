@@ -398,15 +398,20 @@ enum MonitorTasks {
                     mitreTechniques: "attack.t1040",
                     suppressed: false
                 )
+                var primaryPersisted = false
                 do {
-                    if try await state.alertSink.submit(alert: alert) {
+                    primaryPersisted = try await state.alertSink.submit(alert: alert)
+                    if primaryPersisted {
                         await state.notifier.notify(alert: alert)
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[SDR] \(sdrEvent.type.rawValue): \(sdrEvent.title)")
 
-                // LLM analysis for SDR device / display-hotplug events (non-blocking)
-                if let llm = state.llmService {
+                // LLM analysis is derivative of the stored primary. A muted,
+                // deduplicated, or failed primary must not spend a model call or
+                // leave an orphan AI alert that points at a row which does not
+                // exist.
+                if primaryPersisted, let llm = state.llmService {
                     let title = sdrEvent.title
                     let desc = sdrEvent.description
                     let detail = sdrEvent.detail
@@ -493,17 +498,24 @@ enum MonitorTasks {
                     mitreTechniques: "attack.t1518.001",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                var primaryPersisted = false
+                do {
+                    primaryPersisted = try await state.alertSink.submit(alert: alert)
+                } catch {
+                    await StorageErrorTracker.shared.recordAlertError(error)
+                }
 
                 // Only push notifications for insider threat tools (high privacy impact)
-                if discovery.category == .insiderThreat {
+                if primaryPersisted, discovery.category == .insiderThreat {
                     await state.notifier.notify(alert: alert)
                 }
 
                 print("[EDR] \(discovery.category.rawValue): \(discovery.toolName) by \(discovery.vendor)\(processInfo)")
 
-                // LLM contextual analysis for EDR/RMM discoveries (non-blocking)
-                if let llm = state.llmService {
+                // As with the event-engine triage path, advisory model work is
+                // authorized only by the exact primary alert commit—not merely
+                // by a candidate discovery that the sink later suppressed.
+                if primaryPersisted, let llm = state.llmService {
                     let toolName = discovery.toolName
                     let vendor = discovery.vendor
                     let category = discovery.category.rawValue

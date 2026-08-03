@@ -24,7 +24,7 @@
 > most of the current release cadence. See
 > [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
 
-MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
+MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Detection runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console or vendor lock-in. Optional outbound features and the release build's signed update check are documented below. It draws on the same lineage as Sysmon + Sigma on Windows -- rich endpoint telemetry plus transparent, readable detection rules -- adapted to macOS's Endpoint Security framework.
 
 A distinguishing focus is **AI-coding-agent observability**: MacCrab's AI Guard and tamper-evident **Agent Traces** attribute file reads, config writes, MCP calls, and network egress to the specific agent session that caused them -- so when an AI coding tool (Claude Code, Codex, and the like), or a compromised one, touches something sensitive, you have a signed, replayable record. The Endpoint Security detection engine underneath gives that attribution teeth.
 
@@ -91,13 +91,13 @@ Once running, MacCrab gives you:
 - **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 6 other AI tools for credential access, project boundary escapes, and prompt injection
 - **Forensic plugins + the Rave store** -- run built-in forensic scanners on this Mac, or install signed community plugins from the [Rave store](https://rave.maccrab.com). Every plugin runs sandboxed and declares its read-set + network access for your consent before install
 - **Out-of-band rule updates** *(built, not yet provisioned)* -- the signed, anti-rollback channel is implemented end-to-end (`maccrabctl rules update`; pushed rules are detection-only and can never override a built-in rule), but **no rule-channel signing key ships yet**, so the command fails closed on every current build. Detection rules ship with the app until the channel is provisioned — see [`docs/RULE_CHANNEL.md`](docs/RULE_CHANNEL.md)
-- **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
+- **No product analytics by default** -- detection data stays in local SQLite stores; release builds check the signed Sparkle update feed, and opt-in outbound features are documented below
 
 ---
 
 ## Privacy
 
-MacCrab has **zero telemetry** and no phone-home behavior. All data is collected and stored locally in SQLite. Nothing leaves your machine unless you explicitly enable an optional feature (LLM backends, threat intel feeds, fleet telemetry, or a third-party forensic plugin you install that declares network egress -- such plugins run sandboxed and surface their read-set + network access for your consent before install) -- and when you do, the outbound path enforces a **TLS 1.2 floor**, applies **SPKI certificate pinning by default** for providers that ship pins (with a `MACCRAB_TLS_PINNING=off` operator opt-out for stale-pin recovery), and runs every payload through `LLMSanitizer` which redacts API keys, user paths, hostnames + computer names, RFC1918 / link-local / loopback IPs (v4 + v6), email addresses, and CDHashes before transmission. The full sanitiser scope is documented under [Detection Stack → LLM Reasoning Backends](#detection-stack).
+MacCrab sends no product-analytics or diagnostic telemetry by default. Detection data is collected and stored locally in SQLite. Signed release builds do make a daily Sparkle feed request to check for updates (development candidates disable automatic checks); that request does not upload detection data. Detection data leaves your machine only when you explicitly enable an outbound feature (a cloud or remote LLM backend, threat-intel feed, fleet telemetry, or a third-party forensic plugin whose declared network access you approve). Cloud/remote LLM traffic uses `SecureURLSession`, a TLS 1.2 floor, configured SPKI pins, and best-effort `LLMSanitizer` redaction. Other opt-in integrations have their own documented payload and transport policies; they do not pass through the LLM sanitizer. The LLM redaction scope is documented under [Detection Stack → LLM Reasoning Backends](#detection-stack).
 
 **Network threat-intel enrichment is off by default.** The feeds that make outbound requests -- abuse.ch (URLhaus / MalwareBazaar / Feodo Tracker), OSV / npm package checks, package-freshness lookups, and Certificate-Transparency lookups -- are **opt-in** and require explicit enablement (`threat_intel_enabled`, `vuln_scan_enabled`, `package_freshness_enabled`, `cert_transparency_enabled`; all default `false`). The bundled IOCs work offline until you turn a feed on, and local detection (rules, sequences, campaigns) is unaffected by these toggles.
 
@@ -430,20 +430,20 @@ This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/a
 <details>
 <summary><strong>LLM Reasoning Backends (click to expand)</strong></summary>
 
-MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured.
+MacCrab integrates optional LLM backends for structured alert investigations, campaign summaries, defense recommendations, package-intent refinement, and CLI threat-hunt translation. Model output is advisory; it never executes a response action. Features fall back or remain unavailable when no backend is configured.
 
 **Outbound traffic posture** — every cloud-LLM request goes through `SecureURLSession`, which enforces a **TLS 1.2 minimum** floor and applies **SPKI certificate pinning by default** for providers that ship pins, validating the SHA-256 SPKI hash of the leaf or intermediate cert. Set `MACCRAB_TLS_PINNING=off` or `=warn` to downgrade to warn-only (OS trust store) for stale-pin recovery; `=strict` is a no-op for hosts without configured pins. TLS 1.2 enforcement remains on for every provider regardless of the pinning mode.
 
-**Sanitiser scope** — `LLMSanitizer.sanitize(_:)` runs before any payload leaves the box and redacts:
+**Sanitiser scope** — `LLMSanitizer.sanitize(_:)` runs before a cloud or remote LLM payload leaves the box and redacts:
 
 - **API keys / bearer tokens** — Anthropic (`sk-ant-…`), OpenAI (`sk-…`), Stripe-style (`pk_…`/`sk_…`), generic high-entropy 32–64 char tokens, `Bearer <token>` headers
 - **User paths** — `/Users/<name>/…` → `/Users/<redacted>/…`; same for `~`-form paths
 - **Computer + host names** — local `gethostname()` value + any `*.local` / `*.lan` reference
-- **Private IPs** — IPv4 RFC1918 (`10.*`, `172.16-31.*`, `192.168.*`) + link-local + loopback; IPv6 ULA (`fc00::/7`) + link-local (`fe80::/10`)
+- **IP addresses** — private, link-local, loopback, and remaining public IPv4/IPv6 literals (safe over-redaction is preferred to leaking an IOC)
 - **Email addresses** — RFC-5322 shape
 - **CDHashes** — 40-char hex strings (over-redacts but preferred to leaking process identity)
 
-The sanitiser runs even for the local Ollama backend — defense-in-depth in case a future config error routes a "local" model through a proxy.
+The sanitiser runs for every cloud or remote endpoint. It is intentionally skipped only for a trusted, explicitly local loopback Ollama configuration; a remote Ollama URL or a loopback URL delivered over the untrusted control plane is sanitized too.
 
 | Backend | Config | Use case |
 |---------|--------|----------|
@@ -457,10 +457,13 @@ LLM-powered features:
 
 | Feature | Command / Trigger |
 |---------|-------------------|
-| **Natural language threat hunting** | `maccrabctl hunt "<query>"` or AI Analysis tab in dashboard |
-| **Investigation summaries** | Auto-generated when a campaign fires; stored as `maccrab.llm.investigation-summary` alert |
+| **Natural language threat hunting** | `maccrabctl hunt "<query>"` against the local event and alert stores |
+| **Structured alert investigations** | At most one post-commit investigation per triggering event, attached to a stored HIGH/CRITICAL alert |
+| **Campaign summaries** | Optional advisory summary stored as `maccrab.llm.investigation-summary` when a campaign fires |
 | **Active defense recommendations** | Generated alongside campaign alerts; stored as `maccrab.llm.defense-recommendation` alert |
-| **AI-generated detection rules** | Auto-generated from observed campaigns using `RuleGenerator.generateFromCampaignEnhanced()` |
+| **Package-intent refinement** | Bounded asynchronous tie-breaker for ambiguous AI-attributed package installs |
+
+Campaign-to-rule candidate generation exists as experimental code, but it is not a production LLM feature or an automatic install path. Generated source is never trusted or enabled without compilation and the normal rule-install controls.
 
 All LLM settings can be configured in **Settings > AI Backend** in the dashboard, or via `daemon_config.json`.
 

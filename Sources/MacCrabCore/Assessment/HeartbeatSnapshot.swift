@@ -34,6 +34,12 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// (`Date().timeIntervalSince1970`) by the daemon — decoded as `Double`.
     public let writtenAtUnix: Double?
     public let uptimeSeconds: Int?
+    /// Stable process-epoch identity copied into each heartbeat. Consumers must
+    /// not compute cumulative-counter deltas across a change in any epoch field.
+    public let enginePID: Int?
+    public let engineStartedAtUnix: Double?
+    public let engineVersion: String?
+    public let engineBuild: String?
     /// Build channel of the RUNNING engine: `"release"`, `"dev"`, or
     /// `"unknown"` when the executing bundle predates the marker. `nil` when
     /// the heartbeat itself predates this field.
@@ -81,6 +87,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let esKernelDroppedTotal: Int?
     public let esKernelDroppedByType: [String: Int]?
     public let esProcessedByType: [String: Int]?
+    public let esIntentionallyFilteredBeforeWorkerByType: [String: Int]?
+    public let esNormalizedYieldedByType: [String: Int]?
     public let esCopyBackpressureDroppedTotal: Int?
     public let esStreamYieldDroppedTotal: Int?
     public let esloggerDroppedTotal: Int?
@@ -95,6 +103,23 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let detectionInputDroppedTotal: Int?
     /// Batched-writer storage-layer drop — a storage loss, NOT a detection gap.
     public let eventsStorageWriteDroppedTotal: Int?
+    /// Rows reported committed at write time. Historical commits are not
+    /// subtracted if a later corruption recovery replaces the active database.
+    public let eventsStorageWritePersistedTotal: Int?
+    /// Retry attempts, not unique rows; one row may be counted more than once.
+    public let eventsStorageWriteRetriedTotal: Int?
+    /// Rows queued in the writer actor, excluding a batch currently inside the
+    /// asynchronous database insert call.
+    public let eventsStorageWriteBufferDepth: Int?
+    /// Rows detached from the writer queue and currently inside the asynchronous
+    /// database insert call. `buffer + inFlight` is the complete outstanding
+    /// writer backlog for one process epoch.
+    public let eventsStorageWriteInFlightDepth: Int?
+    /// EventStore policy-filter decisions across both batch and direct inserts.
+    /// Passing rows may be evaluated again after a writer retry, so these are
+    /// decision counts rather than unique-event counts.
+    public let eventsInsertFilterDroppedTotal: Int?
+    public let eventsInsertFilterPassedTotal: Int?
     public let payloadTruncatedTotal: Int?
 
     // MARK: Storage-error accounting
@@ -123,6 +148,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case schemaVersion = "schema_version"
         case writtenAtUnix = "written_at_unix"
         case uptimeSeconds = "uptime_seconds"
+        case enginePID = "engine_pid"
+        case engineStartedAtUnix = "engine_started_at_unix"
+        case engineVersion = "engine_version"
+        case engineBuild = "engine_build"
         case buildChannel = "build_channel"
         case alertsEmitted = "alerts_emitted"
         case eventsProcessed = "events_processed"
@@ -140,6 +169,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case esKernelDroppedTotal = "es_kernel_dropped_total"
         case esKernelDroppedByType = "es_kernel_dropped_by_type"
         case esProcessedByType = "es_processed_by_type"
+        case esIntentionallyFilteredBeforeWorkerByType = "es_intentionally_filtered_before_worker_by_type"
+        case esNormalizedYieldedByType = "es_normalized_yielded_by_type"
         case esCopyBackpressureDroppedTotal = "es_copy_backpressure_dropped_total"
         case esStreamYieldDroppedTotal = "es_stream_yield_dropped_total"
         case esloggerDroppedTotal = "eslogger_dropped_total"
@@ -149,6 +180,12 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case mergedFileTerminatedTotal = "merged_file_terminated_total"
         case detectionInputDroppedTotal = "detection_input_dropped_total"
         case eventsStorageWriteDroppedTotal = "events_storage_write_dropped_total"
+        case eventsStorageWritePersistedTotal = "events_storage_write_persisted_total"
+        case eventsStorageWriteRetriedTotal = "events_storage_write_retried_total"
+        case eventsStorageWriteBufferDepth = "events_storage_write_buffer_depth"
+        case eventsStorageWriteInFlightDepth = "events_storage_write_in_flight_depth"
+        case eventsInsertFilterDroppedTotal = "events_insert_filter_dropped_total"
+        case eventsInsertFilterPassedTotal = "events_insert_filter_passed_total"
         case payloadTruncatedTotal = "payload_truncated_total"
         case eventInsertErrorsTotal = "event_insert_errors_total"
         case eventInsertErrorRatePerMin = "event_insert_error_rate_per_min"
@@ -202,6 +239,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let mergedTerminatedBySourceAndLane: [String: [String: UInt64]]?
         public let offeredByLane: [String: UInt64]?
         public let dequeuedByLane: [String: UInt64]?
+        public let ruleEvaluationReachedByLaneAndCategory: [String: [String: UInt64]]?
+        public let ruleEvaluationCompletedByLaneAndCategory: [String: [String: UInt64]]?
         public let completedByLane: [String: UInt64]?
         public let backlogEstimateByLane: [String: UInt64]?
         public let inFlightByLane: [String: UInt64]?
@@ -229,6 +268,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case mergedTerminatedBySourceAndLane = "merged_terminated_by_source_and_lane"
             case offeredByLane = "offered_by_lane"
             case dequeuedByLane = "dequeued_by_lane"
+            case ruleEvaluationReachedByLaneAndCategory = "rule_evaluation_reached_by_lane_and_category"
+            case ruleEvaluationCompletedByLaneAndCategory = "rule_evaluation_completed_by_lane_and_category"
             case completedByLane = "completed_by_lane"
             case backlogEstimateByLane = "backlog_estimate_by_lane"
             case inFlightByLane = "in_flight_by_lane"
@@ -369,6 +410,18 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let freeSpaceFloorBytes: Int64?
         public let pinnedReader: Bool?
         public let recovering: Bool?
+        public let autoVacuumMode: Int?
+        public let footprintLatchTripsTotal: Int64?
+        public let footprintLatchClearsTotal: Int64?
+        public let recoveryRunsTotal: Int64?
+        public let recoveryTracesDeletedTotal: Int64?
+        public let recoveryTraceChildRowsDeletedTotal: Int64?
+        public let recoveryEdgesDeletedTotal: Int64?
+        public let recoveryEntitiesDeletedTotal: Int64?
+        public let recoveryVacuumPagesReclaimedTotal: Int64?
+        public let recoveryNoPhysicalProgressTotal: Int64?
+        public let lastRecoveryFootprintBeforeBytes: Int64?
+        public let lastRecoveryFootprintAfterBytes: Int64?
 
         private enum CodingKeys: String, CodingKey {
             case enabled
@@ -386,6 +439,18 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case freeSpaceFloorBytes = "free_space_floor_bytes"
             case pinnedReader = "pinned_reader"
             case recovering
+            case autoVacuumMode = "auto_vacuum_mode"
+            case footprintLatchTripsTotal = "footprint_latch_trips_total"
+            case footprintLatchClearsTotal = "footprint_latch_clears_total"
+            case recoveryRunsTotal = "recovery_runs_total"
+            case recoveryTracesDeletedTotal = "recovery_traces_deleted_total"
+            case recoveryTraceChildRowsDeletedTotal = "recovery_trace_child_rows_deleted_total"
+            case recoveryEdgesDeletedTotal = "recovery_edges_deleted_total"
+            case recoveryEntitiesDeletedTotal = "recovery_entities_deleted_total"
+            case recoveryVacuumPagesReclaimedTotal = "recovery_vacuum_pages_reclaimed_total"
+            case recoveryNoPhysicalProgressTotal = "recovery_no_physical_progress_total"
+            case lastRecoveryFootprintBeforeBytes = "last_recovery_footprint_before_bytes"
+            case lastRecoveryFootprintAfterBytes = "last_recovery_footprint_after_bytes"
         }
     }
 

@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google AI API 키";
 "settings.llmGeminiModel" = "모델";
 "settings.llmInfo" = "작동 방식";
-"settings.llmInfoDesc" = "AI 백엔드는 자연어 위협 헌팅, 조사 요약, 탐지 규칙 생성, 방어 권고의 네 가지 기능을 제공합니다.";
+"settings.llmInfoDesc" = "AI 백엔드는 구조화된 경보 조사, 캠페인 요약, 방어 권고 및 패키지 의도 개선을 추가할 수 있습니다. 모델 출력은 자문용이며 어떤 작업도 실행하지 않습니다.";
 "settings.llmLocalPrivacy" = "로컬에서 실행 중입니다. 어떤 데이터도 컴퓨터를 벗어나지 않습니다.";
 "settings.llmMistralHelp" = "console.mistral.ai에서 API 키를 발급받으세요";
 "settings.llmMistralKey" = "Mistral API 키";

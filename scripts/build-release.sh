@@ -21,10 +21,10 @@
 #             embedded.provisionprofile     (same profile)
 #             MacOS/com.maccrab.agent       (ES daemon, signed with ES entitlement)
 #             _CodeSignature/CodeResources
-#   bin/maccrabctl                          (CLI tool, shared-Keychain entitlement only)
-#   bin/maccrab-mcp                         (MCP server, shared-Keychain entitlement only)
-#   install.sh                              (thin wrapper; cask + manual installers call this)
-#   compiled_rules/*.json
+#       Resources/bin/maccrabctl             (CLI tool, shared-Keychain entitlement only)
+#       Resources/bin/maccrab-mcp            (MCP server, shared-Keychain entitlement only)
+#       Resources/compiled_rules/*.json      (signed built-in detection corpus)
+#   install.sh                               (manual privileged installer)
 #
 # ─── Composable stages (v1.19.0 / S5-T6) ─────────────────────────────
 # The release build is decomposed into four ordered stages that can be
@@ -188,7 +188,48 @@ if [ "$CHANNEL" = "dev" ]; then SU_AUTOCHECK="false"; else SU_AUTOCHECK="true"; 
 
 BUILD_DIR="$PROJECT_DIR/.build/release"
 
-# Staging dir + EXIT-trap policy depend on the run mode.
+# The publish stage owns two transient disk-image paths.  Keep their exact
+# values empty until this invocation creates them: the global EXIT handler may
+# then clean an interrupted attach/copy/convert without ever guessing at a
+# mountpoint or touching the successful, read-only DMG artifact.
+# BEGIN RELEASE_DMG_EXIT_CLEANUP
+RELEASE_DMG_MOUNT_PATH=""
+RELEASE_RW_DMG_PATH=""
+RELEASE_DMG_ATTACH_ATTEMPTED=0
+RELEASE_CLEAN_STAGING_ON_EXIT=0
+
+cleanup_release_dmg_working_state() {
+    # Set ATTACH_ATTEMPTED immediately before hdiutil attach.  This covers an
+    # interrupt during attach while still constraining detach to the exact
+    # private mktemp directory created by this process.
+    if [ "$RELEASE_DMG_ATTACH_ATTEMPTED" = "1" ] \
+            && [ -n "$RELEASE_DMG_MOUNT_PATH" ]; then
+        /usr/bin/hdiutil detach "$RELEASE_DMG_MOUNT_PATH" -force \
+            >/dev/null 2>&1 || true
+        RELEASE_DMG_ATTACH_ATTEMPTED=0
+    fi
+    if [ -n "$RELEASE_DMG_MOUNT_PATH" ]; then
+        /bin/rmdir "$RELEASE_DMG_MOUNT_PATH" >/dev/null 2>&1 || true
+        RELEASE_DMG_MOUNT_PATH=""
+    fi
+    if [ -n "$RELEASE_RW_DMG_PATH" ]; then
+        /bin/rm -f "$RELEASE_RW_DMG_PATH" >/dev/null 2>&1 || true
+        RELEASE_RW_DMG_PATH=""
+    fi
+}
+
+cleanup_release_build() {
+    exit_status=$?
+    trap - EXIT
+    cleanup_release_dmg_working_state
+    if [ "$RELEASE_CLEAN_STAGING_ON_EXIT" = "1" ]; then
+        /bin/rm -rf "$STAGING_DIR" >/dev/null 2>&1 || true
+    fi
+    exit "$exit_status"
+}
+# END RELEASE_DMG_EXIT_CLEANUP
+
+# Staging dir + EXIT-cleanup policy depend on the run mode.
 #   all-stages: per-PID dir under /tmp, trap-cleaned on exit (historical).
 #   single-stage: deterministic dir under .build so the next stage finds
 #                 it; NOT trap-cleaned (the pipeline owns its lifetime —
@@ -196,16 +237,17 @@ BUILD_DIR="$PROJECT_DIR/.build/release"
 #                 end just like the all-stages flow did).
 if [ "$STAGE" = "all" ]; then
     STAGING_DIR="/private/tmp/maccrab-release-$$"
-    # Clean up the staging dir on any exit path. Without this trap, every
+    RELEASE_CLEAN_STAGING_ON_EXIT=1
+    # Clean up the staging dir on any exit path. Without this handler, every
     # failed release run (Sparkle resolve failure, codesign failure,
     # hdiutil failure, notarize timeout) leaks a multi-MB staged dir to
     # /tmp; ten failed runs filled the dev disk before the audit caught
-    # this. The trap fires after the final rm too, so successful runs
+    # this. The handler fires after the final rm too, so successful runs
     # still pass through cleanly (the dir is already gone).
-    trap 'rm -rf "$STAGING_DIR"' EXIT
 else
     STAGING_DIR="$PROJECT_DIR/.build/maccrab-stage"
 fi
+trap cleanup_release_build EXIT
 
 cd "$PROJECT_DIR"
 
@@ -395,12 +437,10 @@ STAGE_ENV_EOF
     echo "$VERSION" > "$STAGING_DIR/compiled_rules/.bundle_version"
 
     # v1.4.3: tamper-detection manifest. For every compiled_rules file
-    # we stamp a SHA-256 into manifest.json. RuleBundleInstaller verifies
-    # the installed tree against this manifest before trusting it; a
-    # mismatch (attacker modified the installed rules tree post-sync)
-    # surfaces a dashboard banner and refuses to sync further. Generated
-    # at build time so the manifest is signed inside the .app bundle
-    # and can't be swapped independently of the app.
+    # we stamp a SHA-256 into manifest.json. BundledRuleSynchronizer verifies
+    # both the sysext-sealed source and the installed tree before any reader
+    # starts. Generated at build time so the manifest is signed into both the
+    # app seed and the root-executing System Extension.
     echo "  Generating rule-manifest hashes..."
     (
         cd "$STAGING_DIR/compiled_rules"
@@ -508,16 +548,11 @@ stage_assemble() {
     done < <(find Rules -name '*.yml' -not -path 'Rules/graph/*')
     echo "    ✓ Bundled $(ls "$APP/Contents/Resources/rules/" | wc -l | tr -d ' ') YAML files → Resources/rules/ ($uuid_copied UUID-named)"
 
-    # v1.4.2: ship compiled rules INSIDE the .app bundle so Sparkle
-    # auto-updates (which replace only the .app, not the cask-postflight
-    # state under /Library/Application Support) still refresh rule JSON.
-    # The app's RuleBundleInstaller compares the bundled
-    # `.bundle_version` against `/Library/Application Support/MacCrab/
-    # compiled_rules/.bundle_version` on launch and syncs when the
-    # bundled copy is newer. Without this, every Sparkle update left
-    # users on whatever rule set their original brew install shipped —
-    # v1.3.11's compiler fix and every rule severity change since then
-    # never reached Sparkle-updated installs.
+    # Ship compiled rules inside the app as a signed parity/reference copy. The
+    # same exact corpus is copied into the System Extension below; only the root
+    # sysext publishes installed rules, after verifying its own code seal. This
+    # keeps Sparkle updates fresh without a GUI-time privilege prompt or an
+    # installer-time in-place corpus mutation.
     cp -r "$STAGING_DIR/compiled_rules" "$APP/Contents/Resources/compiled_rules"
 
     ICON_SRC="$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
@@ -752,12 +787,21 @@ PLIST
     # ─── System extension bundle ─────────────────────────────────────
     AGENT_ID="com.maccrab.agent"
     SYSEXT_BUNDLE="$APP/Contents/Library/SystemExtensions/${AGENT_ID}.systemextension"
-    mkdir -p "$SYSEXT_BUNDLE/Contents/MacOS"
+    mkdir -p "$SYSEXT_BUNDLE/Contents/MacOS" \
+        "$SYSEXT_BUNDLE/Contents/Resources"
 
     # Mach-O executable name inside the sysext bundle. Convention: match
     # the bundle identifier so Apple's extension registration tooling
     # (systemextensionsctl, sysextd) locates it consistently.
     cp "$STAGING_DIR/bin/MacCrabAgent" "$SYSEXT_BUNDLE/Contents/MacOS/${AGENT_ID}"
+    cp -R "$STAGING_DIR/compiled_rules" \
+        "$SYSEXT_BUNDLE/Contents/Resources/compiled_rules"
+    if ! /usr/bin/diff -qr \
+            "$APP/Contents/Resources/compiled_rules" \
+            "$SYSEXT_BUNDLE/Contents/Resources/compiled_rules" >/dev/null; then
+        echo "ERROR: app and System Extension compiled-rule corpora drifted during assembly" >&2
+        exit 1
+    fi
 
     cat > "$SYSEXT_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -785,7 +829,7 @@ PLIST
 </dict>
 </plist>
 PLIST
-    echo "    ✓ System extension bundle layout created"
+    echo "    ✓ System extension bundle layout + sealed rule corpus created"
 
     # Strip any quarantine xattrs the filesystem picked up during staging.
     xattr -cr "$APP" 2>/dev/null || true
@@ -1229,6 +1273,22 @@ stage_publish() {
     cp "$SCRIPT_DIR/install.sh" "$STAGING_DIR/install.sh"
     chmod +x "$STAGING_DIR/install.sh"
 
+    # unsigned-build deliberately keeps bin/, compiled_rules/, rules_source/
+    # and release-python/ as reproducible inputs to assembly/signing. They are
+    # internal handoffs, not published payload, once the signed app contains
+    # their runtime counterparts (the loose binaries alone added ~79 MiB to
+    # rc.4). Validate every counterpart before pruning. The helper also
+    # normalizes user-readable modes for install.sh and the app bundle.
+    "$SCRIPT_DIR/prepare-dmg-payload.sh" "$STAGING_DIR"
+    # Mode normalization happens after the signing stage, so repeat strict deep
+    # verification against the exact app that will be copied into the image.
+    # A green pre-normalization signature check is not release evidence.
+    if ! $CODESIGN_BIN --verify --deep --strict "$APP"; then
+        echo "ERROR: staged app signature failed after final payload normalization" >&2
+        exit 1
+    fi
+    echo "    ✓ Staged app signature remains valid after payload normalization"
+
     # ─── Guard: never ship private-key material ──────────────────────
     # Regression guard for the security review's F7 ("dev/test keys ship")
     # concern. Scans the fully-assembled staging tree for PEM private-key
@@ -1316,17 +1376,40 @@ stage_publish() {
     # /tmp (not /Volumes) so a crash can't leave a stale /Volumes/MacCrab… volume.
     STAGE_KB=$(du -sk "$STAGING_DIR" | cut -f1)
     RW_DMG="${DMG_PATH%.dmg}.rw.dmg"
-    DMG_MNT="/tmp/maccrab-dmg-mnt-$$"
-    rm -f "$RW_DMG"
-    hdiutil create -size "$(( STAGE_KB / 1024 + 150 ))m" -volname "MacCrab v$VERSION" \
+    /bin/rm -f "$RW_DMG"
+    # The path becomes owned only after the stale exact-path work image is
+    # removed.  From this assignment onward EXIT removes a partial image.
+    RELEASE_RW_DMG_PATH="$RW_DMG"
+    /usr/bin/hdiutil create -size "$(( STAGE_KB / 1024 + 150 ))m" -volname "MacCrab v$VERSION" \
         -fs HFS+ -ov "$RW_DMG" >/dev/null
-    mkdir -p "$DMG_MNT"
-    hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
-    ditto "$STAGING_DIR/" "$DMG_MNT/"
-    hdiutil detach "$DMG_MNT" -force >/dev/null
-    rmdir "$DMG_MNT" 2>/dev/null || true
-    hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
-    rm -f "$RW_DMG"
+    DMG_MNT=$(/usr/bin/mktemp -d /private/tmp/maccrab-dmg-mnt.XXXXXX)
+    /bin/chmod 0700 "$DMG_MNT"
+    RELEASE_DMG_MOUNT_PATH="$DMG_MNT"
+    RELEASE_DMG_ATTACH_ATTEMPTED=1
+    /usr/bin/hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
+    /usr/bin/ditto "$STAGING_DIR/" "$DMG_MNT/"
+    # Validate/normalize the actual mounted HFS payload too.  This catches a
+    # transport-time mode regression rather than assuming staging modes survive
+    # ditto.  The helper is idempotent after loose-payload pruning.
+    if ! "$SCRIPT_DIR/prepare-dmg-payload.sh" "$DMG_MNT"; then
+        echo "ERROR: mounted DMG payload validation/normalization failed" >&2
+        exit 1
+    fi
+    # Verify the mounted HFS copy, not merely its source. This is the last app
+    # pathname/content users receive before DMG conversion and catches mode or
+    # metadata damage introduced by transport into the image.
+    if ! $CODESIGN_BIN --verify --deep --strict "$DMG_MNT/MacCrab.app"; then
+        echo "ERROR: mounted DMG app signature failed after final payload normalization" >&2
+        exit 1
+    fi
+    echo "    ✓ Mounted DMG app passes strict deep signature verification"
+    /usr/bin/hdiutil detach "$DMG_MNT" -force >/dev/null
+    RELEASE_DMG_ATTACH_ATTEMPTED=0
+    /bin/rmdir "$DMG_MNT"
+    RELEASE_DMG_MOUNT_PATH=""
+    /usr/bin/hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
+    /bin/rm -f "$RW_DMG"
+    RELEASE_RW_DMG_PATH=""
 
     # Load signing/notary values only around the fixed notarization script.
     # They remain ordinary (unexported) shell variables here and are exported
@@ -1379,15 +1462,15 @@ stage_publish() {
     # v1.11.0 RC2 (audit ship MEDIUM): exclude `manifest.json` from the
     # rule count so release.json doesn't ship "428 rules" when the actual
     # count is 427. manifest.json is build-time metadata, not a rule.
-    RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
+    RULE_COUNT=$(find "$APP/Contents/Resources/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
     # v1.19.0 (S7-4): record the Sigma breakdown so release.json is the single
     # source of truth for the public 483 figure AND its composition. Counted
     # from the freshly-staged compiled tree so it can never drift from RULE_COUNT
     # (single-event + sequence + graph = total). `builtins` is the hardcoded
     # maccrab.* detection count (BuiltinRuleCatalog.all) — a separate, parallel
     # class, NOT part of the 483.
-    RULES_SEQUENCE=$(find "$STAGING_DIR/compiled_rules/sequences" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
-    RULES_GRAPH=$(find "$STAGING_DIR/compiled_rules/graph" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    RULES_SEQUENCE=$(find "$APP/Contents/Resources/compiled_rules/sequences" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    RULES_GRAPH=$(find "$APP/Contents/Resources/compiled_rules/graph" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
     RULES_SINGLE=$(( RULE_COUNT - RULES_SEQUENCE - RULES_GRAPH ))
     BUILTINS=$(grep -c '\.init("maccrab\.' "$PROJECT_DIR/Sources/MacCrabCore/Detection/BuiltinRuleCatalog.swift" | tr -d ' ')
     echo "  Rules: $RULE_COUNT (single $RULES_SINGLE + sequence $RULES_SEQUENCE + graph $RULES_GRAPH) + $BUILTINS built-in"

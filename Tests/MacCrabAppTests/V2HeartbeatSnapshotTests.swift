@@ -134,6 +134,14 @@ struct V2HeartbeatSnapshotTests {
             ],
             "offered_by_lane": ["priority": 18, "file": 10],
             "dequeued_by_lane": ["priority": 16, "file": 9],
+            "rule_evaluation_reached_by_lane_and_category": [
+                "priority": ["process": 14, "file": 2],
+                "file": ["file": 9],
+            ],
+            "rule_evaluation_completed_by_lane_and_category": [
+                "priority": ["process": 13, "file": 2],
+                "file": ["file": 9],
+            ],
             "completed_by_lane": ["priority": 15, "file": 9],
             "backlog_estimate_by_lane": ["priority": 1, "file": 0],
             "in_flight_by_lane": ["priority": 1, "file": 0],
@@ -165,12 +173,17 @@ struct V2HeartbeatSnapshotTests {
         #expect(pipeline.detectionInputDroppedTotal == 10)
         #expect(pipeline.backlogEstimateByLane["priority"] == 1)
         #expect(pipeline.inFlightByLane["priority"] == 1)
+        #expect(pipeline.ruleEvaluationReachedByLaneAndCategory["priority"]?["process"] == 14)
+        #expect(pipeline.ruleEvaluationCompletedByLaneAndCategory["priority"]?["process"] == 13)
+        #expect(pipeline.ruleEvaluationCompletedByLaneAndCategory["file"]?["file"] == 9)
         #expect(pipeline.processingP99MicrosByLane["priority"] == 4_000)
         #expect(pipeline.latencySampleCountByLane["file"] == 9)
         #expect(pipeline.collectorBuffer["unified_log_stream_yield_dropped_total"] == 2)
         let diagnostics = pipeline.diagnosticDictionary
         #expect(diagnostics["detection_input_dropped_total"] as? UInt64 == 10)
         #expect((diagnostics["upstream_dropped_by_lane"] as? [String: UInt64])?["file"] == 1)
+        #expect((diagnostics["rule_evaluation_completed_by_lane_and_category"]
+            as? [String: [String: UInt64]])?["priority"]?["process"] == 13)
         #expect(V2HeartbeatSnapshot.EventPipeline(from: nil) == nil)
     }
 

@@ -735,6 +735,28 @@ struct RootWholeFileReadBoundaryTests {
         #expect(mcpMonitor.contains("String(snapshot.statusChangeNanoseconds)"),
                 "same-size same-mtime source replacement must invalidate the clean cache")
 
+        // The root System Extension authenticates and reads its sealed rule
+        // corpus through a purpose-built boundary because it must additionally
+        // enforce owner, link-count, ACL and BSD-flag policy. Classify that one
+        // direct read here: the descriptor is no-follow, the pre-read size is
+        // caller-bounded, and the same inode/length is checked after the read.
+        let ruleSynchronizer = try source(
+            "Sources/MacCrabAgentKit/BundledRuleSynchronizer.swift"
+        )
+        for boundary in [
+            "O_RDONLY | O_CLOEXEC | O_NOFOLLOW",
+            "before.st_nlink == 1",
+            "before.st_uid == requiredOwnerUID",
+            "before.st_size <= off_t(maximumBytes)",
+            "before.st_dev == after.st_dev",
+            "before.st_ino == after.st_ino",
+            "before.st_size == after.st_size",
+            "data.count == Int(after.st_size)",
+        ] {
+            #expect(ruleSynchronizer.contains(boundary),
+                    "bundled-rule read boundary drifted: \(boundary)")
+        }
+
         #expect(setup.contains("if !Self.shouldAutoDeployDeception() {"),
                 "the root engine must not deploy decoys through a user-owned home")
         #expect(setup.contains(
@@ -757,6 +779,7 @@ struct RootWholeFileReadBoundaryTests {
         let expected: [String: [String: Int]] = [
             "MacCrabAgentKit/DaemonState.swift": ["string": 1],
             "MacCrabAgentKit/DaemonTimers.swift": ["data": 2],
+            "MacCrabAgentKit/BundledRuleSynchronizer.swift": ["readToEnd": 1],
             "MacCrabCore/AIGuard/AgentLineageService.swift": ["data": 1],
             "MacCrabCore/AIGuard/MCPBehavioralBaseline.swift": ["data": 1],
             "MacCrabCore/Assessment/HeartbeatSnapshot.swift": ["data": 1],

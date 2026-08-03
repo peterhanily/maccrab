@@ -9,13 +9,15 @@ import SwiftUI
 
 struct V2RootView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var sysextManager: SystemExtensionManager
 
-    init(appState: AppState) {
+    init(appState: AppState, sysextManager: SystemExtensionManager) {
         self.appState = appState
+        self.sysextManager = sysextManager
     }
 
     var body: some View {
-        V2DashboardShell(appState: appState)
+        V2DashboardShell(appState: appState, sysextManager: sysextManager)
             // v1.12.0 fix: cascade text selection to every workspace
             // and subview. SwiftUI Text views default to non-selectable
             // on macOS; without this modifier, users can't highlight

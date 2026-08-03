@@ -17,6 +17,10 @@ struct HeartbeatSnapshotTests {
       "schema_version": 5,
       "written_at_unix": 1700000000.5,
       "uptime_seconds": 3600,
+      "engine_pid": 4242,
+      "engine_started_at_unix": 1699996400.25,
+      "engine_version": "1.21.6-rc.5",
+      "engine_build": "1210605",
       "alerts_emitted": 12,
       "events_processed": 8377,
       "events_dropped": 4,
@@ -50,6 +54,14 @@ struct HeartbeatSnapshotTests {
         },
         "offered_by_lane": { "priority": 90, "file": 50 },
         "dequeued_by_lane": { "priority": 86, "file": 49 },
+        "rule_evaluation_reached_by_lane_and_category": {
+          "priority": { "process": 80, "file": 5, "network": 1 },
+          "file": { "file": 49 }
+        },
+        "rule_evaluation_completed_by_lane_and_category": {
+          "priority": { "process": 79, "file": 5, "network": 1 },
+          "file": { "file": 49 }
+        },
         "completed_by_lane": { "priority": 85, "file": 49 },
         "backlog_estimate_by_lane": { "priority": 3, "file": 0 },
         "in_flight_by_lane": { "priority": 1, "file": 0 },
@@ -122,6 +134,8 @@ struct HeartbeatSnapshotTests {
       "es_kernel_dropped_total": 0,
       "es_kernel_dropped_by_type": { "exec": 0, "write": 3 },
       "es_processed_by_type": { "exec": 4000, "write": 4377 },
+      "es_intentionally_filtered_before_worker_by_type": { "open": 60000, "close": 4000 },
+      "es_normalized_yielded_by_type": { "exec": 3999, "write": 4370 },
       "es_copy_backpressure_dropped_total": 6931,
       "es_stream_yield_dropped_total": 0,
       "eslogger_dropped_total": 0,
@@ -131,6 +145,12 @@ struct HeartbeatSnapshotTests {
       "merged_file_terminated_total": 2,
       "detection_input_dropped_total": 12,
       "events_storage_write_dropped_total": 3605,
+      "events_storage_write_persisted_total": 4700,
+      "events_storage_write_retried_total": 17,
+      "events_storage_write_buffer_depth": 55,
+      "events_storage_write_in_flight_depth": 400,
+      "events_insert_filter_dropped_total": 200,
+      "events_insert_filter_passed_total": 8305,
       "payload_truncated_total": 1,
       "event_insert_errors_total": 0,
       "event_insert_error_rate_per_min": 0,
@@ -155,6 +175,10 @@ struct HeartbeatSnapshotTests {
         #expect(h.schemaVersion == 5)
         #expect(h.writtenAtUnix == 1700000000.5)
         #expect(h.uptimeSeconds == 3600)
+        #expect(h.enginePID == 4242)
+        #expect(h.engineStartedAtUnix == 1699996400.25)
+        #expect(h.engineVersion == "1.21.6-rc.5")
+        #expect(h.engineBuild == "1210605")
         #expect(h.alertsEmitted == 12)
         #expect(h.eventsProcessed == 8377)
         #expect(h.eventsDropped == 4)
@@ -171,6 +195,9 @@ struct HeartbeatSnapshotTests {
         #expect(h.eventPipeline?.detectionInputDroppedTotal == 10)
         #expect(h.eventPipeline?.backlogEstimateByLane?["priority"] == 3)
         #expect(h.eventPipeline?.inFlightByLane?["priority"] == 1)
+        #expect(h.eventPipeline?.ruleEvaluationReachedByLaneAndCategory?["priority"]?["process"] == 80)
+        #expect(h.eventPipeline?.ruleEvaluationCompletedByLaneAndCategory?["priority"]?["process"] == 79)
+        #expect(h.eventPipeline?.ruleEvaluationCompletedByLaneAndCategory?["file"]?["file"] == 49)
         #expect(h.eventPipeline?.processingP99MicrosByLane?["priority"] == 4_000)
         #expect(h.eventPipeline?.latencySampleCountByLane?["file"] == 49)
         #expect(h.eventPipeline?.collectorBuffer?["unified_log_stream_yield_dropped_total"] == 2)
@@ -178,6 +205,8 @@ struct HeartbeatSnapshotTests {
         #expect(h.esKernelDroppedTotal == 0)
         #expect(h.esKernelDroppedByType?["write"] == 3)
         #expect(h.esProcessedByType?["exec"] == 4000)
+        #expect(h.esIntentionallyFilteredBeforeWorkerByType?["open"] == 60_000)
+        #expect(h.esNormalizedYieldedByType?["write"] == 4_370)
         #expect(h.esCopyBackpressureDroppedTotal == 6931)
         #expect(h.esStreamYieldDroppedTotal == 0)
         #expect(h.esloggerDroppedTotal == 0)
@@ -187,6 +216,12 @@ struct HeartbeatSnapshotTests {
         #expect(h.mergedFileTerminatedTotal == 2)
         #expect(h.detectionInputDroppedTotal == 12)
         #expect(h.eventsStorageWriteDroppedTotal == 3605)
+        #expect(h.eventsStorageWritePersistedTotal == 4700)
+        #expect(h.eventsStorageWriteRetriedTotal == 17)
+        #expect(h.eventsStorageWriteBufferDepth == 55)
+        #expect(h.eventsStorageWriteInFlightDepth == 400)
+        #expect(h.eventsInsertFilterDroppedTotal == 200)
+        #expect(h.eventsInsertFilterPassedTotal == 8305)
         #expect(h.payloadTruncatedTotal == 1)
         // Storage-error + degraded + self-defense + FDA.
         #expect(h.eventInsertErrorsTotal == 0)
@@ -287,6 +322,14 @@ struct HeartbeatSnapshotTests {
         #expect(h.detectionInputDroppedTotal == nil)
         #expect(h.collectorHealth == nil)
         #expect(h.eventPipeline == nil)
+        #expect(h.enginePID == nil)
+        #expect(h.engineStartedAtUnix == nil)
+        #expect(h.engineVersion == nil)
+        #expect(h.engineBuild == nil)
+        #expect(h.esIntentionallyFilteredBeforeWorkerByType == nil)
+        #expect(h.eventsStorageWritePersistedTotal == nil)
+        #expect(h.eventsStorageWriteInFlightDepth == nil)
+        #expect(h.eventsInsertFilterDroppedTotal == nil)
         #expect(h.traceGraphStorageAdmission == nil)
         #expect(h.traceStoreStorageAdmission == nil)
         #expect(h.browserInventory == nil)

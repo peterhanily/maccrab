@@ -8,21 +8,9 @@ import MacCrabForensics
 
 @main
 struct MacCrabApp: App {
-    // v1.4.2: sync rules from the app bundle to the installed
-    // rules-dir. v1.11.1 (audit launch-perf): moved off the
-    // MacCrabApp.init() main-thread path to a Task.detached fired
-    // from the WindowGroup's .onAppear (line ~95). Pre-fix the
-    // sync ran SYNCHRONOUSLY on main BEFORE SwiftUI rendered the
-    // first frame — on first install / Sparkle update it ran
-    // SHA-256 manifest verification + copied hundreds of rule
-    // files to /Library/Application Support/MacCrab/compiled_rules/,
-    // producing a multi-second beachball before the dashboard
-    // window even appeared. Now: window paints first, sync runs
-    // in the background, daemon SIGHUP at sync completion picks up
-    // the new rules. Worst case the user sees rule list briefly
-    // populated from the prior installed corpus while the new one
-    // copies in; the dashboard's mtime-gated AppState.loadRules
-    // refresh picks up the new set on its next 5s tick.
+    // The root System Extension self-syncs its own code-sealed rule corpus
+    // before constructing any reader. The GUI deliberately does not copy
+    // rules or request administrator credentials during app launch.
     init() {}
 
     @StateObject private var appState = AppState()
@@ -40,6 +28,10 @@ struct MacCrabApp: App {
     /// awaiting operator consent. Non-nil presents the consent sheet; the
     /// scheme handler NEVER installs without this explicit confirm step.
     @State private var pendingInstallLink: RaveInstallLink?
+    /// A custom URL can be opened by another app or a web page. Never let an
+    /// unauthenticated `maccrab://deactivate` invocation submit a destructive
+    /// system-extension request without an explicit operator confirmation.
+    @State private var deepLinkDeactivationConfirmShown = false
     @Environment(\.scenePhase) private var scenePhase
 
     /// True when the running MacCrab.app was installed via Homebrew Cask
@@ -72,7 +64,7 @@ struct MacCrabApp: App {
     var body: some Scene {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
-            V2RootView(appState: appState)
+            V2RootView(appState: appState, sysextManager: sysextManager)
                 // Single source of truth for the dashboard's minimum
                 // window size. Pre-v1.12.9 there were two competing
                 // minimums — 950×600 here and 1280×800 inside
@@ -95,23 +87,11 @@ struct MacCrabApp: App {
                 .tint(MacCrabTheme.accent)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState, updater: updaterController.updater)
-                    // v1.12.0 fix (rule sync visibility on menubar apps):
-                    // RuleBundleInstaller.syncIfNeeded() moved from this
-                    // .onAppear to AppDelegate.applicationDidFinishLaunching.
-                    // V2RootView .onAppear only fires when the user opens
-                    // the dashboard window — for an LSUIElement=true
-                    // menubar app, a user who never clicks the menubar
-                    // icon will never see the rule sync run. The sysext
-                    // continues to read whatever the cask postflight (or
-                    // a previous version's sync) wrote. Moving to the
-                    // app-level launch hook makes the sync independent of
-                    // window state.
                     // Kick off system-extension activation on first
-                    // launch. The manager dedups against an already-
-                    // activated extension, so this is also safe on
-                    // repeated launches — the request returns
-                    // immediately with .completed.
-                    sysextManager.activate()
+                    // launch. All UI/watchdog callers share this manager, whose
+                    // in-flight guard prevents the Welcome sheet from submitting
+                    // a second request while macOS is already awaiting approval.
+                    sysextManager.activateAutomatically()
                     // v1.4.3 watchdog: AppState polls the sysext
                     // heartbeat; when it's stale, this callback gets
                     // invoked so we can respawn the sysext without
@@ -119,7 +99,7 @@ struct MacCrabApp: App {
                     // internally dedups a redundant activation when
                     // the ext is already running.
                     appState.sysextWatchdogActivate = { [weak sysextManager] in
-                        sysextManager?.activate()
+                        sysextManager?.activateAutomatically()
                     }
                     // Reconcile the launch-at-login preference with the
                     // actual SMAppService state. First run registers;
@@ -191,9 +171,11 @@ struct MacCrabApp: App {
                     // request here. It's async + shows a system approval modal and
                     // may resolve only after a reboot, so we do NOT force-quit —
                     // the user reads the status/reboot guidance and the uninstaller
-                    // verifies via `systemextensionsctl list`.
+                    // verifies via `systemextensionsctl list`. Because any app or
+                    // web page can invoke a registered URL scheme, the request is
+                    // held behind the same explicit confirmation as Settings.
                     if url.host == "deactivate" {
-                        sysextManager.deactivate()
+                        deepLinkDeactivationConfirmShown = true
                         return
                     }
                     // O3c (S2-07): maccrab://install/{plugin|kit}/<id>.
@@ -221,6 +203,36 @@ struct MacCrabApp: App {
                     RaveInstallConsentSheet(link: link) {
                         pendingInstallLink = nil
                     }
+                }
+                .confirmationDialog(
+                    String(
+                        localized: "settings.sysextRemoveTitle",
+                        defaultValue: "Remove the MacCrab Endpoint Security extension?"
+                    ),
+                    isPresented: $deepLinkDeactivationConfirmShown,
+                    titleVisibility: .visible
+                ) {
+                    Button(
+                        String(
+                            localized: "settings.sysextRemoveConfirm",
+                            defaultValue: "Remove"
+                        ),
+                        role: .destructive
+                    ) {
+                        sysextManager.deactivate()
+                    }
+                    Button(
+                        String(
+                            localized: "settings.sysextRemoveCancel",
+                            defaultValue: "Cancel"
+                        ),
+                        role: .cancel
+                    ) { }
+                } message: {
+                    Text(String(
+                        localized: "settings.sysextRemoveBody",
+                        defaultValue: "Detection coverage will stop until you re-install. macOS will show its own approval dialog after this; cancel there if you change your mind."
+                    ))
                 }
         }
         .commands {
@@ -388,14 +400,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Create the status bar item immediately — don't wait for window onAppear
         createStatusBarItem()
-        // v1.12.0 fix: rule sync runs here (was V2RootView.onAppear, which
-        // never fires for menubar-only users who don't click into the
-        // dashboard). Task.detached so the launch sequence isn't blocked;
-        // syncIfNeeded prompts for admin via osascript only when the
-        // installed rule version differs from the bundled version.
-        Task.detached(priority: .utility) {
-            RuleBundleInstaller.syncIfNeeded()
-        }
         // v1.18: forensic-scan retention. The "Scan retention" setting
         // (forensics.retentionDays) promised cleanup "the next time the
         // dashboard opens", but only the manual "Run cleanup now" button was

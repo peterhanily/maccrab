@@ -2140,7 +2140,7 @@ struct V2InvestigationWorkspace: View {
                 if analyzed.isEmpty {
                     V2EmptyState(
                         title: "No AI investigation summary yet",
-                        body: "MacCrab generates an LLM investigation when a campaign is detected at HIGH or CRITICAL severity. The detection engine runs it using its own backend — Settings → AI Backend pushes your configuration to the engine (Ollama local is recommended). Trigger a campaign or open an alert detail to see analysis here.",
+                        body: "MacCrab can add one structured LLM investigation after a HIGH or CRITICAL alert is stored. The detection engine uses the backend configured in Settings → AI Backend (local Ollama is recommended). Trigger a qualifying alert to see its advisory analysis here.",
                         icon: "brain.head.profile"
                     )
                     .v2Panel()
@@ -2685,4 +2685,3 @@ private struct EdgeOverlay: View {
         )
     }
 }
-

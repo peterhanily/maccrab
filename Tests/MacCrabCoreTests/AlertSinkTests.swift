@@ -140,6 +140,27 @@ struct AlertSinkTests {
         #expect(count == 2)
     }
 
+    @Test("submit can transactionally dedup correlator alerts on shared evidence")
+    func submitUsesCustomDedupIdentity() async throws {
+        let (sink, store, dir) = try await makeSink()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let first = try await sink.submit(
+            alert: makeAlert(ruleId: "test.convergence"),
+            event: event(executable: "/usr/bin/a"),
+            dedupProcessPath: "api.example.test"
+        )
+        let second = try await sink.submit(
+            alert: makeAlert(ruleId: "test.convergence"),
+            event: event(executable: "/usr/bin/b"),
+            dedupProcessPath: "api.example.test"
+        )
+
+        #expect(first)
+        #expect(!second)
+        #expect(try await store.count() == 1)
+    }
+
     @Test("submit(alert:) without event uses alert.processPath as dedup key")
     func submitNoEventUsesProcessPath() async throws {
         let (sink, store, dir) = try await makeSink()
@@ -173,23 +194,23 @@ struct AlertSinkTests {
         let (sink, store, dir) = try await makeSink()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Engine path: caller has already filtered + deduped. Sink inserts
-        // the batch as-is. This call must not trigger AlertSink's own dedup
-        // — that would suppress legitimate engine emissions.
+        // Event-less harness path has no evidence/process context. Sink inserts
+        // the batch as-is; production EventLoop always supplies an Event and
+        // therefore uses transactional per-rule + same-evidence reservations.
         let alerts = [
             makeAlert(ruleId: "a"),
             makeAlert(ruleId: "b"),
             makeAlert(ruleId: "c"),
         ]
-        try await sink.insertEngineBatch(alerts: alerts)
+        let persisted = try await sink.insertEngineBatch(alerts: alerts)
 
         let count = try await store.count()
         #expect(count == 3)
+        #expect(persisted.map(\.id) == alerts.map(\.id))
 
         // After a passthrough batch, follow-up direct submits with the SAME
         // ruleId should still go through dedup against their (ruleId, path)
-        // tuple — engine batch insertion doesn't pollute the dedup table.
-        // (insertEngineBatch deliberately bypasses AlertDeduplicator state.)
+        // tuple — this event-less harness insertion doesn't pollute the table.
         let extra = try await sink.submit(alert: makeAlert(ruleId: "a"), event: event())
         #expect(extra == true)
     }
@@ -199,9 +220,225 @@ struct AlertSinkTests {
         let (sink, store, dir) = try await makeSink()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        try await sink.insertEngineBatch(alerts: [])
+        let persisted = try await sink.insertEngineBatch(alerts: [])
         let count = try await store.count()
         #expect(count == 0)
+        #expect(persisted.isEmpty)
+    }
+
+    @Test("insertEngineBatch returns only the exact post-collapse stored alerts")
+    func insertEngineBatchReturnsPersistedSurvivors() async throws {
+        let (sink, store, dir) = try await makeSink()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let ev = event(executable: "/private/tmp/untrusted-tool")
+        func alert(id: String, severity: Severity) -> Alert {
+            Alert(
+                id: id,
+                timestamp: Date(timeIntervalSince1970: 100),
+                ruleId: "rule.\(id)",
+                ruleTitle: id,
+                severity: severity,
+                eventId: ev.id.uuidString,
+                processPath: ev.process.executable,
+                processName: ev.process.name,
+                description: "same evidence",
+                mitreTactics: "attack.execution",
+                mitreTechniques: "attack.t1059",
+                suppressed: false
+            )
+        }
+
+        let persisted = try await sink.insertEngineBatch(
+            alerts: [
+                alert(id: "low", severity: .low),
+                alert(id: "critical", severity: .critical),
+                alert(id: "high", severity: .high),
+            ],
+            event: ev
+        )
+
+        #expect(persisted.count == 1)
+        #expect(persisted.first?.id == "critical")
+        #expect(try await store.count() == 1)
+        #expect(try await store.alert(id: "critical") != nil)
+    }
+
+    @Test("A failed engine batch rolls back rule and evidence reservations")
+    func failedEngineBatchDoesNotPoisonDedup() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-alertsink-rollback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("alerts.db").path
+        let reserve = 16 * SQLitePersistentStorePolicy.bytesPerMiB
+        let roomy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: reserve,
+            storageVolumePath: dir.path
+        )
+        _ = try AlertStore(
+            path: path,
+            storagePolicy: roomy
+        )
+
+        let blocked = SQLitePersistentStorePolicy(
+            maxFootprintBytes: roomy.maxFootprintBytes,
+            freeSpaceFloorBytes: Int64.max,
+            transactionReserveBytes: reserve,
+            storageVolumePath: dir.path
+        )
+        let store = try AlertStore(path: path, storagePolicy: blocked)
+        let sink = AlertSink(
+            alertStore: store,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60)
+        )
+        let ev = event(executable: "/private/tmp/untrusted-tool")
+        let candidate = Alert(
+            id: "retry-after-store-failure",
+            ruleId: "test.rollback",
+            ruleTitle: "Reservation rollback",
+            severity: .high,
+            eventId: ev.id.uuidString,
+            processPath: ev.process.executable,
+            processName: ev.process.name,
+            description: "same candidate is retried",
+            mitreTactics: "attack.execution",
+            mitreTechniques: "attack.t1059"
+        )
+
+        await #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            try await sink.insertEngineBatch(alerts: [candidate], event: ev)
+        }
+        #expect(try await store.count() == 0)
+
+        let recovered = try await store.updateStorageAdmission(roomy)
+        #expect(recovered?.latchedFailure == nil)
+        let retry = try await sink.insertEngineBatch(
+            alerts: [candidate],
+            event: ev
+        )
+        #expect(retry.map(\.id) == [candidate.id])
+        #expect(try await store.count() == 1)
+        let stats = await sink.stats()
+        #expect(stats.inserted == 1)
+        #expect(stats.suppressed == 0)
+    }
+
+    @Test("A later chunk failure settles only the durable prefix")
+    func partialEngineBatchSettlesCommittedPrefixOnly() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-alertsink-partial-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let path = dir.appendingPathComponent("alerts.db").path
+        let roomy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 8 * SQLitePersistentStorePolicy.bytesPerMiB,
+            storageVolumePath: dir.path
+        )
+        let store = try AlertStore(path: path, storagePolicy: roomy)
+        let deduplicator = AlertDeduplicator(suppressionWindow: 60)
+        let sink = AlertSink(alertStore: store, deduplicator: deduplicator)
+        let ev = event(executable: "/private/tmp/partial-batch-tool")
+
+        func candidate(id: String, severity: Severity) -> Alert {
+            Alert(
+                id: id,
+                ruleId: "test.partial.\(id)",
+                ruleTitle: "Partial batch \(id)",
+                severity: severity,
+                eventId: ev.id.uuidString,
+                processPath: ev.process.executable,
+                processName: ev.process.name,
+                description: "distinct rule with no same-evidence tactic",
+                mitreTactics: nil,
+                mitreTechniques: nil
+            )
+        }
+        let candidates = [
+            candidate(id: "medium", severity: .medium),
+            candidate(id: "critical", severity: .critical),
+            candidate(id: "high", severity: .high),
+        ]
+
+        // Match AlertSink's exact stored representation and severity ordering,
+        // then choose a reserve which fits any one row but never two. Truncating
+        // the WAL and setting max == current family + reserve means the first
+        // chunk commits and grows the WAL; the fresh admission probe before the
+        // second chunk deterministically rejects that later chunk.
+        let eventSnapshot = EventSnapshot.encode([ev])
+        let insertionOrder = candidates
+            .map {
+                AlertSink.enrichWithAttribution(
+                    alert: $0,
+                    event: ev,
+                    precomputedSnapshot: eventSnapshot
+                )
+            }
+            .sorted { $0.severity > $1.severity }
+        let pageSize: Int64 = 4_096
+        let singleTransactionEstimates = try insertionOrder.map {
+            SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+                rowMutationBytes: try AlertStore.estimatedAlertMutationBytes(
+                    $0,
+                    pageSizeBytes: pageSize
+                ),
+                pageSizeBytes: pageSize,
+                maximumTreePathPageTouches: 32
+            )
+        }
+        let oneRowReserve = try #require(singleTransactionEstimates.max())
+        #expect(await store.walCheckpointTruncate())
+        let familyBefore = try SQLitePersistentStoreAdmission.measureFamily(path)
+        let tight = SQLitePersistentStorePolicy(
+            maxFootprintBytes: familyBefore + oneRowReserve,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: oneRowReserve,
+            storageVolumePath: dir.path
+        )
+        let tightened = try await store.updateStorageAdmission(tight)
+        #expect(tightened?.latchedFailure == nil)
+
+        let partial: AlertBatchInsertFailure
+        do {
+            _ = try await sink.insertEngineBatch(alerts: candidates, event: ev)
+            Issue.record("expected the second reserve-bounded chunk to fail")
+            return
+        } catch let failure as AlertBatchInsertFailure {
+            partial = failure
+        }
+
+        #expect(partial.committedAlerts.map(\.id) == ["critical"])
+        #expect(partial.uncommittedAlerts.map(\.id) == ["high", "medium"])
+        #expect(try await store.count() == 1)
+        let partialStats = await sink.stats()
+        #expect(partialStats.inserted == 1)
+        #expect(partialStats.suppressed == 0)
+
+        // Restoring headroom and retrying the original candidate set proves the
+        // committed prefix kept its dedup window while only the suffix was rolled
+        // back: critical suppresses, high+medium persist, and no row duplicates.
+        let recovered = try await store.updateStorageAdmission(roomy)
+        #expect(recovered?.latchedFailure == nil)
+        let retry = try await sink.insertEngineBatch(
+            alerts: candidates,
+            event: ev
+        )
+        #expect(retry.map(\.id) == ["high", "medium"])
+        #expect(try await store.count() == 3)
+        let finalStats = await sink.stats()
+        #expect(finalStats.inserted == 3)
+        #expect(finalStats.suppressed == 1)
     }
 
     @Test("Concurrent submits with the same key insert exactly one (TOCTOU pin)")

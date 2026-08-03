@@ -17,6 +17,7 @@ public enum AlertStoreError: Error, LocalizedError {
     case databaseOpenFailed(String)
     case prepareFailed(String)
     case stepFailed(String)
+    case notFound(String)
     /// v1.12.6 Wave 9N: distinguish SQLITE_FULL from generic step
     /// failures so callers can stop retrying immediately on a
     /// disk-pressured host instead of hammering the busted insert.
@@ -35,10 +36,42 @@ public enum AlertStoreError: Error, LocalizedError {
         case .databaseOpenFailed(let msg):  return "Database open failed: \(msg)"
         case .prepareFailed(let msg):       return "Prepare failed: \(msg)"
         case .stepFailed(let msg):          return "Step failed: \(msg)"
+        case .notFound(let id):             return "Alert not found: \(id)"
         case .diskFull(let msg, _):         return "Disk full: \(msg)"
         case let .sqliteFailure(context, message, rc, extended, systemErrno):
             return "SQLite \(context) failed (rc=\(rc), extended=\(extended), system_errno=\(systemErrno)): \(message)"
         }
+    }
+}
+
+/// A reserve-bounded alert batch can commit a prefix before admission or SQLite
+/// rejects a later chunk. Carry the exact durable prefix so AlertSink can commit
+/// only the matching dedup reservations and still authorize post-commit work for
+/// rows which really exist. The remaining suffix is in original insertion order.
+public struct AlertBatchInsertFailure: Error, LocalizedError,
+    SQLiteFailureReporting, @unchecked Sendable {
+    public let committedAlerts: [Alert]
+    public let uncommittedAlerts: [Alert]
+    public let underlyingError: any Error
+
+    public init(
+        committedAlerts: [Alert],
+        uncommittedAlerts: [Alert],
+        underlyingError: any Error
+    ) {
+        self.committedAlerts = committedAlerts
+        self.uncommittedAlerts = uncommittedAlerts
+        self.underlyingError = underlyingError
+    }
+
+    public var errorDescription: String? {
+        "Alert batch stopped after \(committedAlerts.count) committed row(s); "
+            + "\(uncommittedAlerts.count) row(s) remain: "
+            + underlyingError.localizedDescription
+    }
+
+    public var sqliteFailureDetails: SQLiteFailureDetails? {
+        SQLiteFailureClassifier.details(from: underlyingError)
     }
 }
 
@@ -734,16 +767,6 @@ public actor AlertStore {
         alert: Alert,
         beforeWrite: (Int64) throws -> Void
     ) throws {
-        guard let stmt = insertStmt else {
-            // Shed-only opens intentionally have no prepared writer. Surface
-            // the typed storage-admission cause instead of hiding it behind a
-            // generic prepare error; this branch is off the normal hot path.
-            if storageAdmission?.growthBlocked == true {
-                try admitStorageWrite(estimatedTransactionBytes: 0)
-            }
-            throw AlertStoreError.prepareFailed("Insert statement not prepared")
-        }
-
         let newRowBytes: Int64
         do {
             newRowBytes = try Self.estimatedAlertMutationBytes(
@@ -761,6 +784,16 @@ public actor AlertStore {
         )
         try beforeWrite(rowBytes)
 
+        // beforeWrite performs storage admission and may recover by reopening
+        // the database, which finalizes the old cached insert statement. Never
+        // retain that pointer across the admission boundary.
+        guard let stmt = insertStmt else {
+            // admitStorageWrite already performs one full-estimate secondary
+            // recovery when a fresh open races back into shed-only mode.
+            throw AlertStoreError.prepareFailed(
+                "Insert statement not prepared after storage admission"
+            )
+        }
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
 
@@ -981,18 +1014,26 @@ public actor AlertStore {
 
     /// Persists alerts in reserve-bounded transactions. Alert ids use REPLACE,
     /// so retrying the caller array after a later chunk fails is idempotent.
+    /// A failure after at least one commit is wrapped in
+    /// ``AlertBatchInsertFailure`` with the exact durable prefix. A failure before
+    /// any commit preserves the original error type for existing callers.
     ///
     /// - Parameter alerts: The alerts to store.
     /// - Throws: `AlertStoreError` on database failure.
-    public func insert(alerts: [Alert]) throws {
+    @discardableResult
+    public func insert(alerts: [Alert]) throws -> [Alert] {
         let reserve = storageAdmission?.transactionReserveBytes
             ?? SQLitePersistentStorePolicy.bytesPerMiB * 8
         var transactionOpen = false
         var rowEstimate: Int64 = 0
+        var openTransactionAlerts: [Alert] = []
+        var committedAlerts: [Alert] = []
 
         func commit() throws {
             guard transactionOpen else { return }
             try execute("COMMIT")
+            committedAlerts.append(contentsOf: openTransactionAlerts)
+            openTransactionAlerts.removeAll(keepingCapacity: true)
             transactionOpen = false
             rowEstimate = 0
         }
@@ -1022,11 +1063,18 @@ public actor AlertStore {
                         rowBytes
                     )
                 }
+                openTransactionAlerts.append(alert)
             }
             try commit()
+            return committedAlerts
         } catch {
             if transactionOpen { try? execute("ROLLBACK") }
-            throw error
+            guard !committedAlerts.isEmpty else { throw error }
+            throw AlertBatchInsertFailure(
+                committedAlerts: committedAlerts,
+                uncommittedAlerts: Array(alerts.dropFirst(committedAlerts.count)),
+                underlyingError: error
+            )
         }
     }
 
@@ -1887,6 +1935,25 @@ public actor AlertStore {
         storageAdmission = admission
         if recovered || (writerSetupPending && !admission.growthBlocked) {
             try reopenAfterStorageRecovery()
+            if !isReadOnly, insertStmt == nil {
+                guard var secondary = storageAdmission else { return }
+                do {
+                    try secondary.admitWrite(
+                        estimatedTransactionBytes: estimatedTransactionBytes,
+                        on: db
+                    )
+                } catch {
+                    storageAdmission = secondary
+                    throw error
+                }
+                storageAdmission = secondary
+                if !secondary.growthBlocked {
+                    try reopenAfterStorageRecovery()
+                }
+                if insertStmt == nil, let failure = storageAdmission?.latchedFailure {
+                    throw failure
+                }
+            }
         }
     }
 
@@ -2348,6 +2415,12 @@ public actor AlertStore {
             try throwLatchedStoragePressureIfPresent(resultCode: rc)
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             throw AlertStoreError.stepFailed(msg)
+        }
+        // UPDATE success does not mean a row existed. Treat a zero-row update
+        // as a real failure so callers cannot report a completed LLM triage
+        // whose result was silently discarded (the rc.4 pre-insert race).
+        guard let db, sqlite3_changes(db) == 1 else {
+            throw AlertStoreError.notFound(alertId)
         }
     }
 

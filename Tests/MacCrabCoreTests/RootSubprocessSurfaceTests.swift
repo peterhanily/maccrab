@@ -39,7 +39,6 @@ struct RootSubprocessSurfaceTests {
         // are GUI/CLI/MCP/forensics processes and execute unprivileged.
         let allowed: [String: Int] = [
             "Sources/MacCrabApp/AppState.swift": 4,
-            "Sources/MacCrabApp/RuleBundleInstaller.swift": 1,
             "Sources/MacCrabApp/UserRuleInstaller.swift": 1,
             "Sources/MacCrabApp/V2/Data/V2LiveDataProvider.swift": 1,
             "Sources/MacCrabApp/V2/Forensics/RaveInstallConsentSheet.swift": 1,

@@ -41,6 +41,25 @@ protocol EventBatchInserting: Sendable {
 extension EventStore: EventBatchInserting {}
 
 actor BatchedEventWriter {
+    struct TelemetrySnapshot: Sendable, Equatable {
+        /// Rows permanently shed after the detection loop saw the event.
+        let droppedCount: Int
+        /// Cumulative retry attempts; a row can contribute more than once.
+        let retriedCount: Int
+        /// Rows reported committed at write time. This cumulative history is not
+        /// decremented if a later corruption recovery quarantines that database.
+        let persistedCount: Int
+        /// Rows waiting in the actor's queue at snapshot time. A batch currently
+        /// suspended inside `store.insert` is not part of this queue gauge; it is
+        /// reported separately by `inFlightDepth`.
+        let bufferDepth: Int
+        /// Rows detached from the queue and currently owned by one asynchronous
+        /// `store.insert` call. This closes the heartbeat reconciliation gap where
+        /// the queue could read zero before the corresponding persisted/drop
+        /// counters advanced.
+        let inFlightDepth: Int
+    }
+
     private let store: any EventBatchInserting
     /// Kick a background drain once the buffer reaches this depth.
     private let flushThreshold: Int
@@ -64,6 +83,9 @@ actor BatchedEventWriter {
     private var admissionBlocked = false
 
     private var buffer: [Event] = []
+    /// Exactly one drain runs at a time, so this is either zero or the complete
+    /// detached batch suspended in `store.insert(events:)`.
+    private var inFlightDepth = 0
     /// Count of low-value (file) rows currently in `buffer`, maintained
     /// incrementally so the #24 cap-shedding can decide in O(1) whether there is
     /// anything cheaper than the incoming high-value event to evict — without an
@@ -93,6 +115,18 @@ actor BatchedEventWriter {
     nonisolated var retriedCount: Int { retries.get() }
 
     nonisolated var persistedCount: Int { persisted.get() }
+
+    /// One actor-consistent view for the rich heartbeat. Counter values are
+    /// cumulative since process start; buffer depth is an instantaneous gauge.
+    func telemetrySnapshot() -> TelemetrySnapshot {
+        TelemetrySnapshot(
+            droppedCount: drops.get(),
+            retriedCount: retries.get(),
+            persistedCount: persisted.get(),
+            bufferDepth: buffer.count,
+            inFlightDepth: inFlightDepth
+        )
+    }
 
     /// Event categories worth preserving over a file/write flood when the buffer
     /// is at the hard cap (#24): exec/network/tcc/auth/registry rows are rare and
@@ -216,9 +250,11 @@ actor BatchedEventWriter {
             let batch = buffer
             buffer.removeAll(keepingCapacity: true)
             lowValueCount = 0   // buffer emptied; enqueues during the await re-accrue it
+            inFlightDepth = batch.count
             do {
                 let result = try await store.insert(events: batch)
                 persisted.add(result.persistedCount)
+                inFlightDepth = 0
             } catch let partial as EventBatchInsertFailure {
                 persisted.add(partial.progress.persistedCount)
                 let suffix = partial.uncommittedEvents
@@ -234,6 +270,7 @@ actor BatchedEventWriter {
                             $0 + (Self.isHighValue($1) ? 0 : 1)
                         }
                         retries.add(suffix.count)
+                        inFlightDepth = 0
                         return
                     }
                 } else if let eventError = partial.underlyingError as? EventStoreError,
@@ -247,13 +284,19 @@ actor BatchedEventWriter {
                             $0 + (Self.isHighValue($1) ? 0 : 1)
                         }
                         retries.add(suffix.count)
+                        inFlightDepth = 0
                         return
                     }
                 }
+                // Complete the ownership transition before reporting the error:
+                // StorageErrorTracker is an actor hop, and heartbeat snapshots
+                // must never observe rows in neither in-flight nor drop/retry/
+                // persisted accounting while that hop is suspended.
+                drops.add(suffix.count)
+                inFlightDepth = 0
                 await StorageErrorTracker.shared.recordEventError(
                     partial.underlyingError
                 )
-                drops.add(suffix.count)
             } catch let e as EventStoreError where isTransient(e) {
                 // #13: TRANSIENT contention (SQLITE_BUSY/LOCKED) — typically a
                 // reader pinning the WAL past the 5s busy_timeout. Retrying the
@@ -267,18 +310,21 @@ actor BatchedEventWriter {
                     buffer.insert(contentsOf: batch, at: 0)
                     lowValueCount += batch.reduce(0) { $0 + (Self.isHighValue($1) ? 0 : 1) }
                     retries.add(batch.count)
+                    inFlightDepth = 0
                     return
                 }
-                await StorageErrorTracker.shared.recordEventError(e)
                 drops.add(batch.count)
+                inFlightDepth = 0
+                await StorageErrorTracker.shared.recordEventError(e)
             } catch {
                 // PERMANENT (disk full, corruption, encoding) — retrying the same
                 // transaction would just fail again. Record the error AND count the
                 // lost events as storage-write drops so they are not silently
                 // uncounted: `droppedCount` reflects hard-cap overflow, an
                 // unretryable transient, and permanent flush failures.
-                await StorageErrorTracker.shared.recordEventError(error)
                 drops.add(batch.count)
+                inFlightDepth = 0
+                await StorageErrorTracker.shared.recordEventError(error)
             }
         }
     }

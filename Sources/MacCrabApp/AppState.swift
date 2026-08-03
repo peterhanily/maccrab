@@ -137,11 +137,9 @@ final class AppState: ObservableObject {
     }
     @Published var heartbeat: HeartbeatSnapshot?
 
-    /// Rule-tampering state. Written by `RuleBundleInstaller` when the
-    /// installed compiled_rules directory's SHA-256 hashes don't
-    /// match the bundled manifest.json — either because an attacker
-    /// modified the installed tree post-sync, OR because the shipped
-    /// .app bundle itself was tampered with.
+    /// Rule-tampering state. Written by the root System Extension's
+    /// `BundledRuleSynchronizer` when its code-sealed source or installed
+    /// compiled_rules tree fails strict manifest verification.
     struct RuleTamperSnapshot {
         var bundledTampered: Bool
         var installedTampered: Bool
@@ -257,7 +255,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// Read the rule-tamper snapshot that RuleBundleInstaller writes
+    /// Read the rule-tamper snapshot that BundledRuleSynchronizer writes
     /// when verifyManifest finds a SHA-256 mismatch. Absent file →
     /// healthy (no tamper); any present file is a live tamper
     /// indicator the Overview banner surfaces.

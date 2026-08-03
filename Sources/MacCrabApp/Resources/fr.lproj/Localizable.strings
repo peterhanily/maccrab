@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Clé API Google AI";
 "settings.llmGeminiModel" = "Modèle";
 "settings.llmInfo" = "Fonctionnement";
-"settings.llmInfoDesc" = "Le backend IA alimente quatre fonctionnalités : chasse aux menaces en langage naturel, synthèses d'investigation, génération de règles de détection et recommandations de défense.";
+"settings.llmInfoDesc" = "Le backend IA peut ajouter des analyses structurées d’alertes, des synthèses de campagnes, des recommandations de défense et un affinage de l’intention des paquets. Les sorties du modèle sont consultatives et n’exécutent jamais d’action.";
 "settings.llmLocalPrivacy" = "Exécution locale. Aucune donnée ne quitte votre machine.";
 "settings.llmMistralHelp" = "Obtenez une clé API sur console.mistral.ai";
 "settings.llmMistralKey" = "Clé API Mistral";

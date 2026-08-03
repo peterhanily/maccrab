@@ -394,7 +394,10 @@ extract_executor_list() {
 }
 EXECUTOR_BASELINE="$TMP_ROOT/executors.release"
 extract_executor_list "$PROJECT_DIR/scripts/release.sh" > "$EXECUTOR_BASELINE"
-for executor_surface in "$PROJECT_DIR/scripts/ci-local.sh" "$PROJECT_DIR/.githooks/pre-push"; do
+for executor_surface in \
+        "$PROJECT_DIR/scripts/ci-local.sh" \
+        "$PROJECT_DIR/.githooks/pre-push" \
+        "$PROJECT_DIR/scripts/test-release-artifact-preservation.sh"; do
     extract_executor_list "$executor_surface" > "$TMP_ROOT/executors.compare"
     /usr/bin/cmp -s "$EXECUTOR_BASELINE" "$TMP_ROOT/executors.compare" \
         || { echo "  ✗ critical executor list drifted: $executor_surface" >&2; exit 1; }

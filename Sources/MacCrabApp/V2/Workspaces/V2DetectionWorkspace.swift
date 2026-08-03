@@ -259,7 +259,7 @@ public struct V2DetectionWorkspace: View {
     /// System-wide override dir. Written by the dashboard, read by the
     /// daemon at boot and on its `.reload_tick` mtime watcher. Lives
     /// alongside the bundled `compiled_rules/` tree but is NEVER touched
-    /// by `RuleBundleInstaller` on Sparkle updates — so user overrides
+    /// by signed-corpus self-sync on Sparkle updates — so user overrides
     /// persist across version bumps.
     private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
     private static let reloadTickPath = userRulesDir + "/.reload_tick"
@@ -300,10 +300,8 @@ public struct V2DetectionWorkspace: View {
     }
 
     /// Toggle a rule between bundled-default and user-override disabled.
-    /// First disable in a session bootstraps the override directory
-    /// (admin prompt). Subsequent toggles write directly — the dir is
-    /// chmod'd 0775 root:admin during bootstrap so any admin user can
-    /// edit overrides without re-prompting.
+    /// The dashboard queues an owner-bound inbox request; the root engine owns
+    /// and updates the secure override directory without a password dialog.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
         // C6: re-sync the inspector snapshot on every exit path so its labels
         // don't lag the action the user just took.
@@ -992,7 +990,7 @@ public struct V2DetectionWorkspace: View {
                                 fullWidth: true,
                                 tooltip: isDisabled
                                     ? "Re-enable this rule (removes the user override)"
-                                    : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
+                                    : "Disable this rule without editing the bundled YAML. The engine applies the secure override in about five seconds; no password dialog is required."
                             ) {
                                 Task { await toggleRuleDisabled(r) }
                             }
@@ -1724,15 +1722,11 @@ private struct RuleYAMLViewerSheet: View {
 }
 
 /// In-dashboard YAML editor (v1.12.0 RC16).
-/// Loads the bundled rule's YAML into a TextEditor; the Save button
-/// writes the edited YAML to `/Library/Application Support/MacCrab/
-/// user_rules/<uuid>.yml`, spawns the bundled Python compiler with a
-/// vendored PyYAML on PYTHONPATH to produce `<uuid>.json` alongside,
-/// then touches `<dir>/.reload_tick` to trigger the daemon's mtime
-/// watcher (DaemonSetup.swift). User overrides live under user_rules/
-/// which RuleBundleInstaller never touches, so they survive Sparkle
-/// updates. First save in a session may prompt for admin to create
-/// the dir at 0775 root:admin; subsequent saves don't need elevation.
+/// Loads the bundled rule's YAML into a TextEditor. Save compiles it in an
+/// unprivileged temporary directory, then queues an owner-bound request for the
+/// root engine to validate and atomically publish under `user_rules/`. The app
+/// never writes that secure tree and does not request an administrator password.
+/// Signed-corpus self-sync leaves user overrides untouched across updates.
 private struct RuleYAMLEditorSheet: View {
     let rule: V2MockRule
     let onClose: () -> Void

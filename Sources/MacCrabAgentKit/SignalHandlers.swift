@@ -248,7 +248,7 @@ enum SignalHandlers {
                                         -Double(newStorage.tracegraphRetentionDays) * 86_400),
                                     orphanCutoff: Date().addingTimeInterval(-3_600)
                                 )
-                                print("[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted), edges=\(result.edgesDeleted), entities=\(result.entitiesDeleted), pinned=\(result.pinnedReader)")
+                                print("[SIGHUP] TraceGraph bounded recovery: traces=\(result.tracesDeleted), trace_children=\(result.traceChildRowsDeleted), edges=\(result.edgesDeleted), entities=\(result.entitiesDeleted), reclaimed_pages=\(result.vacuumPagesReclaimed), footprint=\(result.footprintBeforeBytes ?? -1)->\(result.footprintBytes ?? -1), pinned=\(result.pinnedReader)")
                             } catch {
                                 print("[SIGHUP] TraceGraph bounded recovery failed: \(error.localizedDescription)")
                             }

@@ -7,110 +7,128 @@ import Foundation
 
 // MARK: - SQL Validation Tests
 
-/// Mock ThreatHunter to expose isValidSQL for testing.
-/// Since isValidSQL is private, we test via huntEnhanced with a mock backend.
-/// Instead, we duplicate the validation logic here for direct unit testing.
-private func isValidSQL(_ sql: String) -> Bool {
-    guard sql.count < 2000 else { return false }
-    let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-    let noComments = trimmed
-        .replacingOccurrences(of: #"--[^\n]*"#, with: " ", options: .regularExpression)
-        .replacingOccurrences(of: #"/\*[\s\S]*?\*/"#, with: " ", options: .regularExpression)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    let upper = noComments.uppercased()
-    guard upper.hasPrefix("SELECT") else { return false }
-    if noComments.contains(";") { return false }
-    let forbidden = [
-        "DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "CREATE",
-        "ATTACH", "DETACH", "PRAGMA", "VACUUM", "ANALYZE",
-        "REINDEX", "REPLACE", "SAVEPOINT", "RELEASE", "ROLLBACK",
-        "BEGIN", "COMMIT", "GRANT", "REVOKE",
-    ]
-    for keyword in forbidden {
-        let pattern = "\\b\(keyword)\\b"
-        if upper.range(of: pattern, options: .regularExpression) != nil {
-            return false
-        }
-    }
-    return true
-}
-
 @Suite("SQL Validation")
 struct SQLValidationTests {
     @Test("Accepts valid SELECT")
     func validSelect() {
-        #expect(isValidSQL("SELECT * FROM events ORDER BY timestamp DESC LIMIT 100"))
+        #expect(
+            ThreatHuntSQLPolicy.validate(
+                "SELECT * FROM events ORDER BY timestamp DESC LIMIT 100"
+            ) == .accepted(.events)
+        )
     }
 
     @Test("Accepts SELECT with WHERE")
     func validSelectWhere() {
-        #expect(isValidSQL("SELECT * FROM alerts WHERE severity = 'critical' ORDER BY timestamp DESC LIMIT 50"))
+        #expect(
+            ThreatHuntSQLPolicy.validate(
+                "SELECT * FROM alerts WHERE severity = 'critical' ORDER BY timestamp DESC LIMIT 50"
+            ) == .accepted(.alerts)
+        )
     }
 
     @Test("Rejects DELETE")
     func rejectsDelete() {
-        #expect(!isValidSQL("DELETE FROM events WHERE 1=1"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("DELETE FROM events WHERE 1=1")
+                == .rejected(.notSelect)
+        )
     }
 
     @Test("Rejects DROP")
     func rejectsDrop() {
-        #expect(!isValidSQL("SELECT 1; DROP TABLE events"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("SELECT 1; DROP TABLE events")
+                == .rejected(.multipleStatements)
+        )
     }
 
     @Test("Rejects semicolons")
     func rejectsSemicolon() {
-        #expect(!isValidSQL("SELECT 1; SELECT 2"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("SELECT 1; SELECT 2")
+                == .rejected(.multipleStatements)
+        )
     }
 
     @Test("Rejects PRAGMA")
     func rejectsPragma() {
-        #expect(!isValidSQL("PRAGMA table_info(events)"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("PRAGMA table_info(events)")
+                == .rejected(.notSelect)
+        )
     }
 
     @Test("Rejects ATTACH")
     func rejectsAttach() {
-        #expect(!isValidSQL("ATTACH DATABASE '/tmp/evil.db' AS evil"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("ATTACH DATABASE '/tmp/evil.db' AS evil")
+                == .rejected(.notSelect)
+        )
     }
 
     @Test("Comment stripping makes hidden mutations harmless")
     func commentStrippingWorks() {
         // After stripping "-- ; DROP TABLE events", this is just "SELECT 1" — harmless
-        #expect(isValidSQL("SELECT 1 -- ; DROP TABLE events"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("SELECT 1 -- ; DROP TABLE events")
+                == .accepted(.events)
+        )
         // But real multi-statement injection is still caught
-        #expect(!isValidSQL("SELECT 1; DROP TABLE events"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("SELECT 1; DROP TABLE events")
+                == .rejected(.multipleStatements)
+        )
     }
 
     @Test("Rejects block comments")
     func rejectsBlockComment() {
         // Block comment wrapping a mutation
-        #expect(isValidSQL("SELECT /* this is fine */ * FROM events LIMIT 10"))
+        #expect(
+            ThreatHuntSQLPolicy.validate(
+                "SELECT /* this is fine */ * FROM events LIMIT 10"
+            ) == .accepted(.events)
+        )
     }
 
     @Test("Rejects INSERT disguised in SELECT")
     func rejectsInsertInSelect() {
-        #expect(!isValidSQL("SELECT * FROM events WHERE 1=1 UNION INSERT INTO events VALUES('x')"))
+        #expect(
+            ThreatHuntSQLPolicy.validate(
+                "SELECT * FROM events WHERE 1=1 UNION INSERT INTO events VALUES('x')"
+            ) == .rejected(.forbiddenOperation)
+        )
     }
 
     @Test("Rejects VACUUM")
     func rejectsVacuum() {
-        #expect(!isValidSQL("VACUUM"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("VACUUM") == .rejected(.notSelect)
+        )
     }
 
     @Test("Rejects oversized SQL")
     func rejectsOversized() {
         let longSQL = "SELECT * FROM events WHERE process_name = '" + String(repeating: "a", count: 2000) + "'"
-        #expect(!isValidSQL(longSQL))
+        #expect(ThreatHuntSQLPolicy.validate(longSQL) == .rejected(.tooLong))
     }
 
     @Test("Allows column named 'description'")
     func allowsDescriptionColumn() {
         // 'description' contains no forbidden keywords as whole words
-        #expect(isValidSQL("SELECT description FROM alerts ORDER BY timestamp DESC LIMIT 10"))
+        #expect(
+            ThreatHuntSQLPolicy.validate(
+                "SELECT description FROM alerts ORDER BY timestamp DESC LIMIT 10"
+            ) == .accepted(.alerts)
+        )
     }
 
     @Test("Rejects BEGIN transaction")
     func rejectsBegin() {
-        #expect(!isValidSQL("BEGIN TRANSACTION"))
+        #expect(
+            ThreatHuntSQLPolicy.validate("BEGIN TRANSACTION")
+                == .rejected(.notSelect)
+        )
     }
 }
 

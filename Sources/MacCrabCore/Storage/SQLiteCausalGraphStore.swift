@@ -138,14 +138,28 @@ public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     public let shedMutationsTotal: UInt64
     public let pinnedReader: Bool
     public let recovering: Bool
+    public let autoVacuumMode: Int
+    public let footprintLatchTripsTotal: UInt64
+    public let footprintLatchClearsTotal: UInt64
+    public let recoveryRunsTotal: UInt64
+    public let recoveryTracesDeletedTotal: UInt64
+    public let recoveryTraceChildRowsDeletedTotal: UInt64
+    public let recoveryEdgesDeletedTotal: UInt64
+    public let recoveryEntitiesDeletedTotal: UInt64
+    public let recoveryVacuumPagesReclaimedTotal: UInt64
+    public let recoveryNoPhysicalProgressTotal: UInt64
+    public let lastRecoveryFootprintBeforeBytes: Int64?
+    public let lastRecoveryFootprintAfterBytes: Int64?
 }
 
 public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
     public let pinnedReader: Bool
     public let tracesDeleted: Int
+    public let traceChildRowsDeleted: Int
     public let edgesDeleted: Int
     public let entitiesDeleted: Int
     public let vacuumPagesReclaimed: Int
+    public let footprintBeforeBytes: Int64?
     public let footprintBytes: Int64?
     public let autoVacuumMode: Int
 }
@@ -248,6 +262,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var shedMutationsTotal: UInt64 = 0
     private var pinnedReader = false
     private var recovering = false
+    private var footprintLatchTripsTotal: UInt64 = 0
+    private var footprintLatchClearsTotal: UInt64 = 0
+    private var recoveryRunsTotal: UInt64 = 0
+    private var recoveryTracesDeletedTotal: UInt64 = 0
+    private var recoveryTraceChildRowsDeletedTotal: UInt64 = 0
+    private var recoveryEdgesDeletedTotal: UInt64 = 0
+    private var recoveryEntitiesDeletedTotal: UInt64 = 0
+    private var recoveryVacuumPagesReclaimedTotal: UInt64 = 0
+    private var recoveryNoPhysicalProgressTotal: UInt64 = 0
+    private var lastRecoveryFootprintBeforeBytes: Int64?
+    private var lastRecoveryFootprintAfterBytes: Int64?
     /// Bound associated with the currently executing actor-isolated growth
     /// mutation. Used to translate SQLite's own FULL/ENOSPC backstop into the
     /// same typed admission signal if the conservative preflight is exhausted.
@@ -267,6 +292,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private static let mib: Int64 = 1_048_576
     private static let defaultMinimumTransactionReserve: Int64 = 8 * mib
     private static let defaultMaximumTransactionReserve: Int64 = 64 * mib
+    /// One default bounded-recovery quantum on the shipped 4 KiB page size.
+    /// The resume watermark stays at least this far below the admission
+    /// threshold at the default 250 MiB policy, so a WAL truncation cannot
+    /// clear the latch with only a few MiB of immediately-refillable headroom.
+    private static let maximumRecoveryHysteresisBytes: Int64 = 8 * mib
+    private static let minimumRecoveryHysteresisBytes: Int64 = 1 * mib
     /// Conservative per-row allowance for B-tree/index page splits in addition
     /// to eight times the caller-controlled UTF-8 payload.
     private static let mutationBaseBytes: Int64 = 1 * mib
@@ -286,6 +317,29 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// Orphan rows are narrower than a whole trace cascade, but public legacy
     /// prune APIs must share the same bounded write shape as recovery.
     private static let substrateDeleteBatchSize = 256
+
+    /// Derive a real recovery band independently of the transaction reserve.
+    /// At the shipped 250 MiB cap, `cap - reserve` is only 75% of cap, so the
+    /// old `min(threshold, 80% of cap)` collapsed to the threshold itself.
+    /// Eight MiB matches one default 2,048-page incremental-vacuum budget; the
+    /// proportional/minimum terms keep small test/operator caps usable.
+    nonisolated static func recoveryResumeBelowBytes(
+        capBytes cap: Int64,
+        admissionThresholdBytes threshold: Int64
+    ) -> Int64 {
+        guard threshold > 1 else { return 0 }
+        let proportionalBand = max(
+            minimumRecoveryHysteresisBytes,
+            threshold / 20
+        )
+        let band = min(
+            maximumRecoveryHysteresisBytes,
+            proportionalBand,
+            max(1, threshold / 2)
+        )
+        let eightyPercentOfCap = cap - (cap / 5)
+        return max(0, min(eightyPercentOfCap, threshold - band))
+    }
 
     // SQLITE_TRANSIENT lives at file scope (see bottom of file) — used
     // by every sqlite3_bind_text call site here.
@@ -530,10 +584,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             self.transactionReserveBytes = reserve
             let threshold = max(0, cap - reserve)
             self.admissionThresholdBytes = threshold
-            // Resume below both the 80% hysteresis target and the admission
-            // high-water. A 50 MB configured minimum therefore retains a
-            // meaningful transaction reserve instead of oscillating at cap.
-            self.resumeBelowBytes = min(threshold, cap * 4 / 5)
+            self.resumeBelowBytes = Self.recoveryResumeBelowBytes(
+                capBytes: cap,
+                admissionThresholdBytes: threshold
+            )
         } else {
             self.transactionReserveBytes = nil
             self.admissionThresholdBytes = nil
@@ -675,12 +729,15 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             transactionReserveBytes = reserve
             let threshold = max(0, cap - reserve)
             admissionThresholdBytes = threshold
-            resumeBelowBytes = min(threshold, cap * 4 / 5)
+            resumeBelowBytes = Self.recoveryResumeBelowBytes(
+                capBytes: cap,
+                admissionThresholdBytes: threshold
+            )
         } else {
             transactionReserveBytes = nil
             admissionThresholdBytes = nil
             resumeBelowBytes = nil
-            footprintAdmissionLatched = false
+            setFootprintAdmissionLatch(false)
         }
         do {
             try configureMaximumPageCount()
@@ -722,8 +779,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             freeSpaceFloorBytes: freeSpaceFloorBytes,
             shedMutationsTotal: shedMutationsTotal,
             pinnedReader: pinnedReader,
-            recovering: recovering
+            recovering: recovering,
+            autoVacuumMode: db.map { Int(StoragePragmas.readAutoVacuumMode($0)) } ?? 0,
+            footprintLatchTripsTotal: footprintLatchTripsTotal,
+            footprintLatchClearsTotal: footprintLatchClearsTotal,
+            recoveryRunsTotal: recoveryRunsTotal,
+            recoveryTracesDeletedTotal: recoveryTracesDeletedTotal,
+            recoveryTraceChildRowsDeletedTotal: recoveryTraceChildRowsDeletedTotal,
+            recoveryEdgesDeletedTotal: recoveryEdgesDeletedTotal,
+            recoveryEntitiesDeletedTotal: recoveryEntitiesDeletedTotal,
+            recoveryVacuumPagesReclaimedTotal: recoveryVacuumPagesReclaimedTotal,
+            recoveryNoPhysicalProgressTotal: recoveryNoPhysicalProgressTotal,
+            lastRecoveryFootprintBeforeBytes: lastRecoveryFootprintBeforeBytes,
+            lastRecoveryFootprintAfterBytes: lastRecoveryFootprintAfterBytes
         )
+    }
+
+    private func setFootprintAdmissionLatch(_ latched: Bool) {
+        guard footprintAdmissionLatched != latched else { return }
+        footprintAdmissionLatched = latched
+        if latched {
+            footprintLatchTripsTotal &+= 1
+        } else {
+            footprintLatchClearsTotal &+= 1
+        }
     }
 
     private func refreshAdmissionMeasurementsAndLatch() {
@@ -735,17 +814,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             } else if let footprint = lastFootprintBytes,
                       let threshold = admissionThresholdBytes,
                       footprint > threshold {
-                footprintAdmissionLatched = true
+                setFootprintAdmissionLatch(true)
             } else if footprintAdmissionLatched,
                       let footprint = lastFootprintBytes,
                       let resume = resumeBelowBytes,
                       footprint < resume {
-                footprintAdmissionLatched = false
+                setFootprintAdmissionLatch(false)
             }
             if footprintAdmissionLatched { measuredReason = .footprintLimit }
         } else {
             lastFootprintBytes = nil
-            footprintAdmissionLatched = false
+            setFootprintAdmissionLatch(false)
         }
 
         if freeSpaceFloorBytes != nil {
@@ -1014,10 +1093,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                         capBytes: cap
                     ))
                 }
-                footprintAdmissionLatched = false
+                setFootprintAdmissionLatch(false)
             }
             if footprint > threshold {
-                footprintAdmissionLatched = true
+                setFootprintAdmissionLatch(true)
                 try rejectGrowth(.footprintLimit(
                     footprintBytes: footprint,
                     admissionThresholdBytes: threshold,
@@ -1162,7 +1241,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 ?? lastFootprintBytes
                 ?? threshold
             lastFootprintBytes = footprint
-            footprintAdmissionLatched = true
+            setFootprintAdmissionLatch(true)
             return .footprintLimit(
                 footprintBytes: footprint,
                 admissionThresholdBytes: threshold,
@@ -3501,14 +3580,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         var entitiesDeleted = 0
         var pagesReclaimed = 0
         let mode = Int(StoragePragmas.readAutoVacuumMode(db))
+        let footprintBefore = footprintProbe(databasePath)
 
         func result() -> CausalGraphStorageRecoveryResult {
             CausalGraphStorageRecoveryResult(
                 pinnedReader: pinnedReader,
                 tracesDeleted: tracesDeleted,
+                traceChildRowsDeleted: traceChildRowsDeleted,
                 edgesDeleted: edgesDeleted,
                 entitiesDeleted: entitiesDeleted,
                 vacuumPagesReclaimed: pagesReclaimed,
+                footprintBeforeBytes: footprintBefore,
                 footprintBytes: footprintProbe(databasePath),
                 autoVacuumMode: mode
             )
@@ -3520,6 +3602,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         guard !recovering else { return result() }
 
         let sqliteFailureGenerationAtStart = sqliteStorageFailureGeneration
+        recoveryRunsTotal &+= 1
         recovering = true
         defer {
             recovering = false
@@ -3531,12 +3614,45 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 refreshAdmissionMeasurementsAndLatch()
                 logger.notice("TraceGraph SQLite storage backstop recovered; mutations may retry")
             }
+            let footprintAfter = footprintProbe(databasePath)
+            lastRecoveryFootprintBeforeBytes = footprintBefore
+            lastRecoveryFootprintAfterBytes = footprintAfter
+            recoveryTracesDeletedTotal &+= UInt64(max(0, tracesDeleted))
+            recoveryTraceChildRowsDeletedTotal &+= UInt64(
+                max(0, traceChildRowsDeleted))
+            recoveryEdgesDeletedTotal &+= UInt64(max(0, edgesDeleted))
+            recoveryEntitiesDeletedTotal &+= UInt64(max(0, entitiesDeleted))
+            recoveryVacuumPagesReclaimedTotal &+= UInt64(
+                max(0, pagesReclaimed))
+            if tracesDeleted > 0 || traceChildRowsDeleted > 0
+                || edgesDeleted > 0 || entitiesDeleted > 0,
+               pagesReclaimed == 0,
+               mode == 2 {
+                recoveryNoPhysicalProgressTotal &+= 1
+            }
         }
 
         // This checkpoint is the admission test for maintenance. No retention
         // delete is allowed to run before it (the old timer did both deletes
         // first and only then guessed pinning from a 64 MB WAL).
         guard checkpointAllowsMaintenance() else { return result() }
+
+        // A legacy mode-0 database cannot return freelist pages to the
+        // filesystem with incremental_vacuum. Checkpointing may itself clear
+        // enough WAL/SHM footprint to restore admission, so remeasure after the
+        // checkpoint. If physical pressure remains, however, DELETE would only
+        // erase logical evidence while leaving the main file (and therefore the
+        // admission latch) unchanged. Preserve the rows until an operator can
+        // stop the engine and perform the explicit offline full-VACUUM
+        // conversion to INCREMENTAL mode.
+        refreshAdmissionMeasurementsAndLatch()
+        let legacyStoreNeedsOfflineConversion = mode == 0
+            && (footprintAdmissionLatched
+                || storageBlockReason == .lowFreeSpace)
+        if legacyStoreNeedsOfflineConversion {
+            logger.fault("TraceGraph bounded recovery cannot reclaim a pressured auto_vacuum=\(mode) store online; preserving logical evidence until an offline full-VACUUM conversion")
+            return result()
+        }
 
         if traceBudget > 0 {
             let expired = try selectTraceIDs(
@@ -3579,7 +3695,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         refreshAdmissionMeasurementsAndLatch()
         var pressureRemains = footprintAdmissionLatched
             || storageBlockReason == .lowFreeSpace
-        if pressureRemains, tracesDeleted < traceBudget {
+        let pressureTraceStartRows = tracesDeleted + traceChildRowsDeleted
+        let pressureTraceStartPages = pagesReclaimed
+        if pressureRemains,
+           mode == 2,
+           vacuumBudget > pagesReclaimed,
+           tracesDeleted < traceBudget {
             let oldest = try selectTraceIDs(
                 olderThan: nil,
                 oldestFirst: true,
@@ -3599,7 +3720,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // checkpoint the trace work before deciding whether to cross into a
         // different evidence class. This is bounded by the same per-tick
         // vacuum budget; mode-0 legacy stores remain fail-closed/pressured.
-        if (tracesDeleted > 0 || traceChildRowsDeleted > 0),
+        if (tracesDeleted > 0 || traceChildRowsDeleted > 0
+                || edgesDeleted > 0 || entitiesDeleted > 0),
            vacuumBudget > pagesReclaimed,
            mode == 2 {
             guard checkpointAllowsMaintenance() else { return result() }
@@ -3613,8 +3735,32 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         refreshAdmissionMeasurementsAndLatch()
         pressureRemains = footprintAdmissionLatched
             || storageBlockReason == .lowFreeSpace
-        if pressureRemains, graphBudget > 0 {
+        if pressureRemains,
+           tracesDeleted + traceChildRowsDeleted + edgesDeleted + entitiesDeleted > 0,
+           pagesReclaimed == 0,
+           mode == 2 {
+            // Retention work was logically valid, but it did not release a
+            // physical page. Do not compound it with pressure eviction.
+            return result()
+        }
+        let pressureTraceRowsDeleted = tracesDeleted + traceChildRowsDeleted
+            - pressureTraceStartRows
+        if pressureRemains,
+           pressureTraceRowsDeleted > 0,
+           pagesReclaimed == pressureTraceStartPages {
+            // The arbitrary trace eviction did not free even one physical
+            // page. Do not cross into a second evidence class on the same
+            // no-progress signal; report it and retry only on a later bounded
+            // tick after the store shape has changed.
+            return result()
+        }
+        if pressureRemains,
+           mode == 2,
+           vacuumBudget > pagesReclaimed,
+           graphBudget > 0 {
             if edgesDeleted < graphBudget {
+                let pressureEdgeStartRows = edgesDeleted
+                let pressureEdgeStartPages = pagesReclaimed
                 edgesDeleted += try await batchedSubstrateDelete(
                     table: "trace_edges",
                     guardSQL: Self.edgeOrphanGuardSQL,
@@ -3623,11 +3769,23 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     batchSize: min(256, graphBudget - edgesDeleted)
                 )
                 guard checkpointAllowsMaintenance() else { return result() }
+                if edgesDeleted > pressureEdgeStartRows,
+                   vacuumBudget > pagesReclaimed {
+                    pagesReclaimed += try await incrementalVacuum(
+                        maxPages: vacuumBudget - pagesReclaimed)
+                    guard checkpointAllowsMaintenance() else { return result() }
+                }
+                if edgesDeleted > pressureEdgeStartRows,
+                   pagesReclaimed == pressureEdgeStartPages {
+                    return result()
+                }
             }
             refreshAdmissionMeasurementsAndLatch()
             pressureRemains = footprintAdmissionLatched
                 || storageBlockReason == .lowFreeSpace
-            if pressureRemains, entitiesDeleted < graphBudget {
+            if pressureRemains,
+               vacuumBudget > pagesReclaimed,
+               entitiesDeleted < graphBudget {
                 entitiesDeleted += try await batchedSubstrateDelete(
                     table: "trace_entities",
                     guardSQL: Self.entityOrphanGuardSQL,

@@ -127,6 +127,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public let freeSpaceBytes: Int64?
         public let maxFootprintBytes: Int64?
         public let freeSpaceFloorBytes: Int64?
+        public let autoVacuumMode: Int?
+        public let footprintLatchTripsTotal: Int64?
+        public let footprintLatchClearsTotal: Int64?
+        public let recoveryRunsTotal: Int64?
+        public let recoveryTracesDeletedTotal: Int64?
+        public let recoveryTraceChildRowsDeletedTotal: Int64?
+        public let recoveryEdgesDeletedTotal: Int64?
+        public let recoveryEntitiesDeletedTotal: Int64?
+        public let recoveryVacuumPagesReclaimedTotal: Int64?
+        public let recoveryNoPhysicalProgressTotal: Int64?
+        public let lastRecoveryFootprintBeforeBytes: Int64?
+        public let lastRecoveryFootprintAfterBytes: Int64?
 
         init?(from raw: [String: Any]?) {
             guard let raw else { return nil }
@@ -139,6 +151,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             freeSpaceBytes = Self.int64(raw["free_space_bytes"])
             maxFootprintBytes = Self.int64(raw["max_footprint_bytes"])
             freeSpaceFloorBytes = Self.int64(raw["free_space_floor_bytes"])
+            autoVacuumMode = Self.int(raw["auto_vacuum_mode"])
+            footprintLatchTripsTotal = Self.int64(raw["footprint_latch_trips_total"])
+            footprintLatchClearsTotal = Self.int64(raw["footprint_latch_clears_total"])
+            recoveryRunsTotal = Self.int64(raw["recovery_runs_total"])
+            recoveryTracesDeletedTotal = Self.int64(raw["recovery_traces_deleted_total"])
+            recoveryTraceChildRowsDeletedTotal = Self.int64(raw["recovery_trace_child_rows_deleted_total"])
+            recoveryEdgesDeletedTotal = Self.int64(raw["recovery_edges_deleted_total"])
+            recoveryEntitiesDeletedTotal = Self.int64(raw["recovery_entities_deleted_total"])
+            recoveryVacuumPagesReclaimedTotal = Self.int64(raw["recovery_vacuum_pages_reclaimed_total"])
+            recoveryNoPhysicalProgressTotal = Self.int64(raw["recovery_no_physical_progress_total"])
+            lastRecoveryFootprintBeforeBytes = Self.int64(raw["last_recovery_footprint_before_bytes"])
+            lastRecoveryFootprintAfterBytes = Self.int64(raw["last_recovery_footprint_after_bytes"])
         }
 
         public var evidenceUnavailable: Bool {
@@ -163,6 +187,12 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if let value = value as? NSNumber { return value.int64Value }
             return nil
         }
+
+        private static func int(_ value: Any?) -> Int? {
+            if let value = value as? Int { return value }
+            if let value = value as? NSNumber { return value.intValue }
+            return nil
+        }
     }
 
     public struct EventPipeline: Sendable, Equatable {
@@ -177,6 +207,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public let mergedTerminatedBySourceAndLane: [String: [String: UInt64]]
         public let offeredByLane: [String: UInt64]
         public let dequeuedByLane: [String: UInt64]
+        public let ruleEvaluationReachedByLaneAndCategory: [String: [String: UInt64]]
+        public let ruleEvaluationCompletedByLaneAndCategory: [String: [String: UInt64]]
         public let completedByLane: [String: UInt64]
         public let backlogEstimateByLane: [String: UInt64]
         public let inFlightByLane: [String: UInt64]
@@ -221,6 +253,12 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             )
             offeredByLane = Self.counterMap(raw["offered_by_lane"])
             dequeuedByLane = Self.counterMap(raw["dequeued_by_lane"])
+            ruleEvaluationReachedByLaneAndCategory = Self.nestedCounterMap(
+                raw["rule_evaluation_reached_by_lane_and_category"]
+            )
+            ruleEvaluationCompletedByLaneAndCategory = Self.nestedCounterMap(
+                raw["rule_evaluation_completed_by_lane_and_category"]
+            )
             completedByLane = Self.counterMap(raw["completed_by_lane"])
             backlogEstimateByLane = Self.counterMap(raw["backlog_estimate_by_lane"])
             inFlightByLane = Self.counterMap(raw["in_flight_by_lane"])
@@ -281,6 +319,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 "merged_terminated_by_source_and_lane": mergedTerminatedBySourceAndLane,
                 "offered_by_lane": offeredByLane,
                 "dequeued_by_lane": dequeuedByLane,
+                "rule_evaluation_reached_by_lane_and_category": ruleEvaluationReachedByLaneAndCategory,
+                "rule_evaluation_completed_by_lane_and_category": ruleEvaluationCompletedByLaneAndCategory,
                 "completed_by_lane": completedByLane,
                 "backlog_estimate_by_lane": backlogEstimateByLane,
                 "in_flight_by_lane": inFlightByLane,

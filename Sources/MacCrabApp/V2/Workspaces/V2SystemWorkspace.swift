@@ -27,12 +27,14 @@ public struct V2SystemWorkspace: View {
     /// same empty panel — an unreadable log rendered as empty reads as "nothing
     /// was changed", which is the opposite of what we know.
     @State private var auditStatus: String?
-    /// Owned so its delegate survives the async OS activation callback while
-    /// this workspace is on screen (the "Reactivate System Extension" repair
-    /// action). Independent of the app's primary manager — sysextd dedups.
-    @StateObject private var sysextManager = SystemExtensionManager()
+    /// Shared with launch, first-run setup and the heartbeat watchdog so a
+    /// repair click cannot overlap an activation already awaiting approval.
+    @ObservedObject var sysextManager: SystemExtensionManager
 
-    public init(state: V2DashboardState) { self.state = state }
+    public init(state: V2DashboardState, sysextManager: SystemExtensionManager) {
+        self.state = state
+        self.sysextManager = sysextManager
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {

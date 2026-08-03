@@ -39,6 +39,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/release.sh
     scripts/build-release.sh
+    scripts/prepare-dmg-payload.sh
+    scripts/install.sh
     scripts/release-env.sh
     scripts/_release_env.py
     scripts/export-release-source.py

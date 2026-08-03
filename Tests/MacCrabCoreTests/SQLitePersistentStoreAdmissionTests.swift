@@ -136,6 +136,25 @@ struct SQLitePersistentStoreAdmissionTests {
         )
     }
 
+    /// Adopt a ceiling one byte below the store's current footprint+reserve.
+    /// updateStorageAdmission therefore latches pressure while preserving the
+    /// already-prepared writer; maintenance can then shrink the family so the
+    /// next ordinary admission takes the reopen-after-recovery path.
+    private func pressureLatchPolicy(
+        directory: URL,
+        databasePath: String,
+        reserveBytes: Int64
+    ) throws -> SQLitePersistentStorePolicy {
+        let footprint = try SQLitePersistentStoreAdmission.measureFamily(
+            databasePath
+        )
+        return policy(
+            directory: directory,
+            max: footprint + reserveBytes - 1,
+            reserve: reserveBytes
+        )
+    }
+
     @Test("Family accounting is exact and rejects partial, symlinked, or hard-linked families")
     func familyAccounting() throws {
         let dir = try tempDirectory()
@@ -815,6 +834,56 @@ struct SQLitePersistentStoreAdmissionTests {
         }
     }
 
+    @Test("Cached insert statements are acquired only after reopening admission")
+    func cachedInsertStatementOrderingDriftGuard() throws {
+        func assertAcquireAfterAdmission(
+            path: String,
+            functionStart: String,
+            functionEnd: String,
+            admissionCall: String
+        ) throws {
+            let source = try repositoryText(path)
+            let start = try #require(source.range(of: functionStart))
+            let end = try #require(
+                source.range(of: functionEnd, range: start.upperBound..<source.endIndex)
+            )
+            let body = String(source[start.lowerBound..<end.lowerBound])
+            let admission = try #require(body.range(of: admissionCall))
+            let acquireNeedle = "let stmt = insertStmt"
+            let acquire = try #require(body.range(of: acquireNeedle))
+            let reset = try #require(body.range(of: "sqlite3_reset(stmt)"))
+
+            #expect(occurrences(of: acquireNeedle, in: body) == 1)
+            #expect(admission.lowerBound < acquire.lowerBound)
+            #expect(acquire.lowerBound < reset.lowerBound)
+        }
+
+        try assertAcquireAfterAdmission(
+            path: "Sources/MacCrabCore/Storage/EventStore.swift",
+            functionStart: "private func insert(\n        event: Event,",
+            functionEnd: "static func estimatedEventMutationBytes(",
+            admissionCall: "try beforeWrite(mutationBytes)"
+        )
+        try assertAcquireAfterAdmission(
+            path: "Sources/MacCrabCore/Storage/AlertStore.swift",
+            functionStart: "private func insert(\n        alert: Alert,",
+            functionEnd: "static func estimatedAlertMutationBytes(",
+            admissionCall: "try beforeWrite(rowBytes)"
+        )
+        try assertAcquireAfterAdmission(
+            path: "Sources/MacCrabCore/Storage/CampaignStore.swift",
+            functionStart: "public func insert(_ r: Record) throws {",
+            functionEnd: "private func existingCampaignMutationBytes(",
+            admissionCall: "try admitStorageWrite("
+        )
+        try assertAcquireAfterAdmission(
+            path: "Sources/MacCrabCore/Storage/AttributionOverrideStore.swift",
+            functionStart: "public func record(_ override: AttributionOverride) throws {",
+            functionEnd: "private func existingOverrideMutationBytes(",
+            admissionCall: "try admitStorageWrite("
+        )
+    }
+
     @Test("Every persistent SQLite checkpoint surface has the fresh sidecar gate")
     func checkpointSurfaceDriftGuard() throws {
         let primaryStores = [
@@ -1288,6 +1357,216 @@ struct SQLitePersistentStoreAdmissionTests {
         ))
         #expect(recovered?.latchedFailure == nil)
         try await store.insert(event: event())
+    }
+
+    @Test("Event batches survive repeated pressure-recovery connection reopens")
+    func eventBatchReacquiresStatementAfterRecovery() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("events.db").path
+        // EventStore's page-aware transaction estimate intentionally includes
+        // fixed commit/WAL headroom; keep the reserve above that estimate while
+        // the independently-derived footprint ceiling supplies the pressure.
+        // Use page-size-independent headroom: at SQLite's supported 64 KiB
+        // maximum, the event row plus fixed tree/WAL estimate is about 5 MiB.
+        let reserve = 16 * SQLitePersistentStorePolicy.bytesPerMiB
+        let store = try EventStore(
+            path: path,
+            storagePolicy: policy(
+                directory: dir,
+                max: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+                reserve: reserve
+            )
+        )
+
+        // RC.4 crashed at sqlite3_reset on the first batch after the 60-second
+        // size-cap sweep. Repeat the exact state transition enough times to make
+        // a one-shot/lifetime accident visible under sanitizers as well.
+        for cycle in 0..<8 {
+            if try await store.count() == 0 {
+                let seed = try await store.insert(events: (0..<8).map { _ in event() })
+                #expect(seed.persistedCount == 8)
+            }
+
+            let tight = try pressureLatchPolicy(
+                directory: dir,
+                databasePath: path,
+                reserveBytes: reserve
+            )
+            let blocked = try await store.updateStorageAdmission(tight)
+            #expect(blocked?.latchedFailure != nil, "cycle \(cycle) did not latch")
+
+            let rows = try await store.count()
+            #expect(try await store.pruneOldest(count: rows) == rows)
+            try await store.vacuum()
+            let compacted = try SQLitePersistentStoreAdmission.measureFamily(path)
+            #expect(compacted + reserve <= tight.maxFootprintBytes)
+
+            let batch = (0..<16).map { _ in event() }
+            let recovered = try await store.insert(events: batch)
+            #expect(recovered.persistedCount == batch.count)
+            #expect(recovered.filteredCount == 0)
+            #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
+            #expect(try await store.count() == batch.count)
+        }
+    }
+
+    @Test("Alert and Campaign writers reacquire cached statements after recovery")
+    func alertAndCampaignReacquireStatementsAfterRecovery() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let alertPath = dir.appendingPathComponent("alerts.db").path
+        let campaignPath = dir.appendingPathComponent("campaigns.db").path
+        let reserve = 2 * SQLitePersistentStorePolicy.bytesPerMiB
+        let roomy = policy(
+            directory: dir,
+            max: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+            reserve: reserve
+        )
+        let alerts = try AlertStore(path: alertPath, storagePolicy: roomy)
+        let campaigns = try CampaignStore(path: campaignPath, storagePolicy: roomy)
+
+        for cycle in 0..<4 {
+            if try await alerts.count() == 0 {
+                try await alerts.insert(alerts: (0..<8).map { _ in alert() })
+            }
+            if try await campaigns.count() == 0 {
+                for _ in 0..<8 { try await campaigns.insert(campaign()) }
+            }
+
+            let alertPolicy = try pressureLatchPolicy(
+                directory: dir,
+                databasePath: alertPath,
+                reserveBytes: reserve
+            )
+            let campaignPolicy = try pressureLatchPolicy(
+                directory: dir,
+                databasePath: campaignPath,
+                reserveBytes: reserve
+            )
+            #expect(
+                (try await alerts.updateStorageAdmission(alertPolicy))?
+                    .latchedFailure != nil,
+                "alert cycle \(cycle) did not latch"
+            )
+            #expect(
+                (try await campaigns.updateStorageAdmission(campaignPolicy))?
+                    .latchedFailure != nil,
+                "campaign cycle \(cycle) did not latch"
+            )
+
+            let alertRows = try await alerts.count()
+            let campaignRows = try await campaigns.count()
+            #expect(try await alerts.pruneOldest(count: alertRows) == alertRows)
+            #expect(
+                try await campaigns.pruneOldest(count: campaignRows)
+                    == campaignRows
+            )
+            try await alerts.vacuum()
+            try await campaigns.vacuum()
+            #expect(
+                try SQLitePersistentStoreAdmission.measureFamily(alertPath)
+                    + reserve <= alertPolicy.maxFootprintBytes
+            )
+            #expect(
+                try SQLitePersistentStoreAdmission.measureFamily(campaignPath)
+                    + reserve <= campaignPolicy.maxFootprintBytes
+            )
+
+            // One post-recovery write is sufficient to exercise the stale
+            // statement edge. Keeping the recovered store below its deliberately
+            // tight ceiling lets the transition repeat on the next cycle.
+            let newAlerts = [alert()]
+            try await alerts.insert(alerts: newAlerts)
+            try await campaigns.insert(campaign())
+            #expect((await alerts.storageAdmissionSnapshot())?.latchedFailure == nil)
+            #expect((await campaigns.storageAdmissionSnapshot())?.latchedFailure == nil)
+            #expect(try await alerts.count() == newAlerts.count)
+            #expect(try await campaigns.count() == 1)
+        }
+    }
+
+    @Test("Attribution override writer restores its skipped statement after recovery")
+    func attributionOverrideReacquiresStatementAfterRecovery() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("attribution_overrides.db").path
+        let reserve = 4 * SQLitePersistentStorePolicy.bytesPerMiB
+        let roomy = policy(
+            directory: dir,
+            max: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+            reserve: reserve
+        )
+
+        // Grow a real store, close its writer, then reopen it one byte beyond
+        // the configured footprint boundary. That open deliberately skips
+        // preparing insertStmt while retaining a maintenance-capable handle.
+        var bootstrap: AttributionOverrideStore? = try AttributionOverrideStore(
+            path: path,
+            storagePolicy: roomy
+        )
+        let note = String(repeating: "x", count: 64 * 1_024)
+        for index in 0..<32 {
+            try await bootstrap?.record(AttributionOverride(
+                eventId: "recovery-seed-\(index)",
+                machineConfidence: "test",
+                verdict: .confirmed,
+                userNote: note
+            ))
+        }
+        #expect(try await bootstrap?.count() == 32)
+        bootstrap = nil
+
+        let tight = try pressureLatchPolicy(
+            directory: dir,
+            databasePath: path,
+            reserveBytes: reserve
+        )
+        let store = try AttributionOverrideStore(
+            path: path,
+            storagePolicy: tight
+        )
+        #expect((await store.storageAdmissionSnapshot())?.latchedFailure != nil)
+
+        // AttributionOverrideStore has no public retention surface. Use a
+        // sibling SQLite connection only in this fixture to model an operator
+        // reclaiming the tiny database while the shed-only reader remains open.
+        // The following successful record is itself a direct reopen assertion:
+        // the store began with insertStmt == nil, so it cannot write unless
+        // admitStorageWrite reopens and prepares a new statement first.
+        do {
+            var maintenanceDB: OpaquePointer?
+            let openRC = SQLiteOpenPathPolicy.open(
+                path,
+                database: &maintenanceDB,
+                flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+            )
+            #expect(openRC == SQLITE_OK)
+            let handle = try #require(maintenanceDB)
+            defer { sqlite3_close(handle) }
+            sqlite3_busy_timeout(handle, 5_000)
+            for sql in [
+                "DELETE FROM attribution_overrides",
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+                "VACUUM",
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+            ] {
+                let rc = sqlite3_exec(handle, sql, nil, nil, nil)
+                try #require(rc == SQLITE_OK)
+            }
+        }
+
+        let compacted = try SQLitePersistentStoreAdmission.measureFamily(path)
+        #expect(compacted + reserve <= tight.maxFootprintBytes)
+        let recoveredID = "post-recovery"
+        try await store.record(AttributionOverride(
+            eventId: recoveredID,
+            machineConfidence: "test",
+            verdict: .confirmed
+        ))
+        #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
+        #expect(try await store.count() == 1)
+        #expect(try await store.fetch(eventId: recoveredID)?.verdict == .confirmed)
     }
 
     @Test("REPLACE admission charges the authoritative old Alert and Campaign rows")
@@ -1790,5 +2069,52 @@ struct SQLitePersistentStoreAdmissionTests {
             "CREATE TRIGGER IF NOT EXISTS trg_hash_chain_global_sequence_unique"
         ))
         #expect(graph.contains("admitSchemaStorageWork(work)"))
+    }
+
+    @Test("Primary stores retry shed-only reopens once with the full write estimate")
+    func secondaryRecoveryUsesFullEstimateDriftGuard() throws {
+        for path in [
+            "Sources/MacCrabCore/Storage/EventStore.swift",
+            "Sources/MacCrabCore/Storage/AlertStore.swift",
+            "Sources/MacCrabCore/Storage/CampaignStore.swift",
+        ] {
+            let source = try repositoryText(path)
+            let start = try #require(source.range(
+                of: "private func admitStorageWrite("
+            ))
+            let end = try #require(source.range(
+                of: "private func admitStorageMaintenanceWrite(",
+                range: start.upperBound..<source.endIndex
+            ))
+            let method = String(source[start.lowerBound..<end.lowerBound])
+
+            #expect(
+                occurrences(
+                    of: "estimatedTransactionBytes: estimatedTransactionBytes",
+                    in: method
+                ) == 2,
+                "\(path) must charge the same full estimate on primary and secondary admission"
+            )
+            #expect(
+                occurrences(of: "try reopenAfterStorageRecovery()", in: method) == 2,
+                "\(path) must reopen once after each successful recovery admission"
+            )
+            #expect(method.contains("if !isReadOnly, insertStmt == nil"))
+            #expect(method.contains("storageAdmission?.latchedFailure"))
+            #expect(!method.contains("estimatedTransactionBytes: 0"))
+
+            // Statement acquisition lives in the insert path after admission;
+            // no cached SQLite pointer is carried across either possible reopen.
+            let admission = try #require(source.range(
+                of: path.contains("CampaignStore")
+                    ? "try admitStorageWrite("
+                    : "try beforeWrite("
+            ))
+            let statement = try #require(source.range(
+                of: "guard let stmt = insertStmt",
+                range: admission.lowerBound..<source.endIndex
+            ))
+            #expect(admission.lowerBound < statement.lowerBound)
+        }
     }
 }

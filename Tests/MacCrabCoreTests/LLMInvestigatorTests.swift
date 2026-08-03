@@ -73,6 +73,8 @@ private actor FakeLLMBackend: LLMBackend {
         callIndex += 1
         return r
     }
+
+    func completedCalls() -> Int { callIndex }
 }
 
 // MARK: - Parser suite
@@ -232,6 +234,7 @@ struct LLMInvestigatorE2ETests {
         #expect(inv?.alertId == "alert-42")
         #expect(inv?.verdict == .likelyMalicious)
         #expect(inv?.suggestedActions.count == 2)
+        #expect(await backend.completedCalls() == 1)
     }
 
     @Test("investigate returns nil when backend returns nil")
@@ -242,5 +245,17 @@ struct LLMInvestigatorE2ETests {
 
         let result = await service.investigate(alert: alert)
         #expect(result == nil)
+        #expect(await backend.completedCalls() == 0)
+    }
+
+    @Test("malformed structured output performs exactly one retry")
+    func malformedRetriesOnce() async {
+        let backend = FakeLLMBackend(responses: ["not-json", "still-not-json"])
+        let service = LLMService(backend: backend, config: LLMConfig())
+
+        let result = await service.investigate(alert: makeAlert())
+
+        #expect(result == nil)
+        #expect(await backend.completedCalls() == 2)
     }
 }

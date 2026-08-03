@@ -338,6 +338,55 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
+    @Test("Recovery hysteresis is independent of the transaction reserve")
+    func recoveryHysteresisIsIndependentOfTransactionReserve() async throws {
+        let path = Self.tempPath("recovery-hysteresis")
+        defer { Self.cleanup(path) }
+        let footprint = ProbeBox(0)
+        let cap = 250 * Self.mib
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            maxFootprintBytes: cap,
+            footprintProbe: { _ in footprint.get() }
+        )
+
+        let initial = await store.storageAdmissionStatus()
+        #expect(initial.transactionReserveBytes == 65_536_000,
+                "the shipped transaction reserve must not shrink to create hysteresis")
+        let threshold = try #require(initial.admissionThresholdBytes)
+        let resume = try #require(initial.resumeBelowBytes)
+        #expect(threshold == 196_608_000)
+        #expect(resume == threshold - (8 * Self.mib))
+
+        footprint.set(threshold + 1)
+        let latched = await store.storageAdmissionStatus()
+        #expect(latched.blocked)
+        #expect(latched.footprintLatchTripsTotal == 1)
+
+        footprint.set(resume)
+        let boundary = await store.storageAdmissionStatus()
+        #expect(boundary.blocked,
+                "the latch clears only after crossing below the resume watermark")
+        #expect(boundary.footprintLatchClearsTotal == 0)
+
+        footprint.set(resume - 1)
+        let cleared = await store.storageAdmissionStatus()
+        #expect(!cleared.blocked)
+        #expect(cleared.footprintLatchTripsTotal == 1)
+        #expect(cleared.footprintLatchClearsTotal == 1)
+
+        let reloaded = await store.updateStorageAdmission(
+            maxFootprintBytes: cap,
+            freeSpaceFloorBytes: nil,
+            transactionReserveBytes: nil
+        )
+        #expect(reloaded.transactionReserveBytes == initial.transactionReserveBytes)
+        #expect(reloaded.admissionThresholdBytes == threshold)
+        #expect(reloaded.resumeBelowBytes == resume,
+                "startup and live-reload policy must derive the same watermark")
+        await store.close()
+    }
+
     @Test("Direct and rolling-graph bypass writers all share the SQLite gate")
     func mutationBypassesAreGated() async throws {
         let path = Self.tempPath("bypasses")
@@ -604,6 +653,66 @@ struct CausalGraphStorageAdmissionTests {
         #expect(!recovered.pinnedReader)
         #expect(recovered.tracesDeleted == 1)
         #expect(try await store.loadTrace(id: "expired") == nil)
+        await store.close()
+    }
+
+    @Test("Pressured legacy mode-0 store preserves evidence for offline conversion")
+    func pressuredLegacyStoreDoesNotDeleteWithoutPhysicalReclaim() async throws {
+        let path = Self.tempPath("legacy-mode-zero-pressure")
+        defer { Self.cleanup(path) }
+
+        // Create a non-empty mode-0 file before the store's schema exists.
+        // SQLite cannot make the later auto_vacuum pragma effective without a
+        // full VACUUM, reproducing an inherited pre-Wave-9B database.
+        var raw: OpaquePointer?
+        #expect(sqlite3_open_v2(
+            path, &raw,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK)
+        let rawDB = try #require(raw)
+        #expect(sqlite3_exec(
+            rawDB,
+            "PRAGMA auto_vacuum = NONE; CREATE TABLE legacy_seed(value TEXT); INSERT INTO legacy_seed VALUES ('seed');",
+            nil, nil, nil
+        ) == SQLITE_OK)
+        sqlite3_close(rawDB)
+        raw = nil
+
+        let bootstrap = try await SQLiteCausalGraphStore(databasePath: path)
+        #expect(await bootstrap.autoVacuumMode() == 0,
+                "fixture must remain an inherited mode-0 database")
+        try await bootstrap.saveTrace(
+            Self.trace("preserve-me", updatedAt: .distantPast), members: [])
+        await bootstrap.close()
+
+        let reportedFootprint = ProbeBox(13 * Self.mib)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            maxFootprintBytes: 16 * Self.mib,
+            transactionReserveBytes: 4 * Self.mib,
+            footprintProbe: { _ in reportedFootprint.get() }
+        )
+        let before = await store.storageAdmissionStatus()
+        #expect(before.blocked)
+        #expect(before.reason == .footprintLimit)
+
+        let recovery = try await store.recoverStorageBudget(
+            retentionCutoff: Date(),
+            orphanCutoff: Date(),
+            maxTraceDeletes: 1,
+            maxGraphDeletesPerTable: 1,
+            maxVacuumPages: 8_192
+        )
+        #expect(recovery.autoVacuumMode == 0)
+        #expect(recovery.tracesDeleted == 0)
+        #expect(recovery.edgesDeleted == 0)
+        #expect(recovery.entitiesDeleted == 0)
+        #expect(recovery.vacuumPagesReclaimed == 0)
+        #expect(try await store.loadTrace(id: "preserve-me") != nil,
+                "mode-0 DELETE cannot reclaim the file and must not destroy evidence")
+        #expect((await store.storageAdmissionStatus()).blocked,
+                "physical pressure remains until the offline conversion")
         await store.close()
     }
 

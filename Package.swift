@@ -213,7 +213,13 @@ let package = Package(
         // link this library and only differ in their outermost main.swift.
         .target(
             name: "MacCrabAgentKit",
-            dependencies: ["MacCrabCore"]
+            dependencies: ["MacCrabCore"],
+            linkerSettings: [
+                // BundledRuleSynchronizer validates the running System
+                // Extension's designated requirement and sealed resources
+                // before treating its compiled-rule corpus as trusted.
+                .linkedFramework("Security"),
+            ]
         ),
         // System Extension target. Compiles to a plain Mach-O; the
         // build-release.sh script wraps it into a .systemextension

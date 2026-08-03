@@ -56,8 +56,8 @@ struct BuiltinCatalogCoverageTests {
         "maccrab.sdr_device.sdr_device",
         "maccrab.edr.remote-access",
         "maccrab.git.credential-helper",
-        "maccrab.llm.behavior-analysis",
         "maccrab.llm.investigation-summary",
+        "maccrab.llm.defense-recommendation",
         // The hyphen→dot fix: the MCP family base must now govern these.
         "maccrab.ai-guard.mcp.credential",
         "maccrab.ai-guard.credential-access",

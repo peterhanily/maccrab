@@ -79,8 +79,8 @@ detection:
     # /bin/launchctl) to do its own maintenance. The Image is the
     # helper, not a MacCrab binary, so the AND never matches.
     # Add a Parent-only filter for any process whose parent IS
-    # MacCrab itself — that covers RuleBundleInstaller's elevated
-    # cleanup, SystemExtensionManager's launchctl invocations,
+    # MacCrab itself — that covers legacy upgrade cleanup,
+    # SystemExtensionManager's launchctl invocations,
     # AppState's pkill SIGUSR1 calls, etc.
     filter_maccrab_parent:
         ParentImage|contains:
@@ -112,8 +112,8 @@ detection:
             - '/Updater'
             - '/Autoupdate'
     # v1.12.5 fix: legitimate destructive operations spawned by
-    # brew/cask, osascript admin shell (RuleBundleInstaller's
-    # elevation channel), or the sysext (de)activation flow all
+    # brew/cask, legacy osascript admin maintenance, or the sysext
+    # (de)activation flow all
     # have rm/mv lineage that trips selection_destruct_path. The
     # filter_maccrab_self block above is AND-style (Image AND
     # ParentImage), which doesn't match when MacCrab itself is the

@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google AI APIキー";
 "settings.llmGeminiModel" = "モデル";
 "settings.llmInfo" = "仕組み";
-"settings.llmInfoDesc" = "AIバックエンドは4つの機能を支えます: 自然言語の脅威ハンティング、調査サマリー、検出ルール生成、防御推奨。";
+"settings.llmInfoDesc" = "AIバックエンドは、構造化されたアラート調査、キャンペーン要約、防御推奨、パッケージ意図の精査を追加できます。モデルの出力は助言のみで、アクションを実行することはありません。";
 "settings.llmLocalPrivacy" = "ローカルで実行中。データがマシンの外に出ることはありません。";
 "settings.llmMistralHelp" = "console.mistral.ai でAPIキーを取得してください";
 "settings.llmMistralKey" = "Mistral APIキー";

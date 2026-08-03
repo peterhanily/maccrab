@@ -738,6 +738,7 @@ enum DaemonTimers {
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
+        let engineIdentity = DaemonProcessIdentity.current
         // Periodic forensic scans (crash reports, power anomalies, library inventory)
         let forensicTimer = DispatchSource.makeTimerSource(queue: .global())
         forensicTimer.schedule(deadline: .now() + 120, repeating: 300) // First at 2min, then every 5min
@@ -1113,10 +1114,11 @@ enum DaemonTimers {
                         if result.pinnedReader {
                             logger.warning("TraceGraph bounded recovery paused by a reader-pinned WAL; no further delete/vacuum work issued this tick")
                         } else if result.tracesDeleted > 0
+                                    || result.traceChildRowsDeleted > 0
                                     || result.edgesDeleted > 0
                                     || result.entitiesDeleted > 0
                                     || result.vacuumPagesReclaimed > 0 {
-                            logger.info("TraceGraph bounded recovery: \(result.tracesDeleted) traces + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed")
+                            logger.info("TraceGraph bounded recovery: \(result.tracesDeleted) traces + \(result.traceChildRowsDeleted) trace-child rows + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes")
                         }
                         let admission = await causalStore.storageAdmissionStatus()
                         if admission.blocked, result.autoVacuumMode != 2 {
@@ -1623,6 +1625,10 @@ enum DaemonTimers {
                 let uptime = Int(Date().timeIntervalSince(startTime))
                 let payload: [String: Any] = [
                     "written_at_unix": nowUnix,
+                    "engine_pid": engineIdentity.pid,
+                    "engine_started_at_unix": engineIdentity.startedAtUnix,
+                    "engine_version": engineIdentity.version,
+                    "engine_build": engineIdentity.build,
                     "uptime_seconds": uptime,
                     "sysext_has_fda": sysextHasFDA,
                     "fda_checked_at_unix": nowUnix,
@@ -1758,7 +1764,7 @@ enum DaemonTimers {
             let fileDropped = eventPipeline.mergedDroppedByLane["file"] ?? 0
             let priorityTerminated = eventPipeline.mergedTerminatedByLane["priority"] ?? 0
             let fileTerminated = eventPipeline.mergedTerminatedByLane["file"] ?? 0
-            let eventWriterDropped = UInt64(state.eventWriter.droppedCount)
+            let eventWriterTelemetry = await state.eventWriter.telemetrySnapshot()
             let unifiedLogDelivery = upstreamCollectorBuffers[.unifiedLog]
             let registryDroppedTotal = await state.collectorRegistry.droppedEventsTotal()
             let addSaturating: (UInt64, UInt64) -> UInt64 = { lhs, rhs in
@@ -1806,6 +1812,7 @@ enum DaemonTimers {
             //    / `es_kernel_dropped_by_type` (v1.21.4 Phase-0 D1). Pre-9K it
             //    was only logged as a warning every 30 s.
             let payloadTruncatedTotal = await state.eventStore.payloadTruncatedTotal()
+            let eventInsertFilterCounters = await state.eventStore.insertFilterCounters()
             let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
 
             // v1.21.4 Phase-0 (D1 + D4): native ES kernel-drop accounting +
@@ -1821,6 +1828,12 @@ enum DaemonTimers {
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esProcessedByType: [String: UInt64] =
                 (state.collector?.esProcessedByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            let esIntentionallyFilteredBeforeWorkerByType: [String: UInt64] =
+                (state.collector?.esIntentionallyFilteredBeforeWorkerByType() ?? [:])
+                    .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
+            let esNormalizedYieldedByType: [String: UInt64] =
+                (state.collector?.esNormalizedYieldedByType() ?? [:])
                     .reduce(into: [:]) { $0[ESCollector.eventTypeName($1.key)] = $1.value }
             let esHandlerP99Micros = state.collector?.esHandlerP99Micros() ?? 0
             let esStreamYieldDropped = state.collector?.esStreamYieldDropped() ?? 0
@@ -2077,6 +2090,16 @@ enum DaemonTimers {
                     "shed_mutations_total": Int64(clamping: s.shedMutationsTotal),
                     "pinned_reader": s.pinnedReader,
                     "recovering": s.recovering,
+                    "auto_vacuum_mode": s.autoVacuumMode,
+                    "footprint_latch_trips_total": Int64(clamping: s.footprintLatchTripsTotal),
+                    "footprint_latch_clears_total": Int64(clamping: s.footprintLatchClearsTotal),
+                    "recovery_runs_total": Int64(clamping: s.recoveryRunsTotal),
+                    "recovery_traces_deleted_total": Int64(clamping: s.recoveryTracesDeletedTotal),
+                    "recovery_trace_child_rows_deleted_total": Int64(clamping: s.recoveryTraceChildRowsDeletedTotal),
+                    "recovery_edges_deleted_total": Int64(clamping: s.recoveryEdgesDeletedTotal),
+                    "recovery_entities_deleted_total": Int64(clamping: s.recoveryEntitiesDeletedTotal),
+                    "recovery_vacuum_pages_reclaimed_total": Int64(clamping: s.recoveryVacuumPagesReclaimedTotal),
+                    "recovery_no_physical_progress_total": Int64(clamping: s.recoveryNoPhysicalProgressTotal),
                 ]
                 if let value = s.maxFootprintBytes { d["max_footprint_bytes"] = value }
                 if let value = s.admissionThresholdBytes { d["admission_threshold_bytes"] = value }
@@ -2085,6 +2108,8 @@ enum DaemonTimers {
                 if let value = s.footprintBytes { d["footprint_bytes"] = value }
                 if let value = s.freeSpaceBytes { d["free_space_bytes"] = value }
                 if let value = s.freeSpaceFloorBytes { d["free_space_floor_bytes"] = value }
+                if let value = s.lastRecoveryFootprintBeforeBytes { d["last_recovery_footprint_before_bytes"] = value }
+                if let value = s.lastRecoveryFootprintAfterBytes { d["last_recovery_footprint_after_bytes"] = value }
                 traceGraphStorageDict = d
             } else if let startupAdmission = state.causalStoreStartupAdmission {
                 traceGraphStorageDict = startupAdmission.heartbeatDictionary
@@ -2185,8 +2210,12 @@ enum DaemonTimers {
             }
             let rulesActive = await state.ruleEngine.enabledRuleCount
 
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "written_at_unix": nowUnix,
+                "engine_pid": engineIdentity.pid,
+                "engine_started_at_unix": engineIdentity.startedAtUnix,
+                "engine_version": engineIdentity.version,
+                "engine_build": engineIdentity.build,
                 "llm": llmHealthDict,
                 "prevention": preventionDict,
                 "browser_inventory": browserInventoryDict,
@@ -2226,6 +2255,8 @@ enum DaemonTimers {
                     "merged_terminated_by_source_and_lane": eventPipeline.mergedTerminatedBySourceAndLane,
                     "offered_by_lane": eventPipeline.offeredByLane,
                     "dequeued_by_lane": eventPipeline.dequeuedByLane,
+                    "rule_evaluation_reached_by_lane_and_category": eventPipeline.ruleEvaluationReachedByLaneAndCategory,
+                    "rule_evaluation_completed_by_lane_and_category": eventPipeline.ruleEvaluationCompletedByLaneAndCategory,
                     "completed_by_lane": eventPipeline.completedByLane,
                     "backlog_estimate_by_lane": eventPipeline.backlogEstimateByLane,
                     "in_flight_by_lane": eventPipeline.inFlightByLane,
@@ -2258,11 +2289,19 @@ enum DaemonTimers {
                 "es_msg_e2e_latency_p99_us": esHandlerP99Micros, // v1.21.4: end-to-end (callback→worker-done incl. queue wait), NOT inline callback wall-time
 
                 "es_processed_by_type": esProcessedByType,
+                // Callback-stage ledger: intentional admission filtering is
+                // policy, while normalized-yielded means an Event was offered
+                // to the collector-local bounded stream. Neither map folds in
+                // copy-backpressure or stream eviction loss.
+                "es_intentionally_filtered_before_worker_by_type": esIntentionallyFilteredBeforeWorkerByType,
+                "es_normalized_yielded_by_type": esNormalizedYieldedByType,
                 "es_stream_yield_dropped_total": esStreamYieldDropped,
                 "es_copy_backpressure_dropped_total": esCopyBackpressureDropped,
                 // v1.21.6 (audit DET-05): rich-heartbeat only, like the other
-                // by-type maps. Divide by `es_processed_by_type` per key to get
-                // the per-detection recall loss.
+                // by-type maps. For one uninterrupted process epoch,
+                // drop/(drop+processed) is the callback→worker refusal fraction.
+                // It is NOT detection recall: processed includes intentional
+                // pre-worker filtering and normalizer rejects, now split above.
                 "es_copy_backpressure_dropped_by_type": esCopyBackpressureDroppedByType,
                 "es_client_split_degraded": esClientSplitDegraded,
                 // Which kernel event source actually won the boot-time fallback
@@ -2335,12 +2374,23 @@ enum DaemonTimers {
                 // input loss, once. `events_dropped` additionally folds in the
                 // CollectorRegistry's non-pipeline loss counter.
                 "detection_input_dropped_total": detectionInputDroppedTotal,
-                "events_storage_write_dropped_total": eventWriterDropped,
+                "events_storage_write_dropped_total": eventWriterTelemetry.droppedCount,
+                "events_storage_write_persisted_total": eventWriterTelemetry.persistedCount,
+                "events_storage_write_retried_total": eventWriterTelemetry.retriedCount,
+                "events_storage_write_buffer_depth": eventWriterTelemetry.bufferDepth,
+                "events_storage_write_in_flight_depth": eventWriterTelemetry.inFlightDepth,
                 "trace_registry": traceRegistryDict,
                 "tracegraph_storage_admission": traceGraphStorageDict,
                 "traces_storage_admission": traceStoreStorageDict,
                 "schema_version": 5,
             ]
+            // The default production EventStore has an insert filter, but a
+            // test/dev store may not. Omit absent counters instead of publishing
+            // fabricated zeros; optional decoders preserve honest-unknown.
+            if let eventInsertFilterCounters {
+                payload["events_insert_filter_dropped_total"] = eventInsertFilterCounters.dropped
+                payload["events_insert_filter_passed_total"] = eventInsertFilterCounters.passed
+            }
 
             // Metrics export — Prometheus-textfile-style JSON at a world-
             // readable path. Counter-style semantics: scrapers compute

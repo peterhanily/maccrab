@@ -18,11 +18,14 @@ fail() {
 
 # Must match the three production gates. Fixture builders materialize every
 # path so committed-blob verification exercises a complete executor graph.
+# BEGIN RELEASE_CRITICAL_EXECUTORS
 RELEASE_CRITICAL_EXECUTORS=(
     .githooks/pre-push
     scripts/ci-local.sh
     scripts/release.sh
     scripts/build-release.sh
+    scripts/prepare-dmg-payload.sh
+    scripts/install.sh
     scripts/release-env.sh
     scripts/_release_env.py
     scripts/export-release-source.py
@@ -38,6 +41,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/publish-cask.sh
     Compiler/compile_rules.py
 )
+# END RELEASE_CRITICAL_EXECUTORS
 
 install_missing_critical_executor_fixtures() {
     local fixture="$1" path
@@ -153,6 +157,7 @@ make_ci_fixture() {
         check-secrets.sh \
         check-release-dependencies.sh \
         test-release-supply-chain.sh \
+        test-install-payload.sh \
         test-sqlcipher-provenance.sh \
         test-rules-trust-anchor.sh \
         test-release-artifact-preservation.sh; do

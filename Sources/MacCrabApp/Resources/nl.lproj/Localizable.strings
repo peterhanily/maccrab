@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google AI API-sleutel";
 "settings.llmGeminiModel" = "Model";
 "settings.llmInfo" = "Hoe het werkt";
-"settings.llmInfoDesc" = "De AI-backend ondersteunt vier functies: threat hunting in natuurlijke taal, onderzoekssamenvattingen, generatie van detectieregels en verdedigingsaanbevelingen.";
+"settings.llmInfoDesc" = "De AI-backend kan gestructureerde alarmonderzoeken, campagnesamenvattingen, verdedigingsaanbevelingen en verfijning van pakketintentie toevoegen. Modeluitvoer is adviserend en voert nooit een actie uit.";
 "settings.llmLocalPrivacy" = "Draait lokaal. Er verlaten geen gegevens je Mac.";
 "settings.llmMistralHelp" = "Vraag een API-sleutel aan op console.mistral.ai";
 "settings.llmMistralKey" = "Mistral API-sleutel";

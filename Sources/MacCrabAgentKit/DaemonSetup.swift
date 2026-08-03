@@ -3,6 +3,25 @@ import Darwin
 import MacCrabCore
 import os.log
 
+/// Immutable identity for one running daemon process. Captured once on first
+/// bootstrap access and copied into both heartbeat files so measurement tooling
+/// can reject deltas that cross a crash/restart epoch. Values are bundle/process
+/// metadata only; no event content enters the heartbeat labels.
+struct DaemonProcessIdentity: Sendable, Equatable {
+    let pid: Int
+    let startedAtUnix: Double
+    let version: String
+    let build: String
+
+    static let current = DaemonProcessIdentity(
+        pid: Int(ProcessInfo.processInfo.processIdentifier),
+        startedAtUnix: Date().timeIntervalSince1970,
+        version: MacCrabVersion.current,
+        build: (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown"
+    )
+}
+
 /// OS-notification toggle records contain only two scalar fields. This is an
 /// internal constant so tests can pin the root/user read boundary without
 /// exposing it as product API.
@@ -31,10 +50,12 @@ enum DaemonSetup {
     /// Each gets a different banner with a different remediation.
     public static func writeStartupMarker(supportDir: String, version: String) {
         let path = supportDir + "/sysext_started.json"
+        let identity = DaemonProcessIdentity.current
         let payload: [String: Any] = [
-            "started_at_unix": Date().timeIntervalSince1970,
-            "pid": getpid(),
+            "started_at_unix": identity.startedAtUnix,
+            "pid": identity.pid,
             "version": version,
+            "build": identity.build,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
         try? FileManager.default.createDirectory(atPath: supportDir, withIntermediateDirectories: true)
@@ -301,9 +322,14 @@ enum DaemonSetup {
         phase: String,
         startedAt: Date
     ) {
+        let identity = DaemonProcessIdentity.current
         let payload: [String: Any] = [
             "written_at_unix": Date().timeIntervalSince1970,
             "started_at_unix": startedAt.timeIntervalSince1970,
+            "engine_pid": identity.pid,
+            "engine_started_at_unix": identity.startedAtUnix,
+            "engine_version": identity.version,
+            "engine_build": identity.build,
             "uptime_seconds": Int(Date().timeIntervalSince(startedAt)),
             "boot_phase": phase,
             "liveness": false,
@@ -526,6 +552,34 @@ enum DaemonSetup {
         // A future hardening could narrow to 0o750 root:admin IF every uid-501
         // reader is confirmed in the admin group — verify the read path first.
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compiledRulesDir)
+
+        // Refresh the installed corpus from the signed, sysextd-staged System
+        // Extension before constructing any rule reader. This replaces the GUI
+        // app's launch-time `osascript with administrator privileges` copy,
+        // which produced a password dialog on every app update and trusted an
+        // app-controlled path across a root boundary. The synchronizer verifies
+        // the designated Developer ID requirement + resource seal in production,
+        // then publishes an exact manifest-verified tree with an atomic swap.
+        // Standalone/dev maccrabd runs deliberately skip this bundle-only path.
+        let ruleSyncOutcome = BundledRuleSynchronizer.synchronizeAtBoot(
+            supportDirectory: supportDir
+        )
+        if BundledRuleSynchronizer.shouldAbortBoot(after: ruleSyncOutcome) {
+            let reason: String
+            if case .failed(let detail, _, _, _) = ruleSyncOutcome {
+                reason = detail
+            } else {
+                reason = "installed rule corpus is not verified"
+            }
+            logger.fault("Aborting before rule readers: no verified installed corpus after sync failure: \(reason, privacy: .public)")
+            print("FATAL: detection rules could not be verified; engine stopped before loading rules.")
+            writeBootPhase(
+                supportDir: supportDir,
+                phase: "rule_sync_failed",
+                startedAt: startedAt
+            )
+            Darwin.exit(EXIT_FAILURE)
+        }
 
         // Initialize components
         let eventStore: EventStore
@@ -1250,7 +1304,10 @@ enum DaemonSetup {
         print("File injection scanner active (native structural detection)")
 
         // Natural language threat hunter
-        let threatHunter = ThreatHunter(databasePath: supportDir + "/events.db")
+        let threatHunter = ThreatHunter(
+            eventsDatabasePath: supportDir + "/events.db",
+            alertsDatabasePath: supportDir + "/alerts.db"
+        )
 
         // Auto rule generator -- creates Sigma rules from observed campaigns
         let ruleGenerator = RuleGenerator(outputDir: supportDir + "/compiled_rules")

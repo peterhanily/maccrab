@@ -54,6 +54,27 @@ struct EventPipelineTelemetryTests {
         #expect(snapshot.latencySampleCountByLane == snapshot.completedByLane)
     }
 
+    @Test("rule boundary is event-cardinality and cross-tabbed by lane/category")
+    func ruleEvaluationBoundaryAccounting() {
+        let telemetry = EventPipelineTelemetry()
+
+        telemetry.recordRuleEvaluationReached(lane: .priority, category: .process)
+        telemetry.recordRuleEvaluationCompleted(lane: .priority, category: .process)
+        telemetry.recordRuleEvaluationReached(lane: .priority, category: .file)
+        telemetry.recordRuleEvaluationReached(lane: .file, category: .file)
+        telemetry.recordRuleEvaluationCompleted(lane: .file, category: .file)
+
+        let snapshot = telemetry.snapshot()
+        #expect(snapshot.ruleEvaluationReachedByLaneAndCategory["priority"]?["process"] == 1)
+        #expect(snapshot.ruleEvaluationCompletedByLaneAndCategory["priority"]?["process"] == 1)
+        #expect(snapshot.ruleEvaluationReachedByLaneAndCategory["priority"]?["file"] == 1)
+        #expect(snapshot.ruleEvaluationCompletedByLaneAndCategory["priority"]?["file"] == 0)
+        #expect(snapshot.ruleEvaluationReachedByLaneAndCategory["file"]?["file"] == 1)
+        #expect(snapshot.ruleEvaluationCompletedByLaneAndCategory["file"]?["file"] == 1)
+        #expect(snapshot.ruleEvaluationReachedByLaneAndCategory["file"]?["network"] == 0,
+                "all fixed categories must be emitted even before first use")
+    }
+
     @Test("defensive snapshot arithmetic never underflows or wraps")
     func snapshotSubtractionSaturatesAtZero() {
         let telemetry = EventPipelineTelemetry()
@@ -294,6 +315,35 @@ struct EventPipelineTelemetryTests {
         #expect(source.components(separatedBy: "lane: .priority").count - 1 == 1)
         #expect(source.components(separatedBy: "lane: .file").count - 1 == 1)
         #expect(source.components(separatedBy: "EventLoop.run(").count - 1 == 2)
+
+        let eventLoopSource = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/MacCrabAgentKit/EventLoop.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(eventLoopSource.components(
+            separatedBy: "recordRuleEvaluationReached("
+        ).count - 1 == 1, "the event-level reached mark must not double count")
+        #expect(eventLoopSource.components(
+            separatedBy: "recordRuleEvaluationCompleted("
+        ).count - 1 == 1, "the event-level completed mark must not double count")
+
+        let reached = try #require(eventLoopSource.range(
+            of: "recordRuleEvaluationReached("
+        ))
+        let singleRules = try #require(eventLoopSource.range(
+            of: "state.ruleEngine.evaluate(enrichedEvent)"
+        ))
+        let sequenceRules = try #require(eventLoopSource.range(
+            of: "state.sequenceEngine.evaluate(enrichedEvent)"
+        ))
+        let completed = try #require(eventLoopSource.range(
+            of: "recordRuleEvaluationCompleted("
+        ))
+        #expect(reached.lowerBound < singleRules.lowerBound)
+        #expect(singleRules.lowerBound < sequenceRules.lowerBound)
+        #expect(sequenceRules.lowerBound < completed.lowerBound)
     }
 
     private func makeEvent(

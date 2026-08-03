@@ -1672,10 +1672,26 @@ public final class ESCollector: @unchecked Sendable {
         contexts.reduce(UInt64(0)) { $0 &+ $1.tracker.globalDropped() }
     }
 
-    /// Per-event-type processed (seen-at-callback) counts (D4) — the denominator
-    /// the flood test measures marker execs against. Merged (union) across queues.
+    /// Per-event-type messages accounted after copy admission (D4): retained-worker
+    /// completions plus intentional pre-worker policy rejects. Copy-backpressure
+    /// refusals are excluded and surfaced separately. Merged across queues.
     public func esProcessedByType() -> [UInt32: UInt64] {
         Self.mergeCountMaps(contexts.map { $0.tracker.processedByType() })
+    }
+
+    /// Per-event-type messages intentionally filtered at callback admission,
+    /// before retained-worker submission. Merged across the split ES clients.
+    public func esIntentionallyFilteredBeforeWorkerByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(
+            contexts.map { $0.tracker.intentionallyFilteredBeforeWorkerByType() }
+        )
+    }
+
+    /// Per-event-type normalized Events offered to the collector-local stream.
+    /// Whether an offer evicted an older buffered event remains accounted by the
+    /// collector delivery telemetry and is deliberately not folded into this map.
+    public func esNormalizedYieldedByType() -> [UInt32: UInt64] {
+        Self.mergeCountMaps(contexts.map { $0.tracker.normalizedYieldedByType() })
     }
 
     /// p99-estimate of END-TO-END message latency in microseconds (D4) — the

@@ -98,6 +98,27 @@ struct AlertInvestigationPersistenceTests {
         #expect(after?.llmInvestigation?.summary.contains("Dropper") == true)
     }
 
+    @Test("updateInvestigation() rejects a missing alert instead of silently succeeding")
+    func updateMissingAlertFails() async throws {
+        let path = makeTempPath()
+        defer { cleanup(path) }
+
+        let store = try AlertStore(path: path)
+        do {
+            try await store.updateInvestigation(
+                alertId: "missing-alert",
+                investigation: sampleInvestigation(alertId: "missing-alert")
+            )
+            Issue.record("missing alert update unexpectedly succeeded")
+        } catch let error as AlertStoreError {
+            guard case .notFound(let id) = error else {
+                Issue.record("expected notFound, got \(error)")
+                return
+            }
+            #expect(id == "missing-alert")
+        }
+    }
+
     @Test("Alerts without investigation decode with nil")
     func nilInvestigation() async throws {
         let path = makeTempPath()

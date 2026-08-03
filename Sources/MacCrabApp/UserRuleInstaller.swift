@@ -7,15 +7,13 @@
 // installed.
 //
 // Flow:
-//   1. ensure /Library/Application Support/MacCrab/user_rules exists and is
-//      writable (prompt for admin ONCE to create it 0775 root:admin),
-//   2. write <id>.yml there,
-//   3. run the bundled compile_rules.py (with vendored PyYAML on PYTHONPATH)
-//      in a tmp dir to produce <id>.json,
-//   4. atomically rename the JSON into user_rules/,
-//   5. touch .reload_tick so the daemon's mtime watcher reloads the rule.
+//   1. compile the supplied YAML in an unprivileged temporary directory using
+//      the bundled compiler + vendored PyYAML,
+//   2. place one owner-bound request in the daemon's sticky inbox,
+//   3. let the root engine validate and atomically install both source and JSON
+//      in its root-owned user_rules directory, then trigger a reload.
 //
-// user_rules/ survives Sparkle updates — RuleBundleInstaller never touches it.
+// user_rules/ survives Sparkle updates — signed-corpus self-sync never touches it.
 
 import Foundation
 
@@ -67,7 +65,8 @@ enum UserRuleInstaller {
     /// fresh tmp dir as both input AND output so the compiler's
     /// `_snapshot_previous_output` step (which tries to create
     /// `<output_dir>.archive/`) doesn't trip over /Library's root-only write
-    /// permissions. The produced JSON is then renamed back into user_rules/.
+    /// permissions. The result is returned for the privileged-inbox request;
+    /// this process never writes the installed rule tree.
     static func compileViaBundledPython(ruleId: String, yaml: String) async -> (json: String?, error: String?) {
         guard let compilerPath = Bundle.main.path(forResource: "compile_rules", ofType: "py", inDirectory: "Compiler") else {
             return (nil, "Bundled compiler not found in MacCrab.app/Contents/Resources/Compiler/")

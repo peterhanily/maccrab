@@ -996,32 +996,32 @@ enum EventLoop {
                     // AlertSink default) leaves each converging process emitting a
                     // fresh alert as the correlator window re-evaluates — the
                     // residual the campaign wave's chainDominatedByShellUtilities
-                    // widening missed (field: 1344 mostly-benign alerts). Atomic
-                    // check+record closes the same TOCTOU window the network path
-                    // documents.
+                    // widening missed (field: 1344 mostly-benign alerts). Pass
+                    // that identity into AlertSink so reservation + commit stay
+                    // transactional with the stored alert.
                     let ruleId = "maccrab.correlator.cross-process"
                     let dedupKey = file.path
-                    if await state.deduplicator.shouldSuppressAndRecord(ruleId: ruleId, processPath: dedupKey) {
-                        // Suppressed at the per-file layer.
-                    } else {
-                        let alert = Alert(
-                            ruleId: ruleId,
-                            ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",
-                            severity: chain.severity,
-                            eventId: UUID().uuidString,
-                            processPath: chain.events.last?.processPath,
-                            processName: chain.events.last?.processName,
-                            description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
-                            mitreTactics: "attack.execution",
-                            mitreTechniques: "attack.t1204",
-                            suppressed: false
-                        )
-                        do {
-                            if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                await state.notifier.notify(alert: alert)
-                            }
-                        } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    }
+                    let alert = Alert(
+                        ruleId: ruleId,
+                        ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",
+                        severity: chain.severity,
+                        eventId: UUID().uuidString,
+                        processPath: chain.events.last?.processPath,
+                        processName: chain.events.last?.processName,
+                        description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
+                        mitreTactics: "attack.execution",
+                        mitreTechniques: "attack.t1204",
+                        suppressed: false
+                    )
+                    do {
+                        if try await state.alertSink.submit(
+                            alert: alert,
+                            event: enrichedEvent,
+                            dedupProcessPath: dedupKey
+                        ) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
             }
             if let net = enrichedEvent.network {
@@ -1040,31 +1040,27 @@ enum EventLoop {
                     // correlator window re-evaluates.
                     let ruleId = "maccrab.correlator.network-convergence"
                     let dedupKey = net.destinationHostname ?? net.destinationIp
-                    // v1.6.21 BLOCKER fix: atomic check+record closes a TOCTOU
-                    // window where two concurrent network-convergence
-                    // evaluations could both observe shouldSuppress == false
-                    // and both emit duplicates.
-                    if await state.deduplicator.shouldSuppressAndRecord(ruleId: ruleId, processPath: dedupKey) {
-                        // Suppressed at the per-destination layer.
-                    } else {
-                        let alert = Alert(
-                            ruleId: ruleId,
-                            ruleTitle: "Multiple Processes Contacting Same Destination",
-                            severity: chain.severity,
-                            eventId: UUID().uuidString,
-                            processPath: chain.events.last?.processPath,
-                            processName: chain.events.last?.processName,
-                            description: chain.description,
-                            mitreTactics: "attack.command_and_control",
-                            mitreTechniques: "attack.t1071",
-                            suppressed: false
-                        )
-                        do {
-                            if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                await state.notifier.notify(alert: alert)
-                            }
-                        } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    }
+                    let alert = Alert(
+                        ruleId: ruleId,
+                        ruleTitle: "Multiple Processes Contacting Same Destination",
+                        severity: chain.severity,
+                        eventId: UUID().uuidString,
+                        processPath: chain.events.last?.processPath,
+                        processName: chain.events.last?.processName,
+                        description: chain.description,
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071",
+                        suppressed: false
+                    )
+                    do {
+                        if try await state.alertSink.submit(
+                            alert: alert,
+                            event: enrichedEvent,
+                            dedupProcessPath: dedupKey
+                        ) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
             }
 
@@ -1919,152 +1915,25 @@ enum EventLoop {
 
             // === Detection: 3 layers ===
 
+            // Event-level boundary telemetry: exactly one reached mark before
+            // RuleEngine starts and one completed mark after both stateless and
+            // sequence rule actors return. These are not per-rule/per-match
+            // counters and never contain event-derived labels.
+            state.eventPipelineTelemetry.recordRuleEvaluationReached(
+                lane: lane,
+                category: enrichedEvent.eventCategory
+            )
+
             // Layer 1: Single-event Sigma rules
-            var matches = await state.ruleEngine.evaluate(enrichedEvent)
+            var primaryMatches = await state.ruleEngine.evaluate(enrichedEvent)
 
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
-            matches.append(contentsOf: sequenceMatches)
-
-            // v1.12.0 post-audit (M-Int2 + M-Int3): attach a
-            // CounterfactualReasoner narrative AND a NextTechniquePredictor
-            // forecast to HIGH/CRITICAL sequence matches. Pre-fix both
-            // actors only fired in unit tests / MCP. This is a single-
-            // step counterfactual built from the firing event because
-            // SequenceEngine doesn't expose its internal `matchedSteps`
-            // chain — a proper N-step counterfactual lives in v1.12.x
-            // once SequenceEngine grows a `partialChain(for:)` accessor.
-            // The single-step result still tells the analyst which
-            // prevention capability could have blocked the impact
-            // moment + the top-3 most-likely next tactics.
-            // R2 FP fix: a trusted browser reading/writing its OWN cookie/login
-            // store and then making outbound connections is normal first-party
-            // behaviour, not credential exfil. NoiseFilter Gate 3 already drops
-            // the PRIMARY sequence match for a trusted browser-helper subject
-            // (that is why `credential_theft_exfil` was lowered to `high`), but
-            // these advisory derivatives (Counterfactual / Forecast / LLM
-            // sequence) are spawned from the RAW sequence matches BEFORE
-            // NoiseFilter runs — so without this guard they outlive the
-            // suppressed primary and re-noise the analyst.
-            //
-            // Precise where possible: when the completing event carries the file
-            // (a browser-self READ), use the path-aware own-profile check so a
-            // browser reading a FOREIGN store (~/.ssh, another browser) is NOT
-            // exempted. The credential-read -> upload sequences complete on the
-            // network leg (no file), so we fall back to the trusted-browser-
-            // helper subject check that mirrors the already-applied Gate 3.
-            let subjectIsBrowserSelfAccess: Bool = {
-                if let filePath = enrichedEvent.file?.path {
-                    return NoiseFilter.isBrowserReadingOwnProfile(
-                        processPath: enrichedEvent.process.executable,
-                        filePath: filePath
-                    )
-                }
-                return NoiseFilter.isTrustedBrowserHelper(path: enrichedEvent.process.executable)
-            }()
-
-            // Skip advisory derivatives for a browser-self access whose primary
-            // match Gate 3 suppresses. `!suppressible` (must-fire) sequence
-            // matches always keep their derivatives — they survive Gate 3 too.
-            if !sequenceMatches.isEmpty {
-                for seqMatch in sequenceMatches where (seqMatch.severity == .high || seqMatch.severity == .critical) && !(subjectIsBrowserSelfAccess && seqMatch.suppressible) {
-                    let matchCopy = seqMatch
-                    let primitive = inferPreventionPrimitive(from: enrichedEvent)
-                    let step = CounterfactualReasoner.ChainStep(
-                        stepId: matchCopy.ruleId,
-                        tactic: .impact,
-                        timestamp: enrichedEvent.timestamp,
-                        primitive: primitive
-                    )
-                    let reasoner = CounterfactualReasoner()
-                    let predictor = NextTechniquePredictor()
-                    let observedTactics = inferTacticsFromMatch(matchCopy)
-                    let anchorEvent = enrichedEvent
-                    let alertSink = state.alertSink
-                    Task.detached(priority: .utility) {
-                        // Counterfactual narrative
-                        let result = await reasoner.analyze(chain: [step])
-                        if result.earliestBlockable != nil {
-                            let alert = Alert(
-                                ruleId: "maccrab.counterfactual.\(matchCopy.ruleId)",
-                                ruleTitle: "Counterfactual: \(matchCopy.ruleName)",
-                                severity: .informational,
-                                eventId: anchorEvent.id.uuidString,
-                                processPath: anchorEvent.process.executable,
-                                processName: anchorEvent.process.name,
-                                description: result.narrative,
-                                mitreTactics: nil,
-                                mitreTechniques: nil
-                            )
-                            do {
-                                _ = try await alertSink.submit(alert: alert, event: anchorEvent)
-                            } catch {
-                                await StorageErrorTracker.shared.recordAlertError(error)
-                            }
-                        }
-                        // Next-tactic forecast
-                        if !observedTactics.isEmpty {
-                            let predictions = await predictor.predictNext(after: observedTactics, topN: 3)
-                            if !predictions.isEmpty {
-                                let summary = predictions.map { "\(String(describing: $0.tactic)) (\(String(format: "%.0f", $0.probability * 100))%)" }.joined(separator: ", ")
-                                let alert = Alert(
-                                    ruleId: "maccrab.predict.next-technique.\(matchCopy.ruleId)",
-                                    ruleTitle: "Forecast: likely next tactic after \(matchCopy.ruleName)",
-                                    severity: .informational,
-                                    eventId: anchorEvent.id.uuidString,
-                                    processPath: anchorEvent.process.executable,
-                                    processName: anchorEvent.process.name,
-                                    description: "Markov-1 prior over MITRE tactics suggests: \(summary). Watch the listed tactics over the next ~10 minutes.",
-                                    mitreTactics: nil,
-                                    mitreTechniques: nil
-                                )
-                                do {
-                                    _ = try await alertSink.submit(alert: alert, event: anchorEvent)
-                                } catch {
-                                    await StorageErrorTracker.shared.recordAlertError(error)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // LLM sequence analysis (non-blocking) — explains temporal attack chains.
-            // Same R2 browser-self-access guard as the counterfactual/forecast
-            // block above: don't spend an LLM call narrating a sequence whose
-            // primary match Gate 3 suppresses for a browser reading its own store.
-            if let llm = state.llmService, !sequenceMatches.isEmpty {
-                for seqMatch in sequenceMatches where !(subjectIsBrowserSelfAccess && seqMatch.suppressible) {
-                    let matchCopy = seqMatch
-                    let procName = enrichedEvent.process.name
-                    let procPath = enrichedEvent.process.executable
-                    Task {
-                        if let analysis = await llm.commentary(
-                            systemPrompt: LLMPrompts.sequenceAnalysisSystem,
-                            userPrompt: LLMPrompts.sequenceAnalysisUser(
-                                ruleName: matchCopy.ruleName,
-                                description: matchCopy.description,
-                                processName: procName, processPath: procPath,
-                                mitreTechniques: matchCopy.mitreTechniques,
-                                tags: matchCopy.tags
-                            ),
-                            maxTokens: 512, temperature: 0.2
-                        ) {
-                            let analysisAlert = Alert(
-                                ruleId: "maccrab.llm.sequence-analysis",
-                                ruleTitle: "AI Sequence Analysis: \(matchCopy.ruleName)",
-                                severity: .informational,
-                                eventId: UUID().uuidString,
-                                processPath: procPath, processName: procName,
-                                description: analysis.response,
-                                mitreTactics: nil, mitreTechniques: nil,
-                                suppressed: false
-                            )
-                            do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                        }
-                    }
-                }
-            }
+            primaryMatches.append(contentsOf: sequenceMatches)
+            state.eventPipelineTelemetry.recordRuleEvaluationCompleted(
+                lane: lane,
+                category: enrichedEvent.eventCategory
+            )
 
             // Layer 3: Baseline anomaly detection (Phase 3)
             // Gate the actor hop with the same shared predicate used inside
@@ -2075,45 +1944,33 @@ enum EventLoop {
                 ? await state.baselineEngine.evaluate(enrichedEvent)
                 : nil
             if let baselineMatch = baselineMatchResult {
-                matches.append(baselineMatch)
+                primaryMatches.append(baselineMatch)
+            }
 
-                // LLM baseline anomaly analysis (non-blocking)
-                if let llm = state.llmService {
-                    let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
-                    let parentPath = enrichedEvent.process.ancestors.first?.executable ?? "unknown"
-                    let childName = enrichedEvent.process.name
-                    let childPath = enrichedEvent.process.executable
-                    let pid = enrichedEvent.process.pid
-                    let userName = enrichedEvent.process.userName
-                    let edgeCount = await state.baselineEngine.edgeCount
-                    Task {
-                        if let analysis = await llm.commentary(
-                            systemPrompt: LLMPrompts.baselineAnomalySystem,
-                            userPrompt: LLMPrompts.baselineAnomalyUser(
-                                parentName: parentName, childName: childName,
-                                parentPath: parentPath, childPath: childPath,
-                                pid: pid, userName: userName, edgeCount: edgeCount
-                            ),
-                            maxTokens: 512, temperature: 0.3
-                        ) {
-                            let analysisAlert = Alert(
-                                ruleId: "maccrab.llm.baseline-analysis",
-                                ruleTitle: "AI Anomaly Analysis: \(parentName) → \(childName)",
-                                severity: .informational,
-                                eventId: UUID().uuidString,
-                                processPath: childPath, processName: childName,
-                                description: analysis.response,
-                                mitreTactics: nil, mitreTechniques: nil,
-                                suppressed: false
-                            )
-                            do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                        }
-                    }
-                }
+            // Filter PRIMARY detections before they can mutate behavioral state or
+            // spawn advisory work. The old ordering filtered only after sequence,
+            // baseline, and BehaviorScoring had consumed the raw candidates. A
+            // match suppressed as warm-up/trusted/self noise could therefore taint
+            // a process score, consume its one-shot threshold latch, and launch
+            // child analyses even though the primary alert never existed.
+            NoiseFilter.apply(
+                &primaryMatches,
+                event: enrichedEvent,
+                isWarmingUp: state.isWarmingUp
+            )
+
+            // RuleMatch is Hashable, so preserve the exact filtered sequence
+            // candidates without duplicating NoiseFilter's trust semantics here.
+            // Deterministic sequence derivatives below must never outlive a
+            // primary that the shared filter removed.
+            let survivingPrimaryMatches = Set(primaryMatches)
+            let survivingSequenceMatches = sequenceMatches.filter {
+                survivingPrimaryMatches.contains($0)
             }
 
             // Layer 4: Behavioral scoring -- escalate score on rule matches
-            for match in matches {
+            var compositeMatches: [RuleMatch] = []
+            for match in primaryMatches {
                 if let scoringResult = await state.behaviorScoring.addRuleMatch(
                     severity: match.severity,
                     ruleTitle: match.ruleName,
@@ -2131,78 +1988,27 @@ enum EventLoop {
                         mitreTechniques: [],
                         tags: ["attack.execution", "attack.defense_evasion"]
                     )
-                    matches.append(behaviorMatch)
-
-                    // LLM behavioral analysis (non-blocking) — explains what the
-                    // indicator combination reveals about the attack pattern
-                    if let llm = state.llmService {
-                        let procName = enrichedEvent.process.name
-                        let procPath = enrichedEvent.process.executable
-                        let pid = enrichedEvent.process.pid
-                        let score = scoringResult.totalScore
-                        let indicators = scoringResult.indicators.map { ($0.name, $0.weight, $0.detail) }
-                        // AI-06: hoist the trust signals out of the event BEFORE
-                        // the detached Task so the prompt can be trust-aware.
-                        // Without these the model had only the process name and
-                        // the indicator list and escalated MacCrab's own false
-                        // positives into "isolate the machine" prose.
-                        let signer = enrichedEvent.process.codeSignature?.signerType.rawValue
-                        let notarized = enrichedEvent.process.codeSignature?.isNotarized
-                        let team = enrichedEvent.process.codeSignature?.teamId
-                        let aiOwned = enrichedEvent.enrichments["ai_tool"] != nil
-                            || enrichedEvent.enrichments["ai_tool_child"] == "true"
-                        Task {
-                            if let analysis = await llm.commentary(
-                                systemPrompt: LLMPrompts.behaviorAnalysisSystem,
-                                userPrompt: LLMPrompts.behaviorAnalysisUser(
-                                    processName: procName, processPath: procPath, pid: pid,
-                                    totalScore: score, indicators: indicators,
-                                    signerType: signer, isNotarized: notarized,
-                                    teamId: team, isAIToolOwned: aiOwned
-                                ),
-                                maxTokens: 512, temperature: 0.2
-                            ) {
-                                let analysisAlert = Alert(
-                                    ruleId: "maccrab.llm.behavior-analysis",
-                                    ruleTitle: "AI Behavioral Analysis: \(procName)",
-                                    severity: .informational,
-                                    eventId: UUID().uuidString,
-                                    processPath: procPath, processName: procName,
-                                    description: analysis.response,
-                                    mitreTactics: nil, mitreTechniques: nil,
-                                    suppressed: false
-                                )
-                                do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            }
-                        }
-                    }
+                    compositeMatches.append(behaviorMatch)
                 }
             }
 
-            // v1.6.9: Apply shared noise filters AFTER all three
-            // detection layers (Sigma / Sequence / Baseline +
-            // Behavioral Composite) have appended their matches.
-            //
-            // Prior to v1.6.9 this ran AFTER Layer 1 only, which is
-            // why /usr/libexec/networkserviceproxy kept firing the
-            // credential_theft_exfil SEQUENCE rule despite every
-            // rule-level filter we added (v1.6.5 filter_apple_daemons),
-            // Gate 6 (v1.6.5), and Gate 7 (v1.6.8) — sequence matches
-            // were appended to `matches` AFTER NoiseFilter.apply, so
-            // they never saw any gate. Moving the call to here makes
-            // every gate apply universally to every layer, which is
-            // what every FP fix since v1.6.2 silently assumed.
-            //
-            // Also called from the FSEvents fallback in MonitorTasks
-            // and the SIGHUP retroactive scan in SignalHandlers, so
-            // behavior stays consistent across every rule-evaluation
-            // entry point.
-            NoiseFilter.apply(&matches, event: enrichedEvent, isWarmingUp: state.isWarmingUp)
+            // Apply the same trust/noise gates to newly-created behavioral
+            // composites before emission.
+            NoiseFilter.apply(
+                &compositeMatches,
+                event: enrichedEvent,
+                isWarmingUp: state.isWarmingUp
+            )
+
+            var matches = primaryMatches
+            matches.append(contentsOf: compositeMatches)
 
             if !matches.isEmpty {
                 // Batch-collect alerts from rule matches, then insert as a single
                 // transaction to reduce SQLite I/O from O(n) transactions to O(1).
                 var batchAlerts: [Alert] = []
+                var batchContexts: [String: EngineAlertCandidateContext] = [:]
+                var batchFanOut: [String: (Alert) async -> Void] = [:]
 
                 for match in matches {
                     // Suppression + deduplication checks. Match-aware: a broad
@@ -2212,13 +2018,9 @@ enum EventLoop {
                     if await state.suppressionManager.isSuppressed(match: match, processPath: enrichedEvent.process.executable) {
                         continue
                     }
-                    // v1.6.21 BLOCKER fix: atomic check+record closes a TOCTOU
-                    // window where two concurrent rule-matches for the same
-                    // (ruleId, processPath) tuple could both pass the
-                    // shouldSuppress check and both emit duplicates.
-                    if await state.deduplicator.shouldSuppressAndRecord(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
-                        continue
-                    }
+                    // Per-rule dedup is reserved transactionally inside
+                    // AlertSink.insertEngineBatch. Recording it here poisoned the
+                    // suppression window when the later batch commit failed.
 
                     // NOTE: the shared alerts-emitted counter is incremented
                     // INSIDE AlertSink (the single chokepoint all ~60 emission
@@ -2280,6 +2082,18 @@ enum EventLoop {
                     }
 
                     batchAlerts.append(alert)
+                    batchContexts[alert.id] = EngineAlertCandidateContext(
+                        match: match,
+                        isSequence: survivingSequenceMatches.contains(match)
+                    )
+                    // Capture the expensive/irreversible work, but do not run it
+                    // until AlertSink returns this exact alert id as a committed
+                    // survivor. The closure shadows the candidate with the
+                    // post-sink alert so severity recalibration and attribution
+                    // are identical to the stored row.
+                    batchFanOut[alert.id] = { persistedAlert in
+                    let alert = persistedAlert
+                    let effectiveSeverity = persistedAlert.severity
                     // Only surface OS notifications for alerts that haven't
                     // been auto-downgraded below high — otherwise noisy rules
                     // keep popping banners after the user has indicated they
@@ -2316,9 +2130,10 @@ enum EventLoop {
                     await state.incidentGrouper.processAlert(
                         alertId: alert.id,
                         timestamp: alert.timestamp,
-                        ruleTitle: match.ruleName,
-                        severity: match.severity,
-                        processPath: enrichedEvent.process.executable,
+                        ruleTitle: alert.ruleTitle,
+                        severity: effectiveSeverity,
+                        processPath: alert.processPath
+                            ?? enrichedEvent.process.executable,
                         parentPath: enrichedEvent.process.ancestors.first?.executable,
                         tactics: tactics
                     )
@@ -2338,7 +2153,7 @@ enum EventLoop {
                     let alertSummary = CampaignDetector.AlertSummary(
                         ruleId: alert.ruleId,
                         ruleTitle: alert.ruleTitle,
-                        severity: match.severity,
+                        severity: effectiveSeverity,
                         processPath: alert.processPath,
                         pid: Int(enrichedEvent.process.pid),
                         userId: String(enrichedEvent.process.userId),
@@ -2366,7 +2181,21 @@ enum EventLoop {
                             suppressed: false,
                             campaignId: campaign.id
                         )
-                        do { _ = try await state.alertSink.submit(alert: campaignAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                        let campaignPersisted: Bool
+                        do {
+                            campaignPersisted = try await state.alertSink.submit(
+                                alert: campaignAlert,
+                                event: enrichedEvent
+                            )
+                        } catch {
+                            await StorageErrorTracker.shared.recordAlertError(error)
+                            campaignPersisted = false
+                        }
+                        // AlertSink is authoritative here too: a collapsed or
+                        // failed campaign row cannot authorize campaign-store
+                        // persistence, notification, rule generation, or LLM
+                        // summaries derived from a row the operator cannot see.
+                        guard campaignPersisted else { continue }
 
                         // Persist the campaign itself so dashboards and the
                         // analyst workflow survive daemon restarts. Failures
@@ -2553,32 +2382,8 @@ enum EventLoop {
                     for sink in state.additionalOutputs {
                         Task { await sink.send(alert: alert, event: enrichedEvent) }
                     }
-
-                    // Phase 4 agentic triage — auto-invoke the LLM for
-                    // HIGH and CRITICAL alerts when an LLMService is
-                    // configured. Runs in a detached Task so the detection
-                    // pipeline is never blocked by model latency. The
-                    // result is persisted via AlertStore.updateInvestigation
-                    // so the dashboard surfaces it on the next poll.
-                    if alert.severity >= .high, let llm = state.llmService {
-                        let capturedAlert = alert
-                        let capturedEvent = enrichedEvent
-                        let store = state.alertStore
-                        Task.detached(priority: .background) {
-                            if let investigation = await llm.investigate(
-                                alert: capturedAlert, event: capturedEvent
-                            ) {
-                                do {
-                                    try await store.updateInvestigation(
-                                        alertId: capturedAlert.id,
-                                        investigation: investigation
-                                    )
-                                } catch {
-                                    await StorageErrorTracker.shared.recordAlertError(error)
-                                }
-                            }
-                        }
                     }
+
                 }
 
                 // Batch insert all rule-match alerts. Routes through the
@@ -2590,45 +2395,150 @@ enum EventLoop {
                 // ai_tool, parent_exec, sha256, host_name) for every
                 // alert in the batch — they all share the same triggering
                 // event by construction.
+                var persistedAlerts: [Alert] = []
                 if !batchAlerts.isEmpty {
-                    do { try await state.alertSink.insertEngineBatch(alerts: batchAlerts, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    do {
+                        persistedAlerts = try await state.alertSink.insertEngineBatch(
+                            alerts: batchAlerts,
+                            event: enrichedEvent
+                        )
+                    } catch let partial as AlertBatchInsertFailure {
+                        // AlertStore uses reserve-bounded transactions, so a
+                        // later chunk can fail after an earlier prefix committed.
+                        // AlertSink has already committed only that prefix's dedup
+                        // reservations/counters. Preserve its exact rows here so
+                        // notifications, response, integrations, campaigns and
+                        // LLM triage still obey the real post-commit boundary.
+                        persistedAlerts = partial.committedAlerts
+                        await StorageErrorTracker.shared.recordAlertError(
+                            partial.underlyingError
+                        )
+                    } catch {
+                        await StorageErrorTracker.shared.recordAlertError(error)
+                    }
                 }
 
-                // LLM analysis for individual HIGH/CRITICAL alerts (non-blocking).
-                // Only the first high/critical alert per event gets analysis to avoid
-                // flooding the LLM when many rules fire on the same event.
-                if let llm = state.llmService,
-                   let topAlert = batchAlerts.first(where: { $0.severity == .critical || $0.severity == .high }),
-                   // Skip campaign/LLM meta-alerts to avoid recursion
-                   !topAlert.ruleId.hasPrefix("maccrab.campaign."),
-                   !topAlert.ruleId.hasPrefix("maccrab.llm.") {
-                    let alertCopy = topAlert
-                    Task {
-                        if let analysis = await llm.commentary(
-                            systemPrompt: LLMPrompts.alertAnalysisSystem,
-                            userPrompt: LLMPrompts.alertAnalysisUser(
-                                ruleTitle: alertCopy.ruleTitle,
-                                severity: alertCopy.severity.rawValue,
-                                processName: alertCopy.processName,
-                                processPath: alertCopy.processPath,
-                                description: alertCopy.description,
-                                mitreTechniques: alertCopy.mitreTechniques,
-                                mitreTactics: alertCopy.mitreTactics
-                            ),
-                            maxTokens: 512, temperature: 0.2
-                        ) {
-                            let analysisAlert = Alert(
-                                ruleId: "maccrab.llm.alert-analysis",
-                                ruleTitle: "AI Analysis: \(alertCopy.ruleTitle)",
+                let postCommitPlan = EngineAlertPostCommit.plan(
+                    persistedAlerts: persistedAlerts,
+                    contextsByAlertID: batchContexts
+                )
+                // Notifications, response actions, integrations, outputs, fleet,
+                // incident grouping, and campaign mutation all live inside these
+                // closures. Invoke only the closures whose exact alert ids were
+                // returned by AlertSink after collapse and commit.
+                for committed in postCommitPlan.survivors {
+                    if let fanOut = batchFanOut[committed.alert.id] {
+                        await fanOut(committed.alert)
+                    }
+                }
+
+                // Attach deterministic counterfactual and next-tactic analyses
+                // only after the corresponding sequence primary survived the
+                // sink's same-evidence collapse and committed successfully.
+                // `insertEngineBatch` returns that authoritative survivor set;
+                // matching by exact alert id prevents an insert failure or
+                // collapsed primary from leaving an orphan derivative behind
+                // while preserving the candidate/context mapping.
+                for committed in postCommitPlan.sequenceSurvivors
+                where committed.match.severity == .high
+                    || committed.match.severity == .critical {
+                    let seqMatch = committed.match
+                    let matchCopy = seqMatch
+                    let primitive = inferPreventionPrimitive(from: enrichedEvent)
+                    let step = CounterfactualReasoner.ChainStep(
+                        stepId: matchCopy.ruleId,
+                        tactic: .impact,
+                        timestamp: enrichedEvent.timestamp,
+                        primitive: primitive
+                    )
+                    let reasoner = CounterfactualReasoner()
+                    let predictor = NextTechniquePredictor()
+                    let observedTactics = inferTacticsFromMatch(matchCopy)
+                    let anchorEvent = enrichedEvent
+                    let alertSink = state.alertSink
+                    Task.detached(priority: .utility) {
+                        let result = await reasoner.analyze(chain: [step])
+                        if result.earliestBlockable != nil {
+                            let alert = Alert(
+                                ruleId: "maccrab.counterfactual.\(matchCopy.ruleId)",
+                                ruleTitle: "Counterfactual: \(matchCopy.ruleName)",
                                 severity: .informational,
-                                eventId: alertCopy.id,
-                                processPath: alertCopy.processPath,
-                                processName: alertCopy.processName,
-                                description: analysis.response,
-                                mitreTactics: nil, mitreTechniques: nil,
-                                suppressed: false
+                                eventId: anchorEvent.id.uuidString,
+                                processPath: anchorEvent.process.executable,
+                                processName: anchorEvent.process.name,
+                                description: result.narrative,
+                                mitreTactics: nil,
+                                mitreTechniques: nil
                             )
-                            do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            do {
+                                _ = try await alertSink.submit(
+                                    alert: alert,
+                                    event: anchorEvent
+                                )
+                            } catch {
+                                await StorageErrorTracker.shared.recordAlertError(error)
+                            }
+                        }
+
+                        if !observedTactics.isEmpty {
+                            let predictions = await predictor.predictNext(
+                                after: observedTactics,
+                                topN: 3
+                            )
+                            if !predictions.isEmpty {
+                                let summary = predictions.map {
+                                    "\(String(describing: $0.tactic)) "
+                                        + "(\(String(format: "%.0f", $0.probability * 100))%)"
+                                }.joined(separator: ", ")
+                                let alert = Alert(
+                                    ruleId: "maccrab.predict.next-technique.\(matchCopy.ruleId)",
+                                    ruleTitle: "Forecast: likely next tactic after \(matchCopy.ruleName)",
+                                    severity: .informational,
+                                    eventId: anchorEvent.id.uuidString,
+                                    processPath: anchorEvent.process.executable,
+                                    processName: anchorEvent.process.name,
+                                    description: "Markov-1 prior over MITRE tactics suggests: \(summary). Watch the listed tactics over the next ~10 minutes.",
+                                    mitreTactics: nil,
+                                    mitreTechniques: nil
+                                )
+                                do {
+                                    _ = try await alertSink.submit(
+                                        alert: alert,
+                                        event: anchorEvent
+                                    )
+                                } catch {
+                                    await StorageErrorTracker.shared.recordAlertError(error)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Automatic LLM triage is post-commit and bounded to one
+                // structured investigation per triggering event. Before this
+                // boundary, every high/critical candidate launched up to two
+                // parse attempts before AlertSink had persisted (or collapsed)
+                // it, and an extra free-form analysis call duplicated the same
+                // UI purpose. A failed insert or fully collapsed batch now makes
+                // no model call; a successful N-alert batch makes at most two
+                // backend calls (the investigator's one parse retry).
+                if let llm = state.llmService,
+                   let triageAlert = postCommitPlan.triageAlert {
+                    let capturedEvent = enrichedEvent
+                    let store = state.alertStore
+                    Task.detached(priority: .background) {
+                        if let investigation = await llm.investigate(
+                            alert: triageAlert,
+                            event: capturedEvent
+                        ) {
+                            do {
+                                try await store.updateInvestigation(
+                                    alertId: triageAlert.id,
+                                    investigation: investigation
+                                )
+                            } catch {
+                                await StorageErrorTracker.shared.recordAlertError(error)
+                            }
                         }
                     }
                 }

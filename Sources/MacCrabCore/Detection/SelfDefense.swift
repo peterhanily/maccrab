@@ -45,10 +45,10 @@ public actor SelfDefense {
     /// `start()` and integrity-check re-hashes.
     private let binaryPath: String
 
-    /// Hash of compiled rules directory. Mutable because legitimate bundle
-    /// syncs (fresh install, Sparkle-delivered rule updates, first-boot
-    /// sequences subdir creation) re-baseline it so subsequent integrity
-    /// checks don't keep firing on an already-observed legitimate change.
+    /// Hash of compiled rules directory. Mutable because legitimate runtime
+    /// rule-subdirectory changes and first-boot sequences creation re-baseline
+    /// it so subsequent integrity checks don't keep firing on an already-
+    /// observed legitimate change.
     private var rulesHash: String?
 
     /// Compiled rules directory path — retained so the write handler can
@@ -57,16 +57,14 @@ public actor SelfDefense {
 
     /// Wall-clock time the actor began monitoring. Writes to the rules
     /// directory within `startupGracePeriod` of this timestamp are treated
-    /// as legitimate (install / upgrade bundle sync) and re-baseline the
-    /// hash without firing a tamper alert. Without this, the sysext's
-    /// SelfDefense watches an empty rules dir at first boot, then
-    /// `RuleBundleInstaller` copies rules in, which fires a bogus
-    /// "rules modified" critical alert on every fresh install.
+    /// as legitimate startup initialization and re-baseline the hash without
+    /// firing a tamper alert. The signed corpus is synchronized before
+    /// SelfDefense starts, so GUI launch never mutates this tree.
     private var startupTime: Date?
 
     /// How long after `.start()` rules-directory writes are treated as
-    /// legitimate bundle-sync churn. 60 seconds is comfortably above any
-    /// observed install / Sparkle-upgrade copy duration.
+    /// legitimate startup churn. 60 seconds covers deferred runtime-rule
+    /// directory initialization on slow disks.
     private let startupGracePeriod: TimeInterval = 60
 
     /// File descriptor sources for dispatch-based file monitoring.
@@ -440,9 +438,9 @@ public actor SelfDefense {
                     // Non-critical deletes are logged but don't fire tamper alerts
                     // (Homebrew upgrades routinely delete the old binary)
                     if !critical { return }
-                    // v1.12.1 FP fix: RuleBundleInstaller's elevated
-                    // `rm -rf <compiled_rules>` triggers this on every
-                    // Sparkle/cask update. The installer drops a
+                    // v1.12.1 transition compatibility: legacy GUI rule
+                    // installers used `rm -rf <compiled_rules>` during an
+                    // update. Those installers dropped a
                     // sentinel before the elevated session — when it's
                     // fresh, treat the delete as a legitimate self-
                     // update and schedule a re-baseline once the new
@@ -464,9 +462,7 @@ public actor SelfDefense {
                 } else if data.contains(.write) {
                     if path.contains("rules") || path.contains("compiled") {
                         // Rules-dir writes need hash comparison + startup-grace
-                        // logic to suppress the bogus tamper alert on fresh
-                        // install (RuleBundleInstaller copies rules INTO the
-                        // monitored dir from the app bundle). Compute the new
+                        // logic for startup-created runtime rule data. Compute the new
                         // hash here on the global queue so the actor doesn't
                         // block on N shasum subprocess calls, then hand off.
                         let newHash = Self.directoryHash(at: rulesDirForClosure)
@@ -556,10 +552,9 @@ public actor SelfDefense {
     ///
     /// Three outcomes:
     ///   1. Inside the startup grace window → rebaseline silently. This
-    ///      covers the fresh-install and Sparkle-upgrade cases where
-    ///      RuleBundleInstaller copies rules into the monitored dir just
-    ///      after the sysext starts, plus DaemonSetup creating the
-    ///      `sequences/` subdir at boot.
+    ///      covers DaemonSetup/runtime initialization such as creating the
+    ///      `sequences/` subdir at boot. Signed-corpus publication happens
+    ///      before this monitor starts.
     ///   2. Past the grace window but hash unchanged → silent (benign
     ///      metadata write; no actual rule mutation happened).
     ///   3. Past the grace window, hash changed → rebaseline AND fire
@@ -850,9 +845,9 @@ public actor SelfDefense {
 
     // MARK: - Self-update detection (v1.12.1 FP fix)
 
-    /// Path of the sentinel file RuleBundleInstaller drops at the start
-    /// of its elevated `rm -rf + cp -R` so SelfDefense can distinguish
-    /// "MacCrab updating itself" from "attacker deleting MacCrab".
+    /// Path used by pre-v1.21.6 GUI installers during elevated rule updates.
+    /// Retained as upgrade-transition compatibility; current builds publish
+    /// the sysext-sealed corpus before SelfDefense starts.
     private nonisolated static let selfUpdateSentinelPath =
         "/Library/Application Support/MacCrab/.maccrab_self_update_in_progress"
 
@@ -863,9 +858,8 @@ public actor SelfDefense {
     /// post-update tamper still surfaces promptly.
     private nonisolated static let selfUpdateSentinelTTL: TimeInterval = 90
 
-    /// Returns true if RuleBundleInstaller (dashboard side) is in the
-    /// middle of an elevated rule sync. Checked before firing delete /
-    /// rename / write alerts on paths inside the data dir.
+    /// Returns true when a legacy upgrade sentinel is still fresh. Checked
+    /// before firing delete/rename/write alerts on paths inside the data dir.
     nonisolated static func isSelfUpdateInProgress() -> Bool {
         guard let attrs = try? FileManager.default.attributesOfItem(
                 atPath: selfUpdateSentinelPath),

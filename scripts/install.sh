@@ -8,18 +8,329 @@
 #
 #   1. Cleans up legacy LaunchDaemons and provisioning profiles left
 #      over from 1.2.x installs on the same machine
-#   2. Installs compiled rules under /Library/Application Support/MacCrab
-#   3. Installs maccrabctl + maccrab-mcp CLI tools
-#   4. Copies MacCrab.app to /Applications
+#   2. Prepares /Library/Application Support/MacCrab without modifying an
+#      existing compiled-rule corpus
+#   3. Stages, verifies, and publishes MacCrab.app to /Applications
+#   4. Installs maccrabctl + maccrab-mcp CLI links
 #   5. Reminds the user to launch the app and approve the extension
 #
-# Must be run with sudo. Homebrew cask users never invoke this
-# directly — the cask's postflight block mirrors the same steps.
+# Must be run with sudo. Homebrew cask users never invoke this directly — the
+# cask's postflight block mirrors the same steps.
+
+# Resolve both supported layouts without guessing from a fixed parent depth:
+#
+#   repository: <root>/scripts/install.sh -> <root>
+#   release DMG: <mount>/install.sh       -> <mount>
+#
+# The pre-fix unconditional dirname(dirname($0)) made the DMG case resolve to
+# /Volumes, so it found no MacCrab.app at all.
+maccrab_resolve_payload_root() {
+    local script_dir="$1"
+    local canonical_dir
+    canonical_dir="$(cd "$script_dir" 2>/dev/null && /bin/pwd -P)" || return 1
+
+    if [ -d "$canonical_dir/MacCrab.app" ] \
+            && [ ! -L "$canonical_dir/MacCrab.app" ] \
+            && [ -f "$canonical_dir/MacCrab.app/Contents/Info.plist" ]; then
+        printf '%s\n' "$canonical_dir"
+        return 0
+    fi
+
+    if [ "$(/usr/bin/basename "$canonical_dir")" = "scripts" ] \
+            && [ -f "$canonical_dir/../Package.swift" ]; then
+        (cd "$canonical_dir/.." && /bin/pwd -P)
+        return 0
+    fi
+
+    return 1
+}
+
+# cp -R preserves the source modes.  Release builds can be assembled under
+# umask 077, and changing ownership to root without widening read/traverse bits
+# turns a valid app into a root-only bundle.  Preserve the executable set while
+# making all bundle content readable/traversable, then explicitly protect the
+# known entry points if a transport stripped their execute bit.
+maccrab_validate_app_executable_roots() {
+    local app="$1"
+    [ -d "$app" ] && [ ! -L "$app" ] || return 1
+    [ -d "$app/Contents" ] && [ ! -L "$app/Contents" ] || return 1
+    [ -d "$app/Contents/MacOS" ] && [ ! -L "$app/Contents/MacOS" ] || return 1
+    [ -f "$app/Contents/MacOS/MacCrab" ] \
+        && [ ! -L "$app/Contents/MacOS/MacCrab" ] || return 1
+
+    # The app/framework resource tree legitimately contains symlinks, but the
+    # executable roots we chmod must not. Reject links (including a linked
+    # executable-directory carrier) before any privileged chmod can follow an
+    # attacker-selected target in a modified/manual payload.
+    if [ -e "$app/Contents/Resources/bin" ] || [ -L "$app/Contents/Resources/bin" ]; then
+        [ -d "$app/Contents/Resources" ] && [ ! -L "$app/Contents/Resources" ] \
+            || return 1
+        [ -d "$app/Contents/Resources/bin" ] \
+            && [ ! -L "$app/Contents/Resources/bin" ] || return 1
+        if /usr/bin/find "$app/Contents/Resources/bin" -type l -print -quit \
+                | /usr/bin/grep -q .; then
+            return 1
+        fi
+    fi
+    if [ -e "$app/Contents/Library/SystemExtensions" ] \
+            || [ -L "$app/Contents/Library/SystemExtensions" ]; then
+        [ -d "$app/Contents/Library" ] && [ ! -L "$app/Contents/Library" ] \
+            || return 1
+        [ -d "$app/Contents/Library/SystemExtensions" ] \
+            && [ ! -L "$app/Contents/Library/SystemExtensions" ] || return 1
+        if /usr/bin/find "$app/Contents/Library/SystemExtensions" \
+                -type l -print -quit | /usr/bin/grep -q .; then
+            return 1
+        fi
+    fi
+}
+
+maccrab_normalize_app_modes() {
+    local app="$1"
+    maccrab_validate_app_executable_roots "$app" || return 1
+
+    # Metadata is outside the code-signature byte seal. A legitimate signed app
+    # can still arrive with an inherited ACL or append/immutable flag that makes
+    # its root-owned installation writable by another identity or impossible to
+    # replace. Do not follow legitimate bundle symlinks while clearing it.
+    /usr/bin/find "$app" \( -type d -o -type f \) \
+        -exec /usr/bin/chflags \
+            nouchg,nouappnd,nodatavault,noschg,nosappnd,nosunlnk,nodataless {} + \
+        || return 1
+    /usr/bin/find "$app" \( -type d -o -type f \) \
+        -exec /bin/chmod -N {} + || return 1
+    /usr/bin/find "$app" -type d -exec /bin/chmod a+rx,go-w {} +
+    /usr/bin/find "$app" -type f -exec /bin/chmod a+r,go-w {} +
+    /usr/bin/find "$app" -type f -perm -u+x -exec /bin/chmod a+x {} +
+    /bin/chmod 0755 "$app/Contents/MacOS/MacCrab"
+    if [ -d "$app/Contents/Resources/bin" ]; then
+        /usr/bin/find "$app/Contents/Resources/bin" -type f \
+            -exec /bin/chmod 0755 {} +
+    fi
+    if [ -d "$app/Contents/Library/SystemExtensions" ]; then
+        /usr/bin/find "$app/Contents/Library/SystemExtensions" -type f \
+            -path '*/Contents/MacOS/*' -exec /bin/chmod 0755 {} +
+    fi
+    if /usr/bin/find "$app" \
+            \( -flags +uchg -o -flags +uappnd -o -flags +datavault \
+               -o -flags +schg -o -flags +sappnd -o -flags +sunlnk \
+               -o -flags +dataless \) -print \
+            | /usr/bin/grep . >/dev/null; then
+        return 1
+    fi
+    if /usr/bin/find "$app" \( -type d -o -type f \) \
+            -exec /bin/ls -lde {} + \
+            | /usr/bin/grep -E '^[[:space:]][[:digit:]]+: ' >/dev/null; then
+        return 1
+    fi
+}
+
+# One indirection keeps the rename transaction fault-injectable without putting
+# a configurable executable path on the privileged install surface. Tests that
+# source this script may replace the function; an executed installer always
+# defines this fixed /bin/mv implementation before entering the transaction.
+maccrab_move_path() {
+    /bin/mv "$1" "$2"
+}
+
+# Restore Previous-MacCrab.app without ever passing an existing directory as
+# mv's destination. Plain BSD mv nests the source inside an existing directory,
+# which is the opposite of rollback. If either rename fails, keep Previous (and
+# any displaced target) inside the root-only workspace for the next recovery
+# attempt; callers must not delete the workspace on failure.
+maccrab_restore_previous_app() {
+    local target_app="$1"
+    local previous_app="$2"
+    local displaced_app="$3"
+
+    [ -d "$previous_app" ] && [ ! -L "$previous_app" ] || return 1
+    if [ -e "$target_app" ] || [ -L "$target_app" ]; then
+        [ -d "$target_app" ] && [ ! -L "$target_app" ] || return 1
+        [ ! -e "$displaced_app" ] && [ ! -L "$displaced_app" ] || return 1
+        maccrab_move_path "$target_app" "$displaced_app" || return 1
+    fi
+
+    # Re-check immediately before the restore. This prevents ordinary failure
+    # paths from nesting Previous inside a surviving target directory.
+    if [ -e "$target_app" ] || [ -L "$target_app" ]; then
+        return 1
+    fi
+    if maccrab_move_path "$previous_app" "$target_app"; then
+        return 0
+    fi
+
+    # Best effort: put the displaced app back at the canonical path. Whether
+    # this succeeds or not, Previous remains recoverable in the workspace.
+    if [ -d "$displaced_app" ] && [ ! -L "$displaced_app" ] \
+            && [ ! -e "$target_app" ] && [ ! -L "$target_app" ]; then
+        maccrab_move_path "$displaced_app" "$target_app" || true
+    fi
+    return 1
+}
+
+# Complete rollback and discard transaction-only copies only after Previous has
+# reached the canonical target. On any failed rename this function returns with
+# the locked workspace intact, making the next installer invocation—not rm—the
+# owner of recovery.
+maccrab_rollback_app_install() {
+    local target_app="$1"
+    local work_root="$2"
+    local staged_app="$work_root/New-MacCrab.app"
+    local previous_app="$work_root/Previous-MacCrab.app"
+    local interrupted_app="$work_root/Interrupted-MacCrab.app"
+
+    if [ -d "$previous_app" ] && [ ! -L "$previous_app" ]; then
+        maccrab_restore_previous_app \
+            "$target_app" "$previous_app" "$interrupted_app" || return 1
+    elif [ -e "$target_app" ] || [ -L "$target_app" ]; then
+        [ -d "$target_app" ] && [ ! -L "$target_app" ] \
+            && [ ! -e "$interrupted_app" ] && [ ! -L "$interrupted_app" ] \
+            && maccrab_move_path "$target_app" "$interrupted_app" \
+            || return 1
+    fi
+
+    [ ! -d "$staged_app" ] || /bin/rm -rf "$staged_app"
+    [ ! -d "$interrupted_app" ] || /bin/rm -rf "$interrupted_app"
+    /bin/rmdir "$work_root"
+}
+
+# Recover the only three names an interrupted publication can leave behind.
+# Recovery always favors the predecessor: if both the target and Previous exist,
+# the prior transaction reached its second rename but not its cleanup, so put
+# Previous back and discard the uncommitted target.  The fixed root also acts as
+# an atomic mkdir lock; concurrent installers cannot create a second workspace.
+maccrab_recover_interrupted_app_install() {
+    local target_app="$1"
+    local required_uid="${2:-0}"
+    local target_parent work_root staged_app previous_app interrupted_app unknown
+
+    target_parent="$(/usr/bin/dirname "$target_app")"
+    work_root="$target_parent/.MacCrab-install"
+    staged_app="$work_root/New-MacCrab.app"
+    previous_app="$work_root/Previous-MacCrab.app"
+    interrupted_app="$work_root/Interrupted-MacCrab.app"
+    if [ ! -e "$work_root" ] && [ ! -L "$work_root" ]; then
+        return 0
+    fi
+    [ -d "$work_root" ] && [ ! -L "$work_root" ] || return 1
+    [ "$(/usr/bin/stat -f '%u:%Lp' "$work_root")" = "$required_uid:700" ] || return 1
+    unknown=$(/usr/bin/find "$work_root" -mindepth 1 -maxdepth 1 \
+        ! -name New-MacCrab.app \
+        ! -name Previous-MacCrab.app \
+        ! -name Interrupted-MacCrab.app -print -quit)
+    [ -z "$unknown" ] || return 1
+    for candidate in "$staged_app" "$previous_app" "$interrupted_app"; do
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+            [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+        fi
+    done
+
+    if [ -d "$previous_app" ]; then
+        maccrab_restore_previous_app \
+            "$target_app" "$previous_app" "$interrupted_app" || return 1
+    elif [ ! -d "$target_app" ] && [ -d "$interrupted_app" ]; then
+        # No predecessor remains to authenticate this ambiguous state. Preserve
+        # it for manual inspection rather than deleting or publishing it.
+        return 1
+    fi
+
+    [ ! -d "$staged_app" ] || /bin/rm -rf "$staged_app"
+    [ ! -d "$interrupted_app" ] || /bin/rm -rf "$interrupted_app"
+    /bin/rmdir "$work_root"
+}
+
+# Publish a fully copied and designated-signature-verified app with same-volume
+# renames. The existing app is untouched until the staged copy passes every
+# gate. The deterministic recovery above closes the two-rename crash gap on the
+# next invocation and always rolls an incomplete transaction back to the old
+# app rather than guessing that the new one committed.
+maccrab_install_app_atomically() {
+    local source_app="$1"
+    local target_app="$2"
+    local target_parent work_root staged_app previous_app
+    local app_requirement saved_umask
+
+    maccrab_validate_app_executable_roots "$source_app" || return 1
+    target_parent="$(/usr/bin/dirname "$target_app")"
+    [ -d "$target_parent" ] && [ ! -L "$target_parent" ] || return 1
+    target_parent="$(cd "$target_parent" && /bin/pwd -P)" || return 1
+    target_app="$target_parent/$(/usr/bin/basename "$target_app")"
+    [ "$(/usr/bin/basename "$target_app")" = "MacCrab.app" ] || return 1
+    if [ -e "$target_app" ] || [ -L "$target_app" ]; then
+        [ -d "$target_app" ] && [ ! -L "$target_app" ] || return 1
+    fi
+
+    maccrab_recover_interrupted_app_install "$target_app" || return 1
+    work_root="$target_parent/.MacCrab-install"
+    saved_umask=$(umask)
+    umask 077
+    if ! /bin/mkdir "$work_root"; then
+        umask "$saved_umask"
+        return 1
+    fi
+    umask "$saved_umask"
+    /bin/chmod 0700 "$work_root" || return 1
+    staged_app="$work_root/New-MacCrab.app"
+    previous_app="$work_root/Previous-MacCrab.app"
+    app_requirement='identifier "com.maccrab.app" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "79S425CW99"'
+
+    if ! /usr/bin/ditto "$source_app" "$staged_app"; then
+        /bin/rm -rf "$work_root"
+        return 1
+    fi
+    if ! /usr/sbin/chown -R root:admin "$staged_app" \
+            || ! maccrab_normalize_app_modes "$staged_app" \
+            || ! /usr/bin/codesign --verify --deep --strict "$staged_app" \
+            || ! /usr/bin/codesign --verify --strict \
+                -R="$app_requirement" "$staged_app"; then
+        /bin/rm -rf "$work_root"
+        return 1
+    fi
+
+    if [ -d "$target_app" ]; then
+        if ! maccrab_move_path "$target_app" "$previous_app"; then
+            /bin/rm -rf "$work_root"
+            return 1
+        fi
+    fi
+    if ! maccrab_move_path "$staged_app" "$target_app"; then
+        if ! maccrab_rollback_app_install "$target_app" "$work_root"; then
+            echo "ERROR: failed to restore $target_app from $previous_app; recovery copies retained in $work_root" >&2
+        fi
+        return 1
+    fi
+
+    # Verify the published pathname too.  A same-volume rename should not alter
+    # bytes, but this turns a surprising filesystem/policy failure into a
+    # rollback instead of discarding the known-good predecessor.
+    if ! /usr/bin/codesign --verify --deep --strict "$target_app" \
+            || ! /usr/bin/codesign --verify --strict \
+                -R="$app_requirement" "$target_app"; then
+        if ! maccrab_rollback_app_install "$target_app" "$work_root"; then
+            echo "ERROR: failed to restore $target_app from $previous_app; recovery copies retained in $work_root" >&2
+        fi
+        return 1
+    fi
+
+    if [ -d "$previous_app" ]; then
+        /bin/rm -rf "$previous_app"
+    fi
+    /bin/rmdir "$work_root"
+}
+
+# Tests source this file for the pure helpers above.  Never run the privileged
+# installer body merely because another script imported those functions.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+if ! PROJECT_DIR="$(maccrab_resolve_payload_root "$SCRIPT_DIR")"; then
+    echo "ERROR: install.sh must be run from a MacCrab source tree or release DMG containing MacCrab.app." >&2
+    exit 1
+fi
 
 PREFIX="${PREFIX:-/usr/local}"
 SUPPORT_DIR="/Library/Application Support/MacCrab"
@@ -83,7 +394,7 @@ if [ -d "$PROFILE_DIR" ]; then
     done
 fi
 
-# ─── Step 2: Support dir + rules ─────────────────────────────────────
+# ─── Step 2: Support directory ───────────────────────────────────────
 info "Creating $SUPPORT_DIR..."
 mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,compiled_rules/graph,logs,inbox}
 chmod 755 "$SUPPORT_DIR"
@@ -94,35 +405,13 @@ chmod 755 "$SUPPORT_DIR"
 # to the rest of the support dir.
 chmod 1777 "$SUPPORT_DIR/inbox"
 
-if [ -d "$PROJECT_DIR/compiled_rules" ] && [ "$(find "$PROJECT_DIR/compiled_rules" -name '*.json' 2>/dev/null | head -1)" ]; then
-    info "Installing pre-compiled detection rules..."
-    cp -f "$PROJECT_DIR/compiled_rules/"*.json "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
-    cp -f "$PROJECT_DIR/compiled_rules/sequences/"*.json "$SUPPORT_DIR/compiled_rules/sequences/" 2>/dev/null || true
-    # Graph rules (v1.12.0) — manifest.json hashes these too, so they must be
-    # installed or the app's manifest check fails (re-sync prompt + false tamper).
-    cp -f "$PROJECT_DIR/compiled_rules/graph/"*.json "$SUPPORT_DIR/compiled_rules/graph/" 2>/dev/null || true
-    # Also copy the .bundle_version marker + manifest.json. Without these,
-    # RuleBundleInstaller.syncIfNeeded() in the app reads installedVersion=""
-    # on first launch, decides the rules are stale, and re-syncs WITH an admin
-    # password prompt — even though the rules are already correct. Copying both
-    # makes the first-launch version+manifest check match and skip the prompt.
-    cp -f "$PROJECT_DIR/compiled_rules/.bundle_version" "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
-    cp -f "$PROJECT_DIR/compiled_rules/manifest.json" "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
-elif [ -d "$PROJECT_DIR/Rules" ] && command -v python3 &>/dev/null; then
-    info "Compiling detection rules..."
-    python3 Compiler/compile_rules.py \
-        --input-dir Rules/ \
-        --output-dir "$SUPPORT_DIR/compiled_rules" 2>&1 | tail -5
-else
-    warn "No rules found to install."
-fi
-
-chmod -R 644 "$SUPPORT_DIR/compiled_rules/"*.json 2>/dev/null || true
-chmod -R 644 "$SUPPORT_DIR/compiled_rules/sequences/"*.json 2>/dev/null || true
-find "$SUPPORT_DIR/compiled_rules" -type d -exec chmod 755 {} \;
-
-RULE_COUNT=$(find "$SUPPORT_DIR/compiled_rules" -name '*.json' | wc -l | tr -d ' ')
-info "Installed $RULE_COUNT compiled rules."
+# Do not pre-seed or update compiled_rules here.  A file-by-file privileged copy
+# can corrupt the last-known-good corpus if installation is interrupted or the
+# disk fills, and doubles peak rule-storage use.  The root System Extension
+# verifies its code-sealed corpus and atomically synchronizes the complete tree
+# before it starts any rule reader.  Existing installations remain untouched;
+# a first install begins with empty directories that the sysext replaces.
+info "Detection rules will be verified and atomically synchronized by the System Extension."
 
 # ─── Step 3: Install MacCrab.app (moved before CLI step) ─────────────
 # Order matters: we want to symlink CLIs into the .app's bundled
@@ -132,10 +421,9 @@ info "Installed $RULE_COUNT compiled rules."
 # every Sparkle update.
 if [ -d "$PROJECT_DIR/MacCrab.app" ]; then
     info "Installing MacCrab.app to /Applications..."
-    rm -rf "/Applications/MacCrab.app"
-    cp -R "$PROJECT_DIR/MacCrab.app" "/Applications/MacCrab.app"
-    chown -R root:admin "/Applications/MacCrab.app"
-    chmod -R go-w "/Applications/MacCrab.app"
+    maccrab_install_app_atomically \
+        "$PROJECT_DIR/MacCrab.app" "/Applications/MacCrab.app" \
+        || error "Staged app copy/signature verification failed; the previous app was retained."
 fi
 
 # ─── Step 4: CLI symlinks ────────────────────────────────────────────

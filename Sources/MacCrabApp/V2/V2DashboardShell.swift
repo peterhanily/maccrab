@@ -8,6 +8,7 @@ struct V2DashboardShell: View {
 
     @StateObject private var state = V2DashboardState()
     @ObservedObject var appState: AppState
+    @ObservedObject var sysextManager: SystemExtensionManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     // A11y: tri-state, defaulting to "system". Pre-fix this stored only
@@ -22,8 +23,9 @@ struct V2DashboardShell: View {
     // hard override was suppressing.
     @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "system"
 
-    init(appState: AppState) {
+    init(appState: AppState, sysextManager: SystemExtensionManager) {
         self.appState = appState
+        self.sysextManager = sysextManager
     }
 
     private var resolvedColorScheme: ColorScheme? {
@@ -163,7 +165,7 @@ struct V2DashboardShell: View {
         case .detection:     V2DetectionWorkspace(state: state, appState: appState)
         case .prevention:    V2PreventionWorkspace(state: state)
         case .intelligence:  V2IntelligenceWorkspace(state: state)
-        case .system:        V2SystemWorkspace(state: state)
+        case .system:        V2SystemWorkspace(state: state, sysextManager: sysextManager)
         case .docs:          V2DocsWorkspace(state: state)
         }
     }
@@ -245,4 +247,3 @@ struct V2DashboardShell: View {
         .frame(width: 0, height: 0)
     }
 }
-

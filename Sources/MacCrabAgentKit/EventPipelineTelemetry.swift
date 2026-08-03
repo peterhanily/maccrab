@@ -25,6 +25,13 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         let mergedTerminatedBySourceAndLane: [String: [String: UInt64]]
         let offeredByLane: [String: UInt64]
         let dequeuedByLane: [String: UInt64]
+        /// One event-level mark immediately before RuleEngine evaluation starts,
+        /// cross-tabbed by its fixed detection lane and normalized category.
+        let ruleEvaluationReachedByLaneAndCategory: [String: [String: UInt64]]
+        /// One event-level mark after both RuleEngine and SequenceEngine return.
+        /// A reached/completed delta therefore identifies work parked inside the
+        /// rule boundary without counting individual rules or matches.
+        let ruleEvaluationCompletedByLaneAndCategory: [String: [String: UInt64]]
         let completedByLane: [String: UInt64]
         let backlogEstimateByLane: [String: UInt64]
         let inFlightByLane: [String: UInt64]
@@ -50,6 +57,9 @@ final class EventPipelineTelemetry: @unchecked Sendable {
         var droppedByLane: [UInt64]
         var terminatedByLane: [UInt64]
         var dequeuedByLane: [UInt64]
+        /// Lane-major flattened storage: lane * categoryCount + category.
+        var ruleEvaluationReachedByLaneAndCategory: [UInt64]
+        var ruleEvaluationCompletedByLaneAndCategory: [UInt64]
         var completedByLane: [UInt64]
         /// Lane-major flattened storage: lane * bucketCount + bucket.
         var latencyBuckets: [UInt64]
@@ -72,6 +82,14 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             droppedByLane = [UInt64](repeating: 0, count: laneCount)
             terminatedByLane = [UInt64](repeating: 0, count: laneCount)
             dequeuedByLane = [UInt64](repeating: 0, count: laneCount)
+            ruleEvaluationReachedByLaneAndCategory = [UInt64](
+                repeating: 0,
+                count: laneCount * EventCategory.allCases.count
+            )
+            ruleEvaluationCompletedByLaneAndCategory = [UInt64](
+                repeating: 0,
+                count: laneCount * EventCategory.allCases.count
+            )
             completedByLane = [UInt64](repeating: 0, count: laneCount)
             latencyBuckets = [UInt64](
                 repeating: 0,
@@ -120,6 +138,35 @@ final class EventPipelineTelemetry: @unchecked Sendable {
     func recordDequeued(lane: EventPipelineLane) {
         state.withLock { locked in
             Self.incrementSaturating(&locked.dequeuedByLane[lane.rawValue])
+        }
+    }
+
+    /// Mark one event entering the single-event + sequence-rule boundary. This
+    /// is event cardinality, not the number of rules evaluated or matches found.
+    @inline(__always)
+    func recordRuleEvaluationReached(
+        lane: EventPipelineLane,
+        category: EventCategory
+    ) {
+        let index = Self.ruleEvaluationIndex(lane: lane, category: category)
+        state.withLock { locked in
+            Self.incrementSaturating(
+                &locked.ruleEvaluationReachedByLaneAndCategory[index]
+            )
+        }
+    }
+
+    /// Mark the same event after both RuleEngine and SequenceEngine returned.
+    @inline(__always)
+    func recordRuleEvaluationCompleted(
+        lane: EventPipelineLane,
+        category: EventCategory
+    ) {
+        let index = Self.ruleEvaluationIndex(lane: lane, category: category)
+        state.withLock { locked in
+            Self.incrementSaturating(
+                &locked.ruleEvaluationCompletedByLaneAndCategory[index]
+            )
         }
     }
 
@@ -221,6 +268,8 @@ final class EventPipelineTelemetry: @unchecked Sendable {
             var mergedTerminatedBySourceAndLane: [String: [String: UInt64]] = [:]
             var offeredByLane: [String: UInt64] = [:]
             var dequeuedByLane: [String: UInt64] = [:]
+            var ruleEvaluationReachedByLaneAndCategory: [String: [String: UInt64]] = [:]
+            var ruleEvaluationCompletedByLaneAndCategory: [String: [String: UInt64]] = [:]
             var completedByLane: [String: UInt64] = [:]
             var backlogByLane: [String: UInt64] = [:]
             var inFlightByLane: [String: UInt64] = [:]
@@ -298,8 +347,23 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 }
                 let key = lane.key
 
+                var ruleReachedByCategory: [String: UInt64] = [:]
+                var ruleCompletedByCategory: [String: UInt64] = [:]
+                for category in EventCategory.allCases {
+                    let ruleIndex = Self.ruleEvaluationIndex(
+                        lane: lane,
+                        category: category
+                    )
+                    ruleReachedByCategory[category.rawValue] =
+                        locked.ruleEvaluationReachedByLaneAndCategory[ruleIndex]
+                    ruleCompletedByCategory[category.rawValue] =
+                        locked.ruleEvaluationCompletedByLaneAndCategory[ruleIndex]
+                }
+
                 offeredByLane[key] = offered
                 dequeuedByLane[key] = dequeued
+                ruleEvaluationReachedByLaneAndCategory[key] = ruleReachedByCategory
+                ruleEvaluationCompletedByLaneAndCategory[key] = ruleCompletedByCategory
                 completedByLane[key] = completed
                 backlogByLane[key] = offered >= removed ? offered - removed : 0
                 inFlightByLane[key] = dequeued >= completed ? dequeued - completed : 0
@@ -337,6 +401,8 @@ final class EventPipelineTelemetry: @unchecked Sendable {
                 mergedTerminatedBySourceAndLane: mergedTerminatedBySourceAndLane,
                 offeredByLane: offeredByLane,
                 dequeuedByLane: dequeuedByLane,
+                ruleEvaluationReachedByLaneAndCategory: ruleEvaluationReachedByLaneAndCategory,
+                ruleEvaluationCompletedByLaneAndCategory: ruleEvaluationCompletedByLaneAndCategory,
                 completedByLane: completedByLane,
                 backlogEstimateByLane: backlogByLane,
                 inFlightByLane: inFlightByLane,
@@ -361,6 +427,23 @@ final class EventPipelineTelemetry: @unchecked Sendable {
     private static func addSaturating(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
         let (sum, overflow) = lhs.addingReportingOverflow(rhs)
         return overflow ? UInt64.max : sum
+    }
+
+    @inline(__always)
+    private static func ruleEvaluationIndex(
+        lane: EventPipelineLane,
+        category: EventCategory
+    ) -> Int {
+        let categoryIndex: Int
+        switch category {
+        case .process: categoryIndex = 0
+        case .file: categoryIndex = 1
+        case .network: categoryIndex = 2
+        case .authentication: categoryIndex = 3
+        case .tcc: categoryIndex = 4
+        case .registry: categoryIndex = 5
+        }
+        return lane.rawValue * EventCategory.allCases.count + categoryIndex
     }
 
     private static func percentile99(

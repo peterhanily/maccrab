@@ -591,16 +591,6 @@ public actor CampaignStore {
 
     /// Persist a campaign record. Overwrites any record with the same id.
     public func insert(_ r: Record) throws {
-        guard let stmt = insertStmt else {
-            // Shed-only opens intentionally have no prepared writer. Surface
-            // the typed storage-admission cause instead of hiding it behind a
-            // generic prepare error; this branch is off the normal hot path.
-            if storageAdmission?.growthBlocked == true {
-                try admitStorageWrite(estimatedTransactionBytes: 0)
-            }
-            throw CampaignStoreError.prepareFailed("insert statement not prepared")
-        }
-
         let jsonData: Data
         do {
             jsonData = try encoder.encode(r)
@@ -656,6 +646,16 @@ public actor CampaignStore {
                 )
         )
 
+        // Admission may clear a sticky pressure latch by reopening the store,
+        // finalizing the old cached statement in the process. Acquire only after
+        // that boundary so sqlite3_reset never receives a finalized pointer.
+        guard let stmt = insertStmt else {
+            // admitStorageWrite already performs one full-estimate secondary
+            // recovery when a fresh open races back into shed-only mode.
+            throw CampaignStoreError.prepareFailed(
+                "insert statement not prepared after storage admission"
+            )
+        }
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
 
@@ -1064,6 +1064,25 @@ public actor CampaignStore {
         storageAdmission = admission
         if recovered || (writerSetupPending && !admission.growthBlocked) {
             try reopenAfterStorageRecovery()
+            if !isReadOnly, insertStmt == nil {
+                guard var secondary = storageAdmission else { return }
+                do {
+                    try secondary.admitWrite(
+                        estimatedTransactionBytes: estimatedTransactionBytes,
+                        on: db
+                    )
+                } catch {
+                    storageAdmission = secondary
+                    throw error
+                }
+                storageAdmission = secondary
+                if !secondary.growthBlocked {
+                    try reopenAfterStorageRecovery()
+                }
+                if insertStmt == nil, let failure = storageAdmission?.latchedFailure {
+                    throw failure
+                }
+            }
         }
     }
 

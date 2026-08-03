@@ -288,9 +288,8 @@ struct WelcomeView: View {
                         : String(localized: "welcome.setup.engineInactive", defaultValue: "Detection engine not detected \u{2014} start the daemon first"))
 
                 // Dynamic: compiled rule count. v1.21.5: the fallback lost
-                // its "run make compile-rules" dev jargon — the rare miss
-                // self-heals via RuleBundleInstaller.syncIfNeeded() at
-                // next launch.
+                // its "run make compile-rules" dev jargon — the root System
+                // Extension self-heals from its signed corpus at boot.
                 SetupRow(
                     icon: compiledRuleCount > 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
                     color: compiledRuleCount > 0 ? .green : .orange,

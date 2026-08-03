@@ -8,11 +8,12 @@
 // AlertDeduplicator. Routing every emission through AlertSink means dedup
 // is mandatory by construction.
 //
-// The rule-engine batch path (EventLoop line ~925 NoiseFilter.apply followed
-// by line ~1265 batch insert) calls `insertEngineBatch(alerts:)` after it has
-// already applied NoiseFilter + per-match dedup. Direct emissions (AI-Guard,
-// supply chain, threat intel, monitor tasks, self-defense) call `submit(alert:
-// event:)` which applies dedup before inserting.
+// The rule-engine batch path calls `insertEngineBatch(alerts:event:)` after it
+// has applied NoiseFilter + operator suppression. AlertSink transactionally
+// reserves per-rule and same-evidence dedup, commits those reservations only
+// after SQLite succeeds, and returns the exact stored survivors. Direct
+// emissions (AI-Guard, supply chain, threat intel, monitor tasks, self-defense)
+// use the same reserve/write/commit contract through `submit`.
 //
 // NoiseFilter is intentionally NOT applied to direct emissions — its gates
 // were tuned for RuleMatch context and applying them blanket to AI-Guard
@@ -234,38 +235,47 @@ public actor AlertSink {
     /// insertion path is introduced (preserves Pass 2 of
     /// pre-release-audit.sh: only one place writes to alerts.db).
     @discardableResult
-    public func submit(alert: Alert, event: Event) async throws -> Bool {
+    public func submit(
+        alert: Alert,
+        event: Event,
+        dedupProcessPath: String? = nil
+    ) async throws -> Bool {
         // v1.18: built-in maccrab.* rule mute / severity override.
         guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
-        let dedupKey = event.process.executable
-        // Atomic check+record closes the TOCTOU window where two concurrent
-        // submits with the same key could both pass shouldSuppress between
-        // each other's recordAlert. AlertDeduplicator is an actor so a
-        // single method invocation is serialized.
-        if await deduplicator.shouldSuppressAndRecord(ruleId: settled.ruleId, processPath: dedupKey) {
+        // Most detections dedup on the triggering executable. Correlators may
+        // supply their actual shared evidence identity (file/destination), but
+        // the reservation still belongs here so it commits with the alert row
+        // instead of poisoning a caller-side window on SQLite failure.
+        let dedupKey = dedupProcessPath ?? event.process.executable
+        // Enrich before reserving so same-evidence severity matches the row that
+        // will actually be stored. A reservation blocks concurrent duplicates
+        // but becomes committed dedup state only after SQLite succeeds.
+        let enriched = recalibrateDevToolingSeverity(
+            Self.enrichWithAttribution(alert: settled, event: event)
+        )
+        let reservation: AlertDeduplicator.EmissionReservation
+        switch await deduplicator.reserveEmission(
+            ruleId: enriched.ruleId,
+            processPath: dedupKey,
+            eventId: enriched.ruleId.hasPrefix("maccrab.campaign.")
+                ? nil : event.id.uuidString,
+            tactics: enriched.mitreTactics,
+            severity: enriched.severity
+        ) {
+        case .suppressed:
             suppressedCount += 1
             return false
+        case .reserved(let reserved):
+            reservation = reserved
         }
-        // AI-17: same-evidence collapse. `ruleId:processPath` cannot see that
-        // CredentialFence's `maccrab.ai-guard.credential-access` and the Sigma
-        // `ai_tool_reads_ssh_keys` rule are the SAME finding fired 50 ms apart
-        // on the SAME event, so one SSH-key read reached the operator as three
-        // alerts. Campaign meta-alerts are exempt: their event id names one
-        // CONTRIBUTING event, not the correlation's own evidence, so collapsing
-        // them against a contributing rule alert would drop the campaign.
-        if !settled.ruleId.hasPrefix("maccrab.campaign."),
-           await deduplicator.shouldSuppressSameEvidence(
-               eventId: event.id.uuidString,
-               tactics: settled.mitreTactics,
-               severity: settled.severity
-           ) {
-            suppressedCount += 1
-            return false
+
+        do {
+            try await alertStore.insert(alert: enriched)
+        } catch {
+            await deduplicator.rollbackEmission(reservation)
+            throw error
         }
-        // v1.19.3 FP recalibration runs AFTER enrichment so the dev-tooling
-        // lineage check sees the parent executable lifted from the event.
-        let enriched = recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: settled, event: event))
-        try await alertStore.insert(alert: enriched)
+        await deduplicator.commitEmission(reservation)
         insertedCount += 1
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
@@ -288,18 +298,28 @@ public actor AlertSink {
         // v1.18: built-in maccrab.* rule mute / severity override.
         guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         let dedupKey = settled.processPath ?? settled.ruleId
-        // Atomic check+record closes the TOCTOU window where two concurrent
-        // submits with the same key could both pass shouldSuppress between
-        // each other's recordAlert. AlertDeduplicator is an actor so a
-        // single method invocation is serialized.
-        if await deduplicator.shouldSuppressAndRecord(ruleId: settled.ruleId, processPath: dedupKey) {
-            suppressedCount += 1
-            return false
-        }
         // v1.19.3 FP recalibration (no event context — parent comes from the
         // alert as-supplied by the caller, if any).
         let enriched = recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: settled))
-        try await alertStore.insert(alert: enriched)
+        let reservation: AlertDeduplicator.EmissionReservation
+        switch await deduplicator.reserveEmission(
+            ruleId: enriched.ruleId,
+            processPath: dedupKey,
+            severity: enriched.severity
+        ) {
+        case .suppressed:
+            suppressedCount += 1
+            return false
+        case .reserved(let reserved):
+            reservation = reserved
+        }
+        do {
+            try await alertStore.insert(alert: enriched)
+        } catch {
+            await deduplicator.rollbackEmission(reservation)
+            throw error
+        }
+        await deduplicator.commitEmission(reservation)
         insertedCount += 1
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
@@ -308,16 +328,15 @@ public actor AlertSink {
         return true
     }
 
-    // MARK: - Engine batch (already filtered + deduped)
+    // MARK: - Engine batch (already noise/operator-suppression filtered)
 
     /// Insert a batch of alerts produced by the rule-engine path that has
-    /// already applied NoiseFilter + per-match dedup. The sink does not
+    /// already applied NoiseFilter + operator suppression. The sink does not
     /// re-apply NoiseFilter; this exists so the engine path uses the same
     /// chokepoint as direct emissions and the architectural invariant holds.
-    /// AI-17 added ONE filter here: the same-evidence collapse, because the
-    /// caller's per-match dedup is per-rule and cannot see that N rules matched
-    /// one event with one tactic. It runs highest-severity-first so the
-    /// strongest match is the one that survives.
+    /// Per-rule dedup and same-evidence collapse are both reserved here and only
+    /// committed after AlertStore succeeds. It runs highest-severity-first so
+    /// the strongest same-evidence match is the one that survives.
     ///
     /// v1.12.6 Wave 2B: optional `event` parameter so the engine path
     /// (which generates N alerts from one Event) can supply the
@@ -325,35 +344,38 @@ public actor AlertSink {
     /// already pre-populated attribution on the alert (or have no Event
     /// context, like test harnesses) pass nil and the alerts go through
     /// unchanged.
-    public func insertEngineBatch(alerts: [Alert], event: Event? = nil) async throws {
-        guard !alerts.isEmpty else { return }
+    @discardableResult
+    public func insertEngineBatch(alerts: [Alert], event: Event? = nil) async throws -> [Alert] {
+        guard !alerts.isEmpty else { return [] }
         // v1.19.3 FP recalibration runs AFTER enrichment (so the dev-tooling
         // lineage check sees each alert's parent executable) and here too so the
         // engine batch path shares the same chokepoint as direct emissions.
         let toInsert: [Alert]
+        var reservations: [AlertDeduplicator.EmissionReservation] = []
         if let event {
             // All alerts in a batch share one triggering event — encode the
             // snapshot ONCE rather than per alert.
             let snapshot = EventSnapshot.encode([event])
             let enriched = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot)) }
-            // AI-17: same-evidence collapse for the batch. N rules matching ONE
-            // event with the SAME exact tactic string are N views of one
-            // finding. Sorted highest-severity-first so the strongest survives
-            // and the weaker siblings fold into it — the deduplicator lets a
-            // strictly higher severity through, which unsorted would re-open
-            // the key and emit the weak one AND the strong one.
+            // Reserve both dedup dimensions before writing, but do not commit
+            // their windows yet. A failed batch rolls every reservation back.
             var kept: [Alert] = []
             for alert in enriched.sorted(by: { $0.severity > $1.severity }) {
-                if !alert.ruleId.hasPrefix("maccrab.campaign."),
-                   await deduplicator.shouldSuppressSameEvidence(
-                       eventId: event.id.uuidString,
-                       tactics: alert.mitreTactics,
-                       severity: alert.severity
-                   ) {
+                switch await deduplicator.reserveEmission(
+                    ruleId: alert.ruleId,
+                    processPath: event.process.executable,
+                    eventId: alert.ruleId.hasPrefix("maccrab.campaign.")
+                        ? nil : event.id.uuidString,
+                    tactics: alert.mitreTactics,
+                    severity: alert.severity
+                ) {
+                case .suppressed:
                     suppressedCount += 1
                     continue
+                case .reserved(let reservation):
+                    reservations.append(reservation)
+                    kept.append(alert)
                 }
-                kept.append(alert)
             }
             toInsert = kept
         } else {
@@ -361,20 +383,58 @@ public actor AlertSink {
         }
         // The whole batch can collapse into an already-emitted direct alert on
         // the same evidence; don't hand an empty array to the store.
-        guard !toInsert.isEmpty else { return }
-        try await alertStore.insert(alerts: toInsert)
-        insertedCount += toInsert.count
+        guard !toInsert.isEmpty else { return [] }
+        let persistedAlerts: [Alert]
+        do {
+            persistedAlerts = try await alertStore.insert(alerts: toInsert)
+        } catch let partial as AlertBatchInsertFailure {
+            // AlertStore commits reserve-bounded prefixes. Settle reservations in
+            // the identical insertion order: only rows in the durable prefix may
+            // enter dedup state; every uncommitted suffix reservation is released.
+            // This also lets EventLoop recover the exact committed alerts from the
+            // typed error and run their post-commit fan-out.
+            for (index, reservation) in reservations.enumerated() {
+                if index < partial.committedAlerts.count {
+                    await deduplicator.commitEmission(reservation)
+                } else {
+                    await deduplicator.rollbackEmission(reservation)
+                }
+            }
+            insertedCount += partial.committedAlerts.count
+            alertCounter.add(partial.committedAlerts.count)
+            for alert in partial.committedAlerts {
+                await captureEvidenceIfPossible(
+                    alertId: alert.id,
+                    timestamp: alert.timestamp
+                )
+            }
+            throw partial
+        } catch {
+            for reservation in reservations {
+                await deduplicator.rollbackEmission(reservation)
+            }
+            throw error
+        }
+        for reservation in reservations {
+            await deduplicator.commitEmission(reservation)
+        }
+        insertedCount += persistedAlerts.count
         // Count every alert in the batch exactly once (the rule-match path's
         // per-match increment was REMOVED from EventLoop so it isn't
         // double-counted) — see `alertCounter`. Callers pre-apply
-        // NoiseFilter + dedup, so `toInsert` is the true emitted set.
-        alertCounter.add(toInsert.count)
+        // NoiseFilter + suppression, and this method commits dedup, so
+        // `toInsert` is the true emitted set.
+        alertCounter.add(persistedAlerts.count)
         // Evidence capture is per-alert because each alert's window center
         // is its own timestamp. The PRIMARY KEY (alert_id, id) on
         // alert_evidence dedupes overlapping windows automatically.
-        for alert in toInsert {
+        for alert in persistedAlerts {
             await captureEvidenceIfPossible(alertId: alert.id, timestamp: alert.timestamp)
         }
+        // This is the authoritative post-collapse, post-commit set. Callers
+        // must use it for follow-up work (not the pre-sink candidate batch),
+        // otherwise they can race an absent row or analyze a suppressed alert.
+        return persistedAlerts
     }
 
     // MARK: - Stats

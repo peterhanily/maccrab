@@ -1102,17 +1102,6 @@ public actor EventStore {
            filter.shouldDrop(event: event) {
             return false
         }
-        guard let stmt = insertStmt else {
-            // An inherited pressure-bound store deliberately opens without a
-            // prepared writer. Preserve the authoritative typed admission
-            // cause instead of masking it as a generic prepare failure. This
-            // branch is off the normal insert hot path.
-            if storageAdmission?.growthBlocked == true {
-                try admitStorageWrite(estimatedTransactionBytes: 0)
-            }
-            throw EventStoreError.prepareFailed("Insert statement not prepared")
-        }
-
         // Sanitize the command line to redact secrets (passwords, tokens, API keys)
         // before persisting to the database.
         let sanitizedCommandLine = CommandSanitizer.sanitize(event.process.commandLine)
@@ -1218,6 +1207,18 @@ public actor EventStore {
         )
         try beforeWrite(mutationBytes)
 
+        // Storage admission can synchronously recover a sticky pressure latch
+        // by calling reopenAfterStorageRecovery(). That path finalizes the old
+        // cached statement and replaces the SQLite handle. Acquire the statement
+        // only after admission so no local pointer can outlive that reopen.
+        guard let stmt = insertStmt else {
+            // admitStorageWrite performs one bounded, full-estimate secondary
+            // recovery if a reopen races back into shed-only mode. Reaching this
+            // guard therefore means no authoritative writer could be restored.
+            throw EventStoreError.prepareFailed(
+                "Insert statement not prepared after storage admission"
+            )
+        }
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
 
@@ -4007,6 +4008,29 @@ public actor EventStore {
         storageAdmission = admission
         if recovered || (writerSetupPending && !admission.growthBlocked) {
             try reopenAfterStorageRecovery()
+            // Space can disappear between the successful probe and the fresh
+            // open. A shed-only reopen has no insert statement. Retry admission
+            // once with the SAME full transaction estimate; a successful retry
+            // reopens again and the caller acquires only the new statement.
+            if !isReadOnly, insertStmt == nil {
+                guard var secondary = storageAdmission else { return }
+                do {
+                    try secondary.admitWrite(
+                        estimatedTransactionBytes: estimatedTransactionBytes,
+                        on: db
+                    )
+                } catch {
+                    storageAdmission = secondary
+                    throw error
+                }
+                storageAdmission = secondary
+                if !secondary.growthBlocked {
+                    try reopenAfterStorageRecovery()
+                }
+                if insertStmt == nil, let failure = storageAdmission?.latchedFailure {
+                    throw failure
+                }
+            }
         }
     }
 

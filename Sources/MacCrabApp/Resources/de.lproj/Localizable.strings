@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google-AI-API-Schlüssel";
 "settings.llmGeminiModel" = "Modell";
 "settings.llmInfo" = "Funktionsweise";
-"settings.llmInfoDesc" = "Das KI-Backend treibt vier Funktionen an: Bedrohungssuche in natürlicher Sprache, Untersuchungszusammenfassungen, Generierung von Erkennungsregeln und Verteidigungsempfehlungen.";
+"settings.llmInfoDesc" = "Das KI-Backend kann strukturierte Alarmuntersuchungen, Kampagnenzusammenfassungen, Abwehrempfehlungen und die Verfeinerung der Paketabsicht ergänzen. Modellausgaben sind nur beratend und führen niemals eine Aktion aus.";
 "settings.llmLocalPrivacy" = "Läuft lokal. Keine Daten verlassen Ihren Rechner.";
 "settings.llmMistralHelp" = "API-Schlüssel erhalten Sie unter console.mistral.ai";
 "settings.llmMistralKey" = "Mistral-API-Schlüssel";

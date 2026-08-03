@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google AI API 金鑰";
 "settings.llmGeminiModel" = "模型";
 "settings.llmInfo" = "運作方式";
-"settings.llmInfoDesc" = "AI 後端提供四項功能：自然語言威脅獵捕、調查摘要、偵測規則產生與防禦建議。";
+"settings.llmInfoDesc" = "AI 後端可提供結構化警示調查、攻擊活動摘要、防禦建議與套件意圖細化。模型輸出僅供參考，絕不會執行任何動作。";
 "settings.llmLocalPrivacy" = "在本機執行。資料不會離開您的電腦。";
 "settings.llmMistralHelp" = "從 console.mistral.ai 取得 API 金鑰";
 "settings.llmMistralKey" = "Mistral API 金鑰";

@@ -23,6 +23,8 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/ci-local.sh
     scripts/release.sh
     scripts/build-release.sh
+    scripts/prepare-dmg-payload.sh
+    scripts/install.sh
     scripts/release-env.sh
     scripts/_release_env.py
     scripts/export-release-source.py
@@ -628,6 +630,7 @@ check "Architectural audit (deterministic)" \
     env MACCRAB_AUDIT_SCOPE=deterministic ./scripts/pre-release-audit.sh
 check "Release dependency provenance" ./scripts/check-release-dependencies.sh
 check "Release supply-chain fixtures" ./scripts/test-release-supply-chain.sh
+check "Installer/DMG payload fixtures" ./scripts/test-install-payload.sh
 check "SQLCipher provenance fixtures" ./scripts/test-sqlcipher-provenance.sh
 
 # Publication gate. `main` is public and dev squash-merges into it, so

@@ -612,7 +612,7 @@
 "settings.llmGeminiKey" = "Google AI API-nyckel";
 "settings.llmGeminiModel" = "Modell";
 "settings.llmInfo" = "Så fungerar det";
-"settings.llmInfoDesc" = "AI-backenden driver fyra funktioner: hotjakt på naturligt språk, utredningssammanfattningar, generering av detekteringsregler och försvarsrekommendationer.";
+"settings.llmInfoDesc" = "AI-backenden kan lägga till strukturerade larmutredningar, kampanjsammanfattningar, försvarsrekommendationer och förfining av paketavsikt. Modellens utdata är rådgivande och utför aldrig någon åtgärd.";
 "settings.llmLocalPrivacy" = "Körs lokalt. Inga data lämnar din dator.";
 "settings.llmMistralHelp" = "Skaffa en API-nyckel på console.mistral.ai";
 "settings.llmMistralKey" = "Mistral API-nyckel";

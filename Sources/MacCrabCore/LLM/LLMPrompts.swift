@@ -34,6 +34,9 @@ public enum LLMPrompts {
         4. Severity values: 'critical', 'high', 'medium', 'low', 'informational'.
         5. NEVER use DELETE, UPDATE, INSERT, DROP, ALTER, CREATE, or semicolons.
         6. Query alerts table for alerts/detections/threats. Query events for processes/files/network.
+        7. Use exactly one store per query: never join events/events_fts with alerts.
+        8. Do not use WITH, recursive CTEs, ATTACH, PRAGMA, or LIMIT/OFFSET expressions.
+        9. LIMIT and OFFSET must be non-negative integer literals; LIMIT must not exceed 500.
 
         EXAMPLES:
         User: "show critical alerts from the last hour"

@@ -34,10 +34,27 @@ public actor AlertDeduplicator {
         let firstSeen: Date
     }
 
+    struct EmissionReservation: Sendable {
+        fileprivate let id: UUID
+        fileprivate let ruleId: String
+        fileprivate let ruleKey: String
+        fileprivate let evidenceKey: String?
+        fileprivate let evidenceSeverity: Severity
+    }
+
+    enum EmissionReservationResult: Sendable {
+        case suppressed
+        case reserved(EmissionReservation)
+    }
+
     // MARK: Properties
 
     /// Active deduplication entries keyed by "\(ruleId):\(processPath)".
     private var entries: [String: DeduplicationEntry] = [:]
+    /// Fresh alerts are reserved before their SQLite write. Pending keys suppress
+    /// concurrent duplicates, but do not enter the committed window or emitted
+    /// statistics until the store commit succeeds.
+    private var pendingRuleReservations: [String: UUID] = [:]
 
     /// Duration (in seconds) after an alert emission during which duplicates
     /// are suppressed. Defaults to 3600 (one hour).
@@ -65,6 +82,109 @@ public actor AlertDeduplicator {
 
     // MARK: - Public API
 
+    /// Atomically reserve both the per-rule key and (when supplied) the exact
+    /// same-evidence key. The caller must commit after durable persistence or
+    /// roll back on failure. This prevents a failed AlertStore write from
+    /// poisoning either deduplication window.
+    func reserveEmission(
+        ruleId: String,
+        processPath: String,
+        eventId: String? = nil,
+        tactics: String? = nil,
+        severity: Severity
+    ) -> EmissionReservationResult {
+        let ruleKey = makeKey(ruleId: ruleId, processPath: processPath)
+        let now = Date()
+        if pendingRuleReservations[ruleKey] != nil {
+            ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].suppressed += 1
+            return .suppressed
+        }
+        if let entry = entries[ruleKey],
+           now.timeIntervalSince(entry.lastAlertTime) < suppressionWindow {
+            entries[ruleKey]?.suppressedCount += 1
+            ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].suppressed += 1
+            return .suppressed
+        }
+
+        let evidenceKey: String?
+        if let eventId, !eventId.isEmpty, let tactics, !tactics.isEmpty {
+            let key = "\(eventId)|\(tactics)"
+            let committed = evidenceEntries[key].flatMap { entry in
+                now.timeIntervalSince(entry.seen) < Self.evidenceWindow
+                    ? entry.severity : nil
+            }
+            let pending = pendingEvidenceReservations[key]?.values.max()
+            if let watermark = [committed, pending].compactMap({ $0 }).max(),
+               severity <= watermark {
+                return .suppressed
+            }
+            evidenceKey = key
+        } else {
+            evidenceKey = nil
+        }
+
+        let id = UUID()
+        pendingRuleReservations[ruleKey] = id
+        if let evidenceKey {
+            pendingEvidenceReservations[evidenceKey, default: [:]][id] = severity
+        }
+        return .reserved(EmissionReservation(
+            id: id,
+            ruleId: ruleId,
+            ruleKey: ruleKey,
+            evidenceKey: evidenceKey,
+            evidenceSeverity: severity
+        ))
+    }
+
+    func commitEmission(_ reservation: EmissionReservation) {
+        guard pendingRuleReservations[reservation.ruleKey] == reservation.id else {
+            return
+        }
+        pendingRuleReservations.removeValue(forKey: reservation.ruleKey)
+        let now = Date()
+        let firstSeen = entries[reservation.ruleKey]?.firstSeen ?? now
+        entries[reservation.ruleKey] = DeduplicationEntry(
+            lastAlertTime: now,
+            suppressedCount: 0,
+            firstSeen: firstSeen
+        )
+        ruleStats[reservation.ruleId, default: (emitted: 0, suppressed: 0)].emitted += 1
+
+        if let evidenceKey = reservation.evidenceKey {
+            pendingEvidenceReservations[evidenceKey]?.removeValue(forKey: reservation.id)
+            if pendingEvidenceReservations[evidenceKey]?.isEmpty == true {
+                pendingEvidenceReservations.removeValue(forKey: evidenceKey)
+            }
+            if let existing = evidenceEntries[evidenceKey],
+               now.timeIntervalSince(existing.seen) < Self.evidenceWindow,
+               existing.severity >= reservation.evidenceSeverity {
+                // A stronger concurrent reservation committed first. Preserve its
+                // watermark even though this already-reserved weaker row also
+                // completed its durable write.
+            } else {
+                evidenceEntries[evidenceKey] = (reservation.evidenceSeverity, now)
+            }
+        }
+        if entries.count > maxEntries {
+            sweep()
+            evictOldestIfNeeded()
+        }
+        if evidenceEntries.count > maxEvidenceEntries { sweepEvidence(now: now) }
+    }
+
+    func rollbackEmission(_ reservation: EmissionReservation) {
+        if pendingRuleReservations[reservation.ruleKey] == reservation.id {
+            pendingRuleReservations.removeValue(forKey: reservation.ruleKey)
+        }
+        if let evidenceKey = reservation.evidenceKey {
+            pendingEvidenceReservations[evidenceKey]?.removeValue(forKey: reservation.id)
+            if pendingEvidenceReservations[evidenceKey]?.isEmpty == true {
+                pendingEvidenceReservations.removeValue(forKey: evidenceKey)
+            }
+        }
+    }
+
     /// Determines whether an alert for the given rule and process should be
     /// suppressed.
     ///
@@ -82,6 +202,11 @@ public actor AlertDeduplicator {
     public func shouldSuppress(ruleId: String, processPath: String) -> Bool {
         let key = makeKey(ruleId: ruleId, processPath: processPath)
         let now = Date()
+
+        if pendingRuleReservations[key] != nil {
+            ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].suppressed += 1
+            return true
+        }
 
         guard let entry = entries[key] else {
             // Never seen before -- do not suppress.
@@ -120,6 +245,11 @@ public actor AlertDeduplicator {
     public func shouldSuppressAndRecord(ruleId: String, processPath: String) -> Bool {
         let key = makeKey(ruleId: ruleId, processPath: processPath)
         let now = Date()
+
+        if pendingRuleReservations[key] != nil {
+            ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].suppressed += 1
+            return true
+        }
 
         if let entry = entries[key] {
             let elapsed = now.timeIntervalSince(entry.lastAlertTime)
@@ -212,6 +342,8 @@ public actor AlertDeduplicator {
         // so a reset must clear it too or a stale watermark would keep
         // collapsing alerts after the operator asked for a clean slate.
         evidenceEntries.removeAll()
+        pendingRuleReservations.removeAll()
+        pendingEvidenceReservations.removeAll()
         logger.info("Deduplication state reset (\(count) entries cleared)")
     }
 
@@ -267,6 +399,7 @@ public actor AlertDeduplicator {
     ///     silently hiding a stronger later finding behind an earlier weak one
     ///     is exactly the failure this must not introduce.
     private var evidenceEntries: [String: (severity: Severity, seen: Date)] = [:]
+    private var pendingEvidenceReservations: [String: [UUID: Severity]] = [:]
 
     /// All alerts for one event land within milliseconds on the direct path and
     /// within a batch tick on the engine path; 120 s is generous headroom and

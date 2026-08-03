@@ -59,9 +59,19 @@ public final class ESSeqTracker: @unchecked Sendable {
 
     // MARK: - D4 state (gauges)
 
-    /// Count of callback invocations per event type — the "seen at the callback"
-    /// denominator the D1 flood test measures marker execs against.
+    /// Callback-delivered messages that were either intentionally rejected by
+    /// the pre-worker policy or completed by the retained worker. Messages
+    /// refused at copy/backpressure admission are excluded and counted by the
+    /// worker's separate per-type map.
     private var processedByTypeMap: [UInt32: UInt64] = [:]
+    /// Messages intentionally rejected by the normalizer-equivalent callback
+    /// admission guard before they consume retained-worker capacity. This is a
+    /// policy/filter outcome, not a loss.
+    private var intentionallyFilteredBeforeWorkerByTypeMap: [UInt32: UInt64] = [:]
+    /// Messages for which normalization produced an Event and the worker offered
+    /// that Event to the collector-local AsyncStream. The separate stream-yield
+    /// telemetry records whether the offer enqueued or evicted an older event.
+    private var normalizedYieldedByTypeMap: [UInt32: UInt64] = [:]
     /// Yield results: `.dropped` (userspace backlog full → oldest evicted) vs
     /// everything else. Only counted when an event was actually yielded.
     private var yieldDroppedCount: UInt64 = 0
@@ -115,7 +125,7 @@ public final class ESSeqTracker: @unchecked Sendable {
 
     // MARK: - D4 record (hot path — after normalise + yield)
 
-    /// Record the per-type processed count, the handler wall-time (nanoseconds,
+    /// Record the per-type retained-worker-completed count, handler wall-time (nanoseconds,
     /// bucketed into microseconds), and the yield outcome. `yielded == false`
     /// (unhandled event type, no yield) contributes to the processed count and
     /// latency but not the yield tallies.
@@ -129,20 +139,22 @@ public final class ESSeqTracker: @unchecked Sendable {
         processedByTypeMap[eventType, default: 0] &+= 1
         recordLatencyLocked(micros: elapsedNanos / 1000)
         if yielded {
+            normalizedYieldedByTypeMap[eventType, default: 0] &+= 1
             if yieldDropped { yieldDroppedCount &+= 1 } else { yieldEnqueuedCount &+= 1 }
         }
     }
 
     /// Record a message intentionally rejected at callback admission before it
     /// enters the retained-message worker. It still belongs in
-    /// `es_processed_by_type` (the denominator used with copy-backpressure
-    /// drops), but it must not add a near-zero sample to the worker end-to-end
+    /// `es_processed_by_type` (the surviving side of copy-backpressure
+    /// admission), but it must not add a near-zero sample to the worker end-to-end
     /// latency histogram. OPEN/CLOSE noise is usually >99% of this queue; mixing
     /// those callback-only samples into p99 would make a badly backlogged worker
     /// look healthy precisely when the latency gauge is needed.
     public func recordFilteredBeforeWorker(eventType: UInt32) {
         lock.lock()
         processedByTypeMap[eventType, default: 0] &+= 1
+        intentionallyFilteredBeforeWorkerByTypeMap[eventType, default: 0] &+= 1
         lock.unlock()
     }
 
@@ -175,6 +187,8 @@ public final class ESSeqTracker: @unchecked Sendable {
         globalDroppedCount = 0
 
         processedByTypeMap.removeAll(keepingCapacity: true)
+        intentionallyFilteredBeforeWorkerByTypeMap.removeAll(keepingCapacity: true)
+        normalizedYieldedByTypeMap.removeAll(keepingCapacity: true)
         for i in 0..<latencyBuckets.count { latencyBuckets[i] = 0 }
         latencyTotalCount = 0
         yieldDroppedCount = 0
@@ -197,11 +211,28 @@ public final class ESSeqTracker: @unchecked Sendable {
         return globalDroppedCount
     }
 
-    /// Per-event-type processed (seen-at-callback) counts (D4).
+    /// Per-event-type callback messages accounted after copy admission (D4):
+    /// retained-worker completions plus intentional pre-worker policy rejects.
     public func processedByType() -> [UInt32: UInt64] {
         lock.lock()
         defer { lock.unlock() }
         return processedByTypeMap
+    }
+
+    /// Per-event-type count of intentional callback-admission filtering. These
+    /// messages never entered the retained worker and must not be read as drops.
+    public func intentionallyFilteredBeforeWorkerByType() -> [UInt32: UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return intentionallyFilteredBeforeWorkerByTypeMap
+    }
+
+    /// Per-event-type count of normalized Events offered to the collector-local
+    /// stream, regardless of that bounded stream's exact yield result.
+    public func normalizedYieldedByType() -> [UInt32: UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return normalizedYieldedByTypeMap
     }
 
     /// p99-estimate of handler wall-time in microseconds (D4). Returns the

@@ -138,6 +138,47 @@ struct BatchedEventWriterTests {
         }
     }
 
+    private final class InsertGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entered = false
+        private let release = DispatchSemaphore(value: 0)
+
+        func markEntered() {
+            lock.lock()
+            entered = true
+            lock.unlock()
+        }
+
+        func hasEntered() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return entered
+        }
+
+        func waitForRelease() { release.wait() }
+        func releaseInsert() { release.signal() }
+    }
+
+    /// Blocks inside the store actor after the writer has detached its batch.
+    /// The writer actor itself remains available at the `await`, which lets the
+    /// test inspect the exact heartbeat state during the insert.
+    private actor SuspendedInserter: EventBatchInserting {
+        let gate: InsertGate
+
+        init(gate: InsertGate) { self.gate = gate }
+
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
+            gate.markEntered()
+            gate.waitForRelease()
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
+        }
+    }
+
     private func tempStore() throws -> (EventStore, URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("bw-\(UUID().uuidString)")
@@ -166,10 +207,20 @@ struct BatchedEventWriterTests {
         // shutdown's, so this proves the shutdown path alone persists the batch.
         let writer = BatchedEventWriter(store: store, flushThreshold: 100_000, hardCap: 100_000)
         for i in 0..<100 { await writer.enqueue(makeEvent(i)) }
+        let queued = await writer.telemetrySnapshot()
+        #expect(queued.bufferDepth == 100)
+        #expect(queued.persistedCount == 0)
+        #expect(queued.retriedCount == 0)
+        #expect(queued.droppedCount == 0)
+        #expect(queued.inFlightDepth == 0)
         #expect(try await store.count() == 0, "nothing flushed before shutdown (batched, not inline)")
         await writer.shutdown()
         #expect(try await store.count() == 100, "shutdown flushes the partial batch")
         #expect(writer.droppedCount == 0)
+        let drained = await writer.telemetrySnapshot()
+        #expect(drained.bufferDepth == 0)
+        #expect(drained.persistedCount == 100)
+        #expect(drained.inFlightDepth == 0)
     }
 
     @Test("crossing the flush threshold drains automatically off the caller")
@@ -183,6 +234,132 @@ struct BatchedEventWriterTests {
         let n = try await waitForCount(store, target: 500)
         #expect(n == 500, "auto-drain persisted all events (got \(n))")
         #expect(writer.droppedCount == 0)
+    }
+
+    @Test("detached batch remains visible as in-flight while store insert is suspended")
+    func inFlightDepthClosesReconciliationGap() async throws {
+        let gate = InsertGate()
+        let writer = BatchedEventWriter(
+            store: SuspendedInserter(gate: gate),
+            flushThreshold: 2,
+            hardCap: 100
+        )
+        await writer.enqueue(makeEvent(0))
+        await writer.enqueue(makeEvent(1))
+
+        for _ in 0..<100 where !gate.hasEntered() {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(gate.hasEntered())
+        let suspended = await writer.telemetrySnapshot()
+        #expect(suspended.bufferDepth == 0)
+        #expect(suspended.inFlightDepth == 2)
+        #expect(suspended.persistedCount == 0)
+        #expect(suspended.droppedCount == 0)
+
+        gate.releaseInsert()
+        var completed = await writer.telemetrySnapshot()
+        for _ in 0..<100 where completed.inFlightDepth != 0 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            completed = await writer.telemetrySnapshot()
+        }
+        #expect(completed.bufferDepth == 0)
+        #expect(completed.inFlightDepth == 0)
+        #expect(completed.persistedCount == 2)
+        await writer.shutdown()
+    }
+
+    @Test("In-flight rows are accounted before any error-reporting suspension")
+    func inFlightFailureAccountingDriftGuard() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/BatchedEventWriter.swift"
+            ),
+            encoding: .utf8
+        )
+        // Every reporting hop must follow both terminal row accounting and the
+        // gauge clear in its catch branch. This is intentionally a source guard:
+        // StorageErrorTracker.shared is a process singleton and cannot be paused
+        // safely in a parallel test run.
+        let partialDrop = try #require(source.range(
+            of: "drops.add(suffix.count)"
+        ))
+        let partialClear = try #require(source.range(
+            of: "inFlightDepth = 0",
+            range: partialDrop.upperBound..<source.endIndex
+        ))
+        let partialReport = try #require(source.range(
+            of: "await StorageErrorTracker.shared.recordEventError(\n                    partial.underlyingError",
+            range: partialClear.upperBound..<source.endIndex
+        ))
+        #expect(partialDrop.lowerBound < partialClear.lowerBound)
+        #expect(partialClear.lowerBound < partialReport.lowerBound)
+
+        let transientCatch = try #require(source.range(
+            of: "catch let e as EventStoreError where isTransient(e)"
+        ))
+        let transientDrop = try #require(source.range(
+            of: "drops.add(batch.count)",
+            range: transientCatch.lowerBound..<source.endIndex
+        ))
+        let transientClear = try #require(source.range(
+            of: "inFlightDepth = 0",
+            range: transientDrop.upperBound..<source.endIndex
+        ))
+        let transientReport = try #require(source.range(
+            of: "await StorageErrorTracker.shared.recordEventError(e)",
+            range: transientClear.upperBound..<source.endIndex
+        ))
+        #expect(transientDrop.lowerBound < transientClear.lowerBound)
+        #expect(transientClear.lowerBound < transientReport.lowerBound)
+
+        let permanentComment = try #require(source.range(
+            of: "// PERMANENT (disk full, corruption, encoding)"
+        ))
+        let permanentDrop = try #require(source.range(
+            of: "drops.add(batch.count)",
+            range: permanentComment.lowerBound..<source.endIndex
+        ))
+        let permanentClear = try #require(source.range(
+            of: "inFlightDepth = 0",
+            range: permanentDrop.upperBound..<source.endIndex
+        ))
+        let permanentReport = try #require(source.range(
+            of: "await StorageErrorTracker.shared.recordEventError(error)",
+            range: permanentClear.upperBound..<source.endIndex
+        ))
+        #expect(permanentDrop.lowerBound < permanentClear.lowerBound)
+        #expect(permanentClear.lowerBound < permanentReport.lowerBound)
+    }
+
+    @Test("insert-filter decisions remain distinct from writer persistence and sheds")
+    func insertFilterLedgerIsDistinct() async throws {
+        let (store, dir) = try tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await store.setInsertFilter(EventInsertFilter(processNames: ["bw0"]))
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: 100_000
+        )
+
+        await writer.enqueue(makeEvent(0)) // policy-filtered by process name
+        await writer.enqueue(makeEvent(1)) // persisted
+        await writer.shutdown()
+
+        let filter = try #require(await store.insertFilterCounters())
+        let telemetry = await writer.telemetrySnapshot()
+        #expect(filter.dropped == 1)
+        #expect(filter.passed == 1)
+        #expect(telemetry.persistedCount == 1)
+        #expect(telemetry.droppedCount == 0,
+                "intentional insert filtering is not a storage writer shed")
+        #expect(telemetry.bufferDepth == 0)
+        #expect(telemetry.inFlightDepth == 0)
     }
 
     @Test("hard cap drops the NEWEST events and counts them distinctly")

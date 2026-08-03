@@ -29,7 +29,7 @@ public enum SystemExtensionState: Equatable, Sendable {
 /// the delegate result handler so a successful deactivation doesn't
 /// flip the badge back to "Active" (the v1.9.0 audit-fix; pre-fix
 /// every `.completed` result was treated as activation).
-public enum SystemExtensionIntent: Sendable {
+public enum SystemExtensionIntent: Equatable, Sendable {
     case activate
     case deactivate
 }
@@ -38,6 +38,7 @@ public enum SystemExtensionIntent: Sendable {
 public final class SystemExtensionManager: NSObject, ObservableObject {
 
     public static let extensionIdentifier = "com.maccrab.agent"
+    static let removalPendingPreference = "systemExtensionRemovalPending"
     private let logger = Logger(subsystem: "com.maccrab.app", category: "sysext-manager")
 
     @Published public private(set) var state: SystemExtensionState = .unknown
@@ -48,25 +49,104 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
     /// machine without going through the OS framework.
     private(set) var pendingIntent: SystemExtensionIntent?
 
+    /// Explicit removal outranks the app's automatic cold-start activation.
+    /// OSSystemExtensionManager does not offer cancellation, so a removal that
+    /// arrives while activation is in flight is submitted immediately after
+    /// that request settles.  A Bool deliberately coalesces repeated deep-link
+    /// and button clicks into one OS request.
+    private(set) var deactivationQueued = false
+
+    /// Test seam for proving request ordering without asking sysextd to mutate
+    /// the running host. Production uses OSSystemExtensionManager directly.
+    private let requestSubmitter: ((OSSystemExtensionRequest) -> Void)?
+    private let preferences: UserDefaults
+
+    var removalPending: Bool {
+        preferences.bool(forKey: Self.removalPendingPreference)
+    }
+
+    /// Automatic recovery must stand down while an explicit removal is queued
+    /// or in flight, but that process-local intent is not durable proof that
+    /// macOS accepted the removal. The persisted latch is set only from a
+    /// successful deactivation result below.
+    var automaticActivationSuppressed: Bool {
+        removalPending || deactivationQueued || pendingIntent == .deactivate
+    }
+
     public override init() {
+        requestSubmitter = nil
+        preferences = .standard
         super.init()
     }
 
-    /// Kick off activation. Safe to call multiple times — sysextd
-    /// dedups and either returns an already-active extension or replaces
-    /// an older build with the currently-bundled one.
-    public func activate() {
-        logger.info("Submitting activation request for \(Self.extensionIdentifier, privacy: .public)")
-        pendingIntent = .activate
+    init(
+        preferences: UserDefaults,
+        requestSubmitter: @escaping (OSSystemExtensionRequest) -> Void
+    ) {
+        self.requestSubmitter = requestSubmitter
+        self.preferences = preferences
+        super.init()
+    }
+
+    /// Reserve the single request slot before constructing an OS request.
+    /// Window appearance, first-run setup and the heartbeat watchdog can all
+    /// converge during startup; submitting each one produced duplicate system
+    /// authorization UI. MainActor serialization makes this a process-local
+    /// in-flight gate without changing the semantics of a later explicit
+    /// reactivation after the current request settles.
+    @discardableResult
+    func beginRequest(intent: SystemExtensionIntent) -> Bool {
+        guard pendingIntent == nil else { return false }
+        pendingIntent = intent
         state = .activating
-        statusMessage = "Requesting extension activation…"
+        switch intent {
+        case .activate:
+            statusMessage = "Requesting extension activation…"
+        case .deactivate:
+            statusMessage = "Deactivating extension…"
+        }
+        return true
+    }
+
+    /// Explicit user activation (Welcome/Enable/Repair). This is the only path
+    /// that clears a persisted removal latch, and only after it successfully
+    /// reserves the request slot. A click received while deactivation is in
+    /// flight must not erase an accepted machine-removal choice without
+    /// actually submitting the requested reversal.
+    public func activate() {
+        submitActivation(explicit: true)
+    }
+
+    /// Automatic cold-launch/watchdog activation. An accepted removal —
+    /// including one waiting for reboot — persists an opt-out so relaunch or a
+    /// stale heartbeat cannot silently undo the operator's explicit intent.
+    /// A merely queued/in-flight removal suppresses only this process.
+    public func activateAutomatically() {
+        guard !automaticActivationSuppressed else {
+            logger.notice("Skipping automatic activation because extension removal is pending/selected")
+            statusMessage = "Automatic activation paused after extension removal request."
+            return
+        }
+        submitActivation(explicit: false)
+    }
+
+    private func submitActivation(explicit: Bool) {
+        guard beginRequest(intent: .activate) else {
+            logger.info("Skipping duplicate activation request while another system-extension request is in flight")
+            return
+        }
+        if explicit {
+            preferences.set(false, forKey: Self.removalPendingPreference)
+            deactivationQueued = false
+        }
+        logger.info("Submitting activation request for \(Self.extensionIdentifier, privacy: .public)")
 
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: Self.extensionIdentifier,
             queue: .main
         )
         request.delegate = self
-        OSSystemExtensionManager.shared.submitRequest(request)
+        submit(request)
     }
 
     /// Trigger a deactivation — the dashboard's "Remove System
@@ -74,17 +154,24 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
     /// the result handler maps `.completed` to `.notActivated` so the
     /// status pill doesn't lie.
     public func deactivate() {
+        if pendingIntent == .activate {
+            deactivationQueued = true
+            statusMessage = "Extension removal queued behind the current activation request…"
+            logger.notice("Queueing explicit deactivation behind in-flight activation")
+            return
+        }
+        guard beginRequest(intent: .deactivate) else {
+            logger.info("Skipping duplicate deactivation request while another system-extension request is in flight")
+            return
+        }
         logger.info("Submitting deactivation request")
-        pendingIntent = .deactivate
-        state = .activating
-        statusMessage = "Deactivating extension…"
 
         let request = OSSystemExtensionRequest.deactivationRequest(
             forExtensionWithIdentifier: Self.extensionIdentifier,
             queue: .main
         )
         request.delegate = self
-        OSSystemExtensionManager.shared.submitRequest(request)
+        submit(request)
     }
 
     /// Apply a request result against a known intent. Pulled out of
@@ -97,12 +184,14 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
             state = .activated
             statusMessage = "Endpoint Security extension is active."
         case (.deactivate, .completed):
+            preferences.set(true, forKey: Self.removalPendingPreference)
             state = .notActivated
             statusMessage = "Endpoint Security extension removed."
         case (.activate, .willCompleteAfterReboot):
             state = .awaitingApproval
             statusMessage = "Extension will finish activating after reboot."
         case (.deactivate, .willCompleteAfterReboot):
+            preferences.set(true, forKey: Self.removalPendingPreference)
             state = .awaitingApproval
             statusMessage = "Extension will finish deactivating after reboot."
         @unknown default:
@@ -116,11 +205,20 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
             statusMessage = "Operation completed with status \(result.rawValue)."
         }
         pendingIntent = nil
+        submitQueuedDeactivation(after: intent)
     }
 
     /// Apply a request failure against a known intent. Same testable
     /// shape as `applyResult`.
     func applyFailure(intent: SystemExtensionIntent, error: Error) {
+        if intent == .deactivate {
+            // Cancellation and rejection are both delivered as failures. Do
+            // not leave transient queue state suppressing the watchdog after
+            // macOS declined this request. A durable latch, if present, came
+            // from an earlier accepted removal and must not be undone by a
+            // later redundant request failing.
+            deactivationQueued = false
+        }
         state = .failed(error.localizedDescription)
         let prefix: String
         switch intent {
@@ -129,6 +227,23 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
         }
         statusMessage = "\(prefix): \(error.localizedDescription)"
         pendingIntent = nil
+        submitQueuedDeactivation(after: intent)
+    }
+
+    private func submit(_ request: OSSystemExtensionRequest) {
+        if let requestSubmitter {
+            requestSubmitter(request)
+        } else {
+            OSSystemExtensionManager.shared.submitRequest(request)
+        }
+    }
+
+    private func submitQueuedDeactivation(after settledIntent: SystemExtensionIntent) {
+        guard settledIntent == .activate, deactivationQueued else { return }
+        deactivationQueued = false
+        // `pendingIntent` was cleared by the result/failure handler above, so
+        // this reserves the one request slot and submits exactly once.
+        deactivate()
     }
 }
 

@@ -1161,7 +1161,7 @@ struct SettingsView: View {
                 if llmEnabled {
                     GroupBox(String(localized: "settings.llmInfo", defaultValue: "How it works")) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(String(localized: "settings.llmInfoDesc", defaultValue: "The AI backend enhances analysis across alert triage, campaign investigation, behavioral and sequence analysis, natural-language threat hunting, defense recommendations, and report narratives. All output is advisory — nothing is ever auto-executed."))
+                            Text(String(localized: "settings.llmInfoDesc", defaultValue: "The AI backend can add structured alert investigations, campaign summaries, defense recommendations, and package-intent refinement. Model output is advisory and never executes an action."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
