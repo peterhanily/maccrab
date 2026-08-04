@@ -49,6 +49,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/run-release-python.sh
     scripts/notarize.sh
     scripts/check-rules-trust-anchor.sh
+    scripts/_appcast_xml.py
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh

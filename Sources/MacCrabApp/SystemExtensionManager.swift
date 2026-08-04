@@ -73,6 +73,17 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
         removalPending || deactivationQueued || pendingIntent == .deactivate
     }
 
+    /// True when protection is off AND the watchdog is structurally unable to
+    /// restore it, so only a human click will. Distinct from a transient
+    /// in-flight removal, which resolves on its own — the UI must be able to
+    /// tell "wait a moment" apart from "nothing will happen until you act".
+    @Published public private(set) var needsExplicitReactivation = false
+
+    /// The latched-off condition is re-evaluated on every watchdog tick (every
+    /// few minutes, indefinitely). Report it loudly once per occurrence rather
+    /// than emitting a fault on every tick.
+    private var hasReportedLatchedActivation = false
+
     public override init() {
         requestSubmitter = nil
         preferences = .standard
@@ -123,8 +134,32 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
     /// A merely queued/in-flight removal suppresses only this process.
     public func activateAutomatically() {
         guard !automaticActivationSuppressed else {
-            logger.notice("Skipping automatic activation because extension removal is pending/selected")
-            statusMessage = "Automatic activation paused after extension removal request."
+            if removalPending {
+                // DURABLE refusal: only an explicit Enable/Repair click clears
+                // this latch, so the engine is down and will stay down until a
+                // human acts. This used to be indistinguishable from the
+                // transient case below — one `notice`, no state change — and on
+                // one host the app ran for nine hours logging it every five
+                // minutes while the Mac had NO protection at all and the
+                // operator believed a qualification run was under way. Refusing
+                // is correct; refusing quietly is not.
+                needsExplicitReactivation = true
+                state = .notActivated
+                statusMessage = "Protection is OFF — automatic restart is paused because "
+                    + "extension removal was accepted earlier. Click Enable Protection to restore it."
+                if !hasReportedLatchedActivation {
+                    hasReportedLatchedActivation = true
+                    logger.fault("""
+                        Protection is OFF and cannot self-heal: automatic activation is latched off \
+                        by a previously accepted extension removal. An explicit Enable/Repair is required.
+                        """)
+                }
+            } else {
+                // TRANSIENT: a removal is queued or in flight. It settles on its
+                // own, so this genuinely is a routine skip.
+                logger.notice("Skipping automatic activation while an extension removal request is in flight")
+                statusMessage = "Automatic activation paused while the removal request settles."
+            }
             return
         }
         submitActivation(explicit: false)
@@ -139,6 +174,11 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
             preferences.set(false, forKey: Self.removalPendingPreference)
             deactivationQueued = false
         }
+        // An activation is now actually in flight, so the "only you can fix
+        // this" condition no longer holds — and if it recurs later it should be
+        // reported again rather than swallowed by the once-only guard.
+        needsExplicitReactivation = false
+        hasReportedLatchedActivation = false
         logger.info("Submitting activation request for \(Self.extensionIdentifier, privacy: .public)")
 
         let request = OSSystemExtensionRequest.activationRequest(

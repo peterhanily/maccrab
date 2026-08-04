@@ -2725,6 +2725,23 @@ else
     if [[ -z "$repo_secrets" ]]; then
         info "Pass J: gh API returned no secrets (insufficient permission?) — skipping"
     else
+        # "No workflows" and "workflows that reference nothing" are different
+        # findings and must not be reported the same way. With the hosted
+        # workflows deleted, an empty $workflow_refs made `grep -qx` fail for
+        # EVERY stored secret, so the pass would have accused all of them of
+        # being orphaned-but-wireable — advice that makes no sense when there is
+        # nothing to wire them into. Separate the two cases.
+        workflow_count=$(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "${workflow_count:-0}" -eq 0 ]]; then
+            warn "Pass J: GitHub Actions secret(s) are stored but this repo has no workflows at all:"
+            while IFS= read -r secret; do
+                [[ -z "$secret" ]] && continue
+                echo "    $secret"
+            done <<< "$repo_secrets"
+            echo "    CI runs locally (see docs/CI-ARCHITECTURE.md), so these can never be used."
+            echo "    A stored secret no workflow can consume is standing credential exposure:"
+            echo "      gh secret delete <NAME>"
+        else
         workflow_refs=$(grep -rohE 'secrets\.[A-Z_][A-Z0-9_]*' .github/workflows/ 2>/dev/null | sed 's/^secrets\.//' | sort -u)
         passJ_orphans=()
         while IFS= read -r secret; do
@@ -2743,6 +2760,7 @@ else
             echo "    Background: v1.12.6 opsec sweep (Wave 9 / final audit) flagged SPARKLE_ED_PRIVATE_KEY as orphaned."
         else
             ok "Pass J: every stored GH Actions secret is referenced by at least one workflow"
+        fi
         fi
     fi
 fi

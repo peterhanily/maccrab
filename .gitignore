@@ -236,6 +236,13 @@ tmp/
 # Signed rule bundle build artifacts (produced by scripts/publish-rules.sh)
 # -----------------------------------------------------------------------------
 dist/
+# Transient clean-CI state in the project root. Both are removed by ci-local.sh's
+# EXIT trap, but a hard kill (SIGKILL, power loss) can strand them — and an
+# untracked file in the project root fails the release's
+# `git status --untracked-files=all` gate with an error that says nothing about
+# the real cause.
+.maccrab-ci-clean.lock/
+.maccrab-ci-release.*/
 .claude/scheduled_tasks.lock
 # AI-assisted agent worktrees (sub-repos created by the harness)
 .claude/worktrees/

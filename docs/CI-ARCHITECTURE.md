@@ -148,9 +148,20 @@ What MacCrab *does* provide for artifact integrity:
 Re-introducing provenance would require a build host that is *not* the signing
 host. That is a change in topology, not a workflow file.
 
-`pre-release-audit.sh` **PASS J** detects orphan GitHub Actions secrets (stored
-but referenced by no workflow). With no workflows present it has nothing to scan
-and stays clean; if Actions are ever reintroduced, it resumes meaning.
+`pre-release-audit.sh` **PASS J** audits stored GitHub Actions secrets against
+the workflows that could consume them, and reports the two cases separately:
+
+- **No workflows in the repo** (today's state): any stored Actions secret is
+  unusable by construction, so PASS J warns and tells you to delete it. A
+  credential nothing can consume is exposure with no compensating benefit. It is
+  quiet only when zero Actions secrets are stored — which is the case now.
+- **Workflows present**: each stored secret must be referenced by at least one
+  of them; the unreferenced ones are reported as orphans.
+
+An earlier version of this paragraph claimed PASS J "has nothing to scan and
+stays clean" with no workflows. It did not: an empty reference set made the
+per-secret `grep -qx` fail for every secret, so it would have accused all of
+them at once. The code now matches this description.
 
 ## Trust map
 

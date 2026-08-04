@@ -50,6 +50,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/run-release-python.sh
     scripts/notarize.sh
     scripts/check-rules-trust-anchor.sh
+    scripts/_appcast_xml.py
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
@@ -471,6 +472,40 @@ echo "Step 3/5: Building DMG..."
 # each time to force sysextd to replace the active extension).
 BUILD_NUMBER="${VERSION}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
 echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
+
+# ...but `rev-list --count` is monotonic only along ONE ancestry, and nothing
+# used to check that this release shares it. A release cut from a branch that
+# squash-merged the qualified work carries a LOWER count than the candidate that
+# was actually tested, and Sparkle compares CFBundleVersion: every tester on the
+# higher candidate build would be told they are current and never offered the
+# shipped release. Enforce the property the derivation assumes — this commit
+# must descend from every release already published — rather than hoping for it.
+require_canonical_origin
+published_tags=$($GIT_BIN ls-remote --tags origin 'refs/tags/v*' \
+    | $AWK_BIN '{ print $2 }' \
+    | /usr/bin/sed -e 's|^refs/tags/||' -e 's|\^{}$||' \
+    | LC_ALL=C /usr/bin/sort -u)
+while IFS= read -r prior_tag; do
+    [ -n "$prior_tag" ] || continue
+    prior_commit=$($GIT_BIN rev-parse --verify --quiet "refs/tags/${prior_tag}^{commit}" || true)
+    if [ -z "$prior_commit" ]; then
+        echo "ERROR: published tag '$prior_tag' is not present locally, so its ancestry" >&2
+        echo "       cannot be checked. Run: git fetch --tags origin" >&2
+        exit 1
+    fi
+    if ! $GIT_BIN merge-base --is-ancestor "$prior_commit" "$SOURCE_COMMIT"; then
+        echo "ERROR: release source $SOURCE_COMMIT does not descend from published tag" >&2
+        echo "       $prior_tag ($prior_commit)." >&2
+        echo "       CFBundleVersion is derived from the commit count, so this build could" >&2
+        echo "       publish a version BELOW one already released — Sparkle would then never" >&2
+        echo "       offer it to anyone running the higher build. Merge (do NOT squash) the" >&2
+        echo "       published history into this branch and re-cut." >&2
+        exit 1
+    fi
+done <<PUBLISHED_TAGS
+$published_tags
+PUBLISHED_TAGS
+echo "  ✓ Descends from every published release tag (commit count cannot regress)"
 if [ "$VERSION_IS_RC" = "1" ]; then
     RELEASE_BUILD_CHANNEL=dev
 else
@@ -759,28 +794,43 @@ if [ "$TAG_TYPE" != "tag" ] || [ "$TAG_COMMIT" != "$FINAL_COMMIT" ]; then
     exit 1
 fi
 
-# Push THIS commit to the release branch explicitly, and only the new tag.
-# `git push origin main --tags` pushed the local `main` ref — which need not
-# contain HEAD — plus every stray local tag in the repo.
-require_canonical_origin
-$GIT_BIN push origin "HEAD:refs/heads/$RELEASE_BRANCH"
-# The warm branch-push hook runs arbitrary project checks and could itself alter
-# local Git configuration. Re-assert the exact hook immediately before the tag
-# push rather than relying only on the pre-build check above.
-require_canonical_origin
-require_versioned_pre_push_gate
-reject_hidden_release_index_state
-verify_release_executor_blobs "$FINAL_COMMIT"
-if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
-        || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
-        || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ] \
-        || [ -n "$($GIT_BIN status --porcelain --untracked-files=all)" ] \
-        || [ "$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")" != "$EXPECTED_HOOK_BLOB" ] \
-        || [ "$($GIT_BIN rev-parse "refs/tags/v$VERSION")" != "$TAG_OBJECT" ] \
-        || [ "$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")" != "$FINAL_COMMIT" ]; then
-    echo "ERROR: branch-push CI changed HEAD, source, hook, or release tag; refusing tag push" >&2
-    exit 1
-fi
+# ORDER MATTERS — the tag goes to the remote BEFORE the release branch.
+#
+# Only the tag push's pre-push hook runs `ci-local.sh --clean`: the from-scratch
+# build, the full suite, and the release manifest expectations. A branch push
+# gets the warm run. Pushing the branch first therefore published the release
+# metadata commit to a PUBLIC main before the authoritative gate had any chance
+# to fail — and when it did fail, main advertised a `release.json` whose
+# `dmg.url` 404s plus an in-tree cask naming a sha256 for a DMG nobody could
+# download, with no release object to back either.
+#
+# Tag first inverts the failure mode. If the clean gate fails, nothing is public
+# at all. If the gate passes but the later branch push fails, the remote holds a
+# fully verified annotated tag and a main that is one commit behind: recoverable
+# and never misleading, which the old order could not say.
+#
+# Both pushes run arbitrary project checks that could themselves alter local Git
+# configuration, so the full release state is re-asserted immediately before each
+# one. One implementation, called twice — the two copies used to drift.
+assert_release_state_unchanged() {
+    local stage="$1"
+    require_canonical_origin
+    require_versioned_pre_push_gate
+    reject_hidden_release_index_state
+    verify_release_executor_blobs "$FINAL_COMMIT"
+    if [ "$($GIT_BIN rev-parse HEAD)" != "$FINAL_COMMIT" ] \
+            || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ] \
+            || [ "$($GIT_BIN rev-parse "$FINAL_COMMIT^{tree}")" != "$METADATA_TREE" ] \
+            || [ -n "$($GIT_BIN status --porcelain --untracked-files=all)" ] \
+            || [ "$($GIT_BIN hash-object --no-filters "$VERSIONED_PRE_PUSH")" != "$EXPECTED_HOOK_BLOB" ] \
+            || [ "$($GIT_BIN rev-parse "refs/tags/v$VERSION")" != "$TAG_OBJECT" ] \
+            || [ "$($GIT_BIN rev-parse "$TAG_OBJECT^{commit}")" != "$FINAL_COMMIT" ]; then
+        echo "ERROR: HEAD, source, hook, or release tag drifted; refusing $stage" >&2
+        exit 1
+    fi
+}
+
+assert_release_state_unchanged "tag push"
 if [ "$RESPIN" = "1" ]; then
     MACCRAB_RELEASE_EXPECTED_DMG="$DMG_PATH" \
     MACCRAB_RELEASE_EXPECTED_SHA256="$gate_dmg_sha" \
@@ -809,6 +859,21 @@ if [ "$remote_tag_object" != "$TAG_OBJECT" ]; then
     echo "ERROR: remote tag object does not match the locally verified annotated tag" >&2
     echo "  expected: $TAG_OBJECT" >&2
     echo "  remote:   ${remote_tag_object:-<missing>}" >&2
+    exit 1
+fi
+
+# The clean gate has now passed and the verified tag is on the remote. Only now
+# does the release branch move. Push THIS commit explicitly: `git push origin
+# main --tags` pushed the local `main` ref — which need not contain HEAD — plus
+# every stray local tag in the repo.
+assert_release_state_unchanged "branch push"
+$GIT_BIN push origin "HEAD:refs/heads/$RELEASE_BRANCH"
+require_canonical_origin
+remote_branch_commit=$($GIT_BIN ls-remote origin "refs/heads/$RELEASE_BRANCH" | $AWK_BIN 'NR == 1 {print $1}')
+if [ "$remote_branch_commit" != "$FINAL_COMMIT" ]; then
+    echo "ERROR: remote $RELEASE_BRANCH does not point at the verified release commit" >&2
+    echo "  expected: $FINAL_COMMIT" >&2
+    echo "  remote:   ${remote_branch_commit:-<missing>}" >&2
     exit 1
 fi
 

@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (2642 tests in 477 suites)
+swift test                     # Unit tests (4109 tests in 649 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -35,7 +35,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 67 built-in tools plus per-plugin tools contributed by installed forensic plugins (31 on a default install → 98 total) for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools; the `forensics_*` case/plugin meta-tools are **built-in and always present** — incl. `forensics_run_analyzer` / `forensics_enrich` and `list_response_actions` / `set_response_action`; the *conditionally* present tools are the per-plugin ones, `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path`. Underscore-named since v1.19.1 for strict-MCP-client compatibility, with the legacy `forensics.*` dotted names still accepted as aliases)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing **69 built-in tools** plus per-plugin tools contributed by installed forensic plugins (29 on a default install → **98 total**, verified by a live `tools/list`). The 69 is not an estimate: `AgentControl.swift` holds an *exhaustive* static classification — `agentToolCapability` (29 gated: 18 `.response`, 9 `.config`, 2 `.authoring`) plus `agentUngatedStaticTools` (40) — and a name in neither set is denied before dispatch, so a new tool cannot inherit read-only authority by omission for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools; the `forensics_*` case/plugin meta-tools are **built-in and always present** — incl. `forensics_run_analyzer` / `forensics_enrich` and `list_response_actions` / `set_response_action`; the *conditionally* present tools are the per-plugin ones, `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path`. Underscore-named since v1.19.1 for strict-MCP-client compatibility, with the legacy `forensics.*` dotted names still accepted as aliases)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -64,7 +64,7 @@ Rules/            438 single-event Sigma-compatible YAML rules (19 tactic direct
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (2642 tests in 477 suites)
+Tests/            Swift Testing unit tests (4109 tests in 649 suites)
 ```
 
 ## Detection Stack (5 tiers)
@@ -187,7 +187,7 @@ All LLM features degrade gracefully when no backend is configured. Cloud APIs ge
 
 **Safety**: Circuit breaker (3 failures → 5min cooldown), rate limiting (5s min interval), response size cap (50KB), SQL mutation prevention, prompt injection mitigation.
 
-**Files:** `Sources/MacCrabCore/LLM/` (13 files — backend protocol, 5 providers, service orchestrator, alert investigator + its structured schema, cache, sanitizer, prompts, shared types). v1.21.6 deleted `TriageService`, `AgenticInvestigator` and `LLMConsensusService` — ~890 lines with zero call sites in the app, CLI, MCP server or engine.
+**Files:** `Sources/MacCrabCore/LLM/` (17 files — backend protocol, 5 providers, service orchestrator, alert investigator + its structured schema, config persistence, cache, sanitizer, prompts, shared types). v1.21.6 deleted `TriageService`, `AgenticInvestigator` and `LLMConsensusService` — ~890 lines with zero call sites in the app, CLI, MCP server or engine.
 
 ## MCP Server (AI Agent Integration)
 
@@ -195,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (67 built-in + 31 per-plugin = 98 in this build; the per-plugin half varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the built-in `forensics_*` meta-tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . These are statically declared and always present; the plugin-contributed tools are the `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` family. Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
+**Tools exposed (69 built-in + 29 per-plugin = 98 in this build; the per-plugin half varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools, the response-action tools (`list_response_actions` / `set_response_action`), and the built-in `forensics_*` meta-tools — `forensics_run_collector` / `forensics_run_analyzer` / `forensics_enrich` / `forensics_search_artifacts` / `forensics_timeline` / `forensics_explain_case` / `forensics_posture_findings` / … . These are statically declared and always present; the plugin-contributed tools are the `launchd_*` / `tcc_*` / `safari_*` / `mail_*` / `imessage_*` / `*_analyze_path` family. Underscore-named since v1.19.1 for strict-MCP-client compatibility; legacy `forensics.*` dotted names still work as aliases.)
 
 | Tool | Purpose |
 |------|---------|
@@ -284,7 +284,16 @@ Optional `daemon_config.json` in the support directory overrides defaults:
 }
 ```
 
-All keys are optional — missing keys use defaults from `DaemonConfig.swift`. Note `events_max_size_mb` is a whole-**footprint** cap, enforced against `db + -wal + -shm` (`measureDatabaseFootprintMB`): `events.db` also carries `alert_evidence` (its own ~100 MB sub-cap) and the events FTS5 search index (~60 MB on a busy host), so on an active machine the main-file floor is ~300 MB regardless of the events working set, and the footprint adds the ≤64 MB WAL sidecar (+ ~4 MB shm) on top. v1.19.0 raised the default 200 → 350; **v1.21.4 raised 350 → 420** because 350 only accounted for the ~300 MB main-file floor and ignored the WAL sidecar the footprint measurement includes — so the enforcer target `0.8 × 350 = 280 MB` sat *below* the floor and the hourly sweep prune+VACUUMed on every tick without ever converging (perpetual file rewrites that drove RSS churn and CPU). At 420 the target `0.8 × 420 = 336 MB` sits above the floor, so the sweep converges. (The events working set itself is still bounded by `events_hot_tier_minutes`.) Since v1.8 the per-tier retention/size knobs live under `storage{}`; the legacy v1.7 top-level keys (`retention_days`, `max_database_size_mb`) still decode and are folded onto the storage block at load time. Since v1.18 the `tracegraph_*` and `traces_*` caps (previously hardcoded in `DaemonTimers`) are tunable here, and `tracegraph.db`'s global entity/edge substrate gets its own orphan-aware retention sweep (`SQLiteCausalGraphStore.pruneOrphanedGraph` / `pruneOldestGraph`) — before v1.18 nothing pruned `trace_edges` / `trace_entities`, so the file grew unbounded. Forensic-scan (`Cases/`) retention is an app-side setting (`forensics.retentionDays`, default 365d), enforced by `CaseManager.pruneCases` at dashboard launch and via Settings → "Run cleanup now".
+All keys are optional — missing keys use defaults from `DaemonConfig.swift`. Note `events_max_size_mb` is a whole-**footprint** cap, enforced against `db + -wal + -shm` (`measureDatabaseFootprintMB`).
+
+**Since schema v8 (v1.21.6) `events_max_size_mb` is a combined envelope, not an events-only allowance.** New alert evidence moved out of `events.db` into `alerts.db`, so the authoritative per-family caps are computed centrally in `DaemonConfig.swift` and must never be re-derived at a call site:
+- events family = `eventsMaxSizeMB - evidenceMaxSizeMB` = `420 - 100` = **320 MB** (`effectiveEventsFamilyMaxSizeMB`, floored at `minimumEventsSizeMiB`)
+- alerts family = `alertsMaxSizeMB + evidenceMaxSizeMB`
+- their sum is unchanged, so the ownership move did not raise the steady-state disk budget
+
+On **upgrade** the preserved legacy `events.db.alert_evidence` table can still own up to the full evidence allocation, so boot measures it and adds a bounded transition reserve to the events family — never larger than `evidenceMaxSizeMB`, zero on a fresh install, shrinking as legacy rows age out, and retained in full if the measurement fails (fail-safe for evidence availability). Use the transition-aware accessor at every live admission and maintenance site.
+
+Historical note on the 420 default: v1.19.0 raised it 200 → 350; **v1.21.4 raised 350 → 420** because 350 only accounted for the then ~300 MB main-file floor (which at the time included `alert_evidence`) and ignored the ≤64 MB WAL sidecar the footprint measurement includes — so the enforcer target `0.8 × 350 = 280 MB` sat *below* the floor and the hourly sweep prune+VACUUMed on every tick without converging (perpetual rewrites that drove RSS churn and CPU). Moving evidence to `alerts.db` in v1.21.6 lowered the events-family floor further, so the 320 MB family cap now clears it with margin. (The events working set itself is still bounded by `events_hot_tier_minutes`.) Since v1.8 the per-tier retention/size knobs live under `storage{}`; the legacy v1.7 top-level keys (`retention_days`, `max_database_size_mb`) still decode and are folded onto the storage block at load time. Since v1.18 the `tracegraph_*` and `traces_*` caps (previously hardcoded in `DaemonTimers`) are tunable here, and `tracegraph.db`'s global entity/edge substrate gets its own orphan-aware retention sweep (`SQLiteCausalGraphStore.pruneOrphanedGraph` / `pruneOldestGraph`) — before v1.18 nothing pruned `trace_edges` / `trace_entities`, so the file grew unbounded. Forensic-scan (`Cases/`) retention is an app-side setting (`forensics.retentionDays`, default 365d), enforced by `CaseManager.pruneCases` at dashboard launch and via Settings → "Run cleanup now".
 
 ## Data Locations
 

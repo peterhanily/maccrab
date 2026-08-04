@@ -330,4 +330,64 @@ struct SystemExtensionManagerTests {
         manager.applyResult(intent: .deactivate, result: .completed)
         #expect(manager.removalPending)
     }
+
+    @Test("A latched-off watchdog reports protection as OFF and needing a human")
+    func latchedActivationSurfacesAsActionable() {
+        let preferences = isolatedPreferences()
+        var submissions = 0
+        let manager = SystemExtensionManager(
+            preferences: preferences,
+            requestSubmitter: { _ in submissions += 1 }
+        )
+
+        // In flight: the removal has not been accepted yet, so this WILL settle
+        // on its own. The watchdog standing down here is routine and must not
+        // be escalated to the operator.
+        manager.deactivate()
+        manager.activateAutomatically()
+        #expect(!manager.needsExplicitReactivation)
+        #expect(manager.statusMessage.contains("paused"))
+
+        // Accepted: nothing will ever restore protection without a click. The
+        // engine ran for nine hours in exactly this state while the only signal
+        // was a debug log line and `state` still read `.unknown`.
+        manager.applyResult(intent: .deactivate, result: .completed)
+        manager.activateAutomatically()
+        #expect(submissions == 1, "a latched watchdog must not submit")
+        #expect(manager.needsExplicitReactivation)
+        #expect(manager.state == .notActivated)
+        #expect(manager.statusMessage.contains("Protection is OFF"))
+        #expect(manager.statusMessage.contains("Enable Protection"))
+
+        // Repeated ticks keep reporting the same actionable state.
+        manager.activateAutomatically()
+        #expect(manager.needsExplicitReactivation)
+        #expect(manager.state == .notActivated)
+
+        // The explicit click clears both the latch and the escalation.
+        manager.activate()
+        #expect(submissions == 2)
+        #expect(!manager.needsExplicitReactivation)
+        #expect(!manager.removalPending)
+    }
+
+    @Test("A reboot-pending removal is latched, not transient")
+    func rebootPendingRemovalEscalates() {
+        let preferences = isolatedPreferences()
+        var submissions = 0
+        let manager = SystemExtensionManager(
+            preferences: preferences,
+            requestSubmitter: { _ in submissions += 1 }
+        )
+
+        // This is the shape the real host was in: stale extensions "waiting to
+        // uninstall on reboot" keep the latch set across relaunches.
+        manager.deactivate()
+        manager.applyResult(intent: .deactivate, result: .willCompleteAfterReboot)
+        manager.activateAutomatically()
+
+        #expect(submissions == 1)
+        #expect(manager.needsExplicitReactivation)
+        #expect(manager.state == .notActivated)
+    }
 }

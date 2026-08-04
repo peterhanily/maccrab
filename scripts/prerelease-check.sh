@@ -211,7 +211,11 @@ README_TESTS=$(grep -oE 'tests-[0-9]+%20passing' README.md \
 if [[ -z "$README_TESTS" ]]; then
     warn "README.md: couldn't parse tests badge"
 else
-    info "README.md tests badge = $README_TESTS (run \`swift test\` to validate)"
+    # Authoritative check lives in ci-local.sh, which compares this badge against
+    # the count the suite ACTUALLY executed moments earlier. Validating it here
+    # would mean re-running the suite or trusting a second hand-maintained
+    # number — which is how the badge came to say 3230 while 4109 tests ran.
+    info "README.md tests badge = $README_TESTS (enforced by ci-local.sh against the executed count)"
 fi
 
 # v1.19.0 (S7-7): release.json must be the single source of truth for the

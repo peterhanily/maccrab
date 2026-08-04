@@ -41,6 +41,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/run-release-python.sh
     scripts/notarize.sh
     scripts/check-rules-trust-anchor.sh
+    scripts/_appcast_xml.py
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
@@ -438,8 +439,51 @@ if [ "$CLEAN_TREE" = "1" ]; then
         if ! restore_release_artifacts && [ "$status" -eq 0 ]; then
             status=1
         fi
+        release_clean_lock_release
         exit "$status"
     }
+
+    # Two concurrent --clean runs can destroy a notarized DMG, and the loss is
+    # silent. Run A stages the artifact out of .build; run B then globs
+    # .build/MacCrab-v*.dmg, finds nothing, sets PRESERVED_RELEASE_COUNT=0,
+    # installs NO restore trap, and runs `rm -rf .build` — which deletes what A
+    # restored. The realistic trigger is an operator, not an attacker: a tag push
+    # while a manual clean run is still winding down. `mkdir` is the portable
+    # atomic test-and-set here; macOS ships no flock(1).
+    CLEAN_RELEASE_LOCK="$PROJECT_DIR/.maccrab-ci-clean.lock"
+    release_clean_lock_held=0
+    release_clean_lock_release() {
+        [ "$release_clean_lock_held" = "1" ] || return 0
+        release_clean_lock_held=0
+        rm -rf "$CLEAN_RELEASE_LOCK"
+    }
+    release_clean_lock_claim() {
+        if mkdir "$CLEAN_RELEASE_LOCK" 2>/dev/null; then
+            release_clean_lock_held=1
+            printf '%s\n' "$$" > "$CLEAN_RELEASE_LOCK/pid" 2>/dev/null || true
+            return 0
+        fi
+        return 1
+    }
+    if ! release_clean_lock_claim; then
+        lock_owner=$(cat "$CLEAN_RELEASE_LOCK/pid" 2>/dev/null || true)
+        # Only a lock whose owner is provably gone may be broken, and only once.
+        if [ -n "$lock_owner" ] && ! kill -0 "$lock_owner" 2>/dev/null; then
+            echo "Clean run: clearing a stale release lock left by dead PID $lock_owner."
+            rm -rf "$CLEAN_RELEASE_LOCK"
+            release_clean_lock_claim || true
+        fi
+        if [ "$release_clean_lock_held" != "1" ]; then
+            echo "ERROR: another clean CI run holds the release-artifact lock (PID ${lock_owner:-unknown})." >&2
+            echo "       Running both would delete the preserved release DMG. Wait for it to" >&2
+            echo "       finish, or remove $CLEAN_RELEASE_LOCK if you are certain it is stale." >&2
+            exit 1
+        fi
+    fi
+    trap 'release_clean_lock_release' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     if [ -L .build ]; then
         echo "ERROR: refusing clean CI with symlink .build" >&2
@@ -612,6 +656,36 @@ check "Swift build tests" swift build --build-tests
 echo ""
 echo -e "${BOLD}Tests${NC}"
 check "Swift test suite" swift test --no-parallel
+
+# README ships a green `tests-N passing` badge that NOTHING verified —
+# prerelease-check.sh only printed it as info. It drifted badly: the badge said
+# 3230, CLAUDE.md said 2642, and the suite actually ran 4109. On a product whose
+# pitch is that its claims are checkable, an unchecked green badge is the wrong
+# kind of decoration. The suite has just run and its summary is still in
+# $CI_LOCAL_OUTPUT, so the true number is free to obtain — compare against the
+# count that was actually executed, not against another hand-maintained file.
+# Read it BEFORE the next check() overwrites the buffer.
+OBSERVED_TEST_COUNT=$(/usr/bin/sed -n 's/.*Test run with \([0-9][0-9]*\) tests.*/\1/p' \
+    "$CI_LOCAL_OUTPUT" | /usr/bin/tail -1)
+assert_readme_tests_badge() {
+    local observed="$1" badge
+    if [ -z "$observed" ]; then
+        echo "could not parse an executed test count from the suite output" >&2
+        return 1
+    fi
+    badge=$(/usr/bin/grep -oE 'tests-[0-9]+%20passing' README.md \
+        | /usr/bin/sed -E 's/tests-([0-9]+)%20passing/\1/' | /usr/bin/head -1)
+    if [ -z "$badge" ]; then
+        echo "README.md has no parseable tests badge" >&2
+        return 1
+    fi
+    if [ "$badge" != "$observed" ]; then
+        echo "README.md tests badge says $badge but the suite just ran $observed" >&2
+        return 1
+    fi
+    echo "README tests badge agrees with the $observed tests just executed"
+}
+check "README tests badge matches suite" assert_readme_tests_badge "$OBSERVED_TEST_COUNT"
 
 echo ""
 echo -e "${BOLD}Rules${NC}"

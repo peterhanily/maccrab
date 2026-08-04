@@ -462,6 +462,64 @@ fi
     || fail "release guard did not diagnose the restricted bare-tool entitlement"
 pass "release signature contract rejects restricted entitlements on bare tools"
 
+# The entitlement-coverage guard stands in for an exec probe on the two
+# components that cannot be exec-probed — the GUI app and the sysext, which are
+# also the only two carrying restricted entitlements and therefore the only two
+# that can take the rc.3-rc.5 AMFI kill. Drive both directions on synthetic
+# plists so the fixture needs neither a signed bundle nor a real profile.
+COVERAGE_FIXTURE="$TMP_ROOT/entitlement-coverage"
+/bin/mkdir -p "$COVERAGE_FIXTURE"
+make_coverage_plist() {
+    local path="$1"
+    shift
+    /usr/bin/plutil -create xml1 "$path"
+    while [ "$#" -gt 0 ]; do
+        /usr/bin/plutil -insert "$1" -json "$2" "$path"
+        shift 2
+    done
+}
+make_coverage_plist "$COVERAGE_FIXTURE/binary.plist" \
+    'com\.apple\.developer\.endpoint-security\.client' 'true' \
+    'keychain-access-groups' '["79S425CW99.com.maccrab.shared"]'
+make_coverage_plist "$COVERAGE_FIXTURE/granting.plist" \
+    'com\.apple\.developer\.endpoint-security\.client' 'true' \
+    'keychain-access-groups' '["79S425CW99.*"]'
+make_coverage_plist "$COVERAGE_FIXTURE/missing.plist" \
+    'keychain-access-groups' '["79S425CW99.*"]'
+make_coverage_plist "$COVERAGE_FIXTURE/foreign.plist" \
+    'com\.apple\.developer\.endpoint-security\.client' 'true' \
+    'keychain-access-groups' '["ZZZZZZZZZZ.*"]'
+
+COVERAGE_BINARY_ENT=$(/bin/cat "$COVERAGE_FIXTURE/binary.plist")
+verify_entitlement_coverage_plists "$COVERAGE_BINARY_ENT" \
+    "$(/bin/cat "$COVERAGE_FIXTURE/granting.plist")" fixture >/dev/null \
+    || fail "entitlement coverage rejected a profile that grants everything requested"
+
+if verify_entitlement_coverage_plists "$COVERAGE_BINARY_ENT" \
+        "$(/bin/cat "$COVERAGE_FIXTURE/missing.plist")" fixture \
+        >"$COVERAGE_FIXTURE/missing.log" 2>&1; then
+    fail "entitlement coverage accepted a profile missing a restricted entitlement"
+fi
+/usr/bin/grep -q 'provisioning profile does not grant' "$COVERAGE_FIXTURE/missing.log" \
+    || fail "entitlement coverage did not diagnose the missing restricted entitlement"
+
+if verify_entitlement_coverage_plists "$COVERAGE_BINARY_ENT" \
+        "$(/bin/cat "$COVERAGE_FIXTURE/foreign.plist")" fixture \
+        >"$COVERAGE_FIXTURE/foreign.log" 2>&1; then
+    fail "entitlement coverage accepted a keychain group outside the profile's team"
+fi
+/usr/bin/grep -q 'is not covered by its profile' "$COVERAGE_FIXTURE/foreign.log" \
+    || fail "entitlement coverage did not diagnose the foreign keychain group"
+pass "entitlement coverage accepts a granting profile and refuses missing/foreign grants"
+
+# The guard is worthless if it is never called on the two entitled components.
+for coverage_phase in 'verify_entitled_component_coverage "$APP" "post-sign"' \
+        'verify_entitled_component_coverage "$DMG_MNT/MacCrab.app" "mounted-DMG"'; do
+    /usr/bin/grep -qF "$coverage_phase" "$SCRIPT_DIR/build-release.sh" \
+        || fail "build-release.sh does not run entitlement coverage: $coverage_phase"
+done
+pass "entitlement coverage runs post-sign and against the mounted DMG"
+
 /usr/bin/grep -qF 'prepare-dmg-payload.sh" "$STAGING_DIR"' "$SCRIPT_DIR/build-release.sh" \
     || fail "release publish stage does not prepare/prune the final payload"
 stage_prepare_line=$(/usr/bin/grep -nF '"$SCRIPT_DIR/prepare-dmg-payload.sh" "$STAGING_DIR"' \

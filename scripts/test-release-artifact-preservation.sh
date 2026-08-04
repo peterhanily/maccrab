@@ -35,6 +35,7 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/run-release-python.sh
     scripts/notarize.sh
     scripts/check-rules-trust-anchor.sh
+    scripts/_appcast_xml.py
     scripts/generate-appcast-entry.sh
     scripts/publish-appcast-entry.sh
     scripts/publish-release-json.sh
@@ -120,7 +121,15 @@ make_ci_fixture() {
         'if [ "${MACCRAB_TEST_RESOLVE_FAIL:-0}" = "1" ] && [ "$*" = "package resolve" ]; then' \
         '    exit 77' \
         'fi' \
+        '# ci-local.sh parses this summary to enforce the README tests badge, so the' \
+        '# stub must emit the real shape rather than nothing.' \
+        'case "$*" in' \
+        '    test*) printf "Test run with 1 tests in 1 suites passed after 0.001 seconds.\n" ;;' \
+        'esac' \
         'exit 0'
+    # Must agree with the stub count above; the badge gate is deliberately exact.
+    printf 'fixture README [![Tests](https://img.shields.io/badge/tests-1%%20passing-brightgreen)]()\n' \
+        > "$fixture/README.md"
     write_executable "$fixture/fake-bin/python3" \
         '#!/bin/bash' \
         'case "$*" in' \
@@ -951,7 +960,8 @@ make_release_fixture() {
     # is tested against real commits, annotated tags, blob IDs, and cleanliness.
     printf '.build/\n.swiftpm/\n*.log\n.fixture-*\nfail-*\nhome/\ntmp/\n' > "$fixture/.gitignore"
     printf 'private-input/\n' > "$fixture/Sources/MacCrabCore/Resources/.gitignore"
-    printf 'fixture README\n' > "$fixture/README.md"
+    printf 'fixture README [![Tests](https://img.shields.io/badge/tests-1%%20passing-brightgreen)]()\n' \
+        > "$fixture/README.md"
     printf 'fixture coverage\n' > "$fixture/docs/COVERAGE.md"
     printf 'fixture notes\n' > "$fixture/RELEASE_NOTES/v9.9.11.md"
     printf 'fixture rc notes\n' > "$fixture/RELEASE_NOTES/v9.9.11-rc.1.md"
@@ -1088,8 +1098,16 @@ make_release_fixture() {
         '        if [ "${2:-}" = "--git-path" ] && [ -n "${MACCRAB_TEST_HOOK_PATH:-}" ]; then printf "%s\n" "$MACCRAB_TEST_HOOK_PATH"; exit 0; fi' \
         '        exec /usr/bin/git "$@" ;;' \
         '    ls-remote)' \
-        '        [ -s .fixture-remote-tag-object ] || exit 0' \
-        '        printf "%s\t%s\n" "$(cat .fixture-remote-tag-object)" "${3:-}" ;;' \
+        '        want=""' \
+        '        for arg in "$@"; do case "$arg" in refs/*) want=$arg ;; esac; done' \
+        '        case "$want" in' \
+        '            refs/heads/*)' \
+        '                [ -s .fixture-remote-branch-commit ] || exit 0' \
+        '                printf "%s\t%s\n" "$(cat .fixture-remote-branch-commit)" "$want" ;;' \
+        '            *)' \
+        '                [ -s .fixture-remote-tag-object ] || exit 0' \
+        '                printf "%s\t%s\n" "$(cat .fixture-remote-tag-object)" "$(cat .fixture-remote-tag-name 2>/dev/null || printf "%s" "$want")" ;;' \
+        '        esac ;;' \
         '    push)' \
         '        case "$*" in' \
         '            *refs/tags/*)' \
@@ -1098,6 +1116,7 @@ make_release_fixture() {
         '                if [ -n "${MACCRAB_TEST_GIT_LOG:-}" ]; then printf "expected=%s sha=%s commit=%s tag=%s hook=%s source=%s source_tree=%s metadata_tree=%s\n" "${MACCRAB_RELEASE_EXPECTED_DMG:-}" "${MACCRAB_RELEASE_EXPECTED_SHA256:-}" "${MACCRAB_RELEASE_EXPECTED_COMMIT:-}" "${MACCRAB_RELEASE_EXPECTED_TAG_OBJECT:-}" "${MACCRAB_RELEASE_EXPECTED_HOOK_BLOB:-}" "${MACCRAB_RELEASE_SOURCE_COMMIT:-}" "${MACCRAB_RELEASE_SOURCE_TREE:-}" "${MACCRAB_RELEASE_METADATA_TREE:-}" >> "$MACCRAB_TEST_GIT_LOG"; fi' \
         '                printf "refs/tags/%s %s refs/tags/%s %040d\n" "$tag_ref" "$tag_object" "$tag_ref" 0 | ./.githooks/pre-push origin fixture' \
         '                printf "%s\n" "$tag_object" > .fixture-remote-tag-object' \
+        '                printf "refs/tags/%s\n" "$tag_ref" > .fixture-remote-tag-name' \
         '                case "${MACCRAB_TEST_ARTIFACT_ATTACK:-none}" in' \
         '                    delete) rm -f .build/MacCrab-v*.dmg ;;' \
         '                    zero) : > .build/MacCrab-v*.dmg ;;' \
@@ -1106,6 +1125,7 @@ make_release_fixture() {
         '            *)' \
         '                head=$(/usr/bin/git rev-parse HEAD)' \
         '                printf "refs/heads/main %s refs/heads/main %040d\n" "$head" 0 | ./.githooks/pre-push origin fixture' \
+        '                printf "%s\n" "$head" > .fixture-remote-branch-commit' \
         '                if [ "${MACCRAB_TEST_MUTATE_ORIGIN_AFTER_BRANCH:-0}" = "1" ]; then /usr/bin/git remote set-url origin https://github.com/attacker/maccrab.git; fi ;;' \
         '        esac ;;' \
         '    *) exec /usr/bin/git "$@" ;;' \
@@ -2255,5 +2275,68 @@ multi_recovery_item=$(sed -n 's/^  ! Appcast recovery item retained: //p' \
 while IFS= read -r github_log; do
     assert_no_github_delete "$github_log"
 done < <(/usr/bin/find "$TEST_ROOT" -name gh.log -type f -print)
+
+# Two concurrent --clean runs used to be able to destroy the notarized DMG: the
+# second globs .build while the first has the artifact staged aside, preserves
+# nothing, installs no restore trap, and then `rm -rf .build`. The lock must
+# refuse BEFORE any destructive step, so a refusal leaves .build untouched.
+ci_lock_busy="$TEST_ROOT/ci-lock-busy"
+make_ci_fixture "$ci_lock_busy"
+mkdir -p "$ci_lock_busy/.build"
+printf 'signed-and-notarized\n' > "$ci_lock_busy/.build/MacCrab-v9.9.30.dmg"
+busy_dmg_sha=$(shasum -a 256 "$ci_lock_busy/.build/MacCrab-v9.9.30.dmg" | awk '{print $1}')
+mkdir -p "$ci_lock_busy/.maccrab-ci-clean.lock"
+# $$ is this test process: alive for the duration, so the lock is never stale.
+printf '%s\n' "$$" > "$ci_lock_busy/.maccrab-ci-clean.lock/pid"
+set +e
+(
+    cd "$ci_lock_busy"
+    PATH="$ci_lock_busy/fake-bin:/usr/bin:/bin" \
+        TMPDIR="$ci_lock_busy/tmp" \
+        MACCRAB_TEST_SWIFT_LOG="$ci_lock_busy/swift.log" \
+        ./scripts/ci-local.sh --clean \
+            --expect-release-dmg .build/MacCrab-v9.9.30.dmg "$busy_dmg_sha"
+) > "$ci_lock_busy/output.log" 2>&1
+lock_busy_status=$?
+set -e
+[ "$lock_busy_status" -ne 0 ] || fail "clean CI ran while another run held the release lock"
+grep -q 'holds the release-artifact lock' "$ci_lock_busy/output.log" \
+    || fail "concurrent clean CI did not diagnose the held release lock"
+[ -d "$ci_lock_busy/.build" ] || fail "lock refusal deleted .build"
+[ "$(shasum -a 256 "$ci_lock_busy/.build/MacCrab-v9.9.30.dmg" | awk '{print $1}')" = "$busy_dmg_sha" ] \
+    || fail "lock refusal disturbed the release DMG"
+[ -d "$ci_lock_busy/.maccrab-ci-clean.lock" ] \
+    || fail "refused run removed the lock belonging to the live holder"
+if find "$ci_lock_busy" -maxdepth 1 -type d -name '.maccrab-ci-release.*' | grep -q .; then
+    fail "lock refusal created a staging directory"
+fi
+
+# A lock whose owner is provably dead must not wedge the release forever.
+ci_lock_stale="$TEST_ROOT/ci-lock-stale"
+make_ci_fixture "$ci_lock_stale"
+mkdir -p "$ci_lock_stale/.build"
+printf 'signed-and-notarized\n' > "$ci_lock_stale/.build/MacCrab-v9.9.31.dmg"
+stale_dmg_sha=$(shasum -a 256 "$ci_lock_stale/.build/MacCrab-v9.9.31.dmg" | awk '{print $1}')
+mkdir -p "$ci_lock_stale/.maccrab-ci-clean.lock"
+# A PID that has certainly exited: spawn one and wait for it.
+( exit 0 ) & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+printf '%s\n' "$dead_pid" > "$ci_lock_stale/.maccrab-ci-clean.lock/pid"
+set +e
+(
+    cd "$ci_lock_stale"
+    PATH="$ci_lock_stale/fake-bin:/usr/bin:/bin" \
+        TMPDIR="$ci_lock_stale/tmp" \
+        MACCRAB_TEST_SWIFT_LOG="$ci_lock_stale/swift.log" \
+        ./scripts/ci-local.sh --clean \
+            --expect-release-dmg .build/MacCrab-v9.9.31.dmg "$stale_dmg_sha"
+) > "$ci_lock_stale/output.log" 2>&1
+set -e
+grep -q 'clearing a stale release lock' "$ci_lock_stale/output.log" \
+    || fail "clean CI did not break a lock whose owner is dead"
+grep -q 'holds the release-artifact lock' "$ci_lock_stale/output.log" \
+    && fail "clean CI refused despite the lock owner being dead"
+[ "$(shasum -a 256 "$ci_lock_stale/.build/MacCrab-v9.9.31.dmg" | awk '{print $1}')" = "$stale_dmg_sha" ] \
+    || fail "stale-lock recovery did not preserve the release DMG"
 
 echo "PASS: release artifacts and publisher failure paths are fail-closed"

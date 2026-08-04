@@ -338,6 +338,114 @@ verify_bare_tool_runtime() {
     fi
     echo "    ✓ $phase bare tools launch under AMFI and report v$VERSION"
 }
+
+# The exec probe above proves maccrabctl/maccrab-mcp are allowed to run — but
+# `verify_bare_tool_entitlements` asserts those two carry ZERO entitlements, so
+# they are the least entitlement-sensitive binaries in the payload. The rc.3-rc.5
+# escape was an AMFI kill from a provisioning-profile/entitlement mismatch, and
+# the two components that can actually suffer that class — MacCrabApp
+# (system-extension.install) and the sysext (endpoint-security.client) — cannot
+# be exec-probed at all: one is a GUI app, the other only ever runs when sysextd
+# spawns it. So verify the invariant statically instead of hoping an exec
+# surfaces it. Every restricted entitlement a binary requests must be granted by
+# the provisioning profile embedded beside it; when it is not, AMFI kills the
+# process at exec and no amount of `codesign --verify` sees it coming.
+plist_dict_keys() {
+    /usr/bin/plutil -p - | /usr/bin/sed -n 's/^  "\([^"]*\)" =>.*/\1/p'
+}
+
+# plutil treats `.` as a keypath separator, and every restricted entitlement key
+# is dotted. Escape them so `com.apple.developer.x` is one key, not five levels.
+plist_escape_keypath() {
+    printf '%s' "$1" | /usr/bin/sed 's/\./\\./g'
+}
+
+# Pure comparison half: takes the two decoded plists as strings so a fixture can
+# drive both the accepting and the refusing path without a signed bundle.
+verify_entitlement_coverage_plists() {
+    local ent="$1" prof="$2" name="$3"
+    local key kp bin_val prof_val count i j elem covered pattern prefix
+
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        case "$key" in
+            com.apple.developer.*|com.apple.application-identifier|keychain-access-groups) ;;
+            *) continue ;;
+        esac
+        kp=$(plist_escape_keypath "$key")
+        if ! prof_val=$(printf '%s' "$prof" | /usr/bin/plutil -extract "$kp" raw -o - - 2>/dev/null); then
+            echo "ERROR: $name requests restricted entitlement '$key' that its embedded" >&2
+            echo "       provisioning profile does not grant — AMFI kills this at exec." >&2
+            return 1
+        fi
+        bin_val=$(printf '%s' "$ent" | /usr/bin/plutil -extract "$kp" raw -o - - 2>/dev/null || true)
+        if [ "$key" = "keychain-access-groups" ]; then
+            count=$bin_val
+            i=0
+            while [ "$i" -lt "${count:-0}" ]; do
+                elem=$(printf '%s' "$ent" | /usr/bin/plutil -extract "$kp.$i" raw -o - -)
+                covered=0
+                j=0
+                while [ "$j" -lt "${prof_val:-0}" ]; do
+                    pattern=$(printf '%s' "$prof" | /usr/bin/plutil -extract "$kp.$j" raw -o - -)
+                    case "$pattern" in
+                        *\*)
+                            prefix=${pattern%\*}
+                            if [ -z "$prefix" ] || [ "${elem#"$prefix"}" != "$elem" ]; then
+                                covered=1
+                            fi
+                            ;;
+                        *)
+                            [ "$elem" = "$pattern" ] && covered=1
+                            ;;
+                    esac
+                    j=$((j + 1))
+                done
+                if [ "$covered" != "1" ]; then
+                    echo "ERROR: $name keychain-access-group '$elem' is not covered by its profile" >&2
+                    return 1
+                fi
+                i=$((i + 1))
+            done
+        elif [ "$bin_val" != "$prof_val" ]; then
+            echo "ERROR: $name entitlement '$key' is '$bin_val' but its profile grants '$prof_val'" >&2
+            return 1
+        fi
+    done <<COVERAGE_KEYS
+$(printf '%s' "$ent" | plist_dict_keys)
+COVERAGE_KEYS
+    echo "    ✓ $name entitlements are all granted by its embedded provisioning profile"
+}
+
+verify_profile_entitlement_coverage() {
+    local bundle="$1" name="$2"
+    local profile="$bundle/Contents/embedded.provisionprofile"
+    local ent prof
+
+    if [ ! -f "$profile" ] || [ -L "$profile" ]; then
+        echo "ERROR: $name has no regular embedded.provisionprofile" >&2
+        return 1
+    fi
+    if ! ent=$(/usr/bin/codesign -d --entitlements - --xml "$bundle" 2>/dev/null); then
+        echo "ERROR: cannot read $name entitlements" >&2
+        return 1
+    fi
+    if ! prof=$(/usr/bin/security cms -D -i "$profile" 2>/dev/null \
+            | /usr/bin/plutil -extract Entitlements xml1 -o - -); then
+        echo "ERROR: cannot decode $name provisioning-profile entitlements" >&2
+        return 1
+    fi
+    verify_entitlement_coverage_plists "$ent" "$prof" "$name"
+}
+
+# The two entitlement-bearing components, checked wherever the bare tools are.
+verify_entitled_component_coverage() {
+    local app="$1" phase="$2"
+    verify_profile_entitlement_coverage "$app" "$phase MacCrab.app" || return 1
+    verify_profile_entitlement_coverage \
+        "$app/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension" \
+        "$phase com.maccrab.agent.systemextension" || return 1
+}
 # END BARE_TOOL_RELEASE_GUARDS
 
 # Staging dir + EXIT-cleanup policy depend on the run mode.
@@ -1295,15 +1403,22 @@ ATTESTATION_EOF
         # process may launch. Execute the final signed in-app binaries so a
         # provisioning-profile mismatch (exit 137 in rc.3–rc.5) blocks release.
         verify_bare_tool_runtime "$APP" "post-sign"
+        verify_entitled_component_coverage "$APP" "post-sign"
 
         # Installed footprint is a product resource budget, not merely a DMG
         # compression statistic. A regression once left local symbols in four
         # universal Swift executables and grew MacCrab.app to ~207 MiB while the
         # compressed image looked comparatively small. Measure allocated bytes
-        # after every nested component and signature is final. The fixed 160 MiB
-        # ceiling leaves growth headroom over the ~136 MiB stripped baseline but
-        # requires an explicit source/policy change before future payload bloat
-        # can silently ship.
+        # after every nested component and signature is final.
+        #
+        # The real stripped baseline is ~154 MiB, NOT the ~136 MiB an earlier
+        # comment here claimed: v1.21.6-rc.6, the first artifact this gate ever
+        # measured, came in at 157,620 KiB. That 18 MiB error mattered, because
+        # an engineer reading it would believe ~24 MiB of headroom existed when
+        # the true margin was ~6 MiB. Print the margin on every build so the
+        # number people act on is measured, not remembered — and so the squeeze
+        # is visible long before the gate fires. It fires late and expensively:
+        # after the universal build, lipo, strip, and every signature.
         APP_FOOTPRINT_BUDGET_KIB=163840
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
@@ -1314,9 +1429,11 @@ ATTESTATION_EOF
         esac
         if [ "$APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB" ]; then
             echo "ERROR: MacCrab.app footprint ${APP_FOOTPRINT_KIB} KiB exceeds the fixed ${APP_FOOTPRINT_BUDGET_KIB} KiB release budget" >&2
+            echo "       Over by $((APP_FOOTPRINT_KIB - APP_FOOTPRINT_BUDGET_KIB)) KiB. Shrink the payload or raise the budget deliberately." >&2
             exit 1
         fi
-        echo "    ✓ installed app footprint ${APP_FOOTPRINT_KIB} KiB (budget: ${APP_FOOTPRINT_BUDGET_KIB} KiB)"
+        APP_FOOTPRINT_MARGIN_KIB=$((APP_FOOTPRINT_BUDGET_KIB - APP_FOOTPRINT_KIB))
+        echo "    ✓ installed app footprint ${APP_FOOTPRINT_KIB} KiB (budget: ${APP_FOOTPRINT_BUDGET_KIB} KiB, margin: ${APP_FOOTPRINT_MARGIN_KIB} KiB / $((APP_FOOTPRINT_MARGIN_KIB * 100 / APP_FOOTPRINT_BUDGET_KIB))%)"
 
         # NOTE on stapling the .app bundle (intentionally NOT done): we validated
         # it and it does NOT work for this app. Even after a standalone app
@@ -1501,6 +1618,7 @@ stage_publish() {
     # Repeat against the transported HFS copy users receive. A staging-only
     # probe cannot detect copy/normalization/signature damage in the image.
     verify_bare_tool_runtime "$DMG_MNT/MacCrab.app" "mounted-DMG"
+    verify_entitled_component_coverage "$DMG_MNT/MacCrab.app" "mounted-DMG"
     /usr/bin/hdiutil detach "$DMG_MNT" -force >/dev/null
     RELEASE_DMG_ATTACH_ATTEMPTED=0
     /bin/rmdir "$DMG_MNT"

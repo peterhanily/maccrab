@@ -3,6 +3,70 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.7] — 2026-08-04
+
+Covers everything after rc.1. Release candidates rc.2–rc.6 were built and tested
+locally and never published; their changes are consolidated here.
+
+### Stability
+- **The engine no longer crashes on a database recovery.** A cached SQLite
+  statement could be reused after storage recovery had closed and reopened the
+  database beneath it, which crashed the engine on the next write. On one host
+  this restarted the engine 43 times in 46 minutes.
+- **Multi-step detection can no longer lose its memory limit.** The counter that
+  bounds in-flight partial sequence matches was maintained by hand across six
+  code paths and could drift below zero, after which the 10,000-match cap never
+  engaged and the engine grew without bound. It is now derived from the matches
+  themselves, so drifting out of step is not possible.
+
+### Disk and performance
+- **A single misbehaving detection can no longer fill the disk.** Causal-trace
+  materialisation now stops before a free-space floor and coalesces repeated
+  identical activity instead of recording each occurrence as a separate trace.
+  Every store that can grow now has an admission check *before* the write, not
+  only a cleanup pass after it.
+- **Alert evidence has its own storage budget.** Evidence moved out of the event
+  database into the alert database with an explicit per-family cap, so a burst of
+  evidence can no longer consume the space reserved for event history. Upgrades
+  keep existing evidence readable while the old table drains.
+- **Expensive file analysis runs only when a rule actually wants it**, which
+  removes a large amount of work the engine previously did and discarded.
+
+### Agent traces
+- **The agent-trace receiver binds again.** It had failed to start on every
+  install, and the failure was recorded only in a status file nothing displayed.
+  It is also now off by default; enable it in Settings if you use it.
+
+### AI
+- **Model output is advisory only.** It cannot create alerts on its own, change
+  detection rules, block a process, or contain a host. Deterministic scoring
+  stays authoritative and model output is stored separately from it. Automatic
+  speculative alerts were removed.
+- **Consent is bound to the exact endpoint you approved**, so editing a URL
+  cannot reuse an earlier approval, and an AI backend change only takes effect
+  after the engine confirms it.
+
+### Agent and command-line access
+- **Every tool is explicitly classified.** All 69 built-in tools are either
+  capability-gated or explicitly ungated; a tool in neither group is refused
+  before it runs, so a newly added tool cannot inherit read-only permission by
+  being forgotten.
+
+### Install and updates
+- **Upgrading no longer asks for an administrator password for rules.** The
+  detection corpus is published from inside the signed system extension rather
+  than copied file-by-file during installation, so an interrupted upgrade can no
+  longer leave a partial rule set behind.
+- **The app tells you when protection is off and needs you.** If protection was
+  switched off earlier, the app deliberately will not switch it back on by
+  itself — but it now says so plainly instead of retrying silently in the
+  background.
+- **Update metadata cannot go backwards.** A release whose history diverged from
+  what was already published is refused rather than shipped with a version number
+  lower than a build already in the field.
+- **The app is smaller.** Debug symbols are stripped from all four shipped
+  executables before signing, reducing the installed app by about 25%.
+
 ## [1.21.6-rc.1] — 2026-07-31
 
 Remediation release over 1.21.5, covering every critical, high and medium finding from a full-product audit.

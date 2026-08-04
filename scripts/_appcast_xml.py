@@ -24,6 +24,17 @@ def fail(message: str) -> "None":
     raise ValueError(message)
 
 
+def build_sort_key(build: str) -> tuple[int, ...]:
+    """Order a Sparkle build string the way Sparkle's own comparator does.
+
+    Every run of digits becomes one numeric component, so `1.21.5.1018` is
+    (1, 21, 5, 1018) and `1.21.6-rc.6.1035` is (1, 21, 6, 6, 1035). Comparing
+    tuples of unequal length is correct here because a longer build only ever
+    refines a shorter one; Python already orders (1, 21, 6) below (1, 21, 6, 4).
+    """
+    return tuple(int(part) for part in re.findall(r"[0-9]+", build))
+
+
 def local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -254,6 +265,28 @@ def cmd_inject(args: argparse.Namespace) -> None:
     ]
     if build in existing:
         fail(f"appcast already contains Sparkle build {build}")
+
+    # A duplicate check is not a monotonicity check. `BUILD_NUMBER` is
+    # `VERSION.$(git rev-list --count $SOURCE_COMMIT)`, which only increases
+    # along ONE linear history: a release cut from a branch that squash-merged
+    # the work carries a LOWER commit count than the candidate that was actually
+    # qualified. Publishing that build is worse than publishing nothing —
+    # Sparkle compares CFBundleVersion, so every tester still running the higher
+    # candidate build is told they are up to date and is never offered the
+    # shipped release. Refuse the feed write instead, and say which build lost.
+    regressions = [
+        value
+        for value in existing
+        if value and build_sort_key(value) >= build_sort_key(build)
+    ]
+    if regressions:
+        newest = max(regressions, key=build_sort_key)
+        fail(
+            f"Sparkle build {build} does not exceed {newest} already in the appcast. "
+            "The release commit is not a descendant of every published release "
+            "(a squash-merge or rewritten history does this). Rebase or merge so "
+            "the commit count carries forward, then re-cut."
+        )
 
     text = current.decode("utf-8")
     fragment = item.decode("utf-8").strip()
