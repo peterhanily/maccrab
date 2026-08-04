@@ -190,11 +190,15 @@ public actor AlertClusterService {
         In one sentence, what is most likely happening? Lead with \"Likely\" / \"Possibly\" / \"Attacker\" as appropriate.
         """
 
-        guard let response = await llm.query(
+        guard let response = await llm.commentary(
             systemPrompt: system,
             userPrompt: user,
             maxTokens: 120,
-            temperature: 0.2
+            temperature: 0.2,
+            feature: .alertClusterRationale,
+            additionalValidator: { candidate in
+                Self.isValidRationale(candidate)
+            }
         ) else {
             return cluster
         }
@@ -205,6 +209,14 @@ public actor AlertClusterService {
         var refined = cluster
         refined.rationale = trimmed
         return refined
+    }
+
+    private static func isValidRationale(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty
+            && trimmed.utf8.count <= 1_024
+            && !trimmed.contains("\n")
+            && !trimmed.contains("\r")
     }
 
     private static func rationaleContext(

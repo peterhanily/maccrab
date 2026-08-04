@@ -245,7 +245,11 @@ struct PrivilegedExecutionSecurityTests {
         let floodingDescendantStart = Date()
         let floodingDescendant = BoundedPrivilegedProcessRunner.run(
             executable: "/bin/sh",
-            arguments: ["-c", "/usr/bin/yes descendant-output & printf done"],
+            // Keep the direct child alive until the background writer has
+            // actually started. If the shell exits immediately, a saturated
+            // host may close the pipe before `yes` is ever scheduled, which
+            // tests process scheduling rather than the bounded drain loop.
+            arguments: ["-c", "/usr/bin/yes descendant-output & wait"],
             timeout: 0.25,
             maximumOutputBytes: 32
         )

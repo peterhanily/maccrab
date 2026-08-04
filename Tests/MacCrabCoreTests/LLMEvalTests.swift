@@ -67,29 +67,47 @@ private actor DeterministicBackend: LLMBackend {
         systemPrompt: String, userPrompt: String,
         maxTokens: Int, temperature: Double
     ) async -> String? {
-        // Parse out the rule_id from the user prompt to decide verdict.
-        let ruleLine = userPrompt.split(separator: "\n")
-            .first(where: { $0.contains("rule_id:") })
-            .map { String($0) } ?? ""
-        let ruleId = ruleLine
-            .replacingOccurrences(of: "  rule_id: ", with: "")
-            .trimmingCharacters(in: .whitespaces)
+        // Parse the same bounded JSON envelope the real backend receives.
+        // The old YAML-line scrape silently stopped finding `rule_id` when
+        // the production prompt moved to JSON, leaving this evaluation rail
+        // at 0% without testing the parser contract it claimed to exercise.
+        let marker = "UNTRUSTED_ALERT_CONTEXT_JSON:\n"
+        guard let markerRange = userPrompt.range(of: marker) else { return nil }
+        let remainder = userPrompt[markerRange.upperBound...]
+        guard let jsonLine = remainder.split(separator: "\n").first,
+              let data = String(jsonLine).data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let alert = root["alert"] as? [String: Any],
+              let ruleId = alert["rule_id"] as? String,
+              let alertId = alert["id"] as? String else {
+            return nil
+        }
         let verdict = responses[ruleId]?.rawValue ?? "insufficient_evidence"
 
-        return """
-        {
-          "alertId": "eval",
-          "confidence": 0.75,
-          "verdict": "\(verdict)",
-          "summary": "Deterministic mock verdict for rule \(ruleId).",
-          "evidenceChain": [],
-          "mitreReasoning": [],
-          "suggestedActions": [],
-          "confidencePenalties": [],
-          "modelVersion": "deterministic-mock-v1",
-          "generatedAt": "2026-04-16T00:00:00Z"
+        // Keep the canned response valid under the current grounding
+        // boundary: identity must match the requested alert and at least one
+        // supplied evidence item must be cited. Provenance fields are stamped
+        // locally by LLMInvestigator and therefore are intentionally omitted.
+        let payload: [String: Any] = [
+            "alertId": alertId,
+            "confidence": 0.75,
+            "verdict": verdict,
+            "summary": "Deterministic evaluation fixture verdict.",
+            "evidenceChain": [[
+                "kind": "alert",
+                "id": alertId,
+                "note": "Alert supplied to the deterministic evaluation fixture",
+            ]],
+            "mitreReasoning": [],
+            "suggestedActions": [],
+            "confidencePenalties": [],
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let response = try? JSONSerialization.data(withJSONObject: payload),
+              let encoded = String(data: response, encoding: .utf8) else {
+            return nil
         }
-        """
+        return encoded
     }
 }
 
@@ -136,7 +154,11 @@ struct LLMEvalTests {
         })
 
         let backend = DeterministicBackend(responses: responses)
-        let service = LLMService(backend: backend, config: LLMConfig())
+        let service = LLMService(
+            backend: backend,
+            config: LLMConfig(),
+            minInterval: 0
+        )
 
         var correct = 0
         for f in fixtures {
@@ -165,7 +187,11 @@ struct LLMEvalTests {
             responses[f.alert.ruleId] = v
         }
         let backend = DeterministicBackend(responses: responses)
-        let service = LLMService(backend: backend, config: LLMConfig())
+        let service = LLMService(
+            backend: backend,
+            config: LLMConfig(),
+            minInterval: 0
+        )
 
         var correct = 0
         for f in fixtures {

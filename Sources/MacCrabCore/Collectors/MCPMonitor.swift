@@ -23,9 +23,11 @@ public actor MCPMonitor {
 
     public nonisolated let events: AsyncStream<MCPServerEvent>
     private var continuation: AsyncStream<MCPServerEvent>.Continuation?
-    private var watchTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var dispatchSources: [DispatchSourceFileSystemObject] = []
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private let callbackTasks = CollectorCallbackTaskLifecycle(maximumInFlight: 16)
+    private let sourceCancellationGroup = DispatchGroup()
 
     /// Baseline of known servers keyed by "configFile::serverName".
     private var knownServers: [String: MCPServerEntry] = [:]
@@ -240,7 +242,11 @@ public actor MCPMonitor {
     // MARK: - Lifecycle
 
     public func start() {
-        guard watchTask == nil else { return }
+        guard lifecyclePhase == .initialized, callbackTasks.open() else {
+            logger.warning("MCP monitor start rejected after its one-shot lifecycle advanced")
+            return
+        }
+        lifecyclePhase = .running
         logger.info("MCP monitor starting")
 
         // Perform initial baseline scan
@@ -262,16 +268,47 @@ public actor MCPMonitor {
     }
 
     public func stop() {
-        watchTask?.cancel()
-        watchTask = nil
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let tasks = beginStop()
+        async let tasksJoined = CollectorBoundedTaskJoin.waitForAll(tasks, deadline: deadline)
+        async let sourcesJoined = CollectorDispatchGroupJoin.wait(sourceCancellationGroup, deadline: deadline)
+        let (taskResult, sourceResult) = await (tasksJoined, sourcesJoined)
+        let clean = taskResult && sourceResult
+        if clean {
+            pollTask = nil
+            lifecyclePhase = .stopped
+            logger.info("MCP monitor stopped cleanly")
+        } else {
+            logger.error("MCP monitor stop deadline expired with poll, callback, or source teardown active")
+        }
+        return clean
+    }
+
+    private func beginStop() -> [Task<Void, Never>] {
+        if lifecyclePhase == .stopped { return [] }
+        lifecyclePhase = .stopping
+        var tasks = callbackTasks.sealAndCancel()
+        if let pollTask { tasks.append(pollTask) }
         pollTask?.cancel()
-        pollTask = nil
 
         for source in dispatchSources {
             source.cancel()
         }
         dispatchSources.removeAll()
 
+        continuation?.finish()
+        continuation = nil
+        return tasks
+    }
+
+    deinit {
+        _ = callbackTasks.sealAndCancel()
+        pollTask?.cancel()
+        for source in dispatchSources { source.cancel() }
         continuation?.finish()
     }
 
@@ -295,16 +332,19 @@ public actor MCPMonitor {
 
             let capturedPath = path
             let capturedTool = tool
+            let callbackTasks = self.callbackTasks
 
             source.setEventHandler { [weak self] in
-                guard let self else { return }
-                Task {
-                    await self.handleConfigChange(tool: capturedTool, path: capturedPath)
+                callbackTasks.submit { [weak self] in
+                    await self?.handleConfigChange(tool: capturedTool, path: capturedPath)
                 }
             }
 
+            sourceCancellationGroup.enter()
+            let sourceCancellationGroup = self.sourceCancellationGroup
             source.setCancelHandler {
                 close(fd)
+                sourceCancellationGroup.leave()
             }
 
             source.resume()
@@ -315,6 +355,7 @@ public actor MCPMonitor {
     }
 
     private func handleConfigChange(tool: String, path: String) {
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         logger.info("MCP config changed: \(path)")
         scanConfig(tool: tool, path: path)
     }

@@ -25,6 +25,15 @@ public actor StatisticalAnomalyDetector {
     /// Maximum tracked processes.
     private let maxTracked: Int
 
+    private var observations: UInt64 = 0
+    private var processShapeObservations: UInt64 = 0
+    private var timingObservations: UInt64 = 0
+    private var timingCoverageSkipped: UInt64 = 0
+    private var outOfOrderTimestamps: UInt64 = 0
+    private var emittedAnomalies: UInt64 = 0
+    private var clippedBaselineUpdates: UInt64 = 0
+    private var evictedIdentities: UInt64 = 0
+
     // MARK: - Types
 
     /// Welford's online algorithm for numerically stable running mean/variance.
@@ -39,6 +48,24 @@ public actor StatisticalAnomalyDetector {
             mean += delta / Double(count)
             let delta2 = value - mean
             m2 += delta * delta2
+        }
+
+        /// Keep a detected outlier from immediately teaching the baseline that
+        /// the outlier is normal. A minimum feature-specific scale still lets a
+        /// formerly constant baseline adapt gradually instead of freezing
+        /// forever after its first legitimate change.
+        mutating func updateClipped(
+            _ value: Double,
+            zLimit: Double,
+            minimumScale: Double
+        ) {
+            guard count >= 2 else {
+                update(value)
+                return
+            }
+            let scale = max(stddev, minimumScale)
+            let radius = max(1, zLimit) * scale
+            update(min(max(value, mean - radius), mean + radius))
         }
 
         var variance: Double {
@@ -63,7 +90,8 @@ public actor StatisticalAnomalyDetector {
         var eventFrequency: RunningStats = .init()    // events per minute
         var argCount: RunningStats = .init()           // argument count
         var argEntropy: RunningStats = .init()         // command-line entropy
-        var lastEventTime: Date?
+        var lastTimingEventTime: Date?
+        var lastActivity: Date?
         // v1.21.4 (deep-audit corr-campaign-anomaly): removed four orphaned
         // fields (connectionRate, fileWriteRate, eventCountInWindow, windowStart)
         // that were never read or updated — they implied connection/file-write
@@ -81,12 +109,25 @@ public actor StatisticalAnomalyDetector {
         public let zScore: Double
     }
 
+    public struct Telemetry: Sendable, Equatable {
+        public let observations: UInt64
+        public let processShapeObservations: UInt64
+        public let timingObservations: UInt64
+        public let timingCoverageSkipped: UInt64
+        public let outOfOrderTimestamps: UInt64
+        public let emittedAnomalies: UInt64
+        public let clippedBaselineUpdates: UInt64
+        public let evictedIdentities: UInt64
+        public let trackedIdentities: Int
+        public let maximumTrackedIdentities: Int
+    }
+
     // MARK: - Initialization
 
     public init(zThreshold: Double = 3.0, minSamples: Int = 50, maxTracked: Int = 5000) {
-        self.zThreshold = zThreshold
-        self.minSamples = minSamples
-        self.maxTracked = maxTracked
+        self.zThreshold = max(1, zThreshold.isFinite ? zThreshold : 3.0)
+        self.minSamples = max(2, minSamples)
+        self.maxTracked = max(1, maxTracked)
     }
 
     // MARK: - Public API
@@ -98,103 +139,210 @@ public actor StatisticalAnomalyDetector {
     ///   directly instead of recomputing (the caller has already run the same
     ///   pass over the identical string). Identical input → identical value, so
     ///   the accumulated entropy statistics and any anomaly are unchanged.
+    /// - Parameter binaryIdentity: Stable code identity such as a CDHash. The
+    ///   executable path is the fallback when no stronger identity is present.
+    /// - Parameter timingCoverageComplete: Enables frequency inference only
+    ///   when the caller can prove this category was neither sampled nor
+    ///   dropped. False is the safe default.
     public func processEvent(
         processPath: String,
         argCount: Int,
         commandLine: String,
         category: String,
         timestamp: Date,
-        commandLineEntropy: Double? = nil
+        commandLineEntropy: Double? = nil,
+        binaryIdentity: String? = nil,
+        timingCoverageComplete: Bool = false
     ) -> [AnomalyResult] {
-        // Initialize if new
-        if processStats[processPath] == nil {
-            if processStats.count >= maxTracked {
-                // Evict least recently seen
-                if let oldest = processStats.min(by: { ($0.value.lastEventTime ?? .distantPast) < ($1.value.lastEventTime ?? .distantPast) })?.key {
-                    processStats.removeValue(forKey: oldest)
-                }
+        observations &+= 1
+        let normalizedCategory = category.lowercased()
+        let key = Self.baselineKey(
+            processPath: processPath,
+            category: normalizedCategory,
+            binaryIdentity: binaryIdentity
+        )
+
+        if processStats[key] == nil {
+            if processStats.count >= maxTracked,
+               let oldest = processStats.min(by: {
+                   ($0.value.lastActivity ?? .distantPast)
+                       < ($1.value.lastActivity ?? .distantPast)
+               })?.key {
+                processStats.removeValue(forKey: oldest)
+                evictedIdentities &+= 1
             }
-            processStats[processPath] = ProcessStats()
+            processStats[key] = ProcessStats()
         }
 
-        var stats = processStats[processPath]!
+        var stats = processStats[key]!
         var anomalies: [AnomalyResult] = []
         let now = timestamp
 
-        // Track inter-event interval → event frequency
-        if let lastTime = stats.lastEventTime {
-            let interval = now.timeIntervalSince(lastTime)
-            if interval > 0 && interval < 300 { // Ignore gaps > 5 minutes
-                let eventsPerMinute = 60.0 / interval
-                let z = stats.eventFrequency.zScore(eventsPerMinute)
-                stats.eventFrequency.update(eventsPerMinute)
+        // Delivered-event frequency under sampling/drop measures collector
+        // behavior, not process behavior. Abstain unless the caller can prove
+        // this category's timing stream is complete.
+        if timingCoverageComplete {
+            if let lastTime = stats.lastTimingEventTime {
+                let rawInterval = now.timeIntervalSince(lastTime)
+                if rawInterval > 0, rawInterval < 300 {
+                    let eventsPerMinute = 60.0 / max(0.001, rawInterval)
+                    let priorCount = stats.eventFrequency.count
+                    let priorMean = stats.eventFrequency.mean
+                    let priorStddev = stats.eventFrequency.stddev
+                    let z = stats.eventFrequency.zScore(eventsPerMinute)
+                    if priorCount >= minSamples, z > zThreshold {
+                        anomalies.append(AnomalyResult(
+                            processPath: processPath,
+                            feature: "event_frequency",
+                            value: eventsPerMinute,
+                            mean: priorMean,
+                            stddev: priorStddev,
+                            zScore: z
+                        ))
+                        stats.eventFrequency.updateClipped(
+                            eventsPerMinute,
+                            zLimit: zThreshold,
+                            minimumScale: 1
+                        )
+                        clippedBaselineUpdates &+= 1
+                    } else {
+                        stats.eventFrequency.update(eventsPerMinute)
+                    }
+                    timingObservations &+= 1
+                } else if rawInterval <= 0 {
+                    outOfOrderTimestamps &+= 1
+                }
+            }
+            if stats.lastTimingEventTime == nil
+                || now > (stats.lastTimingEventTime ?? .distantPast) {
+                stats.lastTimingEventTime = now
+            }
+        } else {
+            timingCoverageSkipped &+= 1
+        }
 
-                if stats.eventFrequency.count >= minSamples && z > zThreshold {
+        // Argument shape belongs to a process event. Repeating one launch's
+        // args on thousands of file/network events made the baseline depend on
+        // delivery mix and let file floods drown real launch changes.
+        if normalizedCategory == "process" {
+            processShapeObservations &+= 1
+            let countValue = Double(max(0, argCount))
+            let priorArgCount = stats.argCount.count
+            let priorArgMean = stats.argCount.mean
+            let priorArgStddev = stats.argCount.stddev
+            let argZ = stats.argCount.zScore(countValue)
+            if priorArgCount >= minSamples, argZ > zThreshold, argCount > 5 {
+                anomalies.append(AnomalyResult(
+                    processPath: processPath,
+                    feature: "argument_count",
+                    value: countValue,
+                    mean: priorArgMean,
+                    stddev: priorArgStddev,
+                    zScore: argZ
+                ))
+                stats.argCount.updateClipped(
+                    countValue,
+                    zLimit: zThreshold,
+                    minimumScale: 1
+                )
+                clippedBaselineUpdates &+= 1
+            } else {
+                stats.argCount.update(countValue)
+            }
+
+            let entropy = commandLineEntropy
+                ?? EntropyAnalysis.shannonEntropy(commandLine)
+            if entropy.isFinite {
+                let priorEntropyCount = stats.argEntropy.count
+                let priorEntropyMean = stats.argEntropy.mean
+                let priorEntropyStddev = stats.argEntropy.stddev
+                let entropyZ = stats.argEntropy.zScore(entropy)
+                if priorEntropyCount >= minSamples,
+                   entropyZ > zThreshold,
+                   entropy > 4.5 {
                     anomalies.append(AnomalyResult(
                         processPath: processPath,
-                        feature: "event_frequency",
-                        value: eventsPerMinute,
-                        mean: stats.eventFrequency.mean,
-                        stddev: stats.eventFrequency.stddev,
-                        zScore: z
+                        feature: "commandline_entropy",
+                        value: entropy,
+                        mean: priorEntropyMean,
+                        stddev: priorEntropyStddev,
+                        zScore: entropyZ
                     ))
+                    stats.argEntropy.updateClipped(
+                        entropy,
+                        zLimit: zThreshold,
+                        minimumScale: 0.1
+                    )
+                    clippedBaselineUpdates &+= 1
+                } else {
+                    stats.argEntropy.update(entropy)
                 }
             }
         }
-        stats.lastEventTime = now
 
-        // Track argument count
-        let argZ = stats.argCount.zScore(Double(argCount))
-        stats.argCount.update(Double(argCount))
-        if stats.argCount.count >= minSamples && argZ > zThreshold && argCount > 5 {
-            anomalies.append(AnomalyResult(
-                processPath: processPath,
-                feature: "argument_count",
-                value: Double(argCount),
-                mean: stats.argCount.mean,
-                stddev: stats.argCount.stddev,
-                zScore: argZ
-            ))
-        }
-
-        // Track command-line entropy (reuse the caller-supplied value when present)
-        let entropy = commandLineEntropy ?? EntropyAnalysis.shannonEntropy(commandLine)
-        let entropyZ = stats.argEntropy.zScore(entropy)
-        stats.argEntropy.update(entropy)
-        if stats.argEntropy.count >= minSamples && entropyZ > zThreshold && entropy > 4.5 {
-            anomalies.append(AnomalyResult(
-                processPath: processPath,
-                feature: "commandline_entropy",
-                value: entropy,
-                mean: stats.argEntropy.mean,
-                stddev: stats.argEntropy.stddev,
-                zScore: entropyZ
-            ))
-        }
-
-        processStats[processPath] = stats
+        stats.lastActivity = max(stats.lastActivity ?? .distantPast, now)
+        processStats[key] = stats
+        emittedAnomalies &+= UInt64(anomalies.count)
         return anomalies
     }
 
+    private nonisolated static func baselineKey(
+        processPath: String,
+        category: String,
+        binaryIdentity: String?
+    ) -> String {
+        let identity: String
+        if let binaryIdentity, !binaryIdentity.isEmpty {
+            identity = binaryIdentity
+        } else {
+            identity = processPath
+        }
+        return category + "\u{1F}" + identity
+    }
+
+    public func telemetry() -> Telemetry {
+        Telemetry(
+            observations: observations,
+            processShapeObservations: processShapeObservations,
+            timingObservations: timingObservations,
+            timingCoverageSkipped: timingCoverageSkipped,
+            outOfOrderTimestamps: outOfOrderTimestamps,
+            emittedAnomalies: emittedAnomalies,
+            clippedBaselineUpdates: clippedBaselineUpdates,
+            evictedIdentities: evictedIdentities,
+            trackedIdentities: processStats.count,
+            maximumTrackedIdentities: maxTracked
+        )
+    }
+
     /// Get statistics summary for a process.
-    public func stats(for processPath: String) -> (
+    public func stats(
+        for processPath: String,
+        category: String = "process",
+        binaryIdentity: String? = nil
+    ) -> (
         eventFreqMean: Double, eventFreqStddev: Double,
         argCountMean: Double, argEntropyMean: Double,
         samples: Int
     )? {
-        guard let s = processStats[processPath] else { return nil }
+        let key = Self.baselineKey(
+            processPath: processPath,
+            category: category.lowercased(),
+            binaryIdentity: binaryIdentity
+        )
+        guard let s = processStats[key] else { return nil }
         return (
             s.eventFrequency.mean, s.eventFrequency.stddev,
             s.argCount.mean, s.argEntropy.mean,
-            s.eventFrequency.count
+            max(s.eventFrequency.count, s.argCount.count, s.argEntropy.count)
         )
     }
 
     /// Prune stale process entries.
-    public func prune(olderThan: TimeInterval = 3600) {
-        let cutoff = Date().addingTimeInterval(-olderThan)
+    public func prune(olderThan: TimeInterval = 3600, now: Date = Date()) {
+        let cutoff = now.addingTimeInterval(-max(0, olderThan))
         processStats = processStats.filter { _, stats in
-            (stats.lastEventTime ?? .distantPast) > cutoff
+            (stats.lastActivity ?? .distantPast) > cutoff
         }
     }
 }

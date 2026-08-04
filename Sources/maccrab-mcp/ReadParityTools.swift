@@ -11,9 +11,9 @@
 // Four more human-only surfaces (`why`, `vulns`, `privacy`, `extensions`) had no
 // MCP equivalent at all.
 //
-// Every tool here is READ-ONLY: none appears in `agentToolCapability`, so none
-// is gated, and none writes anything. They deliberately re-read the same stores
-// the CLI reads rather than shelling out to `maccrabctl` — a subprocess would
+// Every tool here is READ-ONLY: each appears in the explicit
+// `agentUngatedStaticTools` registry, and none writes anything. They deliberately
+// re-read the same stores the CLI reads rather than shelling out to `maccrabctl` — a subprocess would
 // inherit the agent's environment and re-parse formatted text.
 
 import Foundation

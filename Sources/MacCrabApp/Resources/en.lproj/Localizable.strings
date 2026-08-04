@@ -205,10 +205,10 @@
 "aiGuard.whatMonitors" = "What AI Guard Monitors";
 "aiGuard.supportedTools" = "Supported AI Coding Tools";
 "aiGuard.recentAlerts" = "Recent AI Safety Alerts";
-"aiGuard.noAlerts" = "No AI safety alerts";
-"aiGuard.noAlertsDesc" = "AI tools are operating within safe boundaries";
-"aiGuard.credentialFenceTitle" = "Credential Fence — Protected Paths";
-"aiGuard.credentialFenceDesc" = "AI tools will trigger CRITICAL alerts if they access any of these:";
+"aiGuard.noAlerts" = "No AI Guard alerts observed in the queried data";
+"aiGuard.noAlertsDesc" = "Absence of an alert is not a safety verdict when event coverage or session retention is incomplete.";
+"aiGuard.credentialFenceTitle" = "Credential Fence — Monitored Paths";
+"aiGuard.credentialFenceDesc" = "Observed AI-tool access to these paths can trigger MEDIUM alerts; unbound or dropped events reduce coverage:";
 
 /* ── AI Guard monitor items ── */
 "aiGuard.shellSpawning" = "Shell Spawning";
@@ -635,7 +635,7 @@
 "settings.llmClaudeHelp" = "Get an API key from console.anthropic.com";
 "settings.llmClaudeKey" = "Anthropic API Key";
 "settings.llmClaudeModel" = "Model";
-"settings.llmCloudPrivacy" = "Cloud AI is off by default and opt-in. When enabled, sanitized alert context (rule titles, MITRE techniques, process trees, redacted paths) is sent to your chosen provider — Anthropic, OpenAI, Google, or Mistral. Best-effort redaction strips usernames, home paths, and private + public IPs, but it is not a guarantee. Use a local Ollama backend for full privacy.";
+"settings.llmCloudPrivacy" = "Cloud AI is off by default and opt-in. When enabled, sanitized alert context (rule titles, MITRE techniques, process trees, redacted paths) is sent to your chosen provider — Anthropic, OpenAI, Google, or Mistral. Best-effort redaction strips usernames, home paths, and private + public IPs, but it is not a guarantee. To avoid Internet egress from MacCrab, use Ollama through a loopback endpoint.";
 "settings.llmEnable" = "AI Backend";
 "settings.llmEnabled" = "Enable AI-powered analysis";
 "settings.llmGeminiHelp" = "Get an API key from aistudio.google.com";
@@ -643,7 +643,16 @@
 "settings.llmGeminiModel" = "Model";
 "settings.llmInfo" = "How it works";
 "settings.llmInfoDesc" = "The AI backend can add structured alert investigations, campaign summaries, defense recommendations, and package-intent refinement. Model output is advisory and never executes an action.";
-"settings.llmLocalPrivacy" = "Running locally. No data leaves your machine.";
+"settings.llmLocalPrivacy" = "MacCrab sends no Internet egress for this loopback endpoint.";
+"settings.llmAllowRemoteEndpoint" = "Allow the detection engine to send advisory evidence to this remote endpoint";
+"settings.llmRemoteEndpointWarning" = "Remote endpoint: %@. Approval is bound to this exact URL and is cleared when it changes. Model input may leave this Mac.";
+"settings.llmRemoteApprovalRequired" = "The app settings were saved, but the detection engine was not changed. Approve this exact remote endpoint to send model input off this Mac.";
+"settings.llmEngineConfigQueueFailed" = "The app settings were saved, but the detection-engine configuration request could not be queued.";
+"settings.llmEngineApplied" = "Applied: %@ — confirmed by a fresh engine heartbeat.";
+"settings.llmEngineDifferent" = "The fresh engine heartbeat reports %@; the settings in this editor are not confirmed as applied.";
+"settings.llmEngineDisabled" = "AI backend disabled";
+"settings.llmEnginePending" = "Pending engine application. The request was queued, but no newer heartbeat confirms the exact provider and model yet. Restarting the detection engine may be required.";
+"settings.llmEngineUnknown" = "Applied engine state is unknown because no fresh LLM heartbeat is available. Saved or queued settings do not prove application.";
 "settings.llmMistralHelp" = "Get an API key from console.mistral.ai";
 "settings.llmMistralKey" = "Mistral API Key";
 "settings.llmMistralModel" = "Model";
@@ -944,3 +953,15 @@
 "settings.llm.legacyMigrationFailed" = "A legacy plaintext credential could not be moved and verified in Keychain. The original file was left unchanged.";
 "system.browserInventoryCoverageGapChip" = "Coverage gap";
 "system.browserInventoryIncompleteTitle" = "Browser extension inventory incomplete";
+
+/* 2026-08-04 audit runtime/storage truth copy. */
+"aiGuard.retainedTelemetryDisclosure" = "Retained session telemetry is bounded to 2,000 recent events per active session and resets when that AI root exits. It is not a 24-hour history or a safety verdict; durable AI Guard alerts appear in Alerts.";
+"settings.evidence.cap" = "Alert evidence allocation: %lld MB";
+"settings.storageFamilyCapsDisclosure" = "Steady-state family caps: events.db %lld MB; alerts.db %lld MB; combined %lld MB. Upgrades may temporarily retain a measured legacy-evidence reserve (never more than %lld MB) until those rows expire.";
+"system.alertEvidenceTransitionDetail" = "Live transition-aware caps: events %@, events+alerts %@. Steady-state caps after preserved legacy events.db evidence ages out: events %@, events+alerts %@. Current bounded reserve: %@ of maximum %@; legacy evidence rows %@, charged %@. %@. A single in-flight capture is normal; pending on repeated heartbeats is stuck.";
+"system.llmRuntimeDegradedChip" = "Fail-closed";
+"system.llmRuntimeDegradedTitle" = "AI runtime quality needs attention";
+"system.otlpLifecycleDegradedDetail" = "The loopback OTLP receiver rejected unauthenticated/self-reported input, broke or incompletely reported an ownership ledger, retained work after sealing, left a lifecycle operation in progress, or did not stop cleanly. Kernel-backed detection is unaffected. Listeners: accepted %llu, completed %llu, active %lld, ready %lld, rejected after seal %llu, conserving %@. Connections: accepted %llu, completed %llu, active %lld, rejected after seal %llu, rejected at capacity %llu, conserving %@. Body tasks: accepted %llu, completed %llu, cancelled %llu, rejected %llu, in flight %lld of %lld, conserving %@. Callback tasks: accepted %llu, completed %llu, cancelled %llu, rejected %llu, in flight %lld of %lld, conserving %@. Lifecycle operations in progress %lld; cleanly stopped %@, last shutdown clean %@, shutdown timeouts %llu.";
+"system.otlpLifecycleDegradedTitle" = "Agent Trace receiver feature degraded";
+"system.sequenceContinuityDegradedTitle" = "Sequence restart continuity degraded";
+"system.sequenceContinuityGapChip" = "Detection continuity gap";

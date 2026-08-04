@@ -234,11 +234,6 @@ public struct CredentialFence: Sendable {
     /// Custom additional paths (user-configurable).
     private let customPaths: [SensitivePath]
 
-    /// All paths to check (default + custom).
-    private var allPaths: [SensitivePath] {
-        Self.defaultPaths + customPaths
-    }
-
     // MARK: - Initialization
 
     public init(customPaths: [SensitivePath] = []) {
@@ -250,6 +245,56 @@ public struct CredentialFence: Sendable {
     /// Check if a file path accesses sensitive credentials.
     /// Returns the credential type if it matches, nil if safe.
     public func checkAccess(filePath: String) -> CredentialType? {
+        if customPaths.isEmpty {
+            return Self.defaultCredentialType(filePath: filePath)
+        }
+        return Self.matchCredential(
+            filePath: filePath,
+            sensitivePaths: Self.defaultPaths + customPaths
+        )
+    }
+
+    /// Canonical built-in classifier shared by downstream consumers that need
+    /// the fence's exact path semantics but do not have user-supplied patterns.
+    /// Keeping this as the one implementation prevents a second credential
+    /// allowlist from drifting as the built-in corpus evolves.
+    static func defaultCredentialType(filePath: String) -> CredentialType? {
+        matchCredential(filePath: filePath, sensitivePaths: defaultPaths)
+    }
+
+    /// Broader privacy boundary for path-bearing AgentLineage snapshots.
+    /// Some files are inappropriate to persist even when reading them is not
+    /// itself an alert-worthy credential event (AWS region config, SSO cache,
+    /// browser profiles, public SSH authorization metadata). Keep this as one
+    /// owner-side classifier; EventLoop and AgentLineage must delegate here
+    /// rather than maintaining parallel substring lists.
+    public static func isPrivateAgentLineagePath(_ filePath: String) -> Bool {
+        if defaultCredentialType(filePath: filePath) != nil { return true }
+        let path = filePath.lowercased()
+        return path.contains("/.aws/config")
+            || path.contains("/.aws/sso/cache/")
+            || path.contains("/.bw/data.json")
+            || path.contains("/.config/op/")
+            || path.contains("/group containers/2bua8c4s2c.com.agilebits/")
+            || path.contains("/group containers/2bua8c4s2c.com.1password/")
+            || path.contains("/.ssh/authorized_keys")
+            || path.hasSuffix("/.gitconfig")
+            || path.contains("/library/application support/google/chrome/")
+            || path.contains("/library/application support/firefox/")
+            || path.contains("/library/application support/bravesoftware/")
+            || path.contains("/library/application support/microsoft edge/")
+            || path.contains("/library/application support/arc/")
+            || path.contains("/library/application support/vivaldi/")
+            || path.contains("/library/application support/com.operasoftware.opera/")
+            || path.contains("/library/safari/")
+            || path.contains("/library/containers/com.apple.safari/")
+            || path.hasSuffix("/cookies.binarycookies")
+    }
+
+    private static func matchCredential(
+        filePath: String,
+        sensitivePaths: [SensitivePath]
+    ) -> CredentialType? {
         let path = filePath.lowercased()
         let filename = (path as NSString).lastPathComponent
 
@@ -279,7 +324,7 @@ public struct CredentialFence: Sendable {
         // matches it as a substring (audit: codesign/security flagged for it).
         if path.contains("/system/library/keychains/") { return nil }
 
-        for sensitive in allPaths {
+        for sensitive in sensitivePaths {
             let pattern = sensitive.pattern.lowercased()
             switch sensitive.kind {
             case .exactFilename:

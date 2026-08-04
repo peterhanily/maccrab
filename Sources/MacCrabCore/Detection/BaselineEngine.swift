@@ -228,6 +228,8 @@ public actor BaselineEngine {
 
     /// Handle for the periodic auto-save task.
     private var autoSaveTask: Task<Void, Never>?
+    private var autoSavePhase: CollectorLifecyclePhase = .initialized
+    private var autoSaveShutdownTask: Task<Bool, Never>?
 
     // MARK: Logging
 
@@ -550,29 +552,80 @@ public actor BaselineEngine {
     ///
     /// The timer saves every 5 minutes during the learning phase and is
     /// cancelled when the engine is deinitialized.
-    public func startAutoSave() {
-        stopAutoSave()
+    @discardableResult
+    public func startAutoSave() -> Bool {
+        if autoSavePhase == .running { return true }
+        guard autoSavePhase == .initialized else { return false }
+        autoSavePhase = .running
 
         autoSaveTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(BaselineEngine.autoSaveInterval * 1_000_000_000))
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(
+                            BaselineEngine.autoSaveInterval * 1_000_000_000
+                        )
+                    )
+                } catch {
+                    break
+                }
 
                 guard !Task.isCancelled else { break }
                 guard let self else { break }
-
-                do {
-                    try await self.save()
-                } catch {
-                    // Logged inside saveSync; nothing more to do here.
+                guard await self.performScheduledAutoSaveIfRunning() else {
+                    break
                 }
             }
         }
+        return true
     }
 
-    /// Stop the periodic auto-save timer.
-    public func stopAutoSave() {
-        autoSaveTask?.cancel()
-        autoSaveTask = nil
+    /// The task re-checks lifecycle state on the actor after its sleep and
+    /// before touching disk. This closes the cancellation/actor-hop race where
+    /// a task could pass `Task.isCancelled`, queue `save()`, and write after
+    /// terminal shutdown had already begun.
+    private func performScheduledAutoSaveIfRunning() -> Bool {
+        guard autoSavePhase == .running, !Task.isCancelled else {
+            return false
+        }
+        do {
+            try saveSync()
+        } catch {
+            logger.error(
+                "Scheduled baseline save failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        return true
+    }
+
+    /// Cancel and bounded-join the exact auto-save task accepted before this
+    /// call. Terminal shutdown uses this instead of `stopAutoSave()` so an
+    /// already-running save cannot mutate its durable baseline after the
+    /// daemon has claimed a clean persistence boundary.
+    @discardableResult
+    public func stopAutoSaveAndJoin(
+        deadline: TimeInterval = 1.0
+    ) async -> Bool {
+        if let autoSaveShutdownTask {
+            return await autoSaveShutdownTask.value
+        }
+        if autoSavePhase == .stopped { return true }
+
+        autoSavePhase = .stopping
+        let task = autoSaveTask
+        task?.cancel()
+        let accepted = task.map { [$0] } ?? []
+        let waiter = Task {
+            await CollectorBoundedTaskJoin.waitForAll(
+                accepted,
+                deadline: deadline
+            )
+        }
+        autoSaveShutdownTask = waiter
+        let joined = await waiter.value
+        autoSavePhase = .stopped
+        if joined { autoSaveTask = nil }
+        return joined
     }
 
     /// Update the engine configuration at runtime.

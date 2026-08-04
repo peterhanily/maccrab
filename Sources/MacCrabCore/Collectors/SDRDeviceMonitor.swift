@@ -48,6 +48,7 @@ public actor SDRDeviceMonitor {
 
     /// Active task.
     private var scanTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     // MARK: - Types
 
@@ -129,7 +130,8 @@ public actor SDRDeviceMonitor {
 
     /// Start monitoring.
     public func start() {
-        guard scanTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("SDR device monitor starting (USB SDR scan every \(self.pollInterval)s)")
 
         // Record initial display state
@@ -138,6 +140,7 @@ public actor SDRDeviceMonitor {
         scanTask = Task { [weak self] in
             // Initial scan
             await self?.scanSDRDevices()
+            guard !Task.isCancelled else { return }
             await self?.checkDisplayState()
 
             while !Task.isCancelled {
@@ -145,6 +148,7 @@ public actor SDRDeviceMonitor {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self?.scanSDRDevices()
+                guard !Task.isCancelled else { break }
                 await self?.checkDisplayState()
             }
         }
@@ -152,9 +156,25 @@ public actor SDRDeviceMonitor {
 
     /// Stop monitoring.
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { scanTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = scanTask
         scanTask?.cancel()
-        scanTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     // MARK: - USB SDR Device Scanning

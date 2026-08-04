@@ -8,6 +8,37 @@ import Foundation
 @Suite("Notarization Checker")
 struct NotarizationCheckerTests {
 
+    private actor RunnerProbe {
+        private(set) var calls = 0
+        private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+        func assess(waitForRelease: Bool = false) async -> String {
+            calls += 1
+            if waitForRelease {
+                await withCheckedContinuation { continuation in
+                    releaseContinuation = continuation
+                }
+            }
+            return "accepted\nsource=Notarized Developer ID"
+        }
+
+        func waitUntilCalled() async {
+            while calls == 0 { await Task.yield() }
+        }
+
+        func release() {
+            releaseContinuation?.resume()
+            releaseContinuation = nil
+        }
+    }
+
+    private func temporaryBinary(byte: UInt8 = 0x41, count: Int = 2_048) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-notarization-\(UUID().uuidString)")
+        try Data(repeating: byte, count: count).write(to: url, options: .atomic)
+        return url
+    }
+
     @Test("cachedResult resolves system-prefix binaries inline without spctl")
     func systemPrefixResolvedInline() async {
         let checker = NotarizationChecker()
@@ -80,5 +111,100 @@ struct NotarizationCheckerTests {
         // Every slot handed back exactly once — no leak, no underflow.
         let residual = await checker.inFlightForTesting
         #expect(residual == 0, "in-flight count should settle at 0; got \(residual)")
+    }
+
+    @Test("Replacing a binary at the same path invalidates its trusted verdict")
+    func replacementInvalidatesCache() async throws {
+        let binary = try temporaryBinary()
+        defer { try? FileManager.default.removeItem(at: binary) }
+        let runner = RunnerProbe()
+        let checker = NotarizationChecker(assessmentRunner: { _ in
+            await runner.assess()
+        })
+
+        #expect(await checker.check(binaryPath: binary.path).status == .notarized)
+        #expect(await checker.cachedResult(binaryPath: binary.path)?.status == .notarized)
+
+        // Atomic write gives the same pathname different bytes/identity.
+        try Data(repeating: 0x42, count: 4_096).write(to: binary, options: .atomic)
+
+        #expect(await checker.cachedResult(binaryPath: binary.path) == nil)
+        #expect(await checker.check(binaryPath: binary.path).status == .notarized)
+        #expect(await runner.calls == 2)
+        #expect(await checker.diagnostics().cacheIdentityInvalidations == 1)
+    }
+
+    @Test("Concurrent cold checks for the same file coalesce to one assessment")
+    func concurrentColdChecksCoalesce() async throws {
+        let binary = try temporaryBinary()
+        defer { try? FileManager.default.removeItem(at: binary) }
+        let runner = RunnerProbe()
+        let checker = NotarizationChecker(assessmentRunner: { _ in
+            await runner.assess(waitForRelease: true)
+        })
+
+        let tasks = (0..<40).map { _ in
+            Task { await checker.check(binaryPath: binary.path) }
+        }
+        await runner.waitUntilCalled()
+
+        // Let every caller reach the actor while the single runner is held.
+        for _ in 0..<2_000 {
+            if await checker.diagnostics().coalescedChecks == 39 { break }
+            await Task.yield()
+        }
+        #expect(await checker.diagnostics().coalescedChecks == 39)
+        #expect(await runner.calls == 1)
+
+        await runner.release()
+        for task in tasks {
+            #expect(await task.value.status == .notarized)
+        }
+        let diagnostics = await checker.diagnostics()
+        #expect(diagnostics.assessmentsCompleted == 1)
+        #expect(diagnostics.assessmentsInFlightOrQueued == 0)
+    }
+
+    @Test("A file changed during assessment is unknown and never cached")
+    func replacementDuringAssessmentIsNotTrusted() async throws {
+        let binary = try temporaryBinary()
+        defer { try? FileManager.default.removeItem(at: binary) }
+        let checker = NotarizationChecker(assessmentRunner: { path in
+            try? Data(repeating: 0x43, count: 8_192).write(
+                to: URL(fileURLWithPath: path),
+                options: .atomic
+            )
+            return "accepted\nsource=Notarized Developer ID"
+        })
+
+        let result = await checker.check(binaryPath: binary.path)
+
+        #expect(result.status == .unknown)
+        #expect(await checker.cachedResult(binaryPath: binary.path) == nil)
+        #expect(await checker.diagnostics().identityChangesDuringAssessment == 1)
+    }
+
+    @Test("Unique-path assessment demand is bounded before the spctl queue")
+    func uniquePathDemandIsBounded() async throws {
+        let first = try temporaryBinary(byte: 0x51)
+        let second = try temporaryBinary(byte: 0x52)
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let runner = RunnerProbe()
+        let checker = NotarizationChecker(
+            maximumAssessmentDemand: 1,
+            assessmentRunner: { _ in await runner.assess(waitForRelease: true) }
+        )
+        let held = Task { await checker.check(binaryPath: first.path) }
+        await runner.waitUntilCalled()
+
+        let shed = await checker.check(binaryPath: second.path)
+
+        #expect(shed.status == .unknown)
+        #expect(await checker.diagnostics().saturatedChecks == 1)
+        await runner.release()
+        #expect(await held.value.status == .notarized)
     }
 }

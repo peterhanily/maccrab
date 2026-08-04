@@ -109,6 +109,11 @@ public final class ESCollector: @unchecked Sendable {
     private let deliveryTelemetry = EventCollectorBufferTelemetry(
         capacity: eventStreamCapacity
     )
+    /// ES starts exactly once during construction. The condition serialises
+    /// teardown callers and lets the async finalizer join the synchronous ES
+    /// worker/client drain without claiming cancellation is completion.
+    private let lifecycleCondition = NSCondition()
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     public var deliveryCounters: EventCollectorBufferSnapshot {
         deliveryTelemetry.snapshot()
@@ -236,6 +241,57 @@ public final class ESCollector: @unchecked Sendable {
     /// of patterns; allocating one per exec at 200-500 events/sec
     /// adds avoidable allocation pressure on the ES callback queue.
     fileprivate static let sharedAIRegistry = AIToolRegistry()
+
+    /// Dynamic AI consumers are an additional exception to the deliberately
+    /// narrow static OPEN allowlist. Keep their callback state in one
+    /// lock-backed immutable registry: EventLoop publishes complete tracker
+    /// snapshots after root/child lifecycle edges; the ES callback only reads.
+    ///
+    /// This policy intentionally contains *only* the dynamic-AI built-in. It
+    /// answers "does an active AI consumer need this otherwise-discarded
+    /// OPEN?" and is OR-ed with the established credential/agent-content
+    /// paths below. The full rule-derived file policy remains a separate audit
+    /// surface and cannot accidentally broaden this hot-path exception.
+    static let dynamicAIFileInterestRegistry: FileEventInterestPolicyRegistry = {
+        let registry = FileEventInterestPolicyRegistry()
+        _ = registry.install(FileEventInterestDescriptorSnapshot(
+            singleEventRules: [],
+            sequenceRules: [],
+            graphRules: [],
+            builtinRequirements: [BuiltinFileEventRequirement(
+                id: "maccrab.ai-guard.callback-open",
+                sources: [.endpointSecurityFile],
+                kind: .dynamicAIConsumers
+            )]
+        ))
+        _ = registry.publishDynamicAI(.current(
+            validUntilUptimeNanoseconds: UInt64.max,
+            demands: []
+        ))
+        return registry
+    }()
+
+    /// Atomically replace callback demand from AIProcessTracker's complete
+    /// active-session view. `UInt64.max` is deliberate: EventLoop publishes on
+    /// every lifecycle edge, so the snapshot remains current until replaced;
+    /// arbitrary wall-clock expiry would turn an idle non-AI host into an
+    /// admit-all OPEN firehose. Bounds failure still installs `.unknown` and
+    /// therefore fails open.
+    @discardableResult
+    public static func publishDynamicAIFileEventSessions(
+        _ sessions: [DynamicAIFileEventSession]
+    ) -> Bool {
+        dynamicAIFileInterestRegistry.publishDynamicAI(.currentCanonical(
+            validUntilUptimeNanoseconds: UInt64.max,
+            sessions: sessions
+        ))
+    }
+
+    /// Close the short process-start grace on EXIT so rapid PID reuse cannot
+    /// inherit even the bounded over-admission window.
+    public static func revokeDynamicAIFileEventProcess(_ processID: Int32) {
+        dynamicAIFileInterestRegistry.revokeDynamicAIGrace(processID: processID)
+    }
 
     /// v1.21.4 (P6): low-volume operator-visible signal for the agent-trace
     /// self-stamp path. Logs at `.info` ONLY when a TRACEPARENT is actually
@@ -832,15 +888,29 @@ public final class ESCollector: @unchecked Sendable {
         path: String? = nil,
         closeModified: Bool = true,
         isPlatformBinary: Bool = false,
-        protection: Int32 = 0
+        protection: Int32 = 0,
+        processID: Int32? = nil,
+        dynamicAIRegistry: FileEventInterestPolicyRegistry = dynamicAIFileInterestRegistry
     ) -> Bool {
         switch eventType {
         case ES_EVENT_TYPE_NOTIFY_OPEN.rawValue:
             guard let path else { return true }
-            guard isCredentialReadPath(path) || isAgentContentReadPath(path) else {
-                return true
+            // Keep the platform-keychain safe drop independent and FIRST: a
+            // broad/unknown dynamic snapshot must not re-admit securityd's
+            // constant own-keychain noise.
+            if isPlatformBinary && isKeychainPath(path) { return true }
+            if isCredentialReadPath(path) || isAgentContentReadPath(path) {
+                return false
             }
-            return isPlatformBinary && isKeychainPath(path)
+            let facts = FileEventAdmissionFacts.endpointSecurity(
+                path: path,
+                fileAction: .open,
+                eventAction: "open",
+                eventType: .change,
+                processID: processID,
+                isPlatformBinary: isPlatformBinary
+            )
+            return !dynamicAIRegistry.shouldAdmit(facts)
 
         case ES_EVENT_TYPE_NOTIFY_CLOSE.rawValue:
             guard closeModified else { return true }
@@ -864,6 +934,56 @@ public final class ESCollector: @unchecked Sendable {
         }
     }
 
+    /// Bridge a newly-observed AI root/descendant across the split ES clients:
+    /// EXEC/FORK can be delivered on the process client concurrently with the
+    /// new PID's first OPEN on the file client, before EventLoop has published
+    /// the next complete tracker snapshot. Grant only direct AI roots or
+    /// children of an already-attributed PID, and expire automatically if the
+    /// process event is lost downstream.
+    private static func bridgeDynamicAIProcessStart(
+        message: UnsafePointer<es_message_t>
+    ) {
+        let msg = message.pointee
+        let now = DispatchTime.now().uptimeNanoseconds
+        let graceNanos: UInt64 = 2_000_000_000
+        let (deadline, overflow) = now.addingReportingOverflow(graceNanos)
+        let validUntil = overflow ? UInt64.max : deadline
+
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_EXEC:
+            let target = msg.event.exec.target
+            let processID = audit_token_to_pid(target.pointee.audit_token)
+            let parentID = target.pointee.ppid
+            let executable = esFileToPath(target.pointee.executable)
+            if dynamicAIFileInterestRegistry.isKnownDynamicAIProcess(
+                parentID,
+                nowUptimeNanoseconds: now
+            ) || sharedAIRegistry.isAITool(executablePath: executable) != nil {
+                _ = dynamicAIFileInterestRegistry.grantDynamicAIGrace(
+                    processID: processID,
+                    validUntilUptimeNanoseconds: validUntil,
+                    nowUptimeNanoseconds: now
+                )
+            }
+
+        case ES_EVENT_TYPE_NOTIFY_FORK:
+            let parentID = audit_token_to_pid(msg.process.pointee.audit_token)
+            guard dynamicAIFileInterestRegistry.isKnownDynamicAIProcess(
+                parentID,
+                nowUptimeNanoseconds: now
+            ) else { return }
+            let childID = audit_token_to_pid(msg.event.fork.child.pointee.audit_token)
+            _ = dynamicAIFileInterestRegistry.grantDynamicAIGrace(
+                processID: childID,
+                validUntilUptimeNanoseconds: validUntil,
+                nowUptimeNanoseconds: now
+            )
+
+        default:
+            break
+        }
+    }
+
     /// Extract only the fields required by `shouldDropBeforeWorker` while the
     /// borrowed ES message is valid on the callback boundary. Kept messages are
     /// still normalised on the worker; high-volume rejected messages are never
@@ -874,12 +994,18 @@ public final class ESCollector: @unchecked Sendable {
         let msg = message.pointee
         let eventType = msg.event_type.rawValue
 
+        // This side effect is confined to process-start events and happens
+        // before any file admission read. It never retains the borrowed ES
+        // message and only swaps/updates bounded lock-backed callback state.
+        bridgeDynamicAIProcessStart(message: message)
+
         switch msg.event_type {
         case ES_EVENT_TYPE_NOTIFY_OPEN:
             return shouldDropBeforeWorker(
                 eventType: eventType,
                 path: esFileToPath(msg.event.open.file),
-                isPlatformBinary: msg.process.pointee.is_platform_binary
+                isPlatformBinary: msg.process.pointee.is_platform_binary,
+                processID: audit_token_to_pid(msg.process.pointee.audit_token)
             )
 
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
@@ -1002,6 +1128,9 @@ public final class ESCollector: @unchecked Sendable {
         subscribeMemoryProtection: Bool = true,
         workerMaxInFlight: Int = ESCollector.maxInFlightMessages
     ) throws {
+        // Compile/seed callback demand on the setup thread. The first kernel
+        // OPEN must never pay static-initialisation or policy-compilation cost.
+        _ = Self.dynamicAIFileInterestRegistry
         self.subscribeFileOpen = subscribeFileOpen
         self.subscribeIntrospection = subscribeIntrospection
         self.subscribeMemoryProtection = subscribeMemoryProtection
@@ -1056,6 +1185,7 @@ public final class ESCollector: @unchecked Sendable {
         muteNoisyPaths()
         muteSelf()
         try subscribe()
+        lifecyclePhase = .running
 
         logger.info("ESCollector initialised — \(self.contexts.count) ES client(s), split_degraded=\(self.splitDegraded).")
     }
@@ -1622,6 +1752,21 @@ public final class ESCollector: @unchecked Sendable {
     /// Tear down BOTH ES clients (or the single unified client in degraded mode)
     /// and finish the event stream.
     public func stop() {
+        lifecycleCondition.lock()
+        if lifecyclePhase == .stopped {
+            lifecycleCondition.unlock()
+            return
+        }
+        if lifecyclePhase == .stopping {
+            while lifecyclePhase == .stopping {
+                lifecycleCondition.wait()
+            }
+            lifecycleCondition.unlock()
+            return
+        }
+        lifecyclePhase = .stopping
+        lifecycleCondition.unlock()
+
         // v1.21.4 Phase-4 (Mitigation C): symmetric teardown across every
         // context. `teardownContext` drains that context's off-thread worker
         // FIRST — so every retained ES message is released (via
@@ -1644,6 +1789,30 @@ public final class ESCollector: @unchecked Sendable {
         // stream above.
         traceBindingContinuation?.finish()
         traceBindingContinuation = nil
+
+        lifecycleCondition.lock()
+        lifecyclePhase = .stopped
+        lifecycleCondition.broadcast()
+        lifecycleCondition.unlock()
+    }
+
+    /// Run the synchronous ES message/client drain on retained work and bound
+    /// only the caller's wait. If a callback normaliser is uncooperative, false
+    /// is returned while the retained teardown task continues owning `self` and
+    /// the client handles until it really completes.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let teardown = Task.detached(priority: .utility) { [self] in
+            stop()
+        }
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            [teardown],
+            deadline: deadline
+        )
+        if !joined {
+            logger.error("ESCollector stop deadline expired while retained messages or clients were still draining.")
+        }
+        return joined
     }
 
     // MARK: - v1.21.4 Phase-0 (D1 + D4) — telemetry-drop instrumentation
@@ -1968,18 +2137,17 @@ public final class ESCollector: @unchecked Sendable {
         // kernel silently DROPS messages across ALL event types.
         if msg.event_type == ES_EVENT_TYPE_NOTIFY_OPEN {
             let openPath = esFileToPath(msg.event.open.file)
-            // Emit for credential/secret reads OR agent-content reads (skills /
-            // hooks / config / workflows the agent consumes as instructions —
-            // the injection-evidence retro-scan pivots on the latter). Both
-            // checks are cheap substring scans; everything else is dropped here,
-            // before the heap-allocating processFromESProcess build, so the OPEN
-            // firehose stays bounded across ALL event types.
-            guard isCredentialReadPath(openPath) || isAgentContentReadPath(openPath) else { return nil }
-            // ES-OPEN-5: keychain DBs are opened constantly by securityd /
-            // the Security framework (platform binaries) for every keychain
-            // query; the keychain read-rules only care about non-Apple
-            // openers, so drop the platform-binary case here.
-            if isKeychainPath(openPath) && msg.process.pointee.is_platform_binary {
+            // Exact callback/normaliser parity. In addition to the static
+            // credential and agent-content paths, a fresh owner snapshot may
+            // retain ordinary text OPENs for an attributed AI PID. The
+            // separate platform-keychain gate remains inside the shared helper
+            // and cannot be bypassed by fail-open dynamic state.
+            if shouldDropBeforeWorker(
+                eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+                path: openPath,
+                isPlatformBinary: msg.process.pointee.is_platform_binary,
+                processID: audit_token_to_pid(msg.process.pointee.audit_token)
+            ) {
                 return nil
             }
         }
@@ -2173,12 +2341,11 @@ public final class ESCollector: @unchecked Sendable {
             // class, dead until now because no OPEN event was ever emitted.
             let openEvent = msg.event.open
             let openPath = esFileToPath(openEvent.file)
-            // Same widened admission as the hot-path guard: credential/secret
-            // reads (revives the "credential file read by untrusted process"
-            // rule class) OR agent-content reads (the read the injection-evidence
-            // weld retro-scans). Both emit an identical .file/.open Event — the
-            // path is all the retro-scan needs; content is re-read at trigger time.
-            guard Self.isCredentialReadPath(openPath) || Self.isAgentContentReadPath(openPath) else { return nil }
+            // Admission was already decided before processInfo allocation via
+            // the shared static+dynamic helper above. Do not narrow it back to
+            // the legacy static allowlist here: ordinary README/source OPENs
+            // retained for FileInjectionScanner and PromptIntentBridge must
+            // materialise as events.
             return Event(
                 timestamp: timestamp,
                 eventCategory: .file,

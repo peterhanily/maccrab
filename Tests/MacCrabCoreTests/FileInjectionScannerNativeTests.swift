@@ -70,4 +70,66 @@ struct FileInjectionScannerNativeTests {
         let path = try write("a\u{200B}b\u{200C}c\u{200D}d", ext: "dylib")
         #expect(await FileInjectionScanner().scanFile(path: path) == nil)
     }
+
+    @Test("only reads and completed writes are event-eligible")
+    func eventEligibilityRejectsIncompleteWrites() async throws {
+        let path = try write("a\u{200B}b\u{200C}c\u{200D}d")
+        for action in ["create", "write", "rename", "unlink", "setmode"] {
+            #expect(!FileInjectionScanner.isEligible(path: path, eventAction: action))
+            #expect(await FileInjectionScanner().scanFile(path: path, eventAction: action) == nil)
+        }
+        #expect(FileInjectionScanner.isEligible(path: path, eventAction: "open"))
+        #expect(FileInjectionScanner.isEligible(path: path, eventAction: "close_modified"))
+
+        // An ineligible partial-write callback must not cache the carrier and
+        // suppress the first completed-write scan.
+        let completed = await FileInjectionScanner().scanFile(
+            path: path,
+            eventAction: "close_modified"
+        )
+        #expect(completed?.isInjected == true)
+    }
+
+    @Test("same pathname is rescanned when its descriptor identity changes")
+    func changedFileInvalidatesCache() async throws {
+        let scanner = FileInjectionScanner()
+        let path = try write("# Clean content long enough to scan.\n")
+        #expect(await scanner.scanFile(path: path, eventAction: "open") == nil)
+
+        // Reuse the same pathname inside the old five-minute TTL. The former
+        // path->Date cache incorrectly suppressed this changed file.
+        try "a\u{200B}b\u{200C}c\u{200D}d".write(
+            toFile: path,
+            atomically: true,
+            encoding: .utf8
+        )
+        let changed = await scanner.scanFile(path: path, eventAction: "open")
+        #expect(changed?.isInjected == true)
+
+        // The exact same stable snapshot is still coalesced.
+        #expect(await scanner.scanFile(path: path, eventAction: "open") == nil)
+    }
+
+    @Test("leading-dot UTF-8 configuration files use their declared text type")
+    func scansDotEnv() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fis-dot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent(".env").path
+        try "a\u{200B}b\u{200C}c\u{200D}d".write(
+            toFile: path,
+            atomically: true,
+            encoding: .utf8
+        )
+        #expect(FileInjectionScanner.isSupportedTextPath(path))
+        #expect(await FileInjectionScanner().scanFile(path: path, eventAction: "open") != nil)
+    }
+
+    @Test("binary document extensions are not advertised as UTF-8 scans")
+    func binaryDocumentsAreTruthfullyUnsupported() {
+        for path in ["/tmp/report.pdf", "/tmp/report.doc", "/tmp/report.docx"] {
+            #expect(!FileInjectionScanner.isSupportedTextPath(path))
+            #expect(!FileInjectionScanner.isEligible(path: path, eventAction: "open"))
+        }
+    }
 }

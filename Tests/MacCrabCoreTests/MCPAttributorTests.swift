@@ -230,15 +230,18 @@ struct MCPBaselineSnapshotTests {
 
         let snapshot = MCPBaselineService.readSnapshot(at: path)
         #expect(snapshot != nil)
+        #expect(snapshot?.schemaVersion == 2)
+        #expect(snapshot?.mode == .shadow)
         #expect(snapshot?.baselines.count == 1)
         let b = snapshot!.baselines[0]
         #expect(b.serverName == "fs")
         #expect(b.tool == "claude")
         #expect(b.fileBasenames.contains("a"))
-        #expect(b.fileBasenames.contains("b"))
-        // MCPBaselineService normalizes domains to their registrable form
-        // (api.github.com → github.com). Match the normalized form.
-        #expect(b.domains.contains("github.com"))
+        #expect(!b.fileBasenames.contains("b"),
+                "A post-learning novelty must not authorize itself")
+        let pending = try #require(snapshot?.pendingBaselines.first)
+        #expect(pending.fileBasenames.contains("b"))
+        #expect(pending.domains.contains("api.github.com"))
     }
 
     @Test("Empty service writes a snapshot with zero baselines")

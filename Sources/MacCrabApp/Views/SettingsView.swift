@@ -82,8 +82,23 @@ struct SettingsView: View {
     @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 420  // match DaemonConfig default (v1.21.4: 350 → 420)
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
+    @AppStorage("storage.evidenceMaxSizeMB")     private var evidenceMaxSizeMB: Int = 100
     @AppStorage("storage.campaignsRetentionDays") private var campaignsRetentionDays: Int = 365
     @AppStorage("storage.campaignsMaxSizeMB")    private var campaignsMaxSizeMB: Int = 50
+
+    // Mirror DaemonConfig.StorageConfig's steady-state ownership split in the
+    // UI. On upgrade, the daemon may temporarily add only the measured legacy
+    // events.db evidence still present (bounded by the evidence allocation);
+    // heartbeat/status surfaces report that live transition reserve.
+    private var effectiveEvidenceMaxSizeMB: Int {
+        min(max(50, evidenceMaxSizeMB), max(50, eventsMaxSizeMB - 96))
+    }
+    private var effectiveEventsFamilyMaxSizeMB: Int {
+        max(96, eventsMaxSizeMB - effectiveEvidenceMaxSizeMB)
+    }
+    private var effectiveAlertsFamilyMaxSizeMB: Int {
+        alertsMaxSizeMB + effectiveEvidenceMaxSizeMB
+    }
 
     @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
     /// v1.17 (issue #2): true when the OS has denied notification
@@ -105,6 +120,10 @@ struct SettingsView: View {
     @AppStorage("llm.openaiURL") private var llmOpenAIURL: String = "https://api.openai.com/v1"
     @AppStorage("llm.model") private var llmModel: String = ""
     @AppStorage("llm.enabled") private var llmEnabled: Bool = false
+    /// Remote permission is bound to the exact endpoint string. A blanket
+    /// boolean would stay armed when the URL changed and silently authorize a
+    /// different host.
+    @AppStorage("llm.approvedRemoteEndpoint") private var llmApprovedRemoteEndpoint: String = ""
 
     // API key is @State, not @AppStorage — the previous @AppStorage backing
     // wrote secrets to `~/Library/Preferences/com.maccrab.app.plist` (default
@@ -117,6 +136,10 @@ struct SettingsView: View {
     @State private var llmAPIKeyReadSucceeded = false
     @State private var llmCredentialStatus: String?
     @State private var llmCredentialStatusIsError = false
+    /// A successful inbox write is only queue admission. Keep the timestamp so
+    /// an older heartbeat with coincidentally identical values cannot be used
+    /// to claim that this request was applied.
+    @State private var llmConfigRequestQueuedAt: Date?
     private let secrets = SecretsStore()
 
     // AppleLanguages entries are region-tagged ("en-IE", "zh-Hant-TW"), and on
@@ -307,17 +330,17 @@ struct SettingsView: View {
                         // the daemon — slider can't go below that.
                         storageRow(
                             label: String(localized: "settings.events.label", defaultValue: "Event firehose"),
-                            help: String(localized: "settings.events.help", defaultValue: "Recent raw activity for live rules. Floor 15 min — anything shorter risks dropping events mid-sequence."),
+                            help: String(localized: "settings.events.help", defaultValue: "Recent raw activity for live rules. This legacy envelope reserves the alert-evidence budget; the effective events.db cap is shown below. Floor 15 min."),
                             stepperValue: eventsTierLabel(eventsHotTierMinutes),
                             stepperBinding: $eventsHotTierMinutes,
                             stepperRange: 15...1440,
                             stepperStep: 15,
                             sizeBinding: $eventsMaxSizeMB,
-                            sizeRange: 100...2000,
+                            sizeRange: 150...2000,
                             sizeStep: 100,
                             currentSize: currentSize(databaseFile: "events.db"),
                             currentBytes: currentBytes(databaseFile: "events.db"),
-                            capMB: eventsMaxSizeMB
+                            capMB: effectiveEventsFamilyMaxSizeMB
                         )
 
                         Divider()
@@ -327,7 +350,7 @@ struct SettingsView: View {
                         // × 365 = 180 MB) and forensically valuable.
                         storageRow(
                             label: String(localized: "settings.alerts.label", defaultValue: "Alert history"),
-                            help: String(localized: "settings.alerts.help", defaultValue: "Detections fired by MacCrab. Survives any event-firehose prune."),
+                            help: String(localized: "settings.alerts.help", defaultValue: "Detections plus bounded alert-owned event context. The gauge uses the combined alerts.db family cap."),
                             stepperValue: "\(alertsRetentionDays)d",
                             stepperBinding: $alertsRetentionDays,
                             stepperRange: 30...1095,
@@ -337,8 +360,23 @@ struct SettingsView: View {
                             sizeStep: 50,
                             currentSize: currentSize(databaseFile: "alerts.db"),
                             currentBytes: currentBytes(databaseFile: "alerts.db"),
-                            capMB: alertsMaxSizeMB
+                            capMB: effectiveAlertsFamilyMaxSizeMB
                         )
+
+                        Stepper(
+                            String(localized: "settings.evidence.cap", defaultValue: "Alert evidence allocation: \(effectiveEvidenceMaxSizeMB) MB"),
+                            value: $evidenceMaxSizeMB,
+                            in: 50...min(500, max(50, eventsMaxSizeMB - 96)),
+                            step: 50
+                        )
+                        .font(.caption)
+
+                        Text(String(
+                            localized: "settings.storageFamilyCapsDisclosure",
+                            defaultValue: "Steady-state family caps: events.db \(effectiveEventsFamilyMaxSizeMB) MB; alerts.db \(effectiveAlertsFamilyMaxSizeMB) MB; combined \(eventsMaxSizeMB + alertsMaxSizeMB) MB. Upgrades may temporarily retain a measured legacy-evidence reserve (never more than \(effectiveEvidenceMaxSizeMB) MB) until those rows expire."
+                        ))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
 
                         Divider()
 
@@ -360,9 +398,10 @@ struct SettingsView: View {
                     }
                     .padding(8)
                     .onChange(of: eventsHotTierMinutes) { _ in syncStorageOverrides() }
-                    .onChange(of: eventsMaxSizeMB)       { _ in syncStorageOverrides() }
+                    .onChange(of: eventsMaxSizeMB)       { _ in normalizeStorageBudgetSplit(); syncStorageOverrides() }
                     .onChange(of: alertsRetentionDays)   { _ in syncStorageOverrides() }
                     .onChange(of: alertsMaxSizeMB)       { _ in syncStorageOverrides() }
+                    .onChange(of: evidenceMaxSizeMB)     { _ in syncStorageOverrides() }
                     .onChange(of: campaignsRetentionDays) { _ in syncStorageOverrides() }
                     .onChange(of: campaignsMaxSizeMB)    { _ in syncStorageOverrides() }
                     .onAppear { migrateLegacyStorageKeys() }
@@ -1101,6 +1140,7 @@ struct SettingsView: View {
                                 .foregroundColor(llmCredentialStatusIsError ? .orange : .green)
                                 .fixedSize(horizontal: false, vertical: true)
                             }
+
                             // Invalidate the test result on any config edit
                             // so a stale "OK" doesn't mislead after the user
                             // changes the URL/key/model.
@@ -1154,6 +1194,8 @@ struct SettingsView: View {
                                 }
                             }
                         }
+
+                        llmEngineApplicationStatus
                     }
                     .padding(8)
                 }
@@ -1165,15 +1207,16 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
-                            if llmProvider == "ollama" && (llmOllamaURL.contains("localhost") || llmOllamaURL.contains("127.0.0.1")) {
-                                Text(String(localized: "settings.llmLocalPrivacy", defaultValue: "Running locally. No data leaves your machine."))
+                            if llmProvider == "ollama"
+                                && LoopbackEndpoint.isLoopback(urlString: llmOllamaURL) {
+                                Text(String(localized: "settings.llmLocalPrivacy", defaultValue: "MacCrab sends no Internet egress for this loopback endpoint."))
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
                                 // A4-06: be honest that cloud redaction is
                                 // best-effort heuristics, not a guarantee, and
                                 // point operators at the fully-private option.
-                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames, API-key-shaped tokens) is redacted before sending. This is best-effort heuristic scrubbing, not a guarantee — novel data shapes can still slip through. For fully private analysis, use a local Ollama backend, where no data leaves this Mac."))
+                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames, API-key-shaped tokens) is redacted before sending. This is best-effort heuristic scrubbing, not a guarantee — novel data shapes can still slip through. To avoid Internet egress from MacCrab, use Ollama through a loopback endpoint."))
                                     .font(.caption)
                                     .foregroundColor(.orange)
                             }
@@ -1214,6 +1257,8 @@ struct SettingsView: View {
                     .onChange(of: llmOllamaURL) { _ in syncLLMConfig() }
             }
 
+            remoteEndpointApprovalControl
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(localized: "settings.llmOllamaModel", defaultValue: "Model"))
                     .font(.caption).fontWeight(.medium)
@@ -1248,6 +1293,8 @@ struct SettingsView: View {
                     .font(.caption)
                     .onChange(of: llmOpenAIURL) { _ in syncLLMConfig() }
             }
+
+            remoteEndpointApprovalControl
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(localized: "settings.llmAPIKey", defaultValue: "API Key"))
@@ -1348,6 +1395,146 @@ struct SettingsView: View {
             Text(String(localized: "settings.llmGeminiHelp", defaultValue: "Get an API key from aistudio.google.com"))
                 .font(.caption2)
                 .foregroundColor(.secondary)
+        }
+    }
+
+    private var currentConfigurableEndpoint: String? {
+        switch llmProvider {
+        case "ollama": return llmOllamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        case "openai": return llmOpenAIURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        default: return nil
+        }
+    }
+
+    private var requestedLLMEngineConfiguration: LLMEngineConfiguration {
+        let model: String
+        switch llmProvider {
+        case "ollama": model = llmOllamaModel
+        default: model = llmModel.isEmpty ? defaultModel(for: llmProvider) : llmModel
+        }
+        return LLMEngineConfiguration(
+            enabled: llmEnabled,
+            provider: llmProvider,
+            model: model
+        )
+    }
+
+    private var engineHeartbeatConfirmsEditor: Bool {
+        LLMSettingsApplicationTruth.heartbeatConfirms(
+            requested: requestedLLMEngineConfiguration,
+            queuedAt: llmConfigRequestQueuedAt,
+            reported: appState.llmStatus.appliedConfiguration,
+            heartbeatWrittenAt: appState.llmStatus.heartbeatWrittenAt,
+            heartbeatIsStale: appState.heartbeat?.isStale ?? true
+        )
+    }
+
+    private func llmConfigurationSummary(_ configuration: LLMEngineConfiguration) -> String {
+        configuration.enabled
+            ? "\(configuration.provider)/\(configuration.model)"
+            : String(localized: "settings.llmEngineDisabled", defaultValue: "AI backend disabled")
+    }
+
+    @ViewBuilder
+    private var llmEngineApplicationStatus: some View {
+        Divider()
+        if engineHeartbeatConfirmsEditor,
+           let reported = appState.llmStatus.appliedConfiguration {
+            Label(
+                String(
+                    localized: "settings.llmEngineApplied",
+                    defaultValue: "Applied: \(llmConfigurationSummary(reported)) — confirmed by a fresh engine heartbeat."
+                ),
+                systemImage: "checkmark.shield.fill"
+            )
+            .font(.caption)
+            .foregroundColor(.green)
+            .fixedSize(horizontal: false, vertical: true)
+        } else if llmConfigRequestQueuedAt != nil {
+            Label(
+                String(
+                    localized: "settings.llmEnginePending",
+                    defaultValue: "Pending engine application. The request was queued, but no newer heartbeat confirms the exact provider and model yet. Restarting the detection engine may be required."
+                ),
+                systemImage: "clock.badge.exclamationmark"
+            )
+            .font(.caption)
+            .foregroundColor(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        } else if !(appState.heartbeat?.isStale ?? true),
+                  let reported = appState.llmStatus.appliedConfiguration {
+            Label(
+                String(
+                    localized: "settings.llmEngineDifferent",
+                    defaultValue: "The fresh engine heartbeat reports \(llmConfigurationSummary(reported)); the settings in this editor are not confirmed as applied."
+                ),
+                systemImage: "exclamationmark.arrow.triangle.2.circlepath"
+            )
+            .font(.caption)
+            .foregroundColor(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Label(
+                String(
+                    localized: "settings.llmEngineUnknown",
+                    defaultValue: "Applied engine state is unknown because no fresh LLM heartbeat is available. Saved or queued settings do not prove application."
+                ),
+                systemImage: "questionmark.diamond"
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var currentEndpointRequiresRemoteApproval: Bool {
+        // Disabling must never require authorization to contact the endpoint:
+        // the disable request carries no URL or model at all.
+        guard llmEnabled,
+              let endpoint = currentConfigurableEndpoint,
+              !endpoint.isEmpty else {
+            return false
+        }
+        return !LoopbackEndpoint.isLoopback(urlString: endpoint)
+    }
+
+    private var currentRemoteEndpointIsApproved: Bool {
+        guard currentEndpointRequiresRemoteApproval,
+              let endpoint = currentConfigurableEndpoint else { return false }
+        return llmApprovedRemoteEndpoint == endpoint
+    }
+
+    private var remoteEndpointApprovalBinding: Binding<Bool> {
+        Binding(
+            get: { currentRemoteEndpointIsApproved },
+            set: { approved in
+                llmApprovedRemoteEndpoint = approved
+                    ? (currentConfigurableEndpoint ?? "") : ""
+                syncLLMConfig()
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var remoteEndpointApprovalControl: some View {
+        if currentEndpointRequiresRemoteApproval,
+           let endpoint = currentConfigurableEndpoint {
+            Toggle(
+                String(
+                    localized: "settings.llmAllowRemoteEndpoint",
+                    defaultValue: "Allow the detection engine to send advisory evidence to this remote endpoint"
+                ),
+                isOn: remoteEndpointApprovalBinding
+            )
+            .font(.caption)
+            Text(
+                String(
+                    localized: "settings.llmRemoteEndpointWarning",
+                    defaultValue: "Remote endpoint: \(endpoint). Approval is bound to this exact URL and is cleared when it changes. Model input may leave this Mac."
+                )
+            )
+            .font(.caption2)
+            .foregroundColor(.orange)
         }
     }
 
@@ -1543,6 +1730,10 @@ struct SettingsView: View {
     /// Persist non-secret LLM settings and save the selected provider's key to
     /// the shared Keychain. API keys never enter the JSON dictionary.
     private func syncLLMConfig() {
+        // Any editor mutation supersedes the preceding request. A failure on
+        // this attempt must not leave an old request presented as pending for
+        // the newly edited values.
+        llmConfigRequestQueuedAt = nil
         // A credential edit is not applied merely because SecItemAdd/Update
         // returned: exact read-back is required. On failure the user sees the
         // status above and neither JSON nor root-engine config is changed.
@@ -1600,26 +1791,49 @@ struct SettingsView: View {
         var engineConfig: [String: Any] = [
             "enabled": llmEnabled,
             "provider": llmProvider,
-            "ollama_url": llmOllamaURL,
-            "ollama_model": llmOllamaModel,
         ]
-        switch llmProvider {
-        case "openai":
-            engineConfig["openai_url"] = llmOpenAIURL
-            engineConfig["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
-        case "claude":
-            engineConfig["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
-        case "mistral":
-            engineConfig["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel
-        case "gemini":
-            engineConfig["gemini_model"] = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
-        default: break
+        if llmEnabled {
+            switch llmProvider {
+            case "ollama":
+                engineConfig["ollama_url"] = llmOllamaURL
+                engineConfig["ollama_model"] = llmOllamaModel
+            case "openai":
+                engineConfig["openai_url"] = llmOpenAIURL
+                engineConfig["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
+            case "claude":
+                engineConfig["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
+            case "mistral":
+                engineConfig["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel
+            case "gemini":
+                engineConfig["gemini_model"] = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
+            default: break
+            }
         }
-        V2DaemonControl.sendLLMConfig(engineConfig)
+        if currentEndpointRequiresRemoteApproval {
+            guard currentRemoteEndpointIsApproved else {
+                llmCredentialStatus = String(
+                    localized: "settings.llmRemoteApprovalRequired",
+                    defaultValue: "The app settings were saved, but the detection engine was not changed. Approve this exact remote endpoint to send model input off this Mac."
+                )
+                llmCredentialStatusIsError = true
+                return
+            }
+            engineConfig["allow_remote_endpoint"] = true
+        }
+        let queuedAt = Date()
+        guard V2DaemonControl.sendLLMConfig(engineConfig) else {
+            llmCredentialStatus = String(
+                localized: "settings.llmEngineConfigQueueFailed",
+                defaultValue: "The app settings were saved, but the detection-engine configuration request could not be queued."
+            )
+            llmCredentialStatusIsError = true
+            return
+        }
 
-        // Update AppState so UI reflects immediately
-        appState.llmStatus.isConfigured = llmEnabled
-        appState.llmStatus.provider = llmProvider
+        // Queue admission is deliberately not copied into AppState's applied
+        // fields. Only a fresh, newer root-engine heartbeat can confirm the
+        // exact enabled/provider/model tuple.
+        llmConfigRequestQueuedAt = queuedAt
     }
 
     /// v1.6.14 / v1.8.0: write the per-tier storage block to
@@ -1647,6 +1861,7 @@ struct SettingsView: View {
                 "eventsMaxSizeMB":        eventsMaxSizeMB,
                 "alertsRetentionDays":    alertsRetentionDays,
                 "alertsMaxSizeMB":        alertsMaxSizeMB,
+                "evidenceMaxSizeMB":      effectiveEvidenceMaxSizeMB,
                 "campaignsRetentionDays": campaignsRetentionDays,
                 "campaignsMaxSizeMB":     campaignsMaxSizeMB,
             ]
@@ -2218,7 +2433,7 @@ struct SettingsView: View {
             // 350 and the legacy value was silently dropped. Gate on absence
             // of the key instead of a magic-number default.
             if defaults.object(forKey: "storage.eventsMaxSizeMB") == nil {
-                eventsMaxSizeMB = max(100, min(legacyCap, 2000))
+                eventsMaxSizeMB = max(150, min(legacyCap, 2000))
             }
         }
 
@@ -2232,9 +2447,23 @@ struct SettingsView: View {
             }
         }
 
+        normalizeStorageBudgetSplit()
+
         // Push the (possibly migrated) values to user_overrides.json so
         // the daemon's overlay reader sees them on the next SIGHUP / boot.
         syncStorageOverrides()
+    }
+
+    /// Keep @AppStorage itself inside the same feasible region displayed and
+    /// written to the daemon. Without this normalization, lowering the legacy
+    /// envelope could leave a stale larger evidence value in the Stepper while
+    /// the daemon silently clamped a different effective allocation.
+    private func normalizeStorageBudgetSplit() {
+        eventsMaxSizeMB = max(150, min(2_000, eventsMaxSizeMB))
+        evidenceMaxSizeMB = min(
+            max(50, evidenceMaxSizeMB),
+            min(500, max(50, eventsMaxSizeMB - 96))
+        )
     }
 
     /// Format the events hot-tier as "30m" / "2h" / "24h" depending on

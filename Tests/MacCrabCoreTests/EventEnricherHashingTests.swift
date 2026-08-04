@@ -9,6 +9,32 @@ import Foundation
 @Suite("EventEnricher hashing")
 struct EventEnricherHashingTests {
 
+    private func deferredPlane() -> HeavyEnrichmentPlane {
+        // This suite verifies hash evidence and stable-file binding, not the
+        // production 50 ms work budget. Full-suite utility-executor contention
+        // must not convert the fixture into a deliberate timeout test.
+        HeavyEnrichmentPlane(configuration: .init(operationTimeoutSeconds: 30))
+    }
+
+    private func applyingHashPatch(
+        from enricher: EventEnricher,
+        to event: Event
+    ) async -> Event {
+        let initiallyEnriched = await enricher.enrich(event)
+        let addition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(30_000_000_000)
+        let deadline = addition.overflow ? UInt64.max : addition.partialValue
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if let patch = await enricher.drainDeferredEnrichments(limit: 16).first(where: {
+                $0.component == .processHashes
+            }), let applied = patch.applying(to: initiallyEnriched) {
+                return applied
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return initiallyEnriched
+    }
+
     private func makeTempFile(bytes: Data) throws -> String {
         let path = NSTemporaryDirectory() + "maccrab_enricher_hash_\(UUID().uuidString).bin"
         try bytes.write(to: URL(fileURLWithPath: path))
@@ -46,7 +72,11 @@ struct EventEnricherHashingTests {
         let path = try makeTempFile(bytes: "hello".data(using: .utf8)!)
         defer { cleanup(path) }
 
-        let enricher = EventEnricher(processHasher: ProcessHasher())
+        let plane = deferredPlane()
+        let enricher = EventEnricher(
+            processHasher: ProcessHasher(),
+            heavyEnrichmentPlane: plane
+        )
         let event = Event(
             eventCategory: .process,
             eventType: .start,
@@ -54,9 +84,10 @@ struct EventEnricherHashingTests {
             process: makeProcess(executable: path)
         )
 
-        let enriched = await enricher.enrich(event)
+        let enriched = await applyingHashPatch(from: enricher, to: event)
         #expect(enriched.process.hashes?.sha256 ==
                 "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        _ = await enricher.shutdownHeavyEnrichment()
     }
 
     @Test("file event is NOT hashed (avoids re-hash on every I/O)")
@@ -125,7 +156,11 @@ struct EventEnricherHashingTests {
         let path = try makeTempFile(bytes: "fork-me".data(using: .utf8)!)
         defer { cleanup(path) }
 
-        let enricher = EventEnricher(processHasher: ProcessHasher())
+        let plane = deferredPlane()
+        let enricher = EventEnricher(
+            processHasher: ProcessHasher(),
+            heavyEnrichmentPlane: plane
+        )
         let event = Event(
             eventCategory: .process,
             eventType: .start,
@@ -133,7 +168,8 @@ struct EventEnricherHashingTests {
             process: makeProcess(executable: path)
         )
 
-        let enriched = await enricher.enrich(event)
+        let enriched = await applyingHashPatch(from: enricher, to: event)
         #expect(enriched.process.hashes?.sha256 != nil)
+        _ = await enricher.shutdownHeavyEnrichment()
     }
 }

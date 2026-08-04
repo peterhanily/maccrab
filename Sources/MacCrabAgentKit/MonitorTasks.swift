@@ -12,6 +12,93 @@ import os.log
 /// no explicit `Task.checkCancellation()` is needed inside the bodies.
 enum MonitorTasks {
     static func start(state: DaemonState, supervisor: MonitorSupervisor) async {
+        // Self-defense owns no process-exit handlers. Its baseline, file
+        // sources, periodic task, and alert callback live under this one
+        // supervised lifetime; all emitted alerts cross AlertSink.
+        let selfDefense = state.selfDefense
+        let selfDefenseLifecycle = state.detectionWorkLifecycle
+        let selfDefenseSink = state.alertSink
+        let selfDefenseNotifier = state.notifier
+        await supervisor.start("self-defense") {
+            let started = await selfDefense.start { event in
+                logger.critical("SELF-DEFENSE: [\(event.type.rawValue)] \(event.description)")
+                print("[TAMPER] \(event.type.rawValue): \(event.description)")
+                let alert = Alert(
+                    ruleId: "maccrab.self-defense.\(event.type.rawValue)",
+                    ruleTitle: "MacCrab Tamper Detection: \(event.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                    severity: event.severity,
+                    eventId: UUID().uuidString,
+                    processPath: event.path,
+                    processName: "maccrabd",
+                    description: event.description,
+                    mitreTactics: "attack.defense_evasion",
+                    mitreTechniques: "attack.t1562.001",
+                    suppressed: false
+                )
+                selfDefenseLifecycle.submit(label: "self-defense-alert") {
+                    do {
+                        if try await selfDefenseSink.submit(alert: alert) {
+                            await selfDefenseNotifier.notify(alert: alert)
+                        }
+                    } catch {
+                        await StorageErrorTracker.shared.recordAlertError(error)
+                    }
+                }
+            }
+            guard started else {
+                logger.error("Self-defense start refused because its producer lifecycle is already sealed")
+                print("Self-defense unavailable: producer lifecycle is already sealed")
+                return
+            }
+            print("Self-defense active (supervised — baseline formed off the boot path)")
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
+            }
+            _ = await selfDefense.stop(deadline: 0.75)
+        }
+
+        await supervisor.start(
+            "es-health",
+            collector: "ESClientMonitor",
+            registry: state.collectorRegistry
+        ) {
+            await state.esHealthMonitor.start()
+            let esHealth = await state.esHealthMonitor.currentStatus()
+            if esHealth.isHealthy {
+                print("ES infrastructure (deferred probe): healthy (xprotectd, syspolicyd, endpointsecurityd running)")
+            } else {
+                print("ES infrastructure (deferred probe): DEGRADED -- \(esHealth.issues.joined(separator: ", "))")
+            }
+            for await healthEvent in state.esHealthMonitor.events {
+                await state.collectorRegistry.recordTick(name: "ESClientMonitor")
+                let alert = Alert(
+                    ruleId: "maccrab.self-defense.\(healthEvent.type.rawValue)",
+                    ruleTitle: "ES Infrastructure: \(healthEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                    severity: healthEvent.severity,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "maccrabd",
+                    description: healthEvent.description,
+                    mitreTactics: "attack.defense_evasion",
+                    mitreTechniques: "attack.t1562.001",
+                    suppressed: false
+                )
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch {
+                    await StorageErrorTracker.shared.recordAlertError(error)
+                }
+                print("[ES-HEALTH] \(healthEvent.type.rawValue): \(healthEvent.description)")
+            }
+            _ = await state.esHealthMonitor.stopAndJoin(deadline: 0.75)
+        }
+
         // FSEvents file monitor task (non-root fallback)
         if !state.isRoot {
             await supervisor.start("fsevents", collector: "FSEventsCollector", registry: state.collectorRegistry) {
@@ -29,10 +116,8 @@ enum MonitorTasks {
                         // Match-aware: broad allowlists can't silence a must-fire
                         // critical (active C2 / credential-theft) detection.
                         if await state.suppressionManager.isSuppressed(match: match, processPath: enriched.process.executable) { continue }
-                        let effective = await state.deduplicator.effectiveSeverity(
-                            ruleId: match.ruleId, original: match.severity)
                         let alert = Alert(
-                            ruleId: match.ruleId, ruleTitle: match.ruleName, severity: effective,
+                            ruleId: match.ruleId, ruleTitle: match.ruleName, severity: match.severity,
                             eventId: enriched.id.uuidString, processPath: enriched.process.executable,
                             processName: enriched.process.name, description: match.description,
                             mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
@@ -48,7 +133,7 @@ enum MonitorTasks {
                             continue
                         }
                         guard inserted else { continue }
-                        if effective >= .high {
+                        if alert.severity >= .high {
                             await state.notifier.notify(alert: alert)
                         }
                         print("[FS] \(match.ruleName) | \(enriched.file?.path ?? "?")")
@@ -58,6 +143,7 @@ enum MonitorTasks {
                 // yield drains the autorelease pool per iteration —
                 // same EventLoop fix shape, lower volume.
                 await Task.yield()
+                _ = await state.fsEventsCollector.stopAndJoin(deadline: 0.75)
             }
         }
 
@@ -82,7 +168,9 @@ enum MonitorTasks {
                         await state.notifier.notify(alert: alert)
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.behaviorScoring.addIndicator(
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: nil,
                     named: "event_tap_keylogger",
                     detail: "PID \(tapInfo.tappingPID) taps keyboard",
                     forProcess: tapInfo.tappingPID,
@@ -91,6 +179,7 @@ enum MonitorTasks {
                 print("[CRIT] Event tap keylogger: \(tapInfo.processName) (PID \(tapInfo.tappingPID))")
                 await Task.yield()
             }
+            _ = await state.eventTapMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // System policy monitoring task
@@ -128,7 +217,9 @@ enum MonitorTasks {
                 }
                 if let name = indicatorName {
                     // Use PID 0 for system-level events
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: nil,
                         named: name,
                         detail: policyEvent.description,
                         forProcess: 0,
@@ -140,6 +231,7 @@ enum MonitorTasks {
                 print("\(severityIcon) System policy: \(policyEvent.type.rawValue) -- \(policyEvent.description.prefix(100))")
                 await Task.yield()
             }
+            _ = await state.systemPolicyMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // MCP server monitoring task
@@ -168,7 +260,9 @@ enum MonitorTasks {
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 if mcpEvent.eventType == .suspicious {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: nil,
                         named: "mcp_server_suspicious",
                         detail: "\(mcpEvent.serverName): \(mcpEvent.reason)",
                         forProcess: 0, path: mcpEvent.command
@@ -177,16 +271,14 @@ enum MonitorTasks {
                 print("[MCP] \(mcpEvent.eventType.rawValue): \(mcpEvent.serverName) -- \(mcpEvent.reason)")
                 await Task.yield()
             }
+            _ = await state.mcpMonitor.stopAndJoin(deadline: 0.75)
         }
 
-        // v1.7.0: MCP behavioral baseline deviation listener.
-        // MCPBaselineService.observe() is called from EventLoop on each
-        // attributed event; the service learns per-(tool, server)
-        // fingerprints (file basenames, domains, child process names)
-        // for `defaultLearningObservations` (20) events, then enforces.
-        // Deviations stream here and become alerts via AlertSink so
-        // they participate in the same dedup + notification pipeline as
-        // any other rule.
+        // MCP behavioral-profile review listener. Production runs the service
+        // in shadow mode, so this stream is silent. An explicitly selected
+        // review-alert mode can publish bounded novel candidates after the
+        // initial comparison profile forms; candidates remain separate from
+        // accepted values and have no automatic response authority.
         await supervisor.start("mcp-baseline") {
             for await dev in state.mcpBaseline.deviations {
                 let detailKind: String
@@ -197,12 +289,12 @@ enum MonitorTasks {
                 }
                 let alert = Alert(
                     ruleId: "maccrab.mcp.baseline-anomaly.\(dev.tool).\(dev.serverName).\(dev.kind.rawValue)",
-                    ruleTitle: "MCP Baseline Drift: \(dev.serverName) (\(dev.tool)) — new \(detailKind)",
+                    ruleTitle: "MCP Behavior Review Candidate: \(dev.serverName) (\(dev.tool)) — new \(detailKind)",
                     severity: .medium,
                     eventId: UUID().uuidString,
                     processPath: dev.serverKey,
                     processName: dev.serverName,
-                    description: "MCP server '\(dev.serverName)' under \(dev.tool) observed a previously-unseen \(detailKind): \(dev.observedValue). Baseline learned over \(MCPBaselineService.defaultLearningObservations) prior observations.",
+                    description: "MCP server '\(dev.serverName)' under \(dev.tool) observed a \(detailKind) absent from its bounded comparison profile: \(dev.observedValue). This is an uncalibrated review candidate, not a confirmed threat or an authorization for automatic response.",
                     mitreTactics: "attack.initial_access,attack.command_and_control",
                     mitreTechniques: "attack.t1195.002,attack.t1059",
                     suppressed: false
@@ -226,6 +318,8 @@ enum MonitorTasks {
         // one. Rate limit cache is in-memory only; resets on restart.
         let usbRateLimiter = USBRateLimiter()
         await supervisor.start("usb", collector: "USBMonitor", registry: state.collectorRegistry) {
+            await state.usbMonitor.start()
+            print("USB device monitor active (supervised)")
             for await usbEvent in state.usbMonitor.events {
                 await state.collectorRegistry.recordTick(name: "USBMonitor")
                 let severity: Severity
@@ -279,11 +373,14 @@ enum MonitorTasks {
                 print("[USB] \(usbEvent.isConnected ? "+" : "-") \(usbEvent.vendorName) \(usbEvent.productName)\(usbEvent.isMassStorage ? " [MASS STORAGE]" : "")")
                 await Task.yield()
             }
+            _ = await state.usbMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // Clipboard monitoring task
         _ = state.clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
         await supervisor.start("clipboard", collector: "ClipboardMonitor", registry: state.collectorRegistry) {
+            await state.clipboardMonitor.start()
+            print("Clipboard monitor active (supervised, sensitive data + injection detection)")
             for await clipEvent in state.clipboardMonitor.events {
                 await state.collectorRegistry.recordTick(name: "ClipboardMonitor")
                 if clipEvent.containsSensitiveData {
@@ -302,10 +399,13 @@ enum MonitorTasks {
                 }
                 await Task.yield()
             }
+            _ = await state.clipboardMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // Browser extension monitoring task
         await supervisor.start("browser-extensions", collector: "BrowserExtensionMonitor", registry: state.collectorRegistry) {
+            await state.browserExtMonitor.start()
+            print("Browser extension monitor active (supervised)")
             for await extEvent in state.browserExtMonitor.events {
                 await state.collectorRegistry.recordTick(name: "BrowserExtensionMonitor")
                 // Browser extension monitor fires an initial inventory scan
@@ -332,6 +432,7 @@ enum MonitorTasks {
                 print("[EXT] \(extEvent.browser): \(extEvent.extensionName)\(extEvent.isSuspicious ? " [SUSPICIOUS]" : "")")
                 await Task.yield()
             }
+            _ = await state.browserExtMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // Ultrasonic attack monitoring task
@@ -356,10 +457,13 @@ enum MonitorTasks {
                 print("[ULTRASONIC] \(usEvent.attackType.rawValue) at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz!")
                 await Task.yield()
             }
+            _ = await state.ultrasonicMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // Rootkit detection task
         await supervisor.start("rootkit", collector: "RootkitDetector", registry: state.collectorRegistry) {
+            await state.rootkitDetector.start()
+            print("Rootkit detector active (supervised, dual-API cross-reference)")
             for await hidden in state.rootkitDetector.events {
                 await state.collectorRegistry.recordTick(name: "RootkitDetector")
                 let alert = Alert(
@@ -380,10 +484,13 @@ enum MonitorTasks {
                 print("[ROOTKIT] Hidden process: PID \(hidden.pid) (\(hidden.source))")
                 await Task.yield()
             }
+            _ = await state.rootkitDetector.stopAndJoin(deadline: 0.75)
         }
 
         // SDR device + display-hotplug monitoring task (no electromagnetic analysis)
         await supervisor.start("sdr_device", collector: "SDRDeviceMonitor", registry: state.collectorRegistry) {
+            await state.sdrDeviceMonitor.start()
+            print("SDR device monitor active (supervised — device + display-hotplug detection)")
             for await sdrEvent in state.sdrDeviceMonitor.events {
                 await state.collectorRegistry.recordTick(name: "SDRDeviceMonitor")
                 let alert = Alert(
@@ -416,7 +523,7 @@ enum MonitorTasks {
                     let desc = sdrEvent.description
                     let detail = sdrEvent.detail
                     let alertId = alert.id
-                    Task {
+                    state.advisoryWorkLifecycle.submit(label: "sdr-llm") {
                         if let analysis = await llm.commentary(
                             systemPrompt: """
                                 You are a physical-security analyst. MacCrab has detected either a \
@@ -429,7 +536,8 @@ enum MonitorTasks {
                                 indicate, with practical verification steps. Keep under 200 words.
                                 """,
                             userPrompt: "Detection: \(title)\nDetail: \(desc)\nTechnical: \(detail)",
-                            maxTokens: 512, temperature: 0.2
+                            maxTokens: 512, temperature: 0.2,
+                            feature: .sdrContext
                         ) {
                             let analysisAlert = Alert(
                                 ruleId: "maccrab.llm.sdr-analysis",
@@ -448,11 +556,14 @@ enum MonitorTasks {
                 }
                 await Task.yield()
             }
+            _ = await state.sdrDeviceMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // BTM / SMAppService reconciliation task (read-only dumpbtm snapshot;
         // ghost-login-item persistence the real-time ES BTM sensor missed).
         await supervisor.start("btm_snapshot", collector: "BTMSnapshotMonitor", registry: state.collectorRegistry) {
+            await state.btmSnapshotMonitor.start()
+            print("BTM snapshot monitor active (supervised — persistence reconcile)")
             for await btmEvent in state.btmSnapshotMonitor.events {
                 await state.collectorRegistry.recordTick(name: "BTMSnapshotMonitor")
                 let alert = Alert(
@@ -475,10 +586,13 @@ enum MonitorTasks {
                 print("[BTM] reconcile: \(btmEvent.title)")
                 await Task.yield()
             }
+            _ = await state.btmSnapshotMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // EDR/RMM tool monitoring task
         await supervisor.start("edr-rmm", collector: "EDRMonitor", registry: state.collectorRegistry) {
+            await state.edrMonitor.start()
+            print("EDR/RMM monitor active (supervised)")
             for await discovery in state.edrMonitor.events {
                 await state.collectorRegistry.recordTick(name: "EDRMonitor")
                 let capList = discovery.capabilities.prefix(4).joined(separator: ", ")
@@ -525,7 +639,7 @@ enum MonitorTasks {
                     let instPath = discovery.installedPath
                     let alertId = alert.id
 
-                    Task {
+                    state.advisoryWorkLifecycle.submit(label: "edr-llm") {
                         if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.edrContextSystem,
                             userPrompt: LLMPrompts.edrContextUser(
@@ -533,7 +647,8 @@ enum MonitorTasks {
                                 capabilities: capabilities, processName: procName,
                                 processPath: procPath, installedPath: instPath
                             ),
-                            maxTokens: 512, temperature: 0.2
+                            maxTokens: 512, temperature: 0.2,
+                            feature: .edrContext
                         ) {
                             let contextAlert = Alert(
                                 ruleId: "maccrab.llm.edr-context",
@@ -553,6 +668,7 @@ enum MonitorTasks {
                 }
                 await Task.yield()
             }
+            _ = await state.edrMonitor.stopAndJoin(deadline: 0.75)
         }
 
         // DNS event processing task
@@ -641,6 +757,7 @@ enum MonitorTasks {
                 }
                 await Task.yield()
             }
+            _ = await state.dnsCollector.stopAndJoin(deadline: 0.75)
         }
     }
 }

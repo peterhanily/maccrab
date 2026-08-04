@@ -9,6 +9,26 @@ import Foundation
 @Suite("EventEnricher: Wave 9I uid → user_name resolution")
 struct EventEnricherUserNameTests {
 
+    private func resolvingUserName(
+        _ event: Event,
+        with enricher: EventEnricher
+    ) async -> Event {
+        let initiallyEnriched = await enricher.enrich(event)
+        if !initiallyEnriched.process.userName.isEmpty { return initiallyEnriched }
+        let addition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(30_000_000_000)
+        let deadline = addition.overflow ? UInt64.max : addition.partialValue
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if let patch = await enricher.drainDeferredEnrichments(limit: 16).first(where: {
+                $0.component == .userName
+            }), let applied = patch.applying(to: initiallyEnriched) {
+                return applied
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return initiallyEnriched
+    }
+
     private func makeProcess(
         userId: UInt32,
         userName: String,
@@ -36,7 +56,12 @@ struct EventEnricherUserNameTests {
         // name (since the test harness has a passwd entry). Using getuid()
         // makes this safe across CI / dev / arbitrary user shells.
         let currentUid = UInt32(getuid())
-        let enricher = EventEnricher()
+        let enricher = EventEnricher(heavyEnrichmentPlane: HeavyEnrichmentPlane(
+            // The test verifies getpwuid evidence, not the production 50 ms
+            // admission budget. Utility workers can be starved in the full
+            // parallel suite, so use a coarse test-only hang detector.
+            configuration: .init(operationTimeoutSeconds: 30)
+        ))
         let event = Event(
             eventCategory: .process,
             eventType: .start,
@@ -44,9 +69,10 @@ struct EventEnricherUserNameTests {
             process: makeProcess(userId: currentUid, userName: "")
         )
 
-        let enriched = await enricher.enrich(event)
+        let enriched = await resolvingUserName(event, with: enricher)
         #expect(!enriched.process.userName.isEmpty,
                 "uid → user_name resolution should fill in the empty userName")
+        _ = await enricher.shutdownHeavyEnrichment()
     }
 
     @Test("Pre-set userName is preserved (no override on non-empty input)")

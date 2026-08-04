@@ -281,8 +281,18 @@ struct EventPipelineTelemetryTests {
             )
             #expect(source.contains(".bufferingNewest("), "\(file) lost its bounded stream")
             #expect(source.contains("deliveryCounters"), "\(file) is absent from heartbeat inventory")
-            #expect(source.contains("deliveryTelemetry.recordYield(offered: event, result: result)"),
-                    "\(file) does not inspect the actual AsyncStream yield result")
+            let yieldBinding = try NSRegularExpression(
+                pattern: #"let\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*continuation\.yield\(event\)"#
+            ).firstMatch(
+                in: source,
+                range: NSRange(source.startIndex..., in: source)
+            )
+            let bindingRange = try #require(yieldBinding?.range(at: 1))
+            let bindingSwiftRange = try #require(Range(bindingRange, in: source))
+            let binding = String(source[bindingSwiftRange])
+            #expect(source.contains(
+                "deliveryTelemetry.recordYield(offered: event, result: \(binding))"
+            ), "\(file) does not inspect the actual AsyncStream yield result")
         }
     }
 

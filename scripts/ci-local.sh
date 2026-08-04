@@ -4,6 +4,13 @@ set -euo pipefail
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+# Swift Testing schedules test functions concurrently independently of
+# SwiftPM's `--no-parallel` process-level setting. Several MacCrab tests
+# deliberately exercise utility-priority work; letting the framework fan all
+# 4,000+ tests out at once can starve that executor long enough to manufacture
+# lifecycle timeouts. Keep release qualification deterministic and bounded.
+SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1
+export SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd -P)"
 PROJECT_DIR="$(/usr/bin/dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
@@ -604,7 +611,7 @@ check "Swift build tests" swift build --build-tests
 
 echo ""
 echo -e "${BOLD}Tests${NC}"
-check "Swift test suite" swift test
+check "Swift test suite" swift test --no-parallel
 
 echo ""
 echo -e "${BOLD}Rules${NC}"

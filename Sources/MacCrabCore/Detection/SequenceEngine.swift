@@ -266,14 +266,26 @@ public actor SequenceEngine {
     // MARK: - Internal Tracking Types
 
     /// Records a single matched step within an in-flight sequence.
-    struct MatchedStep: Sendable {
+    struct MatchedStep: Sendable, Equatable {
         let stepId: String
         let eventId: UUID
         let timestamp: Date
         let processPid: pid_t
-        let processPath: String
+        /// Event-time ancestry is retained with the match because the in-memory
+        /// ProcessLineage DAG is process-local. Without it, a restored partial
+        /// could only complete PID-local rules; grandchild/sibling relations
+        /// would silently fail after restart even though the partial survived.
+        let processParentPid: pid_t
+        /// Exact evidence used by ProcessLineage's sibling contract. Equal
+        /// numeric PPIDs are insufficient unless the parent node was observed.
+        let processParentWasTracked: Bool
+        let processAncestorPids: [pid_t]
         let filePath: String?
         let networkDest: String?
+
+        func hasAncestor(_ candidatePID: pid_t) -> Bool {
+            processParentPid == candidatePID || processAncestorPids.contains(candidatePID)
+        }
     }
 
     /// Tracks an in-flight sequence being assembled from individual events.
@@ -282,12 +294,13 @@ public actor SequenceEngine {
     /// rule. As new events arrive and match subsequent steps, the partial
     /// match is advanced. Once the trigger condition is satisfied, the
     /// sequence fires and the partial match is consumed.
-    struct PartialMatch: Sendable {
+    struct PartialMatch: Sendable, Equatable {
         let id: UUID
         let ruleId: String
         let createdAt: Date
         var matchedSteps: [String: MatchedStep]   // stepId -> matched event info
         let correlationKey: String?                // shared value binding steps together
+        var checkpointWeight: Int
 
         /// Timestamp of the most recently matched step.
         var latestTimestamp: Date {
@@ -299,6 +312,11 @@ public actor SequenceEngine {
 
     /// All loaded sequence rules keyed by rule ID.
     private var rules: [String: SequenceRule] = [:]
+
+    /// Rule-ID -> step-ID -> fixed heavyweight evidence dependency. Populated
+    /// with rule definitions so covered events do no condition-tree traversal
+    /// merely to decide whether a step is currently evaluable.
+    private var heavyDependencyMasks: [String: [String: HeavyEnrichmentDependencyMask]] = [:]
 
     /// Index from logsource category to rule IDs that have at least one step
     /// matching that category. Enables fast dispatch: only rules with a
@@ -313,10 +331,11 @@ public actor SequenceEngine {
     /// partial: another initial event may have happened before this step but be
     /// delivered later by the other pipeline lane. Treating the entry as
     /// single-consumer state makes detection depend on lane delivery order.
-    private struct PendingStep: Sendable {
+    struct PendingStep: Sendable, Equatable {
         let step: SequenceStep
         let matched: MatchedStep
         let arrivedAt: Date
+        var checkpointWeight: Int
     }
 
     private struct EventEvaluationPlan {
@@ -342,7 +361,40 @@ public actor SequenceEngine {
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
     /// Per-rule cap on buffered out-of-order later steps. Oldest evicted first.
-    private static let maxPendingPerRule = 256
+    static let maxPendingPerRule = 256
+
+    /// Global cap shared by runtime, capture, and restore. A per-rule bound is
+    /// not a global memory bound when the rule corpus itself is large.
+    static let maxPendingTotal = SequenceCheckpointLimits.maximumTotalPendingSteps
+
+    private struct PendingStepRef: Sendable, Equatable {
+        let identity: SequenceCheckpointPendingIdentity
+    }
+
+    /// Arrival-ordered global queue. Stale references created by per-rule
+    /// eviction/sweeps are compacted in bounded batches, mirroring partial LRU.
+    private var pendingEvictionQueue: [PendingStepRef] = []
+    private var pendingEvictionQueueHead = 0
+    private static let pendingEvictionQueueStaleSlack = 256
+
+    /// Cumulative history items shed by either per-rule or global bounds.
+    private var evictedPendingStepCount: Int = 0
+
+    /// Recovery is a startup-only operation. Empty runtime collections are not
+    /// proof that no event was evaluated: a miss or single-step completion can
+    /// leave them empty while still racing a detached checkpoint read.
+    private var checkpointRestoreAllowed = true
+
+    /// Conservative serialized-state weight, updated through the centralized
+    /// bucket setters below. Capture verifies it against a full recomputation
+    /// but never mutates detection state.
+    private var checkpointStateWeight = SequenceCheckpointCodec.semanticStateBaseWeight
+
+    /// Monotonic, process-local generation for the semantics-bearing recovery
+    /// state (rule definitions/enabled states, partials, and pending history).
+    /// It is only an observation hint: the checkpoint's canonical semantic
+    /// digest is authoritative and prevents generation wrap/restart ambiguity.
+    private var checkpointGeneration: UInt64 = 0
 
     /// Exact number of partials currently present in `partialMatches`.
     ///
@@ -408,7 +460,7 @@ public actor SequenceEngine {
     /// Entries are appended at the back (newest) and
     /// removed from the front (oldest), so the array stays naturally sorted
     /// by creation time without any explicit sorting.
-    private struct PartialMatchRef: Sendable {
+    struct PartialMatchRef: Sendable, Equatable {
         let ruleId: String
         let partialId: UUID
         let createdAt: Date
@@ -603,6 +655,14 @@ public actor SequenceEngine {
         if value < UInt64.max { value += 1 }
     }
 
+    /// Cheap hot-path dirtiness signal. No hashing, encoding, compression, or
+    /// filesystem work is permitted here; the checkpoint coordinator performs
+    /// those operations after copying a bounded Sendable snapshot out of actor
+    /// isolation.
+    private func markCheckpointStateMutation() {
+        Self.incrementSaturating(&checkpointGeneration)
+    }
+
     private func acquireMutationLeaseOrThrow() async throws {
         switch await acquireMutationLease() {
         case .acquired:
@@ -634,20 +694,30 @@ public actor SequenceEngine {
     /// a partial-bucket loop.
     private func purgeRuntimeState(for ruleIds: Set<String>, resetStats: Bool) {
         guard !ruleIds.isEmpty else { return }
+        var checkpointStateChanged = false
         for ruleId in ruleIds {
-            partialMatches.removeValue(forKey: ruleId)
-            pendingLaterSteps.removeValue(forKey: ruleId)
+            if partialMatches[ruleId] != nil {
+                setPartialBucket([], for: ruleId)
+                checkpointStateChanged = true
+            }
+            if pendingLaterSteps[ruleId] != nil {
+                setPendingBucket([], for: ruleId)
+                checkpointStateChanged = true
+            }
             if resetStats {
                 ruleStats.removeValue(forKey: ruleId)
             }
         }
         compactEvictionQueue(force: true)
+        compactPendingEvictionQueue(force: true)
+        if checkpointStateChanged { markCheckpointStateMutation() }
     }
 
     /// Install or replace one additive rule. Equivalent same-ID definitions keep
     /// their in-flight state; changed definitions cannot safely consume steps
     /// captured under the old predicate/order/trigger semantics.
     private func installRule(_ rule: SequenceRule) {
+        let definitionChanged = rules[rule.id] != rule
         if let previous = rules[rule.id] {
             if previous != rule {
                 purgeRuntimeState(for: [rule.id], resetStats: true)
@@ -655,9 +725,18 @@ public actor SequenceEngine {
             removeRuleFromIndex(rule.id)
         }
         rules[rule.id] = rule
+        heavyDependencyMasks[rule.id] = Dictionary(
+            uniqueKeysWithValues: rule.steps.map { step in
+                (step.id, HeavyEnrichmentRuleCoverage.dependencyMask(
+                    predicates: step.predicates,
+                    conditionTree: step.conditionTree
+                ))
+            }
+        )
         for step in rule.steps {
             ruleIndex[step.logsourceCategory, default: []].insert(rule.id)
         }
+        if definitionChanged { markCheckpointStateMutation() }
     }
 
     /// Number of unconsumed queue entries, excluding the retained Array prefix.
@@ -700,6 +779,95 @@ public actor SequenceEngine {
             evictionQueue.removeAll(keepingCapacity: true)
         }
         evictionQueueHead = 0
+    }
+
+    private var totalPendingStepCount: Int {
+        pendingLaterSteps.values.reduce(into: 0) { $0 += $1.count }
+    }
+
+    private var activePendingEvictionReferenceCount: Int {
+        max(0, pendingEvictionQueue.count - pendingEvictionQueueHead)
+    }
+
+    private func pendingIdentity(
+        ruleId: String,
+        pending: PendingStep
+    ) -> SequenceCheckpointPendingIdentity {
+        SequenceCheckpointPendingIdentity(
+            ruleID: ruleId,
+            stepID: pending.step.id,
+            eventID: pending.matched.eventId
+        )
+    }
+
+    private func compactPendingEvictionQueue(force: Bool = false) {
+        let liveCount = totalPendingStepCount
+        let retentionLimit = liveCount > Int.max - Self.pendingEvictionQueueStaleSlack
+            ? Int.max
+            : liveCount + Self.pendingEvictionQueueStaleSlack
+        let prefixNeedsCompaction = pendingEvictionQueueHead >= 1_024
+            && pendingEvictionQueueHead * 2 >= pendingEvictionQueue.count
+        guard force
+                || activePendingEvictionReferenceCount > retentionLimit
+                || prefixNeedsCompaction else { return }
+
+        let liveIdentities = Set(pendingLaterSteps.flatMap { ruleId, pending in
+            pending.map { pendingIdentity(ruleId: ruleId, pending: $0) }
+        })
+        if pendingEvictionQueueHead < pendingEvictionQueue.count {
+            pendingEvictionQueue = pendingEvictionQueue[pendingEvictionQueueHead...].filter {
+                liveIdentities.contains($0.identity)
+            }
+        } else {
+            pendingEvictionQueue.removeAll(keepingCapacity: true)
+        }
+        pendingEvictionQueueHead = 0
+    }
+
+    private func popOldestPendingReference() -> PendingStepRef? {
+        guard pendingEvictionQueueHead < pendingEvictionQueue.count else {
+            pendingEvictionQueue.removeAll(keepingCapacity: true)
+            pendingEvictionQueueHead = 0
+            return nil
+        }
+        let reference = pendingEvictionQueue[pendingEvictionQueueHead]
+        pendingEvictionQueueHead += 1
+        if pendingEvictionQueueHead == pendingEvictionQueue.count {
+            pendingEvictionQueue.removeAll(keepingCapacity: true)
+            pendingEvictionQueueHead = 0
+        }
+        return reference
+    }
+
+    private func recordPendingEvictions(_ count: Int) {
+        guard count > 0 else { return }
+        evictedPendingStepCount = Self.saturatingTelemetryAdd(
+            evictedPendingStepCount,
+            count
+        )
+    }
+
+    private func enforceGlobalPendingCap() {
+        var excess = totalPendingStepCount - Self.maxPendingTotal
+        guard excess > 0 else {
+            compactPendingEvictionQueue()
+            return
+        }
+        var removed = 0
+        while excess > 0, let reference = popOldestPendingReference() {
+            let identity = reference.identity
+            guard var bucket = pendingLaterSteps[identity.ruleID],
+                  let index = bucket.firstIndex(where: {
+                      $0.step.id == identity.stepID
+                          && $0.matched.eventId == identity.eventID
+                  }) else { continue }
+            bucket.remove(at: index)
+            setPendingBucket(bucket, for: identity.ruleID)
+            excess -= 1
+            removed += 1
+        }
+        recordPendingEvictions(removed)
+        compactPendingEvictionQueue()
     }
 
     /// Pop in O(1) amortized time. Array storage is occasionally compacted in
@@ -797,6 +965,9 @@ public actor SequenceEngine {
     /// rejects any failure before changing live state.
     private func loadRulesWithLease(from directory: URL, enabledStatuses: Set<String>? = nil) throws -> Int {
         let batch = try readRuleBatch(from: directory, enabledStatuses: enabledStatuses)
+        var proposedRules = rules
+        for rule in batch.rules { proposedRules[rule.id] = rule }
+        try validateCheckpointableRuleCorpus(Array(proposedRules.values))
         for rule in batch.rules {
             installRule(rule)
         }
@@ -828,6 +999,12 @@ public actor SequenceEngine {
         let jsonFiles = contents
             .filter { $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard jsonFiles.count <= SequenceCheckpointLimits.maximumRules else {
+            throw SequenceEngineError.invalidRule(
+                "<corpus>",
+                "Sequence rule file count exceeds \(SequenceCheckpointLimits.maximumRules)"
+            )
+        }
         let sourceFileNames = Set(jsonFiles.map(\.lastPathComponent))
         if jsonFiles.isEmpty {
             logger.warning("No .json sequence rule files found in \(directory.path)")
@@ -1016,6 +1193,7 @@ public actor SequenceEngine {
 
         var nextRules: [String: SequenceRule] = [:]
         var nextIndex: [String: Set<String>] = [:]
+        var nextHeavyDependencies: [String: [String: HeavyEnrichmentDependencyMask]] = [:]
         for stagedRule in batch.rules {
             var rule = stagedRule
             // A successful reload replaces rule CONTENT, but an explicit runtime
@@ -1037,13 +1215,25 @@ public actor SequenceEngine {
                 }
             }
             nextRules[rule.id] = rule
+            nextHeavyDependencies[rule.id] = Dictionary(
+                uniqueKeysWithValues: rule.steps.map { step in
+                    (step.id, HeavyEnrichmentRuleCoverage.dependencyMask(
+                        predicates: step.predicates,
+                        conditionTree: step.conditionTree
+                    ))
+                }
+            )
             for step in rule.steps {
                 nextIndex[step.logsourceCategory, default: []].insert(rule.id)
             }
         }
 
+        let ruleFingerprintStateChanged = prevRules != nextRules
+        try validateCheckpointableRuleCorpus(Array(nextRules.values))
         rules = nextRules
         ruleIndex = nextIndex
+        heavyDependencyMasks = nextHeavyDependencies
+        if ruleFingerprintStateChanged { markCheckpointStateMutation() }
 
         // Retain in-flight state only when BOTH identity and the complete rule
         // definition are unchanged. A same-ID edit is not compatible state: an
@@ -1074,11 +1264,20 @@ public actor SequenceEngine {
         try Task.checkCancellation()
 
         try validateRule(rule)
+        var proposedRules = rules
+        proposedRules[rule.id] = rule
+        try validateCheckpointableRuleCorpus(Array(proposedRules.values))
         installRule(rule)
     }
 
     /// Validate that a rule is internally consistent.
     private func validateRule(_ rule: SequenceRule) throws {
+        guard rule.window.isFinite, rule.window > 0 else {
+            throw SequenceEngineError.invalidRule(
+                rule.id,
+                "Window must be finite and greater than zero"
+            )
+        }
         guard !rule.steps.isEmpty else {
             throw SequenceEngineError.invalidRule(rule.id, "Rule has no steps")
         }
@@ -1087,23 +1286,73 @@ public actor SequenceEngine {
         guard stepIds.count == rule.steps.count else {
             throw SequenceEngineError.invalidRule(rule.id, "Duplicate step IDs")
         }
+        let stepIndex = Dictionary(uniqueKeysWithValues: rule.steps.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
 
         // Validate afterStep references.
         for step in rule.steps {
-            if let afterStep = step.afterStep, !stepIds.contains(afterStep) {
-                throw SequenceEngineError.invalidRule(
-                    rule.id,
-                    "Step '\(step.id)' references unknown afterStep '\(afterStep)'"
-                )
+            if let afterStep = step.afterStep {
+                guard stepIds.contains(afterStep), afterStep != step.id else {
+                    throw SequenceEngineError.invalidRule(
+                        rule.id,
+                        "Step '\(step.id)' has an unknown or self afterStep '\(afterStep)'"
+                    )
+                }
+                if rule.ordered,
+                   (stepIndex[afterStep] ?? Int.max) >= (stepIndex[step.id] ?? 0) {
+                    throw SequenceEngineError.invalidRule(
+                        rule.id,
+                        "Ordered step '\(step.id)' afterStep must reference an earlier step"
+                    )
+                }
             }
         }
 
         // Validate processRelation references.
         for step in rule.steps {
-            if let spec = step.processRelation, !stepIds.contains(spec.relativeToStep) {
+            if let spec = step.processRelation {
+                guard stepIds.contains(spec.relativeToStep),
+                      spec.relativeToStep != step.id else {
+                    throw SequenceEngineError.invalidRule(
+                        rule.id,
+                        "Step '\(step.id)' has an unknown or self relativeToStep '\(spec.relativeToStep)'"
+                    )
+                }
+                if rule.ordered,
+                   (stepIndex[spec.relativeToStep] ?? Int.max)
+                        >= (stepIndex[step.id] ?? 0) {
+                    throw SequenceEngineError.invalidRule(
+                        rule.id,
+                        "Ordered step '\(step.id)' process relation must reference an earlier step"
+                    )
+                }
+            }
+        }
+
+        if !rule.ordered {
+            var reachable = Set(rule.steps.compactMap { step in
+                step.afterStep == nil && step.processRelation == nil ? step.id : nil
+            })
+            var changed = true
+            while changed {
+                changed = false
+                for step in rule.steps where !reachable.contains(step.id) {
+                    let dependencies = [
+                        step.afterStep,
+                        step.processRelation?.relativeToStep,
+                    ].compactMap { $0 }
+                    if !dependencies.isEmpty,
+                       dependencies.allSatisfy(reachable.contains) {
+                        reachable.insert(step.id)
+                        changed = true
+                    }
+                }
+            }
+            guard reachable.count == rule.steps.count else {
                 throw SequenceEngineError.invalidRule(
                     rule.id,
-                    "Step '\(step.id)' references unknown relativeToStep '\(spec.relativeToStep)'"
+                    "Unordered dependency graph is cyclic or unreachable from a seed step"
                 )
             }
         }
@@ -1128,6 +1377,12 @@ public actor SequenceEngine {
         // Validate trigger condition references.
         switch rule.trigger {
         case .steps(let ids):
+            guard !ids.isEmpty, Set(ids).count == ids.count else {
+                throw SequenceEngineError.invalidRule(
+                    rule.id,
+                    "Trigger step IDs must be nonempty and unique"
+                )
+            }
             for id in ids {
                 guard stepIds.contains(id) else {
                     throw SequenceEngineError.invalidRule(
@@ -1146,6 +1401,23 @@ public actor SequenceEngine {
         case .allSteps:
             break
         }
+
+        do {
+            try SequenceCheckpointCodec.validateRuleFingerprintShape(rule)
+        } catch {
+            throw SequenceEngineError.invalidRule(rule.id, error.localizedDescription)
+        }
+    }
+
+    private func validateCheckpointableRuleCorpus(_ proposedRules: [SequenceRule]) throws {
+        do {
+            _ = try SequenceCheckpointCodec.ruleFingerprint(proposedRules)
+        } catch {
+            throw SequenceEngineError.invalidRule(
+                "<corpus>",
+                "Rule corpus is not checkpointable: \(error.localizedDescription)"
+            )
+        }
     }
 
     // MARK: - Rule Management
@@ -1156,17 +1428,20 @@ public actor SequenceEngine {
         defer { releaseMutationLease() }
         guard !Task.isCancelled else { return }
 
-        guard rules[ruleId] != nil else {
+        guard let previous = rules[ruleId] else {
             logger.warning("setEnabled called for unknown sequence rule: \(ruleId)")
             return
         }
+        guard previous.enabled != enabled else { return }
         rules[ruleId]?.enabled = enabled
+        markCheckpointStateMutation()
 
         // If disabling, discard any in-flight partial matches for this rule.
         if !enabled {
-            partialMatches.removeValue(forKey: ruleId)
-            pendingLaterSteps.removeValue(forKey: ruleId)
+            setPartialBucket([], for: ruleId)
+            setPendingBucket([], for: ruleId)
             compactEvictionQueue(force: true)
+            compactPendingEvictionQueue(force: true)
         }
     }
 
@@ -1194,6 +1469,12 @@ public actor SequenceEngine {
     /// `sequence_partials_evicted_total`.
     public var partialsEvictedTotal: Int {
         evictedPartialCount
+    }
+
+    /// Pending later-step history shed by the per-rule or global memory cap.
+    /// A nonzero value means out-of-order sequence continuity was degraded.
+    public var pendingStepsEvictedTotal: Int {
+        evictedPendingStepCount
     }
 
     /// Number of ENABLED sequence rules — the count that actually evaluates,
@@ -1256,6 +1537,14 @@ public actor SequenceEngine {
         let saturatedWaiterCount: UInt64
     }
 
+    public struct CheckpointWeightDiagnostics: Sendable, Equatable {
+        public let cachedWeight: Int
+        public let recomputedWeight: Int
+        public let maximumWeight: Int
+        public let partialCount: Int
+        public let pendingCount: Int
+    }
+
     func configurationDiagnostics() -> ConfigurationDiagnostics {
         ConfigurationDiagnostics(
             maxPartialMatches: maxPartialMatches,
@@ -1290,6 +1579,21 @@ public actor SequenceEngine {
         )
     }
 
+    public func checkpointWeightDiagnostics() -> CheckpointWeightDiagnostics {
+        CheckpointWeightDiagnostics(
+            cachedWeight: checkpointStateWeight,
+            // The heartbeat calls this every 30 seconds on the detection
+            // actor. Re-summing immutable per-record weights independently
+            // verifies bucket accounting without allocating and sorting a
+            // second complete checkpoint model on that latency-sensitive path.
+            // checkpointCapture performs the deeper field-by-field audit.
+            recomputedWeight: recomputedCheckpointAccountingWeight(),
+            maximumWeight: SequenceCheckpointCodec.maximumSemanticStateWeight,
+            partialCount: totalPartialCount,
+            pendingCount: totalPendingStepCount
+        )
+    }
+
     /// Internal deterministic test hook: hold the same production lease while
     /// awaiting an external gate. The actor remains reentrant, allowing tests to
     /// prove queued cancellation/removal without timing a filesystem or lineage
@@ -1309,6 +1613,500 @@ public actor SequenceEngine {
         Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount }
     }
 
+    // MARK: - Durable recovery checkpoint
+
+    private nonisolated static func checkpointPartial(
+        _ partial: PartialMatch,
+        rule: SequenceRule
+    ) -> SequenceCheckpointPartial {
+        SequenceCheckpointPartial(
+            id: partial.id,
+            ruleID: partial.ruleId,
+            createdAt: partial.createdAt,
+            matchedSteps: partial.matchedSteps.values
+                .sorted { $0.stepId < $1.stepId }
+                .map { checkpointMatchedStep($0, for: rule) },
+            correlationKey: partial.correlationKey
+        )
+    }
+
+    private nonisolated static func checkpointPending(
+        _ pending: PendingStep,
+        ruleId: String,
+        rule: SequenceRule
+    ) -> SequenceCheckpointPendingStep {
+        SequenceCheckpointPendingStep(
+            ruleID: ruleId,
+            stepID: pending.step.id,
+            matched: checkpointMatchedStep(pending.matched, for: rule),
+            arrivedAt: pending.arrivedAt
+        )
+    }
+
+    private func partialBucketWeight(ruleId: String, partials: [PartialMatch]) -> Int {
+        guard !partials.isEmpty else { return 0 }
+        return partials.reduce(
+            SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: ruleId)
+        ) { Self.saturatingTelemetryAdd($0, $1.checkpointWeight) }
+    }
+
+    private func pendingBucketWeight(ruleId: String, pending: [PendingStep]) -> Int {
+        guard !pending.isEmpty else { return 0 }
+        return pending.reduce(
+            SequenceCheckpointCodec.estimatedBucketOverhead(ruleID: ruleId)
+        ) { Self.saturatingTelemetryAdd($0, $1.checkpointWeight) }
+    }
+
+    private func recomputedCheckpointAccountingWeight() -> Int {
+        var total = SequenceCheckpointCodec.semanticStateBaseWeight
+        for (ruleId, partials) in partialMatches where !partials.isEmpty {
+            total = Self.saturatingTelemetryAdd(
+                total,
+                partialBucketWeight(ruleId: ruleId, partials: partials)
+            )
+        }
+        for (ruleId, pending) in pendingLaterSteps where !pending.isEmpty {
+            total = Self.saturatingTelemetryAdd(
+                total,
+                pendingBucketWeight(ruleId: ruleId, pending: pending)
+            )
+        }
+        return total
+    }
+
+    private func setPartialBucket(_ partials: [PartialMatch], for ruleId: String) {
+        let oldWeight = partialBucketWeight(
+            ruleId: ruleId,
+            partials: partialMatches[ruleId] ?? []
+        )
+        if checkpointStateWeight < oldWeight {
+            checkpointStateWeight = recomputedCheckpointAccountingWeight()
+        }
+        checkpointStateWeight -= min(checkpointStateWeight, oldWeight)
+        let newWeight = partialBucketWeight(ruleId: ruleId, partials: partials)
+        checkpointStateWeight = Self.saturatingTelemetryAdd(checkpointStateWeight, newWeight)
+        partialMatches[ruleId] = partials.isEmpty ? nil : partials
+    }
+
+    private func setPendingBucket(_ pending: [PendingStep], for ruleId: String) {
+        let oldWeight = pendingBucketWeight(
+            ruleId: ruleId,
+            pending: pendingLaterSteps[ruleId] ?? []
+        )
+        if checkpointStateWeight < oldWeight {
+            checkpointStateWeight = recomputedCheckpointAccountingWeight()
+        }
+        checkpointStateWeight -= min(checkpointStateWeight, oldWeight)
+        let newWeight = pendingBucketWeight(ruleId: ruleId, pending: pending)
+        checkpointStateWeight = Self.saturatingTelemetryAdd(checkpointStateWeight, newWeight)
+        pendingLaterSteps[ruleId] = pending.isEmpty ? nil : pending
+    }
+
+    private nonisolated static func weightedPartial(
+        _ partial: PartialMatch,
+        rule: SequenceRule
+    ) -> PartialMatch {
+        var weighted = partial
+        weighted.checkpointWeight = SequenceCheckpointCodec.estimatedWeight(
+            of: checkpointPartial(weighted, rule: rule)
+        )
+        return weighted
+    }
+
+    private nonisolated static func weightedPending(
+        _ pending: PendingStep,
+        ruleId: String,
+        rule: SequenceRule
+    ) -> PendingStep {
+        var weighted = pending
+        weighted.checkpointWeight = SequenceCheckpointCodec.estimatedWeight(
+            of: checkpointPending(weighted, ruleId: ruleId, rule: rule)
+        )
+        return weighted
+    }
+
+    /// Enforce the conservative carrier budget on runtime state, while the
+    /// event mutation is still in progress. Pending replay history is shed
+    /// oldest-first before live partials; both losses are explicit telemetry.
+    private func enforceCheckpointStateWeightBudget() {
+        var partialsRemoved = 0
+        var pendingRemoved = 0
+        while checkpointStateWeight > SequenceCheckpointCodec.maximumSemanticStateWeight {
+            let before = checkpointStateWeight
+            let overage = before - SequenceCheckpointCodec.maximumSemanticStateWeight
+            var removedThisPass = 0
+
+            if totalPendingStepCount > 0 {
+                var weights: [SequenceCheckpointPendingIdentity: Int] = [:]
+                for (ruleId, pending) in pendingLaterSteps {
+                    for item in pending {
+                        weights[pendingIdentity(ruleId: ruleId, pending: item)] = item.checkpointWeight
+                    }
+                }
+                var selected = Set<SequenceCheckpointPendingIdentity>()
+                var reduction = 0
+                if pendingEvictionQueueHead < pendingEvictionQueue.count {
+                    for reference in pendingEvictionQueue[pendingEvictionQueueHead...] {
+                        guard let weight = weights[reference.identity] else { continue }
+                        selected.insert(reference.identity)
+                        reduction = Self.saturatingTelemetryAdd(reduction, weight)
+                        if reduction >= overage { break }
+                    }
+                }
+                if !selected.isEmpty {
+                    for (ruleId, pending) in Array(pendingLaterSteps) {
+                        let surviving = pending.filter {
+                            !selected.contains(pendingIdentity(ruleId: ruleId, pending: $0))
+                        }
+                        if surviving.count != pending.count {
+                            setPendingBucket(surviving, for: ruleId)
+                        }
+                    }
+                    removedThisPass = selected.count
+                    pendingRemoved += selected.count
+                    compactPendingEvictionQueue(force: true)
+                }
+            } else {
+                var weights: [UUID: Int] = [:]
+                for partials in partialMatches.values {
+                    for partial in partials { weights[partial.id] = partial.checkpointWeight }
+                }
+                var selected = Set<UUID>()
+                var reduction = 0
+                if evictionQueueHead < evictionQueue.count {
+                    for reference in evictionQueue[evictionQueueHead...] {
+                        guard let weight = weights[reference.partialId] else { continue }
+                        selected.insert(reference.partialId)
+                        reduction = Self.saturatingTelemetryAdd(reduction, weight)
+                        if reduction >= overage { break }
+                    }
+                }
+                if !selected.isEmpty {
+                    for (ruleId, partials) in Array(partialMatches) {
+                        let surviving = partials.filter { !selected.contains($0.id) }
+                        if surviving.count != partials.count {
+                            setPartialBucket(surviving, for: ruleId)
+                        }
+                    }
+                    removedThisPass = selected.count
+                    partialsRemoved += selected.count
+                    compactEvictionQueue(force: true)
+                }
+            }
+
+            guard removedThisPass > 0, checkpointStateWeight < before else {
+                logger.error("Sequence checkpoint weight exceeded without evictable runtime state")
+                break
+            }
+        }
+        if pendingRemoved > 0 { recordPendingEvictions(pendingRemoved) }
+        if partialsRemoved > 0 {
+            evictedPartialCount = Self.saturatingTelemetryAdd(
+                evictedPartialCount,
+                partialsRemoved
+            )
+        }
+        if pendingRemoved > 0 || partialsRemoved > 0 {
+            markCheckpointStateMutation()
+            compactPendingEvictionQueue()
+            compactEvictionQueue()
+        }
+    }
+
+    /// Copy the bounded semantics-bearing state while holding the same lease as
+    /// evaluation/reload. The returned value is Sendable; canonical encoding,
+    /// hashing, LZFSE compression, and disk I/O are intentionally performed by
+    /// SequenceCheckpointCoordinator after this method leaves actor isolation.
+    func checkpointCapture(at capturedAt: Date = Date()) async throws -> SequenceCheckpointCapture {
+        try await acquireMutationLeaseOrThrow()
+        defer { releaseMutationLease() }
+        try Task.checkCancellation()
+
+        compactEvictionQueue(force: true)
+        compactPendingEvictionQueue(force: true)
+        let checkpointPartialBuckets: [SequenceCheckpointPartialBucket] =
+            partialMatches.keys.sorted().compactMap { ruleId in
+                guard let partials = partialMatches[ruleId], !partials.isEmpty,
+                      let rule = rules[ruleId] else { return nil }
+                return SequenceCheckpointPartialBucket(
+                    ruleID: ruleId,
+                    partials: partials.map { Self.checkpointPartial($0, rule: rule) }
+                )
+            }
+
+        let checkpointPendingBuckets: [SequenceCheckpointPendingBucket] =
+            pendingLaterSteps.keys.sorted().compactMap { ruleId in
+                guard let pending = pendingLaterSteps[ruleId], !pending.isEmpty,
+                      let rule = rules[ruleId] else { return nil }
+                return SequenceCheckpointPendingBucket(
+                    ruleID: ruleId,
+                    steps: pending.map {
+                        Self.checkpointPending($0, ruleId: ruleId, rule: rule)
+                    }
+                )
+            }
+
+        // Deep field-by-field audit on the normal 30-second checkpoint path.
+        // The same materialized buckets are reused below, avoiding the former
+        // double allocation/sort. This catches a missed per-record reweight;
+        // the heartbeat's cheap resummation catches bucket-account drift.
+        let recomputedWeight = SequenceCheckpointCodec.estimatedSemanticStateWeight(
+            partialBuckets: checkpointPartialBuckets,
+            pendingBuckets: checkpointPendingBuckets
+        )
+        guard recomputedWeight == checkpointStateWeight else {
+            throw SequenceCheckpointError.invalidPayload(
+                "runtime checkpoint weight accounting drifted (cached \(checkpointStateWeight), exact \(recomputedWeight))"
+            )
+        }
+        guard checkpointStateWeight <= SequenceCheckpointCodec.maximumSemanticStateWeight else {
+            throw SequenceCheckpointError.invalidPayload(
+                "runtime checkpoint state exceeds its carrier budget"
+            )
+        }
+
+        let livePartialIDs = Set(
+            checkpointPartialBuckets.flatMap { bucket in
+                bucket.partials.map { $0.id }
+            }
+        )
+        let activeReferences = evictionQueueHead < evictionQueue.count
+            ? Array(evictionQueue[evictionQueueHead...])
+            : []
+        let checkpointEvictionOrder = activeReferences.map(\.partialId)
+        guard checkpointEvictionOrder.count == livePartialIDs.count,
+              Set(checkpointEvictionOrder) == livePartialIDs else {
+            throw SequenceCheckpointError.invalidPayload(
+                "live eviction queue does not exactly cover active partials"
+            )
+        }
+
+        let livePendingIdentities = Set(checkpointPendingBuckets.flatMap { bucket in
+            bucket.steps.map {
+                SequenceCheckpointPendingIdentity(
+                    ruleID: bucket.ruleID,
+                    stepID: $0.stepID,
+                    eventID: $0.matched.eventID
+                )
+            }
+        })
+        let activePendingReferences = pendingEvictionQueueHead < pendingEvictionQueue.count
+            ? Array(pendingEvictionQueue[pendingEvictionQueueHead...])
+            : []
+        let checkpointPendingEvictionOrder = activePendingReferences.map(\.identity)
+        guard checkpointPendingEvictionOrder.count <= Self.maxPendingTotal,
+              checkpointPendingEvictionOrder.count == livePendingIdentities.count,
+              Set(checkpointPendingEvictionOrder) == livePendingIdentities else {
+            throw SequenceCheckpointError.invalidPayload(
+                "live pending eviction queue does not exactly cover pending history"
+            )
+        }
+
+        return SequenceCheckpointCapture(
+            capturedAt: capturedAt,
+            sourceGeneration: checkpointGeneration,
+            rules: rules.values.sorted { $0.id < $1.id },
+            partialBuckets: checkpointPartialBuckets,
+            pendingBuckets: checkpointPendingBuckets,
+            evictionOrder: checkpointEvictionOrder,
+            pendingEvictionOrder: checkpointPendingEvictionOrder
+        )
+    }
+
+    /// Process-local hint used after a detached write to determine whether new
+    /// events changed state while the older snapshot was being persisted.
+    func checkpointGenerationSnapshot() -> UInt64 {
+        checkpointGeneration
+    }
+
+    /// Atomically validate and install a decoded checkpoint after rules load.
+    /// Every rule/step/identity/cap/timestamp check completes before any live
+    /// state is replaced. Existing live state refuses restore so a late caller
+    /// cannot discard events that arrived during daemon startup.
+    func restoreCheckpoint(
+        _ payload: SequenceCheckpointPayload,
+        now: Date = Date()
+    ) async throws -> SequenceCheckpointApplyResult {
+        try await acquireMutationLeaseOrThrow()
+        defer { releaseMutationLease() }
+        try Task.checkCancellation()
+
+        guard checkpointRestoreAllowed,
+              totalPartialCount == 0,
+              pendingLaterSteps.values.allSatisfy(\.isEmpty) else {
+            throw SequenceCheckpointError.engineAlreadyActive
+        }
+
+        let validated = try SequenceCheckpointValidator.validate(
+            payload,
+            rules: rules,
+            maximumPartialMatches: maxPartialMatches,
+            maximumPendingPerRule: Self.maxPendingPerRule,
+            now: now
+        )
+
+        var restoredPartials: [String: [PartialMatch]] = [:]
+        var partialByID: [UUID: PartialMatch] = [:]
+        for bucket in validated.partialBuckets {
+            guard let rule = rules[bucket.ruleID] else {
+                throw SequenceCheckpointError.invalidPayload(
+                    "validated partial bucket lost active rule \(bucket.ruleID)"
+                )
+            }
+            let values = bucket.partials.map { record in
+                let matchedSteps = Dictionary(uniqueKeysWithValues: record.matchedSteps.map {
+                    ($0.stepID, Self.runtimeMatchedStep($0))
+                })
+                let partial = PartialMatch(
+                    id: record.id,
+                    ruleId: record.ruleID,
+                    createdAt: record.createdAt,
+                    matchedSteps: matchedSteps,
+                    correlationKey: record.correlationKey,
+                    checkpointWeight: 0
+                )
+                return Self.weightedPartial(partial, rule: rule)
+            }
+            restoredPartials[bucket.ruleID] = values
+            for partial in values { partialByID[partial.id] = partial }
+        }
+
+        var restoredPending: [String: [PendingStep]] = [:]
+        var pendingByIdentity: [SequenceCheckpointPendingIdentity: PendingStep] = [:]
+        for bucket in validated.pendingBuckets {
+            guard let rule = rules[bucket.ruleID] else {
+                throw SequenceCheckpointError.invalidPayload(
+                    "validated pending bucket lost active rule \(bucket.ruleID)"
+                )
+            }
+            let stepsByID = Dictionary(uniqueKeysWithValues: rule.steps.map { ($0.id, $0) })
+            let restoredBucket = try bucket.steps.map { record in
+                guard let step = stepsByID[record.stepID] else {
+                    throw SequenceCheckpointError.invalidPayload(
+                        "validated pending step lost definition \(record.stepID)"
+                    )
+                }
+                let pending = PendingStep(
+                    step: step,
+                    matched: Self.runtimeMatchedStep(record.matched),
+                    arrivedAt: record.arrivedAt,
+                    checkpointWeight: 0
+                )
+                return Self.weightedPending(
+                    pending,
+                    ruleId: bucket.ruleID,
+                    rule: rule
+                )
+            }
+            restoredPending[bucket.ruleID] = restoredBucket
+            for pending in restoredBucket {
+                pendingByIdentity[pendingIdentity(ruleId: bucket.ruleID, pending: pending)] = pending
+            }
+        }
+
+        var restoredEvictionQueue: [PartialMatchRef] = []
+        restoredEvictionQueue.reserveCapacity(validated.evictionOrder.count)
+        for partialID in validated.evictionOrder {
+            guard let partial = partialByID[partialID] else {
+                throw SequenceCheckpointError.invalidPayload(
+                    "validated eviction identity lost partial \(partialID)"
+                )
+            }
+            restoredEvictionQueue.append(PartialMatchRef(
+                ruleId: partial.ruleId,
+                partialId: partial.id,
+                createdAt: partial.createdAt
+            ))
+        }
+
+
+        var restoredPendingEvictionQueue: [PendingStepRef] = []
+        restoredPendingEvictionQueue.reserveCapacity(validated.pendingEvictionOrder.count)
+        for identity in validated.pendingEvictionOrder {
+            guard pendingByIdentity[identity] != nil else {
+                throw SequenceCheckpointError.invalidPayload(
+                    "validated pending eviction identity lost step \(identity.eventID)"
+                )
+            }
+            restoredPendingEvictionQueue.append(PendingStepRef(identity: identity))
+        }
+
+        partialMatches.removeAll(keepingCapacity: true)
+        pendingLaterSteps.removeAll(keepingCapacity: true)
+        checkpointStateWeight = SequenceCheckpointCodec.semanticStateBaseWeight
+        for (ruleId, partials) in restoredPartials {
+            setPartialBucket(partials, for: ruleId)
+        }
+        for (ruleId, pending) in restoredPending {
+            setPendingBucket(pending, for: ruleId)
+        }
+        evictionQueue = restoredEvictionQueue
+        evictionQueueHead = 0
+        pendingEvictionQueue = restoredPendingEvictionQueue
+        pendingEvictionQueueHead = 0
+        lastSweep = now
+        lastPreemptiveSweep = .distantPast
+        markCheckpointStateMutation()
+        checkpointRestoreAllowed = false
+
+        return SequenceCheckpointApplyResult(
+            partialCount: restoredPartials.values.reduce(0) { $0 + $1.count },
+            pendingCount: restoredPending.values.reduce(0) { $0 + $1.count },
+            expiredPartialCount: validated.expiredPartialCount,
+            expiredPendingCount: validated.expiredPendingCount,
+            generation: checkpointGeneration
+        )
+    }
+
+    private nonisolated static func checkpointMatchedStep(
+        _ matched: MatchedStep,
+        for rule: SequenceRule
+    ) -> SequenceCheckpointMatchedStep {
+        let ancestryRequired = rule.correlationType == .processLineage
+            || rule.steps.contains { step in
+                guard let relation = step.processRelation?.relation else { return false }
+                switch relation {
+                case .descendant, .ancestor, .sameTree:
+                    return true
+                case .same, .sameProcess, .sibling, .any:
+                    return false
+                }
+            }
+        let siblingEvidenceRequired = rule.steps.contains {
+            $0.processRelation?.relation == .sibling
+        }
+        return SequenceCheckpointMatchedStep(
+            stepID: matched.stepId,
+            eventID: matched.eventId,
+            timestamp: matched.timestamp,
+            processPID: matched.processPid,
+            processParentPID: ancestryRequired || siblingEvidenceRequired
+                ? matched.processParentPid : 0,
+            processParentWasTracked: siblingEvidenceRequired
+                && matched.processParentWasTracked,
+            processAncestorPIDs: ancestryRequired ? matched.processAncestorPids : [],
+            filePath: rule.correlationType == .filePath ? matched.filePath : nil,
+            networkDestination: rule.correlationType == .networkEndpoint
+                ? matched.networkDest : nil
+        )
+    }
+
+    private nonisolated static func runtimeMatchedStep(
+        _ matched: SequenceCheckpointMatchedStep
+    ) -> MatchedStep {
+        MatchedStep(
+            stepId: matched.stepID,
+            eventId: matched.eventID,
+            timestamp: matched.timestamp,
+            processPid: matched.processPID,
+            processParentPid: matched.processParentPID,
+            processParentWasTracked: matched.processParentWasTracked,
+            processAncestorPids: matched.processAncestorPIDs,
+            filePath: matched.filePath,
+            networkDest: matched.networkDestination
+        )
+    }
+
     // MARK: - Event Evaluation
 
     /// Evaluate an event against all applicable sequence rules.
@@ -1325,9 +2123,29 @@ public actor SequenceEngine {
     /// - Parameter event: The incoming security event.
     /// - Returns: Array of `RuleMatch` for sequences that completed on this event.
     public func evaluate(_ event: Event) async -> [RuleMatch] {
+        await evaluate(event, dependencyFilter: nil)
+    }
+
+    /// Re-evaluate only sequence steps that consume newly completed heavyweight
+    /// evidence. Independent steps are never replayed, so an event cannot seed
+    /// or advance unrelated partial state a second time.
+    public func reevaluate(
+        _ event: Event,
+        forCompleted components: Set<HeavyEnrichmentComponent>
+    ) async -> [RuleMatch] {
+        let dependencyFilter = HeavyEnrichmentDependencyMask(components: components)
+        guard !dependencyFilter.isEmpty else { return [] }
+        return await evaluate(event, dependencyFilter: dependencyFilter)
+    }
+
+    private func evaluate(
+        _ event: Event,
+        dependencyFilter: HeavyEnrichmentDependencyMask?
+    ) async -> [RuleMatch] {
         guard await acquireMutationLease() == .acquired else { return [] }
         defer { releaseMutationLease() }
         guard !Task.isCancelled else { return [] }
+        checkpointRestoreAllowed = false
 
         // Periodic housekeeping: sweep expired partials and enforce memory cap.
         let now = Date()
@@ -1351,6 +2169,7 @@ public actor SequenceEngine {
         }
 
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
+        let unresolvedMask = HeavyEnrichmentRuleCoverage.unresolvedMask(in: event)
 
         // Find rule IDs that have at least one step matching this category.
         guard let candidateRuleIds = ruleIndex[category] else {
@@ -1361,6 +2180,21 @@ public actor SequenceEngine {
         for ruleId in candidateRuleIds {
             guard let rule = rules[ruleId], rule.enabled else { continue }
 
+            // Filter at STEP granularity. Replaying every step of a rule merely
+            // because one step gained evidence can duplicate an independent
+            // seed/advance mutation for this same event.
+            let eligibleSteps = rule.steps.filter { step in
+                guard step.logsourceCategory == category else { return false }
+                guard let dependencyFilter else { return true }
+                let stepDependencyMask = heavyDependencyMasks[ruleId]?[step.id]
+                    ?? HeavyEnrichmentRuleCoverage.dependencyMask(
+                        predicates: step.predicates,
+                        conditionTree: step.conditionTree
+                    )
+                return !stepDependencyMask.intersection(dependencyFilter).isEmpty
+            }
+            guard !eligibleSteps.isEmpty else { continue }
+
             // corr-detection #272: this rule was dispatched for evaluation
             // (its category matched this event and it is enabled). Count it so a
             // sequence rule that is loaded+enabled but never actually exercised
@@ -1368,8 +2202,18 @@ public actor SequenceEngine {
             ruleStats[ruleId, default: SequenceRuleStats(ruleId: ruleId)].evaluationCount &+= 1
 
             // Find which steps of this rule match the event's category AND predicates.
-            let matchingSteps = rule.steps.filter { step in
-                step.logsourceCategory == category && evaluateStepPredicates(step, against: event)
+            let matchingSteps = eligibleSteps.filter { step in
+                let stepDependencyMask = heavyDependencyMasks[ruleId]?[step.id]
+                    ?? HeavyEnrichmentRuleCoverage.dependencyMask(
+                        predicates: step.predicates,
+                        conditionTree: step.conditionTree
+                    )
+                return evaluateStepPredicates(
+                    step,
+                    against: event,
+                    dependencyMask: stepDependencyMask,
+                    unresolvedMask: unresolvedMask
+                )
             }
 
             guard !matchingSteps.isEmpty else { continue }
@@ -1408,6 +2252,27 @@ public actor SequenceEngine {
             guard !Task.isCancelled else { return [] }
         }
 
+        let eventTrackedParent = relationshipSnapshot?.trackedDirectParent(
+            of: event.process.pid
+        )
+        var eventAncestorPIDs: [pid_t] = []
+        eventAncestorPIDs.reserveCapacity(SequenceCheckpointLimits.maximumProcessAncestors)
+        var seenEventAncestors = Set<pid_t>()
+        func appendAncestor(_ pid: pid_t) {
+            guard eventAncestorPIDs.count < SequenceCheckpointLimits.maximumProcessAncestors,
+                  pid >= 0,
+                  pid != event.process.pid,
+                  seenEventAncestors.insert(pid).inserted else { return }
+            eventAncestorPIDs.append(pid)
+        }
+        // Prioritize the authoritative snapshot evidence used by live matching;
+        // then fill any remaining bounded slots from event enrichment.
+        for pid in (relationshipSnapshot?.ancestorPIDs(of: event.process.pid) ?? []).sorted() {
+            appendAncestor(pid)
+        }
+        for ancestor in event.process.ancestors { appendAncestor(ancestor.pid) }
+        eventAncestorPIDs.sort()
+
         var completedMatches: [RuleMatch] = []
 
         for plan in plans {
@@ -1422,7 +2287,9 @@ public actor SequenceEngine {
                     eventId: event.id,
                     timestamp: event.timestamp,
                     processPid: event.process.pid,
-                    processPath: event.process.executable,
+                    processParentPid: eventTrackedParent ?? event.process.ppid,
+                    processParentWasTracked: eventTrackedParent != nil,
+                    processAncestorPids: eventAncestorPIDs,
                     filePath: event.file?.path,
                     networkDest: self.networkDestination(from: event)
                 )
@@ -1477,7 +2344,8 @@ public actor SequenceEngine {
                     updatedList.remove(at: idx)
                 }
 
-                partialMatches[ruleId] = updatedList
+                setPartialBucket(updatedList, for: ruleId)
+                markCheckpointStateMutation()
             }
 
             // --- Phase 2: Create new partial matches for initial steps ---
@@ -1504,6 +2372,14 @@ public actor SequenceEngine {
                     matched: matched,
                     ruleId: rule.id
                 )
+                if (rule.correlationType == .filePath
+                        || rule.correlationType == .networkEndpoint),
+                   correlationKey == nil {
+                    // Missing the required binding is not an independent key.
+                    // Storing nil would make checkCorrelation's old guard path
+                    // admit every later file/network value.
+                    continue
+                }
 
                 // Avoid creating a duplicate partial if this event already started
                 // one for the same rule with the same correlation key in this evaluation.
@@ -1519,21 +2395,26 @@ public actor SequenceEngine {
                     ruleId: ruleId,
                     createdAt: now,
                     matchedSteps: [:],
-                    correlationKey: correlationKey
+                    correlationKey: correlationKey,
+                    checkpointWeight: 0
                 )
                 newPartial.matchedSteps[step.id] = matched
+                newPartial = Self.weightedPartial(newPartial, rule: rule)
 
                 // Edge case: single-step rule or anySteps(1).
                 if isTriggerSatisfied(rule.trigger, matchedStepIds: Set(newPartial.matchedSteps.keys), totalSteps: rule.steps.count) {
                     completedMatches.append(makeMatch(rule: rule, partial: newPartial))
                     // Don't store the partial -- it's already complete.
                 } else {
-                    partialMatches[ruleId, default: []].append(newPartial)
+                    var bucket = partialMatches[ruleId] ?? []
+                    bucket.append(newPartial)
+                    setPartialBucket(bucket, for: ruleId)
                     evictionQueue.append(PartialMatchRef(
                         ruleId: ruleId,
                         partialId: newPartial.id,
                         createdAt: now
                     ))
+                    markCheckpointStateMutation()
                     seededInitial = true
                 }
             }
@@ -1579,6 +2460,8 @@ public actor SequenceEngine {
             }
         }
 
+        enforceCheckpointStateWeightBudget()
+
         // corr-detection #272: record fires for every sequence completed on
         // this event (both Phase-1 advances and Phase-2 single-step completions
         // land in `completedMatches`), so per-rule fire counts + last-fire are
@@ -1599,8 +2482,17 @@ public actor SequenceEngine {
     // MARK: - Predicate Evaluation
 
     /// Evaluate all predicates for a step against an event.
-    private func evaluateStepPredicates(_ step: SequenceStep, against event: Event) -> Bool {
+    private func evaluateStepPredicates(
+        _ step: SequenceStep,
+        against event: Event,
+        dependencyMask: HeavyEnrichmentDependencyMask,
+        unresolvedMask: HeavyEnrichmentDependencyMask
+    ) -> Bool {
         let predicates = step.predicates
+
+        // Fail the whole step while any evidence it references is unresolved.
+        // This happens before predicate negation and condition-tree `not`.
+        guard dependencyMask.intersection(unresolvedMask).isEmpty else { return false }
 
         if let tree = step.conditionTree {
             // A tree without predicates is malformed. validateRule rejects it,
@@ -1858,6 +2750,22 @@ public actor SequenceEngine {
     /// ancestry query. Keeping this precise avoids even the single batch actor
     /// hop for predicate matches whose relations are PID-local (`same`/`any`).
     private func planNeedsLineageSnapshot(_ plan: EventEvaluationPlan) -> Bool {
+        // Any matched event in a lineage-dependent rule may become a durable
+        // seed or pending candidate. Capture the authoritative snapshot proof
+        // now even when no relation is evaluated on this call; it cannot be
+        // reconstructed after ProcessLineage restarts.
+        if plan.rule.correlationType == .processLineage
+            || plan.rule.steps.contains(where: {
+                guard let relation = $0.processRelation?.relation else { return false }
+                switch relation {
+                case .descendant, .ancestor, .sibling, .sameTree:
+                    return true
+                case .same, .sameProcess, .any:
+                    return false
+                }
+            }) {
+            return true
+        }
         let existingPartials = partialMatches[plan.ruleId] ?? []
         let liveAdvanceCanQuery = existingPartials.contains { partial in
             plan.matchingSteps.contains { step in
@@ -1889,9 +2797,9 @@ public actor SequenceEngine {
     /// Operates purely on `MatchedStep` — never a live `Event` — so the Phase-1
     /// live path and the Phase-3 replay path share ONE constraint implementation
     /// and cannot drift (cf. corr-detection #275). Callers own trigger/completion
-    /// and list mutation. `matched.timestamp`/`processPid`/`processPath` stand in
-    /// for the former `event.timestamp`/`process.pid`/`process.executable`, which
-    /// are identical because `MatchedStep` is built from that same event.
+    /// and list mutation. `matched.timestamp`/`processPid` stand in for the
+    /// former `event.timestamp`/`process.pid`, which are identical because
+    /// `MatchedStep` is built from that same event.
     private func advancePartial(
         rule: SequenceRule,
         step: SequenceStep,
@@ -1954,10 +2862,8 @@ public actor SequenceEngine {
             }
             let relationHolds = checkProcessRelation(
                 spec.relation,
-                eventPid: matched.processPid,
-                eventPath: matched.processPath,
-                referencePid: refStep.processPid,
-                referencePath: refStep.processPath,
+                event: matched,
+                reference: refStep,
                 relationshipSnapshot: relationshipSnapshot
             )
             guard relationHolds else { return nil }
@@ -1965,7 +2871,7 @@ public actor SequenceEngine {
 
         var updated = partial
         updated.matchedSteps[step.id] = matched
-        return updated
+        return Self.weightedPartial(updated, rule: rule)
     }
 
     /// Build the `RuleMatch` for a completed sequence. Single construction point
@@ -1992,11 +2898,26 @@ public actor SequenceEngine {
         if buf.contains(where: { $0.matched.eventId == matched.eventId && $0.step.id == step.id }) {
             return
         }
-        buf.append(PendingStep(step: step, matched: matched, arrivedAt: now))
+        guard let rule = rules[ruleId] else { return }
+        var pending = PendingStep(
+            step: step,
+            matched: matched,
+            arrivedAt: now,
+            checkpointWeight: 0
+        )
+        pending = Self.weightedPending(pending, ruleId: ruleId, rule: rule)
+        buf.append(pending)
+        pendingEvictionQueue.append(PendingStepRef(
+            identity: pendingIdentity(ruleId: ruleId, pending: pending)
+        ))
         if buf.count > Self.maxPendingPerRule {
-            buf.removeFirst(buf.count - Self.maxPendingPerRule)
+            let removed = buf.count - Self.maxPendingPerRule
+            buf.removeFirst(removed)
+            recordPendingEvictions(removed)
         }
-        pendingLaterSteps[ruleId] = buf
+        setPendingBucket(buf, for: ruleId)
+        enforceGlobalPendingCap()
+        markCheckpointStateMutation()
     }
 
     /// Replay retained out-of-order later steps for `ruleId` against the rule's
@@ -2016,10 +2937,19 @@ public actor SequenceEngine {
         relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
     ) -> [RuleMatch] {
         guard var pending = pendingLaterSteps[ruleId], !pending.isEmpty else { return [] }
+        let originalPending = pending
+        let originalPartials = partialMatches[ruleId] ?? []
 
         // Drop buffered steps older than the rule window.
         pending.removeAll { now.timeIntervalSince($0.arrivedAt) > rule.window }
-        guard !pending.isEmpty else { pendingLaterSteps[ruleId] = nil; return [] }
+        guard !pending.isEmpty else {
+            setPendingBucket([], for: ruleId)
+            if !originalPending.isEmpty {
+                compactPendingEvictionQueue(force: true)
+                markCheckpointStateMutation()
+            }
+            return []
+        }
 
         var matches: [RuleMatch] = []
         var partials = partialMatches[ruleId] ?? []
@@ -2064,8 +2994,14 @@ public actor SequenceEngine {
             partials = replayed
         }
 
-        partialMatches[ruleId] = partials
-        pendingLaterSteps[ruleId] = pending.isEmpty ? nil : pending
+        setPartialBucket(partials, for: ruleId)
+        setPendingBucket(pending, for: ruleId)
+        if partials != originalPartials || pending != originalPending {
+            if pending != originalPending {
+                compactPendingEvictionQueue(force: true)
+            }
+            markCheckpointStateMutation()
+        }
         return matches
     }
 
@@ -2084,7 +3020,7 @@ public actor SequenceEngine {
 
         case .processSame:
             // All steps must come from the same PID.
-            guard let key = partial.correlationKey else { return true }
+            guard let key = partial.correlationKey else { return false }
             return String(candidate.processPid) == key
 
         case .processLineage:
@@ -2101,24 +3037,25 @@ public actor SequenceEngine {
             // (root) step stays bound, so sibling steps spawned by that root
             // still correlate through it. Step-level `processRelation` (checked
             // separately in Phase 1) further refines rules that declare it.
-            guard let relationshipSnapshot else { return false }
             for bound in partial.matchedSteps.values {
                 if candidate.processPid == bound.processPid { return true }
-                if relationshipSnapshot.isDescendant(candidate.processPid, of: bound.processPid) {
+                if relationshipSnapshot?.isDescendant(candidate.processPid, of: bound.processPid) == true
+                    || candidate.hasAncestor(bound.processPid) {
                     return true
                 }
-                if relationshipSnapshot.isDescendant(bound.processPid, of: candidate.processPid) {
+                if relationshipSnapshot?.isDescendant(bound.processPid, of: candidate.processPid) == true
+                    || bound.hasAncestor(candidate.processPid) {
                     return true
                 }
             }
             return false
 
         case .filePath:
-            guard let key = partial.correlationKey else { return true }
+            guard let key = partial.correlationKey else { return false }
             return candidate.filePath == key
 
         case .networkEndpoint:
-            guard let key = partial.correlationKey else { return true }
+            guard let key = partial.correlationKey else { return false }
             return candidate.networkDest == key
         }
     }
@@ -2155,24 +3092,24 @@ public actor SequenceEngine {
 
     // MARK: - Process Relationship Checking
 
-    /// Check whether a process relationship holds between the event's process
-    /// and a reference step's process using the lineage graph.
+    /// Check whether a process relationship holds between two matched steps.
+    /// The live ProcessLineage snapshot is preferred; bounded event-time
+    /// ancestry carried by each match preserves the same relationship after an
+    /// engine restart when that process-local DAG begins empty.
     ///
     /// - Parameters:
     ///   - relation: The required relationship.
-    ///   - eventPid: PID of the current event's process.
-    ///   - eventPath: Executable path of the current event's process.
-    ///   - referencePid: PID of the reference step's process.
-    ///   - referencePath: Executable path of the reference step's process.
+    ///   - event: Current candidate step.
+    ///   - reference: Already-bound reference step.
     /// - Returns: `true` if the relationship holds.
     private func checkProcessRelation(
         _ relation: ProcessRelation,
-        eventPid: pid_t,
-        eventPath _: String,
-        referencePid: pid_t,
-        referencePath _: String,
+        event: MatchedStep,
+        reference: MatchedStep,
         relationshipSnapshot: ProcessLineage.RelationshipSnapshot?
     ) -> Bool {
+        let eventPid = event.processPid
+        let referencePid = reference.processPid
         switch relation {
         case .same:
             return eventPid == referencePid
@@ -2180,14 +3117,20 @@ public actor SequenceEngine {
         case .descendant:
             // Event process is a child/grandchild of the reference process.
             return relationshipSnapshot?.isDescendant(eventPid, of: referencePid) == true
+                || event.hasAncestor(referencePid)
 
         case .ancestor:
             // Event process is a parent/grandparent of the reference process.
             return relationshipSnapshot?.isDescendant(referencePid, of: eventPid) == true
+                || reference.hasAncestor(eventPid)
 
         case .sibling:
             // Event process and reference process share a direct parent.
             return relationshipSnapshot?.areSiblings(eventPid, referencePid) == true
+                || (event.processParentWasTracked
+                    && reference.processParentWasTracked
+                    && event.processParentPid > 0
+                    && event.processParentPid == reference.processParentPid)
 
         case .sameProcess:
             // Identical to .same (exact PID); separate token used by authors.
@@ -2196,9 +3139,12 @@ public actor SequenceEngine {
         case .sameTree:
             // Same process, or anywhere in its ancestry/descendants.
             if eventPid == referencePid { return true }
-            guard let relationshipSnapshot else { return false }
-            if relationshipSnapshot.isDescendant(eventPid, of: referencePid) { return true }
-            return relationshipSnapshot.isDescendant(referencePid, of: eventPid)
+            if relationshipSnapshot?.isDescendant(eventPid, of: referencePid) == true
+                || event.hasAncestor(referencePid) {
+                return true
+            }
+            return relationshipSnapshot?.isDescendant(referencePid, of: eventPid) == true
+                || reference.hasAncestor(eventPid)
 
         case .any:
             // No process-relationship constraint; correlate by window/order only.
@@ -2234,35 +3180,42 @@ public actor SequenceEngine {
     /// Called periodically from `evaluate(_:)` based on `sweepInterval`.
     private func sweepExpired() {
         let now = Date()
+        var checkpointStateChanged = false
 
-        for (ruleId, partials) in partialMatches {
+        for (ruleId, partials) in Array(partialMatches) {
             guard let rule = rules[ruleId] else {
                 // Rule was removed; discard all its partials.
-                partialMatches.removeValue(forKey: ruleId)
+                setPartialBucket([], for: ruleId)
+                checkpointStateChanged = true
                 continue
             }
 
             let surviving = partials.filter { now.timeIntervalSince($0.createdAt) <= rule.window }
-            partialMatches[ruleId] = surviving.isEmpty ? nil : surviving
+            if surviving != partials { checkpointStateChanged = true }
+            setPartialBucket(surviving, for: ruleId)
         }
 
         // #95: prune the out-of-order backfill buffer on the same cadence — a
         // buffered later step older than its rule's window can never combine
         // with a future initial step, so drop it (and any buffer whose rule was
         // removed) to keep the buffer from accreting under sustained load.
-        for (ruleId, buffered) in pendingLaterSteps {
+        for (ruleId, buffered) in Array(pendingLaterSteps) {
             guard let rule = rules[ruleId] else {
-                pendingLaterSteps.removeValue(forKey: ruleId)
+                setPendingBucket([], for: ruleId)
+                checkpointStateChanged = true
                 continue
             }
             let surviving = buffered.filter { now.timeIntervalSince($0.arrivedAt) <= rule.window }
-            pendingLaterSteps[ruleId] = surviving.isEmpty ? nil : surviving
+            if surviving != buffered { checkpointStateChanged = true }
+            setPendingBucket(surviving, for: ruleId)
         }
 
         // Rebuild from exact live IDs. Age-only front trimming retained every
         // completed ref until the corpus's largest window elapsed, allowing the
         // auxiliary queue to scale with seed throughput rather than live state.
         compactEvictionQueue(force: true)
+        compactPendingEvictionQueue(force: true)
+        if checkpointStateChanged { markCheckpointStateMutation() }
     }
 
     /// Evict the oldest partial matches to bring total count back under the cap.
@@ -2294,14 +3247,11 @@ public actor SequenceEngine {
             partials.remove(at: idx)
             removed += 1
 
-            if partials.isEmpty {
-                partialMatches.removeValue(forKey: ref.ruleId)
-            } else {
-                partialMatches[ref.ruleId] = partials
-            }
+            setPartialBucket(partials, for: ref.ruleId)
         }
 
         if removed > 0 {
+            markCheckpointStateMutation()
             evictedPartialCount = Self.saturatingTelemetryAdd(
                 evictedPartialCount,
                 removed

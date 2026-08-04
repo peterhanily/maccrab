@@ -19,10 +19,10 @@ public actor FSEventsCollector {
 
     public nonisolated let events: AsyncStream<Event>
     private var continuation: AsyncStream<Event>.Continuation?
-    private var stream: FSEventStreamRef?
-    private var runLoop: CFRunLoop?
-    private var contextInfo: UnsafeMutableRawPointer?
-    private var isRunning = false
+    private var workerTask: Task<Void, Never>?
+    private var workerControl: FSEventsWorkerControl?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private var lifecycleGeneration: UInt64 = 0
 
     /// Directories to watch for security-relevant file changes.
     private static let watchedPaths: [String] = [
@@ -52,26 +52,38 @@ public actor FSEventsCollector {
     // MARK: - Lifecycle
 
     public func start() {
-        guard !isRunning else { return }
-        isRunning = true
+        guard lifecyclePhase == .initialized else {
+            logger.warning("FSEvents start rejected after its one-shot lifecycle advanced")
+            return
+        }
+        lifecyclePhase = .running
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
 
         let paths = Self.watchedPaths.filter { FileManager.default.fileExists(atPath: $0) }
         guard !paths.isEmpty else {
             logger.warning("FSEvents: no watched paths exist")
+            lifecyclePhase = .stopped
+            continuation?.finish()
+            continuation = nil
             return
         }
 
         let continuation = self.continuation!
         let logger = self.logger
+        let control = FSEventsWorkerControl()
+        workerControl = control
 
-        // FSEventStream must be created and scheduled on a specific thread.
-        // We hop back to the actor after creation to record stream + run
-        // loop refs on `self`, so stop() can release the resources rather
-        // than leaking them. Pre-fix the locals were trapped inside this
-        // closure and `self.stream` stayed nil — stop() short-circuited
-        // and the FSEventStream + dispatch worker thread + Unmanaged
-        // context all leaked for the daemon's lifetime.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        // The worker owns creation AND teardown of every Core Foundation
+        // resource. `stop()` only seals its thread-safe control token. This
+        // removes the old adopt-after-create race where stop could run while
+        // `self.stream` was still nil and the later actor hop resurrected a
+        // leaked stream/run loop/context.
+        workerTask = Task.detached(priority: .utility) { [weak self] in
+            guard !control.shouldStop else {
+                await self?.workerExited(generation: generation)
+                return
+            }
             let pathsCF = paths as CFArray
 
             var context = FSEventStreamContext()
@@ -98,6 +110,7 @@ public actor FSEventsCollector {
             ) else {
                 logger.error("FSEvents: failed to create event stream")
                 Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
+                await self?.workerExited(generation: generation)
                 return
             }
 
@@ -105,54 +118,89 @@ public actor FSEventsCollector {
                 logger.error("FSEvents: CFRunLoopGetCurrent returned nil")
                 FSEventStreamRelease(stream)
                 Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
+                await self?.workerExited(generation: generation)
                 return
             }
             FSEventStreamScheduleWithRunLoop(stream, runLoop, CFRunLoopMode.defaultMode.rawValue)
-            FSEventStreamStart(stream)
-
-            // Hop back to the actor to record the refs so stop() can
-            // release them. Sendable across the boundary: stream/runLoop
-            // are CF refs, info is an opaque pointer.
-            let streamSendable = stream
-            let runLoopSendable = runLoop
-            Task { [weak self] in
-                await self?.recordStream(streamSendable, runLoop: runLoopSendable, info: info)
+            let admitted = control.install(runLoop: runLoop)
+            var started = false
+            if admitted, !Task.isCancelled, !control.shouldStop {
+                started = FSEventStreamStart(stream)
             }
-
-            logger.info("FSEvents collector active — watching \(paths.count) directories")
-
-            // Run the run loop to receive events. Returns when stop()
-            // calls CFRunLoopStop on this loop.
-            CFRunLoopRun()
+            if started {
+                logger.info("FSEvents collector active — watching \(paths.count) directories")
+                // Use bounded run-loop slices as a second line of defence. Even
+                // if stop wins immediately before the first run call, the worker
+                // observes the sealed token within 250 ms rather than blocking
+                // forever on a lost CFRunLoopStop edge.
+                while !Task.isCancelled, !control.shouldStop {
+                    _ = CFRunLoopRunInMode(
+                        CFRunLoopMode.defaultMode,
+                        0.25,
+                        false
+                    )
+                }
+                FSEventStreamStop(stream)
+            } else if admitted, !control.shouldStop {
+                logger.error("FSEvents: failed to start event stream")
+            }
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
+            control.clear(runLoop: runLoop)
+            await self?.workerExited(generation: generation)
         }
-    }
-
-    private func recordStream(_ stream: FSEventStreamRef,
-                              runLoop: CFRunLoop,
-                              info: UnsafeMutableRawPointer) {
-        self.stream = stream
-        self.runLoop = runLoop
-        self.contextInfo = info
     }
 
     public func stop() {
-        isRunning = false
-        if let stream = stream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            self.stream = nil
+        _ = beginStop()
+    }
+
+    /// Seal stream creation before waking the run loop, then join the worker
+    /// that owns stream invalidation, release, and callback-context release.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            task.map { [$0] } ?? [],
+            deadline: deadline
+        )
+        if joined {
+            workerTask = nil
+            workerControl = nil
+            lifecyclePhase = .stopped
+            logger.info("FSEvents collector stopped cleanly")
+        } else {
+            logger.error("FSEvents stop deadline expired with stream worker active")
         }
-        if let runLoop = runLoop {
-            // Wakes the dispatch worker out of CFRunLoopRun so the queue
-            // worker thread is returned to the pool.
-            CFRunLoopStop(runLoop)
-            self.runLoop = nil
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        workerControl?.requestStop()
+        let task = workerTask
+        task?.cancel()
+        continuation?.finish()
+        continuation = nil
+        return task
+    }
+
+    private func workerExited(generation: UInt64) {
+        guard generation == lifecycleGeneration else { return }
+        workerTask = nil
+        workerControl = nil
+        if lifecyclePhase == .running {
+            lifecyclePhase = .stopped
+            continuation?.finish()
+            continuation = nil
         }
-        if let info = contextInfo {
-            Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
-            self.contextInfo = nil
-        }
+    }
+
+    deinit {
+        workerControl?.requestStop()
+        workerTask?.cancel()
         continuation?.finish()
     }
 
@@ -223,6 +271,48 @@ public actor FSEventsCollector {
 }
 
 // MARK: - Callback Context
+
+/// Crosses the actor/CFRunLoop boundary without transferring ownership of the
+/// stream itself. The worker remains the sole releaser; shutdown can only seal
+/// admission and wake/stop the currently-published run loop.
+final class FSEventsWorkerControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    private var runLoop: CFRunLoop?
+
+    var shouldStop: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    func install(runLoop: CFRunLoop) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped else { return false }
+        self.runLoop = runLoop
+        return true
+    }
+
+    func requestStop() {
+        lock.lock()
+        stopped = true
+        let published = runLoop
+        lock.unlock()
+        if let published {
+            CFRunLoopStop(published)
+            CFRunLoopWakeUp(published)
+        }
+    }
+
+    func clear(runLoop completed: CFRunLoop) {
+        lock.lock()
+        if let current = runLoop, current === completed {
+            runLoop = nil
+        }
+        lock.unlock()
+    }
+}
 
 private class FSEventsCallbackInfo {
     let continuation: AsyncStream<Event>.Continuation

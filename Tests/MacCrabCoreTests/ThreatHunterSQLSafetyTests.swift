@@ -8,6 +8,24 @@ private enum ThreatHunterFixtureError: Error {
     case execute(String)
 }
 
+private actor ThreatHunterLLMBackend: LLMBackend {
+    let providerName = "ThreatHunterFixture"
+    private let response: String
+
+    init(response: String) { self.response = response }
+
+    func isAvailable() async -> Bool { true }
+
+    func complete(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> String? {
+        response
+    }
+}
+
 private func executeFixtureSQL(at path: String, sql: String) throws {
     var database: OpaquePointer?
     guard sqlite3_open_v2(
@@ -108,6 +126,51 @@ private func makeThreatHunterFixture(rowCount: Int = 550) throws -> (
 
 @Suite("ThreatHunter split-store SQL safety")
 struct ThreatHunterSQLSafetyTests {
+    @Test("LLM hunt SQL validation has conserving accepted and rejected operations")
+    func semanticValidationAccounting() async throws {
+        let fixture = try makeThreatHunterFixture(rowCount: 2)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let acceptedService = LLMService(
+            backend: ThreatHunterLLMBackend(
+                response: "SELECT id FROM events ORDER BY timestamp DESC LIMIT 1"
+            ),
+            config: LLMConfig(),
+            minInterval: 0
+        )
+        let acceptedHunter = ThreatHunter(
+            eventsDatabasePath: fixture.events,
+            alertsDatabasePath: fixture.alerts,
+            llmService: acceptedService
+        )
+        #expect(await acceptedHunter.huntEnhanced("latest event")?.resultCount == 1)
+        let accepted = await acceptedService.runtimeTelemetrySnapshot()
+            .counters(for: .threatHunt)?.downstreamValidation
+        #expect(accepted?.operationsStartedTotal == 1)
+        #expect(accepted?.accepted == 1)
+        #expect(accepted?.finalRejection == 0)
+        #expect(accepted?.conservationMaintained == true)
+
+        let rejectedService = LLMService(
+            backend: ThreatHunterLLMBackend(response: "DELETE FROM events"),
+            config: LLMConfig(),
+            minInterval: 0
+        )
+        let rejectedHunter = ThreatHunter(
+            eventsDatabasePath: fixture.events,
+            alertsDatabasePath: fixture.alerts,
+            llmService: rejectedService
+        )
+        #expect(await rejectedHunter.huntEnhanced("find unsigned processes") != nil,
+                "Unsafe LLM SQL must fall back to deterministic hunting")
+        let rejected = await rejectedService.runtimeTelemetrySnapshot()
+            .counters(for: .threatHunt)?.downstreamValidation
+        #expect(rejected?.operationsStartedTotal == 1)
+        #expect(rejected?.accepted == 0)
+        #expect(rejected?.finalRejection == 1)
+        #expect(rejected?.conservationMaintained == true)
+    }
+
     @Test("event and alert queries route to their separate read-only stores")
     func routesSplitStores() async throws {
         let fixture = try makeThreatHunterFixture(rowCount: 2)

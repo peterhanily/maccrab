@@ -106,39 +106,230 @@ struct IntentClassifierTests {
 @Suite("v1.12.0: BayesianIntentEngine")
 struct BayesianIntentEngineTests {
 
-    @Test("Single observation shifts mass toward the implicated goal but doesn't flip benign instantly (correct Bayesian behavior with strong benign prior)")
+    private static func crossesAlertGate(_ posterior: BayesianIntentEngine.Posterior) -> Bool {
+        posterior.observationAddedIndependentEvidence
+            && posterior.topGoal != .benign
+            && posterior.topProbability >= 0.85
+            && posterior.distinctEvidenceCount >= 3
+    }
+
+    @Test("Single observation shifts the advisory score but an exact callback is idempotent")
     func singleObservationShiftsMass() async {
         let engine = BayesianIntentEngine()
-        let posterior = await engine.observe(.credentialRead, treeKey: "tree-a")
-        // Benign remains plausible but credentialHarvest gains significant probability.
+        let observedAt = Date().addingTimeInterval(10)
+        let receivedAt = observedAt
+        let posterior = await engine.observe(
+            .credentialRead,
+            treeKey: "tree-a",
+            observationToken: "event-1",
+            observedAt: observedAt,
+            receivedAt: receivedAt
+        )
         let credHarvest = posterior.probabilities[.credentialHarvest] ?? 0.0
         #expect(credHarvest > 0.01, "credentialHarvest should pick up mass from a credentialRead observation; got \(credHarvest)")
-        // After three matching observations, credentialHarvest should dominate.
-        _ = await engine.observe(.credentialRead, treeKey: "tree-a")
-        let final = await engine.observe(.credentialRead, treeKey: "tree-a")
-        #expect(final.topGoal == .credentialHarvest)
+        // Repeated normalization must not inherit Dictionary's randomized
+        // iteration order: identical callback inputs are bit-exactly stable.
+        for _ in 0..<32 {
+            let duplicate = await engine.observe(
+                .credentialRead,
+                treeKey: "tree-a",
+                observationToken: "event-1",
+                observedAt: observedAt,
+                receivedAt: receivedAt
+            )
+            #expect(duplicate.observationDisposition == .suppressedExactDuplicate)
+            #expect(duplicate.probabilities == posterior.probabilities)
+            #expect(duplicate.evidenceLog == [.credentialRead])
+        }
     }
 
-    @Test("CredentialRead + nonRegistryEgress drives exfiltration / credentialHarvest > 0.7")
-    func credentialExfilPosterior() async {
+    @Test("Different evidence types from one event remain independent and can cross the gate")
+    func distinctEvidenceCanCross() async {
         let engine = BayesianIntentEngine()
-        _ = await engine.observe(.credentialRead, treeKey: "tree-1")
-        _ = await engine.observe(.nonRegistryEgress, treeKey: "tree-1")
-        let posterior = await engine.observe(.nonRegistryEgress, treeKey: "tree-1")
-        let top = posterior.topGoal
-        #expect(top == .exfiltration || top == .credentialHarvest)
-        #expect(posterior.topProbability > 0.6)
+        let observedAt = Date().addingTimeInterval(10)
+        _ = await engine.observe(
+            .launchAgentWrite, treeKey: "tree-1",
+            observationToken: "event-multi", observedAt: observedAt
+        )
+        _ = await engine.observe(
+            .shellRcWrite, treeKey: "tree-1",
+            observationToken: "event-multi", observedAt: observedAt
+        )
+        let posterior = await engine.observe(
+            .workflowWrite, treeKey: "tree-1",
+            observationToken: "event-multi", observedAt: observedAt
+        )
+        #expect(posterior.topGoal == .persistence)
+        #expect(posterior.distinctEvidenceCount == 3)
+        #expect(Self.crossesAlertGate(posterior))
     }
 
-    @Test("Repeated destructiveCmd observations make destructive dominate")
-    func destructivePosteriorAccumulates() async {
-        let engine = BayesianIntentEngine()
-        // Two destructive observations are sufficient to overwhelm the
-        // strong benign prior (0.95 → 0.05).
-        _ = await engine.observe(.destructiveCmd, treeKey: "tree-2")
-        let posterior = await engine.observe(.destructiveCmd, treeKey: "tree-2")
-        #expect(posterior.topGoal == .destructive)
-        #expect(posterior.topProbability > 0.5)
+    @Test("Repeated same-type callbacks refresh one contribution and cannot compound across the alert gate")
+    func repeatedEvidenceDoesNotCompound() async {
+        let engine = BayesianIntentEngine(
+            evidenceCooldown: 60,
+            evidenceWindow: 24 * 60 * 60,
+            decayHalfLife: 60 * 60
+        )
+        let start = Date().addingTimeInterval(10)
+        var latest = await engine.observe(
+            .destructiveCmd, treeKey: "tree-2",
+            observationToken: "event-0", observedAt: start
+        )
+        let initialScore = latest.probabilities[.destructive] ?? 0
+
+        // Even genuinely separate observations outside the cooldown only
+        // refresh the single coarse evidence-type contribution.
+        for i in 1...100 {
+            latest = await engine.observe(
+                .destructiveCmd,
+                treeKey: "tree-2",
+                observationToken: "event-\(i)",
+                observedAt: start.addingTimeInterval(Double(i) * 61)
+            )
+        }
+        #expect(latest.observationDisposition == .acceptedRefresh)
+        #expect(latest.distinctEvidenceCount == 1)
+        #expect(abs((latest.probabilities[.destructive] ?? 0) - initialScore) < 0.000_000_1)
+        #expect(!Self.crossesAlertGate(latest))
+        let stats = await engine.statistics()
+        #expect(stats.acceptedNewEvidence == 1)
+        #expect(stats.acceptedRefreshes == 100)
+        #expect(stats.retainedEvidenceRecords == 1)
+        #expect(stats.observationsConserved)
+    }
+
+    @Test("Stale evidence decays toward the prior and expires from the recent window")
+    func stalePosteriorDecays() async {
+        let engine = BayesianIntentEngine(
+            evidenceCooldown: 1,
+            evidenceWindow: 600,
+            decayHalfLife: 60,
+            treeIdleTTL: 1_200
+        )
+        let start = Date().addingTimeInterval(10)
+        _ = await engine.observe(.launchAgentWrite, treeKey: "decay", observationToken: "a", observedAt: start)
+        _ = await engine.observe(.shellRcWrite, treeKey: "decay", observationToken: "b", observedAt: start)
+        let fresh = await engine.observe(.workflowWrite, treeKey: "decay", observationToken: "c", observedAt: start)
+        let freshPersistence = fresh.probabilities[.persistence] ?? 0
+        #expect(freshPersistence > 0.85)
+
+        let decayed = await engine.posterior(treeKey: "decay", asOf: start.addingTimeInterval(300))
+        #expect((decayed?.probabilities[.persistence] ?? 1) < freshPersistence)
+        #expect(decayed?.topGoal == .benign)
+
+        let expired = await engine.posterior(treeKey: "decay", asOf: start.addingTimeInterval(601))
+        #expect(expired?.evidenceLog.isEmpty == true)
+        #expect(expired?.topGoal == .benign)
+        #expect(abs((expired?.probabilities[.benign] ?? 0) - 0.95) < 0.000_000_1)
+    }
+
+    @Test("Out-of-order evidence is safe: distinct recent types land, stale same-type replays do not")
+    func outOfOrderSafety() async {
+        let engine = BayesianIntentEngine(evidenceCooldown: 30, evidenceWindow: 300)
+        let start = Date().addingTimeInterval(10)
+        _ = await engine.observe(
+            .launchAgentWrite, treeKey: "ordered",
+            observationToken: "newer", observedAt: start.addingTimeInterval(100)
+        )
+        let distinctOlder = await engine.observe(
+            .shellRcWrite, treeKey: "ordered",
+            observationToken: "older-distinct", observedAt: start.addingTimeInterval(50)
+        )
+        #expect(distinctOlder.observationDisposition == .acceptedNewEvidence)
+        #expect(distinctOlder.distinctEvidenceCount == 2)
+
+        let staleReplay = await engine.observe(
+            .launchAgentWrite, treeKey: "ordered",
+            observationToken: "old-same-type", observedAt: start.addingTimeInterval(40)
+        )
+        #expect(staleReplay.observationDisposition == .suppressedStaleReplay)
+        #expect(staleReplay.evidenceLog.count == 2)
+        #expect(staleReplay.lastUpdate == start.addingTimeInterval(100))
+    }
+
+    @Test("Admission telemetry conserves every observation and token memory is bounded")
+    func admissionConservation() async {
+        let engine = BayesianIntentEngine(
+            evidenceCooldown: 60,
+            evidenceWindow: 120,
+            maxObservationTokenUTF8Bytes: 8
+        )
+        let start = Date().addingTimeInterval(10)
+        _ = await engine.observe(.credentialRead, treeKey: "stats", observationToken: "one", observedAt: start)
+        _ = await engine.observe(.credentialRead, treeKey: "stats", observationToken: "one", observedAt: start)
+        _ = await engine.observe(.credentialRead, treeKey: "stats", observationToken: "two", observedAt: start.addingTimeInterval(1))
+        _ = await engine.observe(.credentialRead, treeKey: "stats", observationToken: "old", observedAt: start.addingTimeInterval(-121))
+        _ = await engine.observe(.shellRcWrite, treeKey: "stats", observationToken: "token-too-long", observedAt: start)
+
+        let stats = await engine.statistics()
+        #expect(stats.observations == 5)
+        #expect(stats.acceptedObservations == 1)
+        #expect(stats.suppressedExactDuplicates == 1)
+        #expect(stats.suppressedEvidenceCooldown == 1)
+        #expect(stats.suppressedOutsideEvidenceWindow == 1)
+        #expect(stats.suppressedInvalidTokens == 1)
+        #expect(stats.observationsConserved)
+        #expect(stats.retainedEvidenceRecords <= stats.activeTrees * stats.maximumEvidenceRecordsPerTree)
+    }
+
+    @Test("Tree and evidence state stay bounded with conserved capacity evictions")
+    func boundedStateAndTreeConservation() async {
+        let engine = BayesianIntentEngine(
+            maxTrees: 3,
+            evidenceCooldown: 0,
+            evidenceWindow: 600,
+            treeIdleTTL: 1_200
+        )
+        let start = Date().addingTimeInterval(10)
+        for treeIndex in 0..<50 {
+            let observedAt = start.addingTimeInterval(Double(treeIndex))
+            for evidence in BayesianIntentEngine.Evidence.allCases {
+                _ = await engine.observe(
+                    evidence,
+                    treeKey: "tree-\(treeIndex)",
+                    observationToken: "\(treeIndex)-\(evidence.rawValue)",
+                    observedAt: observedAt
+                )
+            }
+        }
+
+        let stats = await engine.statistics()
+        #expect(stats.activeTrees <= 3)
+        #expect(stats.peakActiveTrees <= 3)
+        #expect(stats.treeCapacityRespected)
+        #expect(stats.treesEvictedForCapacity > 0)
+        #expect(stats.retainedEvidenceRecords <= 3 * BayesianIntentEngine.Evidence.allCases.count)
+        #expect(stats.treeLifecycleConserved)
+        #expect(stats.observationsConserved)
+    }
+
+    @Test("Explicit prune expires evidence then closes an idle tree")
+    func explicitPruneLifecycle() async {
+        let engine = BayesianIntentEngine(
+            evidenceWindow: 10,
+            decayHalfLife: 5,
+            treeIdleTTL: 20
+        )
+        let start = Date().addingTimeInterval(10)
+        _ = await engine.observe(
+            .credentialRead,
+            treeKey: "idle",
+            observationToken: "event",
+            observedAt: start
+        )
+
+        let evidencePrune = await engine.prune(asOf: start.addingTimeInterval(11))
+        #expect(evidencePrune.evidenceRecordsExpired == 1)
+        #expect(evidencePrune.treesRemoved == 0)
+        #expect((await engine.posterior(treeKey: "idle", asOf: start.addingTimeInterval(11)))?.evidenceLog.isEmpty == true)
+
+        let treePrune = await engine.prune(asOf: start.addingTimeInterval(21))
+        #expect(treePrune.treesRemoved == 1)
+        #expect(await engine.posterior(treeKey: "idle") == nil)
+        let stats = await engine.statistics()
+        #expect(stats.treesPrunedForIdle == 1)
+        #expect(stats.treeLifecycleConserved)
     }
 
     @Test("Reset clears tree state")
@@ -148,6 +339,9 @@ struct BayesianIntentEngineTests {
         await engine.reset(treeKey: "tree-x")
         let p = await engine.posterior(treeKey: "tree-x")
         #expect(p == nil)
+        let stats = await engine.statistics()
+        #expect(stats.treesReset == 1)
+        #expect(stats.treeLifecycleConserved)
     }
 }
 
@@ -174,7 +368,9 @@ struct PromptIntentBridgeTests {
         let bridge = makeBridge(events: events, fileContents: [
             "/proj/README.md": "This project uses lodash for utility functions.",
         ])
-        let result = await bridge.analyzeInstall(aiPid: 100, packageName: "lodash")
+        let result = await bridge.analyzeInstall(
+            aiPid: 100, packageName: "lodash", destructiveBlastRadius: 0
+        )
         #expect(result.label == .userInitiated)
     }
 
@@ -187,13 +383,18 @@ struct PromptIntentBridgeTests {
         let bridge = makeBridge(events: events, fileContents: [
             "/proj/needs.md": "Use the requests library for HTTP calls.",
         ])
-        let result = await bridge.analyzeInstall(aiPid: 100, packageName: "requets")
+        let result = await bridge.analyzeInstall(
+            aiPid: 100, packageName: "requets", destructiveBlastRadius: 0
+        )
         #expect(result.label == .slopsquat)
         #expect(result.nearestMentionDistance == 1)
+        #expect(result.confidence == 0,
+                "Unevaluated edit distance must remain below automatic alert admission")
+        #expect(result.reasons.joined().contains("shadow only"))
     }
 
-    @Test("Autonomous install: agent installed package no recently-read file mentions")
-    func autonomousInstall() async {
+    @Test("Missing package mention abstains instead of claiming autonomous intent")
+    func missingMentionAbstains() async {
         let now = Date()
         let events = [
             AgentEvent(timestamp: now.addingTimeInterval(-10), kind: .fileRead(path: "/proj/README.md")),
@@ -201,8 +402,42 @@ struct PromptIntentBridgeTests {
         let bridge = makeBridge(events: events, fileContents: [
             "/proj/README.md": "A todo-list app using SwiftUI.",
         ])
-        let result = await bridge.analyzeInstall(aiPid: 100, packageName: "totally-unrelated-package-name")
-        #expect(result.label == .autonomous)
+        let result = await bridge.analyzeInstall(
+            aiPid: 100,
+            packageName: "totally-unrelated-package-name",
+            destructiveBlastRadius: 0
+        )
+        #expect(result.label == .unknown)
+        #expect(result.confidence == 0)
+        #expect(result.reasons.joined().contains("cannot establish autonomous"))
+    }
+
+    @Test("Unavailable context cannot infer intent even for a destructive action")
+    func unavailableContextAbstains() async {
+        let snapshot = AgentSessionSnapshot(
+            aiPid: 100,
+            toolType: .claudeCode,
+            projectDir: "/proj",
+            startTime: Date(),
+            events: [
+                AgentEvent(
+                    timestamp: Date(),
+                    kind: .fileRead(path: "/proj/missing.md")
+                ),
+            ]
+        )
+        let bridge = PromptIntentBridge(
+            snapshotProvider: { _ in snapshot },
+            fileReader: { _ in nil }
+        )
+        let result = await bridge.analyzeInstall(
+            aiPid: 100,
+            packageName: "unrequested-package",
+            destructiveBlastRadius: 99
+        )
+        #expect(result.label == .unknown)
+        #expect(result.confidence == 0)
+        #expect(result.injectionMarkersFound.isEmpty)
     }
 
     @Test("Injection context: agent read a file with injection markers + destructive action")
@@ -217,6 +452,56 @@ struct PromptIntentBridgeTests {
         let result = await bridge.analyzeInstall(aiPid: 100, packageName: "useful-helper", destructiveBlastRadius: 5)
         #expect(result.label == .injectionContext)
         #expect(!result.injectionMarkersFound.isEmpty)
+    }
+
+    @Test("Newest unique context read is not hidden by 32 older files")
+    func newestContextWinsBoundedSelection() async {
+        let now = Date()
+        var events: [AgentEvent] = (0..<32).map { index in
+            AgentEvent(
+                timestamp: now.addingTimeInterval(Double(-100 + index)),
+                kind: .fileRead(path: "/proj/old-\(index).md")
+            )
+        }
+        events.append(AgentEvent(
+            timestamp: now.addingTimeInterval(-1),
+            kind: .fileRead(path: "/proj/latest.md")
+        ))
+        var contents = Dictionary(uniqueKeysWithValues: (0..<32).map {
+            ("/proj/old-\($0).md", "unrelated historical context \($0)")
+        })
+        contents["/proj/latest.md"] = "Install the requests package."
+        let bridge = makeBridge(events: events, fileContents: contents)
+
+        let result = await bridge.analyzeInstall(
+            aiPid: 100,
+            packageName: "requests",
+            destructiveBlastRadius: 0
+        )
+        #expect(result.label == .userInitiated)
+    }
+
+    @Test("Injected file readers cannot bypass the configured byte cap")
+    func injectedReaderIsByteBounded() async {
+        let snapshot = AgentSessionSnapshot(
+            aiPid: 100,
+            toolType: .claudeCode,
+            projectDir: "/proj",
+            startTime: Date(),
+            events: [AgentEvent(timestamp: Date(), kind: .fileRead(path: "/proj/large.md"))]
+        )
+        let bridge = PromptIntentBridge(
+            snapshotProvider: { _ in snapshot },
+            fileReader: { _ in String(repeating: "x", count: 64) + " requests" },
+            maxFileBytes: 64
+        )
+
+        let result = await bridge.analyzeInstall(
+            aiPid: 100,
+            packageName: "requests",
+            destructiveBlastRadius: 0
+        )
+        #expect(result.label == .unknown)
     }
 }
 

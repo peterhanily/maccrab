@@ -5,12 +5,8 @@
 // the user's recent intent context, surfacing high-signal anomalies
 // that are invisible to behavior-only detection:
 //
-//   - Autonomous install: package was installed without appearing in
-//     any file the agent read in the prior window
 //   - Slopsquat shape: installed name has typo-distance ≤ 2 from a
 //     name in the agent's recent file reads
-//   - Vague-prompt → destructive-action magnitude asymmetry: agent
-//     made few LLM calls relative to the destructive blast radius
 //   - Injection-context: recently-read files contain known prompt-
 //     injection markers AND the agent spawned a destructive action
 //
@@ -18,9 +14,11 @@
 // llmCall variant carries provider/endpoint/byteCounts, not text — that
 // matches Anthropic's published privacy posture (Claude Code Enterprise
 // telemetry deliberately omits prompt body from OTLP exports). Instead
-// we infer intent context from what the agent *read* (the user's
+// we can establish positive context from what the agent *read* (the user's
 // CLAUDE.md, the project's README, the files in the working directory)
-// — proxies that don't require new privacy surface.
+// — proxies that don't require new privacy surface. Absence of a package name
+// in those files is NOT evidence that the operator did not request it, so the
+// bridge abstains instead of claiming autonomous or vague intent.
 
 import Foundation
 import Darwin
@@ -47,6 +45,8 @@ public actor PromptIntentBridge {
         public let aiPid: Int32
         public let packageName: String
         public let label: PromptIntentLabel
+        /// Uncalibrated heuristic score used for explicit review gating. It is
+        /// not a probability or measured confidence.
         public let confidence: Double
         public let nearestMentionedName: String?
         public let nearestMentionDistance: Int?
@@ -119,7 +119,7 @@ public actor PromptIntentBridge {
     ) {
         self.snapshotProvider = snapshotProvider
         self.fileReader = fileReader ?? Self.defaultFileReader
-        self.maxFileBytes = maxFileBytes
+        self.maxFileBytes = min(max(1, maxFileBytes), 64 * 1024)
     }
 
     /// Default file reader. Uses SecureFileIO (O_NOFOLLOW) and
@@ -150,7 +150,7 @@ public actor PromptIntentBridge {
     /// user-initiated, autonomous, slopsquat, etc. Looks at AgentLineage
     /// events from `windowSeconds` before the call (default 300s).
     public func analyzeInstall(
-        aiPid: Int32, packageName: String, destructiveBlastRadius: Int = 0,
+        aiPid: Int32, packageName: String, destructiveBlastRadius: Int,
         windowSeconds: TimeInterval = 300
     ) async -> PromptIntentResult {
         guard let snapshot = await snapshotProvider(aiPid) else {
@@ -164,10 +164,17 @@ public actor PromptIntentBridge {
         }
 
         let cutoff = Date().addingTimeInterval(-windowSeconds)
-        let recentReads = snapshot.events.compactMap { event -> String? in
-            guard event.timestamp >= cutoff else { return nil }
-            if case .fileRead(let path) = event.kind { return path }
-            return nil
+        // Lineage snapshots are oldest-first. Context relevance runs the other
+        // direction: choose the newest unique files, otherwise a busy session's
+        // first 32 reads permanently hide the prompt/config file read just
+        // before the install.
+        var seenReadPaths = Set<String>()
+        var recentReads: [String] = []
+        for event in snapshot.events.reversed() where event.timestamp >= cutoff {
+            guard case .fileRead(let path) = event.kind,
+                  seenReadPaths.insert(path).inserted else { continue }
+            recentReads.append(path)
+            if recentReads.count == 32 { break }
         }
         let llmCallCount = snapshot.events.filter { event in
             guard event.timestamp >= cutoff else { return false }
@@ -179,7 +186,7 @@ public actor PromptIntentBridge {
         // v1.12.0 RC3 (Perf-H3): consult the in-bridge cache before
         // re-reading. Most analyzeInstall calls hit overlapping
         // context paths (CLAUDE.md, README, project dotfiles).
-        let candidatePaths = Array(recentReads.prefix(32))
+        let candidatePaths = recentReads
         var contextCorpus: [(path: String, text: String)] = []
         for path in candidatePaths {
             // v1.12.0 RC4 (Sec-R4-N1): stat the file first so the
@@ -210,7 +217,12 @@ public actor PromptIntentBridge {
                 continue
             }
             // Cache miss or expired: re-read.
-            if let text = await fileReader(path), !text.isEmpty {
+            if let unboundedText = await fileReader(path), !unboundedText.isEmpty {
+                // Enforce the constructor's byte budget even for injected
+                // readers. String prefix counts characters, not bytes, so cap
+                // the UTF-8 representation and repair a split scalar safely.
+                let text = String(decoding: unboundedText.utf8.prefix(maxFileBytes), as: UTF8.self)
+                guard !text.isEmpty else { continue }
                 contextCorpus.append((path: path, text: text))
                 // FIFO eviction at cap.
                 if readCache.count >= readCacheCap, let oldest = readCacheOrder.first {
@@ -282,42 +294,36 @@ public actor PromptIntentBridge {
         if let near = bestSimilar {
             return PromptIntentResult(
                 aiPid: aiPid, packageName: packageName,
-                label: .slopsquat, confidence: 0.8,
+                // Damerau-Levenshtein distance alone has no evaluated precision
+                // on the package ecosystems MacCrab supports. Keep the useful
+                // candidate visible to explicit callers but below automatic
+                // alert admission until a held-out corpus supplies a threshold.
+                label: .slopsquat, confidence: 0.0,
                 nearestMentionedName: near.name,
                 nearestMentionDistance: near.distance,
                 injectionMarkersFound: injectionMarkers,
                 reasons: [
                     "agent context mentions '\(near.name)' (Damerau-Levenshtein distance \(near.distance) from installed '\(packageName)')",
-                    "package name was not explicitly mentioned by the user",
+                    "experimental string-distance candidate; shadow only and not a safety verdict",
                 ]
             )
         }
 
-        // No mention. Check magnitude asymmetry.
-        if destructiveBlastRadius >= 3 && llmCallCount <= 2 {
-            return PromptIntentResult(
-                aiPid: aiPid, packageName: packageName,
-                label: .vagueDestructive, confidence: 0.7,
-                nearestMentionedName: nil,
-                nearestMentionDistance: nil,
-                injectionMarkersFound: injectionMarkers,
-                reasons: [
-                    "only \(llmCallCount) LLM call(s) preceded a destructive install (blast radius \(destructiveBlastRadius))",
-                    "no recently-read context mentions the package",
-                ]
-            )
-        }
-
-        // No mention, no asymmetry → autonomous install.
+        // The telemetry intentionally contains no prompt body. Neither an empty
+        // context corpus nor the absence of a package name in a few files can
+        // prove that the operator did not request the install; LLM call count is
+        // likewise not a measure of prompt specificity. Abstain unless positive
+        // evidence above established a direct mention, slopsquat, or injection
+        // marker paired with a real destructive-action signal.
         return PromptIntentResult(
             aiPid: aiPid, packageName: packageName,
-            label: .autonomous, confidence: 0.75,
+            label: .unknown, confidence: 0.0,
             nearestMentionedName: nil,
             nearestMentionDistance: nil,
             injectionMarkersFound: injectionMarkers,
             reasons: [
-                "no recently-read context mentions the package",
-                "agent chose to install '\(packageName)' without explicit operator reference",
+                "insufficient grounded intent context; prompt bodies are not collected",
+                "\(llmCallCount) content-free LLM call record(s) and no positive package mention cannot establish autonomous intent",
             ]
         )
     }

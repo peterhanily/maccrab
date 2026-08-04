@@ -575,15 +575,12 @@ struct AgentLineageSnapshotTests {
         }
     }
 
-    @Test("Concurrent writeSnapshot calls don't pile up — second drops")
-    func concurrentWritesDropSecond() async throws {
+    @Test("Concurrent writeSnapshot calls stay bounded and conserve every generation")
+    func concurrentWritesStayBounded() async throws {
         // Stability invariant: the heartbeat dispatch fires every 30 s
-        // and dispatches a Task that calls writeSnapshot. If a slow
-        // disk makes one snapshot take longer than 30 s, successive
-        // Tasks must NOT pile up holding actor refs + encoded payloads.
-        // We test this indirectly: drive two concurrent snapshot
-        // requests and assert both terminate without throwing — the
-        // second one should observe `snapshotWriteInFlight` and drop.
+        // and calls writeSnapshot. If a slow disk makes one publication
+        // take longer than 30 s, requests retain at most one newest pending
+        // immutable snapshot rather than piling up unbounded work.
         let dir = NSTemporaryDirectory() + "lineage-conc-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -597,9 +594,14 @@ struct AgentLineageSnapshotTests {
         async let b: () = service.writeSnapshot(to: path)
         _ = await (a, b)
 
-        // Whichever completed first (or both if no contention)
-        // produced a valid file.
+        // At least one generation produced a valid file, and every offered
+        // generation is terminal, superseded, or still represented exactly.
         #expect(AgentLineageService.readSnapshot(at: path) != nil)
+        let telemetry = await service.snapshotWriteTelemetry()
+        #expect(telemetry.offered == 2)
+        #expect(telemetry.conserved)
+        #expect(telemetry.inFlight == 0)
+        #expect(telemetry.pending == 0)
     }
 
     @Test("kindCounts groups events accurately")

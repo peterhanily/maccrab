@@ -82,6 +82,232 @@ enum EventLoop {
         )
     }
 
+    /// Publish one complete tracker-owned view to the synchronous ES callback.
+    /// Every project root here is the value ProjectBoundary accepted (including
+    /// a live cwd resolved from an empty ES field), never the raw event field.
+    private static func publishDynamicAIFileInterest(state: DaemonState) async {
+        _ = await state.aiSessionLifecycleCoordinator.publishCurrent(
+            tracker: state.aiTracker
+        )
+    }
+
+    /// Only collectors backed by Endpoint Security process birth data may
+    /// contribute an anti-recycle start identity. Other collectors synthesize
+    /// ProcessInfo.startTime from observation time and must pass unknown.
+    private static func reliableProcessStartIdentity(
+        source: EventPipelineSource,
+        startTime: Date
+    ) -> UInt64? {
+        switch source {
+        case .endpointSecurity, .eslogger:
+            return AIProcessTracker.processStartIdentity(startTime)
+        case .kdebug, .unifiedLog, .tcc, .network:
+            return nil
+        }
+    }
+
+    /// Prefer immutable executable identity over path when learning a launch
+    /// baseline. Hashes are strongest; the enriched signing tuple is a bounded
+    /// fallback; path remains StatisticalAnomalyDetector's final fallback.
+    /// This keeps an in-place binary replacement from inheriting the old
+    /// executable's "normal" argument/entropy distribution.
+    private static func statisticalBinaryIdentity(
+        for process: MacCrabCore.ProcessInfo
+    ) -> String? {
+        if let cdhash = process.hashes?.cdhash, !cdhash.isEmpty {
+            return "cdhash:" + String(cdhash.lowercased().prefix(128))
+        }
+        if let sha256 = process.hashes?.sha256, !sha256.isEmpty {
+            return "sha256:" + String(sha256.lowercased().prefix(128))
+        }
+        if let signature = process.codeSignature {
+            let team = String((signature.teamId ?? "-").prefix(64))
+            let identifier = String((signature.signingId ?? "-").prefix(256))
+            if team != "-" || identifier != "-" {
+                return "sign:\(signature.signerType.rawValue):\(team):\(identifier)"
+            }
+        }
+        return nil
+    }
+
+    /// Resolve an IP-only network event once, before any attribution, baseline,
+    /// or cross-process consumer runs. The rebuilt value is the single hostname
+    /// source for every later consumer; the enrichment key remains for storage
+    /// compatibility and operator inspection.
+    private static func backfillDNSHostname(
+        state: DaemonState,
+        event: inout Event
+    ) async {
+        guard let network = event.network,
+              network.destinationHostname == nil,
+              let domain = await state.dnsCollector.domainForIP(
+                network.destinationIp
+              ) else { return }
+        let resolvedNetwork = NetworkInfo(
+            sourceIp: network.sourceIp,
+            sourcePort: network.sourcePort,
+            destinationIp: network.destinationIp,
+            destinationPort: network.destinationPort,
+            destinationHostname: domain,
+            direction: network.direction,
+            transport: network.transport
+        )
+        event = Event(
+            id: event.id,
+            timestamp: event.timestamp,
+            eventCategory: event.eventCategory,
+            eventType: event.eventType,
+            eventAction: event.eventAction,
+            process: event.process,
+            file: event.file,
+            network: resolvedNetwork,
+            tcc: event.tcc,
+            enrichments: event.enrichments,
+            severity: event.severity,
+            ruleMatches: event.ruleMatches
+        )
+        event.enrichments["dns.resolved_domain"] = domain
+    }
+
+    /// Ordered root registration shared by a directly-observed AI process and
+    /// an AI ancestor discovered from a child event. ProjectBoundary owns cwd
+    /// resolution and validation; tracker, lineage, durable session identity,
+    /// and callback demand all consume that exact accepted value afterward.
+    private static func registerAIRoot(
+        state: DaemonState,
+        pid: Int32,
+        executable: String,
+        type: AIToolType,
+        reportedProjectDirectory: String,
+        timestamp: Date,
+        startTime: Date,
+        processStartIdentity: UInt64?
+    ) async -> AISessionLifecycleCoordinator.RootRegistration {
+        await state.aiSessionLifecycleCoordinator.registerRoot(
+            tracker: state.aiTracker,
+            projectBoundary: state.projectBoundary,
+            lineageService: state.agentLineageService,
+            sessionRegistry: state.agentSessionRegistry,
+            pid: pid,
+            executable: executable,
+            type: type,
+            reportedProjectDirectory: reportedProjectDirectory,
+            observedAt: timestamp,
+            processStartTime: startTime,
+            processStartIdentity: processStartIdentity
+        )
+    }
+
+    /// One resolved identity for every filesystem guard, regardless of whether
+    /// this event's subject is the AI root itself or a descendant. The root PID
+    /// and project directory come from tracker/ProjectBoundary ownership, not a
+    /// second executable-shape ancestry walk.
+    private struct ResolvedAIAttribution {
+        let rootPid: Int32
+        let toolType: AIToolType
+        let projectDirectory: String
+    }
+
+    private static let credentialFenceExemptBinaries: Set<String> = [
+        "codesign", "security", "stapler", "productsign", "pkgbuild",
+        "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
+        "maccrabctl", "maccrabd", "com.maccrab.agent",
+        "sign_update", "generate_keys",
+    ]
+
+    /// Shared root/descendant enforcement. Keeping both direct controls here
+    /// prevents the root branch from silently bypassing a guard that descendants
+    /// receive, while preserving the credential-only honey/signing exclusions.
+    private static func enforceAIFilesystemGuards(
+        state: DaemonState,
+        event: Event,
+        attribution: ResolvedAIAttribution
+    ) async {
+        guard let filePath = event.file?.path else { return }
+        let process = event.process
+        let toolName = attribution.toolType.displayName
+        let subject = (process.executable as NSString).lastPathComponent
+
+        // Deployed credential-shaped honeyfiles have their own dedicated HIGH
+        // detector. Signing/notarization tools legitimately use keychains under
+        // AI-driven release builds; dedicated keychain-dump rules still cover
+        // malicious CLI use. These exemptions apply only to CredentialFence,
+        // never to project-boundary mutation enforcement.
+        if event.enrichments["IsHoneyfile"] != "true",
+           !credentialFenceExemptBinaries.contains(subject),
+           let (credentialType, description) = state.credentialFence.checkAccessDetailed(
+               filePath: filePath,
+               aiToolName: toolName,
+               aiToolType: attribution.toolType,
+               accessingBinary: subject
+           ) {
+            let alert = Alert(
+                ruleId: "maccrab.ai-guard.credential-access",
+                ruleTitle: "🦀 AI Tool Accessed \(credentialType.rawValue)",
+                severity: .medium,
+                eventId: event.id.uuidString,
+                processPath: process.executable,
+                processName: process.name,
+                description: description,
+                mitreTactics: "attack.credential_access",
+                mitreTechniques: "attack.t1552.001",
+                suppressed: false
+            )
+            do {
+                if try await state.alertSink.submit(alert: alert, event: event) {
+                    await state.notifier.notify(alert: alert)
+                }
+            } catch {
+                await StorageErrorTracker.shared.recordAlertError(error)
+            }
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_credential_access",
+                detail: "\(credentialType.rawValue): \(filePath)",
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+
+        guard ProjectBoundary.mutationEventActions.contains(event.eventAction.lowercased()) else {
+            return
+        }
+        if let violation = await state.projectBoundary.checkWrite(
+            filePath: filePath,
+            aiSessionPid: attribution.rootPid,
+            aiToolName: toolName
+        ) {
+            let alert = Alert(
+                ruleId: "maccrab.ai-guard.boundary-violation",
+                ruleTitle: "🦀 AI Tool Wrote Outside Project Directory",
+                severity: .medium,
+                eventId: event.id.uuidString,
+                processPath: process.executable,
+                processName: process.name,
+                description: violation.description,
+                mitreTactics: "attack.defense_evasion",
+                mitreTechniques: "attack.t1036",
+                suppressed: false
+            )
+            do {
+                if try await state.alertSink.submit(alert: alert, event: event) {
+                    await state.notifier.notify(alert: alert)
+                }
+            } catch {
+                await StorageErrorTracker.shared.recordAlertError(error)
+            }
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_boundary_violation",
+                detail: "Wrote to \(filePath) outside \(attribution.projectDirectory)",
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+    }
+
     static func run(
         state: DaemonState,
         lane: EventPipelineLane,
@@ -90,6 +316,10 @@ enum EventLoop {
     ) async {
         for await envelope in eventStream {
             let event = envelope.event
+            let eventProcessStartIdentity = reliableProcessStartIdentity(
+                source: envelope.source,
+                startTime: event.process.startTime
+            )
             let processingStartedNanos = DispatchTime.now().uptimeNanoseconds
             state.eventPipelineTelemetry.recordDequeued(lane: lane)
             defer {
@@ -112,27 +342,26 @@ enum EventLoop {
             // no-op for events that aren't NOTIFY_EXIT.
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
-                // v1.19 (S1-T5): evict the AI child→session mapping on exit so a
-                // recycled pid can't inherit a stale AI attribution (the
-                // XProtect-as-Claude-Code misattribution). No-op for unknown
-                // pids; also tears down the session if the AI root itself exits.
-                await state.aiTracker.processExited(pid: event.process.pid)
-                // v1.18 Wave-3 P1b: end the durable agent session when its
-                // AI-tool root exits. The registry retains it for a grace
-                // window so descendant events that outlive the root still
-                // correlate (this is endSession's first production caller).
-                if state.aiRegistry.isAITool(executablePath: event.process.executable) != nil {
-                    await state.agentSessionRegistry.end(rootPid: event.process.pid)
-                    await state.agentLineageService.endSession(aiPid: event.process.pid)
-                    // `ProjectBoundary.removeBoundary` had NO callers anywhere in
-                    // the tree. That was harmless only because registration
-                    // always failed (empty cwd on the ES path); now that
-                    // boundaries are actually stored, an unevicted map grows for
-                    // the daemon's lifetime and a recycled pid inherits the dead
-                    // session's boundary — turning ordinary writes by an
-                    // unrelated process into boundary violations.
-                    await state.projectBoundary.removeBoundary(aiPid: event.process.pid)
-                }
+                _ = await state.aiSessionLifecycleCoordinator.processExited(
+                    tracker: state.aiTracker,
+                    projectBoundary: state.projectBoundary,
+                    lineageService: state.agentLineageService,
+                    sessionRegistry: state.agentSessionRegistry,
+                    pid: event.process.pid,
+                    expectedStartIdentity: eventProcessStartIdentity,
+                    now: event.timestamp
+                )
+            }
+
+            // Reserve before enrichment so a pending heavyweight result always
+            // has bounded external ownership. Saturation back-pressures this
+            // consumer; it never turns into an unreported event eviction.
+            guard let heavyReservation = await state.deferredEnrichmentBuffer
+                .reserveEventSlot() else {
+                // Reservation admission seals only after ingestion has been
+                // asked to stop. Do not begin unowned enrichment past that
+                // terminal boundary.
+                break
             }
 
             // Enrich the event (lineage, code signing)
@@ -142,19 +371,85 @@ enum EventLoop {
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await state.yaraEnricher.enrich(enrichedEvent)
             }
+            let hasPendingHeavyEnrichment = await state.deferredEnrichmentBuffer
+                .retain(enrichedEvent, using: heavyReservation)
+
+            // Network consumers below must all see the same recovered hostname.
+            // In particular MCPBaseline and CrossProcessCorrelator previously ran
+            // before the later DNS enrichment and permanently learned nil/IP-only
+            // observations even when DNSCollector already knew the domain.
+            await backfillDNSHostname(state: state, event: &enrichedEvent)
 
             // === AI Tool Detection ===
             //
-            // v1.6.9 fast path: if the subject isn't itself an AI
-            // tool AND no AI tool is currently registered,
-            // short-circuit out of the whole AI-child block. On
-            // idle machines this skips ~4 actor hops per event.
-            // `hasActiveSessionsHint` is a nonisolated lock-protected
-            // mirror of `sessions.isEmpty` — a stale read is
-            // harmless (one event's lineage missed; next event
-            // heals). Using `isAITool` twice below is fine;
-            // `aiRegistry.isAITool` is nonisolated and O(1).
             let aiProc = enrichedEvent.process
+            var resolvedAIAttribution: ResolvedAIAttribution?
+            // Resolve genuine active ancestry BEFORE considering the subject's
+            // executable as a new root. A nested Codex/Claude binary is still a
+            // descendant of the already-active session; promoting it first
+            // minted dozens of empty roots and evicted the useful timeline from
+            // AgentLineageService's bounded LRU.
+            let directAIType: AIToolType? = {
+                guard enrichedEvent.eventAction != "fork",
+                      enrichedEvent.eventAction != "exit" else { return nil }
+                return state.aiRegistry.isAITool(executablePath: aiProc.executable)
+            }()
+            var childAttribution: (
+                isChild: Bool,
+                toolType: AIToolType?,
+                projectDir: String?,
+                rootPid: Int32?,
+                attributionChanged: Bool
+            ) = (false, nil, nil, nil, false)
+
+            if enrichedEvent.eventAction != "exit",
+               state.aiTracker.hasActiveSessionsHint {
+                childAttribution = await state.aiTracker.isAIChild(
+                    pid: aiProc.pid,
+                    ancestors: aiProc.ancestors,
+                    promoteUnregisteredAncestors: false,
+                    processStartIdentity: eventProcessStartIdentity
+                )
+                if childAttribution.attributionChanged {
+                    await publishDynamicAIFileInterest(state: state)
+                }
+            }
+
+            // A daemon that starts after an agent may first observe one of its
+            // children, not the root itself. Promote the nearest genuine AI
+            // ancestor in owner order: boundary resolution first, then tracker
+            // and lineage, then bind the child. Directly-recognised non-fork
+            // subjects remain roots unless a currently-active ancestor already
+            // claimed them above.
+            if !childAttribution.isChild,
+               directAIType == nil,
+               enrichedEvent.eventAction != "exit",
+               let ancestor = aiProc.ancestors.first(where: {
+                   !AIProcessTracker.isApplePlatformPath($0.executable)
+                       && state.aiRegistry.isAITool(executablePath: $0.executable) != nil
+               }),
+               let ancestorType = state.aiRegistry.isAITool(executablePath: ancestor.executable) {
+                _ = await registerAIRoot(
+                    state: state,
+                    pid: ancestor.pid,
+                    executable: ancestor.executable,
+                    type: ancestorType,
+                    reportedProjectDirectory: "",
+                    timestamp: enrichedEvent.timestamp,
+                    startTime: enrichedEvent.timestamp,
+                    processStartIdentity: nil
+                )
+                childAttribution = await state.aiTracker.isAIChild(
+                    pid: aiProc.pid,
+                    ancestors: aiProc.ancestors,
+                    promoteUnregisteredAncestors: false,
+                    processStartIdentity: eventProcessStartIdentity
+                )
+                if childAttribution.attributionChanged {
+                    await publishDynamicAIFileInterest(state: state)
+                }
+            }
+
             // AI-09: a NOTIFY_FORK event is built from `forkEvent.child`, and a
             // freshly-forked child still carries its PARENT's image until it
             // execs — so ES reports the forked pid as `claude` even when it is
@@ -169,42 +464,33 @@ enum EventLoop {
             // AI CHILD. Gating on `== "exec"` instead would REGRESS — an agent
             // already running when the daemon starts never emits an exec we see,
             // so it would never get a session at all.
-            if enrichedEvent.eventAction != "fork",
-               let aiType = state.aiRegistry.isAITool(executablePath: aiProc.executable) {
-                await state.aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
-                // The shipping ES path leaves `workingDirectory` empty, so let
-                // the actor read the cwd off the live process. Without this the
-                // registration is always rejected and `checkWrite` fails open
-                // (no boundary registered == allowed) for every AI write.
-                await state.projectBoundary.registerBoundary(
-                    aiPid: aiProc.pid,
-                    projectDir: aiProc.workingDirectory,
-                    resolveLiveCWDIfEmpty: true
-                )
-                // v1.6.7: start a lineage session so subsequent events
-                // (file, network, alert) under this AI tool populate a
-                // chronological timeline.
-                await state.agentLineageService.startSession(
-                    aiPid: aiProc.pid,
-                    toolType: aiType,
-                    projectDir: aiProc.workingDirectory,
-                    startTime: enrichedEvent.timestamp
+            if !childAttribution.isChild, let aiType = directAIType {
+                let rootRegistration = await registerAIRoot(
+                    state: state,
+                    pid: aiProc.pid,
+                    executable: aiProc.executable,
+                    type: aiType,
+                    reportedProjectDirectory: aiProc.workingDirectory,
+                    timestamp: enrichedEvent.timestamp,
+                    startTime: aiProc.startTime,
+                    processStartIdentity: eventProcessStartIdentity
                 )
                 enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
                 enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
-                // v1.18 Wave-3 P1: mint/get the durable session id and
-                // stamp it on the AI tool's OWN event. This branch (the
-                // root) previously recorded NO timeline data — only
-                // descendants did — so the tool's own file/net activity
-                // was uncorrelated. The bind at EventStore persists this.
-                let sid = await state.agentSessionRegistry.session(
+                enrichedEvent.enrichments["ai_root_pid"] = String(aiProc.pid)
+                if !rootRegistration.projectDirectory.isEmpty {
+                    enrichedEvent.enrichments["ai_project_dir"] = rootRegistration.projectDirectory
+                }
+                resolvedAIAttribution = ResolvedAIAttribution(
                     rootPid: aiProc.pid,
-                    pathHash: ProcessIdentity.fnv1a64(aiProc.executable),
-                    startTime: aiProc.startTime,
-                    tool: aiType.rawValue,
-                    now: enrichedEvent.timestamp
+                    toolType: aiType,
+                    projectDirectory: rootRegistration.projectDirectory
                 )
-                enrichedEvent.enrichments["ai_tool_session_id"] = sid
+                // v1.18 Wave-3 P1: stamp the durable session id minted/healed
+                // by the ordered root registration above.
+                if let sessionID = rootRegistration.sessionID {
+                    enrichedEvent.enrichments["ai_tool_session_id"] = sessionID
+                }
                 // AI-13: `AgentEvent.Kind.llmCall` had ZERO producers anywhere
                 // in the codebase — only the case definition and two consumers
                 // in PromptIntentBridge. So `llmCallCount` was permanently 0 and
@@ -229,14 +515,36 @@ enum EventLoop {
                         timestamp: enrichedEvent.timestamp
                     )
                 }
-            } else if state.aiTracker.hasActiveSessionsHint {
-                // Only pay the isAIChild actor hop when there are
-                // actually AI sessions running that this event could
-                // belong to.
-                let (isChild, aiType, projectDir) = await state.aiTracker.isAIChild(pid: aiProc.pid, ancestors: aiProc.ancestors)
-                if isChild {
+                // Root-owned file activity feeds the same bounded context as
+                // child activity. Dynamic callback demand includes both root
+                // and descendants, so omitting this producer would retain
+                // README/source OPENs only to discard them before the timeline.
+                if let file = enrichedEvent.file,
+                   let kind = AgentLineageService.materializedFileEventKind(
+                       path: file.path,
+                       eventAction: enrichedEvent.eventAction
+                   ) {
+                    await state.agentLineageService.record(
+                        aiPid: aiProc.pid,
+                        kind: kind,
+                        timestamp: enrichedEvent.timestamp
+                    )
+                }
+            } else if childAttribution.isChild {
+                    let aiType = childAttribution.toolType
+                    let projectDir = childAttribution.projectDir
                     enrichedEvent.enrichments["ai_tool"] = aiType?.rawValue ?? "unknown"
                     enrichedEvent.enrichments["ai_tool_child"] = "true"
+                    if let rootPid = childAttribution.rootPid {
+                        enrichedEvent.enrichments["ai_root_pid"] = String(rootPid)
+                        if let aiType {
+                            resolvedAIAttribution = ResolvedAIAttribution(
+                                rootPid: rootPid,
+                                toolType: aiType,
+                                projectDirectory: projectDir ?? ""
+                            )
+                        }
+                    }
                     if let dir = projectDir { enrichedEvent.enrichments["ai_project_dir"] = dir }
 
                     // v1.9 Agent Traces (PR-2): correlate kernel event back
@@ -323,63 +631,51 @@ enum EventLoop {
                         }
                     }
 
-                    // v1.6.7: record lineage events for this AI child.
-                    // The session's root PID is the nearest AI-tool
-                    // ancestor; walk the provided ancestry list to
-                    // find it rather than re-querying the tracker.
-                    if let aiAncestor = aiProc.ancestors.first(where: {
-                        state.aiRegistry.isAITool(executablePath: $0.executable) != nil
-                    }) {
-                        let rootPid = aiAncestor.pid
+                    // v1.6.7: record lineage events against the tracker-owned
+                    // root. The nearest executable that merely *looks* like an
+                    // AI tool may itself be a nested descendant; using it here
+                    // split durable identity and timeline state across roots.
+                    if let rootPid = childAttribution.rootPid {
+                        let rootExecutable = aiProc.ancestors.first {
+                            $0.pid == rootPid
+                        }?.executable
                         // v1.18 Wave-3 P1: resolve this descendant's event to
                         // the root's durable session id (grace-aware, so a
                         // child that outlives the root still correlates) and
                         // stamp it for EventStore persistence.
                         if let sid = await state.agentSessionRegistry.sessionForRoot(
                             pid: rootPid,
-                            pathHash: ProcessIdentity.fnv1a64(aiAncestor.executable),
+                            pathHash: rootExecutable.map { ProcessIdentity.fnv1a64($0) },
                             now: enrichedEvent.timestamp
                         ) {
                             enrichedEvent.enrichments["ai_tool_session_id"] = sid
                         }
-                        // Always record the spawn for any AI-child exec.
-                        await state.agentLineageService.record(
-                            aiPid: rootPid,
-                            kind: .processSpawn(
-                                basename: aiProc.name,
-                                pid: aiProc.pid
-                            ),
-                            timestamp: enrichedEvent.timestamp
-                        )
-                        // For file events, record the read/write. Our
-                        // FileAction enum has no "read"; reads come
-                        // through as `.close` in most ES subtypes.
-                        //
-                        // v1.12.0 RC3 fix (Sec-H2): filter credential-
-                        // shaped paths out of the lineage record. The
-                        // snapshot persists to disk (under root) and is
-                        // readable by the dashboard (admin user). A
-                        // path like `~/.aws/credentials` recorded here
-                        // would surface to any tool that reads the
-                        // snapshot or any LLM call that ingests it.
-                        // Filtering at record time keeps the deception/
-                        // intent-bridge signal (which only needs the
-                        // shape of the agent's activity, not specific
-                        // credential paths) while keeping the file
-                        // path off disk.
-                        if let file = enrichedEvent.file,
-                           !isCredentialShapedPath(file.path) {
-                            let kind: AgentEvent.Kind
-                            switch file.action {
-                            case .write, .create, .rename, .link:
-                                kind = .fileWrite(path: file.path)
-                            case .delete:
-                                kind = .fileWrite(path: file.path)
-                            case .close, .open:
-                                kind = .fileRead(path: file.path)
-                            }
+                        // One spawn row per actual EXEC. Pre-fix this was
+                        // unconditional inside the AI-child branch, so every
+                        // file callback emitted another identical processSpawn.
+                        if enrichedEvent.eventCategory == .process,
+                           enrichedEvent.eventAction == "exec" {
                             await state.agentLineageService.record(
-                                aiPid: rootPid, kind: kind,
+                                aiPid: rootPid,
+                                kind: .processSpawn(
+                                    basename: aiProc.name,
+                                    pid: aiProc.pid
+                                ),
+                                timestamp: enrichedEvent.timestamp
+                            )
+                        }
+                        // Persist only the completed text context consumed by
+                        // PromptIntentBridge. The canonical helper also owns the
+                        // private-path denylist, so callback demand and lineage
+                        // materialisation cannot drift.
+                        if let file = enrichedEvent.file,
+                           let kind = AgentLineageService.materializedFileEventKind(
+                               path: file.path,
+                               eventAction: enrichedEvent.eventAction
+                           ) {
+                            await state.agentLineageService.record(
+                                aiPid: rootPid,
+                                kind: kind,
                                 timestamp: enrichedEvent.timestamp
                             )
                         }
@@ -401,7 +697,9 @@ enum EventLoop {
                     // AI child spawning a shell -- track it
                     let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]
                     if shellNames.contains(where: { aiProc.executable.hasSuffix($0) }) {
-                        await state.behaviorScoring.addIndicator(
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
                             named: "ai_tool_spawns_shell",
                             detail: "\(aiType?.displayName ?? "AI tool") spawned \(aiProc.name)",
                             forProcess: aiProc.pid, path: aiProc.executable
@@ -410,7 +708,9 @@ enum EventLoop {
 
                     // AI child running sudo
                     if aiProc.executable.hasSuffix("/sudo") || aiProc.commandLine.hasPrefix("sudo ") {
-                        await state.behaviorScoring.addIndicator(
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
                             named: "ai_tool_runs_sudo",
                             detail: "\(aiType?.displayName ?? "AI tool") child running sudo: \(aiProc.commandLine.prefix(100))",
                             forProcess: aiProc.pid, path: aiProc.executable
@@ -420,7 +720,9 @@ enum EventLoop {
                     // AI child installing packages
                     let pkgCmds = ["npm install", "npm i ", "pip install", "pip3 install", "cargo add", "brew install"]
                     if pkgCmds.contains(where: { aiProc.commandLine.lowercased().contains($0) }) {
-                        await state.behaviorScoring.addIndicator(
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
                             named: "ai_tool_installs_unknown_pkg",
                             detail: aiProc.commandLine.prefix(200).description,
                             forProcess: aiProc.pid, path: aiProc.executable
@@ -432,7 +734,9 @@ enum EventLoop {
                     let execPipe = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
                     if dlExec.contains(where: { aiProc.commandLine.contains($0) })
                         && execPipe.contains(where: { aiProc.commandLine.contains($0) }) {
-                        await state.behaviorScoring.addIndicator(
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
                             named: "ai_tool_downloads_and_exec",
                             detail: aiProc.commandLine.prefix(200).description,
                             forProcess: aiProc.pid, path: aiProc.executable
@@ -443,7 +747,9 @@ enum EventLoop {
                     if let file = enrichedEvent.file {
                         let persistPaths = ["/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/", ".zshrc", ".bashrc", ".bash_profile"]
                         if persistPaths.contains(where: { file.path.contains($0) }) {
-                            await state.behaviorScoring.addIndicator(
+                            await BehaviorScoreAlertEmitter.record(
+                                state: state,
+                                event: enrichedEvent,
                                 named: "ai_tool_persistence_write",
                                 detail: "AI tool writing to \(file.path)",
                                 forProcess: aiProc.pid, path: aiProc.executable
@@ -451,135 +757,6 @@ enum EventLoop {
                         }
                     }
 
-                    // === Credential Fence: check file access against sensitive paths ===
-                    // v1.18 (AI-Guard #4): skip the credential-fence on a deployed
-                    // honeyfile. HoneyfileManager seeds canaries at real
-                    // credential-shaped paths (~/.aws/credentials.bak,
-                    // ~/.ssh/id_rsa.old) which CredentialFence's static /decoys/
-                    // exclusion misses — so without this the AI-credential-fence
-                    // double-fired on a decoy that the dedicated honeyfile_accessed
-                    // detector (keyed on this same IsHoneyfile enrichment) already
-                    // handles. The enricher tags these IsHoneyfile=true.
-                    //
-                    // v1.18 (AI-Guard #4): code-signing / notarization tools
-                    // (codesign, security, stapler, …) legitimately read the
-                    // keychain as part of a build and run as Claude Code
-                    // descendants during dev, so the fence flagged them as "AI Tool
-                    // Accessed Keychain" — 130 firings on codesign/security/stapler
-                    // that also fed the 8.0 ai_tool_credential_access indicator and
-                    // escalated to CRITICAL "persistent threat actor" campaigns
-                    // (audit). Their malicious use is covered by the dedicated
-                    // keychain_dump_via_security / keychain-CLI Sigma rules; exempt
-                    // them from the broad AI-credential fence.
-                    let credFenceSubject = (enrichedEvent.process.executable as NSString).lastPathComponent
-                    let credFenceSigningTools: Set<String> = [
-                        "codesign", "security", "stapler", "productsign", "pkgbuild",
-                        "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
-                        // MacCrab's OWN tools read the keychain for signature
-                        // verification (cdhash/tree-score/why, the daemon's signing
-                        // enrichment) — flagging ourselves for keychain access is a
-                        // self-FP, surfaced live when maccrabctl was run under an AI
-                        // tool (1.18.0 RC verification: it was the lone residual
-                        // keychain alert after the signing-tool exemption landed).
-                        "maccrabctl", "maccrabd", "com.maccrab.agent",
-                        // Sparkle release tooling (appcast EdDSA signing) — benign
-                        // dev-host noise, not AI credential theft.
-                        "sign_update", "generate_keys",
-                    ]
-                    if let filePath = enrichedEvent.file?.path,
-                       enrichedEvent.enrichments["IsHoneyfile"] != "true",
-                       !credFenceSigningTools.contains(credFenceSubject) {
-                        if let (credType, credDesc) = state.credentialFence.checkAccessDetailed(
-                            filePath: filePath,
-                            aiToolName: aiType?.displayName ?? "AI tool",
-                            aiToolType: aiType,
-                            // AI-07: `credFenceSubject` is the accessing binary's
-                            // basename, already computed just above for the
-                            // signing-tool exemption. Pass it so the fence can
-                            // tell "gh read its own token store" (benign, 218 of
-                            // this rule's 777 live alerts) apart from "gh read
-                            // ~/.aws/credentials" (still alerts).
-                            accessingBinary: credFenceSubject
-                        ) {
-                            let alert = Alert(
-                                ruleId: "maccrab.ai-guard.credential-access",
-                                ruleTitle: "🦀 AI Tool Accessed \(credType.rawValue)",
-                                // v1.17.1: .critical → .high. v1.18: .high →
-                                // .medium. This is a DIRECT emission
-                                // (alertSink.submit) that never passes through
-                                // NoiseFilter (see AlertSink), so the only
-                                // effect is the notification floor: AI tools
-                                // touch credential-shaped paths constantly in
-                                // normal dev, so this is recorded for the
-                                // dashboard/timeline but should not banner at a
-                                // High floor. The FP SOURCE (benign cp/rm via
-                                // whole-AI-subtree attribution, honeyfiles, web
-                                // source files via unanchored substring match)
-                                // lives in CredentialFence.checkAccess and is
-                                // unchanged by the severity edit. The built-in
-                                // catalog default for this rule is kept in sync
-                                // (BuiltinRuleCatalog).
-                                severity: .medium,
-                                eventId: enrichedEvent.id.uuidString,
-                                processPath: aiProc.executable,
-                                processName: aiProc.name,
-                                description: credDesc,
-                                mitreTactics: "attack.credential_access",
-                                mitreTechniques: "attack.t1552.001",
-                                suppressed: false
-                            )
-                            do {
-                                if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                    await state.notifier.notify(alert: alert)
-                                }
-                            } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            await state.behaviorScoring.addIndicator(
-                                named: "ai_tool_credential_access",
-                                detail: "\(credType.rawValue): \(filePath)",
-                                forProcess: aiProc.pid, path: aiProc.executable
-                            )
-                        }
-
-                        // === Project Boundary: check writes outside project dir ===
-                        // Check via the child-to-session mapping
-                        let sessions = await state.aiTracker.activeSessions()
-                        for session in sessions where session.childPids.contains(aiProc.pid) || session.aiPid == aiProc.pid {
-                            if let violation = await state.projectBoundary.checkWrite(
-                                filePath: filePath,
-                                aiSessionPid: session.aiPid,
-                                aiToolName: aiType?.displayName ?? "AI tool"
-                            ) {
-                                let alert = Alert(
-                                    ruleId: "maccrab.ai-guard.boundary-violation",
-                                    ruleTitle: "🦀 AI Tool Wrote Outside Project Directory",
-                                    // v1.18: .high → .medium. Routine during
-                                    // normal dependency installs / package
-                                    // manager writes; recorded but should not
-                                    // banner at a High floor. Kept in sync with
-                                    // BuiltinRuleCatalog.
-                                    severity: .medium,
-                                    eventId: enrichedEvent.id.uuidString,
-                                    processPath: aiProc.executable,
-                                    processName: aiProc.name,
-                                    description: violation.description,
-                                    mitreTactics: "attack.defense_evasion",
-                                    mitreTechniques: "attack.t1036",
-                                    suppressed: false
-                                )
-                                do {
-                                    if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                        await state.notifier.notify(alert: alert)
-                                    }
-                                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                await state.behaviorScoring.addIndicator(
-                                    named: "ai_tool_boundary_violation",
-                                    detail: "Wrote to \(filePath) outside \(session.projectDir)",
-                                    forProcess: aiProc.pid, path: aiProc.executable
-                                )
-                            }
-                            break
-                        }
-                    }
                     // === Prompt Injection Scanning (native) ===
                     // v1.21.6: was gated on `injectionScanner.isAvailable`, which
                     // probed for an uninstallable `forensicate` CLI — so this alert
@@ -615,7 +792,9 @@ enum EventLoop {
                                         await state.notifier.notify(alert: alert)
                                     }
                                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                await state.behaviorScoring.addIndicator(
+                                await BehaviorScoreAlertEmitter.record(
+                                    state: state,
+                                    event: enrichedEvent,
                                     named: threat.severity == .critical
                                         ? "prompt_injection_critical" : "prompt_injection",
                                     detail: detail,
@@ -624,7 +803,14 @@ enum EventLoop {
                             }
                         }
                     }
-                }
+            }
+
+            if let resolvedAIAttribution {
+                await enforceAIFilesystemGuards(
+                    state: state,
+                    event: enrichedEvent,
+                    attribution: resolvedAIAttribution
+                )
             }
 
             // v1.21.4 Phase-6 6A: agent-trace correlation for the event's
@@ -687,58 +873,94 @@ enum EventLoop {
             if state.packageFreshnessEnabled && enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
                 let packages = PackageFreshnessChecker.parseInstallCommand(enrichedEvent.process.commandLine)
                 if !packages.isEmpty {
-                    let results = await state.packageChecker.checkPackages(packages)
-                    for result in results where result.riskLevel >= .medium {
-                        let severity: Severity = result.riskLevel == .critical ? .critical : result.riskLevel == .high ? .high : .medium
-                        let alert = Alert(
-                            ruleId: "maccrab.supply-chain.fresh-package",
-                            ruleTitle: "Fresh Package Installed: \(result.name) (\(result.registry.rawValue))",
-                            severity: severity,
-                            eventId: enrichedEvent.id.uuidString,
-                            processPath: enrichedEvent.process.executable,
-                            processName: enrichedEvent.process.name,
-                            description: result.description,
-                            mitreTactics: "attack.initial_access",
-                            mitreTechniques: "attack.t1195.002",
-                            suppressed: false
-                        )
-                        do {
-                            if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                await state.notifier.notify(alert: alert)
+                    let packageChecker = state.packageChecker
+                    let alertSink = state.alertSink
+                    let notifier = state.notifier
+                    let behaviorScoring = state.behaviorScoring
+                    let responseEngine = state.responseEngine
+                    let behaviorWarmingUp = state.isWarmingUp
+                    let preventionEnabled = state.preventionEnabled
+                    let supplyChainGate = state.supplyChainGate
+                    let packageEvent = enrichedEvent
+                    // Registry intelligence can produce a detection and an
+                    // explicitly enabled prevention action, so it belongs to
+                    // the protection lane (not the advisory/model lane). A
+                    // rejected submission degrades protection truthfully but
+                    // never stalls the event consumer on Internet latency.
+                    state.detectionWorkLifecycle.submit(
+                        label: "package-freshness"
+                    ) {
+                        let results = await packageChecker.checkPackages(packages)
+                        for result in results where result.riskLevel >= .medium {
+                            let severity: Severity = result.riskLevel == .critical ? .critical : result.riskLevel == .high ? .high : .medium
+                            let alert = Alert(
+                                ruleId: "maccrab.supply-chain.fresh-package",
+                                ruleTitle: "Fresh Package Installed: \(result.name) (\(result.registry.rawValue))",
+                                severity: severity,
+                                eventId: packageEvent.id.uuidString,
+                                processPath: packageEvent.process.executable,
+                                processName: packageEvent.process.name,
+                                description: result.description,
+                                mitreTactics: "attack.initial_access",
+                                mitreTechniques: "attack.t1195.002",
+                                suppressed: false
+                            )
+                            do {
+                                if try await alertSink.submit(
+                                    alert: alert,
+                                    event: packageEvent
+                                ) {
+                                    await notifier.notify(alert: alert)
+                                }
+                            } catch {
+                                await StorageErrorTracker.shared
+                                    .recordAlertError(error)
                             }
-                        } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                        await state.behaviorScoring.addIndicator(
-                            named: "fresh_package_install",
-                            detail: "\(result.name) (\(result.registry.rawValue)) age: \(result.ageInDays.map { String(format: "%.1f", $0) } ?? "unknown") days",
-                            forProcess: enrichedEvent.process.pid,
-                            path: enrichedEvent.process.executable
-                        )
-                        // === Supply Chain Gate: block critical-risk packages ===
-                        if state.preventionEnabled && result.riskLevel >= .high {
-                            if let blocked = await state.supplyChainGate.gate(
-                                packageName: result.name,
-                                registry: result.registry.rawValue,
-                                ageInDays: result.ageInDays,
-                                riskLevel: result.riskLevel.rawValue,
-                                installerPid: enrichedEvent.process.pid
-                            ) {
-                                let blockAlert = Alert(
-                                    ruleId: "maccrab.prevention.supply-chain-blocked",
-                                    ruleTitle: "BLOCKED: Package Install Killed -- \(blocked.packageName)",
-                                    severity: .critical,
-                                    eventId: UUID().uuidString,
-                                    processPath: enrichedEvent.process.executable,
-                                    processName: enrichedEvent.process.name,
-                                    description: "Supply chain gate killed installer (PID \(blocked.installerPid)): \(blocked.reason)",
-                                    mitreTactics: "attack.initial_access",
-                                    mitreTechniques: "attack.t1195.002",
-                                    suppressed: false
-                                )
-                                do {
-                                    if try await state.alertSink.submit(alert: blockAlert, event: enrichedEvent) {
-                                        await state.notifier.notify(alert: blockAlert)
+                            await BehaviorScoreAlertEmitter.record(
+                                behaviorScoring: behaviorScoring,
+                                alertSink: alertSink,
+                                notifier: notifier,
+                                responseEngine: responseEngine,
+                                event: packageEvent,
+                                isWarmingUp: behaviorWarmingUp,
+                                named: "fresh_package_install",
+                                detail: "\(result.name) (\(result.registry.rawValue)) age: \(result.ageInDays.map { String(format: "%.1f", $0) } ?? "unknown") days",
+                                forProcess: packageEvent.process.pid,
+                                path: packageEvent.process.executable
+                            )
+                            // === Supply Chain Gate: block critical-risk packages ===
+                            if preventionEnabled && result.riskLevel >= .high {
+                                if let blocked = await supplyChainGate.gate(
+                                    packageName: result.name,
+                                    registry: result.registry.rawValue,
+                                    ageInDays: result.ageInDays,
+                                    riskLevel: result.riskLevel.rawValue,
+                                    installerPid: packageEvent.process.pid
+                                ) {
+                                    let blockAlert = Alert(
+                                        ruleId: "maccrab.prevention.supply-chain-blocked",
+                                        ruleTitle: "BLOCKED: Package Install Killed -- \(blocked.packageName)",
+                                        severity: .critical,
+                                        eventId: UUID().uuidString,
+                                        processPath: packageEvent.process.executable,
+                                        processName: packageEvent.process.name,
+                                        description: "Supply chain gate killed installer (PID \(blocked.installerPid)): \(blocked.reason)",
+                                        mitreTactics: "attack.initial_access",
+                                        mitreTechniques: "attack.t1195.002",
+                                        suppressed: false
+                                    )
+                                    do {
+                                        if try await alertSink.submit(
+                                            alert: blockAlert,
+                                            event: packageEvent
+                                        ) {
+                                            await notifier.notify(alert: blockAlert)
+                                        }
+                                    } catch {
+                                        await StorageErrorTracker.shared
+                                            .recordAlertError(error)
                                     }
-                                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                                }
                             }
                         }
                     }
@@ -815,7 +1037,7 @@ enum EventLoop {
             // (and all system binaries) resolve synchronously with zero fork. On a cold
             // miss, the authoritative check — which warms the LRU cache for next time
             // and preserves the 5-concurrent rate limiter inside the actor — runs in a
-            // detached Task off the hot path, where it also drives the behavior
+            // bounded derived-work task off the hot path, where it also drives the behavior
             // indicator + sandbox prevention AND emits the revoked-cert alert on
             // first exec (see below). v1.17.2: the `notarization.status`
             // enrichment IS now read by detection — the RuleEngine
@@ -838,14 +1060,22 @@ enum EventLoop {
                 let procName = enrichedEvent.process.name
                 let eventId = enrichedEvent.id.uuidString
                 let isAppleSigned = enrichedEvent.process.codeSignature?.signerType == .apple
+                let codeSignatureResolved = DeferredEventEnrichment.coverageState(
+                    for: .codeSignature,
+                    in: enrichedEvent
+                ) == nil
                 let preventionEnabled = state.preventionEnabled
                 let notarizationChecker = state.notarizationChecker
                 let behaviorScoring = state.behaviorScoring
                 let sandboxAnalyzer = state.sandboxAnalyzer
                 let alertSink = state.alertSink
                 let notifier = state.notifier
+                let responseEngine = state.responseEngine
+                let behaviorWarmingUp = state.isWarmingUp
                 let detachedEvent = enrichedEvent
-                Task.detached(priority: .utility) {
+                await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+                    label: "notarization-check"
+                ) {
                     let notarResult = await notarizationChecker.check(binaryPath: execPath)
 
                     // v1.17.2: a REVOKED Developer-ID cert (spctl 'revoked') is
@@ -879,8 +1109,20 @@ enum EventLoop {
                         return
                     }
 
-                    guard notarResult.status == .notNotarized && !isAppleSigned else { return }
-                    await behaviorScoring.addIndicator(
+                    // nil while heavyweight signing evidence is pending or
+                    // unavailable is unknown, not "not Apple signed". Revocation
+                    // above remains authoritative from spctl; the weaker
+                    // not-notarized indicator and sandbox authority fail closed.
+                    guard notarResult.status == .notNotarized,
+                          codeSignatureResolved,
+                          !isAppleSigned else { return }
+                    await BehaviorScoreAlertEmitter.record(
+                        behaviorScoring: behaviorScoring,
+                        alertSink: alertSink,
+                        notifier: notifier,
+                        responseEngine: responseEngine,
+                        event: detachedEvent,
+                        isWarmingUp: behaviorWarmingUp,
                         named: "not_notarized",
                         detail: execPath,
                         forProcess: procPid,
@@ -963,7 +1205,9 @@ enum EventLoop {
                             await state.notifier.notify(alert: alert)
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "ai_tool_unapproved_network",
                         detail: "\(violation.destinationDomain ?? violation.destinationIP):\(violation.destinationPort)",
                         forProcess: enrichedEvent.process.pid,
@@ -1008,7 +1252,7 @@ enum EventLoop {
                         eventId: UUID().uuidString,
                         processPath: chain.events.last?.processPath,
                         processName: chain.events.last?.processName,
-                        description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
+                        description: "Cross-process chain (\(chain.distinctPIDCount) distinct PIDs, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
                         mitreTactics: "attack.execution",
                         mitreTechniques: "attack.t1204",
                         suppressed: false
@@ -1076,7 +1320,9 @@ enum EventLoop {
                 ) {
                     if logProb < -8.0 {
                         enrichedEvent.enrichments["tree.anomaly_score"] = String(format: "%.2f", logProb)
-                        await state.behaviorScoring.addIndicator(
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
                             named: "anomalous_process_tree",
                             detail: "\(parentName) -> \(childName) (logP=\(String(format: "%.1f", logProb)))",
                             forProcess: enrichedEvent.process.pid,
@@ -1100,7 +1346,9 @@ enum EventLoop {
                     ancestryDepth: enrichedEvent.process.ancestors.count
                 )
                 for finding in topologyFindings {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: finding.kind.rawValue,
                         detail: finding.detail,
                         forProcess: enrichedEvent.process.pid,
@@ -1122,7 +1370,9 @@ enum EventLoop {
             let cmdline = enrichedEvent.process.commandLine.lowercased()
             let args = enrichedEvent.process.args.joined(separator: " ").lowercased()
             if cmdline.contains("dyld_insert_libraries") || args.contains("dyld_insert_libraries") {
-                await state.behaviorScoring.addIndicator(
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: enrichedEvent,
                     named: "library_injection",
                     detail: "DYLD_INSERT_LIBRARIES in command/env",
                     forProcess: enrichedEvent.process.pid,
@@ -1130,48 +1380,61 @@ enum EventLoop {
                 )
             }
 
-            // === Statistical anomaly detection ===
-            // Command-line Shannon entropy, computed ONCE here and shared with
-            // both consumers below (the statistical detector's entropy track and
-            // the high_entropy_commandline check), which previously each computed
-            // it independently over the identical string. Pure dedup — same input
-            // string → same value. Kept per-event (NOT gated to exec) so the
-            // statistical anomaly stats are byte-identical to before.
-            let commandLineEntropy = EntropyAnalysis.shannonEntropy(enrichedEvent.process.commandLine)
-            let anomalies = await state.statisticalDetector.processEvent(
-                processPath: enrichedEvent.process.executable,
-                argCount: enrichedEvent.process.args.count,
-                commandLine: enrichedEvent.process.commandLine,
-                category: enrichedEvent.eventCategory.rawValue,
-                timestamp: enrichedEvent.timestamp,
-                commandLineEntropy: commandLineEntropy
-            )
-            for anomaly in anomalies {
-                await state.behaviorScoring.addIndicator(
-                    named: "statistical_frequency_anomaly",
-                    detail: "\(anomaly.feature) z=\(String(format: "%.1f", anomaly.zScore))",
-                    forProcess: enrichedEvent.process.pid,
-                    path: enrichedEvent.process.executable
+            // === Launch-shape statistical + entropy analysis ===
+            // Argument shape and command-line entropy describe one process
+            // launch, not every later file/network event emitted by that same
+            // process. The old per-event path trained and scored the identical
+            // command line thousands of times during file churn, wasting CPU
+            // and teaching delivery mix as behavior. Evaluate exactly once on
+            // exec and abstain from frequency inference while upstream loss or
+            // sampling means launch timing is not known complete.
+            let isProcessExec = enrichedEvent.eventCategory == .process
+                && enrichedEvent.eventAction.caseInsensitiveCompare("exec") == .orderedSame
+            if isProcessExec {
+                let commandLineEntropy = EntropyAnalysis.shannonEntropy(
+                    enrichedEvent.process.commandLine
                 )
-            }
-
-            // === Entropy analysis on command lines ===
-            if !enrichedEvent.process.commandLine.isEmpty {
-                let (entropy, suspicious, _) = EntropyAnalysis.analyzeCommandLine(enrichedEvent.process.commandLine, fullEntropy: commandLineEntropy)
-                if suspicious {
-                    await state.behaviorScoring.addIndicator(
-                        named: "high_entropy_commandline",
-                        detail: "entropy=\(String(format: "%.2f", entropy))",
+                let anomalies = await state.statisticalDetector.processEvent(
+                    processPath: enrichedEvent.process.executable,
+                    argCount: enrichedEvent.process.args.count,
+                    commandLine: enrichedEvent.process.commandLine,
+                    category: enrichedEvent.eventCategory.rawValue,
+                    timestamp: enrichedEvent.timestamp,
+                    commandLineEntropy: commandLineEntropy,
+                    binaryIdentity: Self.statisticalBinaryIdentity(
+                        for: enrichedEvent.process
+                    ),
+                    timingCoverageComplete: false
+                )
+                for anomaly in anomalies {
+                    let indicator = anomaly.feature == "event_frequency"
+                        ? "statistical_frequency_anomaly"
+                        : "statistical_process_shape_anomaly"
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
+                        named: indicator,
+                        detail: "\(anomaly.feature) z=\(String(format: "%.1f", anomaly.zScore))",
                         forProcess: enrichedEvent.process.pid,
                         path: enrichedEvent.process.executable
                     )
                 }
-            }
 
-            // === DNS enrichment: resolve IP -> domain from DNS cache ===
-            if let net = enrichedEvent.network, enrichedEvent.network?.destinationHostname == nil {
-                if let domain = await state.dnsCollector.domainForIP(net.destinationIp) {
-                    enrichedEvent.enrichments["dns.resolved_domain"] = domain
+                if !enrichedEvent.process.commandLine.isEmpty {
+                    let (entropy, suspicious, _) = EntropyAnalysis.analyzeCommandLine(
+                        enrichedEvent.process.commandLine,
+                        fullEntropy: commandLineEntropy
+                    )
+                    if suspicious {
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
+                            named: "high_entropy_commandline",
+                            detail: "entropy=\(String(format: "%.2f", entropy))",
+                            forProcess: enrichedEvent.process.pid,
+                            path: enrichedEvent.process.executable
+                        )
+                    }
                 }
             }
 
@@ -1181,20 +1444,47 @@ enum EventLoop {
                 if let host = net.destinationHostname {
                     // v1.19.1: the crt.sh GET reveals the destination domain, so
                     // it is opt-in (off by default). The local typosquat check
-                    // below makes NO network request and runs regardless.
-                    if state.certTransparencyEnabled,
-                       let ctResult = await state.ctMonitor.checkDomain(host), ctResult.isSuspicious {
-                        await state.behaviorScoring.addIndicator(
-                            BehaviorScoring.Indicator(name: "suspicious_certificate", weight: 4.0, detail: ctResult.reason ?? host),
-                            forProcess: enrichedEvent.process.pid,
-                            path: enrichedEvent.process.executable
-                        )
+                    // below makes NO network request and runs regardless. The
+                    // remote lookup is advisory and must never hold the event
+                    // consumer behind Internet latency.
+                    if state.certTransparencyEnabled {
+                        let pid = enrichedEvent.process.pid
+                        let processPath = enrichedEvent.process.executable
+                        let ctMonitor = state.ctMonitor
+                        let behaviorScoring = state.behaviorScoring
+                        let alertSink = state.alertSink
+                        let notifier = state.notifier
+                        let responseEngine = state.responseEngine
+                        let ctEvent = enrichedEvent
+                        let behaviorWarmingUp = state.isWarmingUp
+                        state.advisoryWorkLifecycle.submit(
+                            label: "cert-transparency"
+                        ) {
+                            if let ctResult = await ctMonitor
+                                .checkDomain(host), ctResult.isSuspicious {
+                                await BehaviorScoreAlertEmitter.record(
+                                    behaviorScoring: behaviorScoring,
+                                    alertSink: alertSink,
+                                    notifier: notifier,
+                                    responseEngine: responseEngine,
+                                    event: ctEvent,
+                                    isWarmingUp: behaviorWarmingUp,
+                                    named: "suspicious_certificate",
+                                    detail: ctResult.reason ?? host,
+                                    forProcess: pid,
+                                    path: processPath
+                                )
+                            }
+                        }
                     }
                     // Typosquatting check
                     let (isTypo, typoReason) = await state.ctMonitor.isTyposquat(host)
                     if isTypo {
-                        await state.behaviorScoring.addIndicator(
-                            BehaviorScoring.Indicator(name: "typosquat_domain", weight: 6.0, detail: typoReason ?? host),
+                        await BehaviorScoreAlertEmitter.record(
+                            state: state,
+                            event: enrichedEvent,
+                            named: "typosquat_domain",
+                            detail: typoReason ?? host,
                             forProcess: enrichedEvent.process.pid,
                             path: enrichedEvent.process.executable
                         )
@@ -1253,7 +1543,9 @@ enum EventLoop {
                             await state.notifier.notify(alert: alert)
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "known_malicious_ip",
                         detail: net.destinationIp,
                         forProcess: enrichedEvent.process.pid,
@@ -1287,7 +1579,9 @@ enum EventLoop {
                             await state.notifier.notify(alert: alert)
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "known_malicious_domain",
                         detail: host,
                         forProcess: enrichedEvent.process.pid,
@@ -1325,7 +1619,9 @@ enum EventLoop {
                         await state.notifier.notify(alert: alert)
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.behaviorScoring.addIndicator(
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: enrichedEvent,
                     named: "known_malicious_hash",
                     detail: "CDHash: \(cdhash)",
                     forProcess: enrichedEvent.process.pid,
@@ -1335,7 +1631,9 @@ enum EventLoop {
 
             // === DYLD injection via environment variables (from eslogger) ===
             if let dyldEnv = enrichedEvent.enrichments["exec.dyld_env"] {
-                await state.behaviorScoring.addIndicator(
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: enrichedEvent,
                     named: "library_injection",
                     detail: "DYLD env var: \(dyldEnv.prefix(100))",
                     forProcess: enrichedEvent.process.pid,
@@ -1427,24 +1725,46 @@ enum EventLoop {
 
             // === File injection scanning (AI tool file access) ===
             if enrichedEvent.enrichments["ai_tool"] != nil || enrichedEvent.enrichments["ai_tool_child"] != nil,
-               let filePath = enrichedEvent.file?.path {
-                if let scanResult = await state.fileInjectionScanner.scanFile(path: filePath) {
-                    let alert = Alert(
-                        ruleId: "maccrab.ai-guard.file-injection",
-                        ruleTitle: "Prompt Injection in File: \((filePath as NSString).lastPathComponent)",
-                        severity: scanResult.severity,
-                        eventId: enrichedEvent.id.uuidString,
-                        processPath: enrichedEvent.process.executable,
-                        processName: enrichedEvent.process.name,
-                        description: "Hidden prompt injection detected in \(filePath) (\(scanResult.confidence)% confidence). Threats: \(scanResult.threats.joined(separator: "; "))",
-                        mitreTactics: "attack.initial_access", mitreTechniques: "attack.t1195.002",
-                        suppressed: false
-                    )
-                    do {
-                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                            await state.notifier.notify(alert: alert)
+               let filePath = enrichedEvent.file?.path,
+               FileInjectionScanner.isEligible(
+                   path: filePath,
+                   eventAction: enrichedEvent.eventAction
+               ) {
+                let scanner = state.fileInjectionScanner
+                let alertSink = state.alertSink
+                let notifier = state.notifier
+                let scanEvent = enrichedEvent
+                state.detectionWorkLifecycle.submit(
+                    label: "file-injection-scan"
+                ) {
+                    if let scanResult = await scanner.scanFile(
+                        path: filePath,
+                        eventAction: scanEvent.eventAction
+                    ) {
+                        let alert = Alert(
+                            ruleId: "maccrab.ai-guard.file-injection",
+                            ruleTitle: "Prompt Injection in File: \((filePath as NSString).lastPathComponent)",
+                            severity: scanResult.severity,
+                            eventId: scanEvent.id.uuidString,
+                            processPath: scanEvent.process.executable,
+                            processName: scanEvent.process.name,
+                            description: "Hidden prompt injection detected in \(filePath) (\(scanResult.confidence)% confidence). Threats: \(scanResult.threats.joined(separator: "; "))",
+                            mitreTactics: "attack.initial_access",
+                            mitreTechniques: "attack.t1195.002",
+                            suppressed: false
+                        )
+                        do {
+                            if try await alertSink.submit(
+                                alert: alert,
+                                event: scanEvent
+                            ) {
+                                await notifier.notify(alert: alert)
+                            }
+                        } catch {
+                            await StorageErrorTracker.shared
+                                .recordAlertError(error)
                         }
-                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    }
                 }
             }
 
@@ -1468,7 +1788,12 @@ enum EventLoop {
 
             // === Behavioral scoring: process-level indicators ===
             let proc = enrichedEvent.process
-            if proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {
+            let codeSignatureResolved = DeferredEventEnrichment.coverageState(
+                for: .codeSignature,
+                in: enrichedEvent
+            ) == nil
+            if codeSignatureResolved,
+               proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {
                 // v1.19.1 (audit): legitimately-unsigned DEVELOPER tooling
                 // (node_modules CLIs like esbuild, the Swift/Xcode toolchain,
                 // Homebrew, AI agents) dominated the dev-endpoint false-positive
@@ -1482,32 +1807,42 @@ enum EventLoop {
                 // -weight variant (1.0 vs 3.0) so a malicious binary PLANTED in
                 // node_modules / homebrew still accrues compound score.
                 if CampaignDetector.isDevelopmentToolingPath(proc.executable) {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "unsigned_dev_tooling", detail: proc.executable,
                         forProcess: proc.pid, path: proc.executable
                     )
                 } else {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "unsigned_binary", detail: proc.executable,
                         forProcess: proc.pid, path: proc.executable
                     )
                 }
             }
             if proc.executable.contains("/tmp/") || proc.executable.contains("/private/tmp/") {
-                await state.behaviorScoring.addIndicator(
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: enrichedEvent,
                     named: "executed_from_tmp", detail: proc.executable,
                     forProcess: proc.pid, path: proc.executable
                 )
             }
             if let file = enrichedEvent.file {
                 if file.path.contains("/LaunchAgents/") {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "writes_launch_agent", detail: file.path,
                         forProcess: proc.pid, path: proc.executable
                     )
                 }
                 if file.path.contains("/LaunchDaemons/") {
-                    await state.behaviorScoring.addIndicator(
+                    await BehaviorScoreAlertEmitter.record(
+                        state: state,
+                        event: enrichedEvent,
                         named: "writes_launch_daemon", detail: file.path,
                         forProcess: proc.pid, path: proc.executable
                     )
@@ -1520,7 +1855,9 @@ enum EventLoop {
             // Nothing below reads the event back from events.db (detection uses
             // the in-memory enrichedEvent; alert evidence is snapshotted in
             // memory), so deferring the write is detection-safe.
-            await state.eventWriter.enqueue(enrichedEvent)
+            if !hasPendingHeavyEnrichment {
+                await state.eventWriter.enqueue(enrichedEvent, lane: lane)
+            }
 
             // v1.10.0 TraceGraph ingestion. Bridge handles category/action
             // mapping internally and returns nil-equivalent for events
@@ -1536,14 +1873,13 @@ enum EventLoop {
             // sink — same flow as Sigma single-event matches above.
             //
             // v1.12.0 post-audit (B3): the per-trace neighborhood SQL
-            // walk is detached into a fire-and-forget Task. Pre-fix,
+            // walk runs in the bounded, joinable derived-work plane. Pre-fix,
             // a burst of anchor materializations (one `npm install` can
             // fire dozens) would serialize on the single causalStore
             // SQLite actor — same actor that handles every event/edge
             // insertion — and head-of-line-block the main event pump.
-            // Detaching is safe because the graph evaluator's only
-            // downstream consumer is the alert sink, which is itself
-            // an actor with its own queue.
+            // The work stays off the hot path, while daemon shutdown now owns
+            // and joins every task before the alert sink is sealed.
             if let bridge = state.causalGraphBridge {
                 let materialized = await bridge.process(enrichedEvent)
                 if !materialized.isEmpty,
@@ -1555,7 +1891,9 @@ enum EventLoop {
                     let anchorProcName = enrichedEvent.process.name
                     let anchorEvent = enrichedEvent
                     let alertSink = state.alertSink
-                    Task.detached(priority: .utility) {
+                    await state.detectionWorkLifecycle.submitOrRunInlineOnOverload(
+                        label: "graph-rule-evaluation"
+                    ) {
                         for trace in traceList {
                             guard let rootId = trace.rootEntityId else { continue }
                             let window = TimeWindow(
@@ -1639,10 +1977,10 @@ enum EventLoop {
                 }
             }
 
-            // v1.12.0 — Bayesian intent posterior update. Each event
+            // v1.12.0 — Bayesian-style intent advisory update. Each event
             // is mapped to zero-or-more Evidence values; the engine
-            // accumulates per-process-tree posteriors and we emit an
-            // alert only when the top non-benign goal crosses 0.85
+            // accumulates bounded per-process-tree evidence and we emit an
+            // alert only when the top non-benign normalized score crosses 0.85
             // with at least 3 distinct evidence types. Threshold +
             // evidence floor are deliberately strict — single-event
             // signals already fire through Sigma rules below.
@@ -1662,24 +2000,34 @@ enum EventLoop {
             // for the Supply chain section.
             let intentEvidence = IntentEvidenceClassifier.extract(enrichedEvent)
             var latestPosterior: BayesianIntentEngine.Posterior?
-            let treeKey = IntentEvidenceClassifier.treeKey(for: enrichedEvent)
+            // One canonical scope must feed observation, snapshot lookup,
+            // operator explanation, BehaviorBrief construction, and the LLM
+            // cache fallback. AI events use their durable session identity;
+            // non-AI events use an anti-PID-reuse process identity.
+            let intentScopeKey = IntentEvidenceClassifier.scopeKey(for: enrichedEvent)
             if !intentEvidence.isEmpty {
                 for evidence in intentEvidence {
-                    latestPosterior = await state.bayesianIntent.observe(evidence, treeKey: treeKey)
+                    latestPosterior = await state.bayesianIntent.observe(
+                        evidence,
+                        treeKey: intentScopeKey,
+                        observationToken: enrichedEvent.id.uuidString,
+                        observedAt: enrichedEvent.timestamp
+                    )
                 }
                 if let posterior = latestPosterior,
+                   posterior.observationAddedIndependentEvidence,
                    posterior.topGoal != .benign,
                    posterior.topProbability >= state.intentPosteriorThreshold,
                    posterior.distinctEvidenceCount >= state.intentPosteriorMinDistinctEvidence {
                     let goalLabel = String(describing: posterior.topGoal)
                     let alert = Alert(
                         ruleId: "maccrab.intent.bayesian-posterior",
-                        ruleTitle: "Intent posterior crossed threshold (\(goalLabel))",
+                        ruleTitle: "Intent advisory score crossed threshold (\(goalLabel))",
                         severity: posterior.topProbability >= 0.95 ? .high : .medium,
                         eventId: enrichedEvent.id.uuidString,
                         processPath: enrichedEvent.process.executable,
                         processName: enrichedEvent.process.name,
-                        description: "Bayesian belief network reports p(\(goalLabel))=\(String(format: "%.2f", posterior.topProbability)) for process tree \(treeKey) after \(posterior.evidenceLog.count) observations (\(Set(posterior.evidenceLog).map { $0.rawValue }.sorted().joined(separator: ", ")))",
+                        description: "Uncalibrated normalized advisory score for \(goalLabel) is \(String(format: "%.2f", posterior.topProbability)) for intent scope \(posterior.treeKey), based on \(posterior.distinctEvidenceCount) independent evidence types (\(posterior.evidenceLog.map { $0.rawValue }.sorted().joined(separator: ", "))). This is a deterministic ranking signal, not an empirical probability.",
                         mitreTactics: nil,
                         mitreTechniques: nil
                     )
@@ -1693,12 +2041,12 @@ enum EventLoop {
 
             // v1.12.0 — IntentClassifier verdict stamp. On a package-
             // manager install exec, build a BehaviorBrief from the
-            // Bayesian engine's per-tree evidence log + the current
+            // Bayesian engine's per-scope evidence log + the current
             // event's lineage / command-line, run the pure-local
             // heuristic classifier, and stamp IntentLabel +
             // IntentConfidence onto the event. The downstream Sigma
             // rule `llm_classifier_high_risk_intent.yml` predicates on
-            // these enrichments to fire when the verdict is one of
+                // these enrichments to fire when the verdict is one of
             // {credentialHarvest, exfiltration, destructive,
             // lateralMovement}. LLM-backed verdicts remain available
             // via the `classify_package_intent` MCP tool — the hot-
@@ -1708,7 +2056,7 @@ enum EventLoop {
             // v1.12.0 RC3 fix (B-Int1): when the current event has no
             // new evidence (e.g., a plain `npm install` exec without
             // any credential-read in this same observation), we still
-            // need the brief to see the tree's historical evidence
+            // need the brief to see the intent scope's historical evidence
             // log. Otherwise the install event would build a brief
             // with empty credentialsRead → heuristic returns .benign
             // → the rule never fires for the credential-read-then-
@@ -1729,34 +2077,85 @@ enum EventLoop {
             } else if let latest = latestPosterior {
                 posteriorForBrief = latest
             } else {
-                posteriorForBrief = await state.bayesianIntent.posterior(treeKey: treeKey)
+                posteriorForBrief = await state.bayesianIntent.posterior(
+                    treeKey: intentScopeKey
+                )
             }
             if let brief = IntentBriefBuilder.brief(for: enrichedEvent, posterior: posteriorForBrief) {
                 let heuristicResult = IntentClassifier.heuristicClassifyPublic(brief)
+                // A refinement is valid only for this AI session AND these
+                // exact classifier inputs. The durable session id prevents PID
+                // reuse/cross-terminal pooling; legacy events fall back to the
+                // anti-reuse process scope. SHA-256(BehaviorBrief) prevents an
+                // asynchronous verdict for package A from labeling package B.
+                let refinementScope = IntentRefinementCache.scope(
+                    sessionID: enrichedEvent.enrichments["ai_tool_session_id"],
+                    fallbackTreeKey: intentScopeKey,
+                    brief: brief
+                )
 
-                // v1.12.6 (wire-the-orphans Wave 3A): if a prior event
-                // in the same process tree already triggered a
-                // successful LLM classification, that refined verdict
-                // wins for the current event — the LLM saw the brief
-                // with full context and overrides the per-event
-                // heuristic. The TTL on the cache keeps this in line
-                // with the synchronous hot path: a stale refinement
-                // (older than 10 min) is treated as missing.
-                var stampedLabel = heuristicResult.label.rawValue
-                var stampedConfidence = heuristicResult.confidence
-                var stampedProvider = heuristicResult.provider
-                if let refinement = await state.intentRefinementCache.refinement(for: treeKey) {
-                    stampedLabel = refinement.label
-                    stampedConfidence = refinement.confidence
-                    stampedProvider = refinement.provider
-                    enrichedEvent.enrichments["IntentRefinedBy"] = refinement.provider
+                // The deterministic classifier owns the rule-facing fields.
+                // A model result is uncalibrated advisory evidence: it is
+                // stamped under an explicit `IntentModel*` namespace and can
+                // add review context, but it must never erase or downgrade an
+                // observed deterministic signal before Sigma evaluation.
+                enrichedEvent.enrichments["IntentLabel"] = heuristicResult.label.rawValue
+                enrichedEvent.enrichments["IntentConfidence"] = String(
+                    format: "%.2f", heuristicResult.confidence
+                )
+                enrichedEvent.enrichments["IntentProvider"] = heuristicResult.provider
+                if let refinementScope,
+                   let refinement = await state.intentRefinementCache.refinement(for: refinementScope) {
+                    enrichedEvent.enrichments["IntentModelLabel"] = refinement.label
+                    enrichedEvent.enrichments["IntentModelScore"] = String(
+                        format: "%.2f", refinement.confidence
+                    )
+                    enrichedEvent.enrichments["IntentModelProvider"] = refinement.provider
+                    enrichedEvent.enrichments["IntentModelDisagrees"] = String(
+                        refinement.label != heuristicResult.label.rawValue
+                    )
                     if !refinement.reasons.isEmpty {
-                        enrichedEvent.enrichments["IntentReasons"] = refinement.reasons.prefix(3).joined(separator: " | ")
+                        enrichedEvent.enrichments["IntentModelReasons"] = refinement.reasons
+                            .prefix(3).joined(separator: " | ")
+                    }
+
+                    let advisoryLabels: Set<String> = [
+                        IntentClassifier.IntentLabel.credentialHarvest.rawValue,
+                        IntentClassifier.IntentLabel.exfiltration.rawValue,
+                        IntentClassifier.IntentLabel.persistence.rawValue,
+                        IntentClassifier.IntentLabel.destructive.rawValue,
+                        IntentClassifier.IntentLabel.lateralMovement.rawValue,
+                    ]
+                    if advisoryLabels.contains(refinement.label),
+                       refinement.confidence >= 0.5 {
+                        let advisory = Alert(
+                            ruleId: "maccrab.llm.intent-refinement.\(refinement.label)",
+                            ruleTitle: "Model advisory: package intent requires review",
+                            severity: .informational,
+                            eventId: enrichedEvent.id.uuidString,
+                            processPath: enrichedEvent.process.executable,
+                            processName: enrichedEvent.process.name,
+                            description: "Uncalibrated model score \(String(format: "%.2f", refinement.confidence)) labeled this bounded behavior brief \(refinement.label). Deterministic label remains \(heuristicResult.label.rawValue); the model result cannot authorize response or lower deterministic severity.",
+                            mitreTactics: nil,
+                            mitreTechniques: nil
+                        )
+                        let advisoryEvent = enrichedEvent
+                        let alertSink = state.alertSink
+                        state.advisoryWorkLifecycle.submit(
+                            label: "intent-model-advisory"
+                        ) {
+                            do {
+                                _ = try await alertSink.submit(
+                                    alert: advisory,
+                                    event: advisoryEvent
+                                )
+                            } catch {
+                                await StorageErrorTracker.shared
+                                    .recordAlertError(error)
+                            }
+                        }
                     }
                 }
-                enrichedEvent.enrichments["IntentLabel"] = stampedLabel
-                enrichedEvent.enrichments["IntentConfidence"] = String(format: "%.2f", stampedConfidence)
-                enrichedEvent.enrichments["IntentProvider"] = stampedProvider
                 // v1.12.0 RC6 (Int-R6-N1) + RC7 fix (Int-R7-N1):
                 // stamp a boolean high-confidence flag so the Sigma
                 // rule can predicate on a numeric-equivalent threshold
@@ -1774,7 +2173,7 @@ enum EventLoop {
                 // 0.5 as the "moderate confidence" tier — same value
                 // as `unknown` fallback's confidence, distinct from
                 // `benign` (0.8). CHANGELOG updated to match.
-                if stampedConfidence >= 0.5 {
+                if heuristicResult.confidence >= 0.5 {
                     enrichedEvent.enrichments["IntentHighConfidence"] = "true"
                 }
 
@@ -1783,9 +2182,9 @@ enum EventLoop {
                 // the source of truth for the current event — we never
                 // block the hot path waiting on the LLM. But for
                 // AI-attributed installs where the heuristic was
-                // ambiguous, we dispatch a detached classification so
-                // the next event in the same tree sees a refined
-                // verdict. Cost is bounded by:
+                // ambiguous, we dispatch a bounded background classification so
+                // the next identical install observation in the same
+                // AI session sees a refined verdict. Cost is bounded by:
                 //
                 //   1. AI attribution required — non-AI installs run
                 //      heuristic only, matching prior behaviour.
@@ -1793,10 +2192,10 @@ enum EventLoop {
                 //      heuristic verdicts skip the LLM entirely. This
                 //      is the standard "LLM is a tie-breaker, not a
                 //      default classifier" pattern.
-                //   3. IntentRefinementCache acts as a per-tree
-                //      cooldown (10-min TTL) so a single tree can
-                //      trigger at most one LLM call per window,
-                //      regardless of how many events it generates.
+                //   3. IntentRefinementCache acts as a per-session +
+                //      BehaviorBrief cooldown (10-min TTL). Distinct packages
+                //      never share a verdict, while repeat observations of the
+                //      same install reuse one classification.
                 //   4. LLMService already enforces the global 5s min
                 //      interval, 3-failure circuit breaker, and 50KB
                 //      response cap.
@@ -1809,32 +2208,43 @@ enum EventLoop {
                 let isAITriggered = enrichedEvent.enrichments["ai_tool"] != nil
                     || enrichedEvent.enrichments["agent_tool"] != nil
                     || enrichedEvent.enrichments["ai_tool_child"] == "true"
-                if isAITriggered && heuristicResult.confidence < 0.7 {
-                    let shouldDispatch = await state.intentRefinementCache.shouldClassify(treeKey: treeKey)
-                    if shouldDispatch {
-                        await state.intentRefinementCache.recordDispatch(treeKey: treeKey)
-                        let classifier = state.intentClassifier
-                        let cache = state.intentRefinementCache
-                        let capturedBrief = brief
-                        let capturedTreeKey = treeKey
-                        Task.detached(priority: .utility) { @Sendable in
-                            let llmResult = await classifier.classify(capturedBrief)
-                            // Treat .unknown / heuristic-fallback as
-                            // "no useful refinement" — they wouldn't
-                            // improve the next event's verdict and
-                            // would burn the TTL window.
-                            guard llmResult.label != .unknown,
-                                  llmResult.provider != "heuristic" else {
-                                return
-                            }
-                            let refinement = IntentRefinementCache.Refinement(
-                                label: llmResult.label.rawValue,
-                                confidence: llmResult.confidence,
-                                provider: llmResult.provider,
-                                reasons: llmResult.reasons
-                            )
-                            await cache.recordResult(treeKey: capturedTreeKey, refinement: refinement)
+                if isAITriggered,
+                   heuristicResult.confidence < 0.7,
+                   let refinementScope,
+                   let generation = await state.intentRefinementCache.begin(scope: refinementScope) {
+                    let classifier = state.intentClassifier
+                    let cache = state.intentRefinementCache
+                    let capturedBrief = brief
+                    let capturedScope = refinementScope
+                    let submitted = state.advisoryWorkLifecycle.submit(
+                        label: "intent-refinement"
+                    ) { @Sendable in
+                        let llmResult = await classifier.classify(capturedBrief)
+                        // Treat .unknown / heuristic-fallback as
+                        // "no useful refinement" — they wouldn't
+                        // improve the next event's verdict. The admitted
+                        // generation still owns the cooldown until TTL expiry.
+                        guard llmResult.label != .unknown,
+                              llmResult.provider != "heuristic" else {
+                            return
                         }
+                        let refinement = IntentRefinementCache.Refinement(
+                            label: llmResult.label.rawValue,
+                            confidence: llmResult.confidence,
+                            provider: llmResult.provider,
+                            reasons: llmResult.reasons
+                        )
+                        _ = await cache.recordResult(
+                            scope: capturedScope,
+                            token: generation,
+                            refinement: refinement
+                        )
+                    }
+                    if !submitted {
+                        _ = await cache.cancelBeforeDispatch(
+                            scope: capturedScope,
+                            token: generation
+                        )
                     }
                 }
 
@@ -1842,16 +2252,11 @@ enum EventLoop {
                 // initiated by an AI coding agent (claude / codex /
                 // cursor / etc.), also run PromptIntentBridge.
                 // It correlates the AI agent's recent context reads
-                // with the package being installed and labels the
-                // install user-initiated / autonomous / slopsquat /
-                // injectionContext / vagueDestructive. The result
-                // becomes a PromptIntentLabel enrichment which a
-                // future rule can predicate on. Runs in a detached
-                // Task because the bridge reads up to 32 context
-                // files — too heavy for the hot path. The stamping
-                // lands on the FOLLOWING events from the same tree
-                // (PromptIntentLabel is a session attribute, not a
-                // per-event verdict).
+                // with the package being installed and can produce a direct,
+                // review-only slopsquat/context alert. It does not stamp a
+                // durable session enrichment or claim to reconstruct the raw
+                // prompt. Runs in the bounded advisory plane because the
+                // bridge may read up to 32 context files.
                 // v1.12.0 RC3 fix (B-Int2): the enrichment key is
                 // "ai_tool" (set by AIProcessTracker at lines 89/97
                 // above) or "agent_tool" (set by TraceCorrelator's
@@ -1863,32 +2268,34 @@ enum EventLoop {
                     ?? enrichedEvent.enrichments["agent_tool"]
                 if let agentTool = agentToolKey,
                    !agentTool.isEmpty {
-                    // v1.12.0 RC4 fix (Int-R4-N3): pre-fix used
-                    // `ancestors.last?.pid` which is launchd (pid 1),
-                    // not the AI tool's pid. AgentLineageService keys
-                    // its snapshot by the AI process's actual pid
-                    // (the `claude` / `cursor` / etc. binary), so the
-                    // bridge would always get nil and short-circuit.
-                    // Match the lookup pattern already used at
-                    // lines 183-186 for the lineage-record path:
-                    // find the first ancestor that AIToolRegistry
-                    // recognizes as an AI tool.
-                    var aiPid = enrichedEvent.process.pid
-                    for ancestor in enrichedEvent.process.ancestors {
-                        if state.aiRegistry.isAITool(executablePath: ancestor.executable) != nil {
-                            aiPid = ancestor.pid
-                            break
-                        }
-                    }
+                    // Consume the tracker-owned root stamped during AI
+                    // attribution. Re-walking by executable shape selected a
+                    // nested Codex/Claude descendant instead of the active root,
+                    // so PromptIntentBridge queried a lineage session that did
+                    // not exist.
+                    let aiPid = enrichedEvent.enrichments["ai_root_pid"]
+                        .flatMap { Int32($0) } ?? enrichedEvent.process.pid
                     let pkgName = brief.packageName
                     let bridge = state.promptIntentBridge
                     let alertSink = state.alertSink
                     let anchorEvent = enrichedEvent
                     let aiPidCaptured = aiPid
-                    Task.detached(priority: .utility) {
+                    // Prompt/file-context correlation is advisory. It must not
+                    // consume the security-decision lane or fall back inline
+                    // to as many as 32 file reads when that lane is saturated.
+                    // Advisory lifecycle telemetry makes overload shedding
+                    // visible without delaying deterministic rule evaluation.
+                    state.advisoryWorkLifecycle.submit(
+                        label: "prompt-intent"
+                    ) {
                         let verdict = await bridge.analyzeInstall(
                             aiPid: aiPidCaptured,
-                            packageName: pkgName
+                            packageName: pkgName,
+                            // A package-install observation is not itself a
+                            // measured destructive action. Passing zero keeps
+                            // injection/destructive labels abstained until a
+                            // separate evidence source supplies real scope.
+                            destructiveBlastRadius: 0
                         )
                         guard verdict.label != .unknown,
                               verdict.label != .userInitiated,
@@ -1900,7 +2307,7 @@ enum EventLoop {
                             eventId: anchorEvent.id.uuidString,
                             processPath: anchorEvent.process.executable,
                             processName: anchorEvent.process.name,
-                            description: "PromptIntentBridge classified install of \(pkgName) as \(verdict.label.rawValue) (confidence \(String(format: "%.2f", verdict.confidence))). Reasons: \(verdict.reasons.joined(separator: "; "))",
+                            description: "PromptIntentBridge classified install of \(pkgName) as \(verdict.label.rawValue) (uncalibrated heuristic score \(String(format: "%.2f", verdict.confidence))). Reasons: \(verdict.reasons.joined(separator: "; "))",
                             mitreTactics: nil,
                             mitreTechniques: nil
                         )
@@ -1947,602 +2354,23 @@ enum EventLoop {
                 primaryMatches.append(baselineMatch)
             }
 
-            // Filter PRIMARY detections before they can mutate behavioral state or
-            // spawn advisory work. The old ordering filtered only after sequence,
-            // baseline, and BehaviorScoring had consumed the raw candidates. A
-            // match suppressed as warm-up/trusted/self noise could therefore taint
-            // a process score, consume its one-shot threshold latch, and launch
-            // child analyses even though the primary alert never existed.
-            NoiseFilter.apply(
-                &primaryMatches,
+            await dispatchReviewedMatches(
+                state: state,
                 event: enrichedEvent,
-                isWarmingUp: state.isWarmingUp
+                primaryMatches: primaryMatches,
+                sequenceMatches: sequenceMatches
             )
 
-            // RuleMatch is Hashable, so preserve the exact filtered sequence
-            // candidates without duplicating NoiseFilter's trust semantics here.
-            // Deterministic sequence derivatives below must never outlive a
-            // primary that the shared filter removed.
-            let survivingPrimaryMatches = Set(primaryMatches)
-            let survivingSequenceMatches = sequenceMatches.filter {
-                survivingPrimaryMatches.contains($0)
-            }
-
-            // Layer 4: Behavioral scoring -- escalate score on rule matches
-            var compositeMatches: [RuleMatch] = []
-            for match in primaryMatches {
-                if let scoringResult = await state.behaviorScoring.addRuleMatch(
-                    severity: match.severity,
-                    ruleTitle: match.ruleName,
-                    forProcess: enrichedEvent.process.pid,
-                    path: enrichedEvent.process.executable
-                ) {
-                    // Behavioral threshold crossed -- generate composite alert
-                    let indicatorSummary = scoringResult.indicators.prefix(5)
-                        .map { "\($0.name)(\($0.weight))" }.joined(separator: ", ")
-                    let behaviorMatch = RuleMatch(
-                        ruleId: "maccrab.behavior.composite",
-                        ruleName: "Behavioral Score Threshold: \(enrichedEvent.process.name)",
-                        severity: scoringResult.severity,
-                        description: "Process accumulated suspicious behavior score of \(String(format: "%.1f", scoringResult.totalScore)). Top indicators: \(indicatorSummary)",
-                        mitreTechniques: [],
-                        tags: ["attack.execution", "attack.defense_evasion"]
-                    )
-                    compositeMatches.append(behaviorMatch)
-                }
-            }
-
-            // Apply the same trust/noise gates to newly-created behavioral
-            // composites before emission.
-            NoiseFilter.apply(
-                &compositeMatches,
-                event: enrichedEvent,
-                isWarmingUp: state.isWarmingUp
-            )
-
-            var matches = primaryMatches
-            matches.append(contentsOf: compositeMatches)
-
-            if !matches.isEmpty {
-                // Batch-collect alerts from rule matches, then insert as a single
-                // transaction to reduce SQLite I/O from O(n) transactions to O(1).
-                var batchAlerts: [Alert] = []
-                var batchContexts: [String: EngineAlertCandidateContext] = [:]
-                var batchFanOut: [String: (Alert) async -> Void] = [:]
-
-                for match in matches {
-                    // Suppression + deduplication checks. Match-aware: a broad
-                    // path/host/rule allowlist can't silence a must-fire critical
-                    // (active C2 / credential-theft) detection — only an explicit
-                    // rule+process entry can.
-                    if await state.suppressionManager.isSuppressed(match: match, processPath: enrichedEvent.process.executable) {
-                        continue
-                    }
-                    // Per-rule dedup is reserved transactionally inside
-                    // AlertSink.insertEngineBatch. Recording it here poisoned the
-                    // suppression window when the later batch commit failed.
-
-                    // NOTE: the shared alerts-emitted counter is incremented
-                    // INSIDE AlertSink (the single chokepoint all ~60 emission
-                    // paths flow through) — see AlertSink.alertCounter. The
-                    // pre-fix increment here counted ONLY the single-event
-                    // rule-match path (~16x undercount); the batch insert below
-                    // (insertEngineBatch) now counts these alerts, so counting
-                    // here too would double-count.
-
-                    // Feedback-driven severity auto-tuning: rules the user
-                    // repeatedly dismisses get downgraded one level (critical
-                    // is never downgraded — the operator shouldn't be able to
-                    // mute ransomware or SIP alerts by swiping them away).
-                    let effectiveSeverity = await state.deduplicator.effectiveSeverity(
-                        ruleId: match.ruleId, original: match.severity)
-
-                    var alert = Alert(
-                        id: UUID().uuidString,
-                        timestamp: Date(),
-                        ruleId: match.ruleId,
-                        ruleTitle: match.ruleName,
-                        severity: effectiveSeverity,
-                        eventId: enrichedEvent.id.uuidString,
-                        processPath: enrichedEvent.process.executable,
-                        processName: enrichedEvent.process.name,
-                        description: match.description,
-                        mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
-                        mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
-                        suppressed: false
-                    )
-
-                    // Phase-5 delivery-provenance weld: for the handful of
-                    // already-precise HIGH cred/exfil triggers, attach the
-                    // download-origin narrative (and a suspicious-delivery flag
-                    // when the FP conjunction holds) as ALERT CONTEXT. Pure
-                    // enrichment on `alert.description` — no new alert, no
-                    // severity change. Runs before the alert flows to responders
-                    // and outputs so the context travels with it everywhere.
-                    if state.deliveryProvenanceWeld.isTrigger(ruleId: alert.ruleId),
-                       let weld = await state.deliveryProvenanceWeld.weld(alert: alert, event: enrichedEvent) {
-                        alert.description = weld.appended(to: alert.description)
-                    }
-
-                    // Phase-5 injection-evidence weld: for the shipped agent-
-                    // attributed cred-read / read->egress triggers, retro-scan the
-                    // SAME agent session's prior agent-content reads (skills /
-                    // hooks / config) for the shipped injection-marker set. On a
-                    // hit, attach the poisoned file as context AND bump severity
-                    // one level. Session-scoped and additive — no new alert, no
-                    // auto-executed response. Awaited inline (like the delivery
-                    // weld) so the bumped severity + context travel with THIS
-                    // alert to responders, notifier, outputs, and the campaign
-                    // detector. Plaintext-marker matching only (see
-                    // InjectionEvidenceWeld header on obfuscation).
-                    if state.injectionEvidenceWeld.isTrigger(ruleId: alert.ruleId),
-                       let evidence = await state.injectionEvidenceWeld.evidence(alert: alert, event: enrichedEvent) {
-                        alert.description = evidence.appended(to: alert.description)
-                        alert.severity = evidence.bumpedSeverity(from: alert.severity)
-                    }
-
-                    batchAlerts.append(alert)
-                    batchContexts[alert.id] = EngineAlertCandidateContext(
-                        match: match,
-                        isSequence: survivingSequenceMatches.contains(match)
-                    )
-                    // Capture the expensive/irreversible work, but do not run it
-                    // until AlertSink returns this exact alert id as a committed
-                    // survivor. The closure shadows the candidate with the
-                    // post-sink alert so severity recalibration and attribution
-                    // are identical to the stored row.
-                    batchFanOut[alert.id] = { persistedAlert in
-                    let alert = persistedAlert
-                    let effectiveSeverity = persistedAlert.severity
-                    // Only surface OS notifications for alerts that haven't
-                    // been auto-downgraded below high — otherwise noisy rules
-                    // keep popping banners after the user has indicated they
-                    // don't care.
-                    if effectiveSeverity >= .high {
-                        await state.notifier.notify(alert: alert)
-                    }
-                    await state.responseEngine.execute(alert: alert, event: enrichedEvent)
-
-                    // Send to external notification integrations (Slack, Teams, etc.)
-                    await state.notificationIntegrations.sendAlert(
-                        ruleTitle: alert.ruleTitle,
-                        severity: effectiveSeverity.rawValue,
-                        processName: alert.processName,
-                        processPath: alert.processPath,
-                        description: alert.description ?? "",
-                        mitreTechniques: alert.mitreTechniques
-                    )
-
-                    // Buffer for fleet telemetry
-                    if let fleet = state.fleetClient {
-                        await fleet.bufferAlert(FleetAlertSummary(
-                            ruleId: alert.ruleId,
-                            ruleTitle: alert.ruleTitle,
-                            severity: alert.severity.rawValue,
-                            processPath: alert.processPath ?? "",
-                            mitreTechniques: alert.mitreTechniques ?? "",
-                            timestamp: alert.timestamp
-                        ))
-                    }
-
-                    // Group into incident
-                    let tactics = match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }
-                    await state.incidentGrouper.processAlert(
-                        alertId: alert.id,
-                        timestamp: alert.timestamp,
-                        ruleTitle: alert.ruleTitle,
-                        severity: effectiveSeverity,
-                        processPath: alert.processPath
-                            ?? enrichedEvent.process.executable,
-                        parentPath: enrichedEvent.process.ancestors.first?.executable,
-                        tactics: tactics
-                    )
-
-                    // Campaign detection: chain alerts into higher-level patterns
-                    // v1.12.6 Wave 2C: surface MITRE technique tags, AI-tool
-                    // attribution, and the process-tree depth so the campaign
-                    // aggregates can be computed at persist time without a
-                    // cross-DB join.
-                    let techniqueTags = match.tags.filter { $0.contains("t1") }
-                    // v1.19 (S1-T4): mark trusted-subject alerts so the campaign
-                    // detector can exclude LOW/MEDIUM trusted/agent activity from
-                    // tactic-counting (HIGH/CRITICAL still feed). Same trust
-                    // judgement NoiseFilter uses for the must-fire floor.
-                    let isTrustedSubject = NoiseFilter.isTrustedSigner(event: enrichedEvent)
-                        || NoiseFilter.isAppleSystemBinary(event: enrichedEvent)
-                    let alertSummary = CampaignDetector.AlertSummary(
-                        ruleId: alert.ruleId,
-                        ruleTitle: alert.ruleTitle,
-                        severity: effectiveSeverity,
-                        processPath: alert.processPath,
-                        pid: Int(enrichedEvent.process.pid),
-                        userId: String(enrichedEvent.process.userId),
-                        timestamp: alert.timestamp,
-                        tactics: Set(tactics),
-                        mitreTechniques: Set(techniqueTags),
-                        aiTool: enrichedEvent.enrichments["ai_tool"],
-                        processTreeDepth: enrichedEvent.process.ancestors.count,
-                        isTrustedSubject: isTrustedSubject
-                    )
-                    let campaigns = await state.campaignDetector.processAlert(alertSummary)
-                    for campaign in campaigns {
-                        let campaignAlert = Alert(
-                            id: campaign.id,
-                            timestamp: campaign.detectedAt,
-                            ruleId: "maccrab.campaign.\(campaign.type.rawValue)",
-                            ruleTitle: campaign.title,
-                            severity: campaign.severity,
-                            eventId: alert.id,
-                            processPath: campaign.alerts.last?.processPath,
-                            processName: nil,
-                            description: campaign.description,
-                            mitreTactics: campaign.tactics.joined(separator: ","),
-                            mitreTechniques: "",
-                            suppressed: false,
-                            campaignId: campaign.id
-                        )
-                        let campaignPersisted: Bool
-                        do {
-                            campaignPersisted = try await state.alertSink.submit(
-                                alert: campaignAlert,
-                                event: enrichedEvent
-                            )
-                        } catch {
-                            await StorageErrorTracker.shared.recordAlertError(error)
-                            campaignPersisted = false
-                        }
-                        // AlertSink is authoritative here too: a collapsed or
-                        // failed campaign row cannot authorize campaign-store
-                        // persistence, notification, rule generation, or LLM
-                        // summaries derived from a row the operator cannot see.
-                        guard campaignPersisted else { continue }
-
-                        // Persist the campaign itself so dashboards and the
-                        // analyst workflow survive daemon restarts. Failures
-                        // are non-fatal — log and continue.
-                        if let store = state.campaignStore {
-                            // v1.12.6 Wave 2C: pass through the aggregate
-                            // attribution computed by `CampaignDetector` over
-                            // the contributing alerts. Empty sets surface as
-                            // nil so the DB column stays NULL (idiomatic for
-                            // "absent" rather than "[]").
-                            let aggregatedUsers = campaign.affectedUsers.isEmpty
-                                ? nil : Array(campaign.affectedUsers).sorted()
-                            let aggregatedExecs = campaign.affectedExecutables.isEmpty
-                                ? nil : Array(campaign.affectedExecutables).sorted()
-                            let aggregatedTechniques = campaign.techniques.isEmpty
-                                ? nil : Array(campaign.techniques).sorted()
-                            let aggregatedAITools = campaign.aiTools.isEmpty
-                                ? nil : Array(campaign.aiTools).sorted()
-                            let record = CampaignStore.Record(
-                                id: campaign.id,
-                                type: campaign.type.rawValue,
-                                severity: campaign.severity,
-                                title: campaign.title,
-                                description: campaign.description,
-                                tactics: Array(campaign.tactics).sorted(),
-                                timeSpanSeconds: campaign.timeSpanSeconds,
-                                detectedAt: campaign.detectedAt,
-                                alerts: campaign.alerts.map {
-                                    CampaignStore.AlertRef(
-                                        ruleId: $0.ruleId,
-                                        ruleTitle: $0.ruleTitle,
-                                        severity: $0.severity,
-                                        processPath: $0.processPath,
-                                        pid: $0.pid,
-                                        userId: $0.userId,
-                                        timestamp: $0.timestamp,
-                                        tactics: Array($0.tactics).sorted()
-                                    )
-                                },
-                                affectedUsers: aggregatedUsers,
-                                affectedExecutables: aggregatedExecs,
-                                firstSeen: campaign.firstSeen,
-                                lastSeen: campaign.lastSeen,
-                                processTreeDepth: campaign.processTreeDepth,
-                                techniques: aggregatedTechniques,
-                                aiTools: aggregatedAITools
-                            )
-                            do {
-                                try await store.insert(record)
-                            } catch {
-                                await StorageErrorTracker.shared.recordAlertError(error)
-                            }
-                        }
-
-                        await state.notifier.notify(alert: campaignAlert)
-
-                        // Auto-generate a Sigma rule from the campaign. RuleGenerator
-                        // writes the rule file and logs internally; the returned value
-                        // is informational only.
-                        let campaignAlerts = campaign.alerts.map { a in
-                            (ruleId: a.ruleId, ruleTitle: a.ruleTitle, processPath: a.processPath, tactics: a.tactics, timestamp: a.timestamp)
-                        }
-                        if state.llmService != nil {
-                            _ = await state.ruleGenerator.generateFromCampaignEnhanced(
-                                campaignType: campaign.type.rawValue,
-                                alerts: campaignAlerts
-                            )
-                        } else {
-                            _ = await state.ruleGenerator.generateFromCampaign(
-                                campaignType: campaign.type.rawValue,
-                                alerts: campaignAlerts
-                            )
-                        }
-
-                        // LLM investigation summary + defense recommendation (non-blocking)
-                        if let llm = state.llmService {
-                            let campaignTitle = campaign.title
-                            let campaignType = campaign.type.rawValue
-                            let campaignSeverity = campaign.severity
-                            let campaignId = campaign.id
-                            let campaignTactics = Array(campaign.tactics)
-                            let alertSummaries = campaign.alerts.prefix(10).map { a in
-                                (title: a.ruleTitle, process: a.processPath, severity: a.severity.rawValue)
-                            }
-
-                            Task {
-                                // Investigation summary — use extended thinking for
-                                // HIGH/CRITICAL campaigns with 3+ tactics. Falls back
-                                // to regular query on non-Opus backends automatically.
-                                let useDeepAnalysis = (campaignSeverity == .critical || campaignSeverity == .high)
-                                    && campaignTactics.count >= 3
-                                let investigationText: String?
-                                if useDeepAnalysis {
-                                    investigationText = await llm.deepAnalyzeCampaign(
-                                        campaignType: campaignType,
-                                        title: campaignTitle,
-                                        severity: campaignSeverity.rawValue,
-                                        tactics: campaignTactics,
-                                        alerts: alertSummaries,
-                                        thinkingBudgetTokens: 8000
-                                    )
-                                } else {
-                                    investigationText = await llm.query(
-                                        systemPrompt: LLMPrompts.investigationSystem,
-                                        userPrompt: LLMPrompts.investigationUser(
-                                            campaignType: campaignType, title: campaignTitle,
-                                            severity: campaignSeverity.rawValue,
-                                            tactics: campaignTactics,
-                                            alerts: alertSummaries
-                                        ),
-                                        maxTokens: 1024, temperature: 0.3
-                                    )?.response
-                                }
-                                // AI-06: this site gates at the JOIN of both branches instead of using
-                                // `commentary()`, because the deep path goes through
-                                // `deepAnalyzeCampaign` → `queryWithExtendedThinking`, which
-                                // `commentary()` does not wrap. Same predicate either way.
-                                if let text = investigationText, await llm.isUsable() {
-                                    let label = useDeepAnalysis ? "Deep Analysis" : "Investigation Summary"
-                                    let summaryAlert = Alert(
-                                        ruleId: "maccrab.llm.investigation-summary",
-                                        ruleTitle: "\(label): \(campaignTitle)",
-                                        severity: .informational,
-                                        eventId: campaignId,
-                                        processPath: nil, processName: nil,
-                                        description: text,
-                                        mitreTactics: nil, mitreTechniques: nil,
-                                        suppressed: false
-                                    )
-                                    do { _ = try await state.alertSink.submit(alert: summaryAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                }
-
-                                // Active defense recommendation (high/critical only)
-                                // NOTE: Advisory only — recommendations are stored as informational
-                                // alerts for human review. Actions are NEVER auto-executed.
-                                if campaignSeverity == .critical || campaignSeverity == .high {
-                                    let context = "Campaign: \(campaignType) — \(campaignTitle)\nSeverity: \(campaignSeverity.rawValue)\nAlerts: \(alertSummaries.map { "[\($0.severity)] \($0.title) (\($0.process ?? "?"))" }.joined(separator: "; "))"
-                                    if let rec = await llm.commentary(
-                                        systemPrompt: LLMPrompts.activeDefenseSystem,
-                                        userPrompt: LLMPrompts.activeDefenseUser(alertContext: context),
-                                        maxTokens: 512, temperature: 0.1
-                                    ) {
-                                        let recAlert = Alert(
-                                            ruleId: "maccrab.llm.defense-recommendation",
-                                            ruleTitle: "Defense Recommendation: \(campaignTitle)",
-                                            severity: .informational,
-                                            eventId: campaignId,
-                                            processPath: nil, processName: nil,
-                                            description: rec.response,
-                                            mitreTactics: nil, mitreTechniques: nil,
-                                            suppressed: false
-                                        )
-                                        do { _ = try await state.alertSink.submit(alert: recAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // v1.17.4: removed the always-on inline alerts.jsonl writer.
-                    // It dual-wrote the file (its own 50 MB/keep-5 rotation)
-                    // alongside the configurable FileOutput sink (100 MB rotation)
-                    // — two code paths, conflicting rotation, on the same default
-                    // path. No code reads alerts.jsonl; AlertStore (alerts.db) is
-                    // the canonical, queryable alert store. Operators who want a
-                    // local NDJSON tail configure a `file` output (daemon_config
-                    // `outputs`), which flows through `state.additionalOutputs`
-                    // below as the single writer.
-
-                    // Webhook output (Phase 3)
-                    if let webhook = state.webhookOutput {
-                        Task { await webhook.send(alert: alert, event: enrichedEvent) }
-                    }
-
-                    // Syslog output (Phase 3)
-                    if let syslog = state.syslogOutput {
-                        Task { await syslog.send(alert: alert) }
-                    }
-
-                    // Phase 7 additional outputs (FileOutput, StreamOutput
-                    // Splunk HEC / Elastic Bulk / Datadog). Fire-and-forget
-                    // per sink — a slow or failing sink never blocks the
-                    // detection pipeline.
-                    for sink in state.additionalOutputs {
-                        Task { await sink.send(alert: alert, event: enrichedEvent) }
-                    }
-                    }
-
-                }
-
-                // Batch insert all rule-match alerts. Routes through the
-                // AlertSink chokepoint even though NoiseFilter + dedup were
-                // already applied above — keeps the architectural invariant
-                // (no direct AlertStore.insert outside AlertSink) intact.
-                // v1.12.6 Wave 2B: pass enrichedEvent so AlertSink can
-                // populate the schema-v5 attribution columns (user, CWD,
-                // ai_tool, parent_exec, sha256, host_name) for every
-                // alert in the batch — they all share the same triggering
-                // event by construction.
-                var persistedAlerts: [Alert] = []
-                if !batchAlerts.isEmpty {
-                    do {
-                        persistedAlerts = try await state.alertSink.insertEngineBatch(
-                            alerts: batchAlerts,
-                            event: enrichedEvent
-                        )
-                    } catch let partial as AlertBatchInsertFailure {
-                        // AlertStore uses reserve-bounded transactions, so a
-                        // later chunk can fail after an earlier prefix committed.
-                        // AlertSink has already committed only that prefix's dedup
-                        // reservations/counters. Preserve its exact rows here so
-                        // notifications, response, integrations, campaigns and
-                        // LLM triage still obey the real post-commit boundary.
-                        persistedAlerts = partial.committedAlerts
-                        await StorageErrorTracker.shared.recordAlertError(
-                            partial.underlyingError
-                        )
-                    } catch {
-                        await StorageErrorTracker.shared.recordAlertError(error)
-                    }
-                }
-
-                let postCommitPlan = EngineAlertPostCommit.plan(
-                    persistedAlerts: persistedAlerts,
-                    contextsByAlertID: batchContexts
+            // Replay cannot overtake the initial evaluation. Publish the final
+            // synchronous event revision now, apply any terminal patches that
+            // won the two-lane race, then drain work completed during this event.
+            if hasPendingHeavyEnrichment {
+                await DeferredEnrichmentDispatcher.markReadyAndDispatch(
+                    event: enrichedEvent,
+                    state: state
                 )
-                // Notifications, response actions, integrations, outputs, fleet,
-                // incident grouping, and campaign mutation all live inside these
-                // closures. Invoke only the closures whose exact alert ids were
-                // returned by AlertSink after collapse and commit.
-                for committed in postCommitPlan.survivors {
-                    if let fanOut = batchFanOut[committed.alert.id] {
-                        await fanOut(committed.alert)
-                    }
-                }
-
-                // Attach deterministic counterfactual and next-tactic analyses
-                // only after the corresponding sequence primary survived the
-                // sink's same-evidence collapse and committed successfully.
-                // `insertEngineBatch` returns that authoritative survivor set;
-                // matching by exact alert id prevents an insert failure or
-                // collapsed primary from leaving an orphan derivative behind
-                // while preserving the candidate/context mapping.
-                for committed in postCommitPlan.sequenceSurvivors
-                where committed.match.severity == .high
-                    || committed.match.severity == .critical {
-                    let seqMatch = committed.match
-                    let matchCopy = seqMatch
-                    let primitive = inferPreventionPrimitive(from: enrichedEvent)
-                    let step = CounterfactualReasoner.ChainStep(
-                        stepId: matchCopy.ruleId,
-                        tactic: .impact,
-                        timestamp: enrichedEvent.timestamp,
-                        primitive: primitive
-                    )
-                    let reasoner = CounterfactualReasoner()
-                    let predictor = NextTechniquePredictor()
-                    let observedTactics = inferTacticsFromMatch(matchCopy)
-                    let anchorEvent = enrichedEvent
-                    let alertSink = state.alertSink
-                    Task.detached(priority: .utility) {
-                        let result = await reasoner.analyze(chain: [step])
-                        if result.earliestBlockable != nil {
-                            let alert = Alert(
-                                ruleId: "maccrab.counterfactual.\(matchCopy.ruleId)",
-                                ruleTitle: "Counterfactual: \(matchCopy.ruleName)",
-                                severity: .informational,
-                                eventId: anchorEvent.id.uuidString,
-                                processPath: anchorEvent.process.executable,
-                                processName: anchorEvent.process.name,
-                                description: result.narrative,
-                                mitreTactics: nil,
-                                mitreTechniques: nil
-                            )
-                            do {
-                                _ = try await alertSink.submit(
-                                    alert: alert,
-                                    event: anchorEvent
-                                )
-                            } catch {
-                                await StorageErrorTracker.shared.recordAlertError(error)
-                            }
-                        }
-
-                        if !observedTactics.isEmpty {
-                            let predictions = await predictor.predictNext(
-                                after: observedTactics,
-                                topN: 3
-                            )
-                            if !predictions.isEmpty {
-                                let summary = predictions.map {
-                                    "\(String(describing: $0.tactic)) "
-                                        + "(\(String(format: "%.0f", $0.probability * 100))%)"
-                                }.joined(separator: ", ")
-                                let alert = Alert(
-                                    ruleId: "maccrab.predict.next-technique.\(matchCopy.ruleId)",
-                                    ruleTitle: "Forecast: likely next tactic after \(matchCopy.ruleName)",
-                                    severity: .informational,
-                                    eventId: anchorEvent.id.uuidString,
-                                    processPath: anchorEvent.process.executable,
-                                    processName: anchorEvent.process.name,
-                                    description: "Markov-1 prior over MITRE tactics suggests: \(summary). Watch the listed tactics over the next ~10 minutes.",
-                                    mitreTactics: nil,
-                                    mitreTechniques: nil
-                                )
-                                do {
-                                    _ = try await alertSink.submit(
-                                        alert: alert,
-                                        event: anchorEvent
-                                    )
-                                } catch {
-                                    await StorageErrorTracker.shared.recordAlertError(error)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Automatic LLM triage is post-commit and bounded to one
-                // structured investigation per triggering event. Before this
-                // boundary, every high/critical candidate launched up to two
-                // parse attempts before AlertSink had persisted (or collapsed)
-                // it, and an extra free-form analysis call duplicated the same
-                // UI purpose. A failed insert or fully collapsed batch now makes
-                // no model call; a successful N-alert batch makes at most two
-                // backend calls (the investigator's one parse retry).
-                if let llm = state.llmService,
-                   let triageAlert = postCommitPlan.triageAlert {
-                    let capturedEvent = enrichedEvent
-                    let store = state.alertStore
-                    Task.detached(priority: .background) {
-                        if let investigation = await llm.investigate(
-                            alert: triageAlert,
-                            event: capturedEvent
-                        ) {
-                            do {
-                                try await store.updateInvestigation(
-                                    alertId: triageAlert.id,
-                                    investigation: investigation
-                                )
-                            } catch {
-                                await StorageErrorTracker.shared.recordAlertError(error)
-                            }
-                        }
-                    }
-                }
             }
+            await DeferredEnrichmentDispatcher.drainAvailable(state: state)
 
             // v1.10.2 (audit BLOCKER): the for-await body has many
             // Foundation calls (enricher, ruleEngine, JSONEncoder via
@@ -2564,55 +2392,531 @@ enum EventLoop {
         logger.info("Event stream ended. Daemon exiting.")
     }
 
+    /// The one reviewed rule-match path for both first-pass and deferred
+    /// dependency-filtered evaluation. Keeping suppression, behavior scoring,
+    /// durable commit, response authority, notifications, integrations,
+    /// campaigns, outputs, and advisory triage behind this one function prevents
+    /// deferred evidence from acquiring a smaller or less-reviewed alert path.
+    static func dispatchReviewedMatches(
+        state: DaemonState,
+        event: Event,
+        primaryMatches initialPrimaryMatches: [RuleMatch],
+        sequenceMatches: [RuleMatch]
+    ) async {
+        var primaryMatches = initialPrimaryMatches
+        // Filter PRIMARY detections before they can mutate behavioral state or
+        // spawn advisory work. The old ordering filtered only after sequence,
+        // baseline, and BehaviorScoring had consumed the raw candidates. A
+        // match suppressed as warm-up/trusted/self noise could therefore taint
+        // a process score, consume its one-shot threshold latch, and launch
+        // child analyses even though the primary alert never existed.
+        NoiseFilter.apply(
+            &primaryMatches,
+            event: event,
+            isWarmingUp: state.isWarmingUp
+        )
+
+        // RuleMatch is Hashable, so preserve the exact filtered sequence
+        // candidates without duplicating NoiseFilter's trust semantics here.
+        // Deterministic sequence derivatives below must never outlive a
+        // primary that the shared filter removed.
+        let survivingPrimaryMatches = Set(primaryMatches)
+        let survivingSequenceMatches = sequenceMatches.filter {
+            survivingPrimaryMatches.contains($0)
+        }
+
+        // Layer 4: Behavioral scoring -- escalate score on surviving rule
+        // matches. Threshold delivery has its own durable token and is
+        // acknowledged only after AlertSink commits or deliberately
+        // filters/collapses the composite; it is no longer appended to the
+        // primary batch where a failed commit silently spent the latch.
+        for match in primaryMatches {
+            await BehaviorScoreAlertEmitter.recordRuleMatch(
+                state: state,
+                event: event,
+                match: match
+            )
+        }
+
+        let matches = primaryMatches
+
+        if !matches.isEmpty {
+            // Batch-collect alerts from rule matches, then insert as a single
+            // transaction to reduce SQLite I/O from O(n) transactions to O(1).
+            var batchAlerts: [Alert] = []
+            var batchContexts: [String: EngineAlertCandidateContext] = [:]
+            var batchFanOut: [String: (Alert) async -> Void] = [:]
+
+            for match in matches {
+                // Suppression + deduplication checks. Match-aware: a broad
+                // path/host/rule allowlist can't silence a must-fire critical
+                // (active C2 / credential-theft) detection — only an explicit
+                // rule+process entry can.
+                if await state.suppressionManager.isSuppressed(match: match, processPath: event.process.executable) {
+                    continue
+                }
+                // Per-rule dedup is reserved transactionally inside
+                // AlertSink.insertEngineBatch. Recording it here poisoned the
+                // suppression window when the later batch commit failed.
+
+                // NOTE: the shared alerts-emitted counter is incremented
+                // INSIDE AlertSink (the single chokepoint all ~60 emission
+                // paths flow through) — see AlertSink.alertCounter. The
+                // pre-fix increment here counted ONLY the single-event
+                // rule-match path (~16x undercount); the batch insert below
+                // (insertEngineBatch) now counts these alerts, so counting
+                // here too would double-count.
+
+                // Rule severity is part of the reviewed rule contract.
+                // Suppressing a prior alert is not an explicit TP/FP label
+                // and cannot silently weaken later notification/response.
+                let effectiveSeverity = match.severity
+
+                var alert = Alert(
+                    id: UUID().uuidString,
+                    timestamp: Date(),
+                    ruleId: match.ruleId,
+                    ruleTitle: match.ruleName,
+                    severity: effectiveSeverity,
+                    eventId: event.id.uuidString,
+                    processPath: event.process.executable,
+                    processName: event.process.name,
+                    description: match.description,
+                    mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
+                    mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
+                    suppressed: false
+                )
+
+                // Phase-5 delivery-provenance weld: for the handful of
+                // already-precise HIGH cred/exfil triggers, attach the
+                // download-origin narrative (and a suspicious-delivery flag
+                // when the FP conjunction holds) as ALERT CONTEXT. Pure
+                // enrichment on `alert.description` — no new alert, no
+                // severity change. Runs before the alert flows to responders
+                // and outputs so the context travels with it everywhere.
+                if state.deliveryProvenanceWeld.isTrigger(ruleId: alert.ruleId),
+                   let weld = await state.deliveryProvenanceWeld.weld(alert: alert, event: event) {
+                    alert.description = weld.appended(to: alert.description)
+                }
+
+                // Phase-5 injection-evidence weld: for the shipped agent-
+                // attributed cred-read / read->egress triggers, retro-scan the
+                // SAME agent session's prior agent-content reads (skills /
+                // hooks / config) for the shipped injection-marker set. On a
+                // hit, attach the poisoned file as context AND bump severity
+                // one level. Session-scoped and additive — no new alert, no
+                // auto-executed response. Awaited inline (like the delivery
+                // weld) so the bumped severity + context travel with THIS
+                // alert to responders, notifier, outputs, and the campaign
+                // detector. Plaintext-marker matching only (see
+                // InjectionEvidenceWeld header on obfuscation).
+                if state.injectionEvidenceWeld.isTrigger(ruleId: alert.ruleId),
+                   let evidence = await state.injectionEvidenceWeld.evidence(alert: alert, event: event) {
+                    alert.description = evidence.appended(to: alert.description)
+                    alert.severity = evidence.bumpedSeverity(from: alert.severity)
+                }
+
+                batchAlerts.append(alert)
+                batchContexts[alert.id] = EngineAlertCandidateContext(
+                    match: match,
+                    isSequence: survivingSequenceMatches.contains(match)
+                )
+                // Capture the expensive/irreversible work, but do not run it
+                // until AlertSink returns this exact alert id as a committed
+                // survivor. The closure shadows the candidate with the
+                // post-sink alert so severity recalibration and attribution
+                // are identical to the stored row.
+                batchFanOut[alert.id] = { persistedAlert in
+                let alert = persistedAlert
+                let effectiveSeverity = persistedAlert.severity
+                // Surface OS notifications for committed high/critical
+                // alerts. Suppression policy is applied explicitly before
+                // insertion; severity is never learned from dismissals.
+                if effectiveSeverity >= .high {
+                    await state.notifier.notify(alert: alert)
+                }
+                await state.responseEngine.execute(alert: alert, event: event)
+
+                // Send to external notification integrations (Slack, Teams, etc.)
+                await state.notificationIntegrations.sendAlert(
+                    ruleTitle: alert.ruleTitle,
+                    severity: effectiveSeverity.rawValue,
+                    processName: alert.processName,
+                    processPath: alert.processPath,
+                    description: alert.description ?? "",
+                    mitreTechniques: alert.mitreTechniques
+                )
+
+                // Buffer for fleet telemetry
+                if let fleet = state.fleetClient {
+                    await fleet.bufferAlert(FleetAlertSummary(
+                        ruleId: alert.ruleId,
+                        ruleTitle: alert.ruleTitle,
+                        severity: alert.severity.rawValue,
+                        processPath: alert.processPath ?? "",
+                        mitreTechniques: alert.mitreTechniques ?? "",
+                        timestamp: alert.timestamp
+                    ))
+                }
+
+                // Group into incident
+                let tactics = match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }
+                await state.incidentGrouper.processAlert(
+                    alertId: alert.id,
+                    timestamp: alert.timestamp,
+                    ruleTitle: alert.ruleTitle,
+                    severity: effectiveSeverity,
+                    processPath: alert.processPath
+                        ?? event.process.executable,
+                    parentPath: event.process.ancestors.first?.executable,
+                    tactics: tactics
+                )
+
+                // Campaign detection: chain alerts into higher-level patterns
+                // v1.12.6 Wave 2C: surface MITRE technique tags, AI-tool
+                // attribution, and the process-tree depth so the campaign
+                // aggregates can be computed at persist time without a
+                // cross-DB join.
+                let techniqueTags = match.tags.filter { $0.contains("t1") }
+                // v1.19 (S1-T4): mark trusted-subject alerts so the campaign
+                // detector can exclude LOW/MEDIUM trusted/agent activity from
+                // tactic-counting (HIGH/CRITICAL still feed). Same trust
+                // judgement NoiseFilter uses for the must-fire floor.
+                let isTrustedSubject = NoiseFilter.isTrustedSigner(event: event)
+                    || NoiseFilter.isAppleSystemBinary(event: event)
+                let alertSummary = CampaignDetector.AlertSummary(
+                    ruleId: alert.ruleId,
+                    ruleTitle: alert.ruleTitle,
+                    severity: effectiveSeverity,
+                    processPath: alert.processPath,
+                    pid: Int(event.process.pid),
+                    userId: String(event.process.userId),
+                    timestamp: alert.timestamp,
+                    tactics: Set(tactics),
+                    mitreTechniques: Set(techniqueTags),
+                    aiTool: event.enrichments["ai_tool"],
+                    processTreeDepth: event.process.ancestors.count,
+                    isTrustedSubject: isTrustedSubject
+                )
+                let campaigns = await state.campaignDetector.processAlert(alertSummary)
+                for campaign in campaigns {
+                    let campaignAlert = Alert(
+                        id: campaign.id,
+                        timestamp: campaign.detectedAt,
+                        ruleId: "maccrab.campaign.\(campaign.type.rawValue)",
+                        ruleTitle: campaign.title,
+                        severity: campaign.severity,
+                        eventId: alert.id,
+                        processPath: campaign.alerts.last?.processPath,
+                        processName: nil,
+                        description: campaign.description,
+                        mitreTactics: campaign.tactics.joined(separator: ","),
+                        mitreTechniques: "",
+                        suppressed: false,
+                        campaignId: campaign.id
+                    )
+                    let campaignPersisted: Bool
+                    do {
+                        campaignPersisted = try await state.alertSink.submit(
+                            alert: campaignAlert,
+                            event: event
+                        )
+                    } catch {
+                        await StorageErrorTracker.shared.recordAlertError(error)
+                        campaignPersisted = false
+                    }
+                    // AlertSink is authoritative here too: a collapsed or
+                    // failed campaign row cannot authorize campaign-store
+                    // persistence, notification, rule generation, or LLM
+                    // summaries derived from a row the operator cannot see.
+                    guard campaignPersisted else { continue }
+
+                    // Persist the campaign itself so dashboards and the
+                    // analyst workflow survive daemon restarts. Failures
+                    // are non-fatal — log and continue.
+                    if let store = state.campaignStore {
+                        // v1.12.6 Wave 2C: pass through the aggregate
+                        // attribution computed by `CampaignDetector` over
+                        // the contributing alerts. Empty sets surface as
+                        // nil so the DB column stays NULL (idiomatic for
+                        // "absent" rather than "[]").
+                        let aggregatedUsers = campaign.affectedUsers.isEmpty
+                            ? nil : Array(campaign.affectedUsers).sorted()
+                        let aggregatedExecs = campaign.affectedExecutables.isEmpty
+                            ? nil : Array(campaign.affectedExecutables).sorted()
+                        let aggregatedTechniques = campaign.techniques.isEmpty
+                            ? nil : Array(campaign.techniques).sorted()
+                        let aggregatedAITools = campaign.aiTools.isEmpty
+                            ? nil : Array(campaign.aiTools).sorted()
+                        let record = CampaignStore.Record(
+                            id: campaign.id,
+                            type: campaign.type.rawValue,
+                            severity: campaign.severity,
+                            title: campaign.title,
+                            description: campaign.description,
+                            tactics: Array(campaign.tactics).sorted(),
+                            timeSpanSeconds: campaign.timeSpanSeconds,
+                            detectedAt: campaign.detectedAt,
+                            alerts: campaign.alerts.map {
+                                CampaignStore.AlertRef(
+                                    ruleId: $0.ruleId,
+                                    ruleTitle: $0.ruleTitle,
+                                    severity: $0.severity,
+                                    processPath: $0.processPath,
+                                    pid: $0.pid,
+                                    userId: $0.userId,
+                                    timestamp: $0.timestamp,
+                                    tactics: Array($0.tactics).sorted()
+                                )
+                            },
+                            affectedUsers: aggregatedUsers,
+                            affectedExecutables: aggregatedExecs,
+                            firstSeen: campaign.firstSeen,
+                            lastSeen: campaign.lastSeen,
+                            processTreeDepth: campaign.processTreeDepth,
+                            techniques: aggregatedTechniques,
+                            aiTools: aggregatedAITools
+                        )
+                        do {
+                            try await store.insert(record)
+                        } catch {
+                            await StorageErrorTracker.shared.recordAlertError(error)
+                        }
+                    }
+
+                    await state.notifier.notify(alert: campaignAlert)
+
+                    // Produce a review-only Sigma candidate from the
+                    // campaign. Stable semantic fingerprints and exclusive
+                    // creation prevent restart growth/clobber. Model work is
+                    // advisory and may never hold this post-commit security
+                    // path behind network latency.
+                    let campaignAlerts = campaign.alerts.map { a in
+                        (ruleId: a.ruleId, ruleTitle: a.ruleTitle, processPath: a.processPath, tactics: a.tactics, timestamp: a.timestamp)
+                    }
+                    let ruleGenerator = state.ruleGenerator
+                    let candidateCampaignType = campaign.type.rawValue
+                    state.advisoryWorkLifecycle.submit(
+                        label: "rule-candidate"
+                    ) {
+                        _ = await ruleGenerator.generateFromCampaignEnhanced(
+                            campaignType: candidateCampaignType,
+                            alerts: campaignAlerts
+                        )
+                    }
+
+                    // LLM investigation summary + defense recommendation (non-blocking)
+                    if let llm = state.llmService {
+                        let campaignTitle = campaign.title
+                        let campaignType = campaign.type.rawValue
+                        let campaignSeverity = campaign.severity
+                        let campaignId = campaign.id
+                        let campaignTactics = Array(campaign.tactics)
+                        let alertSummaries = campaign.alerts.prefix(10).map { a in
+                            (title: a.ruleTitle, process: a.processPath, severity: a.severity.rawValue)
+                        }
+
+                        state.advisoryWorkLifecycle.submit(
+                            label: "campaign-llm"
+                        ) {
+                            // Investigation summary — use extended thinking for
+                            // HIGH/CRITICAL campaigns with 3+ tactics. Falls back
+                            // to regular query on non-Opus backends automatically.
+                            let useDeepAnalysis = (campaignSeverity == .critical || campaignSeverity == .high)
+                                && campaignTactics.count >= 3
+                            let investigationText: String?
+                            if useDeepAnalysis {
+                                investigationText = await llm.deepAnalyzeCampaign(
+                                    campaignType: campaignType,
+                                    title: campaignTitle,
+                                    severity: campaignSeverity.rawValue,
+                                    tactics: campaignTactics,
+                                    alerts: alertSummaries,
+                                    thinkingBudgetTokens: 8000
+                                )
+                            } else {
+                                investigationText = await llm.commentary(
+                                    systemPrompt: LLMPrompts.investigationSystem,
+                                    userPrompt: LLMPrompts.investigationUser(
+                                        campaignType: campaignType, title: campaignTitle,
+                                        severity: campaignSeverity.rawValue,
+                                        tactics: campaignTactics,
+                                        alerts: alertSummaries
+                                    ),
+                                    maxTokens: 1024, temperature: 0.3,
+                                    feature: .campaignInvestigation
+                                )?.response
+                            }
+                            // Both branches apply the central persisted-advisory
+                            // validator and semantic-operation ledger before any
+                            // model-authored prose reaches AlertStore.
+                            if let text = investigationText {
+                                let label = useDeepAnalysis ? "Deep Analysis" : "Investigation Summary"
+                                let summaryAlert = Alert(
+                                    ruleId: "maccrab.llm.investigation-summary",
+                                    ruleTitle: "\(label): \(campaignTitle)",
+                                    severity: .informational,
+                                    eventId: campaignId,
+                                    processPath: nil, processName: nil,
+                                    description: text,
+                                    mitreTactics: nil, mitreTechniques: nil,
+                                    suppressed: false
+                                )
+                                do { _ = try await state.alertSink.submit(alert: summaryAlert, event: event) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            }
+
+                            // Active defense recommendation (high/critical only)
+                            // NOTE: Advisory only — recommendations are stored as informational
+                            // alerts for human review. Actions are NEVER auto-executed.
+                            if campaignSeverity == .critical || campaignSeverity == .high {
+                                let context = "Campaign: \(campaignType) — \(campaignTitle)\nSeverity: \(campaignSeverity.rawValue)\nAlerts: \(alertSummaries.map { "[\($0.severity)] \($0.title) (\($0.process ?? "?"))" }.joined(separator: "; "))"
+                                if let rec = await llm.commentary(
+                                    systemPrompt: LLMPrompts.activeDefenseSystem,
+                                    userPrompt: LLMPrompts.activeDefenseUser(alertContext: context),
+                                    maxTokens: 512, temperature: 0.1,
+                                    feature: .activeDefense
+                                ) {
+                                    let recAlert = Alert(
+                                        ruleId: "maccrab.llm.defense-recommendation",
+                                        ruleTitle: "Defense Recommendation: \(campaignTitle)",
+                                        severity: .informational,
+                                        eventId: campaignId,
+                                        processPath: nil, processName: nil,
+                                        description: rec.response,
+                                        mitreTactics: nil, mitreTechniques: nil,
+                                        suppressed: false
+                                    )
+                                    do { _ = try await state.alertSink.submit(alert: recAlert, event: event) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // v1.17.4: removed the always-on inline alerts.jsonl writer.
+                // It dual-wrote the file (its own 50 MB/keep-5 rotation)
+                // alongside the configurable FileOutput sink (100 MB rotation)
+                // — two code paths, conflicting rotation, on the same default
+                // path. No code reads alerts.jsonl; AlertStore (alerts.db) is
+                // the canonical, queryable alert store. Operators who want a
+                // local NDJSON tail configure a `file` output (daemon_config
+                // `outputs`), which flows through `state.additionalOutputs`
+                // below as the single writer.
+
+                // Webhook output (Phase 3)
+                if let webhook = state.webhookOutput {
+                    state.outputWorkLifecycle.submit(label: "webhook") {
+                        await webhook.send(alert: alert, event: event)
+                    }
+                }
+
+                // Syslog output (Phase 3)
+                if let syslog = state.syslogOutput {
+                    state.outputWorkLifecycle.submit(label: "syslog") {
+                        await syslog.send(alert: alert)
+                    }
+                }
+
+                // Phase 7 additional outputs (FileOutput, StreamOutput
+                // Splunk HEC / Elastic Bulk / Datadog). Fire-and-forget
+                // per sink — a slow or failing sink never blocks the
+                // detection pipeline.
+                for sink in state.additionalOutputs {
+                    state.outputWorkLifecycle.submit(
+                        label: "additional-output"
+                    ) {
+                        await sink.send(alert: alert, event: event)
+                    }
+                }
+                }
+
+            }
+
+            // Batch insert all rule-match alerts. Routes through the
+            // AlertSink chokepoint even though NoiseFilter + dedup were
+            // already applied above — keeps the architectural invariant
+            // (no direct AlertStore.insert outside AlertSink) intact.
+            // v1.12.6 Wave 2B: pass event so AlertSink can
+            // populate the schema-v5 attribution columns (user, CWD,
+            // ai_tool, parent_exec, sha256, host_name) for every
+            // alert in the batch — they all share the same triggering
+            // event by construction.
+            var persistedAlerts: [Alert] = []
+            if !batchAlerts.isEmpty {
+                do {
+                    persistedAlerts = try await state.alertSink.insertEngineBatch(
+                        alerts: batchAlerts,
+                        event: event
+                    )
+                } catch let partial as AlertBatchInsertFailure {
+                    // AlertStore uses reserve-bounded transactions, so a
+                    // later chunk can fail after an earlier prefix committed.
+                    // AlertSink has already committed only that prefix's dedup
+                    // reservations/counters. Preserve its exact rows here so
+                    // notifications, response, integrations, campaigns and
+                    // LLM triage still obey the real post-commit boundary.
+                    persistedAlerts = partial.committedAlerts
+                    await StorageErrorTracker.shared.recordAlertError(
+                        partial.underlyingError
+                    )
+                } catch {
+                    await StorageErrorTracker.shared.recordAlertError(error)
+                }
+            }
+
+            let postCommitPlan = EngineAlertPostCommit.plan(
+                persistedAlerts: persistedAlerts,
+                contextsByAlertID: batchContexts
+            )
+            // Notifications, response actions, integrations, outputs, fleet,
+            // incident grouping, and campaign mutation all live inside these
+            // closures. Invoke only the closures whose exact alert ids were
+            // returned by AlertSink after collapse and commit.
+            for committed in postCommitPlan.survivors {
+                if let fanOut = batchFanOut[committed.alert.id] {
+                    await fanOut(committed.alert)
+                }
+            }
+
+            // Counterfactual and next-tactic engines remain available for
+            // explicit analyst workflows. They are intentionally not run
+            // here: one synthetic step cannot establish an observed chain,
+            // enabled-at-event prevention state, or an evaluated forecast.
+            // Automatic derivative alerts would therefore fabricate more
+            // certainty than the retained evidence supports.
+
+            // Automatic LLM triage is post-commit and bounded to one
+            // structured investigation per triggering event. Before this
+            // boundary, every high/critical candidate launched up to two
+            // parse attempts before AlertSink had persisted (or collapsed)
+            // it, and an extra free-form analysis call duplicated the same
+            // UI purpose. A failed insert or fully collapsed batch now makes
+            // no model call; a successful N-alert batch makes at most two
+            // backend calls (the investigator's one parse retry).
+            if let llm = state.llmService,
+               let triageAlert = postCommitPlan.triageAlert {
+                let capturedEvent = event
+                let store = state.alertStore
+                state.advisoryWorkLifecycle.submit(label: "llm-triage") {
+                    if let investigation = await llm.investigate(
+                        alert: triageAlert,
+                        event: capturedEvent
+                    ) {
+                        do {
+                            try await store.updateInvestigation(
+                                alertId: triageAlert.id,
+                                investigation: investigation
+                            )
+                        } catch {
+                            await StorageErrorTracker.shared.recordAlertError(error)
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+
     // NoiseFilter logic lives in MacCrabCore/Detection/NoiseFilter.swift
     // so the test target can exercise it directly. See FPRegressionTests.
-}
-
-/// v1.12.0 RC3 (Sec-H2): credential-path filter for AgentLineageService
-/// records. The lineage snapshot is persisted to disk and read by the
-/// dashboard / PromptIntentBridge / future MCP tooling — paths that
-/// match credential shapes are dropped at record time so they never
-/// leave the daemon's memory.
-func isCredentialShapedPath(_ path: String) -> Bool {
-    let lower = path.lowercased()
-    return lower.contains("/.aws/credentials")
-        || lower.contains("/.aws/config")
-        // v1.12.0 RC5 (Sec-R5-N7): AWS SSO cache + Azure CLI +
-        // Bitwarden + 1Password CLI paths added.
-        || lower.contains("/.aws/sso/cache/")
-        || lower.contains("/.azure/")
-        || lower.contains("/.bw/data.json")
-        || lower.contains("/.config/op/")
-        // v1.12.0 RC6 (Sec-R6-N4): 1Password desktop (v7 and v8)
-        // group-container vault paths, GnuPG keyrings.
-        || lower.contains("/group containers/2bua8c4s2c.com.agilebits/")
-        || lower.contains("/group containers/2bua8c4s2c.com.1password/")
-        || lower.contains("/.gnupg/")
-        || lower.contains("/.ssh/id_")
-        || lower.contains("/.ssh/authorized_keys")
-        || lower.hasSuffix("/.netrc")
-        || lower.hasSuffix("/.npmrc")
-        || lower.hasSuffix("/.pypirc")
-        || lower.contains("/.docker/config.json")
-        || lower.contains("/.kube/config")
-        || lower.hasSuffix("/.gitconfig")
-        || lower.contains("/.config/gh/hosts.yml")
-        || lower.contains("/.cargo/credentials")
-        || lower.contains("/library/keychains/")
-        // v1.12.0 RC4 fix (Sec-R4-N7): expand browser profile coverage
-        // beyond Chrome + Firefox. Safari uses /Library/Safari/ and
-        // /Library/Containers/com.apple.Safari/; Arc, Brave, Edge,
-        // Vivaldi, Opera all live under /Library/Application Support/.
-        || lower.contains("/library/application support/google/chrome/")
-        || lower.contains("/library/application support/firefox/")
-        || lower.contains("/library/application support/bravesoftware/")
-        || lower.contains("/library/application support/microsoft edge/")
-        || lower.contains("/library/application support/arc/")
-        || lower.contains("/library/application support/vivaldi/")
-        || lower.contains("/library/application support/com.operasoftware.opera/")
-        || lower.contains("/library/safari/")
-        || lower.contains("/library/containers/com.apple.safari/")
-        || lower.hasSuffix("/login data")
-        || lower.hasSuffix("/cookies")
-        || lower.hasSuffix("/cookies.binarycookies")
 }

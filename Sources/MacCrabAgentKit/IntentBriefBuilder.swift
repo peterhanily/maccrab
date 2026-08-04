@@ -3,7 +3,7 @@
 //
 // v1.12.0 — assembles an `IntentClassifier.BehaviorBrief` from a
 // package-manager install exec event + the Bayesian engine's posterior
-// for the same process tree. The brief feeds the synchronous heuristic
+// for the same intent scope. The brief feeds the synchronous heuristic
 // classifier in EventLoop so the downstream Sigma rule
 // (`Rules/ai_safety/llm_classifier_high_risk_intent.yml`) can fire on
 // the same event that produced the install signal.
@@ -57,9 +57,13 @@ enum IntentBriefBuilder {
         guard isInstall else { return nil }
 
         let packageName = extractPackageName(from: cmd, exeName: exeName) ?? "<unknown>"
-        let lineage = event.process.ancestors.map { ($0.executable as NSString).lastPathComponent }
+        // A corrupted or synthetic event must not turn one classification into
+        // an unbounded prompt/allocation. Closest ancestry is the useful part.
+        let lineage = event.process.ancestors.prefix(16).map {
+            String((($0.executable as NSString).lastPathComponent).prefix(512))
+        }
 
-        // Pull categorical evidence from the Bayesian engine's per-tree
+        // Pull categorical evidence from the Bayesian engine's per-scope
         // log so the heuristic sees an actual history (credentialRead,
         // launchAgentWrite, etc.) and not just the current install
         // event. Without this, the brief is always thin and the

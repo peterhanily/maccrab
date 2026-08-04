@@ -17,7 +17,7 @@ import os.log
 ///
 /// Requires microphone permission (TCC).
 public actor UltrasonicMonitor {
-    private let logger = Logger(subsystem: "com.maccrab", category: "ultrasonic-monitor")
+    private nonisolated let logger = Logger(subsystem: "com.maccrab", category: "ultrasonic-monitor")
 
     public struct UltrasonicEvent: Sendable {
         public let attackType: AttackType
@@ -37,15 +37,16 @@ public actor UltrasonicMonitor {
     public nonisolated let events: AsyncStream<UltrasonicEvent>
     private var continuation: AsyncStream<UltrasonicEvent>.Continuation?
     private var monitorTask: Task<Void, Never>?
+    private var activeCapture: UltrasonicSampleCapture?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     /// Analysis parameters
-    private let sampleRate: Float = 48000  // 48 kHz captures up to 24 kHz (Nyquist)
-    private let fftSize: Int = 4096        // ~11.7 Hz resolution at 48 kHz
-    private let ultrasonicThreshold: Float = 18000  // Hz — above this is ultrasonic
-    private let speechBandLow: Float = 300
-    private let speechBandHigh: Float = 8000
-    private let energyRatioThreshold: Float = -6  // dB — ultrasonic must be within 6dB of speech
-    private let sampleDuration: TimeInterval = 1.0  // Sample 1 second every interval
+    private nonisolated let fftSize: Int = 4096
+    private nonisolated let ultrasonicThreshold: Float = 18000
+    private nonisolated let speechBandLow: Float = 300
+    private nonisolated let speechBandHigh: Float = 8000
+    private nonisolated let energyRatioThreshold: Float = -6
+    private nonisolated let sampleDuration: TimeInterval = 1.0
     private let pollInterval: TimeInterval
 
     public init(pollInterval: TimeInterval = 30) {
@@ -58,7 +59,8 @@ public actor UltrasonicMonitor {
     }
 
     public func start() {
-        guard monitorTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("Ultrasonic monitor starting (sample every \(self.pollInterval)s)")
 
         monitorTask = Task { [weak self] in
@@ -76,12 +78,46 @@ public actor UltrasonicMonitor {
     }
 
     public func stop() {
-        monitorTask?.cancel()
-        monitorTask = nil
-        continuation?.finish()
+        _ = beginStop()
     }
 
-    private func analyzeSample() {
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 2.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { monitorTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = monitorTask
+        activeCapture?.cancel()
+        monitorTask?.cancel()
+        continuation?.finish()
+        continuation = nil
+        return task
+    }
+
+    private func analyzeSample() async {
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
+        let capture = UltrasonicSampleCapture()
+        activeCapture = capture
+        let event = await Task.detached(priority: .utility) { [self] in
+            captureAndAnalyze(control: capture)
+        }.value
+        if activeCapture === capture { activeCapture = nil }
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
+        if let event {
+            continuation?.yield(event)
+            logger.warning("Ultrasonic attack detected: \(event.attackType.rawValue) at \(event.peakFrequencyHz) Hz (confidence: \(event.confidence))")
+        }
+    }
+
+    private nonisolated func captureAndAnalyze(
+        control: UltrasonicSampleCapture
+    ) -> UltrasonicEvent? {
         // Record a short audio sample using AVAudioEngine
         // This requires microphone TCC permission
 
@@ -92,14 +128,12 @@ public actor UltrasonicMonitor {
         // Verify sample rate is high enough
         guard format.sampleRate >= 44100 else {
             logger.warning("Sample rate \(format.sampleRate) too low for ultrasonic detection (need >= 44100)")
-            return
+            return nil
         }
 
         let actualSampleRate = Float(format.sampleRate)
-        var samples: [Float] = []
         let expectedSamples = Int(actualSampleRate * Float(sampleDuration))
-
-        let semaphore = DispatchSemaphore(value: 0)
+        control.setExpectedSamples(expectedSamples)
 
         // Use nil format to let AVAudioEngine choose a compatible format.
         // Passing the inputNode's outputFormat can cause a format mismatch
@@ -108,38 +142,34 @@ public actor UltrasonicMonitor {
             guard let channelData = buffer.floatChannelData else { return }
             let frameCount = Int(buffer.frameLength)
             let data = Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
-            samples.append(contentsOf: data)
-            if samples.count >= expectedSamples {
-                semaphore.signal()
-            }
+            control.append(data)
         }
 
         do {
             try engine.start()
         } catch {
+            inputNode.removeTap(onBus: 0)
             logger.debug("Cannot access microphone: \(error.localizedDescription)")
-            return
+            return nil
         }
 
         // Wait for sample (with timeout)
-        let result = semaphore.wait(timeout: .now() + sampleDuration + 1.0)
+        let completed = control.wait(timeout: sampleDuration + 1.0)
         inputNode.removeTap(onBus: 0)
         engine.stop()
 
-        guard result == .success, samples.count >= fftSize else { return }
+        guard completed,
+              let samples = control.samplesPrefix(fftSize) else { return nil }
 
         // Perform FFT analysis
-        let spectrum = computeSpectrum(samples: Array(samples.prefix(fftSize)), sampleRate: actualSampleRate)
+        let spectrum = computeSpectrum(samples: samples, sampleRate: actualSampleRate)
 
         // Check for ultrasonic energy
-        if let event = analyzeSpectrum(spectrum, sampleRate: actualSampleRate) {
-            continuation?.yield(event)
-            logger.warning("Ultrasonic attack detected: \(event.attackType.rawValue) at \(event.peakFrequencyHz) Hz (confidence: \(event.confidence))")
-        }
+        return analyzeSpectrum(spectrum, sampleRate: actualSampleRate)
     }
 
     /// Compute magnitude spectrum using Accelerate vDSP FFT.
-    private func computeSpectrum(samples: [Float], sampleRate: Float) -> [Float] {
+    private nonisolated func computeSpectrum(samples: [Float], sampleRate: Float) -> [Float] {
         let n = samples.count
         let log2n = vDSP_Length(log2(Float(n)))
 
@@ -187,7 +217,7 @@ public actor UltrasonicMonitor {
     }
 
     /// Analyze spectrum for ultrasonic attack patterns.
-    private func analyzeSpectrum(_ spectrum: [Float], sampleRate: Float) -> UltrasonicEvent? {
+    private nonisolated func analyzeSpectrum(_ spectrum: [Float], sampleRate: Float) -> UltrasonicEvent? {
         guard !spectrum.isEmpty else { return nil }
 
         let binWidth = sampleRate / Float(spectrum.count * 2)
@@ -239,5 +269,64 @@ public actor UltrasonicMonitor {
             confidence: confidence,
             timestamp: Date()
         )
+    }
+}
+
+/// AVAudioEngine delivers tap buffers on its own realtime callback queue. This
+/// lock protects the shared sample prefix and makes cancellation wake the
+/// blocking capture immediately; the engine itself remains owned and cleaned
+/// up by the detached capture thread.
+private final class UltrasonicSampleCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var samples: [Float] = []
+    private var expectedSamples = Int.max
+    private var signaled = false
+    private var cancelled = false
+
+    func setExpectedSamples(_ count: Int) {
+        lock.lock()
+        expectedSamples = max(1, count)
+        lock.unlock()
+    }
+
+    func append(_ newSamples: [Float]) {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return
+        }
+        // Retain only the requested one-second prefix. Audio callbacks may
+        // continue briefly before the tap is removed; they cannot grow memory.
+        let remaining = max(0, expectedSamples - samples.count)
+        if remaining > 0 { samples.append(contentsOf: newSamples.prefix(remaining)) }
+        let shouldSignal = samples.count >= expectedSamples && !signaled
+        if shouldSignal { signaled = true }
+        lock.unlock()
+        if shouldSignal { semaphore.signal() }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let shouldSignal = !signaled
+        if shouldSignal { signaled = true }
+        lock.unlock()
+        if shouldSignal { semaphore.signal() }
+    }
+
+    func wait(timeout: TimeInterval) -> Bool {
+        let result = semaphore.wait(timeout: .now() + max(0, timeout))
+        lock.lock()
+        let clean = result == .success && !cancelled
+        lock.unlock()
+        return clean
+    }
+
+    func samplesPrefix(_ count: Int) -> [Float]? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled, samples.count >= count else { return nil }
+        return Array(samples.prefix(count))
     }
 }

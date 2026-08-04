@@ -25,8 +25,44 @@ import os.log
 
 public actor AlertSink {
 
+    private struct EvidenceCaptureRequest: Sendable {
+        let alertId: String
+        let timestamp: Date
+        let admittedEventPrefixGeneration: UInt64
+        /// Bounded in-memory fallback for an alert emitted before the hot loop
+        /// has handed its triggering Event to BatchedEventWriter, or when that
+        /// writer terminally sheds the row.
+        let triggeringEvent: Event?
+    }
+
     private let alertStore: AlertStore
     private let eventStore: EventStore?
+    private let evidenceCaptureOverride: (@Sendable (
+        _ alertId: String,
+        _ timestamp: Date
+    ) async throws -> AlertEvidenceCaptureResult)?
+    private let evidencePrefixGeneration: (@Sendable () async -> UInt64)?
+    private let evidencePrefixBarrier: (@Sendable (UInt64) async -> Bool)?
+    private var evidenceBudgetBytes: Int64
+    /// A fixed-size ring keeps the alert commit path O(1) and makes memory
+    /// ownership explicit. Jobs carry only alert identity/time; event payloads
+    /// are selected by the single worker after the alert transaction returns.
+    private let evidenceQueueCapacity: Int
+    private var evidenceQueue: [EvidenceCaptureRequest?]
+    private var evidenceQueueHead = 0
+    private var evidenceQueueTail = 0
+    private var evidenceQueueCount = 0
+    private var evidenceWorker: Task<Void, Never>?
+    private var evidenceAccepting = true
+    private var evidenceCaptureOffered = 0
+    private var evidenceCaptureCompleted = 0
+    private var evidenceCaptureShed = 0
+    private var evidenceCaptureInFlight = 0
+    private var evidencePrefixBarrierTimeouts = 0
+    private var evidenceShedAtShutdownDeadline = 0
+    private var alertAccepting = true
+    private var alertAdmissionsInFlight = 0
+    private var alertsRejectedAfterSeal = 0
     private let deduplicator: AlertDeduplicator
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "AlertSink")
 
@@ -40,6 +76,9 @@ public actor AlertSink {
     /// the metrics file and diagnostic surfaces.
     private(set) public var suppressedCount: Int = 0
     private(set) public var insertedCount: Int = 0
+    private(set) public var evidenceRowsCaptured: Int = 0
+    private(set) public var evidenceRowsPruned: Int = 0
+    private(set) public var evidenceCaptureFailures: Int = 0
 
     /// Shared "alerts emitted" counter incremented once per successfully
     /// inserted (post-dedup) alert across EVERY emission path — the sink is
@@ -59,13 +98,44 @@ public actor AlertSink {
         deduplicator: AlertDeduplicator,
         eventStore: EventStore? = nil,
         builtinSettingsDir: String? = nil,
-        alertCounter: LockedCounter = LockedCounter()
+        alertCounter: LockedCounter = LockedCounter(),
+        evidenceBudgetBytes: Int64 = 100
+            * SQLitePersistentStorePolicy.bytesPerMiB,
+        evidenceQueueCapacity: Int = 512,
+        evidencePrefixGeneration: (@Sendable () async -> UInt64)? = nil,
+        evidencePrefixBarrier: (@Sendable (UInt64) async -> Bool)? = nil,
+        evidenceCaptureOverride: (@Sendable (
+            _ alertId: String,
+            _ timestamp: Date
+        ) async throws -> AlertEvidenceCaptureResult)? = nil
     ) {
         self.alertStore = alertStore
         self.eventStore = eventStore
+        self.evidenceCaptureOverride = evidenceCaptureOverride
+        self.evidencePrefixGeneration = evidencePrefixGeneration
+        self.evidencePrefixBarrier = evidencePrefixBarrier
+        self.evidenceBudgetBytes = max(0, evidenceBudgetBytes)
+        self.evidenceQueueCapacity = max(1, evidenceQueueCapacity)
+        self.evidenceQueue = Array(
+            repeating: nil,
+            count: max(1, evidenceQueueCapacity)
+        )
         self.deduplicator = deduplicator
         self.builtinSettingsDir = builtinSettingsDir
         self.alertCounter = alertCounter
+    }
+
+    private func beginAlertAdmission(offers: Int) -> Bool {
+        guard alertAccepting else {
+            alertsRejectedAfterSeal += max(0, offers)
+            return false
+        }
+        alertAdmissionsInFlight += 1
+        return true
+    }
+
+    private func finishAlertAdmission() {
+        alertAdmissionsInFlight = max(0, alertAdmissionsInFlight - 1)
     }
 
     /// Built-in `maccrab.*` rule gating (v1.18). Returns the (possibly
@@ -201,21 +271,144 @@ public actor AlertSink {
         return downweighted("Severity reduced — trusted development-tooling lineage (\(alert.processName ?? "dev tool")); routine build/runtime activity, surfaced for review not escalation.")
     }
 
-    // v1.8.0: when an alert is committed, snapshot the surrounding ±60s of
-    // events into `alert_evidence` so the dashboard's alert detail can show
-    // "what was happening when this fired?" even after the 24h hot tier
-    // drops the originating events. Best-effort — failure is logged but
-    // does not back out the alert insert.
-    private func captureEvidenceIfPossible(alertId: String, timestamp: Date) async {
-        guard let eventStore else { return }
-        do {
-            try await eventStore.recordAlertEvidence(
-                alertId: alertId,
-                alertTimestamp: timestamp
-            )
-        } catch {
-            logger.warning("Evidence capture failed for alert \(alertId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+    // Post-commit only: queue a small identity record and return to the alert
+    // producer. Event selection, validation, SQLite accounting, and pruning all
+    // run on one bounded worker lane so an alert storm cannot serialize the
+    // EventLoop behind O(total-evidence) work.
+    private func enqueueEvidenceCapture(
+        alertId: String,
+        timestamp: Date,
+        triggeringEvent: Event? = nil
+    ) async {
+        guard evidenceCaptureOverride != nil || eventStore != nil else { return }
+        evidenceCaptureOffered += 1
+        guard evidenceAccepting, evidenceBudgetBytes > 0,
+              evidenceQueueCount < evidenceQueueCapacity else {
+            evidenceCaptureShed += 1
+            // First and power-of-two losses provide an actionable signal without
+            // turning an alert storm into a second log storm.
+            if evidenceCaptureShed == 1
+                || (evidenceCaptureShed & (evidenceCaptureShed - 1)) == 0 {
+                logger.warning("Evidence capture queue shed \(self.evidenceCaptureShed, privacy: .public) job(s); capacity=\(self.evidenceQueueCapacity, privacy: .public), accepting=\(self.evidenceAccepting, privacy: .public)")
+            }
+            return
         }
+        let prefixGeneration = await evidencePrefixGeneration?() ?? 0
+        // The generation lookup is an actor hop. Shutdown or another alert can
+        // claim the last slot while it is suspended, so re-check both gates.
+        guard evidenceAccepting, evidenceBudgetBytes > 0,
+              evidenceQueueCount < evidenceQueueCapacity else {
+            evidenceCaptureShed += 1
+            return
+        }
+        evidenceQueue[evidenceQueueTail] = EvidenceCaptureRequest(
+            alertId: alertId,
+            timestamp: timestamp,
+            admittedEventPrefixGeneration: prefixGeneration,
+            triggeringEvent: triggeringEvent
+        )
+        evidenceQueueTail = (evidenceQueueTail + 1) % evidenceQueueCapacity
+        evidenceQueueCount += 1
+        startEvidenceWorkerIfNeeded()
+    }
+
+    private func dequeueEvidenceCapture() -> EvidenceCaptureRequest? {
+        guard evidenceQueueCount > 0 else { return nil }
+        let request = evidenceQueue[evidenceQueueHead]
+        evidenceQueue[evidenceQueueHead] = nil
+        evidenceQueueHead = (evidenceQueueHead + 1) % evidenceQueueCapacity
+        evidenceQueueCount -= 1
+        return request
+    }
+
+    private func startEvidenceWorkerIfNeeded() {
+        guard evidenceWorker == nil, evidenceQueueCount > 0 else { return }
+        evidenceWorker = Task { [weak self] in
+            await self?.drainEvidenceQueue()
+        }
+    }
+
+    private func drainEvidenceQueue() async {
+        while let request = dequeueEvidenceCapture() {
+            evidenceCaptureInFlight = 1
+            await captureEvidence(request)
+            evidenceCaptureInFlight = 0
+        }
+        evidenceWorker = nil
+        // Actor isolation makes the empty-check + nil transition atomic with
+        // enqueue, but retain this guard as a drift-proof invariant if drain
+        // gains a suspension between those operations in the future.
+        startEvidenceWorkerIfNeeded()
+    }
+
+    private func captureEvidence(_ request: EvidenceCaptureRequest) async {
+        do {
+            try Task.checkCancellation()
+            let result: AlertEvidenceCaptureResult
+            if let evidenceCaptureOverride {
+                result = try await evidenceCaptureOverride(
+                    request.alertId,
+                    request.timestamp
+                )
+            } else {
+                guard let eventStore else { return }
+                if let evidencePrefixBarrier,
+                   request.admittedEventPrefixGeneration > 0,
+                   !(await evidencePrefixBarrier(
+                        request.admittedEventPrefixGeneration
+                   )) {
+                    evidencePrefixBarrierTimeouts += 1
+                }
+                try Task.checkCancellation()
+                var candidates: [AlertEvidenceCandidate] = []
+                if let event = request.triggeringEvent,
+                   let trigger = Self.evidenceCandidate(event: event) {
+                    candidates.append(trigger)
+                }
+                let remaining = max(
+                    0,
+                    AlertEvidencePolicy.maximumEventsPerAlert
+                        - candidates.count
+                )
+                candidates.append(contentsOf:
+                    try await eventStore.alertEvidenceCandidates(
+                        alertTimestamp: request.timestamp,
+                        maxRows: remaining
+                    )
+                )
+                try Task.checkCancellation()
+                var seen: Set<String> = []
+                candidates = candidates.filter {
+                    seen.insert($0.eventId.lowercased()).inserted
+                }
+                result = try await alertStore.captureEvidence(
+                    alertId: request.alertId,
+                    candidates: candidates,
+                    maxBytes: evidenceBudgetBytes
+                )
+            }
+            evidenceRowsCaptured += result.insertedRows
+            evidenceRowsPruned += result.prunedRows
+            evidenceCaptureCompleted += 1
+        } catch {
+            evidenceCaptureFailures += 1
+            logger.warning("Evidence capture failed for alert \(request.alertId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private nonisolated static func evidenceCandidate(
+        event: Event
+    ) -> AlertEvidenceCandidate? {
+        guard let data = try? JSONEncoder().encode(event),
+              !data.isEmpty,
+              data.count <= AlertEvidencePolicy.maximumRawPayloadBytes else {
+            return nil
+        }
+        return AlertEvidenceCandidate(
+            eventId: event.id.uuidString,
+            timestamp: event.timestamp,
+            rawJSON: String(decoding: data, as: UTF8.self)
+        )
     }
 
     // MARK: - Single alert with event context
@@ -240,6 +433,8 @@ public actor AlertSink {
         event: Event,
         dedupProcessPath: String? = nil
     ) async throws -> Bool {
+        guard beginAlertAdmission(offers: 1) else { return false }
+        defer { finishAlertAdmission() }
         // v1.18: built-in maccrab.* rule mute / severity override.
         guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         // Most detections dedup on the triggering executable. Correlators may
@@ -269,6 +464,14 @@ public actor AlertSink {
             reservation = reserved
         }
 
+        // Shutdown may seal the sink while the deduplicator actor hop above is
+        // suspended. Do not begin a new durable write after that boundary.
+        guard alertAccepting else {
+            alertsRejectedAfterSeal += 1
+            await deduplicator.rollbackEmission(reservation)
+            return false
+        }
+
         do {
             try await alertStore.insert(alert: enriched)
         } catch {
@@ -280,7 +483,11 @@ public actor AlertSink {
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
         alertCounter.increment()
-        await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
+        await enqueueEvidenceCapture(
+            alertId: enriched.id,
+            timestamp: enriched.timestamp,
+            triggeringEvent: event
+        )
         return true
     }
 
@@ -295,6 +502,8 @@ public actor AlertSink {
     /// dashboards consolidating multiple hosts' alerts.
     @discardableResult
     public func submit(alert: Alert) async throws -> Bool {
+        guard beginAlertAdmission(offers: 1) else { return false }
+        defer { finishAlertAdmission() }
         // v1.18: built-in maccrab.* rule mute / severity override.
         guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         let dedupKey = settled.processPath ?? settled.ruleId
@@ -313,6 +522,11 @@ public actor AlertSink {
         case .reserved(let reserved):
             reservation = reserved
         }
+        guard alertAccepting else {
+            alertsRejectedAfterSeal += 1
+            await deduplicator.rollbackEmission(reservation)
+            return false
+        }
         do {
             try await alertStore.insert(alert: enriched)
         } catch {
@@ -324,7 +538,10 @@ public actor AlertSink {
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
         alertCounter.increment()
-        await captureEvidenceIfPossible(alertId: enriched.id, timestamp: enriched.timestamp)
+        await enqueueEvidenceCapture(
+            alertId: enriched.id,
+            timestamp: enriched.timestamp
+        )
         return true
     }
 
@@ -347,6 +564,8 @@ public actor AlertSink {
     @discardableResult
     public func insertEngineBatch(alerts: [Alert], event: Event? = nil) async throws -> [Alert] {
         guard !alerts.isEmpty else { return [] }
+        guard beginAlertAdmission(offers: alerts.count) else { return [] }
+        defer { finishAlertAdmission() }
         // v1.19.3 FP recalibration runs AFTER enrichment (so the dev-tooling
         // lineage check sees each alert's parent executable) and here too so the
         // engine batch path shares the same chokepoint as direct emissions.
@@ -384,6 +603,13 @@ public actor AlertSink {
         // The whole batch can collapse into an already-emitted direct alert on
         // the same evidence; don't hand an empty array to the store.
         guard !toInsert.isEmpty else { return [] }
+        guard alertAccepting else {
+            alertsRejectedAfterSeal += toInsert.count
+            for reservation in reservations {
+                await deduplicator.rollbackEmission(reservation)
+            }
+            return []
+        }
         let persistedAlerts: [Alert]
         do {
             persistedAlerts = try await alertStore.insert(alerts: toInsert)
@@ -403,9 +629,10 @@ public actor AlertSink {
             insertedCount += partial.committedAlerts.count
             alertCounter.add(partial.committedAlerts.count)
             for alert in partial.committedAlerts {
-                await captureEvidenceIfPossible(
+                await enqueueEvidenceCapture(
                     alertId: alert.id,
-                    timestamp: alert.timestamp
+                    timestamp: alert.timestamp,
+                    triggeringEvent: event
                 )
             }
             throw partial
@@ -426,10 +653,14 @@ public actor AlertSink {
         // `toInsert` is the true emitted set.
         alertCounter.add(persistedAlerts.count)
         // Evidence capture is per-alert because each alert's window center
-        // is its own timestamp. The PRIMARY KEY (alert_id, id) on
+        // is its own timestamp. The PRIMARY KEY (alert_id, event_id) on
         // alert_evidence dedupes overlapping windows automatically.
         for alert in persistedAlerts {
-            await captureEvidenceIfPossible(alertId: alert.id, timestamp: alert.timestamp)
+            await enqueueEvidenceCapture(
+                alertId: alert.id,
+                timestamp: alert.timestamp,
+                triggeringEvent: event
+            )
         }
         // This is the authoritative post-collapse, post-commit set. Callers
         // must use it for follow-up work (not the pre-sink candidate batch),
@@ -441,6 +672,85 @@ public actor AlertSink {
 
     public func stats() -> (inserted: Int, suppressed: Int) {
         (insertedCount, suppressedCount)
+    }
+
+    public func evidenceStats() -> AlertEvidenceCaptureTelemetry {
+        AlertEvidenceCaptureTelemetry(
+            offered: evidenceCaptureOffered,
+            completed: evidenceCaptureCompleted,
+            shed: evidenceCaptureShed,
+            shedAtShutdownDeadline: evidenceShedAtShutdownDeadline,
+            failures: evidenceCaptureFailures,
+            pending: evidenceQueueCount,
+            inFlight: evidenceCaptureInFlight,
+            capturedRows: evidenceRowsCaptured,
+            prunedRows: evidenceRowsPruned,
+            budgetBytes: evidenceBudgetBytes,
+            queueCapacity: evidenceQueueCapacity,
+            accepting: evidenceAccepting,
+            prefixBarrierTimeouts: evidencePrefixBarrierTimeouts,
+            alertsRejectedAfterSeal: alertsRejectedAfterSeal,
+            alertAdmissionsInFlight: alertAdmissionsInFlight
+        )
+    }
+
+    /// Join all work offered before this call without sealing the lane. Tests,
+    /// diagnostics, and an explicit flush request use this; graceful process
+    /// teardown should call `shutdownEvidenceCapture()` instead.
+    public func flushEvidenceCapture() async {
+        startEvidenceWorkerIfNeeded()
+        while let worker = evidenceWorker {
+            await worker.value
+        }
+    }
+
+    /// Atomically seal alert admission and evidence admission, then wait only to
+    /// the supplied deadline for work accepted before the seal. Queued evidence
+    /// remaining at the deadline is moved to the terminal shed ledger; one
+    /// cancellation-uncooperative in-flight job remains honestly `pending`.
+    /// Call only after the producer lifecycles have been joined or cancelled.
+    @discardableResult
+    public func shutdownEvidenceCapture(
+        timeout: Duration = .seconds(5)
+    ) async -> AlertSinkShutdownResult {
+        alertAccepting = false
+        evidenceAccepting = false
+        startEvidenceWorkerIfNeeded()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while alertAdmissionsInFlight > 0 || evidenceWorker != nil {
+            guard !Task.isCancelled, clock.now < deadline else { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let expired = alertAdmissionsInFlight > 0 || evidenceWorker != nil
+        var shedAtDeadline = 0
+        if expired, evidenceQueueCount > 0 {
+            shedAtDeadline = evidenceQueueCount
+            while dequeueEvidenceCapture() != nil {}
+            evidenceCaptureShed += shedAtDeadline
+            evidenceShedAtShutdownDeadline += shedAtDeadline
+        }
+        if expired {
+            evidenceWorker?.cancel()
+        }
+
+        return AlertSinkShutdownResult(
+            completed: evidenceCaptureCompleted,
+            failed: evidenceCaptureFailures,
+            shedAtDeadline: shedAtDeadline,
+            pending: evidenceQueueCount + evidenceCaptureInFlight,
+            alertAdmissionsInFlight: alertAdmissionsInFlight,
+            alertsRejectedAfterSeal: alertsRejectedAfterSeal,
+            deadlineExpired: expired
+        )
+    }
+
+    /// Apply a SIGHUP-reloaded evidence ownership budget before the next
+    /// capture. AlertStore's combined family admission is updated separately.
+    public func updateEvidenceBudget(maxBytes: Int64) {
+        evidenceBudgetBytes = max(0, maxBytes)
     }
 
     // MARK: - Attribution enrichment (schema v5)

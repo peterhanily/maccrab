@@ -193,21 +193,95 @@ public actor AgentLineageService {
 
     private var sessions: [Int32: SessionRecord] = [:]
 
-    /// In-flight guard for `writeSnapshot`. The heartbeat timer fires
-    /// every 30 s and dispatches a `Task` to encode + write. Without
-    /// this guard a slow disk (full /Library, contention with VACUUM,
-    /// high IO load) would queue successive Tasks indefinitely — each
-    /// holding a capture of the actor and the full encoded payload —
-    /// until the actor mailbox grew unbounded. With the guard we drop
-    /// snapshots while a previous write is still in flight; the
-    /// dashboard sees the stale-by-30s threshold but never a memory
-    /// blow-up.
-    private var snapshotWriteInFlight: Bool = false
+    /// Snapshot publication is serialized but its JSON encoding and disk I/O
+    /// run outside this actor. The previous synchronous implementation kept
+    /// the actor occupied for the entire encode/write, so `record` and
+    /// `endSession` could stall behind a slow disk. Its `snapshotWriteInFlight`
+    /// guard could not help: a synchronous actor method cannot be re-entered
+    /// while the write is running, so the guard was never observed as true.
+    ///
+    /// At most one immutable snapshot is in flight and one latest snapshot is
+    /// pending. A newer pending generation supersedes the older pending copy;
+    /// this bounds retained snapshot memory while ensuring the writer catches
+    /// up to the newest state after a slow publication completes. The original
+    /// caller remains joined until the in-flight and pending generations drain,
+    /// so daemon timer shutdown still owns every publication task.
+    private let snapshotWriter: CoalescingSnapshotWriter<LineageSnapshot>
+
+    public struct SnapshotWriteTelemetry: Sendable, Equatable {
+        public let offered: UInt64
+        public let started: UInt64
+        public let completed: UInt64
+        public let failed: UInt64
+        public let superseded: UInt64
+        public let inFlight: Int
+        public let pending: Int
+
+        public var conserved: Bool {
+            offered == completed
+                &+ failed
+                &+ superseded
+                &+ UInt64(inFlight)
+                &+ UInt64(pending)
+        }
+    }
 
     public init(maxEventsPerSession: Int = defaultMaxEventsPerSession,
                 maxSessions: Int = defaultMaxSessions) {
         self.maxEventsPerSession = maxEventsPerSession
         self.maxSessions = maxSessions
+        self.snapshotWriter = CoalescingSnapshotWriter(
+            category: "agent-lineage-snapshot",
+            persistence: Self.persistSnapshot
+        )
+    }
+
+    init(
+        maxEventsPerSession: Int = defaultMaxEventsPerSession,
+        maxSessions: Int = defaultMaxSessions,
+        snapshotPersistence: @escaping @Sendable (LineageSnapshot, String) -> String?
+    ) {
+        self.maxEventsPerSession = maxEventsPerSession
+        self.maxSessions = maxSessions
+        self.snapshotWriter = CoalescingSnapshotWriter(
+            category: "agent-lineage-snapshot-test",
+            persistence: snapshotPersistence
+        )
+    }
+
+    /// Canonical file-path materialisation contract for the agent timeline.
+    ///
+    /// PromptIntentBridge is the security consumer of lineage file paths: it
+    /// reads recent `.fileRead` context and inspects that bounded text corpus.
+    /// FileInjectionScanner already owns the exact completed-text event
+    /// contract, so lineage reuses it and creates no additional callback
+    /// demand. Early CREATE/WRITE callbacks, binary/PDF/Office files, and raw
+    /// temp/cache churn do not justify path-bearing timeline entries; fixed
+    /// callback telemetry can count them without retaining private paths.
+    /// Credential-shaped paths are never persisted here.
+    public nonisolated static func materializedFileEventKind(
+        path: String,
+        eventAction: String
+    ) -> AgentEvent.Kind? {
+        guard !CredentialFence.isPrivateAgentLineagePath(path) else {
+            return nil
+        }
+        guard FileInjectionScanner.isEligible(
+            path: path,
+            eventAction: eventAction
+        ) else {
+            return nil
+        }
+        switch eventAction.lowercased() {
+        case "open":
+            return .fileRead(path: path)
+        case "close_modified":
+            return .fileWrite(path: path)
+        default:
+            // Kept defensive even though isEligible currently enforces the
+            // same closed action set.
+            return nil
+        }
     }
 
     // MARK: Session lifecycle
@@ -306,61 +380,52 @@ public actor AgentLineageService {
         }
     }
 
-    /// Serialize the live in-memory state to JSON at `path`. Atomic
-    /// via temp+rename — the dashboard reader never observes a partial
-    /// write. World-readable so the user-side dashboard can pick it up
-    /// across the privilege boundary.
-    ///
-    /// Drops the write if a previous one is still in flight (slow
-    /// disk, contention with VACUUM). At the default caps the bound on
-    /// in-memory state is `32 sessions × 10_000 events × ~120 B` ≈ 38 MB
-    /// — real workloads stay under 1 MB but the guard matters because
-    /// the heartbeat fires every 30 s and we can't afford to queue
-    /// snapshots if a single write stalls.
-    public func writeSnapshot(to path: String) {
-        guard !snapshotWriteInFlight else {
-            logger.info("Skipping lineage snapshot — previous write still in flight")
-            return
-        }
-        snapshotWriteInFlight = true
-        defer { snapshotWriteInFlight = false }
-
+    /// Publish an immutable copy of the live state. Snapshot assembly is
+    /// bounded by the session/event caps and occurs on this actor; JSON encoding
+    /// and descriptor-safe atomic replacement execute in a detached child and
+    /// therefore cannot block event recording. Concurrent timer calls retain
+    /// only their newest pending generation.
+    public func writeSnapshot(to path: String) async {
         let snapshot = LineageSnapshot(writtenAt: Date(), sessions: allSessions())
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        await snapshotWriter.publish(snapshot, to: path)
+    }
 
-        // Match the heartbeat-write pattern in DaemonTimers: try a
-        // direct rename first (avoids the brief "destination missing"
-        // window between removeItem and moveItem). Fall back to
-        // remove+rename only if the direct path failed because the
-        // destination already exists. `Data.write(_:options:.atomic)`
-        // already publishes the tmp file atomically, so this is a
-        // 2-stage rather than 3-stage atomic.
-        let tmpPath = path + ".tmp"
+    /// Fixed-cardinality conservation telemetry for heartbeat/UI plumbing.
+    public func snapshotWriteTelemetry() async -> SnapshotWriteTelemetry {
+        let telemetry = await snapshotWriter.telemetry()
+        return SnapshotWriteTelemetry(
+            offered: telemetry.offered,
+            started: telemetry.started,
+            completed: telemetry.completed,
+            failed: telemetry.failed,
+            superseded: telemetry.superseded,
+            inFlight: telemetry.inFlight,
+            pending: telemetry.pending
+        )
+    }
+
+    /// Encode and atomically replace outside the lineage actor. The secure
+    /// writer refuses symlink/hard-link/foreign-owned destinations and fsyncs
+    /// complete bytes before publication. The admin group keeps the
+    /// user-context dashboard readable without making private lineage data
+    /// world-readable.
+    @Sendable
+    private nonisolated static func persistSnapshot(
+        _ snapshot: LineageSnapshot,
+        to path: String
+    ) -> String? {
         do {
-            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
-            do {
-                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
-            } catch {
-                try? FileManager.default.removeItem(atPath: path)
-                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
-            }
-            // v1.12.0 RC3 fix (Sec-H1): mode 0o640 + admin group (gid
-            // 80 on macOS). The snapshot carries per-AI-agent file-
-            // read / network / processSpawn history including private
-            // project paths and internal hostnames. Pre-fix 0o644
-            // made it world-readable — any local user could inspect
-            // another user's AI agent's behavioral history. 0o640
-            // + admin group keeps the menubar app (admin-context
-            // user) able to read while denying non-admin local users.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(snapshot)
+            try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o640)
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o640, .groupOwnerAccountID: 80],
                 ofItemAtPath: path
             )
+            return nil
         } catch {
-            logger.warning("Failed to write agent lineage snapshot: \(error.localizedDescription, privacy: .public)")
-            // Best-effort cleanup of the orphaned tmp file so we don't
-            // leak partial state across daemon restarts.
-            try? FileManager.default.removeItem(atPath: tmpPath)
+            return String(error.localizedDescription.prefix(512))
         }
     }
 

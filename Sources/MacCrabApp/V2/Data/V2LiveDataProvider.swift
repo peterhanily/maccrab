@@ -756,9 +756,9 @@ public final class V2LiveDataProvider: V2DataProvider {
         // profiled. Detached off-MainActor like the permissions()/heartbeat reads.
         let baselinePath = dataDir.map { $0 + "/mcp_baselines.json" }
         return await Task.detached(priority: .userInitiated) {
-            let baselineKeys: Set<String> = baselinePath
+            let baselineKeys = baselinePath
                 .flatMap { MCPBaselineService.readSnapshot(at: $0) }
-                .map { Set($0.baselines.map(\.serverKey)) } ?? []
+                .map { Self.liveMCPBaselineKeys(from: $0, now: Date()) } ?? []
             var byKey: [String: V2MockMCP] = [:]
             for cfg in configs {
                 let path = (cfg.path as NSString).expandingTildeInPath
@@ -826,6 +826,22 @@ public final class V2LiveDataProvider: V2DataProvider {
         return "localhost"
     }
 
+    /// Only a current v2 daemon snapshot proves that the running engine has
+    /// observed a server. A stale file from a stopped/previous daemon instance
+    /// must not make the UI claim the server is presently profiled.
+    nonisolated static func liveMCPBaselineKeys(
+        from snapshot: MCPBaselineService.BaselineSnapshot,
+        now: Date,
+        maximumAge: TimeInterval = 120
+    ) -> Set<String> {
+        let age = now.timeIntervalSince(snapshot.writtenAt)
+        guard snapshot.schemaVersion
+                == MCPBaselineService.BaselineSnapshot.currentSchemaVersion,
+              age >= -5,
+              age <= maximumAge else { return [] }
+        return Set(snapshot.baselines.map(\.serverKey))
+    }
+
     // v1.11.0: collectors + permissions wired from existing daemon
     // snapshots (heartbeat_rich.json + tcc_snapshot.json). Packages
     // remains empty pending the v1.11.x PackageScanner; integrations
@@ -884,7 +900,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
-    private static let requiredTCCServices: Set<String> = [
+    nonisolated private static let requiredTCCServices: Set<String> = [
         "kTCCServiceSystemPolicyAllFiles",  // Full Disk Access
         "kTCCServiceEndpointSecurityClient",
     ]
@@ -894,7 +910,7 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// builds) and the menubar app. Matches the closed set used by
     /// AppState.querySysextFDAInDB — a prefix/LIKE match would collide
     /// with any future `com.maccrab.agent.*`.
-    private static let macCrabTCCClients: Set<String> = [
+    nonisolated private static let macCrabTCCClients: Set<String> = [
         "com.maccrab.agent",
         "com.maccrab.agent.systemextension",
         "com.maccrab.app",

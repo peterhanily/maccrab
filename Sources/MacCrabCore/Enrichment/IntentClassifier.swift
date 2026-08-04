@@ -1,18 +1,17 @@
 // IntentClassifier.swift
 // MacCrabCore
 //
-// LLM-driven intent classifier for package install / process behavior
-// traces. Takes a structured behavior summary and returns a calibrated
-// IntentLabel verdict.
+// Advisory intent classifier for package install / process behavior
+// traces. Takes a structured behavior summary and returns a bounded advisory
+// label plus an uncalibrated model/heuristic score.
 //
 // Why local-first: per NDSS 2025 "Mind the Gap" benchmarks, Llama 3.3
 // 70B hits F1 0.77 / GPT-4.1 hits F1 0.99 on malicious-PyPI
 // classification. We use the configured LLM backend (typically Ollama
-// for privacy) as a primary filter and surface a confidence-calibrated
-// abstention path when the model is uncertain — Wen et al. TACL 2025
-// showed temperature/Platt calibration alone fails on this task, so we
-// gate the verdict on a structured-output guard (the LLM MUST return
-// the JSON schema; if it doesn't, we mark `.unknown`).
+// for privacy) as an advisory classifier and surface an abstention path when
+// the model declines. The backend-provided 0...1 value is not an empirical
+// probability: MacCrab has no representative calibration corpus for it. The
+// LLM MUST return the JSON schema; otherwise the result is `.unknown`.
 //
 // Prompt-injection defense: package READMEs / postinstall scripts are
 // indirect-injection vectors (OWASP LLM01:2025). We delimit untrusted
@@ -44,7 +43,8 @@ public actor IntentClassifier {
 
     public struct ClassificationResult: Sendable {
         public let label: IntentLabel
-        public let confidence: Double      // 0.0-1.0
+        /// Backend/heuristic score in 0...1. This is not calibrated probability.
+        public let confidence: Double
         public let reasons: [String]       // top-3 contributing signals
         public let abstained: Bool         // true when label == .unknown
         public let provider: String        // which LLM backend answered
@@ -119,15 +119,23 @@ public actor IntentClassifier {
     public func classify(_ brief: BehaviorBrief) async -> ClassificationResult {
         // First, try the LLM if we have one.
         if let service = llmService {
+            let semanticToken = await service.beginDownstreamValidation(
+                feature: .intentClassification
+            )
             let systemPrompt = Self.systemPrompt
             let userPrompt = Self.makeUserPrompt(brief)
             if let enhancement = await service.query(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 maxTokens: 600,
-                temperature: 0.1
+                temperature: 0.1,
+                feature: .intentClassification
             ) {
                 if let parsed = Self.parseVerdict(enhancement.response) {
+                    _ = await service.finishDownstreamValidation(
+                        token: semanticToken,
+                        outcome: .accepted
+                    )
                     return ClassificationResult(
                         label: parsed.label,
                         confidence: parsed.confidence,
@@ -139,6 +147,10 @@ public actor IntentClassifier {
                 }
                 logger.warning("LLM intent verdict parse failed; falling back to heuristics")
             }
+            _ = await service.finishDownstreamValidation(
+                token: semanticToken,
+                outcome: .finalRejection
+            )
         }
         if useHeuristicFallback {
             return Self.heuristicClassify(brief)
@@ -187,10 +199,40 @@ public actor IntentClassifier {
         // newlines + "Ignore previous instructions" in their package
         // name, it lands inside a JSON string literal where the
         // classifier sees it as evidence, not orders.
+        let boundedBrief = BehaviorBrief(
+            packageName: bounded(brief.packageName, bytes: 512),
+            packageRegistry: bounded(brief.packageRegistry, bytes: 128),
+            packageVersion: brief.packageVersion.map { bounded($0, bytes: 128) },
+            installerLineage: bounded(brief.installerLineage, count: 16, bytes: 512),
+            credentialsRead: bounded(brief.credentialsRead, count: 16, bytes: 1_024),
+            networkEgress: bounded(brief.networkEgress, count: 16, bytes: 512),
+            filesWritten: bounded(brief.filesWritten, count: 16, bytes: 1_024),
+            processesSpawned: bounded(brief.processesSpawned, count: 16, bytes: 512),
+            hasObfuscatedContent: brief.hasObfuscatedContent,
+            hasBundledRuntime: brief.hasBundledRuntime,
+            hasLanguageMismatch: brief.hasLanguageMismatch,
+            aiAgentTriggered: brief.aiAgentTriggered
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let body = (try? encoder.encode(brief)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let body = (try? encoder.encode(boundedBrief)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return "Classify the intent of this package install. BRIEF:\n\n\(body)\n\nRespond with JSON only."
+    }
+
+    private static func bounded(_ value: String, bytes: Int) -> String {
+        guard value.utf8.count > bytes else { return value }
+        var result = ""
+        result.reserveCapacity(min(value.count, bytes))
+        for character in value {
+            let candidate = result + String(character)
+            if candidate.utf8.count > bytes { break }
+            result = candidate
+        }
+        return result
+    }
+
+    private static func bounded(_ values: [String], count: Int, bytes: Int) -> [String] {
+        values.prefix(count).map { bounded($0, bytes: bytes) }
     }
 
     // MARK: - Response parsing
@@ -202,20 +244,53 @@ public actor IntentClassifier {
     }
 
     static func parseVerdict(_ response: String) -> ParsedVerdict? {
-        // Some local models wrap JSON in ``` fences; strip them defensively.
-        let cleaned = response
-            .replacingOccurrences(of: "```json", with: "")
-            .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = cleaned.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let labelRaw = obj["label"] as? String,
-              let label = IntentLabel(rawValue: labelRaw) else {
+        struct Wire: Decodable {
+            let label: IntentLabel
+            let confidence: Double
+            let reasons: [String]
+        }
+
+        var cleaned = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("```json") {
+            cleaned.removeFirst("```json".count)
+        } else if cleaned.hasPrefix("```") {
+            cleaned.removeFirst(3)
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasSuffix("```") {
+            cleaned.removeLast(3)
+            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard cleaned.utf8.count <= 16_384,
+              let data = cleaned.data(using: .utf8),
+              let wire = try? JSONDecoder().decode(Wire.self, from: data),
+              wire.confidence.isFinite,
+              (0.0...1.0).contains(wire.confidence),
+              (1...3).contains(wire.reasons.count),
+              wire.reasons.allSatisfy(isSafeReason) else {
             return nil
         }
-        let confidence = (obj["confidence"] as? Double) ?? 0.5
-        let reasons = (obj["reasons"] as? [String]) ?? []
-        return ParsedVerdict(label: label, confidence: confidence, reasons: reasons)
+        return ParsedVerdict(
+            label: wire.label,
+            confidence: wire.confidence,
+            reasons: wire.reasons
+        )
+    }
+
+    private static func isSafeReason(_ value: String) -> Bool {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.utf8.count <= 1_024,
+              LLMService.isSafePersistedAdvisory(value) else { return false }
+        return !value.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x00...0x1F, 0x7F...0x9F,
+                 0x200B...0x200F, 0x202A...0x202E,
+                 0x2060...0x206F, 0xFEFF, 0xE0000...0xE007F:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Heuristic fallback

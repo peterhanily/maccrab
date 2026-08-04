@@ -3,6 +3,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import MacCrabCore
 
 public struct V2SystemWorkspace: View {
     @ObservedObject var state: V2DashboardState
@@ -121,6 +122,87 @@ public struct V2SystemWorkspace: View {
                 if let browser = heartbeat?.browserInventory, browser.degraded {
                     browserInventoryDegradedBanner(browser)
                 }
+                if let checkpoint = heartbeat?.sequenceCheckpoint,
+                   checkpoint.degraded {
+                    sequenceCheckpointDegradedBanner(checkpoint)
+                }
+                if let llm = heartbeat?.llm, llm.runtimeRequiresAttention {
+                    llmRuntimeDegradedBanner(llm)
+                }
+                if let timers = heartbeat?.timerLifecycle,
+                   timers.featureDegraded {
+                    lifecycleDegradedBanner(
+                        timers,
+                        title: "Engine maintenance lifecycle degraded",
+                        workLabel: "maintenance timer",
+                        impact: "A maintenance or retention operation was lost, did not join cleanly, or could not be accounted for completely. Live event detection may continue, but the affected maintenance guarantee is not healthy."
+                    )
+                }
+                if let liveness = heartbeat?.livenessTimerLifecycle,
+                   liveness.featureDegraded {
+                    lifecycleDegradedBanner(
+                        liveness,
+                        title: "Liveness writer lifecycle degraded",
+                        workLabel: "liveness heartbeat",
+                        impact: "The independent liveness writer lost work, did not join cleanly, or reported incomplete accounting, so external process-health observations may be incomplete."
+                    )
+                }
+                if let startup = heartbeat?.startupWorkLifecycle,
+                   startup.featureDegraded {
+                    lifecycleDegradedBanner(
+                        startup,
+                        title: "Startup work lifecycle degraded",
+                        workLabel: "startup worker",
+                        impact: "A boot hydration or long-lived startup worker was lost, did not join cleanly, or reported incomplete accounting. Review the named counters before trusting that startup features are complete."
+                    )
+                }
+                if let detection = heartbeat?.detectionWorkLifecycle,
+                   detection.detectionProtectionDegraded {
+                    lifecycleDegradedBanner(
+                        detection,
+                        title: "Protection degraded — detection work lost",
+                        workLabel: "detection task",
+                        impact: "A security decision was rejected after close, shed, left unjoined, or could not be accounted for completely. Some derived detections may be missing; lossless inline overload fallback and intentional coalescing are not counted as loss."
+                    )
+                }
+                if let advisory = heartbeat?.advisoryWorkLifecycle,
+                   advisory.featureDegraded {
+                    lifecycleDegradedBanner(
+                        advisory,
+                        title: "AI advisory features degraded",
+                        workLabel: "advisory task",
+                        impact: "Optional model-backed explanations or enrichments shed work or reported incomplete ownership. Deterministic detection and locally persisted alerts continue."
+                    )
+                }
+                if let output = heartbeat?.outputWorkLifecycle,
+                   output.featureDegraded {
+                    lifecycleDegradedBanner(
+                        output,
+                        title: "Alert delivery features degraded",
+                        workLabel: "output task",
+                        impact: "A notification, webhook, syslog, or additional output may not have been delivered or fully accounted for. Detection and local alert persistence continue."
+                    )
+                }
+                if splitWorkLifecycleUnavailable,
+                   let legacy = heartbeat?.legacyDerivedWorkLifecycle,
+                   legacy.featureDegraded {
+                    lifecycleDegradedBanner(
+                        legacy,
+                        title: "Legacy derived-work lifecycle degraded",
+                        workLabel: "derived task",
+                        impact: "This older engine reports one aggregate lane, so MacCrab cannot distinguish detection loss from advisory or delivery loss. Upgrade for exact attribution."
+                    )
+                }
+                if let otlp = heartbeat?.otlpReceiverLifecycle,
+                   otlp.featureDegraded {
+                    otlpReceiverLifecycleBanner(otlp)
+                }
+                if let budget = heartbeat?.alertEvidenceBudget,
+                   budget.legacyTransitionMeasurementFailed == true
+                    || (budget.legacyTransitionReserveBytes ?? 0) > 0
+                    || budget.captureDegraded {
+                    alertEvidenceTransitionBanner(budget)
+                }
                 if let storage = heartbeat?.traceGraphStorageAdmission,
                    storage.evidenceUnavailable {
                     traceGraphStorageBanner(storage)
@@ -222,6 +304,45 @@ public struct V2SystemWorkspace: View {
             }
             if let browserInventory = hb.browserInventory {
                 hbDict["browser_inventory"] = browserInventory.diagnosticDictionary
+            }
+            if let sequenceCheckpoint = hb.sequenceCheckpoint {
+                hbDict["sequence_checkpoint"] = sequenceCheckpoint.diagnosticDictionary
+            }
+            if let llm = hb.llm {
+                hbDict["llm"] = llm.diagnosticDictionary
+            }
+            if let traceGraph = hb.traceGraphStorageAdmission {
+                hbDict["tracegraph_storage_admission"] = traceGraph.diagnosticDictionary
+            }
+            if let budget = hb.alertEvidenceBudget,
+               let data = try? JSONEncoder().encode(budget),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                hbDict["alert_evidence_budget"] = object
+            }
+            if let timers = hb.timerLifecycle,
+               let data = try? JSONEncoder().encode(timers),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                hbDict["timer_lifecycle"] = object
+            }
+            let lifecycleBlocks: [(String, MacCrabCore.HeartbeatSnapshot.TimerLifecycle?)] = [
+                ("liveness_timer_lifecycle", hb.livenessTimerLifecycle),
+                ("startup_work_lifecycle", hb.startupWorkLifecycle),
+                ("detection_work_lifecycle", hb.detectionWorkLifecycle),
+                ("advisory_work_lifecycle", hb.advisoryWorkLifecycle),
+                ("output_work_lifecycle", hb.outputWorkLifecycle),
+                ("derived_work_lifecycle", hb.legacyDerivedWorkLifecycle),
+            ]
+            for (key, lifecycle) in lifecycleBlocks {
+                if let lifecycle,
+                   let data = try? JSONEncoder().encode(lifecycle),
+                   let object = try? JSONSerialization.jsonObject(with: data) {
+                    hbDict[key] = object
+                }
+            }
+            if let otlp = hb.otlpReceiverLifecycle,
+               let data = try? JSONEncoder().encode(otlp),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                hbDict["otlp_receiver_lifecycle"] = object
             }
             diag["heartbeat"] = hbDict
             diag["collectors"] = hb.collectors.map { c -> [String: Any] in
@@ -342,6 +463,43 @@ public struct V2SystemWorkspace: View {
         .v2Panel()
     }
 
+    private func sequenceCheckpointDegradedBanner(
+        _ checkpoint: V2HeartbeatSnapshot.SequenceCheckpoint
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(V2Theme.warning.opacity(0.18))
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .foregroundStyle(V2Theme.warning)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(String(
+                        localized: "system.sequenceContinuityDegradedTitle",
+                        defaultValue: "Sequence restart continuity degraded"
+                    ))
+                    .scaledSystem(13, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(
+                        String(
+                            localized: "system.sequenceContinuityGapChip",
+                            defaultValue: "Detection continuity gap"
+                        ),
+                        kind: .degraded
+                    )
+                }
+                Text(checkpoint.operatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
     /// TraceGraph can be storage-shed while the rest of detection and the
     /// heartbeat remain healthy. Keep that forensic-evidence gap prominent;
     /// an empty Investigation view must never be mistaken for "no activity".
@@ -359,8 +517,12 @@ public struct V2SystemWorkspace: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(String(
-                        localized: "system.traceGraphStoragePausedTitle",
-                        defaultValue: "TraceGraph evidence persistence paused"
+                        localized: storage.graphWriteDegraded
+                            ? "system.traceGraphWriteDegradedTitle"
+                            : "system.traceGraphStoragePausedTitle",
+                        defaultValue: storage.graphWriteDegraded
+                            ? "TraceGraph evidence writes degraded"
+                            : "TraceGraph evidence persistence paused"
                     ))
                     .scaledSystem(13, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
@@ -370,6 +532,155 @@ public struct V2SystemWorkspace: View {
                     )
                 }
                 Text(storage.operatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    /// Content-free runtime accounting for optional AI features. This banner is
+    /// deliberately independent of the provider's current reachability: a later
+    /// successful call cannot erase unattributed requests, failed semantic
+    /// validation, or a broken conservation ledger from this process epoch.
+    private func llmRuntimeDegradedBanner(
+        _ llm: V2HeartbeatSnapshot.LLMHealth
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(V2Theme.warning.opacity(0.18))
+                Image(systemName: "brain.head.profile")
+                    .foregroundStyle(V2Theme.warning)
+                    .scaledSystem(16, weight: .semibold)
+            }
+            .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(String(
+                        localized: "system.llmRuntimeDegradedTitle",
+                        defaultValue: "AI runtime quality needs attention"
+                    ))
+                    .scaledSystem(13, weight: .semibold)
+                    .foregroundStyle(V2Theme.primaryText)
+                    V2StatusChip(
+                        String(localized: "system.llmRuntimeDegradedChip", defaultValue: "Fail-closed"),
+                        kind: .warning
+                    )
+                }
+                Text(llm.runtimeOperatorDetail)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    private func lifecycleDegradedBanner(
+        _ timers: MacCrabCore.HeartbeatSnapshot.TimerLifecycle,
+        title: String,
+        workLabel: String,
+        impact: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "timer")
+                .foregroundStyle(V2Theme.warning)
+                .scaledSystem(20, weight: .semibold)
+                .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .scaledSystem(13, weight: .semibold)
+                Text("\(impact) Offered \(timers.offeredHandlersTotal ?? 0), accepted \(timers.acceptedHandlersTotal ?? 0), completed \(timers.completedHandlersTotal ?? 0), in flight \(timers.inFlightHandlers ?? 0) of \(timers.maximumInFlightHandlers ?? 0), rejected \(timers.rejectedHandlersTotal ?? 0) (closed \(timers.closedRejectedHandlersTotal ?? 0), overload shed \(timers.overloadShedHandlersTotal ?? 0)), coalesced \(timers.coalescedHandlersTotal ?? 0), lossless inline fallback \(timers.inlineFallbackHandlersTotal ?? 0). Accepted conservation \(timers.conservesAcceptedHandlers.map { String($0) } ?? "unknown"); offered conservation \(timers.conservesOfferedHandlers.map { String($0) } ?? "unknown"). Current in-flight \(workLabel) work is normal when both conservation ledgers hold.")
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    private var splitWorkLifecycleUnavailable: Bool {
+        guard let heartbeat else { return false }
+        return heartbeat.livenessTimerLifecycle == nil
+            && heartbeat.startupWorkLifecycle == nil
+            && heartbeat.detectionWorkLifecycle == nil
+            && heartbeat.advisoryWorkLifecycle == nil
+            && heartbeat.outputWorkLifecycle == nil
+    }
+
+    private func otlpReceiverLifecycleBanner(
+        _ lifecycle: MacCrabCore.HeartbeatSnapshot.OTLPReceiverLifecycle
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .foregroundStyle(V2Theme.warning)
+                .scaledSystem(20, weight: .semibold)
+                .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(
+                    localized: "system.otlpLifecycleDegradedTitle",
+                    defaultValue: "Agent Trace receiver feature degraded"
+                ))
+                    .scaledSystem(13, weight: .semibold)
+                Text(String(
+                    localized: "system.otlpLifecycleDegradedDetail",
+                    defaultValue: "The loopback OTLP receiver rejected unauthenticated/self-reported input, broke or incompletely reported an ownership ledger, retained work after sealing, left a lifecycle operation in progress, or did not stop cleanly. Kernel-backed detection is unaffected. Listeners: accepted \(lifecycle.listenersAcceptedTotal ?? 0), completed \(lifecycle.listenersCompletedTotal ?? 0), active \(lifecycle.activeListeners ?? 0), ready \(lifecycle.readyListeners ?? 0), rejected after seal \(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserving \(lifecycle.listenersConserved.map { String($0) } ?? "unknown"). Connections: accepted \(lifecycle.connectionsAcceptedTotal ?? 0), completed \(lifecycle.connectionsCompletedTotal ?? 0), active \(lifecycle.activeConnections ?? 0), rejected after seal \(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected at capacity \(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserving \(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"). Body tasks: accepted \(lifecycle.bodyTasksAcceptedTotal ?? 0), completed \(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled \(lifecycle.bodyTasksCancelledTotal ?? 0), rejected \(lifecycle.bodyTasksRejectedTotal ?? 0), in flight \(lifecycle.bodyTasksInFlight ?? 0) of \(lifecycle.maximumBodyTasks ?? 0), conserving \(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"). Callback tasks: accepted \(lifecycle.callbackTasksAcceptedTotal ?? 0), completed \(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled \(lifecycle.callbackTasksCancelledTotal ?? 0), rejected \(lifecycle.callbackTasksRejectedTotal ?? 0), in flight \(lifecycle.callbackTasksInFlight ?? 0) of \(lifecycle.maximumCallbackTasks ?? 0), conserving \(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"). Lifecycle operations in progress \(lifecycle.lifecycleOperationsInProgress ?? 0); cleanly stopped \(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last shutdown clean \(lifecycle.lastShutdownClean.map { String($0) } ?? "not attempted"), shutdown timeouts \(lifecycle.shutdownTimeoutsTotal ?? 0)."
+                ))
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .v2Panel()
+    }
+
+    private func alertEvidenceTransitionBanner(
+        _ budget: MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget
+    ) -> some View {
+        func mib(_ bytes: Int64?) -> String {
+            guard let bytes else { return "unknown" }
+            return "\(bytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB"
+        }
+        let transitionFailed = budget.legacyTransitionMeasurementFailed == true
+        let captureDegraded = budget.captureDegraded
+        let title = transitionFailed
+            ? "Legacy evidence transition measurement failed"
+            : (captureDegraded
+                ? "Alert evidence capture degraded"
+                : "Legacy evidence compatibility reserve active")
+        let liveEvents = mib(budget.eventsFamilyEffectiveCapBytes)
+        let liveTotal = mib(budget.eventsAndAlertsTotalCapBytes)
+        let steadyEvents = mib(budget.eventsFamilySteadyStateCapBytes)
+        let steadyTotal = mib(budget.eventsAndAlertsSteadyStateTotalCapBytes)
+        let reserve = mib(budget.legacyTransitionReserveBytes)
+        let maximumReserve = mib(budget.legacyTransitionMaxBytes)
+        let legacyRows = budget.legacyRowCount.map(String.init) ?? "unknown"
+        let legacyCharged = mib(budget.legacyChargedBytes)
+        let captureConserving = budget.captureConservationMaintained
+            .map { $0 ? "true" : "false" }
+            ?? "unknown"
+        let accepting = budget.captureAccepting.map { $0 ? "true" : "false" }
+            ?? "unknown"
+        let allocationExact = budget.allocatedBytesExact.map { $0 ? "true" : "false" }
+            ?? "unknown"
+        let capture = "capture offered \(budget.captureOfferedTotal ?? 0), completed \(budget.captureCompletedTotal ?? 0), failed \(budget.captureFailuresTotal ?? 0), shed \(budget.captureShedTotal ?? 0), pending \(budget.capturePending ?? 0), in flight \(budget.captureInFlight ?? 0) of capacity \(budget.captureQueueCapacity ?? 0), accepting \(accepting), conserving \(captureConserving); evidence allocation exact \(allocationExact), generation \(budget.mutationGeneration ?? 0), full refreshes \(budget.fullRefreshesTotal ?? 0)"
+
+        return HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "externaldrive.fill.badge.timemachine")
+                .foregroundStyle(transitionFailed || captureDegraded ? V2Theme.warning : V2Theme.dataAccent)
+                .scaledSystem(20, weight: .semibold)
+                .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).scaledSystem(13, weight: .semibold)
+                Text(String(
+                    localized: "system.alertEvidenceTransitionDetail",
+                    defaultValue: "Live transition-aware caps: events \(liveEvents), events+alerts \(liveTotal). Steady-state caps after preserved legacy events.db evidence ages out: events \(steadyEvents), events+alerts \(steadyTotal). Current bounded reserve: \(reserve) of maximum \(maximumReserve); legacy evidence rows \(legacyRows), charged \(legacyCharged). \(capture). A single in-flight capture is normal; pending on repeated heartbeats is stuck."
+                ))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)

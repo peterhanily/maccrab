@@ -24,7 +24,8 @@
 // events under a flood. If the writer itself can't keep up, it drops the
 // NEWEST event and bumps a DISTINCT counter (`droppedCount`) so a storage-write
 // drop is never conflated with a detection-input (merged-stream) drop —
-// detection still saw every event; only its events.db row was shed.
+// detection still saw every event; only its events.db row was shed. At the
+// shared cap, priority input may replace the newest queued file-lane row.
 
 import Foundation
 import MacCrabCore
@@ -41,23 +42,48 @@ protocol EventBatchInserting: Sendable {
 extension EventStore: EventBatchInserting {}
 
 actor BatchedEventWriter {
+    private struct BufferedEvent: Sendable {
+        let generation: UInt64
+        let event: Event
+    }
+
     struct TelemetrySnapshot: Sendable, Equatable {
+        /// Every hand-off from EventLoop, including rows rejected at the hard
+        /// cap. Together with the terminal counters and the two gauges below,
+        /// this is an exact per-lane conservation ledger:
+        /// offered = persisted + filtered + dropped + buffered + in-flight.
+        let offeredByLane: [String: Int]
         /// Rows permanently shed after the detection loop saw the event.
         let droppedCount: Int
+        let droppedByLane: [String: Int]
         /// Cumulative retry attempts; a row can contribute more than once.
         let retriedCount: Int
+        let retriedByLane: [String: Int]
         /// Rows reported committed at write time. This cumulative history is not
         /// decremented if a later corruption recovery quarantines that database.
         let persistedCount: Int
+        let persistedByLane: [String: Int]
+        /// Intentional EventInsertFilter decisions. These are terminal storage
+        /// outcomes, not writer sheds and not detection-input losses.
+        let filteredCount: Int
+        let filteredByLane: [String: Int]
         /// Rows waiting in the actor's queue at snapshot time. A batch currently
         /// suspended inside `store.insert` is not part of this queue gauge; it is
         /// reported separately by `inFlightDepth`.
         let bufferDepth: Int
+        let bufferDepthByLane: [String: Int]
         /// Rows detached from the queue and currently owned by one asynchronous
         /// `store.insert` call. This closes the heartbeat reconciliation gap where
         /// the queue could read zero before the corresponding persisted/drop
         /// counters advanced.
         let inFlightDepth: Int
+        let inFlightDepthByLane: [String: Int]
+        /// Highest event accepted into the bounded writer and highest
+        /// contiguous generation that reached a terminal persistence outcome.
+        /// Evidence capture waits on this ledger instead of racing the 250 ms
+        /// batch window.
+        let admittedGeneration: UInt64
+        let terminalGeneration: UInt64
     }
 
     private let store: any EventBatchInserting
@@ -82,17 +108,32 @@ actor BatchedEventWriter {
     /// instead of once per batch.
     private var admissionBlocked = false
 
-    private var buffer: [Event] = []
+    /// Separate queues make the storage policy explicit: priority rows are
+    /// always detached before file-firehose rows, and every database batch is
+    /// lane-homogeneous. The latter is what makes EventStore's aggregate
+    /// persisted/filtered result attributable without guessing.
+    private var buffers = [[BufferedEvent]](
+        repeating: [], count: EventPipelineLane.allCases.count
+    )
     /// Exactly one drain runs at a time, so this is either zero or the complete
     /// detached batch suspended in `store.insert(events:)`.
     private var inFlightDepth = 0
-    /// Count of low-value (file) rows currently in `buffer`, maintained
-    /// incrementally so the #24 cap-shedding can decide in O(1) whether there is
-    /// anything cheaper than the incoming high-value event to evict — without an
-    /// O(n) `firstIndex` scan on every high-value event during a high-value flood
-    /// (rc.3-verify perf fix).
-    private var lowValueCount = 0
+    private var inFlightDepthByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
+    private var admittedGeneration: UInt64 = 0
+    private var terminalGeneration: UInt64 = 0
+    /// Accepted generations without a terminal persistence outcome. This set
+    /// is bounded by the writer hard cap plus its one detached batch; unlike an
+    /// out-of-order terminal history, it cannot grow forever if a file-lane row
+    /// remains behind sustained priority traffic.
+    private var pendingGenerations: Set<UInt64> = []
+
     private var draining = false
+    /// Joinable handle for both threshold-triggered and timer-triggered drains.
+    /// Shutdown must not infer completion from `draining`: the actor can be
+    /// suspended inside SQLite while that flag is true.
+    private var drainTask: Task<Void, Never>?
     private var flushLoop: Task<Void, Never>?
     /// Storage-write drops since start (writer-queue overflow). A `LockedCounter`
     /// (Sendable, lock-guarded) so `droppedCount` can be read `nonisolated` from
@@ -106,6 +147,23 @@ actor BatchedEventWriter {
     /// only their committed prefix; filtered rows are neither persisted nor
     /// misreported as storage sheds.
     private let persisted = LockedCounter()
+    /// Actor-isolated lane ledgers. Totals above remain lock-backed for the
+    /// existing nonisolated compatibility accessors.
+    private var offeredByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
+    private var droppedByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
+    private var retriedByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
+    private var persistedByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
+    private var filteredByLane = [Int](
+        repeating: 0, count: EventPipelineLane.allCases.count
+    )
 
     /// Storage-write drops since start. NOT a detection gap — the event was
     /// fully processed by the pipeline; only its events.db row was dropped.
@@ -120,22 +178,103 @@ actor BatchedEventWriter {
     /// cumulative since process start; buffer depth is an instantaneous gauge.
     func telemetrySnapshot() -> TelemetrySnapshot {
         TelemetrySnapshot(
+            offeredByLane: laneDictionary(offeredByLane),
             droppedCount: drops.get(),
+            droppedByLane: laneDictionary(droppedByLane),
             retriedCount: retries.get(),
+            retriedByLane: laneDictionary(retriedByLane),
             persistedCount: persisted.get(),
-            bufferDepth: buffer.count,
-            inFlightDepth: inFlightDepth
+            persistedByLane: laneDictionary(persistedByLane),
+            filteredCount: filteredByLane.reduce(0, +),
+            filteredByLane: laneDictionary(filteredByLane),
+            bufferDepth: bufferDepth,
+            bufferDepthByLane: laneDictionary(buffers.map(\.count)),
+            inFlightDepth: inFlightDepth,
+            inFlightDepthByLane: laneDictionary(inFlightDepthByLane),
+            admittedGeneration: admittedGeneration,
+            terminalGeneration: terminalGeneration
         )
     }
 
-    /// Event categories worth preserving over a file/write flood when the buffer
-    /// is at the hard cap (#24): exec/network/tcc/auth/registry rows are rare and
-    /// forensically valuable; file-write events ARE the flood.
-    private static func isHighValue(_ e: Event) -> Bool {
-        switch e.eventCategory {
-        case .file: return false
-        case .process, .network, .tcc, .authentication, .registry: return true
+    private var bufferDepth: Int {
+        buffers.reduce(0) { $0 + $1.count }
+    }
+
+    private func laneDictionary(_ values: [Int]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for lane in EventPipelineLane.allCases {
+            result[lane.key] = values[lane.rawValue]
         }
+        return result
+    }
+
+    private func recordDrop(_ count: Int, lane: EventPipelineLane) {
+        guard count > 0 else { return }
+        drops.add(count)
+        droppedByLane[lane.rawValue] += count
+    }
+
+    private func recordRetry(_ count: Int, lane: EventPipelineLane) {
+        guard count > 0 else { return }
+        retries.add(count)
+        retriedByLane[lane.rawValue] += count
+    }
+
+    private func recordPersisted(_ count: Int, lane: EventPipelineLane) {
+        guard count > 0 else { return }
+        persisted.add(count)
+        persistedByLane[lane.rawValue] += count
+    }
+
+    private func recordFiltered(_ count: Int, lane: EventPipelineLane) {
+        guard count > 0 else { return }
+        filteredByLane[lane.rawValue] += count
+    }
+
+    private func setInFlight(_ count: Int, lane: EventPipelineLane) {
+        inFlightDepth = count
+        inFlightDepthByLane[lane.rawValue] = count
+    }
+
+    private func clearInFlight(lane: EventPipelineLane) {
+        inFlightDepth = 0
+        inFlightDepthByLane[lane.rawValue] = 0
+    }
+
+    private func markTerminal(_ events: some Collection<BufferedEvent>) {
+        for item in events {
+            pendingGenerations.remove(item.generation)
+        }
+        if let oldestPending = pendingGenerations.min() {
+            terminalGeneration = oldestPending > 0 ? oldestPending - 1 : 0
+        } else {
+            terminalGeneration = admittedGeneration
+        }
+    }
+
+    /// Priority first. A batch is deliberately one lane only so the store's
+    /// aggregate result remains exactly attributable.
+    private func detachNextBatch() -> (
+        lane: EventPipelineLane,
+        events: [BufferedEvent]
+    )? {
+        for lane in [EventPipelineLane.priority, .file]
+        where !buffers[lane.rawValue].isEmpty {
+            let batch = buffers[lane.rawValue]
+            buffers[lane.rawValue].removeAll(keepingCapacity: true)
+            return (lane, batch)
+        }
+        return nil
+    }
+
+    private func prependForRetry(
+        _ events: [BufferedEvent],
+        lane: EventPipelineLane
+    ) -> Bool {
+        guard bufferDepth + events.count <= hardCap else { return false }
+        buffers[lane.rawValue].insert(contentsOf: events, at: 0)
+        recordRetry(events.count, lane: lane)
+        return true
     }
 
     /// - Note: In production `flushThreshold` / `hardCap` are FIXED at their
@@ -148,11 +287,13 @@ actor BatchedEventWriter {
     ///   not this initializer — must keep `flushThreshold <= hardCap`: we apply
     ///   floors only and do NOT silently clamp one to the other (clamping hid
     ///   the overflow branch and papered over misconfig). The defaults already
-    ///   satisfy 1000 <= 250_000.
+    ///   satisfy 1000 <= 20_000. The former 250K default could itself retain
+    ///   hundreds of MiB of Event object graphs, defeating the product RSS
+    ///   budget before it ever became a useful backpressure boundary.
     init(
         store: any EventBatchInserting,
         flushThreshold: Int = 1000,
-        hardCap: Int = 250_000,
+        hardCap: Int = 20_000,
         volumePath: String? = nil,
         freeSpaceFloorMB: Int = 1024
     ) {
@@ -163,34 +304,50 @@ actor BatchedEventWriter {
         self.hardCap = max(1, hardCap)
     }
 
-    /// O(1) hand-off from the hot consumer. Appends to the in-memory buffer and,
-    /// once the batch threshold is crossed, kicks a background drain — it does
-    /// NOT block the caller on SQLite. Drops the newest event if the buffer is
-    /// already at the hard cap (writer can't keep up).
-    func enqueue(_ event: Event) {
-        if buffer.count >= hardCap {
-            // #24: at the cap, don't blindly shed a high-value event to a file
-            // flood. If the incoming event is high-value AND a cheaper file row
-            // exists (lowValueCount > 0 — the O(1) guard so a high-value flood
-            // doesn't pay an O(n) scan per event), evict the OLDEST file row to
-            // make room; otherwise drop the incoming. A pure file flood still
-            // drops in O(1) (the incoming is a file → the else branch).
-            if Self.isHighValue(event), lowValueCount > 0,
-               let idx = buffer.firstIndex(where: { !Self.isHighValue($0) }) {
-                buffer.remove(at: idx)
-                lowValueCount -= 1
-                drops.increment()   // the evicted file row is the storage-write drop
+    /// O(1) hand-off from the hot consumer. The explicit pipeline lane is
+    /// preserved through storage rather than re-inferred from a broader
+    /// "file category = cheap" rule (credential OPEN is a file-category event
+    /// that deliberately rides the priority lane).
+    ///
+    /// At the shared hard cap an incoming priority event evicts the newest file
+    /// row, while a file event can never evict priority. This preserves the
+    /// existing total memory bound; it does not raise or partition the cap.
+    @discardableResult
+    func enqueue(
+        _ event: Event,
+        lane explicitLane: EventPipelineLane? = nil
+    ) -> UInt64? {
+        let lane = explicitLane ?? EventPipelineLane.finalLane(for: event)
+        offeredByLane[lane.rawValue] += 1
+
+        if bufferDepth >= hardCap {
+            if lane == .priority, !buffers[EventPipelineLane.file.rawValue].isEmpty {
+                // O(1): evict the newest queued file row. `removeFirst()` shifts
+                // up to the full queue on every priority arrival in exactly the
+                // saturated-file episode this policy exists to survive. Keeping
+                // the older prefix also preserves more chronological continuity.
+                let evicted = buffers[EventPipelineLane.file.rawValue].removeLast()
+                recordDrop(1, lane: .file)
+                markTerminal(CollectionOfOne(evicted))
             } else {
-                drops.increment()   // nothing cheaper to shed — drop the incoming
-                return
+                recordDrop(1, lane: lane)
+                return nil
             }
         }
-        buffer.append(event)
-        if !Self.isHighValue(event) { lowValueCount += 1 }
-        if buffer.count >= flushThreshold && !draining {
-            draining = true
-            Task { await self.drain() }
+        guard admittedGeneration < UInt64.max else {
+            recordDrop(1, lane: lane)
+            return nil
         }
+        admittedGeneration += 1
+        let generation = admittedGeneration
+        pendingGenerations.insert(generation)
+        buffers[lane.rawValue].append(
+            BufferedEvent(generation: generation, event: event)
+        )
+        if bufferDepth >= flushThreshold && !draining {
+            startDrain()
+        }
+        return generation
     }
 
     /// A retryable batch failure: SQLITE_BUSY / SQLITE_LOCKED contention, surfaced
@@ -225,16 +382,26 @@ actor BatchedEventWriter {
     }
 
     private func drain() async {
-        defer { draining = false }
-        while !buffer.isEmpty {
+        defer {
+            draining = false
+            drainTask = nil
+        }
+        while bufferDepth > 0 {
             // Disk admission check BEFORE the write, not after SQLite fails. Shed
             // the batch and stop the pass; the periodic flush loop retries, so
             // ingestion resumes by itself once the retention sweeps free space.
             if let freeMB = admissionBlockedFreeMB() {
-                let shed = buffer.count
-                buffer.removeAll(keepingCapacity: true)
-                lowValueCount = 0
-                drops.add(shed)
+                let priorityRows = buffers[EventPipelineLane.priority.rawValue]
+                let fileRows = buffers[EventPipelineLane.file.rawValue]
+                let priorityShed = priorityRows.count
+                let fileShed = fileRows.count
+                buffers[EventPipelineLane.priority.rawValue].removeAll(keepingCapacity: true)
+                buffers[EventPipelineLane.file.rawValue].removeAll(keepingCapacity: true)
+                recordDrop(priorityShed, lane: .priority)
+                recordDrop(fileShed, lane: .file)
+                markTerminal(priorityRows)
+                markTerminal(fileRows)
+                let shed = priorityShed + fileShed
                 if !admissionBlocked {
                     admissionBlocked = true
                     Logger(subsystem: "com.maccrab.agentkit", category: "storage")
@@ -247,30 +414,36 @@ actor BatchedEventWriter {
                 Logger(subsystem: "com.maccrab.agentkit", category: "storage")
                     .notice("Storage admission restored — free space back above the floor; event persistence resumed.")
             }
-            let batch = buffer
-            buffer.removeAll(keepingCapacity: true)
-            lowValueCount = 0   // buffer emptied; enqueues during the await re-accrue it
-            inFlightDepth = batch.count
+            guard let detached = detachNextBatch() else { return }
+            let lane = detached.lane
+            let batch = detached.events
+            setInFlight(batch.count, lane: lane)
             do {
-                let result = try await store.insert(events: batch)
-                persisted.add(result.persistedCount)
-                inFlightDepth = 0
+                let result = try await store.insert(
+                    events: batch.map(\.event)
+                )
+                recordPersisted(result.persistedCount, lane: lane)
+                recordFiltered(result.filteredCount, lane: lane)
+                markTerminal(batch)
+                clearInFlight(lane: lane)
             } catch let partial as EventBatchInsertFailure {
-                persisted.add(partial.progress.persistedCount)
-                let suffix = partial.uncommittedEvents
+                recordPersisted(partial.progress.persistedCount, lane: lane)
+                recordFiltered(partial.progress.filteredCount, lane: lane)
+                let suffixCount = min(
+                    batch.count,
+                    partial.uncommittedEvents.count
+                )
+                let committedPrefix = batch.dropLast(suffixCount)
+                let suffix = Array(batch.suffix(suffixCount))
+                markTerminal(committedPrefix)
                 if partial.replacementReadyForRetry {
                     // Corruption recovery quarantined the DB containing any
                     // earlier committed chunks. EventStore resets progress and
                     // returns the full filter-passing batch; the fresh DB is
                     // ready, so retry it instead of falsely counting the old
                     // prefix as durable or permanently shedding recoverable rows.
-                    if buffer.count + suffix.count <= hardCap {
-                        buffer.insert(contentsOf: suffix, at: 0)
-                        lowValueCount += suffix.reduce(0) {
-                            $0 + (Self.isHighValue($1) ? 0 : 1)
-                        }
-                        retries.add(suffix.count)
-                        inFlightDepth = 0
+                    if prependForRetry(suffix, lane: lane) {
+                        clearInFlight(lane: lane)
                         return
                     }
                 } else if let eventError = partial.underlyingError as? EventStoreError,
@@ -278,13 +451,8 @@ actor BatchedEventWriter {
                     // Only the rolled-back/unstarted suffix is retried. The
                     // committed prefix is already durable and must never be
                     // duplicated in retry/drop telemetry.
-                    if buffer.count + suffix.count <= hardCap {
-                        buffer.insert(contentsOf: suffix, at: 0)
-                        lowValueCount += suffix.reduce(0) {
-                            $0 + (Self.isHighValue($1) ? 0 : 1)
-                        }
-                        retries.add(suffix.count)
-                        inFlightDepth = 0
+                    if prependForRetry(suffix, lane: lane) {
+                        clearInFlight(lane: lane)
                         return
                     }
                 }
@@ -292,8 +460,9 @@ actor BatchedEventWriter {
                 // StorageErrorTracker is an actor hop, and heartbeat snapshots
                 // must never observe rows in neither in-flight nor drop/retry/
                 // persisted accounting while that hop is suspended.
-                drops.add(suffix.count)
-                inFlightDepth = 0
+                recordDrop(suffix.count, lane: lane)
+                markTerminal(suffix)
+                clearInFlight(lane: lane)
                 await StorageErrorTracker.shared.recordEventError(
                     partial.underlyingError
                 )
@@ -306,15 +475,13 @@ actor BatchedEventWriter {
                 // hard cap — if there's no room to hold the retry, shed as a last
                 // resort. This is the leading (previously-misattributed) cause of
                 // the external audit's get_events-returns-0 under WAL contention.
-                if buffer.count + batch.count <= hardCap {
-                    buffer.insert(contentsOf: batch, at: 0)
-                    lowValueCount += batch.reduce(0) { $0 + (Self.isHighValue($1) ? 0 : 1) }
-                    retries.add(batch.count)
-                    inFlightDepth = 0
+                if prependForRetry(batch, lane: lane) {
+                    clearInFlight(lane: lane)
                     return
                 }
-                drops.add(batch.count)
-                inFlightDepth = 0
+                recordDrop(batch.count, lane: lane)
+                markTerminal(batch)
+                clearInFlight(lane: lane)
                 await StorageErrorTracker.shared.recordEventError(e)
             } catch {
                 // PERMANENT (disk full, corruption, encoding) — retrying the same
@@ -322,8 +489,9 @@ actor BatchedEventWriter {
                 // lost events as storage-write drops so they are not silently
                 // uncounted: `droppedCount` reflects hard-cap overflow, an
                 // unretryable transient, and permanent flush failures.
-                drops.add(batch.count)
-                inFlightDepth = 0
+                recordDrop(batch.count, lane: lane)
+                markTerminal(batch)
+                clearInFlight(lane: lane)
                 await StorageErrorTracker.shared.recordEventError(error)
             }
         }
@@ -343,19 +511,76 @@ actor BatchedEventWriter {
         }
     }
 
+    /// Capture the writer generation admitted before an alert's evidence job.
+    /// A generation is assigned only after the bounded queue accepts the row;
+    /// queue-cap rejection remains visible through ordinary drop telemetry.
+    func evidencePrefixGeneration() -> UInt64 {
+        admittedGeneration
+    }
+
+    /// Wait a bounded interval for every admitted generation through `target`
+    /// to reach persisted, filtered, or explicitly-dropped terminal state.
+    /// This preserves batching: the wait joins the ordinary drain rather than
+    /// issuing a per-alert SQLite transaction. False is an honest context gap;
+    /// AlertSink still retains the request's bounded triggering-event snapshot.
+    func awaitEvidencePrefix(
+        through target: UInt64,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        guard target > terminalGeneration else { return true }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        if !draining, bufferDepth > 0 {
+            startDrain()
+        }
+        while terminalGeneration < target {
+            guard !Task.isCancelled, clock.now < deadline else {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+            if !draining, bufferDepth > 0 {
+                startDrain()
+            }
+        }
+        return true
+    }
+
     /// Flush a below-threshold partial batch (called by the timer + on shutdown).
     func flushPartial() async {
-        if !buffer.isEmpty && !draining {
-            draining = true
-            await drain()
+        if let task = drainTask {
+            await task.value
+            return
+        }
+        if bufferDepth > 0 {
+            startDrain()
+            if let task = drainTask {
+                await task.value
+            }
         }
     }
 
     /// Stop the timer and flush anything still buffered. Call on graceful
     /// daemon teardown so the last partial batch reaches disk.
     func shutdown() async {
-        flushLoop?.cancel()
+        let timer = flushLoop
         flushLoop = nil
+        timer?.cancel()
+        await timer?.value
+
+        // A threshold-triggered drain is independent of the timer. Join it too
+        // before the final partial pass, then capture anything queued between
+        // those joins and this actor turn.
+        if let task = drainTask {
+            await task.value
+        }
         await flushPartial()
+    }
+
+    private func startDrain() {
+        guard !draining, drainTask == nil, bufferDepth > 0 else { return }
+        draining = true
+        drainTask = Task { [weak self] in
+            await self?.drain()
+        }
     }
 }

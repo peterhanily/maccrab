@@ -40,6 +40,13 @@ public enum DaemonBootstrap {
 
         let state = await DaemonSetup.initialize()
 
+        // Start the bounded recovery lane before any monitor/event consumer can
+        // mutate sequence state. DaemonSetup has already loaded the complete
+        // sequence corpus and attempted its fingerprint-bound restore.
+        await state.sequenceCheckpointCoordinator.startPeriodicCheckpointing(
+            engine: state.sequenceEngine
+        )
+
         // Clear any stale cumulative storage-error total left by an older build:
         // rewrite storage_errors.json from the (empty-on-boot) rolling 24h window
         // so a long-past burst (field-observed ~1M, stale for weeks) stops showing
@@ -58,8 +65,15 @@ public enum DaemonBootstrap {
         // separately via timerHandles.
         let supervisor = MonitorSupervisor()
 
-        let signalHandles = SignalHandlers.install(state: state, supervisor: supervisor)
         await MonitorTasks.start(state: state, supervisor: supervisor)
+
+        // Primary stream producers start deterministically—never through an
+        // outer fire-and-forget Task that can resurrect after shutdown. Their
+        // internal workers are stopped by the central finalizer before driver
+        // and consumer joins are declared clean.
+        await state.networkCollector.start()
+        await state.tccMonitor.start()
+        logger.info("Network and TCC primary collectors active")
 
         let startTime = Date()
         let timerHandles = DaemonTimers.start(
@@ -67,6 +81,12 @@ public enum DaemonBootstrap {
             eventCount: { UInt64(_sharedEventCount.get()) },
             alertCount: { UInt64(_sharedAlertCount.get()) },
             startTime: startTime
+        )
+        let signalHandles = SignalHandlers.install(
+            state: state,
+            supervisor: supervisor,
+            timerLifecycle: timerHandles.lifecycle,
+            livenessLifecycle: timerHandles.livenessLifecycle
         )
 
         return DaemonHandles(
@@ -93,28 +113,46 @@ public enum DaemonBootstrap {
         // EventLoop.run holds no loop-local mutable state (all state is in
         // DaemonState's actors + Sendable counters); cross-collector reordering
         // into the engines already existed before the split.
-        let streams = handles.state.mergedEventStreams()
+        let streams = await handles.state.mergedEventStreams()
         // v1.21.4 (audit #211): the alerts-emitted counter is no longer passed
         // to the loop — AlertSink now owns the increment (the single chokepoint
         // every emission path flows through), and it was wired the SAME
         // `_sharedAlertCount` instance in DaemonState.init, so the heartbeat
         // read below is unchanged.
-        async let priorityConsumer: Void = EventLoop.run(
+        guard let consumers = await handles.state.eventIngestionLifecycle
+            .spawnConsumers(
+                priority: {
+                    await EventLoop.run(
+                        state: handles.state,
+                        lane: .priority,
+                        eventStream: streams.priority,
+                        eventCount: _sharedEventCount
+                    )
+                },
+                file: {
+                    await EventLoop.run(
+                        state: handles.state,
+                        lane: .file,
+                        eventStream: streams.file,
+                        eventCount: _sharedEventCount
+                    )
+                }
+            ) else {
+            return
+        }
+        _ = await (consumers.priority.value, consumers.file.value)
+
+        // Stream termination, signals, and essential-source recovery all use
+        // this one ordered implementation. The lifecycle claim inside it makes
+        // simultaneous terminal causes idempotent.
+        _ = await DaemonShutdownCoordinator.finalize(
             state: handles.state,
-            lane: .priority,
-            eventStream: streams.priority,
-            eventCount: _sharedEventCount
+            supervisor: handles.supervisor,
+            timerLifecycle: handles.timerHandles.lifecycle,
+            livenessLifecycle: handles.timerHandles.livenessLifecycle,
+            totalDeadline: 3.75,
+            context: "event streams ended"
         )
-        async let fileConsumer: Void = EventLoop.run(
-            state: handles.state,
-            lane: .file,
-            eventStream: streams.file,
-            eventCount: _sharedEventCount
-        )
-        _ = await (priorityConsumer, fileConsumer)
-        // Both streams ended (SIGTERM / sysextd teardown) — flush anything still
-        // buffered so a graceful shutdown doesn't lose the last partial batch.
-        await handles.state.eventWriter.shutdown()
     }
 
     /// The full bootstrap + run. Most callers want this; the split
@@ -142,6 +180,55 @@ public enum DaemonBootstrap {
             _ = handles.supervisor
         }
         await runEventLoop(handles: handles)
+    }
+
+    /// Keep every graceful-exit surface honest about whether the newest
+    /// in-flight multi-event detections reached their durable recovery point.
+    /// Success is quiet; a skip or failure is a protection-degraded condition.
+    static func reportSequenceCheckpointFlush(
+        _ result: SequenceCheckpointWriteResult,
+        context: String,
+        requiresCleanBoundary: Bool,
+        ingestionQuiesced: Bool,
+        dirtyAfterFlush: Bool
+    ) {
+        switch result {
+        case .failed(let detail):
+            logger.fault("Sequence checkpoint flush failed during \(context, privacy: .public): \(detail, privacy: .public)")
+            return
+        case .alreadyInProgress:
+            logger.fault("Sequence checkpoint flush skipped during \(context, privacy: .public): another operation remained in progress after periodic-lane join")
+            return
+        case .notDue, .budgetDeferred:
+            logger.fault("Sequence checkpoint forced flush returned an invalid periodic-only result during \(context, privacy: .public)")
+            return
+        case .written(_), .unchanged:
+            break
+        }
+        if requiresCleanBoundary && (!ingestionQuiesced || dirtyAfterFlush) {
+            let reason = !ingestionQuiesced
+                ? "one or more ingestion, timer, monitor, or derived-work mutation planes did not drain before their deadline"
+                : "sequence state changed during the forced passes"
+            logger.fault("Sequence checkpoint during \(context, privacy: .public) is BEST EFFORT, not a clean shutdown boundary: \(reason, privacy: .public)")
+            return
+        }
+        switch result {
+        case .written(let bytes):
+            if dirtyAfterFlush {
+                logger.notice("Sequence checkpoint advanced during \(context, privacy: .public) (\(bytes) bytes); newer live state remains dirty within the configured crash RPO")
+            } else {
+                logger.info("Sequence checkpoint is current during \(context, privacy: .public) (\(bytes) bytes)")
+            }
+        case .unchanged:
+            if dirtyAfterFlush {
+                logger.fault("Sequence checkpoint reported unchanged but remained dirty during \(context, privacy: .public)")
+            } else {
+                logger.info("Sequence checkpoint already current during \(context, privacy: .public)")
+            }
+        case .failed, .alreadyInProgress, .notDue, .budgetDeferred:
+            // Returned above with the more specific failure detail.
+            break
+        }
     }
 }
 

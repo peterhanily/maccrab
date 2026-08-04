@@ -61,16 +61,23 @@ struct IntentEvidenceClassifierTests {
         #expect(!satisfies)
     }
 
-    @Test("Distinct evidence types accumulate; duplicates do not double-count for floor")
+    @Test("Duplicate evidence types retain one bounded contribution")
     func distinctEvidenceTypesFloor() async {
         let engine = BayesianIntentEngine()
         let key = "/usr/bin/zsh@1234"
         _ = await engine.observe(.credentialRead, treeKey: key)
         _ = await engine.observe(.credentialRead, treeKey: key)
         let final = await engine.observe(.credentialRead, treeKey: key)
-        // evidenceLog has 3 entries (each call appends), but Set() has 1.
-        #expect(final.evidenceLog.count == 3)
+        // The coarse type contributes at most once; callbacks inside the
+        // cooldown are explicitly suppressed instead of compounding score.
+        #expect(final.evidenceLog.count == 1)
         #expect(Set(final.evidenceLog).count == 1)
+        #expect(final.observationDisposition == .suppressedEvidenceCooldown)
+        let stats = await engine.statistics()
+        #expect(stats.observations == 3)
+        #expect(stats.acceptedObservations == 1)
+        #expect(stats.suppressedEvidenceCooldown == 2)
+        #expect(stats.observationsConserved)
     }
 
     @Test("Different process trees keep separate posteriors")

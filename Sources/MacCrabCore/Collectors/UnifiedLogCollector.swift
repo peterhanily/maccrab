@@ -94,6 +94,8 @@ public final class UnifiedLogCollector: @unchecked Sendable {
     private var continuation: AsyncStream<Event>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "UnifiedLogCollector")
     private var readTask: Task<Void, Never>?
+    private let lifecycleLock = NSLock()
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     private let deliveryTelemetry = EventCollectorBufferTelemetry(
         capacity: streamCapacity
     )
@@ -157,6 +159,7 @@ public final class UnifiedLogCollector: @unchecked Sendable {
             capturedContinuation.finish()
             throw UnifiedLogCollectorError.launchFailed(error.localizedDescription)
         }
+        lifecyclePhase = .running
 
         logger.info("UnifiedLogCollector started — monitoring \(Self.monitoredSubsystems.count) subsystems.")
 
@@ -166,13 +169,14 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         let fileHandle = pipe.fileHandleForReading
         let deliveryTelemetry = self.deliveryTelemetry
 
-        self.readTask = Task.detached {
+        self.readTask = Task.detached { [weak self] in
             Self.readLoop(
                 fileHandle: fileHandle,
                 continuation: continuation,
                 logger: log,
                 deliveryTelemetry: deliveryTelemetry
             )
+            self?.readerExited()
         }
     }
 
@@ -184,17 +188,65 @@ public final class UnifiedLogCollector: @unchecked Sendable {
 
     /// Stops the log stream subprocess and finishes the event stream.
     public func stop() {
-        readTask?.cancel()
-        readTask = nil
+        _ = beginStop()
+    }
 
-        if process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-            logger.info("UnifiedLogCollector stopped — subprocess terminated.")
+    /// Cancel the blocking stdout reader, terminate its subprocess, and join
+    /// that exact task prefix within a caller-owned deadline.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            task.map { [$0] } ?? [],
+            deadline: deadline
+        )
+        completeStop(joined: joined)
+        if joined {
+            logger.info("UnifiedLogCollector stopped cleanly.")
+        } else {
+            logger.error("UnifiedLogCollector stop deadline expired with its stdout reader active.")
         }
+        return joined
+    }
 
-        continuation?.finish()
+    private func completeStop(joined: Bool) {
+        lifecycleLock.lock()
+        if joined {
+            readTask = nil
+            lifecyclePhase = .stopped
+        }
+        lifecycleLock.unlock()
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        lifecycleLock.lock()
+        if lifecyclePhase == .stopped {
+            lifecycleLock.unlock()
+            return nil
+        }
+        lifecyclePhase = .stopping
+        let task = readTask
+        let streamContinuation = continuation
         continuation = nil
+        lifecycleLock.unlock()
+
+        task?.cancel()
+        if process.isRunning { process.terminate() }
+        streamContinuation?.finish()
+        return task
+    }
+
+    private func readerExited() {
+        lifecycleLock.lock()
+        guard lifecyclePhase == .running else {
+            lifecycleLock.unlock()
+            return
+        }
+        let streamContinuation = continuation
+        continuation = nil
+        lifecycleLock.unlock()
+        streamContinuation?.finish()
+        logger.error("UnifiedLogCollector subprocess/stdout ended unexpectedly; source stream closed.")
     }
 
     // MARK: - Read Loop

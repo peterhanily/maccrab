@@ -186,7 +186,7 @@
 "aiGuard.title" = "AI-toolactiviteit";
 "aiGuard.subtitle" = "Bewaakt Claude Code, Codex, OpenClaw, Cursor en hun onderliggende processen";
 "aiGuard.noAlerts" = "Geen AI-beveiligingswaarschuwingen";
-"aiGuard.noAlertsDesc" = "AI-tools werken binnen veilige grenzen";
+"aiGuard.noAlertsDesc" = "Het ontbreken van een waarschuwing is geen veiligheidsoordeel wanneer de gebeurtenisdekking of sessiebewaring onvolledig is.";
 
 /* ── Components ── */
 "components.suppress" = "Onderdrukken";
@@ -613,7 +613,7 @@
 "settings.llmGeminiModel" = "Model";
 "settings.llmInfo" = "Hoe het werkt";
 "settings.llmInfoDesc" = "De AI-backend kan gestructureerde alarmonderzoeken, campagnesamenvattingen, verdedigingsaanbevelingen en verfijning van pakketintentie toevoegen. Modeluitvoer is adviserend en voert nooit een actie uit.";
-"settings.llmLocalPrivacy" = "Draait lokaal. Er verlaten geen gegevens je Mac.";
+"settings.llmLocalPrivacy" = "MacCrab verstuurt via dit loopback-eindpunt geen uitgaand internetverkeer.";
 "settings.llmMistralHelp" = "Vraag een API-sleutel aan op console.mistral.ai";
 "settings.llmMistralKey" = "Mistral API-sleutel";
 "settings.llmMistralModel" = "Model";

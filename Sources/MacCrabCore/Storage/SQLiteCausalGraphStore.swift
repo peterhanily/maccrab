@@ -1940,10 +1940,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             id, entity_type, stable_key, display_name,
             first_seen, last_seen, attributes_json, source,
             confidence, observation_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(entity_type, stable_key) DO UPDATE SET
             last_seen = max(trace_entities.last_seen, excluded.last_seen),
-            observation_count = trace_entities.observation_count + 1,
+            observation_count = trace_entities.observation_count + excluded.observation_count,
             attributes_json = excluded.attributes_json,
             confidence = excluded.confidence,
             display_name = excluded.display_name
@@ -1965,6 +1965,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         sqlite3_bind_text(stmt, 7, encryptedAttrs, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 8, entity.source, -1, SQLITE_TRANSIENT)
         sqlite3_bind_double(stmt, 9, entity.confidence)
+        sqlite3_bind_int64(stmt, 10, Int64(max(1, entity.observationCount)))
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -2017,8 +2018,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     // MARK: - upsertBatch  (v1.17.4 perf)
     //
-    // Persist all entities then all edges for ONE event inside a SINGLE
-    // transaction, reusing one prepared statement per table (reset + rebind)
+    // Persist all entities then all edges for one or more observations inside
+    // a SINGLE transaction, reusing one prepared statement per table
+    // (reset + rebind).
     // instead of prepare/step/finalize + autocommit PER ROW. Pre-fix a
     // single event's ~7 upserts were ~7 autocommit transactions + 7
     // prepares (RollingCausalGraph.ingest called the store one row at a
@@ -2046,10 +2048,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     id, entity_type, stable_key, display_name,
                     first_seen, last_seen, attributes_json, source,
                     confidence, observation_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(entity_type, stable_key) DO UPDATE SET
                     last_seen = max(trace_entities.last_seen, excluded.last_seen),
-                    observation_count = trace_entities.observation_count + 1,
+                    observation_count = trace_entities.observation_count + excluded.observation_count,
                     attributes_json = excluded.attributes_json,
                     confidence = excluded.confidence,
                     display_name = excluded.display_name
@@ -2070,6 +2072,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     sqlite3_bind_text(stmt, 7, encryptedAttrs, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 8, entity.source, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_double(stmt, 9, entity.confidence)
+                    sqlite3_bind_int64(stmt, 10, Int64(max(1, entity.observationCount)))
                     let rc = sqlite3_step(stmt)
                     if rc != SQLITE_DONE {
                         try throwSQLiteFailure(

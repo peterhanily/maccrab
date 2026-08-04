@@ -542,7 +542,7 @@ if [ -s "$ci_branch/swift.log" ] && grep -q '^package resolve$' "$ci_branch/swif
 fi
 [ -f "$ci_branch/.build/warm-build-object.o" ] \
     || fail "ordinary branch push unexpectedly wiped the warm build tree"
-for expected_swift in 'build' 'build --build-tests' 'test'; do
+for expected_swift in 'build' 'build --build-tests' 'test --no-parallel'; do
     grep -q "^${expected_swift}$" "$ci_branch/swift.log" \
         || fail "ordinary branch hook did not run swift $expected_swift"
 done
@@ -957,7 +957,6 @@ make_release_fixture() {
     printf 'fixture rc notes\n' > "$fixture/RELEASE_NOTES/v9.9.11-rc.1.md"
     printf '{}\n' > "$fixture/Xcode/Resources/MacCrabApp.entitlements"
     printf '{}\n' > "$fixture/Xcode/Resources/MacCrabAgent.entitlements"
-    printf '{}\n' > "$fixture/Xcode/Resources/MacCrabTools.entitlements"
     printf '{"version":"9.9.10","sha256":"%064d"}\n' 0 > "$fixture/release.json"
     printf 'cask "maccrab" do\n  version "9.9.10"\n  sha256 "%064d"\nend\n' 0 \
         > "$fixture/Casks/maccrab.rb"
@@ -1363,7 +1362,7 @@ set -e
 
 release_missing_entitlement="$TEST_ROOT/release-missing-tracked-entitlement"
 make_release_fixture "$release_missing_entitlement"
-/usr/bin/git -C "$release_missing_entitlement" rm -q Xcode/Resources/MacCrabTools.entitlements
+/usr/bin/git -C "$release_missing_entitlement" rm -q Xcode/Resources/MacCrabAgent.entitlements
 /usr/bin/git -C "$release_missing_entitlement" -c core.hooksPath=.no-hooks \
     commit -q -m 'remove entitlement fixture'
 set +e
@@ -1383,7 +1382,7 @@ set -e
 grep -q 'shipped signing capability is not tracked' "$release_missing_entitlement/output.log" \
     || fail "missing tracked entitlement was not diagnosed before build"
 [ ! -s "$release_missing_entitlement/build.log" ] \
-    || fail "release built without a committed tool entitlement"
+    || fail "release built without a committed agent entitlement"
 
 # A release from a fresh/misconfigured clone must not merely assume Git will
 # execute the versioned gate. Abort before the mocked build creates `.build`.

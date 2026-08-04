@@ -5,6 +5,24 @@ import Testing
 
 @Suite("ES callback-to-worker admission")
 struct ESCallbackAdmissionTests {
+    private func dynamicRegistry(
+        _ snapshot: DynamicAIFileEventDemandSnapshot
+    ) -> FileEventInterestPolicyRegistry {
+        let registry = FileEventInterestPolicyRegistry()
+        _ = registry.install(FileEventInterestDescriptorSnapshot(
+            singleEventRules: [],
+            sequenceRules: [],
+            graphRules: [],
+            builtinRequirements: [BuiltinFileEventRequirement(
+                id: "test.dynamic-ai-open",
+                sources: [.endpointSecurityFile],
+                kind: .dynamicAIConsumers
+            )]
+        ))
+        #expect(registry.publishDynamicAI(snapshot))
+        return registry
+    }
+
     @Test("ordinary OPEN and unmodified CLOSE never consume worker slots")
     func rejectsTheMeasuredFirehose() {
         #expect(ESCollector.shouldDropBeforeWorker(
@@ -31,6 +49,55 @@ struct ESCallbackAdmissionTests {
                 path: path
             ), "callback rejected detection-relevant OPEN: \(path)")
         }
+    }
+
+    @Test("fresh AI demand retains useful text OPENs without retaining temp binary churn")
+    func dynamicAITextOpenAdmission() {
+        let registry = dynamicRegistry(.currentCanonical(
+            validUntilUptimeNanoseconds: UInt64.max,
+            sessions: [DynamicAIFileEventSession(
+                rootProcessID: 42,
+                childProcessIDs: [43],
+                projectRoots: ["/Users/x/project"]
+            )]
+        ))
+
+        #expect(!ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/Users/x/project/README.md",
+            processID: 43,
+            dynamicAIRegistry: registry
+        ))
+        #expect(ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/private/var/folders/hf/cache.bin",
+            processID: 43,
+            dynamicAIRegistry: registry
+        ))
+        #expect(ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/Users/x/project/README.md",
+            processID: 99,
+            dynamicAIRegistry: registry
+        ))
+    }
+
+    @Test("unknown dynamic state fails open but never bypasses platform keychain drop")
+    func dynamicAIFailOpenPreservesKeychainGate() {
+        let registry = dynamicRegistry(.unknown)
+        #expect(!ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/Users/x/project/README.md",
+            processID: 42,
+            dynamicAIRegistry: registry
+        ))
+        #expect(ESCollector.shouldDropBeforeWorker(
+            eventType: ES_EVENT_TYPE_NOTIFY_OPEN.rawValue,
+            path: "/Users/x/Library/Keychains/login.keychain-db",
+            isPlatformBinary: true,
+            processID: 42,
+            dynamicAIRegistry: registry
+        ))
     }
 
     @Test("platform keychain noise drops but non-platform keychain access survives")

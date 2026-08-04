@@ -451,7 +451,9 @@ public actor EventStore {
         for databasePath: String
     ) -> SQLitePersistentStorePolicy {
         SQLitePersistentStorePolicy(
-            maxFootprintBytes: 420 * SQLitePersistentStorePolicy.bytesPerMiB,
+            // DaemonConfig's legacy 420 MiB envelope reserves 100 MiB for
+            // alert-owned evidence after the schema-v8 file split.
+            maxFootprintBytes: 320 * SQLitePersistentStorePolicy.bytesPerMiB,
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
                 .eventTransactionReserveBytes,
@@ -1721,7 +1723,7 @@ public actor EventStore {
     }
 
     /// Persists a batch in reserve-bounded transactions. A very large caller
-    /// array (the daemon buffer is independently capped at 250K) can no longer
+    /// array (the daemon buffer is independently capped at 20K) can no longer
     /// grow one WAL transaction without limit. Each chunk commits before the
     /// next fresh disk probe; immutable event-id duplicate no-ops make retry
     /// after a later chunk failure idempotent, though the whole input array is intentionally no
@@ -2436,14 +2438,22 @@ public actor EventStore {
     /// are exhausted before `count` is met — i.e. the protected process rows
     /// within the floor ALONE are keeping the DB over cap — the loop falls
     /// back to unconditional oldest-first (even on protected rows) for the
-    /// remaining count. This guarantees `pruneOldest` always removes `count`
-    /// rows (or the whole table), so events.db can never grow unbounded no
-    /// matter how large the protected channel gets.
+    /// remaining count. Without the separate hard floor below, this guarantees
+    /// `pruneOldest` removes `count` rows (or the whole table), no matter how
+    /// large the protected category gets.
+    ///
+    /// `hardFloorCutoff` is different: when supplied, no category newer than
+    /// that timestamp is eligible in either phase and the method may return
+    /// fewer rows than requested. This is the store primitive used when the
+    /// daemon must prefer honest storage shedding/degraded state over silently
+    /// deleting the entire recent forensic/correlation window to make a
+    /// configured byte target appear feasible.
     @discardableResult
     public func pruneOldest(
         count: Int,
         protecting protectedCategory: EventCategory? = nil,
-        newerThan floorCutoff: Date? = nil
+        newerThan floorCutoff: Date? = nil,
+        preservingAllNewerThan hardFloorCutoff: Date? = nil
     ) async throws -> Int {
         guard count > 0 else { return 0 }
         let batchSize: Int32 = min(
@@ -2493,10 +2503,14 @@ public actor EventStore {
             // unchanged (leading `timestamp` term, no expression in ORDER BY),
             // so idx_events_ts_category still drives an ordered top-N scan
             // rather than a full sort of the eligible set.
+            let hardFloorPredicate = hardFloorCutoff == nil
+                ? ""
+                : " AND timestamp < ?4"
             let eligibleWhere = """
-                timestamp < ?2
+                (timestamp < ?2
                    OR (event_category <> ?1
-                       AND event_category NOT IN ('network', 'authentication', 'tcc'))
+                       AND event_category NOT IN ('network', 'authentication', 'tcc')))
+                \(hardFloorPredicate)
                 """
             let deleteEligibleFTS = """
                 DELETE FROM events_fts WHERE rowid IN (
@@ -2562,6 +2576,12 @@ public actor EventStore {
                     )
                     sqlite3_bind_double(statement, 2, floorTs)
                     sqlite3_bind_int(statement, 3, thisBatch)
+                    if let hardFloorCutoff {
+                        sqlite3_bind_double(
+                            statement, 4,
+                            hardFloorCutoff.timeIntervalSince1970
+                        )
+                    }
                 }
                 if deleted == 0 { break }  // no more eligible rows — engage valve below
                 totalDeleted += deleted
@@ -2576,14 +2596,19 @@ public actor EventStore {
 
         // Phase 2 — plain oldest-first. The whole job when no floor is
         // configured; the safety-valve tail otherwise.
+        let hardFloorWhere = hardFloorCutoff == nil
+            ? ""
+            : " WHERE timestamp < ?2"
         let deleteFTS = """
             DELETE FROM events_fts WHERE rowid IN (
-                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+                SELECT rowid FROM events\(hardFloorWhere)
+                ORDER BY timestamp ASC LIMIT ?1
             )
             """
         let deleteEvents = """
             DELETE FROM events WHERE rowid IN (
-                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+                SELECT rowid FROM events\(hardFloorWhere)
+                ORDER BY timestamp ASC LIMIT ?1
             )
             """
         // v1.21.6 (audit DL-05): same roll-up-before-delete as Phase 1. This
@@ -2599,7 +2624,8 @@ public actor EventStore {
                 COALESCE(process_path, ''),
                 COUNT(*) AS c
             FROM events WHERE rowid IN (
-                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+                SELECT rowid FROM events\(hardFloorWhere)
+                ORDER BY timestamp ASC LIMIT ?1
             )
             GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
             ON CONFLICT(day, event_category, process_signer, process_path)
@@ -2619,6 +2645,12 @@ public actor EventStore {
                 estimatedTransactionBytes: estimate
             ) { statement in
                 sqlite3_bind_int(statement, 1, thisBatch)
+                if let hardFloorCutoff {
+                    sqlite3_bind_double(
+                        statement, 2,
+                        hardFloorCutoff.timeIntervalSince1970
+                    )
+                }
             }
             if deleted == 0 { break }  // table empty
             totalDeleted += deleted
@@ -2761,10 +2793,102 @@ public actor EventStore {
         return results
     }
 
+    /// Select a bounded, deterministic set of already-persisted events leading
+    /// up to an alert. This is a read-only source operation: new evidence is
+    /// owned and written by AlertStore in alerts.db.
+    ///
+    /// The inner ordering chooses the strongest/closest candidates; the outer
+    /// ordering returns the selected set chronologically for incident review.
+    /// Both caller-controlled bounds are clamped to the fixed policy ceiling.
+    /// Oversized or malformed legacy payloads are omitted rather than copied
+    /// into the new evidence tier.
+    public func alertEvidenceCandidates(
+        alertTimestamp: Date,
+        windowSeconds: TimeInterval = AlertEvidencePolicy.lookbackSeconds,
+        maxRows: Int = AlertEvidencePolicy.maximumEventsPerAlert
+    ) throws -> [AlertEvidenceCandidate] {
+        let requestedRows = min(
+            AlertEvidencePolicy.maximumEventsPerAlert,
+            max(0, maxRows)
+        )
+        guard requestedRows > 0 else { return [] }
+        let boundedWindow = min(
+            AlertEvidencePolicy.lookbackSeconds,
+            max(0, windowSeconds)
+        )
+        let alertTs = alertTimestamp.timeIntervalSince1970
+        let lowerTs = alertTs - boundedWindow
+        let sql = """
+            SELECT id, timestamp, raw_json
+            FROM (
+                SELECT id, timestamp, raw_json
+                FROM events
+                WHERE timestamp BETWEEN ?1 AND ?2
+                  AND LENGTH(CAST(raw_json AS BLOB)) <= ?3
+                ORDER BY
+                    CASE severity
+                        WHEN 'critical' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3
+                        ELSE 4
+                    END,
+                    ABS(timestamp - ?2) ASC,
+                    timestamp DESC,
+                    id ASC
+                LIMIT ?4
+            ) selected
+            ORDER BY timestamp ASC, id ASC
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, lowerTs)
+        sqlite3_bind_double(statement, 2, alertTs)
+        sqlite3_bind_int(
+            statement, 3,
+            Int32(clamping: AlertEvidencePolicy.maximumRawPayloadBytes)
+        )
+        sqlite3_bind_int(statement, 4, Int32(clamping: requestedRows))
+
+        var candidates: [AlertEvidenceCandidate] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else {
+                try throwLatchedStoragePressureIfPresent(resultCode: step)
+                throw EventStoreError.stepFailed(
+                    "alert evidence candidate selection failed"
+                )
+            }
+            guard let idBytes = sqlite3_column_text(statement, 0),
+                  let rawBytes = sqlite3_column_text(statement, 2) else {
+                continue
+            }
+            let rawCount = Int(sqlite3_column_bytes(statement, 2))
+            guard rawCount > 0,
+                  rawCount <= AlertEvidencePolicy.maximumRawPayloadBytes else {
+                continue
+            }
+            candidates.append(AlertEvidenceCandidate(
+                eventId: String(cString: idBytes),
+                timestamp: Date(
+                    timeIntervalSince1970: sqlite3_column_double(statement, 1)
+                ),
+                rawJSON: String(cString: rawBytes)
+            ))
+        }
+        return candidates
+    }
+
+    /// LEGACY COMPATIBILITY WRITE ONLY. New production alert capture must use
+    /// `alertEvidenceCandidates` followed by `AlertStore.captureEvidence`.
+    /// Existing events.db evidence remains readable and receives retention /
+    /// explicit-delete cleanup, but no shipping call site may grow this table.
+    ///
     /// Capture a snapshot of the `windowSeconds` of events immediately
-    /// PRECEDING the alert into `alert_evidence`. Idempotent — re-running for
-    /// the same `alertId` is safe (PRIMARY KEY on (alert_id, id) silently
-    /// dedupes).
+    /// PRECEDING the alert into legacy `events.db.alert_evidence`. Idempotent —
+    /// re-running for the same `alertId` is safe (PRIMARY KEY on
+    /// (alert_id, id) silently dedupes).
     ///
     /// Called synchronously from the alert-firing path so the dashboard's alert
     /// detail view can show "what led up to this?" even after the hot-tier
@@ -2785,7 +2909,8 @@ public actor EventStore {
     /// higher-severity rows so the cap doesn't drop the most informative
     /// context — same-severity rows tie-break by closeness to the alert
     /// timestamp.
-    public func recordAlertEvidence(
+    @available(*, deprecated, message: "Legacy test/compatibility write; new capture belongs to AlertStore")
+    func recordAlertEvidence(
         alertId: String,
         alertTimestamp: Date,
         windowSeconds: TimeInterval = 30,
@@ -3160,6 +3285,140 @@ public actor EventStore {
             total = try rawJsonBytes()
         }
         return deleted
+    }
+
+    /// Exact ownership of the preserved pre-schema-v8 evidence tier.
+    ///
+    /// New evidence is never written here, but an upgrade may retain up to a
+    /// year of existing rows. Daemon storage admission uses this cold-path
+    /// measurement to grant only the transition reserve those rows need. The
+    /// DBSTAT query deliberately throws when page ownership cannot be proven;
+    /// callers then retain the full configured reserve rather than stranding a
+    /// live events database below an unknowable floor.
+    public func legacyAlertEvidenceBudgetSnapshot(
+        maxBytes: Int64
+    ) throws -> AlertEvidenceBudgetSnapshot {
+        let exists = try prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alert_evidence' LIMIT 1"
+        )
+        defer { sqlite3_finalize(exists) }
+        let existenceStep = sqlite3_step(exists)
+        if existenceStep == SQLITE_DONE {
+            return AlertEvidenceBudgetSnapshot(
+                rowCount: 0,
+                logicalBytes: 0,
+                allocatedBytes: 0,
+                chargedBytes: 0,
+                maxBytes: max(0, maxBytes)
+            )
+        }
+        guard existenceStep == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "legacy alert evidence schema lookup failed"
+            )
+        }
+
+        let logical = try prepare(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(raw_json AS BLOB))), 0) FROM alert_evidence"
+        )
+        defer { sqlite3_finalize(logical) }
+        guard sqlite3_step(logical) == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "legacy alert evidence logical-size query failed"
+            )
+        }
+        let rowCount = Int(sqlite3_column_int64(logical, 0))
+        let logicalBytes = max(0, sqlite3_column_int64(logical, 1))
+        guard rowCount > 0 else {
+            return AlertEvidenceBudgetSnapshot(
+                rowCount: 0,
+                logicalBytes: 0,
+                allocatedBytes: 0,
+                chargedBytes: 0,
+                maxBytes: max(0, maxBytes)
+            )
+        }
+
+        let allocated = try prepare(
+            """
+            SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
+            WHERE name = 'alert_evidence'
+               OR name IN (
+                   SELECT name FROM sqlite_master
+                   WHERE type = 'index' AND tbl_name = 'alert_evidence'
+               )
+            """
+        )
+        defer { sqlite3_finalize(allocated) }
+        guard sqlite3_step(allocated) == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "legacy alert evidence DBSTAT ownership query failed"
+            )
+        }
+        let allocatedBytes = max(0, sqlite3_column_int64(allocated, 0))
+        return AlertEvidenceBudgetSnapshot(
+            rowCount: rowCount,
+            logicalBytes: logicalBytes,
+            allocatedBytes: allocatedBytes,
+            chargedBytes: max(logicalBytes, allocatedBytes),
+            maxBytes: max(0, maxBytes)
+        )
+    }
+
+    /// Authoritative cold-path proof for a legacy-evidence reserve change.
+    ///
+    /// The evidence table's DBSTAT ownership determines the *candidate*
+    /// reserve, but never proves that events.db can actually adopt the lower
+    /// hard ceiling. Before publishing a shrink, callers also need a fresh
+    /// family footprint after a fully drained checkpoint. A pinned reader is
+    /// reported through `walCheckpointDrained == false`; freelist pages remain
+    /// charged in both `pageCount` and the physical family measurement until
+    /// maintenance has really reclaimed them.
+    public func legacyAlertEvidenceTransitionMeasurement(
+        maxBytes: Int64
+    ) throws -> LegacyAlertEvidenceTransitionMeasurement {
+        guard db != nil else {
+            throw EventStoreError.stepFailed(
+                "legacy alert-evidence transition probe requires an open database"
+            )
+        }
+
+        // Checkpoint first, then stat the complete family. The checkpoint is
+        // deliberately non-destructive: failure/pinning leaves the previous
+        // reserve applied and exposes a pending candidate to the operator.
+        let checkpointDrained = walCheckpoint()
+        let evidence = try legacyAlertEvidenceBudgetSnapshot(maxBytes: maxBytes)
+        let family = try SQLitePersistentStoreAdmission.measureFamily(
+            databasePath
+        )
+        let pageSize = try strictPragmaInt64("PRAGMA page_size")
+        let pageCount = try strictPragmaInt64("PRAGMA page_count")
+        let freelistCount = try strictPragmaInt64("PRAGMA freelist_count")
+        guard pageSize > 0, pageCount >= 0, freelistCount >= 0,
+              freelistCount <= pageCount else {
+            throw EventStoreError.stepFailed(
+                "legacy alert-evidence transition page accounting is invalid"
+            )
+        }
+        return LegacyAlertEvidenceTransitionMeasurement(
+            evidence: evidence,
+            familyFootprintBytes: family,
+            walCheckpointDrained: checkpointDrained,
+            pageSizeBytes: pageSize,
+            pageCount: pageCount,
+            freelistCount: freelistCount
+        )
+    }
+
+    private func strictPragmaInt64(_ sql: String) throws -> Int64 {
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "SQLite transition accounting pragma failed"
+            )
+        }
+        return sqlite3_column_int64(statement, 0)
     }
 
     /// Read events captured for `alertId` by `recordAlertEvidence`. Returns

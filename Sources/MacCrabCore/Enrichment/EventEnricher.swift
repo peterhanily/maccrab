@@ -8,6 +8,19 @@
 import Foundation
 import os.log
 
+private struct HeavyFieldResolution<Value: Sendable>: Sendable {
+    let value: Value?
+    let coverage: HeavyEnrichmentCoverage?
+
+    static func complete(_ value: Value?) -> HeavyFieldResolution<Value> {
+        HeavyFieldResolution(value: value, coverage: nil)
+    }
+
+    static func degraded(_ state: HeavyEnrichmentCoverage) -> HeavyFieldResolution<Value> {
+        HeavyFieldResolution(value: nil, coverage: state)
+    }
+}
+
 // MARK: - EventEnricher
 
 /// Central enrichment pipeline for MacCrab events.
@@ -17,8 +30,10 @@ import os.log
 /// - Full process ancestor chain (from the lineage DAG).
 /// - Code-signing evaluation results (from the cache/Security framework).
 ///
-/// All access is serialised through the actor, so callers can safely call
-/// `enrich(_:)` from any concurrency context.
+/// Cheap graph/cache orchestration is actor-isolated. Blocking cache misses
+/// are owned by ``HeavyEnrichmentPlane`` and return later as identity-bound
+/// patches, so either ingestion lane can call `enrich(_:)` safely without a
+/// slow disk or Security.framework call serialising the other lane.
 public actor EventEnricher {
 
     // MARK: Dependencies
@@ -30,9 +45,8 @@ public actor EventEnricher {
     private let codeSigningCache: CodeSigningCache
 
     /// Optional SHA-256/CDHash fingerprinter. When provided, exec/fork events
-    /// get their `process.hashes` populated. Runs opportunistically — I/O
-    /// errors or cache misses silently leave hashes nil so event throughput
-    /// is never blocked by hashing latency.
+    /// get their `process.hashes` populated. Cache misses run on the bounded
+    /// heavy plane; pending/rejected/unavailable coverage is explicit.
     private let processHasher: ProcessHasher?
 
     /// Optional deception module. When provided, file events whose path
@@ -51,13 +65,13 @@ public actor EventEnricher {
     /// `close` events whose target path is in the
     /// `FileContentEnricher.shouldScan` allowlist get the first
     /// `maxBytes` of text written into
-    /// `enrichments["FileContent"]` for `FileContent|contains`
-    /// rule selectors. Tight allowlist to keep the hot path fast.
+    /// `enrichments["FileContent"]` for `FileContent|contains` selectors.
+    /// Reads are descriptor-stable deferred evidence, never inline I/O.
     private let fileContentEnricher: FileContentEnricher?
 
     /// Opt-in: capture a filtered set of env vars from exec/fork processes
-    /// via `sysctl(KERN_PROCARGS2)`. Costs a syscall per exec — gated at
-    /// daemon startup by `MACCRAB_CAPTURE_ENV=1`.
+    /// via `sysctl(KERN_PROCARGS2)`. The bounded heavy plane owns that syscall;
+    /// the feature remains gated at daemon startup by `MACCRAB_CAPTURE_ENV=1`.
     private let captureEnv: Bool
 
     /// Telemetry-gap gate. Returns `true` when a kernel drop (ES per-client
@@ -66,6 +80,12 @@ public actor EventEnricher {
     /// path never fires and unresolved orphans stay `.unknown`. Wired in
     /// `DaemonSetup` to a `TelemetryGapProbe` over `ESCollector.esGlobalDropped()`.
     private let telemetryGapSignal: (@Sendable () -> Bool)?
+
+    /// Fixed-concurrency owner for every filesystem/Security/sysctl operation
+    /// that can block.  `EventEnricher` itself remains the cheap orchestration
+    /// actor; cache misses become identity-bound deferred patches instead of
+    /// serialising both ingestion lanes.
+    private let heavyEnrichmentPlane: HeavyEnrichmentPlane
 
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
@@ -100,7 +120,8 @@ public actor EventEnricher {
         fileContentEnricher: FileContentEnricher? = nil,
         captureEnv: Bool = false,
         pruneInterval: UInt64 = 5000,
-        telemetryGapSignal: (@Sendable () -> Bool)? = nil
+        telemetryGapSignal: (@Sendable () -> Bool)? = nil,
+        heavyEnrichmentPlane: HeavyEnrichmentPlane = HeavyEnrichmentPlane()
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
@@ -111,6 +132,7 @@ public actor EventEnricher {
         self.captureEnv = captureEnv
         self.pruneInterval = pruneInterval
         self.telemetryGapSignal = telemetryGapSignal
+        self.heavyEnrichmentPlane = heavyEnrichmentPlane
     }
 
     // MARK: Enrichment
@@ -137,51 +159,42 @@ public actor EventEnricher {
         // consumed later (step 5) when building the enriched event.
         let (ancestors, parentInfo) = await lineage.ancestorsAndParentInfo(of: proc.pid)
 
-        // --- 3. Evaluate code signing ---
-        let codeSignature: CodeSignatureInfo?
-        if let collectorSig = proc.codeSignature {
-            // The collector (ESHelpers / EsloggerParser) already classified the
-            // signer cheaply from the kernel signals. Keep it — EXCEPT for the
-            // one spoofable case (v1.17.2 anti-spoof):
-            //
-            // SignerType.classify promotes a binary to `.apple` when its
-            // signing identifier starts with `com.apple.` AND it has a
-            // non-empty team_id (needed to keep Apple's NON-platform apps —
-            // Xcode, iWork — classified .apple). But `signing_id` is the
-            // developer-chosen `Identifier=` field: a third party holding any
-            // Developer ID cert can self-name `com.apple.*` and be laundered
-            // into `.apple`, skipping the ~126 SignerType:apple-negated rules.
-            //
-            // Kernel `is_platform_binary` is unspoofable, so a genuine platform
-            // binary needs no further check. Only the
-            // (.apple AND NOT platform-binary) case is ambiguous — re-verify it
-            // CRYPTOGRAPHICALLY via the `anchor apple` SecRequirement. This is
-            // the expensive path, but it runs ONLY for that narrow case and is
-            // LRU-cached per executable path, so a real Apple app pays it once
-            // and the common (.devId/.adHoc/.unsigned/platform) events never do.
-            if collectorSig.signerType == .apple && !proc.isPlatformBinary {
-                let verified = await codeSigningCache.evaluate(path: proc.executable)
-                if verified.signerType != .apple {
-                    // signing_id said Apple but the cert chain does not anchor
-                    // to Apple — a spoof. Trust the cryptographic verdict.
-                    codeSignature = collectorSig.withSignerType(verified.signerType)
-                } else {
-                    codeSignature = collectorSig
-                }
-            } else {
-                codeSignature = collectorSig
-            }
-        } else {
-            codeSignature = await codeSigningCache.evaluate(path: proc.executable)
+        // --- 3. Resolve heavyweight evidence without running misses here ---
+        //
+        // Collector evidence and validated cache hits stay on this event. A
+        // Security/hash/sysctl/file-content miss is offered to the bounded
+        // heavy plane and represented honestly as pending/rejected coverage.
+        // EventLoop consumes the identity-bound patch later and re-runs the
+        // rules that depend on it; no rule input is silently discarded.
+        let binding = HeavyEnrichmentBinding(event: event)
+        var heavyCoverage: [HeavyEnrichmentComponent: HeavyEnrichmentCoverage] = [:]
+
+        let codeSignatureResolution = await resolveCodeSignature(
+            for: event,
+            binding: binding
+        )
+        let codeSignature = codeSignatureResolution.value
+        if let state = codeSignatureResolution.coverage {
+            heavyCoverage[.codeSignature] = state
         }
 
-        // --- 3.5 Compute file + process hashes on exec/fork ---
-        //
-        // Only hash when a new process is observed; subsequent events
-        // inherit the hash via the FileHasher cache if they share an
-        // executable path. Avoids re-hashing a long-running process on
-        // every file/network event it emits.
-        let hashes = await resolveHashes(for: event, existing: proc.hashes)
+        let hashResolution = await resolveHashes(for: event, binding: binding)
+        let hashes = hashResolution.value
+        if let state = hashResolution.coverage {
+            heavyCoverage[.processHashes] = state
+        }
+
+        let environmentResolution = await resolveEnvironment(for: event, binding: binding)
+        let environment = environmentResolution.value
+        if let state = environmentResolution.coverage {
+            heavyCoverage[.environment] = state
+        }
+
+        let userNameResolution = await resolveUserName(for: event, binding: binding)
+        let resolvedUserName = userNameResolution.value ?? proc.userName
+        if let state = userNameResolution.coverage {
+            heavyCoverage[.userName] = state
+        }
 
         // --- 3.6 Session / launch-source inference ---
         //
@@ -194,17 +207,6 @@ public actor EventEnricher {
             ?? telemetryGapSession(ancestors: ancestors.isEmpty ? proc.ancestors : ancestors)
 
         // --- 4. Build enriched ProcessInfo ---
-        // v1.12.6 Wave 9I: resolve uid → user_name when the collector
-        // left it empty. ESHelpers.processFromESProcess sets userName
-        // to "" because the ES framework only exposes audit-token UID;
-        // resolution requires getpwuid(). Pre-9I that resolution never
-        // happened, so 99.8% of events.db rows had user_id populated
-        // but user_name NULL. The dashboard's Wave 9H "User" inspector
-        // row showed empty as a result. Cached per-uid to avoid a
-        // getpwuid syscall per event on a single-user machine.
-        let resolvedUserName = proc.userName.isEmpty
-            ? Self.userNameForUid(proc.userId)
-            : proc.userName
         let enrichedProcess = ProcessInfo(
             pid: proc.pid,
             ppid: proc.ppid,
@@ -225,7 +227,7 @@ public actor EventEnricher {
             isPlatformBinary: proc.isPlatformBinary,
             hashes: hashes,
             session: session,
-            envVars: resolveEnvVars(for: event, existing: proc.envVars),
+            envVars: environment,
             // v1.21.4 (P6 fix, part 2): preserve the real audit identity through
             // enrichment. This ProcessInfo rebuild otherwise dropped the field
             // (defaulting to nil), which made the agent-trace direct correlation
@@ -284,42 +286,18 @@ public actor EventEnricher {
             }
         }
 
-        // v1.12.0 FileContent enrichment: read first 64KB of the
-        // target file on close-write events, but only for paths in
-        // the FileContentEnricher allowlist (Info.plist, CHANGELOG,
-        // README, .gitconfig, LaunchAgents plists, specific IOC
-        // filenames). The rule layer uses
-        // `FileContent|contains: '...'` selectors against this.
-        //
-        // v1.12.0 post-audit (M-Perf3, deferred to v1.12.x): this
-        // synchronous file read sits on the enricher actor. Under
-        // disk pressure (slow USB / network mount / encrypted volume)
-        // it can stall enrichment of every other event. The audit
-        // recommended detaching into a Task — but detaching is
-        // incompatible with the rule pipeline's load-bearing
-        // assumption that `enrichments["FileContent"]` is set BEFORE
-        // rule eval on the SAME event. The proper fix is a small
-        // in-memory FileContent cache keyed by (path, mtime) with a
-        // read deadline (~50ms); on deadline-miss the event flows
-        // through without FileContent and the cache picks up the
-        // miss for the next event hitting the same path. Deferred to
-        // v1.12.x — for v1.12.0 the allowlist is tight enough
-        // (Info.plist + LaunchAgents + a handful of installer
-        // filenames + bounded node_modules/site-packages source
-        // files) that the synchronous cost is acceptable.
-        // v1.17.4: collectors emit "close_modified" (ESCollector/Kdebug/
-        // Eslogger), never bare "close" — the old `== "close"` gate meant
-        // ALL 14 FileContent|contains rules were dead. hasPrefix is tolerant
-        // of any close-class action.
-        if let scanner = fileContentEnricher,
-           let filePath = event.file?.path,
-           event.eventCategory == .file,
-           event.eventAction.hasPrefix("close"),
-           FileContentEnricher.shouldScan(targetPath: filePath) {
-            if let content = await scanner.scan(path: filePath) {
-                enrichedEvent.enrichments["FileContent"] = content
-            }
+        // FileContent evidence is load-bearing rule input.  A miss is now a
+        // conserved deferred read of the exact close event rather than a
+        // token-bucket nil that permanently loses that write.
+        let fileContentResolution = await resolveFileContent(for: event, binding: binding)
+        if let evidence = fileContentResolution.value {
+            enrichedEvent.enrichments["FileContent"] = evidence.content
         }
+        if let state = fileContentResolution.coverage {
+            heavyCoverage[.fileContent] = state
+        }
+
+        DeferredEventEnrichment.storeCoverage(heavyCoverage, in: &enrichedEvent.enrichments)
 
         // Mark that enrichment has been applied.
         enrichedEvent.enrichments["enriched"] = "true"
@@ -350,48 +328,242 @@ public actor EventEnricher {
         return SessionInfo(launchSource: .telemetryGap)
     }
 
-    // MARK: Hashing
+    // MARK: Heavy evidence resolution
 
-    /// Resolve `ProcessHashes` for an event. Preserves collector-provided
-    /// hashes when present; otherwise opportunistically computes them for
-    /// exec/fork events when a `ProcessHasher` is configured.
-    private func resolveHashes(for event: Event, existing: ProcessHashes?) async -> ProcessHashes? {
-        if let existing { return existing }
-        guard let hasher = processHasher else { return nil }
+    private func resolveCodeSignature(
+        for event: Event,
+        binding: HeavyEnrichmentBinding
+    ) async -> HeavyFieldResolution<CodeSignatureInfo> {
+        let process = event.process
+        let collectorSignature = process.codeSignature
+        let needsCryptographicVerification = collectorSignature?.signerType == .apple
+            && !process.isPlatformBinary
 
-        // Only fingerprint on process-launch events — keeps the hot path
-        // short and avoids spurious SHA-256 recomputation on file / network
-        // events emitted by long-running processes.
-        guard event.eventCategory == .process,
-              event.eventAction == "exec" || event.eventAction == "fork" else {
-            return nil
+        // Kernel-derived ordinary classifications are complete.  The one
+        // spoofable `.apple && !platform` classification must be re-anchored.
+        if let collectorSignature, !needsCryptographicVerification {
+            return .complete(collectorSignature)
         }
 
-        let computed = await hasher.hash(
-            pid: event.process.pid,
-            executablePath: event.process.executable
-        )
-        guard computed.hasAny else { return nil }
-        return ProcessHashes(
-            sha256: computed.sha256,
-            cdhash: computed.cdhash,
-            md5: nil
-        )
+        // A validated CodeSigningCache hit is intentionally same-event.  The
+        // cache re-stats the path and rejects a same-path replacement before
+        // returning a verdict.
+        if let cached = await codeSigningCache.lookup(path: process.executable) {
+            if let collectorSignature {
+                return .complete(
+                    cached.signerType == .apple
+                        ? collectorSignature
+                        : collectorSignature.withSignerType(cached.signerType)
+                )
+            }
+            return .complete(cached)
+        }
+
+        let path = process.executable
+        let cache = codeSigningCache
+        let offer = await heavyEnrichmentPlane.offer(
+            component: .codeSignature,
+            binding: binding,
+            cacheResult: false
+        ) {
+            let before = HeavyEnrichmentFileIdentity.capture(path: path)
+            let verified = await cache.evaluate(path: path)
+            let after = HeavyEnrichmentFileIdentity.capture(path: path)
+            guard let stable = after, before == stable else {
+                // Never publish a trusted verdict when the path was absent or
+                // changed while Security.framework evaluated it.
+                return .codeSignature(HeavyCodeSignatureEvidence(
+                    value: nil,
+                    fileIdentity: nil
+                ))
+            }
+            let final: CodeSignatureInfo
+            if let collectorSignature {
+                final = verified.signerType == .apple
+                    ? collectorSignature
+                    : collectorSignature.withSignerType(verified.signerType)
+            } else {
+                final = verified
+            }
+            return .codeSignature(HeavyCodeSignatureEvidence(
+                value: final,
+                fileIdentity: stable
+            ))
+        }
+        switch offer {
+        case .cacheHit(.codeSignature(let evidence)):
+            guard let value = evidence.value, evidence.fileIdentity != nil else {
+                return .degraded(.unavailable)
+            }
+            return .complete(value)
+        case .cacheHit:
+            return .degraded(.unavailable)
+        case .pending:
+            return .degraded(.pending)
+        case .rejected:
+            return .degraded(.rejected)
+        }
     }
 
-    // MARK: Environment capture
-
-    /// If captureEnv is enabled and the event is an exec/fork without
-    /// pre-existing envVars, read the target process env via sysctl and
-    /// filter through EnvCapture's allowlist/deny rules.
-    private func resolveEnvVars(for event: Event, existing: [String: String]?) -> [String: String]? {
-        if let existing { return existing }
-        guard captureEnv else { return nil }
-        guard event.eventCategory == .process,
+    /// Preserves collector hashes immediately; a launch-event miss is hashed
+    /// on the heavy plane and bound to one stable executable identity.
+    private func resolveHashes(
+        for event: Event,
+        binding: HeavyEnrichmentBinding
+    ) async -> HeavyFieldResolution<ProcessHashes> {
+        if let existing = event.process.hashes { return .complete(existing) }
+        guard let hasher = processHasher,
+              event.eventCategory == .process,
               event.eventAction == "exec" || event.eventAction == "fork" else {
-            return nil
+            return .complete(nil)
         }
-        return EnvCapture.capture(pid: event.process.pid)
+
+        let path = event.process.executable
+        let pid = event.process.pid
+        let offer = await heavyEnrichmentPlane.offer(
+            component: .processHashes,
+            binding: binding,
+            cacheResult: false
+        ) {
+            let before = HeavyEnrichmentFileIdentity.capture(path: path)
+            let computed = await hasher.hash(pid: pid, executablePath: path)
+            let after = HeavyEnrichmentFileIdentity.capture(path: path)
+            guard computed.hasAny, let stable = after, before == stable else {
+                return .processHashes(HeavyProcessHashEvidence(
+                    value: nil,
+                    fileIdentity: nil
+                ))
+            }
+            return .processHashes(HeavyProcessHashEvidence(
+                value: ProcessHashes(
+                    sha256: computed.sha256,
+                    cdhash: computed.cdhash,
+                    md5: nil
+                ),
+                fileIdentity: stable
+            ))
+        }
+        switch offer {
+        case .cacheHit(.processHashes(let evidence)):
+            guard let value = evidence.value, evidence.fileIdentity != nil else {
+                return .degraded(.unavailable)
+            }
+            return .complete(value)
+        case .cacheHit:
+            return .degraded(.unavailable)
+        case .pending:
+            return .degraded(.pending)
+        case .rejected:
+            return .degraded(.rejected)
+        }
+    }
+
+    /// Opt-in sysctl capture runs off the ingestion actor.  PID/start/path are
+    /// checked before and after capture so rapid PID reuse cannot attach a new
+    /// process's environment to the old exec event.
+    private func resolveEnvironment(
+        for event: Event,
+        binding: HeavyEnrichmentBinding
+    ) async -> HeavyFieldResolution<[String: String]> {
+        if let existing = event.process.envVars { return .complete(existing) }
+        guard captureEnv,
+              event.eventCategory == .process,
+              event.eventAction == "exec" || event.eventAction == "fork" else {
+            return .complete(nil)
+        }
+
+        let offer = await heavyEnrichmentPlane.offer(
+            component: .environment,
+            binding: binding,
+            cacheResult: false
+        ) {
+            guard HeavyEnrichmentLiveProcessIdentity.matches(binding) else {
+                return .environment(nil)
+            }
+            let value = EnvCapture.capture(pid: binding.processID)
+            guard HeavyEnrichmentLiveProcessIdentity.matches(binding) else {
+                return .environment(nil)
+            }
+            return .environment(value)
+        }
+        switch offer {
+        case .cacheHit(.environment(let value)):
+            return value.map(HeavyFieldResolution.complete) ?? .degraded(.unavailable)
+        case .cacheHit:
+            return .degraded(.unavailable)
+        case .pending:
+            return .degraded(.pending)
+        case .rejected:
+            return .degraded(.rejected)
+        }
+    }
+
+    /// getpwuid can reach directory services.  Only a lock-protected cache hit
+    /// runs inline; the first lookup for a UID is owned by the heavy plane and
+    /// all events for that same identity coalesce.
+    private func resolveUserName(
+        for event: Event,
+        binding: HeavyEnrichmentBinding
+    ) async -> HeavyFieldResolution<String> {
+        if !event.process.userName.isEmpty { return .complete(event.process.userName) }
+        if let cached = Self.userNameCache.lookup(event.process.userId) {
+            return cached.isEmpty ? .degraded(.unavailable) : .complete(cached)
+        }
+
+        let uid = event.process.userId
+        let offer = await heavyEnrichmentPlane.offer(
+            component: .userName,
+            binding: binding
+        ) {
+            .userName(Self.userNameForUid(uid))
+        }
+        switch offer {
+        case .cacheHit(.userName(let value)):
+            guard let value, !value.isEmpty else { return .degraded(.unavailable) }
+            return .complete(value)
+        case .cacheHit:
+            return .degraded(.unavailable)
+        case .pending:
+            return .degraded(.pending)
+        case .rejected:
+            return .degraded(.rejected)
+        }
+    }
+
+    private func resolveFileContent(
+        for event: Event,
+        binding: HeavyEnrichmentBinding
+    ) async -> HeavyFieldResolution<HeavyFileContentEvidence> {
+        guard let scanner = fileContentEnricher,
+              let path = event.file?.path,
+              event.eventCategory == .file,
+              event.eventAction.hasPrefix("close"),
+              FileContentEnricher.shouldScan(targetPath: path) else {
+            return .complete(nil)
+        }
+
+        let offer = await heavyEnrichmentPlane.offer(
+            component: .fileContent,
+            binding: binding
+        ) {
+            let maximumBytes = scanner.maxBytes
+            let maximumFileSize = scanner.maxFileSize
+            return .fileContent(HeavyFileContentEvidence.read(
+                path: path,
+                maximumBytes: maximumBytes,
+                maximumFileSize: maximumFileSize
+            ))
+        }
+        switch offer {
+        case .cacheHit(.fileContent(let evidence)):
+            return evidence.map(HeavyFieldResolution.complete) ?? .degraded(.unavailable)
+        case .cacheHit:
+            return .degraded(.unavailable)
+        case .pending:
+            return .degraded(.pending)
+        case .rejected:
+            return .degraded(.rejected)
+        }
     }
 
     // MARK: Lineage Updates
@@ -442,6 +614,26 @@ public actor EventEnricher {
         await lineage.nodeCount
     }
 
+    /// Terminal evidence patches for the daemon's bounded deferred
+    /// re-evaluation lane.  The caller should batch by event ID before running
+    /// detection so one event with multiple components is evaluated once.
+    public func drainDeferredEnrichments(limit: Int = 128) async -> [DeferredEventEnrichment] {
+        await heavyEnrichmentPlane.drainDeferredResults(limit: limit)
+    }
+
+    public func heavyEnrichmentSnapshot() async -> HeavyEnrichmentPlaneSnapshot {
+        await heavyEnrichmentPlane.snapshot()
+    }
+
+    /// One-shot shutdown seam.  Admission seals before cancellation and an
+    /// uncooperative syscall remains visible as a lingering physical worker.
+    @discardableResult
+    public func shutdownHeavyEnrichment(
+        deadlineSeconds: TimeInterval = 1.0
+    ) async -> HeavyEnrichmentPlaneSnapshot {
+        await heavyEnrichmentPlane.shutdown(deadlineSeconds: deadlineSeconds)
+    }
+
     // MARK: - User name resolution (Wave 9I)
 
     /// Per-uid cache of resolved user names. On a single-user macOS
@@ -466,26 +658,31 @@ private final class UserNameCache: @unchecked Sendable {
     private var entries: [UInt32: String] = [:]
     private let lock = NSLock()
 
+    func lookup(_ uid: UInt32) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[uid]
+    }
+
     func name(for uid: UInt32) -> String {
         lock.lock()
+        defer { lock.unlock() }
         if let cached = entries[uid] {
-            lock.unlock()
             return cached
         }
-        lock.unlock()
 
         // Resolve via libc. `getpwuid` may return nil for daemon /
         // service uids that don't have a passwd entry; in that case
-        // store "" so we don't re-syscall on the next event.
+        // store "" so we don't re-syscall on the next event. Keep the lock
+        // through getpwuid: libc returns process-global static storage, so
+        // concurrent misses for different UIDs must not race while copying it.
         let resolved: String
         if let pw = getpwuid(uid_t(uid)) {
             resolved = String(cString: pw.pointee.pw_name)
         } else {
             resolved = ""
         }
-        lock.lock()
         entries[uid] = resolved
-        lock.unlock()
         return resolved
     }
 }

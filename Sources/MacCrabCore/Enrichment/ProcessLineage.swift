@@ -77,6 +77,19 @@ public actor ProcessLineage {
                   let rhsParent = trackedDirectParentByPID[rhs] else { return false }
             return lhsParent == rhsParent
         }
+
+        /// Bounded checkpoint-facing evidence. The snapshot already caps every
+        /// walk at ProcessLineage.maxAncestorDepth; callers apply their own
+        /// persisted-field ceiling when merging event-provided ancestry.
+        func ancestorPIDs(of pid: pid_t) -> Set<pid_t> {
+            ancestorPIDsByPID[pid] ?? []
+        }
+
+        /// A numeric event PPID is not proof that the parent node was observed.
+        /// Persist the exact tracked edge used by areSiblings instead.
+        func trackedDirectParent(of pid: pid_t) -> pid_t? {
+            trackedDirectParentByPID[pid]
+        }
     }
 
     struct RelationshipSnapshotDiagnostics: Sendable {
@@ -172,7 +185,10 @@ public actor ProcessLineage {
     // exited ones with comfortable headroom. ~30 MB private heap reclaimed.
     public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20, maxProcessCount: Int = 10_000) {
         self.retentionWindow = retentionWindow
-        self.maxAncestorDepth = maxAncestorDepth
+        self.maxAncestorDepth = min(
+            max(maxAncestorDepth, 1),
+            SequenceCheckpointLimits.maximumProcessAncestors
+        )
         self.maxProcessCount = maxProcessCount
     }
 

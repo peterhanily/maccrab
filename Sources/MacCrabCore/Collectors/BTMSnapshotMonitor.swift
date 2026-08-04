@@ -46,6 +46,7 @@ public actor BTMSnapshotMonitor {
 
     /// Active scan task.
     private var scanTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     // MARK: - Types
 
@@ -107,7 +108,8 @@ public actor BTMSnapshotMonitor {
 
     /// Start monitoring.
     public func start() {
-        guard scanTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("BTM snapshot monitor starting (dumpbtm reconcile every \(self.pollInterval)s)")
         scanTask = Task { [weak self] in
             // Initial scan establishes the reported set AND reports pre-existing
@@ -125,16 +127,36 @@ public actor BTMSnapshotMonitor {
 
     /// Stop monitoring.
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { scanTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = scanTask
         scanTask?.cancel()
-        scanTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     // MARK: - Scan
 
-    private func scan() {
-        guard let output = Self.runDumpBTM() else { return }
-        let suspicious = Self.suspiciousRecords(Self.parseDumpBTM(output))
+    private func scan() async {
+        let suspicious: [BTMRecord] = await Task.detached(priority: .utility) {
+            () -> [BTMRecord] in
+            guard let output = Self.runDumpBTM() else { return [] }
+            return Self.suspiciousRecords(Self.parseDumpBTM(output))
+        }.value
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         for record in suspicious {
             let key = record.uuid.isEmpty ? (record.identifier ?? record.name) : record.uuid
             guard !reportedItems.contains(key) else { continue }

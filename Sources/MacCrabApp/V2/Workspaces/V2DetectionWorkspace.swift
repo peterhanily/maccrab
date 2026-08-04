@@ -12,28 +12,28 @@ struct AIToolRollupRow: Identifiable, Hashable {
     let tool: String
     let sessions: Int
     let events: Int
-    let alerts: Int
+    let llmCalls: Int
     let lastSeen: Date
     var id: String { tool }
 }
 
 /// Roll a flat list of agent-session snapshots up by tool type. Pure +
-/// free so it's unit-testable without the SwiftUI view. Sorted most-alerting,
-/// then most-active, first.
+/// free so it's unit-testable without the SwiftUI view. These are retained
+/// in-memory lineage facts, not time-window or safety metrics.
 func aiToolRollup(_ sessions: [AgentSessionSnapshot]) -> [AIToolRollupRow] {
-    var byTool: [String: (sessions: Int, events: Int, alerts: Int, lastSeen: Date)] = [:]
+    var byTool: [String: (sessions: Int, events: Int, llmCalls: Int, lastSeen: Date)] = [:]
     for s in sessions {
         let key = s.toolType.displayName
         var agg = byTool[key] ?? (0, 0, 0, Date.distantPast)
         agg.sessions += 1
         agg.events += s.eventCount
-        agg.alerts += s.kindCounts.alerts
+        agg.llmCalls += s.kindCounts.llmCalls
         agg.lastSeen = max(agg.lastSeen, s.lastActivity)
         byTool[key] = agg
     }
     return byTool
-        .map { AIToolRollupRow(tool: $0.key, sessions: $0.value.sessions, events: $0.value.events, alerts: $0.value.alerts, lastSeen: $0.value.lastSeen) }
-        .sorted { ($0.alerts, $0.events, $0.tool) > ($1.alerts, $1.events, $1.tool) }
+        .map { AIToolRollupRow(tool: $0.key, sessions: $0.value.sessions, events: $0.value.events, llmCalls: $0.value.llmCalls, lastSeen: $0.value.lastSeen) }
+        .sorted { ($0.events, $0.llmCalls, $0.tool) > ($1.events, $1.llmCalls, $1.tool) }
 }
 
 public struct V2DetectionWorkspace: View {
@@ -1085,36 +1085,45 @@ public struct V2DetectionWorkspace: View {
         }
     }
 
-    // AI Guard metrics from the live agent-lineage snapshot (appState.aiSessions),
-    // replacing the old '—'/'via daemon' placeholders.
+    // Retained, in-memory lineage snapshot. This ring is neither a 24h/7d
+    // database nor an alert source: sessions disappear on root exit and each
+    // active session retains at most 2,000 recent events. Never infer safety or
+    // time-window counts from absence here.
     private var trackedToolCount: Int { Set(appState.aiSessions.map { $0.toolType }).count }
-    private var toolCalls24h: Int {
-        let cutoff = Date().addingTimeInterval(-24 * 3600)
-        return appState.aiSessions.filter { $0.lastActivity >= cutoff }.reduce(0) { $0 + $1.eventCount }
+    private var retainedLineageEvents: Int {
+        appState.aiSessions.reduce(0) { $0 + $1.eventCount }
     }
-    private var aiAlerts7d: Int {
-        let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
-        return appState.aiSessions.filter { $0.lastActivity >= cutoff }.reduce(0) { $0 + $1.kindCounts.alerts }
+    private var retainedLLMCalls: Int {
+        appState.aiSessions.reduce(0) { $0 + $1.kindCounts.llmCalls }
     }
 
     private var aiGuardOverview: some View {
-        HStack(spacing: 12) {
-            metricCard(title: "MCP servers", value: "\(mcpServers.count)",
-                       trend: mcpServers.isEmpty ? "none configured" : "discovered configs",
-                       trendKind: mcpServers.isEmpty ? .neutral : .ai,
-                       icon: "server.rack", iconColor: V2Theme.medium)
-            metricCard(title: "Tracked tools", value: "\(trackedToolCount)",
-                       trend: trackedToolCount == 0 ? "no agent sessions" : "AI tools seen",
-                       trendKind: trackedToolCount == 0 ? .neutral : .ai,
-                       icon: "brain.head.profile", iconColor: V2Theme.aiAccent)
-            metricCard(title: "Tool calls (24h)", value: "\(toolCalls24h)",
-                       trend: toolCalls24h == 0 ? "none in 24h" : "agent activity",
-                       trendKind: toolCalls24h == 0 ? .neutral : .ai,
-                       icon: "wand.and.stars", iconColor: V2Theme.aiAccent)
-            metricCard(title: "AI alerts (7d)", value: "\(aiAlerts7d)",
-                       trend: aiAlerts7d == 0 ? "none in 7d" : "flagged",
-                       trendKind: aiAlerts7d == 0 ? .healthy : .warning,
-                       icon: "exclamationmark.shield.fill", iconColor: V2Theme.aiAccent)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                metricCard(title: "MCP servers", value: "\(mcpServers.count)",
+                           trend: mcpServers.isEmpty ? "none configured" : "discovered configs",
+                           trendKind: mcpServers.isEmpty ? .neutral : .ai,
+                           icon: "server.rack", iconColor: V2Theme.medium)
+                metricCard(title: "Tracked tools", value: "\(trackedToolCount)",
+                           trend: trackedToolCount == 0 ? "no retained sessions" : "active retained sessions",
+                           trendKind: .neutral,
+                           icon: "brain.head.profile", iconColor: V2Theme.aiAccent)
+                metricCard(title: "Retained lineage events", value: "\(retainedLineageEvents)",
+                           trend: "bounded in-memory snapshot",
+                           trendKind: .neutral,
+                           icon: "point.3.connected.trianglepath.dotted", iconColor: V2Theme.aiAccent)
+                metricCard(title: "Retained LLM calls", value: "\(retainedLLMCalls)",
+                           trend: "content-free lineage records",
+                           trendKind: .neutral,
+                           icon: "wand.and.stars", iconColor: V2Theme.aiAccent)
+            }
+            Text(String(
+                localized: "aiGuard.retainedTelemetryDisclosure",
+                defaultValue: "Retained session telemetry is bounded to 2,000 recent events per active session and resets when that AI root exits. It is not a 24-hour history or a safety verdict; durable AI Guard alerts appear in Alerts."
+            ))
+                .font(V2Theme.meta())
+                .foregroundStyle(V2Theme.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1137,7 +1146,7 @@ public struct V2DetectionWorkspace: View {
                         Text("Tool").frame(maxWidth: .infinity, alignment: .leading)
                         Text("Sessions").frame(width: 80, alignment: .trailing)
                         Text("Events").frame(width: 80, alignment: .trailing)
-                        Text("Alerts").frame(width: 70, alignment: .trailing)
+                        Text("LLM calls").frame(width: 70, alignment: .trailing)
                         Text("Last seen").frame(width: 110, alignment: .trailing)
                     }
                     .font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
@@ -1151,8 +1160,8 @@ public struct V2DetectionWorkspace: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             Text("\(r.sessions)").frame(width: 80, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
                             Text("\(r.events)").frame(width: 80, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
-                            Text("\(r.alerts)").frame(width: 70, alignment: .trailing)
-                                .foregroundStyle(r.alerts > 0 ? V2Theme.high : V2Theme.mutedText)
+                            Text("\(r.llmCalls)").frame(width: 70, alignment: .trailing)
+                                .foregroundStyle(V2Theme.mutedText)
                             Text(r.lastSeen, style: .relative).frame(width: 110, alignment: .trailing).foregroundStyle(V2Theme.mutedText)
                         }
                         .font(V2Theme.body())

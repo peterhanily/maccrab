@@ -23,7 +23,7 @@ import Darwin
 ///   by this FSEvents monitor. The other evidence DBs are not path-watched
 ///   here for the same reason.)
 /// - Debugger attachment (anti-debug)
-/// - Signal interception (SIGKILL/SIGTERM from non-system sources)
+/// - Process-integrity and protected-path tampering
 /// - LaunchDaemon plist removal
 /// - Process injection attempts
 public actor SelfDefense {
@@ -69,6 +69,24 @@ public actor SelfDefense {
 
     /// File descriptor sources for dispatch-based file monitoring.
     private var fileMonitorSources: [DispatchSourceFileSystemObject] = []
+
+    /// Joinable owner of the periodic integrity loop. Process termination is
+    /// owned exclusively by MacCrabAgentKit.SignalHandlers; SelfDefense never
+    /// installs or races a second set of exit handlers.
+    private var periodicTask: Task<Void, Never>?
+
+    /// Every actor hop launched by a DispatchSource callback is admitted here
+    /// before it is created. Shutdown seals admission synchronously, cancels
+    /// the accepted prefix, and joins that exact prefix before reporting a
+    /// clean mutation boundary.
+    private let callbackTasks = CollectorCallbackTaskLifecycle(
+        maximumInFlight: 64
+    )
+
+    /// SelfDefense is deliberately one-shot. Its DispatchSources cannot be
+    /// resurrected after their continuations/fds have entered cancellation.
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private var shutdownTask: Task<Bool, Never>?
 
     /// Whether tamper detection is active.
     private var isActive = false
@@ -208,7 +226,17 @@ public actor SelfDefense {
     // MARK: - Public API
 
     /// Start tamper detection with the given alert handler.
-    public func start(handler: @escaping TamperHandler) {
+    @discardableResult
+    public func start(handler: @escaping TamperHandler) -> Bool {
+        guard lifecyclePhase == .initialized else {
+            return lifecyclePhase == .running
+        }
+        guard callbackTasks.open() else {
+            lifecyclePhase = .stopped
+            logger.fault("Self-defense callback admission could not be opened")
+            return false
+        }
+        lifecyclePhase = .running
         self.tamperHandler = handler
         self.isActive = true
         self.startupTime = Date()
@@ -238,25 +266,52 @@ public actor SelfDefense {
             logger.critical("TAMPER: Debugger attached to MacCrab daemon!")
         }
 
-        // 2. Install signal handlers
-        installSignalHandlers()
-
-        // 3. Start filesystem monitoring
+        // 2. Start filesystem monitoring
         startFileMonitoring()
 
-        // 4. Schedule periodic integrity checks
+        // 3. Schedule periodic integrity checks
         startPeriodicChecks()
 
-        logger.notice("Self-defense active: file monitoring, anti-debug, signal handlers, periodic integrity checks")
+        logger.notice("Self-defense active: file monitoring, anti-debug, periodic integrity checks")
+        return true
     }
 
-    /// Stop tamper detection.
-    public func stop() {
+    /// Stop tamper detection and bounded-join every task accepted from the
+    /// periodic loop or a DispatchSource callback. Once this begins, `start`
+    /// is permanently refused so a late startup task cannot resurrect writes.
+    @discardableResult
+    public func stop(deadline: TimeInterval = 1.0) async -> Bool {
+        if let shutdownTask {
+            return await shutdownTask.value
+        }
+        if lifecyclePhase == .stopped { return true }
+
+        lifecyclePhase = .stopping
         isActive = false
+        let periodic = periodicTask
+        periodic?.cancel()
         for source in fileMonitorSources {
             source.cancel()
         }
         fileMonitorSources.removeAll()
+        // Break the callback ownership chain before awaiting the periodic task;
+        // already-delivered DispatchSource callbacks observe `isActive == false`
+        // and cannot emit after this boundary.
+        tamperHandler = nil
+        var accepted = callbackTasks.sealAndCancel()
+        if let periodic { accepted.append(periodic) }
+        let tasksToJoin = accepted
+        let waiter = Task {
+            await CollectorBoundedTaskJoin.waitForAll(
+                tasksToJoin,
+                deadline: deadline
+            )
+        }
+        shutdownTask = waiter
+        let joined = await waiter.value
+        lifecyclePhase = .stopped
+        if joined { periodicTask = nil }
+        return joined
     }
 
     /// Run a one-time integrity check. Returns any detected tampering.
@@ -345,70 +400,14 @@ public actor SelfDefense {
         return (info.kp_proc.p_flag & P_TRACED) != 0
     }
 
-    // MARK: - Signal Handlers
-
-    private func installSignalHandlers() {
-        // Monitor signals that might be used to kill MacCrab
-        let signals: [(Int32, String)] = [
-            (SIGTERM, "SIGTERM"),
-            (SIGINT, "SIGINT"),
-            (SIGQUIT, "SIGQUIT"),
-        ]
-
-        // Capture the grace deadline into a Sendable local. The signal-source
-        // closure runs on a global queue and can't synchronously read the
-        // actor-isolated `startupTime`; start() sets startupTime before
-        // calling us, so this snapshot is valid for the whole process life.
-        let graceDeadline = (startupTime ?? Date()).addingTimeInterval(startupGracePeriod)
-
-        for (sig, name) in signals {
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
-            source.setEventHandler { [weak self] in
-                guard let self else { return }
-
-                // v1.17.1 FP fix: gate the tamper ALERT the same way the file
-                // monitor paths are (sentinel + startup grace). launchd/the
-                // updater/`pkill -HUP`-adjacent stop signals MacCrab itself on
-                // every legitimate stop, upgrade, and reload — firing a HIGH
-                // "received SIGTERM" tamper event each time. A self-update
-                // sentinel within its TTL, or the first `startupGracePeriod`
-                // seconds (sysext (de)activation churn), is benign. The
-                // graceful-exit behaviour below is UNCONDITIONAL — only the
-                // alert is suppressed.
-                let withinGrace = Date() < graceDeadline
-                let benignSelfSignal = Self.isSelfUpdateInProgress() || withinGrace
-
-                if benignSelfSignal {
-                    self.logger.notice("Received \(name) during self-update/startup grace — graceful stop, no tamper alert")
-                } else {
-                    let event = TamperEvent(
-                        type: .signalReceived,
-                        description: "MacCrab daemon received \(name) signal. Possible attempt to terminate security monitoring.",
-                        severity: .high
-                    )
-                    Task { await self.handleTamperEvent(event) }
-                    self.logger.critical("TAMPER: Received \(name) — logging before exit")
-                }
-
-                // For SIGTERM/SIGINT, allow graceful shutdown after logging —
-                // unconditional, regardless of whether we alerted.
-                if sig == SIGTERM || sig == SIGINT {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        exit(0)
-                    }
-                }
-            }
-            signal(sig, SIG_IGN) // Ignore default handler
-            source.resume()
-        }
-    }
-
     // MARK: - File System Monitoring
 
     private func startFileMonitoring() {
         // Capture rulesDir out of actor isolation so the global-queue
         // DispatchSource closure can compute hashes without awaiting.
         let rulesDirForClosure = self.rulesDir
+        let callbackTasks = self.callbackTasks
+        let callbackLogger = self.logger
 
         for monitored in monitoredPaths {
             let fd = open(monitored.path, O_EVTONLY)
@@ -446,7 +445,14 @@ public actor SelfDefense {
                     // update and schedule a re-baseline once the new
                     // dir exists.
                     if Self.isSelfUpdateInProgress() {
-                        Task { await self.handleSelfUpdateDelete(path: path, desc: desc) }
+                        if !callbackTasks.submit({ [weak self] in
+                            await self?.handleSelfUpdateDelete(
+                                path: path,
+                                desc: desc
+                            )
+                        }) {
+                            callbackLogger.debug("Self-defense callback rejected after shutdown or at capacity (delete)")
+                        }
                         return
                     }
                     eventType = .fileDeleted
@@ -454,7 +460,14 @@ public actor SelfDefense {
                 } else if data.contains(.rename) {
                     if !critical { return }
                     if Self.isSelfUpdateInProgress() {
-                        Task { await self.handleSelfUpdateDelete(path: path, desc: desc) }
+                        if !callbackTasks.submit({ [weak self] in
+                            await self?.handleSelfUpdateDelete(
+                                path: path,
+                                desc: desc
+                            )
+                        }) {
+                            callbackLogger.debug("Self-defense callback rejected after shutdown or at capacity (rename)")
+                        }
                         return
                     }
                     eventType = .fileDeleted
@@ -465,14 +478,20 @@ public actor SelfDefense {
                         // logic for startup-created runtime rule data. Compute the new
                         // hash here on the global queue so the actor doesn't
                         // block on N shasum subprocess calls, then hand off.
-                        let newHash = Self.directoryHash(at: rulesDirForClosure)
-                        Task {
-                            await self.handleRulesWriteEvent(
+                        if !callbackTasks.submit({ [weak self] in
+                            guard !Task.isCancelled else { return }
+                            let newHash = Self.directoryHash(
+                                at: rulesDirForClosure
+                            )
+                            guard !Task.isCancelled else { return }
+                            await self?.handleRulesWriteEvent(
                                 path: path,
                                 desc: desc,
                                 critical: critical,
                                 newHash: newHash
                             )
+                        }) {
+                            callbackLogger.debug("Self-defense callback rejected after shutdown or at capacity (rules write)")
                         }
                         return
                     } else if path.contains("events.db") {
@@ -505,9 +524,27 @@ public actor SelfDefense {
                         if Self.isSelfUpdateInProgress() {
                             return
                         }
-                        if Self.isSignedByMacCrabTeam(at: path) {
-                            return
+                        let binaryEventType = eventType
+                        let binarySeverity: Severity = critical
+                            ? .critical
+                            : .high
+                        if !callbackTasks.submit({ [weak self] in
+                            guard !Task.isCancelled else { return }
+                            if Self.isSignedByMacCrabTeam(at: path) { return }
+                            guard !Task.isCancelled else { return }
+                            let event = TamperEvent(
+                                type: binaryEventType,
+                                description: "\(desc) was modified: \(path)",
+                                path: path,
+                                severity: binarySeverity
+                            )
+                            await self?.handleTamperEvent(event)
+                        }) {
+                            callbackLogger.debug("Self-defense callback rejected after shutdown or at capacity (binary write)")
                         }
+                        // Signature verification and any resulting actor hop
+                        // are owned by the callback ledger above.
+                        return
                     }
                     message = "\(desc) was modified: \(path)"
                 } else if data.contains(.attrib) {
@@ -531,7 +568,11 @@ public actor SelfDefense {
                     severity: severity
                 )
 
-                Task { await self.handleTamperEvent(event) }
+                if !callbackTasks.submit({ [weak self] in
+                    await self?.handleTamperEvent(event)
+                }) {
+                    callbackLogger.debug("Self-defense callback rejected after shutdown or at capacity (tamper event)")
+                }
             }
 
             source.setCancelHandler {
@@ -565,6 +606,7 @@ public actor SelfDefense {
         critical: Bool,
         newHash: String?
     ) {
+        guard isActive else { return }
         if let startupTime, Date().timeIntervalSince(startupTime) < startupGracePeriod {
             rulesHash = newHash
             logger.debug("Rules write during startup grace window — baseline updated, no alert")
@@ -613,10 +655,15 @@ public actor SelfDefense {
     private var sustainedTamperAlerted = false
 
     private func startPeriodicChecks() {
-        Task {
-            while isActive {
-                try? await Task.sleep(nanoseconds: 15_000_000_000) // Every 15 seconds
-                guard isActive else { break }
+        guard periodicTask == nil else { return }
+        periodicTask = Task {
+            while isActive, !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                } catch {
+                    break
+                }
+                guard isActive, !Task.isCancelled else { break }
 
                 // 1. Anti-debug continuous check
                 if Self.isBeingDebugged() {
@@ -773,7 +820,7 @@ public actor SelfDefense {
                     description: "Suspicious environment variable set on MacCrab: \(varName)=\(value.prefix(100)). Possible library injection.",
                     severity: .critical
                 )
-                Task { await handleTamperEvent(event) }
+                handleTamperEvent(event)
             }
         }
     }
@@ -781,6 +828,7 @@ public actor SelfDefense {
     // MARK: - Event Handling
 
     private func handleTamperEvent(_ event: TamperEvent) {
+        guard isActive else { return }
         // Dedup by tamper type: an integrity failure that persists across
         // poll cycles should alert exactly once, not every 15 seconds.
         // A periodic check that confirms the bad state on subsequent cycles
@@ -894,14 +942,18 @@ public actor SelfDefense {
     /// down the stale DispatchSource fd, and schedules a delayed
     /// re-baseline once the new tree has been written.
     private func handleSelfUpdateDelete(path: String, desc: String) async {
+        guard isActive, !Task.isCancelled else { return }
         logger.notice("\(desc) DELETE during self-update window — suppressing alert + scheduling re-baseline (path: \(path, privacy: .public))")
         // Give the elevated cp -R time to finish before recomputing the
         // hash. Re-snapshotting before the new dir exists would baseline
         // to empty, which the next real tamper wouldn't detect.
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            await self?.rebaselineAfterSelfUpdate(path: path)
+        do {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        } catch {
+            return
         }
+        guard !Task.isCancelled else { return }
+        await rebaselineAfterSelfUpdate(path: path)
     }
 
     /// Recompute hashes after a self-update completes. Only re-baselines
@@ -909,6 +961,7 @@ public actor SelfDefense {
     /// expired (failure path); in either case, the new tree on disk is
     /// what we want to baseline against.
     private func rebaselineAfterSelfUpdate(path: String) async {
+        guard isActive else { return }
         if path.contains("compiled_rules") || path.contains("rules") {
             self.rulesHash = Self.directoryHash(at: self.rulesDir)
             logger.info("Rules hash rebaselined after self-update (new hash: \(self.rulesHash ?? "unknown", privacy: .public))")

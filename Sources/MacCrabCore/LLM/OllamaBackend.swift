@@ -6,7 +6,7 @@
 import Foundation
 import os.log
 
-public actor OllamaBackend: LLMBackend {
+public actor OllamaBackend: LLMBackend, BoundedLLMBackend {
     public let providerName = "Ollama"
     private let baseURL: URL
     private let model: String
@@ -89,6 +89,20 @@ public actor OllamaBackend: LLMBackend {
 
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ).value
+    }
+
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
         let url = baseURL.appendingPathComponent("api/generate")
         let payload: [String: Any] = [
             "model": model,
@@ -113,30 +127,36 @@ public actor OllamaBackend: LLMBackend {
             if Self.isPlaintextRemote(self.baseURL) {
                 let urlForLog = self.baseURL.absoluteString
                 logger.error("Refusing to send Ollama Bearer token over plaintext HTTP to non-loopback host (\(urlForLog)). Use https:// or drop the API key.")
-                return nil
+                return .failure
             }
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 120
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("Ollama response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("Ollama network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("Ollama error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let text = json["response"] as? String else { return nil }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+              let text = json["response"] as? String else { return .failure }
+        return .response(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }

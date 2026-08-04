@@ -12,7 +12,7 @@
 import Foundation
 import os.log
 
-public actor ClaudeBackend: LLMBackend {
+public actor ClaudeBackend: LLMBackend, BoundedLLMBackend {
     public let providerName = "Claude"
     private let apiKey: String
     private let model: String
@@ -30,7 +30,23 @@ public actor ClaudeBackend: LLMBackend {
 
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
-        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else { return nil }
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ).value
+    }
+
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
+            return .failure
+        }
 
         // System prompt as a structured block with cache_control so the API
         // caches it server-side across calls that share the same system prompt.
@@ -75,27 +91,35 @@ public actor ClaudeBackend: LLMBackend {
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("Claude response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("Claude network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("Claude API error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         struct Content: Decodable { let type: String; let text: String }
         struct Response: Decodable { let content: [Content] }
 
         guard let resp = try? JSONDecoder().decode(Response.self, from: data),
-              let block = resp.content.first(where: { $0.type == "text" }) else { return nil }
-        return block.text
+              let block = resp.content.first(where: { $0.type == "text" }) else {
+            return .failure
+        }
+        return .response(block.text)
     }
 
     /// Extended thinking: instructs Claude to reason deeply before answering.
@@ -111,14 +135,30 @@ public actor ClaudeBackend: LLMBackend {
         thinkingBudgetTokens: Int = 8000,
         maxOutputTokens: Int = 4096
     ) async -> String? {
+        await completeWithExtendedThinkingResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            maxOutputTokens: maxOutputTokens
+        ).value
+    }
+
+    func completeWithExtendedThinkingResult(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int = 8000,
+        maxOutputTokens: Int = 4096
+    ) async -> LLMBackendCompletionResult {
         // Extended thinking is only supported on Opus 4+ models.
         guard model.contains("opus") else {
-            return await complete(
+            return await completeResult(
                 systemPrompt: systemPrompt, userPrompt: userPrompt,
                 maxTokens: maxOutputTokens, temperature: 0.3
             )
         }
-        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else { return nil }
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
+            return .failure
+        }
 
         struct CacheControl: Encodable { let type: String = "ephemeral" }
         struct SystemBlock: Encodable {
@@ -159,19 +199,25 @@ public actor ClaudeBackend: LLMBackend {
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 120  // Thinking models run longer
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("Claude extended-thinking response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("Claude extended-thinking network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("Claude extended-thinking API error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         // The response contains thinking blocks followed by text blocks.
@@ -179,7 +225,9 @@ public actor ClaudeBackend: LLMBackend {
         struct Content: Decodable { let type: String; let text: String? }
         struct Response: Decodable { let content: [Content] }
         guard let resp = try? JSONDecoder().decode(Response.self, from: data),
-              let text = resp.content.first(where: { $0.type == "text" })?.text else { return nil }
-        return text
+              let text = resp.content.first(where: { $0.type == "text" })?.text else {
+            return .failure
+        }
+        return .response(text)
     }
 }

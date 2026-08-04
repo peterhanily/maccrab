@@ -139,12 +139,14 @@ public actor TCCMonitor {
 
     // MARK: - Properties
 
-    private let logger = Logger(subsystem: "com.maccrab.core", category: "TCCMonitor")
+    private nonisolated let logger = Logger(subsystem: "com.maccrab.core", category: "TCCMonitor")
     private nonisolated let deliveryTelemetry = EventCollectorBufferTelemetry(
         capacity: eventStreamCapacity
     )
     private var continuation: AsyncStream<Event>.Continuation?
-    private var isRunning = false
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private let callbackTasks = CollectorCallbackTaskLifecycle(maximumInFlight: 16)
+    private let sourceCancellationGroup = DispatchGroup()
 
     /// Current snapshot of all TCC entries, keyed by identity.
     private var snapshot: [String: TCCEntry] = [:]
@@ -163,6 +165,7 @@ public actor TCCMonitor {
 
     /// Tracks the last time a change was processed to implement debouncing.
     private var lastChangeTime: Date = .distantPast
+    private let snapshotWriter: CoalescingSnapshotWriter<PermissionSnapshot>
 
     /// The asynchronous stream of normalised events.
     public nonisolated let events: AsyncStream<Event>
@@ -198,6 +201,10 @@ public actor TCCMonitor {
 
     /// Creates a new `TCCMonitor`. Call `start()` to begin monitoring.
     public init() {
+        self.snapshotWriter = CoalescingSnapshotWriter(
+            category: "tcc-permission-snapshot",
+            persistence: Self.persistPermissionSnapshot
+        )
         var capturedContinuation: AsyncStream<Event>.Continuation!
         self.events = AsyncStream<Event>(
             bufferingPolicy: .bufferingNewest(Self.eventStreamCapacity)
@@ -214,14 +221,26 @@ public actor TCCMonitor {
     /// Takes an initial snapshot and installs file-system watchers on both
     /// the system and user TCC database files.
     public func start() async {
-        guard !isRunning else {
-            logger.warning("TCCMonitor.start() called but monitor is already running.")
+        guard lifecyclePhase == .initialized else {
+            logger.warning("TCCMonitor.start() rejected after its one-shot lifecycle advanced.")
             return
         }
-        isRunning = true
+        guard callbackTasks.open() else {
+            logger.error("TCCMonitor.start() rejected because prior callback work is still owned.")
+            lifecyclePhase = .stopped
+            continuation?.finish()
+            continuation = nil
+            return
+        }
+        lifecyclePhase = .running
 
-        // Take the initial snapshot
-        snapshot = readAllEntries()
+        // SQLite busy waits and multi-user reads must not pin this actor: stop
+        // has to be able to seal startup while the cold snapshot is in flight.
+        let initialSnapshot = await Task.detached(priority: .utility) { [self] in
+            readAllEntries()
+        }.value
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
+        snapshot = initialSnapshot
         logger.info("TCCMonitor started — initial snapshot has \(self.snapshot.count) entries.")
 
         // Install file watchers
@@ -277,18 +296,9 @@ public actor TCCMonitor {
         }
     }
 
-    /// v1.7.4: see MCPBaselineService.snapshotWriteInFlight for rationale.
-    private var snapshotWriteInFlight = false
-
-    /// Atomic JSON snapshot of every TCC entry the daemon has read.
-    /// Same temp+rename pattern used by `AgentLineageService`.
-    public func writeSnapshot(to path: String) {
-        guard !snapshotWriteInFlight else {
-            logger.info("Skipping TCC snapshot — previous write still in flight")
-            return
-        }
-        snapshotWriteInFlight = true
-        defer { snapshotWriteInFlight = false }
+    /// Snapshot copy stays actor-isolated; encoding and publication use the
+    /// shared bounded writer so a slow filesystem cannot stall TCC callbacks.
+    public func writeSnapshot(to path: String) async {
         let pubEntries = snapshot.values.map {
             PublicEntry(
                 service: $0.service,
@@ -303,16 +313,21 @@ public actor TCCMonitor {
             )
         }
         let snap = PermissionSnapshot(writtenAt: Date(), entries: pubEntries)
-        guard let data = try? JSONEncoder().encode(snap) else { return }
-        let tmp = path + ".tmp"
+        await snapshotWriter.publish(snap, to: path)
+    }
+
+    public func snapshotWriteTelemetry() async -> CoalescingSnapshotWriterTelemetry {
+        await snapshotWriter.telemetry()
+    }
+
+    @Sendable
+    private nonisolated static func persistPermissionSnapshot(
+        _ snapshot: PermissionSnapshot,
+        to path: String
+    ) -> String? {
         do {
-            try data.write(to: URL(fileURLWithPath: tmp), options: .atomic)
-            do {
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            } catch {
-                try? FileManager.default.removeItem(atPath: path)
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            }
+            let data = try JSONEncoder().encode(snapshot)
+            try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o640)
             // v1.21.5 (audit S-07): 0640, NOT 0644. This file is a verbatim copy of
             // the TCC grant map read from behind SIP/FDA — which client holds
             // Accessibility, Screen Recording, PostEvent, EndpointSecurityClient,
@@ -325,11 +340,12 @@ public actor TCCMonitor {
             // Permissions panel is unaffected for any user who can open the
             // dashboard at all.
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o640],
+                [.posixPermissions: 0o640, .groupOwnerAccountID: 80],
                 ofItemAtPath: path
             )
+            return nil
         } catch {
-            logger.warning("Failed to write TCC snapshot: \(error.localizedDescription, privacy: .public)")
+            return String(error.localizedDescription.prefix(512))
         }
     }
 
@@ -340,8 +356,44 @@ public actor TCCMonitor {
 
     /// Stops monitoring and finishes the event stream.
     public func stop() {
-        guard isRunning else { return }
-        isRunning = false
+        _ = beginStop()
+    }
+
+    /// Seal callback admission before cancelling file-system sources, then join
+    /// both the exact accepted callback prefix and every source cancel handler.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let callbackPrefix = beginStop()
+        async let callbacksJoined = CollectorBoundedTaskJoin.waitForAll(
+            callbackPrefix,
+            deadline: deadline
+        )
+        async let sourcesJoined = CollectorDispatchGroupJoin.wait(
+            sourceCancellationGroup,
+            deadline: deadline
+        )
+        let (callbackResult, sourceResult) = await (
+            callbacksJoined,
+            sourcesJoined
+        )
+        let clean = callbackResult && sourceResult
+        if clean {
+            lifecyclePhase = .stopped
+            logger.info("TCCMonitor stopped cleanly.")
+        } else {
+            logger.error("TCCMonitor stop deadline expired with callback or source teardown active.")
+        }
+        return clean
+    }
+
+    private func beginStop() -> [Task<Void, Never>] {
+        if lifecyclePhase == .stopped { return [] }
+        lifecyclePhase = .stopping
+
+        // Ordering is load-bearing: close task admission before source cancel,
+        // because a callback already queued on its dispatch queue may run after
+        // cancel() is requested.
+        let callbackPrefix = callbackTasks.sealAndCancel()
 
         // Tear down dispatch sources. Each source's cancel handler closes
         // its own fd once GCD has stopped delivering events for it — closing
@@ -355,8 +407,13 @@ public actor TCCMonitor {
 
         continuation?.finish()
         continuation = nil
+        return callbackPrefix
+    }
 
-        logger.info("TCCMonitor stopped.")
+    deinit {
+        _ = callbackTasks.sealAndCancel()
+        for source in watchSources { source.cancel() }
+        continuation?.finish()
     }
 
     // MARK: - File Watching
@@ -379,18 +436,22 @@ public actor TCCMonitor {
             queue: DispatchQueue(label: "com.maccrab.tccmonitor.\(label)")
         )
 
+        let callbackTasks = self.callbackTasks
+
         source.setEventHandler { [weak self] in
-            guard let self else { return }
-            Task {
-                await self.handleDatabaseChange()
+            callbackTasks.submit { [weak self] in
+                await self?.handleDatabaseChange()
             }
         }
 
+        sourceCancellationGroup.enter()
+        let sourceCancellationGroup = self.sourceCancellationGroup
         source.setCancelHandler {
             // Close the fd here — GCD guarantees the cancel handler runs once,
             // after the source has fully stopped delivering events, so there
             // is no use-after-close window.
             Darwin.close(fd)
+            sourceCancellationGroup.leave()
         }
 
         source.resume()
@@ -406,13 +467,17 @@ public actor TCCMonitor {
     /// Implements simple debouncing to coalesce rapid writes (tccd often
     /// writes multiple times for a single user action).
     private func handleDatabaseChange() async {
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         let now = Date()
         guard now.timeIntervalSince(lastChangeTime) >= debounceInterval else {
             return
         }
         lastChangeTime = now
 
-        let currentEntries = readAllEntries()
+        let currentEntries = await Task.detached(priority: .utility) { [self] in
+            readAllEntries()
+        }.value
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         let previousEntries = snapshot
 
         // Detect new or changed grants
@@ -421,10 +486,12 @@ public actor TCCMonitor {
                 // Entry exists in both — check if the auth value changed
                 if previous.authValue != entry.authValue {
                     await emitEvent(entry: entry, previousAuthValue: previous.authValue)
+                    guard lifecyclePhase == .running, !Task.isCancelled else { return }
                 }
             } else {
                 // Brand new entry
                 await emitEvent(entry: entry, previousAuthValue: nil)
+                guard lifecyclePhase == .running, !Task.isCancelled else { return }
             }
         }
 
@@ -432,10 +499,12 @@ public actor TCCMonitor {
         for (key, previousEntry) in previousEntries {
             if currentEntries[key] == nil {
                 await emitRevocationEvent(entry: previousEntry)
+                guard lifecyclePhase == .running, !Task.isCancelled else { return }
             }
         }
 
         // Update the snapshot
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         snapshot = currentEntries
     }
 
@@ -455,13 +524,15 @@ public actor TCCMonitor {
             eventType = .deletion
         }
 
-        let event = await buildEvent(
+        guard let event = await buildEvent(
             entry: entry,
             eventType: eventType,
             eventAction: eventAction,
             allowed: allowed,
             previousAuthValue: previousAuthValue
-        )
+        ) else { return }
+
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
 
         if let continuation {
             let result = continuation.yield(event)
@@ -476,13 +547,15 @@ public actor TCCMonitor {
 
     /// Emits a revocation event for an entry that was removed from the database.
     private func emitRevocationEvent(entry: TCCEntry) async {
-        let event = await buildEvent(
+        guard let event = await buildEvent(
             entry: entry,
             eventType: .deletion,
             eventAction: "tcc_revoke",
             allowed: false,
             previousAuthValue: entry.authValue
-        )
+        ) else { return }
+
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
 
         if let continuation {
             let result = continuation.yield(event)
@@ -502,7 +575,7 @@ public actor TCCMonitor {
         eventAction: String,
         allowed: Bool,
         previousAuthValue: Int?
-    ) async -> Event {
+    ) async -> Event? {
         let authReasonString = Self.authReasonNames[entry.authReason] ?? "reason_\(entry.authReason)"
 
         // Resolve the client path if the client type indicates an absolute path
@@ -511,7 +584,13 @@ public actor TCCMonitor {
             clientPath = entry.client
         } else {
             // Bundle identifier — attempt to resolve via Launch Services
-            clientPath = resolveBundlePath(bundleId: entry.client)
+            clientPath = await Task.detached(priority: .utility) { [self] in
+                resolveBundlePath(bundleId: entry.client)
+            }.value
+        }
+
+        guard lifecyclePhase == .running, !Task.isCancelled else {
+            return nil
         }
 
         // Resolve the client's ACTUAL code signature so SignerType is accurate.
@@ -522,6 +601,7 @@ public actor TCCMonitor {
         let clientSignature = clientPath.isEmpty
             ? nil
             : await codeSigningCache.evaluate(path: clientPath)
+        guard lifecyclePhase == .running, !Task.isCancelled else { return nil }
 
         let tccInfo = TCCInfo(
             service: entry.service,
@@ -598,7 +678,7 @@ public actor TCCMonitor {
     /// Returns a dictionary keyed by identity (`"source:service:client"`).
     /// Silently skips databases that cannot be opened (e.g., insufficient
     /// permissions for the system database when not running as root).
-    private func readAllEntries() -> [String: TCCEntry] {
+    private nonisolated func readAllEntries() -> [String: TCCEntry] {
         var entries: [String: TCCEntry] = [:]
 
         for (path, source) in [(path: Self.systemDBPath, source: "system")] + Self.userDBPaths() {
@@ -616,7 +696,7 @@ public actor TCCMonitor {
     /// Opens the database in read-only mode with WAL journal to avoid
     /// interfering with the tccd daemon. Handles `SQLITE_BUSY` gracefully
     /// by retrying with a short timeout.
-    private func readDatabase(path: String, source: String) -> [TCCEntry] {
+    private nonisolated func readDatabase(path: String, source: String) -> [TCCEntry] {
         guard FileManager.default.fileExists(atPath: path) else {
             logger.debug("TCC database not found at \(path) — skipping.")
             return []
@@ -700,7 +780,7 @@ public actor TCCMonitor {
 
     /// Reads a text column from a prepared statement, returning an empty
     /// string if the column is NULL.
-    private func columnText(_ stmt: OpaquePointer, index: Int32) -> String {
+    private nonisolated func columnText(_ stmt: OpaquePointer, index: Int32) -> String {
         guard let cstr = sqlite3_column_text(stmt, index) else {
             return ""
         }
@@ -713,7 +793,7 @@ public actor TCCMonitor {
     /// `NSWorkspace` (via Launch Services).
     ///
     /// Returns an empty string if the bundle cannot be found.
-    private func resolveBundlePath(bundleId: String) -> String {
+    private nonisolated func resolveBundlePath(bundleId: String) -> String {
         // NSWorkspace.shared is main-actor-isolated on newer SDKs, so we
         // fall back to a file-system search of /Applications.
         if let url = findApplicationURL(bundleId: bundleId) {
@@ -724,7 +804,7 @@ public actor TCCMonitor {
 
     /// Searches common application directories for a bundle matching the
     /// given identifier. This avoids requiring main-actor access.
-    private func findApplicationURL(bundleId: String) -> URL? {
+    private nonisolated func findApplicationURL(bundleId: String) -> URL? {
         // `/Applications` is root:admin 0775 on supported macOS releases, so
         // local admins control its entries. Enumerate it through the same
         // descriptor-pinned bounded boundary as user homes. System application
@@ -782,7 +862,7 @@ public actor TCCMonitor {
         )
     }
 
-    private func findApplicationURL(
+    private nonisolated func findApplicationURL(
         bundleId: String,
         directory: String,
         names: [String]

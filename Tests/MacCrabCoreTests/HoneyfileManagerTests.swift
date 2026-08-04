@@ -204,9 +204,8 @@ struct HoneyfileManagerTests {
         #expect(FileManager.default.fileExists(atPath: manifest))
 
         let mgr2 = HoneyfileManager(homeDir: home, manifestPath: manifest)
-        // Give the init Task a moment to load the manifest.
-        try await Task.sleep(nanoseconds: 50_000_000)
-
+        // Manifest loading is synchronous with actor publication; the first
+        // lookup cannot observe a transient empty set.
         let reloaded = await mgr2.deployedCount()
         #expect(reloaded == originalCount)
     }

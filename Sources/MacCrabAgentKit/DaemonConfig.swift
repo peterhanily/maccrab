@@ -164,7 +164,7 @@ struct DaemonConfig: Codable {
 
     /// Three independent retention budgets — events (firehose, short),
     /// alerts (signal, long), campaigns (signal, long).
-    struct StorageConfig: Codable {
+    struct StorageConfig: Codable, Equatable, Sendable {
         // Operator-controlled integers cross into Dispatch timer arithmetic,
         // Date offsets, buffer allocation, and byte conversions. Floors alone
         // do not make those operations safe: Int.max minutes, for example,
@@ -228,7 +228,25 @@ struct DaemonConfig: Codable {
         /// the storage block's snake-rewrite. See `migrateLegacyStorageKeys`.
         var processEventsFloorMinutes: Int = 60
 
-        /// Hard cap on the events.db file size, in MB. The adaptive rollup
+        /// Legacy combined event+evidence envelope, in MB. Since schema v8
+        /// moved new alert evidence to alerts.db, the steady-state events.db
+        /// family cap is `eventsMaxSizeMB - evidenceMaxSizeMB`; the alerts.db
+        /// family cap is `alertsMaxSizeMB + evidenceMaxSizeMB`. Their exact sum
+        /// remains `eventsMaxSizeMB + alertsMaxSizeMB`, so the ownership move
+        /// neither raises the steady-state disk budget nor labels 420 MiB as an
+        /// event-only allowance.
+        ///
+        /// Upgrades are different: the preserved legacy
+        /// `events.db.alert_evidence` table can still own as much as the full
+        /// evidence allocation. Daemon startup measures that table and adds a
+        /// bounded transition reserve to the steady-state events family. The
+        /// reserve is never larger than `evidenceMaxSizeMB`, is zero on a fresh
+        /// install, and shrinks as legacy rows age out. A failed measurement
+        /// retains the full reserve (fail-safe for evidence availability). Use
+        /// the transition-aware accessor below at every live admission and
+        /// maintenance site; the property alone is the steady-state value.
+        ///
+        /// The adaptive rollup
         /// tightens the cutoff (1h → 30m → 15m) if needed to stay under
         /// this. Last-resort row-count prune kicks in if even the tightest
         /// cutoff can't fit.
@@ -315,13 +333,98 @@ struct DaemonConfig: Codable {
         /// Hard cap on the alerts.db file size, in MB.
         var alertsMaxSizeMB: Int = 100
 
-        /// Hard cap on the `alert_evidence` table (the +/- event window
-        /// snapshotted per alert, stored IN events.db). v1.17.5: this table
+        /// Hard ownership cap for slim `alerts.db.alert_evidence`. The alerts
+        /// and evidence knobs remain independently enforceable inside the same
+        /// family; combined hard admission uses their exact sum. Existing
+        /// `events.db.alert_evidence` rows are preserved read-only-for-new-
+        /// capture and retained/cleaned as legacy data without migration.
+        ///
+        /// v1.17.5: the legacy table
         /// was governed only by age (alertsRetentionDays) + a per-alert row
         /// cap, NOT by total size, so on a busy host it ballooned past the
         /// events cap (field-observed 194 MB). Oldest rows are evicted once
         /// the table's raw_json payload exceeds this. (RC H2)
         var evidenceMaxSizeMB: Int = 100
+
+        /// Authoritative per-family caps after evidence ownership moved. Keep
+        /// these calculations centralized: boot, SIGHUP, timers, and heartbeat
+        /// must never rediscover the subtraction/addition independently.
+        var effectiveEventsFamilyMaxSizeMB: Int {
+            max(
+                Self.minimumEventsSizeMiB,
+                eventsMaxSizeMB - evidenceMaxSizeMB
+            )
+        }
+
+        /// Live events-family ceiling while preserved legacy evidence remains.
+        /// The caller supplies the measured, rounded-up legacy ownership; the
+        /// configured evidence tier is an absolute ceiling on transition cost.
+        func effectiveEventsFamilyMaxSizeMB(
+            legacyEvidenceTransitionReserveMiB requestedReserve: Int
+        ) -> Int {
+            let reserve = min(
+                evidenceMaxSizeMB,
+                max(0, requestedReserve)
+            )
+            let (sum, overflow) = effectiveEventsFamilyMaxSizeMB
+                .addingReportingOverflow(reserve)
+            return overflow ? Int.max : sum
+        }
+
+        /// Runtime ceiling for a reserve already admitted by the two-phase
+        /// transition controller. Unlike the candidate helper above, this does
+        /// not clamp to the *new* evidence knob: a config reload may lower that
+        /// knob while the old physical DB/WAL/freelist still requires a larger
+        /// temporary allowance. The controller keeps that allowance explicit
+        /// as `appliedReserveMiB` until a fresh generation-matched footprint
+        /// proof says the lower candidate is safe.
+        func effectiveEventsFamilyMaxSizeMB(
+            appliedLegacyEvidenceTransitionReserveMiB appliedReserve: Int
+        ) -> Int {
+            let (sum, overflow) = effectiveEventsFamilyMaxSizeMB
+                .addingReportingOverflow(max(0, appliedReserve))
+            return overflow ? Int.max : sum
+        }
+
+        var effectiveAlertsFamilyMaxSizeMB: Int {
+            let (sum, overflow) = alertsMaxSizeMB.addingReportingOverflow(
+                evidenceMaxSizeMB
+            )
+            return overflow ? Int.max : sum
+        }
+
+        var configuredEventsAndAlertsTotalMaxSizeMB: Int {
+            let (sum, overflow) = eventsMaxSizeMB.addingReportingOverflow(
+                alertsMaxSizeMB
+            )
+            return overflow ? Int.max : sum
+        }
+
+        /// Honest live envelope including the bounded upgrade reserve. This is
+        /// intentionally separate from the operator's steady-state total.
+        func configuredEventsAndAlertsTotalMaxSizeMB(
+            legacyEvidenceTransitionReserveMiB requestedReserve: Int
+        ) -> Int {
+            let reserve = min(
+                evidenceMaxSizeMB,
+                max(0, requestedReserve)
+            )
+            let (sum, overflow) = configuredEventsAndAlertsTotalMaxSizeMB
+                .addingReportingOverflow(reserve)
+            return overflow ? Int.max : sum
+        }
+
+        /// Honest live combined ceiling for the reserve already applied by the
+        /// transition controller. This intentionally does not clamp to a newly
+        /// lowered evidence knob; doing so would hide the bounded, still-
+        /// physical upgrade allowance from heartbeat and SIGHUP diagnostics.
+        func configuredEventsAndAlertsTotalMaxSizeMB(
+            appliedLegacyEvidenceTransitionReserveMiB appliedReserve: Int
+        ) -> Int {
+            let (sum, overflow) = configuredEventsAndAlertsTotalMaxSizeMB
+                .addingReportingOverflow(max(0, appliedReserve))
+            return overflow ? Int.max : sum
+        }
 
         /// Campaign retention, in days. Campaigns are the highest-density
         /// signal in the store — even a year is tiny.
@@ -415,14 +518,23 @@ struct DaemonConfig: Codable {
                 Self.maximumSweepIntervalMinutes,
                 max(1, s.eventsSizeCapIntervalMinutes)
             )
+            // The envelope must have room for both the event-family operational
+            // minimum and the minimum independently-budgeted evidence tier.
             s.eventsMaxSizeMB = min(
                 Self.maximumSizeMiB,
-                max(Self.minimumEventsSizeMiB, s.eventsMaxSizeMB)
+                max(Self.minimumEventsSizeMiB + 50, s.eventsMaxSizeMB)
             )
             s.aggregateDays = min(Self.maximumRetentionDays, max(1, s.aggregateDays))
             s.alertsRetentionDays = min(Self.maximumRetentionDays, max(1, s.alertsRetentionDays))
             s.alertsMaxSizeMB = min(Self.maximumSizeMiB, max(50, s.alertsMaxSizeMB))
-            s.evidenceMaxSizeMB = min(Self.maximumSizeMiB, max(50, s.evidenceMaxSizeMB))
+            // Evidence is an allocation *inside* eventsMaxSizeMB's historical
+            // envelope. Clamp an impossible request down instead of silently
+            // increasing the global disk budget. The subtraction is safe after
+            // the envelope floor above.
+            s.evidenceMaxSizeMB = min(
+                s.eventsMaxSizeMB - Self.minimumEventsSizeMiB,
+                min(Self.maximumSizeMiB, max(50, s.evidenceMaxSizeMB))
+            )
             s.campaignsRetentionDays = min(Self.maximumRetentionDays, max(1, s.campaignsRetentionDays))
             s.campaignsMaxSizeMB = min(Self.maximumSizeMiB, max(50, s.campaignsMaxSizeMB))
             s.tracegraphRetentionDays = min(Self.maximumRetentionDays, max(1, s.tracegraphRetentionDays))

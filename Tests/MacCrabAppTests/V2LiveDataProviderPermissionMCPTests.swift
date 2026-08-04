@@ -13,6 +13,7 @@
 import Testing
 import Foundation
 @testable import MacCrabApp
+@testable import MacCrabCore
 
 @Suite("V2LiveDataProvider — permission scoping + MCP host")
 struct V2LiveDataProviderPermissionMCPTests {
@@ -77,5 +78,56 @@ struct V2LiveDataProviderPermissionMCPTests {
     func emptyURLFallsBack() {
         let spec: [String: Any] = ["url": "", "command": "node"]
         #expect(V2LiveDataProvider.mcpHost(for: spec) == "localhost")
+    }
+
+    @Test("Only a current versioned MCP baseline snapshot counts as live profiling")
+    func baselineSnapshotFreshness() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let baseline = MCPServerBaseline(
+            serverKey: "Claude Code::github",
+            tool: "Claude Code",
+            serverName: "github"
+        )
+        let fresh = MCPBaselineService.BaselineSnapshot(
+            writtenAt: now.addingTimeInterval(-30),
+            baselines: [baseline]
+        )
+        #expect(V2LiveDataProvider.liveMCPBaselineKeys(
+            from: fresh, now: now
+        ) == ["Claude Code::github"])
+
+        let stale = MCPBaselineService.BaselineSnapshot(
+            writtenAt: now.addingTimeInterval(-121),
+            baselines: [baseline]
+        )
+        #expect(V2LiveDataProvider.liveMCPBaselineKeys(
+            from: stale, now: now
+        ).isEmpty)
+
+        let legacy = MCPBaselineService.BaselineSnapshot(
+            schemaVersion: 1,
+            writtenAt: now,
+            baselines: [baseline]
+        )
+        #expect(V2LiveDataProvider.liveMCPBaselineKeys(
+            from: legacy, now: now
+        ).isEmpty)
+
+        let unknownFuture = MCPBaselineService.BaselineSnapshot(
+            schemaVersion: MCPBaselineService.BaselineSnapshot.currentSchemaVersion + 1,
+            writtenAt: now,
+            baselines: [baseline]
+        )
+        #expect(V2LiveDataProvider.liveMCPBaselineKeys(
+            from: unknownFuture, now: now
+        ).isEmpty)
+
+        let futureDated = MCPBaselineService.BaselineSnapshot(
+            writtenAt: now.addingTimeInterval(6),
+            baselines: [baseline]
+        )
+        #expect(V2LiveDataProvider.liveMCPBaselineKeys(
+            from: futureDated, now: now
+        ).isEmpty)
     }
 }

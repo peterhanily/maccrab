@@ -106,7 +106,7 @@ struct DetectionPipelineOrderingTests {
         #expect(crossed != nil)
     }
 
-    @Test("EventLoop filters primaries before derivatives and scoring, then filters composites")
+    @Test("EventLoop filters primaries before durable scoring and commit")
     func eventLoopOrderingDriftGuard() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -123,15 +123,8 @@ struct DetectionPipelineOrderingTests {
         let survivingSequences = try #require(source.range(
             of: "let survivingSequenceMatches = sequenceMatches.filter"
         ))
-        let deterministicDerivative = try #require(source.range(
-            of: "let result = await reasoner.analyze(chain: [step])"
-        ))
         let scoring = try #require(source.range(
-            of: "state.behaviorScoring.addRuleMatch("
-        ))
-        let compositeFilter = try #require(source.range(of: "&compositeMatches,"))
-        let emissionMerge = try #require(source.range(
-            of: "matches.append(contentsOf: compositeMatches)"
+            of: "BehaviorScoreAlertEmitter.recordRuleMatch("
         ))
         let batchCommit = try #require(source.range(
             of: "persistedAlerts = try await state.alertSink.insertEngineBatch("
@@ -139,11 +132,15 @@ struct DetectionPipelineOrderingTests {
 
         #expect(primaryFilter.lowerBound < survivingSequences.lowerBound)
         #expect(primaryFilter.lowerBound < scoring.lowerBound)
-        #expect(scoring.lowerBound < compositeFilter.lowerBound)
-        #expect(compositeFilter.lowerBound < emissionMerge.lowerBound)
-        #expect(emissionMerge.lowerBound < batchCommit.lowerBound)
+        #expect(scoring.lowerBound < batchCommit.lowerBound)
         #expect(survivingSequences.lowerBound < batchCommit.lowerBound)
-        #expect(batchCommit.lowerBound < deterministicDerivative.lowerBound)
+
+        // Counterfactual/forecast engines remain explicit analyst tools. The
+        // old source guard required their automatic one-step derivative after
+        // commit, but that emitter was retired because one synthetic step
+        // cannot establish an observed chain or calibrated forecast.
+        #expect(!source.contains("reasoner.analyze(chain: [step])"))
+        #expect(!source.contains("label: \"sequence-forecast\""))
 
         #expect(!source.contains("maccrab.llm.sequence-analysis"))
         #expect(!source.contains("maccrab.llm.baseline-analysis"))

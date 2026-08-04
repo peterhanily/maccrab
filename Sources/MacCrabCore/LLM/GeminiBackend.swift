@@ -6,7 +6,7 @@
 import Foundation
 import os.log
 
-public actor GeminiBackend: LLMBackend {
+public actor GeminiBackend: LLMBackend, BoundedLLMBackend {
     public let providerName = "Gemini"
     private let apiKey: String
     private let model: String
@@ -51,11 +51,25 @@ public actor GeminiBackend: LLMBackend {
 
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ).value
+    }
+
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
         // Gemini API: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
         // The API key is sent via the x-goog-api-key header rather than a query parameter
         // to prevent exposure in HTTP access logs and proxy logs.
         let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
-        guard let url = URL(string: urlStr) else { return nil }
+        guard let url = URL(string: urlStr) else { return .failure }
 
         // Gemini uses a different request format than OpenAI
         let payload: [String: Any] = [
@@ -79,19 +93,25 @@ public actor GeminiBackend: LLMBackend {
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 60
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("Gemini response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("Gemini network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("Gemini API error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         // Response: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
@@ -99,7 +119,9 @@ public actor GeminiBackend: LLMBackend {
               let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]],
-              let text = parts.first?["text"] as? String else { return nil }
-        return text
+              let text = parts.first?["text"] as? String else {
+            return .failure
+        }
+        return .response(text)
     }
 }

@@ -19,14 +19,25 @@ public actor CertTransparency {
     private var cache: [String: CTResult] = [:]
     private let maxCacheSize = 5000
 
-    /// Domains we've already checked (avoid hammering crt.sh).
-    private var checkedDomains: Set<String> = []
+    /// Domains checked recently (avoid hammering crt.sh). This must be bounded
+    /// alongside `cache`; the former Set grew for the full daemon lifetime even
+    /// after its corresponding cache entry had been evicted.
+    private var checkedDomains: [String: Date] = [:]
+    private let failedQueryRetryInterval: TimeInterval = 5 * 60
 
     /// Watch patterns for typosquatting detection (e.g., "mycompany").
     private var watchPatterns: [String] = []
 
     /// Recently discovered suspicious certificates.
     private var suspiciousFindings: [CTFinding] = []
+    private let maxSuspiciousFindings = 5_000
+
+    /// Remote lookups run in DaemonState's advisory lane. This generation gate
+    /// makes a late HTTP result harmless if that lane misses its join deadline:
+    /// shutdown returns synchronously after closing mutation admission, and the
+    /// resumed query discards its result.
+    private var acceptingQueries = true
+    private var lifecycleGeneration: UInt64 = 0
 
     // MARK: - Types
 
@@ -77,20 +88,34 @@ public actor CertTransparency {
     /// Check a domain against CT logs. Returns cached result if available.
     /// This is rate-limited and async — suitable for calling on each network event.
     public func checkDomain(_ domain: String) async -> CTResult? {
+        guard acceptingQueries, !Task.isCancelled else { return nil }
         let normalized = domain.lowercased()
+        let now = Date()
+        let generation = lifecycleGeneration
 
         // Return cache if fresh (< 1 hour)
         if let cached = cache[normalized],
-           Date().timeIntervalSince(cached.checkedAt) < 3600 {
+           now.timeIntervalSince(cached.checkedAt) < 3600 {
             return cached
         }
 
-        // Skip if already checked recently
-        guard !checkedDomains.contains(normalized) else { return cache[normalized] }
-        checkedDomains.insert(normalized)
+        // A failed lookup gets a short retry window instead of either hammering
+        // crt.sh on every event or being suppressed forever.
+        if let lastAttempt = checkedDomains[normalized],
+           now.timeIntervalSince(lastAttempt) < failedQueryRetryInterval {
+            return cache[normalized]
+        }
+        if checkedDomains.count >= maxCacheSize,
+           let oldest = checkedDomains.min(by: { $0.value < $1.value })?.key {
+            checkedDomains.removeValue(forKey: oldest)
+        }
+        checkedDomains[normalized] = now
 
         // Query crt.sh (Certificate Transparency log aggregator)
         guard let result = await queryCrtSh(domain: normalized) else { return nil }
+        guard acceptingQueries,
+              lifecycleGeneration == generation,
+              !Task.isCancelled else { return nil }
 
         // Cache result
         if cache.count >= maxCacheSize {
@@ -109,6 +134,11 @@ public actor CertTransparency {
                 severity: .high
             )
             suspiciousFindings.append(finding)
+            if suspiciousFindings.count > maxSuspiciousFindings {
+                suspiciousFindings.removeFirst(
+                    suspiciousFindings.count - maxSuspiciousFindings
+                )
+            }
             logger.warning("CT suspicious: \(normalized) — \(result.reason ?? "unknown")")
         }
 
@@ -118,6 +148,15 @@ public actor CertTransparency {
     /// Get all suspicious findings.
     public func getFindings() -> [CTFinding] {
         suspiciousFindings
+    }
+
+    /// Permanently close remote-result mutation admission. The HTTP request is
+    /// owned/cancelled/joined by the daemon advisory lane; this local gate is
+    /// the final protection against a cancellation-uncooperative response.
+    public func shutdown() {
+        guard acceptingQueries else { return }
+        acceptingQueries = false
+        lifecycleGeneration &+= 1
     }
 
     /// Check if a domain looks like typosquatting of watched patterns.

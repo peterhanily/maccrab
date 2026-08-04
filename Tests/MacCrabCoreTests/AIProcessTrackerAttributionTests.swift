@@ -78,6 +78,46 @@ struct AIProcessTrackerAttributionTests {
         #expect(result.toolType == .claudeCode)
     }
 
+    @Test("nested same-tool descendants stay bound to the active ancestor root")
+    func nestedSameToolUsesActiveRoot() async {
+        let tracker = AIProcessTracker(lineage: ProcessLineage())
+        #expect(await tracker.registerAIProcess(
+            pid: 1200,
+            type: .codex,
+            projectDir: "/Users/x/project"
+        ))
+
+        // The nearest ancestor also looks exactly like Codex, but it is a
+        // descendant, not a new session root. The already-active root farther
+        // up the genuine ancestry owns this process tree.
+        let result = await tracker.isAIChild(
+            pid: 1202,
+            ancestors: [
+                ancestor(1201, "/Applications/Codex.app/Contents/Resources/codex"),
+                ancestor(1200, "/Applications/Codex.app/Contents/Resources/codex"),
+            ],
+            promoteUnregisteredAncestors: false
+        )
+        #expect(result.isChild)
+        #expect(result.rootPid == 1200)
+        #expect(result.projectDir == "/Users/x/project")
+        #expect(await tracker.sessionCount == 1,
+                "nested Codex must not mint a second bounded-LRU root")
+    }
+
+    @Test("production mode leaves unregistered ancestor promotion to the ordered owner")
+    func ownerControlsAncestorPromotion() async {
+        let tracker = AIProcessTracker(lineage: ProcessLineage())
+        let result = await tracker.isAIChild(
+            pid: 1301,
+            ancestors: [ancestor(1300, claudePath)],
+            promoteUnregisteredAncestors: false
+        )
+        #expect(!result.isChild)
+        #expect(result.rootPid == nil)
+        #expect(await tracker.sessionCount == 0)
+    }
+
     @Test("A recycled pid present in childToSession but NOT in lineage is re-evaluated, not attributed")
     func recycledPidNotAttributed() async {
         let tracker = AIProcessTracker(lineage: ProcessLineage())

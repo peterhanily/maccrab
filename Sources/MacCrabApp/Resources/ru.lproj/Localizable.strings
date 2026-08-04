@@ -186,7 +186,7 @@
 "aiGuard.title" = "Активность ИИ-инструментов";
 "aiGuard.subtitle" = "Отслеживает Claude Code, Codex, OpenClaw, Cursor и их дочерние процессы";
 "aiGuard.noAlerts" = "Нет оповещений безопасности ИИ";
-"aiGuard.noAlertsDesc" = "ИИ-инструменты работают в безопасных границах";
+"aiGuard.noAlertsDesc" = "Отсутствие предупреждений не означает безопасность, если охват событий или сохранение сеансов неполны.";
 
 /* ── Components ── */
 "components.suppress" = "Подавить";
@@ -613,7 +613,7 @@
 "settings.llmGeminiModel" = "Модель";
 "settings.llmInfo" = "Как это работает";
 "settings.llmInfoDesc" = "ИИ-бэкенд может добавлять структурированные расследования оповещений, сводки кампаний, рекомендации по защите и уточнение намерений пакетов. Результаты модели носят рекомендательный характер и никогда не выполняют действий.";
-"settings.llmLocalPrivacy" = "Работает локально. Данные не покидают ваш компьютер.";
+"settings.llmLocalPrivacy" = "MacCrab не отправляет интернет-трафик через эту петлевую конечную точку.";
 "settings.llmMistralHelp" = "Получите API-ключ на console.mistral.ai";
 "settings.llmMistralKey" = "API-ключ Mistral";
 "settings.llmMistralModel" = "Модель";

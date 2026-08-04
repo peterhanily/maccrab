@@ -23,6 +23,60 @@ public protocol LLMBackend: Actor {
     ) async -> String?
 }
 
+// MARK: - Bounded built-in transport result
+
+/// Internal result channel used by MacCrab's built-in HTTP backends. The public
+/// LLMBackend API remains source-compatible for third-party/test backends, while
+/// LLMService can distinguish a transfer that was cancelled at the byte cap
+/// from an ordinary network/backend failure.
+enum LLMBackendCompletionResult: Sendable, Equatable {
+    case response(String)
+    case responseOversize
+    case failure
+
+    var value: String? {
+        guard case .response(let value) = self else { return nil }
+        return value
+    }
+}
+
+/// Refinement adopted by all built-in providers. Keeping this separate from
+/// public `LLMBackend` avoids breaking injected backends while still giving the
+/// service an exhaustive transport outcome for circuit/telemetry accounting.
+protocol BoundedLLMBackend: LLMBackend {
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult
+
+    func completeWithExtendedThinkingResult(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int,
+        maxOutputTokens: Int
+    ) async -> LLMBackendCompletionResult
+}
+
+extension BoundedLLMBackend {
+    /// Mirrors LLMBackend's default extended-thinking fallback, but retains an
+    /// oversize transport disposition instead of collapsing it into nil.
+    func completeWithExtendedThinkingResult(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int = 8000,
+        maxOutputTokens: Int = 4096
+    ) async -> LLMBackendCompletionResult {
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxOutputTokens,
+            temperature: 0.3
+        )
+    }
+}
+
 // MARK: - Optional extended thinking
 
 extension LLMBackend {

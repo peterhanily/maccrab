@@ -1,9 +1,9 @@
 // MCPAuditCoverageTests.swift
 // MacCrabCoreTests
 //
-// G-05: prove 1:1 audit coverage for the mutating control surface.
+// G-05: prove 1:1 audit coverage for the capability-gated control surface.
 //
-// The audit report flagged that it was UNPROVEN that every mutating MCP tool
+// The audit report flagged that it was UNPROVEN that every gated MCP tool
 // and every privileged-inbox verb emits an audit-log line. A mutation with no
 // audit trail is invisible to `dashboard_audit.log` / get_agent_session, so a
 // forgotten `auditLog(...)` silently erases the "who changed what" record — the
@@ -15,7 +15,7 @@
 // critically, FAIL when a FUTURE mutating tool/verb is added without an audit
 // line:
 //
-//   1. everyGatedMcpToolAuditLogs — the canonical mutating MCP surface is the
+//   1. everyGatedMcpToolAuditLogs — the canonical gated MCP surface is the
 //      key set of `agentToolCapability` (AgentControl.swift); it is DERIVED from
 //      source here, so any new gated tool is automatically in scope. Each must
 //      have an `auditLog("<tool>"` call somewhere in Sources/maccrab-mcp/.
@@ -27,7 +27,7 @@
 //
 // This pairs with `mutatingToolsAreGated` (MCPProtocolHarnessTests.swift), which
 // pins the same surface to the CAPABILITY gate. Gate + audit together: a new
-// mutator must be both gated AND audited, or a test fails.
+// sensitive operation must be both gated AND audited, or a test fails.
 
 import Testing
 import Foundation
@@ -90,7 +90,8 @@ struct MCPAuditCoverageTests {
         // silently-empty regex that would make the loop below vacuously pass).
         #expect(gatedTools.count >= 15, "parsed only \(gatedTools.count) gated tools from agentToolCapability — parser likely broke")
         for known in ["set_daemon_config", "create_rule", "suppress_alert", "set_response_action",
-                      "forensics_run_collector", "forensics_run_all"] {
+                      "forensics_run_collector", "forensics_run_all", "classify_package_intent",
+                      "forensics_check_plugin_updates", "forensics_search_catalog", "export_session_bundle"] {
             #expect(gatedTools.contains(known), "expected gated tool '\(known)' not parsed from agentToolCapability")
         }
 
@@ -98,7 +99,7 @@ struct MCPAuditCoverageTests {
         #expect(!source.isEmpty, "could not read Sources/maccrab-mcp/*.swift")
         for tool in gatedTools.sorted() {
             #expect(source.contains("auditLog(\"\(tool)\""),
-                    "gated MCP tool '\(tool)' has no auditLog(\"\(tool)\", …) call — a mutation with no audit trail (G-05). Add an auditLog line to its handler.")
+                    "gated MCP tool '\(tool)' has no auditLog(\"\(tool)\", …) call — a sensitive operation with no audit trail (G-05). Add an auditLog line to its handler.")
         }
     }
 

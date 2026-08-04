@@ -19,6 +19,16 @@ import Darwin
 
 public enum SecureFileIO {
 
+    struct TemporaryCleanupReport: Sendable, Equatable {
+        let inspectedEntries: Int
+        let matchingFiles: Int
+        let removedFiles: Int
+        let removedBytes: Int
+        let remainingFiles: Int
+        let remainingBytes: Int
+        let scanTruncated: Bool
+    }
+
     public enum Error: Swift.Error, LocalizedError, Equatable {
         case pathOutsideScope(path: String, scope: String)
         case symlinkRefused(path: String)
@@ -125,8 +135,173 @@ public enum SecureFileIO {
             data: data,
             mode: mode,
             replaceExisting: true,
+            temporaryNamePrefix: ".maccrab-write-",
             afterDirectoryOpened: nil
         )
+    }
+
+    /// Caller-scoped staging namespace for durable state that also performs
+    /// exact orphan accounting/cleanup. The prefix must be a short hidden leaf
+    /// prefix ending in `-`; it is never interpreted as a path.
+    static func atomicReplace(
+        at path: String,
+        data: Data,
+        mode: mode_t,
+        temporaryNamePrefix: String
+    ) throws {
+        try atomicWrite(
+            at: path,
+            data: data,
+            mode: mode,
+            replaceExisting: true,
+            temporaryNamePrefix: temporaryNamePrefix,
+            afterDirectoryOpened: nil
+        )
+    }
+
+    /// Descriptor-safe, caller-namespace-exact cleanup for crash-orphaned
+    /// atomic-write temporaries. It never touches the shared default namespace.
+    /// Only stale, private, single-link regular files owned by the effective UID
+    /// and carrying the exact `<prefix><UUID>.tmp` shape are eligible.
+    static func cleanupStaleAtomicWriteTemporaries(
+        near path: String,
+        temporaryNamePrefix: String,
+        olderThan minimumAge: TimeInterval,
+        now: Date = Date(),
+        maximumEntries: Int = 4_096,
+        maximumFilesToRemove: Int = 32,
+        maximumBytesToRemove: Int = 64 * 1_024 * 1_024,
+        maximumCandidateBytes: Int = 8 * 1_024 * 1_024
+    ) throws -> TemporaryCleanupReport {
+        guard isSafeTemporaryNamePrefix(temporaryNamePrefix),
+              minimumAge.isFinite, minimumAge >= 0,
+              maximumEntries > 0, maximumEntries <= 65_536,
+              maximumFilesToRemove >= 0, maximumFilesToRemove <= maximumEntries,
+              maximumBytesToRemove >= 0,
+              maximumCandidateBytes >= 0 else {
+            throw Error.writeFailed(path: path, errno: EINVAL)
+        }
+
+        return try withParentDirectory(of: path) {
+            parentDescriptor, _, _ in
+            let duplicate = Darwin.openat(
+                parentDescriptor,
+                ".",
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            )
+            guard duplicate >= 0 else {
+                throw Error.openFailed(path: path, errno: errno)
+            }
+            guard let stream = Darwin.fdopendir(duplicate) else {
+                let savedErrno = errno
+                Darwin.close(duplicate)
+                throw Error.openFailed(path: path, errno: savedErrno)
+            }
+            defer { Darwin.closedir(stream) }
+
+            var inspected = 0
+            var matching = 0
+            var removedFiles = 0
+            var removedBytes = 0
+            var remainingFiles = 0
+            var remainingBytes = 0
+            var truncated = false
+            Darwin.errno = 0
+
+            while let entry = Darwin.readdir(stream) {
+                let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                    pointer.withMemoryRebound(
+                        to: CChar.self,
+                        capacity: Int(MAXNAMLEN) + 1
+                    ) { String(cString: $0) }
+                }
+                guard name != ".", name != "..", !name.isEmpty else { continue }
+                if inspected == maximumEntries {
+                    truncated = true
+                    break
+                }
+                inspected += 1
+                guard temporaryNameMatches(name, prefix: temporaryNamePrefix) else {
+                    continue
+                }
+
+                var metadata = stat()
+                let statStatus = name.withCString {
+                    Darwin.fstatat(
+                        Darwin.dirfd(stream),
+                        $0,
+                        &metadata,
+                        AT_SYMLINK_NOFOLLOW
+                    )
+                }
+                guard statStatus == 0,
+                      (metadata.st_mode & S_IFMT) == S_IFREG,
+                      metadata.st_nlink == 1,
+                      metadata.st_uid == geteuid(),
+                      metadata.st_mode & 0o077 == 0,
+                      metadata.st_size >= 0,
+                      metadata.st_size <= off_t(maximumCandidateBytes) else {
+                    continue
+                }
+
+                matching += 1
+                let size = Int(metadata.st_size)
+                let modifiedAt = TimeInterval(metadata.st_mtimespec.tv_sec)
+                    + TimeInterval(metadata.st_mtimespec.tv_nsec) / 1_000_000_000
+                let age = now.timeIntervalSince1970 - modifiedAt
+                let removalWithinBounds = removedFiles < maximumFilesToRemove
+                    && size <= maximumBytesToRemove
+                    && removedBytes <= maximumBytesToRemove - size
+                var removed = false
+
+                if age >= minimumAge, removalWithinBounds {
+                    var revalidated = stat()
+                    let unchanged = name.withCString {
+                        Darwin.fstatat(
+                            Darwin.dirfd(stream),
+                            $0,
+                            &revalidated,
+                            AT_SYMLINK_NOFOLLOW
+                        )
+                    } == 0
+                        && FileIdentity(metadata).matches(revalidated)
+                        && revalidated.st_size == metadata.st_size
+                        && revalidated.st_nlink == 1
+                        && revalidated.st_uid == geteuid()
+                        && (revalidated.st_mode & S_IFMT) == S_IFREG
+                        && revalidated.st_mode & 0o077 == 0
+                        && revalidated.st_mtimespec.tv_sec == metadata.st_mtimespec.tv_sec
+                        && revalidated.st_mtimespec.tv_nsec == metadata.st_mtimespec.tv_nsec
+                    if unchanged {
+                        removed = name.withCString {
+                            Darwin.unlinkat(Darwin.dirfd(stream), $0, 0)
+                        } == 0
+                    }
+                }
+
+                if removed {
+                    removedFiles += 1
+                    removedBytes += size
+                } else {
+                    remainingFiles += 1
+                    remainingBytes = remainingBytes > Int.max - size
+                        ? Int.max : remainingBytes + size
+                }
+                Darwin.errno = 0
+            }
+            guard Darwin.errno == 0 else {
+                throw Error.readFailed(path: path, errno: errno)
+            }
+            return TemporaryCleanupReport(
+                inspectedEntries: inspected,
+                matchingFiles: matching,
+                removedFiles: removedFiles,
+                removedBytes: removedBytes,
+                remainingFiles: remainingFiles,
+                remainingBytes: remainingBytes,
+                scanTruncated: truncated
+            )
+        }
     }
 
     /// Internal race seam used only by adversarial tests. Production callers
@@ -142,6 +317,7 @@ public enum SecureFileIO {
             data: data,
             mode: mode,
             replaceExisting: false,
+            temporaryNamePrefix: ".maccrab-write-",
             afterDirectoryOpened: afterDirectoryOpened
         )
     }
@@ -151,9 +327,13 @@ public enum SecureFileIO {
         data: Data,
         mode: mode_t,
         replaceExisting: Bool,
+        temporaryNamePrefix: String = ".maccrab-write-",
         afterDirectoryOpened: ((String, Int32) -> Void)?
     ) throws {
         guard mode & ~mode_t(0o7777) == 0 else {
+            throw Error.writeFailed(path: path, errno: EINVAL)
+        }
+        guard isSafeTemporaryNamePrefix(temporaryNamePrefix) else {
             throw Error.writeFailed(path: path, errno: EINVAL)
         }
 
@@ -167,7 +347,7 @@ public enum SecureFileIO {
             }
             let expectedParent = FileIdentity(parentMetadata)
 
-            let temporaryLeaf = ".maccrab-write-\(UUID().uuidString).tmp"
+            let temporaryLeaf = "\(temporaryNamePrefix)\(UUID().uuidString).tmp"
             let temporaryDescriptor = temporaryLeaf.withCString {
                 Darwin.openat(
                     parentDescriptor,
@@ -298,6 +478,22 @@ public enum SecureFileIO {
             // destructive retry against the now-existing name.
             _ = Darwin.fsync(parentDescriptor)
         }
+    }
+
+    private static func isSafeTemporaryNamePrefix(_ prefix: String) -> Bool {
+        prefix.hasPrefix(".maccrab-")
+            && prefix.hasSuffix("-")
+            && !prefix.contains("/")
+            && !prefix.contains("\0")
+            && prefix.utf8.count <= 96
+    }
+
+    private static func temporaryNameMatches(_ name: String, prefix: String) -> Bool {
+        guard name.hasPrefix(prefix), name.hasSuffix(".tmp") else { return false }
+        let uuidStart = name.index(name.startIndex, offsetBy: prefix.count)
+        let uuidEnd = name.index(name.endIndex, offsetBy: -4)
+        guard uuidStart < uuidEnd else { return false }
+        return UUID(uuidString: String(name[uuidStart..<uuidEnd])) != nil
     }
 
     private static func writeAll(

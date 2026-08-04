@@ -94,7 +94,7 @@ struct EDRMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EDRMonitor(pollInterval: 60)
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -110,7 +110,7 @@ struct ClipboardMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = ClipboardMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -123,7 +123,7 @@ struct USBMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = USBMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -136,7 +136,7 @@ struct MCPMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = MCPMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -149,7 +149,7 @@ struct NetworkCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = NetworkCollector()
-        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stop() }) {
+        try await withStartedMonitor(start: { await collector.start() }, stop: { _ = await collector.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -162,7 +162,7 @@ struct SystemPolicyMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = SystemPolicyMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -220,7 +220,7 @@ struct SDRDeviceMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = SDRDeviceMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -233,7 +233,7 @@ struct EventTapMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EventTapMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -246,7 +246,7 @@ struct FSEventsCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = FSEventsCollector()
-        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stop() }) {
+        try await withStartedMonitor(start: { await collector.start() }, stop: { _ = await collector.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -259,7 +259,7 @@ struct TCCMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = TCCMonitor()
-        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { _ = await monitor.stopAndJoin(deadline: 2.0) }) {
             try await Task.sleep(for: .milliseconds(100))
         }
     }

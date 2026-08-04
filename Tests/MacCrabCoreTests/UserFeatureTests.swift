@@ -237,6 +237,32 @@ struct FleetClientTests {
         #expect(FleetClient() == nil)
     }
 
+    @Test("Terminal stop joins push loop and refuses resurrection/buffering")
+    func lifecycleIsOneShot() async throws {
+        setenv("MACCRAB_FLEET_URL", "http://127.0.0.1:65534", 1)
+        defer { unsetenv("MACCRAB_FLEET_URL") }
+        let client = try #require(FleetClient(pushInterval: 3600))
+
+        #expect(await client.start())
+        let accepted = await client.bufferAlert(FleetAlertSummary(
+            ruleId: "maccrab.test.lifecycle",
+            ruleTitle: "Lifecycle",
+            severity: "low",
+            processPath: "/usr/bin/true",
+            mitreTechniques: "",
+            timestamp: Date()
+        ))
+        #expect(accepted)
+        #expect(await client.stop(deadline: 1.0))
+        #expect(await client.start() == false)
+        #expect(await client.bufferIOC(FleetIOCSighting(
+            type: "domain",
+            value: "late.example",
+            context: "test",
+            timestamp: Date()
+        )) == false)
+    }
+
     @Test("FleetAlertSummary roundtrips through JSON")
     func alertSummaryCodable() throws {
         let summary = FleetAlertSummary(

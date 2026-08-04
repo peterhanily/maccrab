@@ -74,15 +74,27 @@ public actor LLMService {
 
     /// Circuit breaker: disable after consecutive failures.
     private var consecutiveFailures: Int = 0
-    private var circuitOpenUntil: Date = .distantPast
+    /// Cooldown is a duration and therefore uses monotonic uptime. Wall-clock
+    /// corrections must not prematurely half-open or indefinitely pin a circuit.
+    private var circuitOpenUntilUptime: TimeInterval = -.infinity
     private let maxConsecutiveFailures: Int = 3
-    private let circuitResetInterval: TimeInterval = 300  // 5 minutes
+    private let circuitResetInterval: TimeInterval
+    private let wallNow: @Sendable () -> Date
+    private let circuitNow: @Sendable () -> TimeInterval
+    /// After the cooldown, exactly one call must prove the backend recovered.
+    /// The failure streak is never cleared by time or by a cache hit.
+    private var circuitRecoveryProbeInFlight = false
 
     /// Max response size to accept (bytes).
-    private let maxResponseSize: Int = 50_000  // ~50KB
+    private let maxResponseSize = LLMBoundedHTTPReader.maximumResponseBytes
 
     private var totalCalls: Int = 0
     private var cacheHits: Int = 0
+
+    /// Content-free, fixed-cardinality request ledger. Kept actor-owned so a
+    /// snapshot cannot observe a torn increment across global and per-feature
+    /// counters.
+    private var runtimeTelemetry = LLMRuntimeTelemetryLedger()
 
     /// v1.18: health observability — timestamp of the last successful
     /// backend response + the configured provider/model labels, so
@@ -99,7 +111,10 @@ public actor LLMService {
             config: config,
             cache: cache,
             minInterval: minInterval,
-            rateLimitClock: .live
+            rateLimitClock: .live,
+            circuitResetInterval: 300,
+            wallNow: { Date() },
+            circuitNow: { Foundation.ProcessInfo.processInfo.systemUptime }
         )
     }
 
@@ -108,11 +123,19 @@ public actor LLMService {
     init(backend: any LLMBackend, config: LLMConfig,
          cache: LLMCache = LLMCache(),
          minInterval: TimeInterval = 5.0,
-         rateLimitClock: LLMRateLimitClock) {
+         rateLimitClock: LLMRateLimitClock,
+         circuitResetInterval: TimeInterval = 300,
+         wallNow: @escaping @Sendable () -> Date = { Date() },
+         circuitNow: @escaping @Sendable () -> TimeInterval = {
+             Foundation.ProcessInfo.processInfo.systemUptime
+         }) {
         self.backend = backend
         self.cache = cache
         self.minInterval = max(0, minInterval)
         self.rateLimitClock = rateLimitClock
+        self.circuitResetInterval = max(0, circuitResetInterval)
+        self.wallNow = wallNow
+        self.circuitNow = circuitNow
         // Only sanitize for cloud providers; Ollama is local. The host is
         // parsed (strict loopback check) rather than substring-matched: a
         // remote Ollama at `http://127.0.0.1.evil.com` must NOT be treated
@@ -191,7 +214,25 @@ public actor LLMService {
     /// every successful backend response (regular + extended-thinking paths).
     private func markSuccess() {
         consecutiveFailures = 0
-        lastSuccessAt = Date()
+        circuitOpenUntilUptime = -.infinity
+        lastSuccessAt = wallNow()
+    }
+
+    /// Any backend response that cannot be consumed is failure evidence, not a
+    /// healthy exchange. This includes an oversized response: treating it as a
+    /// transport success left health green while every product call returned nil.
+    private func markBackendFailure(providerName: String, context: String) {
+        consecutiveFailures += 1
+        if consecutiveFailures >= maxConsecutiveFailures {
+            rearmCircuitCooldown()
+            logger.warning("LLM circuit breaker opened after \(self.consecutiveFailures) unusable responses (provider: \(providerName), context: \(context))")
+        } else {
+            logger.warning("LLM unusable response (provider: \(providerName), context: \(context), failures: \(self.consecutiveFailures))")
+        }
+    }
+
+    private func rearmCircuitCooldown() {
+        circuitOpenUntilUptime = circuitNow() + circuitResetInterval
     }
 
     /// AI-06/AI-08: the single honest "is this LLM genuinely usable right now"
@@ -207,7 +248,7 @@ public actor LLMService {
     ///    failure;
     ///  - the circuit is not open.
     ///
-    /// The failure-streak term is what fixes the AI-08 lie. `circuitOpenUntil`
+    /// The failure-streak term is what fixes the AI-08 lie. The cooldown
     /// expires on the CLOCK alone — no success required — while
     /// `consecutiveFailures` stays at 3, so a backend that succeeded once at
     /// boot and then died reported `healthy: true, circuit_open: false,
@@ -217,7 +258,9 @@ public actor LLMService {
     /// not been asked anything for hours is healthy, not stale, and must keep
     /// both its "healthy" gauge and its commentary.
     public func isUsable() -> Bool {
-        lastSuccessAt != nil && consecutiveFailures == 0 && Date() >= circuitOpenUntil
+        lastSuccessAt != nil
+            && consecutiveFailures == 0
+            && circuitNow() >= circuitOpenUntilUptime
     }
 
     /// v1.18: current LLM health for the heartbeat. Pure read of internal
@@ -228,9 +271,40 @@ public actor LLMService {
             model: modelLabel,
             lastSuccessAtUnix: lastSuccessAt?.timeIntervalSince1970,
             consecutiveFailures: consecutiveFailures,
-            circuitOpen: Date() < circuitOpenUntil,
+            circuitOpen: circuitNow() < circuitOpenUntilUptime,
             usable: isUsable()
         )
+    }
+
+    /// Exact process-lifetime LLM accounting. Prompt/response text and dynamic
+    /// labels are never retained. Heartbeat wiring intentionally lives outside
+    /// this service so reading telemetry has no I/O or persistence side effect.
+    public func runtimeTelemetrySnapshot() -> LLMRuntimeTelemetrySnapshot {
+        runtimeTelemetry.snapshot(capturedAt: wallNow())
+    }
+
+    /// Begin one semantic operation that may consume one or more transport
+    /// requests. The opaque token makes accepted/rejected accounting conserving:
+    /// an operation can finish exactly once and a retry cannot float free.
+    public func beginDownstreamValidation(
+        feature: LLMRuntimeFeature
+    ) -> LLMSemanticOperationToken {
+        runtimeTelemetry.beginDownstreamValidation(feature: feature)
+    }
+
+    @discardableResult
+    public func recordDownstreamValidationRetry(
+        token: LLMSemanticOperationToken
+    ) -> Bool {
+        runtimeTelemetry.recordDownstreamRetry(token: token)
+    }
+
+    @discardableResult
+    public func finishDownstreamValidation(
+        token: LLMSemanticOperationToken,
+        outcome: LLMSemanticValidationOutcome
+    ) -> Bool {
+        runtimeTelemetry.finishDownstreamValidation(token: token, outcome: outcome)
     }
 
     /// Build an `LLMService` from an `LLMConfig`, picking the right
@@ -329,22 +403,106 @@ public actor LLMService {
         await backend.providerName
     }
 
+    /// Built-in providers return a typed bounded-transport result. Injected or
+    /// third-party LLMBackend implementations keep the original String? API
+    /// and are adapted here, preserving source compatibility.
+    private func performCompletion(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
+        if let bounded = backend as? any BoundedLLMBackend {
+            return await bounded.completeResult(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                maxTokens: maxTokens,
+                temperature: temperature
+            )
+        }
+        guard let response = await backend.complete(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ) else {
+            return .failure
+        }
+        return .response(response)
+    }
+
+    private func performExtendedThinkingCompletion(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int,
+        maxOutputTokens: Int
+    ) async -> LLMBackendCompletionResult {
+        if let bounded = backend as? any BoundedLLMBackend {
+            return await bounded.completeWithExtendedThinkingResult(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                thinkingBudgetTokens: thinkingBudgetTokens,
+                maxOutputTokens: maxOutputTokens
+            )
+        }
+        guard let response = await backend.completeWithExtendedThinking(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            maxOutputTokens: maxOutputTokens
+        ) else {
+            return .failure
+        }
+        return .response(response)
+    }
+
     /// Send a prompt to the LLM with sanitization, caching, and rate limiting.
     public func query(
         systemPrompt: String,
         userPrompt: String,
         maxTokens: Int = 2048,
         temperature: Double = 0.2,
-        useCache: Bool = true
+        useCache: Bool = true,
+        feature: LLMRuntimeFeature
     ) async -> LLMEnhancement? {
-        // Circuit breaker: skip if too many recent failures
+        var telemetryToken = runtimeTelemetry.begin(
+            feature: feature,
+            requestedInputBytes: llmUTF8ByteCount(systemPrompt, userPrompt)
+        )
+        var telemetryOutcome: LLMRequestOutcome = .cancellation
+        var telemetryReturnedOutputBytes: UInt64 = 0
+        defer {
+            runtimeTelemetry.finish(
+                token: telemetryToken,
+                outcome: telemetryOutcome,
+                returnedOutputBytes: telemetryReturnedOutputBytes
+            )
+        }
+
+        // Circuit breaker: time only permits ONE half-open backend probe. It
+        // never clears failure evidence. In particular, a six-hour cache hit
+        // after the five-minute cooldown cannot make commentary/heartbeat green
+        // without proving the backend recovered.
+        let isRecoveryProbe: Bool
         if consecutiveFailures >= maxConsecutiveFailures {
-            if Date() < circuitOpenUntil {
+            if circuitNow() < circuitOpenUntilUptime || circuitRecoveryProbeInFlight {
                 logger.info("LLM circuit breaker open, skipping query")
+                telemetryOutcome = .circuitRejection
                 return nil
             }
-            // Reset after cooldown
-            consecutiveFailures = 0
+            circuitRecoveryProbeInFlight = true
+            isRecoveryProbe = true
+        } else {
+            isRecoveryProbe = false
+        }
+        if isRecoveryProbe {
+            runtimeTelemetry.markCircuitRecoveryProbe(&telemetryToken)
+        }
+        defer {
+            if isRecoveryProbe {
+                circuitRecoveryProbeInFlight = false
+                if telemetryOutcome != .success { rearmCircuitCooldown() }
+            }
         }
 
         let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
@@ -358,15 +516,18 @@ public actor LLMService {
             (LLMSanitizer.hasResidualSensitiveContent(finalSystem) ||
              LLMSanitizer.hasResidualSensitiveContent(finalUser)) {
             logger.warning("LLM strict mode: refusing cloud call — sanitized prompt still has residual high-entropy content")
+            telemetryOutcome = .privacyRejection
             return nil
         }
 
         // Check cache
-        if useCache {
+        if useCache && !isRecoveryProbe {
             let key = LLMCache.cacheKey(system: finalSystem, user: finalUser,
                                         temperature: temperature, maxTokens: maxTokens)
             if let cached = await cache.get(key: key) {
                 cacheHits += 1
+                telemetryOutcome = .cacheHit
+                telemetryReturnedOutputBytes = UInt64(cached.utf8.count)
                 return LLMEnhancement(
                     provider: await backend.providerName,
                     prompt: finalUser, response: cached,
@@ -382,9 +543,11 @@ public actor LLMService {
         guard pendingBackendCalls < maxPendingBackendCalls else {
             droppedForAdmission += 1
             logger.warning("LLM admission control: \(self.maxPendingBackendCalls) backend calls already in flight — dropping this request (dropped so far: \(self.droppedForAdmission)). The alert itself is unaffected; only the advisory analysis is skipped.")
+            telemetryOutcome = .admissionShed
             return nil
         }
         pendingBackendCalls += 1
+        runtimeTelemetry.admit(&telemetryToken)
         defer { pendingBackendCalls -= 1 }
 
         let providerName = await backend.providerName
@@ -392,32 +555,62 @@ public actor LLMService {
         // AI-14: claim the slot after the provider lookup so there is no actor
         // suspension between stamping the actual start boundary and invoking
         // the backend. Regular and extended-thinking calls share this state.
-        guard await waitForRateLimitSlot() else { return nil }
+        guard await waitForRateLimitSlot() else {
+            telemetryOutcome = .cancellation
+            return nil
+        }
 
         let start = Date()
         totalCalls += 1
 
-        guard let response = await backend.complete(
+        runtimeTelemetry.startBackend(
+            token: telemetryToken,
+            inputBytes: llmUTF8ByteCount(finalSystem, finalUser)
+        )
+
+        let backendResult = await performCompletion(
             systemPrompt: finalSystem, userPrompt: finalUser,
             maxTokens: maxTokens, temperature: temperature
-        ) else {
-            consecutiveFailures += 1
-            if consecutiveFailures >= maxConsecutiveFailures {
-                circuitOpenUntil = Date().addingTimeInterval(circuitResetInterval)
-                logger.warning("LLM circuit breaker opened after \(self.consecutiveFailures) failures (provider: \(providerName))")
-            } else {
-                logger.warning("LLM query failed (provider: \(providerName), failures: \(self.consecutiveFailures))")
+        )
+        let response: String
+        switch backendResult {
+        case .response(let value):
+            response = value
+        case .responseOversize:
+            logger.warning("LLM transport response exceeded \(self.maxResponseSize) bytes; transfer cancelled")
+            markBackendFailure(
+                providerName: providerName,
+                context: "bounded regular transport response"
+            )
+            telemetryOutcome = .responseOversize
+            return nil
+        case .failure:
+            if Task.isCancelled {
+                telemetryOutcome = .cancellation
+                return nil
             }
+            markBackendFailure(providerName: providerName, context: "regular backend returned nil")
+            telemetryOutcome = .backendFailure
             return nil
         }
 
-        markSuccess()  // reset failures + stamp last-success time
+        let responseUTF8Bytes = UInt64(response.utf8.count)
+        runtimeTelemetry.receiveBackendOutput(
+            token: telemetryToken,
+            bytes: responseUTF8Bytes
+        )
 
         // Response size guard
-        guard response.count <= maxResponseSize else {
-            logger.warning("LLM response too large (\(response.count) bytes), discarding")
+        guard responseUTF8Bytes <= UInt64(maxResponseSize) else {
+            logger.warning("LLM response too large (\(responseUTF8Bytes) bytes), discarding")
+            markBackendFailure(providerName: providerName, context: "oversized regular response")
+            telemetryOutcome = .responseOversize
             return nil
         }
+
+        markSuccess()  // only a usable fresh response proves recovery
+        telemetryOutcome = .success
+        telemetryReturnedOutputBytes = responseUTF8Bytes
 
         let latency = Date().timeIntervalSince(start)
 
@@ -437,9 +630,10 @@ public actor LLMService {
     }
 
     /// AI-06: the entry point an emitter must use for LLM prose that becomes a
-    /// `maccrab.llm.*` alert. Identical to `query()` except that it returns nil
-    /// unless `isUsable()` holds AFTER the call — commentary is published only
-    /// when AI analysis is genuinely set up and working.
+    /// `maccrab.llm.*` alert. Unlike raw `query()`, it requires usable backend
+    /// health and admits only bounded prose without control/injection carriers.
+    /// The optional validator lets a feature add a narrower shape (for example,
+    /// one-line cluster rationale) without bypassing the central boundary.
     ///
     /// Why AFTER and not before: `isUsable()` requires evidence of a real
     /// exchange, and on a freshly-booted daemon that evidence can only come
@@ -456,17 +650,110 @@ public actor LLMService {
         userPrompt: String,
         maxTokens: Int = 2048,
         temperature: Double = 0.2,
-        useCache: Bool = true
+        useCache: Bool = true,
+        feature: LLMRuntimeFeature,
+        additionalValidator: (@Sendable (String) -> Bool)? = nil
     ) async -> LLMEnhancement? {
+        let semanticToken = beginDownstreamValidation(feature: feature)
         guard let result = await query(
             systemPrompt: systemPrompt, userPrompt: userPrompt,
-            maxTokens: maxTokens, temperature: temperature, useCache: useCache
-        ) else { return nil }
-        guard isUsable() else {
-            logger.info("Suppressing LLM commentary: backend not currently usable (failures: \(self.consecutiveFailures))")
+            maxTokens: maxTokens, temperature: temperature, useCache: useCache,
+            feature: feature
+        ) else {
+            _ = finishDownstreamValidation(
+                token: semanticToken,
+                outcome: .finalRejection
+            )
             return nil
         }
+        guard isUsable() else {
+            logger.info("Suppressing LLM commentary: backend not currently usable (failures: \(self.consecutiveFailures))")
+            await removeCommentaryCacheEntry(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                useCache: useCache
+            )
+            _ = finishDownstreamValidation(
+                token: semanticToken,
+                outcome: .finalRejection
+            )
+            return nil
+        }
+        guard Self.isSafePersistedAdvisory(result.response),
+              additionalValidator?(result.response) ?? true else {
+            logger.warning("Suppressing unsafe LLM commentary before persistence")
+            await removeCommentaryCacheEntry(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                useCache: useCache
+            )
+            _ = finishDownstreamValidation(
+                token: semanticToken,
+                outcome: .finalRejection
+            )
+            return nil
+        }
+        _ = finishDownstreamValidation(token: semanticToken, outcome: .accepted)
         return result
+    }
+
+    /// Admission policy for model-authored prose that will be persisted or
+    /// exposed to another model through MCP. Ordinary `query()` intentionally
+    /// remains raw so strict JSON/SQL/Sigma consumers can apply their typed
+    /// parsers. Advisory prose must pass this boundary before storage.
+    public nonisolated static func isSafePersistedAdvisory(_ value: String) -> Bool {
+        let maximumUTF8Bytes = 32_768
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.utf8.count <= maximumUTF8Bytes,
+              !value.unicodeScalars.contains(where: { scalar in
+                  switch scalar.value {
+                  // LF is ordinary multiline prose. All other C0/C1 controls,
+                  // bidi overrides, zero-width carriers, and tag characters
+                  // are rejected instead of rewritten into apparently-safe text.
+                  case 0x00...0x09, 0x0B...0x1F, 0x7F...0x9F,
+                       0x200B...0x200F, 0x202A...0x202E,
+                       0x2060...0x206F, 0xFEFF, 0xE0000...0xE007F:
+                      return true
+                  default:
+                      return false
+                  }
+              }) else { return false }
+
+        let lower = value.precomposedStringWithCompatibilityMapping.lowercased()
+        let instructionCarriers = [
+            "ignore previous instructions", "ignore prior instructions",
+            "disregard previous instructions", "reveal the system prompt",
+            "developer message:", "system message:", "<|im_start|>",
+            "<|system|>", "[inst]", "### new instructions",
+            "begin system prompt", "assistant to=", "tool_calls",
+        ]
+        return !instructionCarriers.contains(where: { lower.contains($0) })
+            && InjectionMarkerScanner.scan(value).isEmpty
+    }
+
+    private func removeCommentaryCacheEntry(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double,
+        useCache: Bool
+    ) async {
+        guard useCache else { return }
+        let finalSystem = shouldSanitize
+            ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
+        let finalUser = shouldSanitize
+            ? LLMSanitizer.sanitize(userPrompt) : userPrompt
+        let key = LLMCache.cacheKey(
+            system: finalSystem,
+            user: finalUser,
+            temperature: temperature,
+            maxTokens: maxTokens
+        )
+        await cache.remove(key: key)
     }
 
     /// Send a prompt using extended thinking when the backend supports it.
@@ -488,11 +775,42 @@ public actor LLMService {
         systemPrompt: String,
         userPrompt: String,
         thinkingBudgetTokens: Int = 8000,
-        maxOutputTokens: Int = 4096
+        maxOutputTokens: Int = 4096,
+        feature: LLMRuntimeFeature
     ) async -> LLMEnhancement? {
+        var telemetryToken = runtimeTelemetry.begin(
+            feature: feature,
+            requestedInputBytes: llmUTF8ByteCount(systemPrompt, userPrompt)
+        )
+        var telemetryOutcome: LLMRequestOutcome = .cancellation
+        var telemetryReturnedOutputBytes: UInt64 = 0
+        defer {
+            runtimeTelemetry.finish(
+                token: telemetryToken,
+                outcome: telemetryOutcome,
+                returnedOutputBytes: telemetryReturnedOutputBytes
+            )
+        }
+
+        let isRecoveryProbe: Bool
         if consecutiveFailures >= maxConsecutiveFailures {
-            if Date() < circuitOpenUntil { return nil }
-            consecutiveFailures = 0
+            if circuitNow() < circuitOpenUntilUptime || circuitRecoveryProbeInFlight {
+                telemetryOutcome = .circuitRejection
+                return nil
+            }
+            circuitRecoveryProbeInFlight = true
+            isRecoveryProbe = true
+        } else {
+            isRecoveryProbe = false
+        }
+        if isRecoveryProbe {
+            runtimeTelemetry.markCircuitRecoveryProbe(&telemetryToken)
+        }
+        defer {
+            if isRecoveryProbe {
+                circuitRecoveryProbeInFlight = false
+                if telemetryOutcome != .success { rearmCircuitCooldown() }
+            }
         }
         let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
         let finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
@@ -507,6 +825,7 @@ public actor LLMService {
             (LLMSanitizer.hasResidualSensitiveContent(finalSystem) ||
              LLMSanitizer.hasResidualSensitiveContent(finalUser)) {
             logger.warning("LLM strict mode: refusing cloud call (extended thinking) — sanitized prompt still has residual high-entropy content")
+            telemetryOutcome = .privacyRejection
             return nil
         }
 
@@ -515,39 +834,72 @@ public actor LLMService {
         guard pendingBackendCalls < maxPendingBackendCalls else {
             droppedForAdmission += 1
             logger.warning("LLM admission control: \(self.maxPendingBackendCalls) backend calls already in flight — dropping this extended-thinking request (dropped so far: \(self.droppedForAdmission)).")
+            telemetryOutcome = .admissionShed
             return nil
         }
         pendingBackendCalls += 1
+        runtimeTelemetry.admit(&telemetryToken)
         defer { pendingBackendCalls -= 1 }
 
         let providerName = await backend.providerName
 
         // Shared with query(): a regular and an extended call cannot reserve
         // the same interval and burst together after the actor re-enters.
-        guard await waitForRateLimitSlot() else { return nil }
+        guard await waitForRateLimitSlot() else {
+            telemetryOutcome = .cancellation
+            return nil
+        }
 
         let start = Date()
         totalCalls += 1
 
-        guard let response = await backend.completeWithExtendedThinking(
+        runtimeTelemetry.startBackend(
+            token: telemetryToken,
+            inputBytes: llmUTF8ByteCount(finalSystem, finalUser)
+        )
+
+        let backendResult = await performExtendedThinkingCompletion(
             systemPrompt: finalSystem,
             userPrompt: finalUser,
             thinkingBudgetTokens: thinkingBudgetTokens,
             maxOutputTokens: maxOutputTokens
-        ) else {
-            consecutiveFailures += 1
-            if consecutiveFailures >= maxConsecutiveFailures {
-                circuitOpenUntil = Date().addingTimeInterval(circuitResetInterval)
-                logger.warning("LLM circuit breaker opened (extended thinking) after \(self.consecutiveFailures) failures")
+        )
+        let response: String
+        switch backendResult {
+        case .response(let value):
+            response = value
+        case .responseOversize:
+            logger.warning("LLM extended-thinking transport response exceeded \(self.maxResponseSize) bytes; transfer cancelled")
+            markBackendFailure(
+                providerName: providerName,
+                context: "bounded extended transport response"
+            )
+            telemetryOutcome = .responseOversize
+            return nil
+        case .failure:
+            if Task.isCancelled {
+                telemetryOutcome = .cancellation
+                return nil
             }
+            markBackendFailure(providerName: providerName, context: "extended backend returned nil")
+            telemetryOutcome = .backendFailure
             return nil
         }
 
-        markSuccess()  // reset failures + stamp last-success time
-        guard response.count <= maxResponseSize else {
+        let responseUTF8Bytes = UInt64(response.utf8.count)
+        runtimeTelemetry.receiveBackendOutput(
+            token: telemetryToken,
+            bytes: responseUTF8Bytes
+        )
+        guard responseUTF8Bytes <= UInt64(maxResponseSize) else {
             logger.warning("LLM extended-thinking response too large, discarding")
+            markBackendFailure(providerName: providerName, context: "oversized extended response")
+            telemetryOutcome = .responseOversize
             return nil
         }
+        markSuccess()  // only a usable fresh response proves recovery
+        telemetryOutcome = .success
+        telemetryReturnedOutputBytes = responseUTF8Bytes
         let latency = Date().timeIntervalSince(start)
         logger.info("LLM extended-thinking query completed in \(String(format: "%.2f", latency))s (\(providerName))")
 

@@ -136,6 +136,11 @@ public actor ThreatIntelFeed {
 
     /// Whether auto-update is running.
     private var isRunning = false
+    private var networkRefreshTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var networkGeneration: UInt64 = 0
+    private var terminallyStopped = false
+    private var shutdownTask: Task<Bool, Never>?
 
     /// v1.19.1: count of network-fetch attempts (incremented at the top of
     /// updateAllFeeds). Lets tests assert a disabled feed performs ZERO
@@ -230,7 +235,9 @@ public actor ThreatIntelFeed {
     // MARK: - Public API
 
     /// Start auto-updating feeds in the background.
-    public func start(networkRefresh: Bool = true) async {
+    @discardableResult
+    public func start(networkRefresh: Bool = true) async -> Bool {
+        guard !terminallyStopped, !Task.isCancelled else { return false }
         // v1.12.6 Wave 9F: load cache + operator drop-ins BEFORE
         // returning so DaemonSetup's subsequent `BundledThreatIntel.
         // loadInto(...)` + `persistCacheNow()` see the hydrated state.
@@ -246,6 +253,7 @@ public actor ThreatIntelFeed {
         // even when network refresh is off. Only the periodic abuse.ch fetch
         // (`updateAllFeeds`) is gated by the opt-in `networkRefresh` flag.
         await loadCachedFeeds()
+        guard !terminallyStopped, !Task.isCancelled else { return false }
 
         // v1.9 Phase-5.7 (TI-M7): wire the operator's drop-in
         // *.hashes.txt / *.ips.txt / *.domains.txt files at boot.
@@ -256,31 +264,115 @@ public actor ThreatIntelFeed {
         loadCustomIOCFiles()
 
         if networkRefresh {
-            startNetworkRefresh()
+            return startNetworkRefresh()
         }
+        return true
     }
 
     /// Launch the periodic abuse.ch network-refresh loop (immediate fetch, then
     /// every `updateInterval`). Idempotent: a call while already running is a
     /// no-op. The actual OUTBOUND request lives only in `updateAllFeeds()`.
-    private func startNetworkRefresh() {
-        guard !isRunning else { return }
-        isRunning = true
-        Task {
-            await updateAllFeeds()
-            while isRunning {
-                try? await Task.sleep(nanoseconds: UInt64(updateInterval * 1_000_000_000))
-                guard isRunning else { break }
-                await updateAllFeeds()
-            }
+    @discardableResult
+    private func startNetworkRefresh() -> Bool {
+        guard !terminallyStopped else { return false }
+        if isRunning { return true }
+        guard networkRefreshTask == nil, refreshTask == nil else {
+            logger.error("Threat-intel refresh cannot restart until prior owned work has drained")
+            return false
         }
+        isRunning = true
+        networkGeneration &+= 1
+        let generation = networkGeneration
+        networkRefreshTask = Task { [weak self] in
+            await self?.runNetworkRefreshLoop(generation: generation)
+            await self?.finishNetworkRefreshLoop(generation: generation)
+        }
+        return true
+    }
+
+    private func runNetworkRefreshLoop(generation: UInt64) async {
+        await refreshOnce(generation: generation)
+        while networkMutationAllowed(generation: generation) {
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(updateInterval * 1_000_000_000)
+                )
+            } catch {
+                break
+            }
+            guard networkMutationAllowed(generation: generation) else {
+                break
+            }
+            await refreshOnce(generation: generation)
+        }
+    }
+
+    private func finishNetworkRefreshLoop(generation: UInt64) {
+        guard !terminallyStopped,
+              generation == networkGeneration else { return }
+        networkRefreshTask = nil
+    }
+
+    /// Coalesce periodic, SIGHUP, inbox, and dashboard refreshes behind one
+    /// retained request. This avoids concurrent full-feed downloads and gives
+    /// pause/shutdown an exact task handle to cancel and join.
+    private func refreshOnce(generation: UInt64) async {
+        guard networkMutationAllowed(generation: generation) else { return }
+        if let refreshTask {
+            await refreshTask.value
+            return
+        }
+        let task = Task { [weak self] in
+            await self?.updateAllFeeds(generation: generation)
+            await self?.finishRefresh(generation: generation)
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func finishRefresh(generation: UInt64) {
+        guard !terminallyStopped,
+              generation == networkGeneration else { return }
+        refreshTask = nil
+    }
+
+    private func networkMutationAllowed(generation: UInt64) -> Bool {
+        !terminallyStopped
+            && isRunning
+            && generation == networkGeneration
+            && !Task.isCancelled
     }
 
     /// v1.19.1: live toggle for the opt-in network refresh. Enabling starts the
     /// loop (with an immediate fetch); disabling halts it so egress stops
     /// without a daemon restart. Wired from the SIGHUP config-reload handler.
-    public func setNetworkRefresh(_ enabled: Bool) {
-        if enabled { startNetworkRefresh() } else { isRunning = false }
+    @discardableResult
+    public func setNetworkRefresh(_ enabled: Bool) async -> Bool {
+        if enabled {
+            return startNetworkRefresh()
+        } else {
+            return await pauseNetworkRefresh()
+        }
+    }
+
+    private func pauseNetworkRefresh(
+        deadline: TimeInterval = 1.0
+    ) async -> Bool {
+        isRunning = false
+        let periodic = networkRefreshTask
+        let refresh = refreshTask
+        periodic?.cancel()
+        refresh?.cancel()
+        let accepted = [periodic, refresh].compactMap { $0 }
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            accepted,
+            deadline: deadline
+        )
+        if joined {
+            networkRefreshTask = nil
+            refreshTask = nil
+        }
+        return joined
     }
 
     /// v1.12.6 Wave 9F: persist the current in-memory IOC set to
@@ -294,12 +386,38 @@ public actor ThreatIntelFeed {
     /// contains the previous cache file's network IOCs before we
     /// rewrite the file.
     public func persistCacheNow() {
+        guard !terminallyStopped else { return }
         saveCache()
     }
 
-    /// Stop auto-updating.
-    public func stop() {
+    /// Terminally stop auto-updating. Unlike the live config toggle, this seals
+    /// the actor against later refresh resurrection by a delayed startup/SIGHUP
+    /// task and joins the exact periodic + in-flight request prefix.
+    @discardableResult
+    public func stop(deadline: TimeInterval = 1.0) async -> Bool {
+        if let shutdownTask { return await shutdownTask.value }
+        if terminallyStopped { return true }
+        terminallyStopped = true
         isRunning = false
+        onFeedUpdate = nil
+        let periodic = networkRefreshTask
+        let refresh = refreshTask
+        periodic?.cancel()
+        refresh?.cancel()
+        let accepted = [periodic, refresh].compactMap { $0 }
+        let waiter = Task {
+            await CollectorBoundedTaskJoin.waitForAll(
+                accepted,
+                deadline: deadline
+            )
+        }
+        shutdownTask = waiter
+        let joined = await waiter.value
+        if joined {
+            networkRefreshTask = nil
+            refreshTask = nil
+        }
+        return joined
     }
 
     /// Trigger a one-shot feed refresh now. Used by the dashboard's
@@ -311,8 +429,8 @@ public actor ThreatIntelFeed {
         // the SIGHUP handler, the refresh-intel inbox request, and the
         // dashboard's "Refresh Now" button — so none of them can egress to
         // abuse.ch while threat-intel enrichment is off.
-        guard isRunning else { return }
-        await updateAllFeeds()
+        guard isRunning, !terminallyStopped else { return }
+        await refreshOnce(generation: networkGeneration)
     }
 
     /// Check if a SHA-256 hash is known-malicious.
@@ -462,6 +580,7 @@ public actor ThreatIntelFeed {
     private var onFeedUpdate: FeedUpdateHandler?
 
     public func onUpdate(_ handler: @escaping FeedUpdateHandler) {
+        guard !terminallyStopped else { return }
         self.onFeedUpdate = handler
     }
 
@@ -489,6 +608,17 @@ public actor ThreatIntelFeed {
         ips: [String] = [],
         domains: [String] = []
     ) -> ImportResult {
+        guard !terminallyStopped else {
+            var rejected: [String] = []
+            for category in [hashes, ips, domains] {
+                for candidate in category
+                    where rejected.count < Self.importRejectionReportCap {
+                    rejected.append(candidate)
+                }
+                if rejected.count >= Self.importRejectionReportCap { break }
+            }
+            return ImportResult(accepted: 0, rejected: rejected)
+        }
         let now = Date()
         var accepted = 0
         var rejected: [String] = []
@@ -532,6 +662,9 @@ public actor ThreatIntelFeed {
     /// dropping malformed lines.
     @discardableResult
     public func loadCustomFile(path: String, type: IOCType) throws -> ImportResult {
+        guard !terminallyStopped else {
+            return ImportResult(accepted: 0, rejected: [path])
+        }
         let content = try String(contentsOfFile: path, encoding: .utf8)
         let lines = content.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -656,15 +789,19 @@ public actor ThreatIntelFeed {
 
     // MARK: - Feed Updates
 
-    private func updateAllFeeds() async {
+    private func updateAllFeeds(generation: UInt64) async {
+        guard networkMutationAllowed(generation: generation) else { return }
         networkFetchAttempts += 1   // v1.19.1: every outbound-fetch attempt (privacy invariant test seam)
         logger.info("Updating threat intelligence feeds…")
         var totalNew = 0
         var anySuccess = false
 
-        let feodo = await updateFeodoTracker()
-        let urlhaus = await updateURLhaus()
-        let bazaar = await updateMalwareBazaar()
+        let feodo = await updateFeodoTracker(generation: generation)
+        guard networkMutationAllowed(generation: generation) else { return }
+        let urlhaus = await updateURLhaus(generation: generation)
+        guard networkMutationAllowed(generation: generation) else { return }
+        let bazaar = await updateMalwareBazaar(generation: generation)
+        guard networkMutationAllowed(generation: generation) else { return }
         totalNew += feodo.added + urlhaus.added + bazaar.added
         anySuccess = feodo.success || urlhaus.success || bazaar.success
 
@@ -695,11 +832,17 @@ public actor ThreatIntelFeed {
     /// Switched from `ipblocklist_recommended.txt` (~30-300 entries)
     /// to `ipblocklist.csv` (full active C2 set, typically 1k-5k entries).
     /// CSV columns: first_seen,dst_ip,dst_port,c2_status,last_online,malware
-    private func updateFeodoTracker() async -> (added: Int, success: Bool) {
+    private func updateFeodoTracker(
+        generation: UInt64
+    ) async -> (added: Int, success: Bool) {
         let url = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
         // fetchLines records its own error (HTTP non-2xx / exception)
         // and returns nil — leave the prior good cache + marker intact.
-        guard let lines = await fetchLines(url: url, feedName: "Feodo") else {
+        guard let lines = await fetchLines(
+            url: url,
+            feedName: "Feodo",
+            generation: generation
+        ), networkMutationAllowed(generation: generation) else {
             return (0, false)
         }
 
@@ -730,7 +873,11 @@ public actor ThreatIntelFeed {
         // we don't freeze the count at the bundled set and report a
         // fake "just updated") and surface the reason on the dashboard.
         guard parsed > 0 else {
-            recordFeedError("Feodo", reason: "0 records parsed (empty feed)")
+            recordFeedError(
+                "Feodo",
+                reason: "0 records parsed (empty feed)",
+                generation: generation
+            )
             return (0, false)
         }
         perFeedLastUpdate["Feodo"] = now
@@ -741,9 +888,15 @@ public actor ThreatIntelFeed {
 
     /// URLhaus — full CSV of online URLs with threat + malware family + tags.
     /// CSV columns: id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter
-    private func updateURLhaus() async -> (added: Int, success: Bool) {
+    private func updateURLhaus(
+        generation: UInt64
+    ) async -> (added: Int, success: Bool) {
         let url = "https://urlhaus.abuse.ch/downloads/csv_online/"
-        guard let lines = await fetchLines(url: url, feedName: "URLhaus") else {
+        guard let lines = await fetchLines(
+            url: url,
+            feedName: "URLhaus",
+            generation: generation
+        ), networkMutationAllowed(generation: generation) else {
             return (0, false)
         }
 
@@ -794,7 +947,11 @@ public actor ThreatIntelFeed {
             }
         }
         guard parsed > 0 else {
-            recordFeedError("URLhaus", reason: "0 records parsed (empty feed)")
+            recordFeedError(
+                "URLhaus",
+                reason: "0 records parsed (empty feed)",
+                generation: generation
+            )
             return (0, false)
         }
         perFeedLastUpdate["URLhaus"] = now
@@ -806,9 +963,15 @@ public actor ThreatIntelFeed {
     /// MalwareBazaar — full CSV of recent samples with file_type + signature + tags.
     /// CSV columns: first_seen_utc,sha256_hash,md5_hash,sha1_hash,reporter,file_name,
     ///              file_type_guess,mime_type,signature,clamav,vtpercent,imphash,…,tags
-    private func updateMalwareBazaar() async -> (added: Int, success: Bool) {
+    private func updateMalwareBazaar(
+        generation: UInt64
+    ) async -> (added: Int, success: Bool) {
         let url = "https://bazaar.abuse.ch/export/csv/recent/"
-        guard let lines = await fetchLines(url: url, feedName: "MalwareBazaar") else {
+        guard let lines = await fetchLines(
+            url: url,
+            feedName: "MalwareBazaar",
+            generation: generation
+        ), networkMutationAllowed(generation: generation) else {
             return (0, false)
         }
 
@@ -843,7 +1006,11 @@ public actor ThreatIntelFeed {
             if isNew { added += 1 }
         }
         guard parsed > 0 else {
-            recordFeedError("MalwareBazaar", reason: "0 records parsed (empty feed)")
+            recordFeedError(
+                "MalwareBazaar",
+                reason: "0 records parsed (empty feed)",
+                generation: generation
+            )
             return (0, false)
         }
         perFeedLastUpdate["MalwareBazaar"] = now
@@ -901,7 +1068,11 @@ public actor ThreatIntelFeed {
 
     // MARK: - Network
 
-    private nonisolated func fetchLines(url urlString: String, feedName: String? = nil) async -> [String]? {
+    private nonisolated func fetchLines(
+        url urlString: String,
+        feedName: String? = nil,
+        generation: UInt64
+    ) async -> [String]? {
         guard let url = URL(string: urlString) else { return nil }
 
         // v1.9 Phase-5.5 (TI-M4): abuse.ch Auth-Key support. When the
@@ -921,7 +1092,11 @@ public actor ThreatIntelFeed {
             let (data, response) = try await SecureURLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 if let feedName {
-                    await self.recordFeedError(feedName, reason: "HTTP \(http.statusCode)")
+                    await self.recordFeedError(
+                        feedName,
+                        reason: "HTTP \(http.statusCode)",
+                        generation: generation
+                    )
                 }
                 return nil
             }
@@ -929,7 +1104,11 @@ public actor ThreatIntelFeed {
             return Self.splitFeedLines(text)
         } catch {
             if let feedName {
-                await self.recordFeedError(feedName, reason: error.localizedDescription)
+                await self.recordFeedError(
+                    feedName,
+                    reason: error.localizedDescription,
+                    generation: generation
+                )
             }
             return nil
         }
@@ -949,7 +1128,12 @@ public actor ThreatIntelFeed {
         text.split(whereSeparator: { $0.isNewline }).map(String.init)
     }
 
-    private func recordFeedError(_ feed: String, reason: String) {
+    private func recordFeedError(
+        _ feed: String,
+        reason: String,
+        generation: UInt64
+    ) {
+        guard networkMutationAllowed(generation: generation) else { return }
         perFeedLastError[feed] = FeedError(at: Date(), reason: reason)
         logger.warning("Feed update failed: \(feed) — \(reason, privacy: .public)")
     }

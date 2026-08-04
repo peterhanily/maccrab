@@ -5,6 +5,7 @@
 // with real ones.
 
 import Foundation
+import MacCrabCore
 
 public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let writtenAt: Date
@@ -59,12 +60,33 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     /// unauthenticated/self-reported and advisory, but a blocked store still
     /// needs to be visible so an empty trace panel is not read as "no spans".
     public let traceStoreStorageAdmission: TraceGraphStorageAdmission?
+    /// Live transition-aware alerts/events caps and the steady-state envelope.
+    public let alertEvidenceBudget: MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget?
+    /// Joinable timer-handler lifecycle accounting. One in-flight heartbeat
+    /// handler is normal; conservation/rejection while accepting is not.
+    public let timerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    public let livenessTimerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    public let startupWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    public let detectionWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    public let advisoryWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    public let outputWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    /// Pre-split compatibility only; never projected into one of the typed
+    /// lanes because that would hide which class actually shed work.
+    public let legacyDerivedWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle?
+    /// Lifecycle health for unauthenticated/self-reported loopback OTLP input.
+    /// A degraded value is an Agent Traces feature gap, not kernel protection.
+    public let otlpReceiverLifecycle: MacCrabCore.HeartbeatSnapshot.OTLPReceiverLifecycle?
     /// Fixed-cardinality event-flow diagnostics. Nil means the running engine
     /// predates the causality block; absence must not be read as zero drops.
     public let eventPipeline: EventPipeline?
     /// Bounded browser inventory coverage. A degraded value means rows shown in
     /// Detection > Browser are partial, not a clean inventory.
     public let browserInventory: BrowserInventory?
+    /// Durable continuity for in-flight multi-event sequence detections.
+    /// Missing means an older engine. A rejected restore or an explicit false
+    /// crash-RPO verdict is a real detection-continuity gap, not merely a
+    /// storage diagnostic.
+    public let sequenceCheckpoint: SequenceCheckpoint?
 
     public struct Collector: Sendable, Equatable, Hashable {
         public let name: String
@@ -139,6 +161,10 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public let recoveryNoPhysicalProgressTotal: Int64?
         public let lastRecoveryFootprintBeforeBytes: Int64?
         public let lastRecoveryFootprintAfterBytes: Int64?
+        /// Shared typed decoder for the exact ingest/write ledgers carried in
+        /// this same block. Keeping the equations in Core prevents the app, CLI,
+        /// and MCP surfaces from drifting on what "Active" means.
+        public let writeTelemetry: MacCrabCore.HeartbeatSnapshot.TraceGraphStorageAdmission?
 
         init?(from raw: [String: Any]?) {
             guard let raw else { return nil }
@@ -163,10 +189,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             recoveryNoPhysicalProgressTotal = Self.int64(raw["recovery_no_physical_progress_total"])
             lastRecoveryFootprintBeforeBytes = Self.int64(raw["last_recovery_footprint_before_bytes"])
             lastRecoveryFootprintAfterBytes = Self.int64(raw["last_recovery_footprint_after_bytes"])
+            writeTelemetry = Self.decodeWriteTelemetry(raw)
         }
 
         public var evidenceUnavailable: Bool {
-            blocked || storeAvailable == false
+            !enabled
+                || blocked
+                || storeAvailable == false
+                || writeTelemetry?.graphWriteDegraded == true
+        }
+
+        public var graphWriteDegraded: Bool {
+            writeTelemetry?.graphWriteDegraded == true
         }
 
         public var operatorDetail: String {
@@ -178,7 +212,62 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if storeAvailable == false {
                 return "The TraceGraph store is unavailable (\(readableReason)). Detection continues, but new causal evidence is not being recorded."
             }
-            return "TraceGraph persistence is paused (\(readableReason)). Detection continues, but new causal evidence is currently being shed while bounded recovery runs."
+            if !enabled {
+                return "TraceGraph persistence is disabled (\(readableReason)). Detection continues, but new causal evidence is not being recorded."
+            }
+            if blocked {
+                return "TraceGraph persistence is paused (\(readableReason)). Detection continues, but new causal evidence is currently being shed while bounded recovery runs."
+            }
+            if let telemetry = writeTelemetry, telemetry.graphWriteDegraded {
+                var failures: [String] = []
+                if let events = telemetry.ingestEventsFailedTotal, events > 0 {
+                    failures.append("\(events) input event(s) failed")
+                }
+                if let batches = telemetry.writeBatchesFailedTotal, batches > 0 {
+                    failures.append("\(batches) batch(es) failed")
+                }
+                if telemetry.writeConservationMaintained == false {
+                    failures.append("persistence accounting does not conserve")
+                }
+                if telemetry.hasOutstandingBacklog == true {
+                    failures.append(
+                        "\(telemetry.ingestEventsPending ?? -1) event(s) and "
+                            + "\((telemetry.pendingEntityRows ?? 0) + (telemetry.pendingEdgeRows ?? 0)) row(s) remain pending"
+                    )
+                }
+                let detail = failures.isEmpty
+                    ? "rolling-graph persistence health is degraded"
+                    : failures.joined(separator: "; ")
+                return "TraceGraph admission is active, but new causal evidence is not fully durable: \(detail). Failed totals remain visible for this engine run; a pending backlog on repeated heartbeats is stuck."
+            }
+            return "TraceGraph evidence persistence is active."
+        }
+
+        public var diagnosticDictionary: [String: Any] {
+            var value: [String: Any] = [
+                "enabled": enabled,
+                "blocked": blocked,
+                "startup_blocked": startupBlocked,
+                "write_degraded": graphWriteDegraded,
+            ]
+            if let storeAvailable { value["store_available"] = storeAvailable }
+            if let reason { value["reason"] = reason }
+            if let telemetry = writeTelemetry,
+               let data = try? JSONEncoder().encode(telemetry),
+               let decoded = try? JSONSerialization.jsonObject(with: data),
+               let object = decoded as? [String: Any] {
+                value.merge(object) { _, typed in typed }
+                if let maintained = telemetry.writeConservationMaintained {
+                    value["write_conservation_maintained"] = maintained
+                }
+                if let failed = telemetry.hasStickyWriteFailure {
+                    value["sticky_write_failure"] = failed
+                }
+                if let backlog = telemetry.hasOutstandingBacklog {
+                    value["outstanding_backlog"] = backlog
+                }
+            }
+            return value
         }
 
         private static func int64(_ value: Any?) -> Int64? {
@@ -192,6 +281,18 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             if let value = value as? Int { return value }
             if let value = value as? NSNumber { return value.intValue }
             return nil
+        }
+
+        private static func decodeWriteTelemetry(
+            _ raw: [String: Any]
+        ) -> MacCrabCore.HeartbeatSnapshot.TraceGraphStorageAdmission? {
+            guard JSONSerialization.isValidJSONObject(raw),
+                  let data = try? JSONSerialization.data(withJSONObject: raw)
+            else { return nil }
+            return try? JSONDecoder().decode(
+                MacCrabCore.HeartbeatSnapshot.TraceGraphStorageAdmission.self,
+                from: data
+            )
         }
     }
 
@@ -438,6 +539,178 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         }
     }
 
+    public struct SequenceCheckpoint: Sendable, Equatable {
+        public let restoreStatus: String?
+        public let restoreDetail: String?
+        public let dirty: Bool?
+        public let configuredCrashRPOSeconds: Double?
+        public let crashRPOBoundCurrentlyMaintained: Bool?
+        public let lastFailure: String?
+        public let durableCarrierValid: Bool?
+        public let orphanCleanupScanTruncated: Bool?
+        public let carrierInvalidationsTotal: UInt64?
+        public let lastCarrierInvalidationReason: String?
+        public let stateContinuityMaintained: Bool?
+        public let stateContinuityDetail: String?
+        public let partialsEvictedTotal: Int?
+        public let partialsInFlight: Int?
+        public let pendingStepsCurrent: Int?
+        public let pendingStepsEvictedTotal: Int?
+        public let checkpointStateWeightBytes: Int?
+        public let checkpointStateWeightRecomputedBytes: Int?
+        public let checkpointStateWeightLimitBytes: Int?
+
+        init?(from raw: [String: Any]?, runtimeRaw: [String: Any]? = nil) {
+            guard let raw else { return nil }
+            restoreStatus = (raw["restore_status"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            restoreDetail = (raw["restore_detail"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            dirty = raw["dirty"] as? Bool
+            configuredCrashRPOSeconds = Self.double(
+                raw["configured_crash_rpo_seconds"]
+            )
+            crashRPOBoundCurrentlyMaintained =
+                raw["crash_rpo_bound_currently_maintained"] as? Bool
+            lastFailure = (raw["last_failure"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            durableCarrierValid = raw["durable_carrier_valid"] as? Bool
+            orphanCleanupScanTruncated = raw["orphan_cleanup_scan_truncated"] as? Bool
+            carrierInvalidationsTotal = Self.unsigned(raw["carrier_invalidations_total"])
+            lastCarrierInvalidationReason =
+                (raw["last_carrier_invalidation_reason"] as? String)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+            stateContinuityMaintained =
+                runtimeRaw?["sequence_state_continuity_maintained"] as? Bool
+            stateContinuityDetail =
+                (runtimeRaw?["sequence_state_continuity_detail"] as? String)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+            partialsEvictedTotal = Self.integer(
+                runtimeRaw?["sequence_partials_evicted_total"]
+            )
+            partialsInFlight = Self.integer(
+                runtimeRaw?["sequence_partials_in_flight"]
+            )
+            pendingStepsCurrent = Self.integer(
+                runtimeRaw?["sequence_pending_steps_current"]
+            )
+            pendingStepsEvictedTotal = Self.integer(
+                runtimeRaw?["sequence_pending_steps_evicted_total"]
+            )
+            checkpointStateWeightBytes = Self.integer(
+                runtimeRaw?["sequence_checkpoint_state_weight_bytes"]
+            )
+            checkpointStateWeightRecomputedBytes = Self.integer(
+                runtimeRaw?["sequence_checkpoint_state_weight_recomputed_bytes"]
+            )
+            checkpointStateWeightLimitBytes = Self.integer(
+                runtimeRaw?["sequence_checkpoint_state_weight_limit_bytes"]
+            )
+        }
+
+        public var degraded: Bool {
+            restoreStatus == "rejected"
+                || crashRPOBoundCurrentlyMaintained == false
+                || durableCarrierValid == false
+                || orphanCleanupScanTruncated == true
+                || stateContinuityMaintained == false
+        }
+
+        public var operatorDetail: String {
+            if stateContinuityMaintained == false {
+                let reason = stateContinuityDetail ?? "runtime state loss or accounting drift"
+                return "MacCrab's live multi-event detection state is degraded (\(reason)). Some in-flight sequences may have been evicted or cannot be accounted for exactly."
+            }
+            if durableCarrierValid == false {
+                return "MacCrab does not currently have a verified durable sequence checkpoint carrier. Detection continues, but restart recovery is unavailable."
+            }
+            if orphanCleanupScanTruncated == true {
+                return "MacCrab could not completely inspect its bounded checkpoint-temporary-file set. Restart continuity may still be current, but its checkpoint disk budget is not fully verified."
+            }
+            if restoreStatus == "rejected" {
+                return "MacCrab rejected the previous sequence checkpoint instead of trusting incompatible or damaged state. In-flight multi-event detections from before this engine start could not be recovered."
+            }
+            if crashRPOBoundCurrentlyMaintained == false {
+                return "MacCrab cannot currently guarantee its configured restart-recovery window for in-flight multi-event detections. Detection continues, but a crash could lose partial sequence state."
+            }
+            if let seconds = configuredCrashRPOSeconds {
+                let recovered = (carrierInvalidationsTotal ?? 0) > 0
+                    ? " A prior carrier invalidation was repaired and remains recorded."
+                    : ""
+                return "In-flight multi-event sequence state is durably recoverable within the configured \(Int(seconds.rounded()))-second crash window.\(recovered)"
+            }
+            return "In-flight multi-event sequence state is durably recoverable."
+        }
+
+        var diagnosticDictionary: [String: Any] {
+            var value: [String: Any] = [:]
+            if let restoreStatus { value["restore_status"] = restoreStatus }
+            if let restoreDetail { value["restore_detail"] = restoreDetail }
+            if let dirty { value["dirty"] = dirty }
+            if let configuredCrashRPOSeconds {
+                value["configured_crash_rpo_seconds"] = configuredCrashRPOSeconds
+            }
+            if let crashRPOBoundCurrentlyMaintained {
+                value["crash_rpo_bound_currently_maintained"] = crashRPOBoundCurrentlyMaintained
+            }
+            if let lastFailure { value["last_failure"] = lastFailure }
+            if let durableCarrierValid { value["durable_carrier_valid"] = durableCarrierValid }
+            if let orphanCleanupScanTruncated {
+                value["orphan_cleanup_scan_truncated"] = orphanCleanupScanTruncated
+            }
+            if let carrierInvalidationsTotal {
+                value["carrier_invalidations_total"] = carrierInvalidationsTotal
+            }
+            if let lastCarrierInvalidationReason {
+                value["last_carrier_invalidation_reason"] = lastCarrierInvalidationReason
+            }
+            if let stateContinuityMaintained {
+                value["state_continuity_maintained"] = stateContinuityMaintained
+            }
+            if let stateContinuityDetail {
+                value["state_continuity_detail"] = stateContinuityDetail
+            }
+            if let partialsEvictedTotal { value["partials_evicted_total"] = partialsEvictedTotal }
+            if let partialsInFlight { value["partials_in_flight"] = partialsInFlight }
+            if let pendingStepsCurrent { value["pending_steps_current"] = pendingStepsCurrent }
+            if let pendingStepsEvictedTotal {
+                value["pending_steps_evicted_total"] = pendingStepsEvictedTotal
+            }
+            if let checkpointStateWeightBytes {
+                value["checkpoint_state_weight_bytes"] = checkpointStateWeightBytes
+            }
+            if let checkpointStateWeightRecomputedBytes {
+                value["checkpoint_state_weight_recomputed_bytes"] = checkpointStateWeightRecomputedBytes
+            }
+            if let checkpointStateWeightLimitBytes {
+                value["checkpoint_state_weight_limit_bytes"] = checkpointStateWeightLimitBytes
+            }
+            return value
+        }
+
+        private static func double(_ value: Any?) -> Double? {
+            if let value = value as? Double { return value }
+            if let value = value as? Int { return Double(value) }
+            if let value = value as? NSNumber { return value.doubleValue }
+            return nil
+        }
+
+        private static func integer(_ value: Any?) -> Int? {
+            if let value = value as? Int { return value }
+            if let value = value as? NSNumber { return value.intValue }
+            return nil
+        }
+
+        private static func unsigned(_ value: Any?) -> UInt64? {
+            if let value = value as? UInt64 { return value }
+            if let value = value as? Int, value >= 0 { return UInt64(value) }
+            if let value = value as? NSNumber {
+                return UInt64(value.stringValue)
+            }
+            return nil
+        }
+    }
+
     /// Engine LLM health parsed from the heartbeat `llm` block.
     public struct LLMHealth: Sendable, Equatable {
         public let configured: Bool
@@ -447,6 +720,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         public let consecutiveFailures: Int
         public let circuitOpen: Bool
         public let healthy: Bool
+        public let runtimeTelemetry: LLMRuntimeTelemetrySnapshot?
+        public let runtimeTelemetryEncodingFailed: Bool
+        private let sharedRuntimeHealth: MacCrabCore.HeartbeatSnapshot.LLMHealth?
 
         init(from raw: [String: Any]) {
             configured = raw["configured"] as? Bool ?? false
@@ -457,12 +733,81 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             consecutiveFailures = raw["consecutive_failures"] as? Int ?? 0
             circuitOpen = raw["circuit_open"] as? Bool ?? false
             healthy = raw["healthy"] as? Bool ?? false
+            sharedRuntimeHealth = Self.decodeSharedRuntimeHealth(raw)
+            runtimeTelemetry = sharedRuntimeHealth?.runtimeTelemetry
+                ?? Self.decodeRuntimeTelemetry(raw["runtime_telemetry"])
+            runtimeTelemetryEncodingFailed =
+                raw["runtime_telemetry_encoding_failed"] as? Bool ?? false
+        }
+
+        public var runtimeConservationMaintained: Bool? {
+            if let verdict = sharedRuntimeHealth?.runtimeConservationMaintained {
+                return verdict
+            }
+            guard let telemetry = runtimeTelemetry else {
+                return runtimeTelemetryEncodingFailed ? false : nil
+            }
+            let counters = [telemetry.totals] + telemetry.perFeature.map(\.counters)
+            return counters.allSatisfy {
+                $0.conservationMaintained
+                    && $0.backendAdmissionConservationMaintained
+                    && $0.circuitRecoveryConservationMaintained
+                    && $0.downstreamValidation.conservationMaintained
+            }
+        }
+
+        public var unspecifiedRequestsTotal: UInt64? {
+            sharedRuntimeHealth?.unspecifiedRequestsTotal
+                ?? runtimeTelemetry?.counters(for: .unspecified)?.requestedTotal
+        }
+
+        public var semanticRetriesTotal: UInt64? {
+            runtimeTelemetry?.totals.downstreamValidation.retryRequested
+        }
+
+        public var semanticFinalRejectionsTotal: UInt64? {
+            runtimeTelemetry?.totals.downstreamValidation.finalRejection
+        }
+
+        public var runtimeRequiresAttention: Bool {
+            guard configured else { return false }
+            if runtimeTelemetryEncodingFailed
+                || sharedRuntimeHealth?.runtimeTelemetryDegraded == true {
+                return true
+            }
+            // Outcome counters are process-lifetime diagnostics. A failure,
+            // shed, oversize reply, or semantic rejection from hours ago must
+            // not permanently pin current health red after a real success has
+            // reset the failure streak. Current operational failure is already
+            // represented by the service-owned streak/circuit state; ledger
+            // conservation and unattributed calls remain structural defects.
+            return runtimeConservationMaintained == false
+                || (unspecifiedRequestsTotal ?? 0) > 0
+                || circuitOpen
+                || consecutiveFailures > 0
+        }
+
+        public var runtimeOperatorDetail: String {
+            guard let totals = runtimeTelemetry?.totals else {
+                return runtimeTelemetryEncodingFailed
+                    ? "MacCrab could not encode its content-free AI runtime ledger. Request health and feature attribution are unknown."
+                    : "AI runtime accounting is unavailable from this engine."
+            }
+            let outcomes = totals.outcomes
+            let semantic = totals.downstreamValidation
+            let features = runtimeTelemetry?.perFeature.map {
+                "\($0.feature.rawValue) \($0.counters.requestedTotal)"
+            }.joined(separator: ", ") ?? "unavailable"
+            return "Process-lifetime ledger: \(totals.requestedTotal) request(s), \(totals.currentInFlight) in flight; outcomes: success \(outcomes.success), cache \(outcomes.cacheHit), backend failure \(outcomes.backendFailure), circuit rejection \(outcomes.circuitRejection), privacy rejection \(outcomes.privacyRejection), admission shed \(outcomes.admissionShed), cancellation \(outcomes.cancellation), oversize \(outcomes.responseOversize). Accounting: \(runtimeConservationMaintained == true ? "conserving" : "degraded"); unspecified feature: \(unspecifiedRequestsTotal ?? 0); semantic validation: operations \(semantic.operationsStartedTotal), current \(semantic.currentOperations), accepted \(semantic.accepted), retries \(semantic.retryRequested), final rejection \(semantic.finalRejection). Requests by fixed feature: \(features). Historical outcome counts do not describe current health. No prompt or response content is retained in these metrics."
         }
 
         /// One-line operator-facing summary of engine LLM state.
         public var summary: String {
             if !configured { return "Not configured for the engine" }
             let who = "\(provider)/\(model)"
+            if runtimeRequiresAttention {
+                return "\(who) — runtime quality needs attention"
+            }
             if healthy { return "\(who) — healthy" }
             if circuitOpen { return "\(who) — circuit open (repeated failures)" }
             if lastSuccessUnix == nil { return "\(who) — enabled, but no successful call yet" }
@@ -474,6 +819,44 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 return "\(who) — last \(consecutiveFailures) call(s) failed; AI analysis is paused until one succeeds"
             }
             return "\(who) — degraded"
+        }
+
+        public var diagnosticDictionary: [String: Any] {
+            var value: [String: Any] = [
+                "configured": configured,
+                "provider": provider,
+                "model": model,
+                "consecutive_failures": consecutiveFailures,
+                "circuit_open": circuitOpen,
+                "healthy": healthy,
+                "runtime_telemetry_encoding_failed": runtimeTelemetryEncodingFailed,
+            ]
+            if let lastSuccessUnix { value["last_success_unix"] = lastSuccessUnix }
+            if let runtimeTelemetry,
+               let data = try? JSONEncoder().encode(runtimeTelemetry),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                value["runtime_telemetry"] = object
+            }
+            return value
+        }
+
+        private static func decodeRuntimeTelemetry(_ value: Any?) -> LLMRuntimeTelemetrySnapshot? {
+            guard let value, JSONSerialization.isValidJSONObject(value),
+                  let data = try? JSONSerialization.data(withJSONObject: value)
+            else { return nil }
+            return try? JSONDecoder().decode(LLMRuntimeTelemetrySnapshot.self, from: data)
+        }
+
+        private static func decodeSharedRuntimeHealth(
+            _ raw: [String: Any]
+        ) -> MacCrabCore.HeartbeatSnapshot.LLMHealth? {
+            guard JSONSerialization.isValidJSONObject(raw),
+                  let data = try? JSONSerialization.data(withJSONObject: raw)
+            else { return nil }
+            return try? JSONDecoder().decode(
+                MacCrabCore.HeartbeatSnapshot.LLMHealth.self,
+                from: data
+            )
         }
     }
 
@@ -497,7 +880,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         return decode(at: chosen.0)
     }
 
-    private static func decode(at path: String) -> V2HeartbeatSnapshot? {
+    /// Internal fixture seam; production callers use `readFreshest()`.
+    static func decode(at path: String) -> V2HeartbeatSnapshot? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
@@ -524,11 +908,33 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         let traceStoreStorageAdmission = TraceGraphStorageAdmission(
             from: raw["traces_storage_admission"] as? [String: Any]
         )
+        let alertEvidenceBudget: MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget? =
+            decodeCoreBlock(raw["alert_evidence_budget"])
+        let timerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["timer_lifecycle"])
+        let livenessTimerLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["liveness_timer_lifecycle"])
+        let startupWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["startup_work_lifecycle"])
+        let detectionWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["detection_work_lifecycle"])
+        let advisoryWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["advisory_work_lifecycle"])
+        let outputWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["output_work_lifecycle"])
+        let legacyDerivedWorkLifecycle: MacCrabCore.HeartbeatSnapshot.TimerLifecycle? =
+            decodeCoreBlock(raw["derived_work_lifecycle"])
+        let otlpReceiverLifecycle: MacCrabCore.HeartbeatSnapshot.OTLPReceiverLifecycle? =
+            decodeCoreBlock(raw["otlp_receiver_lifecycle"])
         let eventPipeline = EventPipeline(
             from: raw["event_pipeline"] as? [String: Any]
         )
         let browserInventory = BrowserInventory(
             from: raw["browser_inventory"] as? [String: Any]
+        )
+        let sequenceCheckpoint = SequenceCheckpoint(
+            from: raw["sequence_checkpoint"] as? [String: Any],
+            runtimeRaw: raw
         )
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
@@ -555,9 +961,26 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             prevention: prevention,
             traceGraphStorageAdmission: traceGraphStorageAdmission,
             traceStoreStorageAdmission: traceStoreStorageAdmission,
+            alertEvidenceBudget: alertEvidenceBudget,
+            timerLifecycle: timerLifecycle,
+            livenessTimerLifecycle: livenessTimerLifecycle,
+            startupWorkLifecycle: startupWorkLifecycle,
+            detectionWorkLifecycle: detectionWorkLifecycle,
+            advisoryWorkLifecycle: advisoryWorkLifecycle,
+            outputWorkLifecycle: outputWorkLifecycle,
+            legacyDerivedWorkLifecycle: legacyDerivedWorkLifecycle,
+            otlpReceiverLifecycle: otlpReceiverLifecycle,
             eventPipeline: eventPipeline,
-            browserInventory: browserInventory
+            browserInventory: browserInventory,
+            sequenceCheckpoint: sequenceCheckpoint
         )
+    }
+
+    private static func decodeCoreBlock<T: Decodable>(_ value: Any?) -> T? {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value)
+        else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 }
 

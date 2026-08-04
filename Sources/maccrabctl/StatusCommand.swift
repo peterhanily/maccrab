@@ -58,10 +58,27 @@ extension MacCrabCtl {
         // events database stay healthy. Surface the forensic-evidence gap next
         // to storage instead of rendering an empty graph as "no activity".
         if daemonRunning {
+            for line in alertEvidenceStorageStatusLines(
+                supportDir: supportDir
+            ) {
+                print(line)
+            }
             for line in traceGraphStorageStatusLines(supportDir: supportDir) {
                 print(line)
             }
             for line in traceStoreStorageStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+            for line in sequenceCheckpointStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+            for line in llmRuntimeStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+            for line in workLifecycleStatusLines(supportDir: supportDir) {
+                print(line)
+            }
+            for line in otlpReceiverLifecycleStatusLines(supportDir: supportDir) {
                 print(line)
             }
         }
@@ -380,6 +397,191 @@ extension MacCrabCtl {
         )
     }
 
+    /// Effective post-split caps from the running engine. Never re-label the
+    /// legacy 420 MiB event+evidence envelope as an event-only database cap.
+    static func alertEvidenceStorageStatusLines(
+        supportDir: String
+    ) -> [String] {
+        guard let budget = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .alertEvidenceBudget,
+              let events = budget.eventsFamilyEffectiveCapBytes,
+              let alerts = budget.alertsFamilyCombinedCapBytes,
+              let total = budget.eventsAndAlertsTotalCapBytes else {
+            return []
+        }
+        func mib(_ bytes: Int64) -> Int64 {
+            bytes / SQLitePersistentStorePolicy.bytesPerMiB
+        }
+        var lines = [
+            "Storage Caps:    LIVE transition-aware: events.db \(mib(events)) MiB; alerts.db \(mib(alerts)) MiB incl. evidence; combined \(mib(total)) MiB"
+        ]
+        if let steadyEvents = budget.eventsFamilySteadyStateCapBytes,
+           let steadyTotal = budget.eventsAndAlertsSteadyStateTotalCapBytes {
+            lines.append("                 STEADY STATE after legacy evidence ages out: events.db \(mib(steadyEvents)) MiB; combined \(mib(steadyTotal)) MiB")
+        }
+        if let reserve = budget.legacyTransitionReserveBytes, reserve > 0 {
+            let maximum = budget.legacyTransitionMaxBytes.map { mib($0) } ?? -1
+            var transition = "                 Legacy evidence reserve: \(mib(reserve)) MiB live (maximum \(maximum) MiB)"
+            if let rows = budget.legacyRowCount { transition += "; rows=\(rows)" }
+            if let charged = budget.legacyChargedBytes {
+                transition += "; charged=\(mib(charged)) MiB"
+            }
+            lines.append(transition)
+        }
+        if budget.legacyTransitionMeasurementFailed == true {
+            lines.append("                 ⚠  Legacy evidence measurement failed; the bounded maximum transition reserve is retained fail-closed.")
+        }
+        if let offered = budget.captureOfferedTotal {
+            let accepting = budget.captureAccepting.map { $0 ? "yes" : "no" }
+                ?? "unknown"
+            let conserving = budget.captureConservationMaintained
+                .map { $0 ? "yes" : "NO" } ?? "unknown"
+            lines.append("Evidence Worker: offered=\(offered), completed=\(budget.captureCompletedTotal ?? -1), failed=\(budget.captureFailuresTotal ?? -1), shed=\(budget.captureShedTotal ?? -1), pending=\(budget.capturePending ?? -1), in_flight=\(budget.captureInFlight ?? -1), capacity=\(budget.captureQueueCapacity ?? -1), accepting=\(accepting), conserving=\(conserving)")
+            if budget.captureDegraded {
+                lines.append("                 ⚠  Alert evidence capture is degraded; a single in-flight job is normal, but failure/shedding/accounting drift or pending work is not.")
+            }
+        }
+        if budget.allocatedBytesExact != nil
+            || budget.mutationGeneration != nil
+            || budget.fullRefreshesTotal != nil {
+            let exact = budget.allocatedBytesExact.map { $0 ? "yes" : "no" }
+                ?? "unknown"
+            let generation = budget.mutationGeneration.map { String($0) }
+                ?? "unknown"
+            let refreshes = budget.fullRefreshesTotal.map { String($0) }
+                ?? "unknown"
+            lines.append("Evidence Budget: allocated_exact=\(exact), mutation_generation=\(generation), full_refreshes=\(refreshes)")
+        }
+        if budget.allocatedBytesExact == false {
+            lines.append("                 Evidence allocation is a conservative upper bound pending an exact DBSTAT refresh.")
+        }
+        if budget.overBudget == true || budget.alertsFamilyBlocked == true {
+            let reason = budget.alertsFamilyReason
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "evidence or alerts family budget exceeded"
+            lines.append("                 ⚠  Alert evidence persistence degraded (\(reason))")
+        }
+        return lines
+    }
+
+    static func timerLifecycleStatusLines(supportDir: String) -> [String] {
+        guard let timers = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .timerLifecycle else { return [] }
+        return lifecycleStatusLines(
+            label: "Maintenance:",
+            lifecycle: timers,
+            degraded: timers.featureDegraded,
+            degradedDetail: "A maintenance/retention operation was lost, did not join cleanly, or has incomplete accounting; live detection may continue, but that maintenance guarantee is degraded."
+        )
+    }
+
+    static func workLifecycleStatusLines(supportDir: String) -> [String] {
+        guard let heartbeat = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir]) else { return [] }
+        var lines: [String] = []
+        if let timers = heartbeat.timerLifecycle {
+            lines.append(contentsOf: lifecycleStatusLines(
+                label: "Maintenance:",
+                lifecycle: timers,
+                degraded: timers.featureDegraded,
+                degradedDetail: "A maintenance/retention operation was lost, did not join cleanly, or has incomplete accounting; live detection may continue, but that maintenance guarantee is degraded."
+            ))
+        }
+        func append(
+            _ label: String,
+            _ lifecycle: HeartbeatSnapshot.TimerLifecycle?,
+            degraded: (HeartbeatSnapshot.TimerLifecycle) -> Bool,
+            detail: String
+        ) {
+            guard let lifecycle else { return }
+            lines.append(contentsOf: lifecycleStatusLines(
+                label: label,
+                lifecycle: lifecycle,
+                degraded: degraded(lifecycle),
+                degradedDetail: detail
+            ))
+        }
+        append(
+            "Liveness:", heartbeat.livenessTimerLifecycle,
+            degraded: { $0.featureDegraded },
+            detail: "The independent liveness heartbeat lost work, did not join cleanly, or has incomplete accounting; external process-health observations may be incomplete."
+        )
+        append(
+            "Startup Work:", heartbeat.startupWorkLifecycle,
+            degraded: { $0.featureDegraded },
+            detail: "A boot hydration or startup worker was lost, did not join cleanly, or has incomplete accounting; startup feature completeness is degraded."
+        )
+        append(
+            "Detection Work:", heartbeat.detectionWorkLifecycle,
+            degraded: { $0.detectionProtectionDegraded },
+            detail: "PROTECTION DEGRADED: a security decision was rejected, shed, left unjoined, or could not be accounted for completely. Lossless inline overload fallback and intentional coalescing are not loss."
+        )
+        append(
+            "AI Advisory:", heartbeat.advisoryWorkLifecycle,
+            degraded: { $0.featureDegraded },
+            detail: "AI/advisory features shed work or reported incomplete ownership; deterministic detection and locally persisted alerts continue."
+        )
+        append(
+            "Alert Outputs:", heartbeat.outputWorkLifecycle,
+            degraded: { $0.featureDegraded },
+            detail: "Notification or external delivery shed work or reported incomplete ownership; detection and local alert persistence continue."
+        )
+
+        let splitPresent = heartbeat.livenessTimerLifecycle != nil
+            || heartbeat.startupWorkLifecycle != nil
+            || heartbeat.detectionWorkLifecycle != nil
+            || heartbeat.advisoryWorkLifecycle != nil
+            || heartbeat.outputWorkLifecycle != nil
+        if !splitPresent {
+            append(
+                "Legacy Derived:", heartbeat.legacyDerivedWorkLifecycle,
+                degraded: { $0.featureDegraded },
+                detail: "This older aggregate cannot attribute loss to detection, AI advisory, or output delivery; upgrade for exact lane health."
+            )
+        }
+        return lines
+    }
+
+    private static func lifecycleStatusLines(
+        label: String,
+        lifecycle: HeartbeatSnapshot.TimerLifecycle,
+        degraded: Bool,
+        degradedDetail: String
+    ) -> [String] {
+        let status = degraded ? "Degraded ⚠" : "Conserving ✓"
+        let paddedLabel = label.padding(toLength: 16, withPad: " ", startingAt: 0)
+        var lines = [
+            "\(paddedLabel)\(status) (offered=\(lifecycle.offeredHandlersTotal ?? 0), accepted=\(lifecycle.acceptedHandlersTotal ?? 0), completed=\(lifecycle.completedHandlersTotal ?? 0), in_flight=\(lifecycle.inFlightHandlers ?? 0)/\(lifecycle.maximumInFlightHandlers ?? 0), rejected=\(lifecycle.rejectedHandlersTotal ?? 0), closed=\(lifecycle.closedRejectedHandlersTotal ?? 0), overload_shed=\(lifecycle.overloadShedHandlersTotal ?? 0), coalesced=\(lifecycle.coalescedHandlersTotal ?? 0), inline_fallback=\(lifecycle.inlineFallbackHandlersTotal ?? 0), accepted_conserves=\(lifecycle.conservesAcceptedHandlers.map { String($0) } ?? "unknown"), offered_conserves=\(lifecycle.conservesOfferedHandlers.map { String($0) } ?? "unknown"))"
+        ]
+        if degraded {
+            lines.append("                 ⚠  \(degradedDetail)")
+        } else if lifecycle.losslessPressureObserved {
+            lines.append("                 Capacity pressure was handled without measured loss (coalesced or run inline).")
+        }
+        return lines
+    }
+
+    static func otlpReceiverLifecycleStatusLines(
+        supportDir: String
+    ) -> [String] {
+        guard let lifecycle = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .otlpReceiverLifecycle else { return [] }
+        let state = lifecycle.featureDegraded
+            ? "Feature degraded ⚠" : "Conserving ✓"
+        var lines = [
+            "Agent OTLP:     \(state) (listeners accepted=\(lifecycle.listenersAcceptedTotal ?? 0), completed=\(lifecycle.listenersCompletedTotal ?? 0), active=\(lifecycle.activeListeners ?? 0), ready=\(lifecycle.readyListeners ?? 0), rejected_after_seal=\(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserves=\(lifecycle.listenersConserved.map { String($0) } ?? "unknown"); connections accepted=\(lifecycle.connectionsAcceptedTotal ?? 0), completed=\(lifecycle.connectionsCompletedTotal ?? 0), active=\(lifecycle.activeConnections ?? 0), rejected_after_seal=\(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected_at_capacity=\(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserves=\(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"); body accepted=\(lifecycle.bodyTasksAcceptedTotal ?? 0), completed=\(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled=\(lifecycle.bodyTasksCancelledTotal ?? 0), rejected=\(lifecycle.bodyTasksRejectedTotal ?? 0), in_flight=\(lifecycle.bodyTasksInFlight ?? 0)/\(lifecycle.maximumBodyTasks ?? 0), conserves=\(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"); callbacks accepted=\(lifecycle.callbackTasksAcceptedTotal ?? 0), completed=\(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled=\(lifecycle.callbackTasksCancelledTotal ?? 0), rejected=\(lifecycle.callbackTasksRejectedTotal ?? 0), in_flight=\(lifecycle.callbackTasksInFlight ?? 0)/\(lifecycle.maximumCallbackTasks ?? 0), conserves=\(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"); lifecycle_operations=\(lifecycle.lifecycleOperationsInProgress ?? 0), cleanly_stopped=\(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last_shutdown_clean=\(lifecycle.lastShutdownClean.map { String($0) } ?? "not_attempted"), shutdown_timeouts=\(lifecycle.shutdownTimeoutsTotal ?? 0))"
+        ]
+        if lifecycle.featureDegraded {
+            lines.append("                 ⚠  Unauthenticated/self-reported OTLP input was rejected, ownership was incomplete/non-conserving, sealed work remains, a lifecycle operation is still in progress, or shutdown was unclean; kernel detection continues.")
+        } else if lifecycle.acceptingListeners == true {
+            lines.append("                 Receiver is open; active listeners/connections/callbacks/body tasks and cleanly_stopped=false are normal while all ownership ledgers conserve.")
+        }
+        return lines
+    }
+
     /// Operator-facing TraceGraph persistence status from the shared heartbeat
     /// DTO. Kept pure apart from the bounded heartbeat read so the shipped CLI
     /// output can be pinned with a fixture in `MacCrabCLITests`.
@@ -392,8 +594,28 @@ extension MacCrabCtl {
         let unavailable = storage.blocked == true
             || storage.storeAvailable == false
             || storage.enabled == false
-        guard unavailable else {
+        guard unavailable || storage.graphWriteDegraded else {
             return ["TraceGraph:      Active ✓"]
+        }
+
+        if !unavailable, storage.graphWriteDegraded {
+            var lines = ["TraceGraph:      Evidence writes degraded ⚠"]
+            if storage.hasStickyWriteFailure == true {
+                lines.append(
+                    "                 Failed since boot: events=\(storage.ingestEventsFailedTotal ?? -1), batches=\(storage.writeBatchesFailedTotal ?? -1), rows=\(storage.writeRowsFailedTotal ?? -1)."
+                )
+            }
+            if storage.writeConservationMaintained == false {
+                lines.append("                 ⚠  Ingest/write accounting does not conserve; persisted evidence totals are not trustworthy.")
+            }
+            if storage.writeTelemetryPresent && !storage.writeTelemetryComplete {
+                lines.append("                 ⚠  TraceGraph write accounting is incomplete; missing counters cannot be treated as healthy.")
+            }
+            if storage.hasOutstandingBacklog == true {
+                let rows = (storage.pendingEntityRows ?? 0) + (storage.pendingEdgeRows ?? 0)
+                lines.append("                 ⚠  Outstanding backlog: \(storage.ingestEventsPending ?? -1) event(s), \(rows) row(s); repeated heartbeats mean the writer is stuck.")
+            }
+            return lines
         }
 
         let state: String
@@ -414,7 +636,129 @@ extension MacCrabCtl {
         if storage.startupBlocked == true {
             lines.append("                 Free disk space or adjust the TraceGraph storage limit, then restart MacCrab.")
         }
+        if storage.hasStickyWriteFailure == true {
+            lines.append(
+                "                 Failed since boot: events=\(storage.ingestEventsFailedTotal ?? -1), batches=\(storage.writeBatchesFailedTotal ?? -1), rows=\(storage.writeRowsFailedTotal ?? -1)."
+            )
+        }
+        if storage.writeConservationMaintained == false {
+            lines.append("                 ⚠  Ingest/write accounting does not conserve; persisted evidence totals are not trustworthy.")
+        }
+        if storage.writeTelemetryPresent && !storage.writeTelemetryComplete {
+            lines.append("                 ⚠  TraceGraph write accounting is incomplete; missing counters cannot be treated as healthy.")
+        }
+        if storage.hasOutstandingBacklog == true {
+            let rows = (storage.pendingEntityRows ?? 0) + (storage.pendingEdgeRows ?? 0)
+            lines.append("                 ⚠  Outstanding backlog: \(storage.ingestEventsPending ?? -1) event(s), \(rows) row(s); repeated heartbeats mean the writer is stuck.")
+        }
         return lines
+    }
+
+    /// Content-free, fixed-cardinality AI request accounting. Transport health
+    /// alone is insufficient: feature attribution, semantic fail-closed
+    /// rejection, and all three exact conservation ledgers stay visible.
+    static func llmRuntimeStatusLines(supportDir: String) -> [String] {
+        guard let llm = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir])?
+            .llm else { return [] }
+        guard llm.configured == true else {
+            return ["AI Runtime:      Not configured"]
+        }
+        guard let runtime = llm.runtimeTelemetry else {
+            if llm.runtimeTelemetryEncodingFailed == true {
+                return [
+                    "AI Runtime:      Telemetry unavailable ⚠",
+                    "                 The engine could not encode its content-free request ledger; AI accounting is unknown.",
+                ]
+            }
+            return ["AI Runtime:      Accounting unavailable (older engine)"]
+        }
+
+        let totals = runtime.totals
+        let outcomes = totals.outcomes
+        let semantic = totals.downstreamValidation
+        let conserving = llm.runtimeConservationMaintained == true
+        let unspecified = llm.unspecifiedRequestsTotal ?? 0
+        let attributionMark = unspecified == 0 ? "✓" : "⚠"
+        let semanticMark = semantic.finalRejection == 0 ? "✓" : "⚠"
+        let featureTotals = runtime.perFeature.map {
+            "\($0.feature.rawValue)=\($0.counters.requestedTotal)"
+        }.joined(separator: ", ")
+
+        return [
+            "AI Runtime:      requested=\(totals.requestedTotal), in_flight=\(totals.currentInFlight), backend_calls=\(totals.backendCallsStartedTotal) \(conserving ? "✓" : "⚠ accounting drift")",
+            "                 outcomes: success=\(outcomes.success), cache_hit=\(outcomes.cacheHit), backend_failure=\(outcomes.backendFailure), circuit_rejection=\(outcomes.circuitRejection), privacy_rejection=\(outcomes.privacyRejection), admission_shed=\(outcomes.admissionShed), cancellation=\(outcomes.cancellation), response_oversize=\(outcomes.responseOversize)",
+            "AI Attribution:  unspecified=\(unspecified) \(attributionMark); features: \(featureTotals)",
+            "AI Validation:   operations=\(semantic.operationsStartedTotal), current=\(semantic.currentOperations), accepted=\(semantic.accepted), retries=\(semantic.retryRequested), final_rejection=\(semantic.finalRejection) \(semanticMark)",
+        ]
+    }
+
+    /// Restart continuity for in-flight multi-event detections. A missing block
+    /// means an older daemon and remains unknown; it must not be fabricated as
+    /// healthy. Digests are intentionally omitted from the operator surface.
+    static func sequenceCheckpointStatusLines(supportDir: String) -> [String] {
+        guard let snapshot = HeartbeatSnapshot
+            .readFreshest(supportDirs: [supportDir]),
+              let checkpoint = snapshot.sequenceCheckpoint
+        else { return [] }
+
+        let status = checkpoint.restoreStatus ?? "unknown"
+        if snapshot.sequenceStateContinuityMaintained == false {
+            let reason = snapshot.sequenceStateContinuityDetail
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "runtime state loss or accounting drift"
+            return [
+                "Sequence State:  Runtime continuity degraded ⚠",
+                "                 Some in-flight multi-event detections were lost or cannot be accounted for exactly (\(reason)).",
+                "                 partials=\(snapshot.sequencePartialsInFlight ?? -1), partial_evictions=\(snapshot.sequencePartialsEvictedTotal ?? -1), pending=\(snapshot.sequencePendingStepsCurrent ?? -1), pending_evictions=\(snapshot.sequencePendingStepsEvictedTotal ?? -1)",
+            ]
+        }
+        if checkpoint.durableCarrierValid == false {
+            return [
+                "Sequence State:  Durable checkpoint unavailable ⚠",
+                "                 Detection continues, but in-flight multi-event state cannot currently survive a restart.",
+            ]
+        }
+        if checkpoint.orphanCleanupScanTruncated == true {
+            return [
+                "Sequence State:  Checkpoint disk accounting incomplete ⚠",
+                "                 The bounded temporary-file cleanup scan was truncated; checkpoint storage use is not fully verified.",
+            ]
+        }
+        if status == "rejected" {
+            return [
+                "Sequence State:  Previous checkpoint rejected ⚠",
+                "                 In-flight multi-event detections from before this engine start could not be recovered.",
+            ]
+        }
+        if checkpoint.crashRPOBoundCurrentlyMaintained == false {
+            let reason = checkpoint.lastFailure
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "configured crash-recovery window is not currently guaranteed"
+            return [
+                "Sequence State:  Restart continuity degraded ⚠",
+                "                 Detection continues, but a crash could lose partial sequence state (\(reason)).",
+            ]
+        }
+        if checkpoint.crashRPOBoundCurrentlyMaintained == true {
+            var lines: [String]
+            if let seconds = checkpoint.configuredCrashRPOSeconds {
+                lines = [
+                    "Sequence State:  Restart-safe ✓ (≤\(Int(seconds.rounded()))s partial-state RPO)"
+                ]
+            } else {
+                lines = ["Sequence State:  Restart-safe ✓"]
+            }
+            if let invalidations = checkpoint.carrierInvalidationsTotal,
+               invalidations > 0 {
+                let reason = checkpoint.lastCarrierInvalidationReason
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "reason unavailable"
+                lines.append("                 Recovered carrier invalidations: \(invalidations) (last: \(reason)).")
+            }
+            return lines
+        }
+        return ["Sequence State:  Status unavailable"]
     }
 
     /// Operator-facing traces.db persistence state. A disabled receiver is an

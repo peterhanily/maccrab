@@ -504,13 +504,21 @@ public actor ThreatHunter {
         // Try LLM first
         if let llm = llmService {
             let start = Date()
+            let semanticToken = await llm.beginDownstreamValidation(
+                feature: .threatHunt
+            )
             if let enhancement = await llm.query(
                 systemPrompt: LLMPrompts.threatHuntSystem,
                 userPrompt: LLMPrompts.threatHuntUser(query: query),
-                maxTokens: 512, temperature: 0.1, useCache: false
+                maxTokens: 512, temperature: 0.1, useCache: false,
+                feature: .threatHunt
             ) {
                 let sql = enhancement.response.trimmingCharacters(in: .whitespacesAndNewlines)
                 if case .accepted = ThreatHuntSQLPolicy.validate(sql) {
+                    _ = await llm.finishDownstreamValidation(
+                        token: semanticToken,
+                        outcome: .accepted
+                    )
                     let execution = executeSQL(sql)
                     let elapsed = Date().timeIntervalSince(start)
                     return HuntResult(
@@ -522,6 +530,10 @@ public actor ThreatHunter {
                     )
                 }
             }
+            _ = await llm.finishDownstreamValidation(
+                token: semanticToken,
+                outcome: .finalRejection
+            )
         }
         // Fall back to deterministic
         return hunt(query)

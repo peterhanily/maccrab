@@ -72,7 +72,8 @@ extension MacCrabCtl {
                 if let enhancement = await llmService.query(
                     systemPrompt: LLMPrompts.investigationSystem,
                     userPrompt: "Generate an executive summary for this security report.\n\n\(context)",
-                    maxTokens: 1024, temperature: 0.3
+                    maxTokens: 1024, temperature: 0.3,
+                    feature: .incidentReport
                 ) {
                     reportData.narrativeSummary = enhancement.response
                     print("  AI narrative: generated (\(enhancement.provider))")

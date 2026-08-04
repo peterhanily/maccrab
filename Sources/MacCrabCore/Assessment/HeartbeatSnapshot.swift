@@ -65,6 +65,32 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     // MARK: Nested health blocks
     public let collectorHealth: [CollectorHealth]?
     public let llm: LLMHealth?
+    /// Joinable dispatch-timer task plane. Missing on older engines means
+    /// lifecycle accounting is unknown, not zero work.
+    public let timerLifecycle: TimerLifecycle?
+    /// The dedicated liveness writer is isolated from slower maintenance
+    /// timers so a blocked sweep cannot hide that the process is alive.
+    public let livenessTimerLifecycle: TimerLifecycle?
+    /// One-shot boot hydration and long-lived startup workers.
+    public let startupWorkLifecycle: TimerLifecycle?
+    /// Security decisions spawned by the event loop. Rejection or an unclean
+    /// close here is a protection gap, unlike shedding in advisory/output
+    /// planes where deterministic detection has already completed.
+    public let detectionWorkLifecycle: TimerLifecycle?
+    /// Optional model-backed analysis. Loss is feature degradation, not loss of
+    /// the deterministic detector that produced the underlying alert/event.
+    public let advisoryWorkLifecycle: TimerLifecycle?
+    /// Notification and external-output fan-out. Loss means delivery may be
+    /// incomplete while alert detection and local persistence continue.
+    public let outputWorkLifecycle: TimerLifecycle?
+    /// Compatibility only for pre-split engines. New lanes are never filled
+    /// from this aggregate because doing so would hide which class lost work.
+    public let legacyDerivedWorkLifecycle: TimerLifecycle?
+    /// Exact listener/connection/callback/body-task ownership for the loopback
+    /// OTLP receiver.
+    /// OTLP data is unauthenticated/self-reported advisory evidence; lifecycle
+    /// failure must remain visible without being called kernel protection loss.
+    public let otlpReceiverLifecycle: OTLPReceiverLifecycle?
     public let prevention: Prevention?
     public let traceRegistry: TraceRegistry?
     public let traceGraphStorageAdmission: TraceGraphStorageAdmission?
@@ -79,6 +105,28 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// Missing on older engines means unknown. A present degraded block means
     /// returned rows are partial and must not be interpreted as a clean census.
     public let browserInventory: BrowserInventory?
+    /// Sticky post-sweep events.db budget truth. A degraded value cannot clear
+    /// merely because a later sampling tick catches a transient size dip.
+    public let eventsRetentionBudget: EventsRetentionBudget?
+    /// Evidence ownership and the effective post-split event/alert SQLite
+    /// family caps. Missing on engines predating schema-v8 evidence ownership.
+    public let alertEvidenceBudget: AlertEvidenceBudget?
+    /// Durable continuity for in-flight multi-event sequence detections.
+    /// Missing means the running engine predates checkpoint integration; a
+    /// present dirty/degraded block must never be rendered as restart-safe.
+    public let sequenceCheckpoint: SequenceCheckpoint?
+    /// Live temporal-correlation state. Eviction or accounting drift is a
+    /// detection-continuity loss even if the checkpoint carrier itself is
+    /// current and writable.
+    public let sequencePartialsEvictedTotal: Int?
+    public let sequencePartialsInFlight: Int?
+    public let sequencePendingStepsCurrent: Int?
+    public let sequencePendingStepsEvictedTotal: Int?
+    public let sequenceCheckpointStateWeightBytes: Int?
+    public let sequenceCheckpointStateWeightRecomputedBytes: Int?
+    public let sequenceCheckpointStateWeightLimitBytes: Int?
+    public let sequenceStateContinuityMaintained: Bool?
+    public let sequenceStateContinuityDetail: String?
 
     // MARK: Drop attribution (the gauges the app decoder omitted)
     /// Native ES per-client kernel ingest-drops. Distinct from `eventsDropped`
@@ -103,18 +151,29 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     public let detectionInputDroppedTotal: Int?
     /// Batched-writer storage-layer drop — a storage loss, NOT a detection gap.
     public let eventsStorageWriteDroppedTotal: Int?
+    /// Exact storage hand-off/result ledgers keyed by the fixed `priority` and
+    /// `file` lanes. For each lane and one process epoch:
+    /// offered = persisted + filtered + dropped + buffer + in-flight.
+    public let eventsStorageWriteOfferedByLane: [String: Int]?
+    public let eventsStorageWriteDroppedByLane: [String: Int]?
     /// Rows reported committed at write time. Historical commits are not
     /// subtracted if a later corruption recovery replaces the active database.
     public let eventsStorageWritePersistedTotal: Int?
+    public let eventsStorageWritePersistedByLane: [String: Int]?
+    public let eventsStorageWriteFilteredTotal: Int?
+    public let eventsStorageWriteFilteredByLane: [String: Int]?
     /// Retry attempts, not unique rows; one row may be counted more than once.
     public let eventsStorageWriteRetriedTotal: Int?
+    public let eventsStorageWriteRetriedByLane: [String: Int]?
     /// Rows queued in the writer actor, excluding a batch currently inside the
     /// asynchronous database insert call.
     public let eventsStorageWriteBufferDepth: Int?
+    public let eventsStorageWriteBufferDepthByLane: [String: Int]?
     /// Rows detached from the writer queue and currently inside the asynchronous
     /// database insert call. `buffer + inFlight` is the complete outstanding
     /// writer backlog for one process epoch.
     public let eventsStorageWriteInFlightDepth: Int?
+    public let eventsStorageWriteInFlightDepthByLane: [String: Int]?
     /// EventStore policy-filter decisions across both batch and direct inserts.
     /// Passing rows may be evaluated again after a writer retry, so these are
     /// decision counts rather than unique-event counts.
@@ -160,12 +219,32 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case rulesActive = "rules_active"
         case collectorHealth = "collector_health"
         case llm
+        case timerLifecycle = "timer_lifecycle"
+        case livenessTimerLifecycle = "liveness_timer_lifecycle"
+        case startupWorkLifecycle = "startup_work_lifecycle"
+        case detectionWorkLifecycle = "detection_work_lifecycle"
+        case advisoryWorkLifecycle = "advisory_work_lifecycle"
+        case outputWorkLifecycle = "output_work_lifecycle"
+        case legacyDerivedWorkLifecycle = "derived_work_lifecycle"
+        case otlpReceiverLifecycle = "otlp_receiver_lifecycle"
         case prevention
         case traceRegistry = "trace_registry"
         case traceGraphStorageAdmission = "tracegraph_storage_admission"
         case traceStoreStorageAdmission = "traces_storage_admission"
         case eventPipeline = "event_pipeline"
         case browserInventory = "browser_inventory"
+        case eventsRetentionBudget = "events_retention_budget"
+        case alertEvidenceBudget = "alert_evidence_budget"
+        case sequenceCheckpoint = "sequence_checkpoint"
+        case sequencePartialsEvictedTotal = "sequence_partials_evicted_total"
+        case sequencePartialsInFlight = "sequence_partials_in_flight"
+        case sequencePendingStepsCurrent = "sequence_pending_steps_current"
+        case sequencePendingStepsEvictedTotal = "sequence_pending_steps_evicted_total"
+        case sequenceCheckpointStateWeightBytes = "sequence_checkpoint_state_weight_bytes"
+        case sequenceCheckpointStateWeightRecomputedBytes = "sequence_checkpoint_state_weight_recomputed_bytes"
+        case sequenceCheckpointStateWeightLimitBytes = "sequence_checkpoint_state_weight_limit_bytes"
+        case sequenceStateContinuityMaintained = "sequence_state_continuity_maintained"
+        case sequenceStateContinuityDetail = "sequence_state_continuity_detail"
         case esKernelDroppedTotal = "es_kernel_dropped_total"
         case esKernelDroppedByType = "es_kernel_dropped_by_type"
         case esProcessedByType = "es_processed_by_type"
@@ -180,10 +259,18 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case mergedFileTerminatedTotal = "merged_file_terminated_total"
         case detectionInputDroppedTotal = "detection_input_dropped_total"
         case eventsStorageWriteDroppedTotal = "events_storage_write_dropped_total"
+        case eventsStorageWriteOfferedByLane = "events_storage_write_offered_by_lane"
+        case eventsStorageWriteDroppedByLane = "events_storage_write_dropped_by_lane"
         case eventsStorageWritePersistedTotal = "events_storage_write_persisted_total"
+        case eventsStorageWritePersistedByLane = "events_storage_write_persisted_by_lane"
+        case eventsStorageWriteFilteredTotal = "events_storage_write_filtered_total"
+        case eventsStorageWriteFilteredByLane = "events_storage_write_filtered_by_lane"
         case eventsStorageWriteRetriedTotal = "events_storage_write_retried_total"
+        case eventsStorageWriteRetriedByLane = "events_storage_write_retried_by_lane"
         case eventsStorageWriteBufferDepth = "events_storage_write_buffer_depth"
+        case eventsStorageWriteBufferDepthByLane = "events_storage_write_buffer_depth_by_lane"
         case eventsStorageWriteInFlightDepth = "events_storage_write_in_flight_depth"
+        case eventsStorageWriteInFlightDepthByLane = "events_storage_write_in_flight_depth_by_lane"
         case eventsInsertFilterDroppedTotal = "events_insert_filter_dropped_total"
         case eventsInsertFilterPassedTotal = "events_insert_filter_passed_total"
         case payloadTruncatedTotal = "payload_truncated_total"
@@ -325,6 +412,174 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         }
     }
 
+    public struct EventsRetentionBudget: Codable, Sendable, Equatable {
+        public let state: String?
+        public let reason: String?
+        public let sticky: Bool?
+        public let forensicFloorMinutes: Int?
+        public let observedFootprintBytes: Int64?
+        public let targetBytes: Int64?
+        public let proactiveBoundaryBytes: Int64?
+        public let nominalCapBytes: Int64?
+        public let evaluatedAtUnix: Double?
+
+        private enum CodingKeys: String, CodingKey {
+            case state
+            case reason
+            case sticky
+            case forensicFloorMinutes = "forensic_floor_minutes"
+            case observedFootprintBytes = "observed_footprint_bytes"
+            case targetBytes = "target_bytes"
+            case proactiveBoundaryBytes = "proactive_boundary_bytes"
+            case nominalCapBytes = "nominal_cap_bytes"
+            case evaluatedAtUnix = "evaluated_at_unix"
+        }
+    }
+
+    public struct AlertEvidenceBudget: Codable, Sendable, Equatable {
+        public let eventsFamilyEffectiveCapBytes: Int64?
+        public let eventsFamilySteadyStateCapBytes: Int64?
+        public let eventsLegacyEnvelopeBytes: Int64?
+        public let alertRowsMaxBytes: Int64?
+        public let evidenceMaxBytes: Int64?
+        public let alertsFamilyCombinedCapBytes: Int64?
+        public let eventsAndAlertsTotalCapBytes: Int64?
+        public let eventsAndAlertsSteadyStateTotalCapBytes: Int64?
+        public let legacyTransitionReserveBytes: Int64?
+        public let legacyTransitionMaxBytes: Int64?
+        public let legacyTransitionMeasurementFailed: Bool?
+        public let legacyRowCount: Int?
+        public let legacyChargedBytes: Int64?
+        public let rowCount: Int?
+        public let logicalBytes: Int64?
+        public let allocatedBytes: Int64?
+        public let chargedBytes: Int64?
+        public let overBudget: Bool?
+        public let captureRowsTotal: Int?
+        public let capturePrunedRowsTotal: Int?
+        public let captureOfferedTotal: Int?
+        public let captureCompletedTotal: Int?
+        public let captureFailuresTotal: Int?
+        public let captureShedTotal: Int?
+        public let capturePending: Int?
+        public let captureInFlight: Int?
+        public let captureQueueCapacity: Int?
+        public let captureAccepting: Bool?
+        public let captureConserved: Bool?
+        public let allocatedBytesExact: Bool?
+        public let mutationGeneration: UInt64?
+        public let fullRefreshesTotal: UInt64?
+        public let alertsFamilyFootprintBytes: Int64?
+        public let alertsFamilyAdmissionCapBytes: Int64?
+        public let alertsFamilyBlocked: Bool?
+        public let alertsFamilyReason: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case eventsFamilyEffectiveCapBytes = "events_family_effective_cap_bytes"
+            case eventsFamilySteadyStateCapBytes = "events_family_steady_state_cap_bytes"
+            case eventsLegacyEnvelopeBytes = "events_legacy_envelope_bytes"
+            case alertRowsMaxBytes = "alert_rows_max_bytes"
+            case evidenceMaxBytes = "evidence_max_bytes"
+            case alertsFamilyCombinedCapBytes = "alerts_family_combined_cap_bytes"
+            case eventsAndAlertsTotalCapBytes = "events_and_alerts_total_cap_bytes"
+            case eventsAndAlertsSteadyStateTotalCapBytes = "events_and_alerts_steady_state_total_cap_bytes"
+            case legacyTransitionReserveBytes = "legacy_transition_reserve_bytes"
+            case legacyTransitionMaxBytes = "legacy_transition_max_bytes"
+            case legacyTransitionMeasurementFailed = "legacy_transition_measurement_failed"
+            case legacyRowCount = "legacy_row_count"
+            case legacyChargedBytes = "legacy_charged_bytes"
+            case rowCount = "row_count"
+            case logicalBytes = "logical_bytes"
+            case allocatedBytes = "allocated_bytes"
+            case chargedBytes = "charged_bytes"
+            case overBudget = "over_budget"
+            case captureRowsTotal = "capture_rows_total"
+            case capturePrunedRowsTotal = "capture_pruned_rows_total"
+            case captureOfferedTotal = "capture_offered_total"
+            case captureCompletedTotal = "capture_completed_total"
+            case captureFailuresTotal = "capture_failures_total"
+            case captureShedTotal = "capture_shed_total"
+            case capturePending = "capture_pending"
+            case captureInFlight = "capture_in_flight"
+            case captureQueueCapacity = "capture_queue_capacity"
+            case captureAccepting = "capture_accepting"
+            case captureConserved = "capture_conserved"
+            case allocatedBytesExact = "allocated_bytes_exact"
+            case mutationGeneration = "mutation_generation"
+            case fullRefreshesTotal = "full_refreshes_total"
+            case alertsFamilyFootprintBytes = "alerts_family_footprint_bytes"
+            case alertsFamilyAdmissionCapBytes = "alerts_family_admission_cap_bytes"
+            case alertsFamilyBlocked = "alerts_family_blocked"
+            case alertsFamilyReason = "alerts_family_reason"
+        }
+
+        /// A single in-flight post-commit capture is normal. Failures, shedding,
+        /// accounting drift, or pending work observed on a slow heartbeat are
+        /// fail-visible; repeated pending snapshots prove a stuck worker.
+        public var captureTelemetryPresent: Bool {
+            [
+                captureOfferedTotal,
+                captureCompletedTotal,
+                captureFailuresTotal,
+                captureShedTotal,
+                capturePending,
+                captureInFlight,
+                captureQueueCapacity,
+            ].contains { $0 != nil }
+                || captureAccepting != nil
+                || captureConserved != nil
+        }
+
+        /// Recompute the producer's exact equation instead of trusting its
+        /// boolean in isolation:
+        ///
+        /// offered = completed + failures + shed + pending + in-flight.
+        ///
+        /// Once any capture telemetry is present, a partial block is unknown
+        /// rather than healthy. A completely absent block remains compatible
+        /// with older engines that predate this worker ledger.
+        public var captureConservationMaintained: Bool? {
+            guard captureTelemetryPresent,
+                  let offered = captureOfferedTotal,
+                  let completed = captureCompletedTotal,
+                  let failures = captureFailuresTotal,
+                  let shed = captureShedTotal,
+                  let pending = capturePending,
+                  let inFlight = captureInFlight,
+                  let capacity = captureQueueCapacity,
+                  captureAccepting != nil,
+                  let producerVerdict = captureConserved,
+                  [offered, completed, failures, shed, pending, inFlight].allSatisfy({ $0 >= 0 }),
+                  capacity > 0,
+                  let terminalAndOutstanding = Self.safeSum(
+                      [completed, failures, shed, pending, inFlight]
+                  ) else { return nil }
+            return producerVerdict && offered == terminalAndOutstanding
+        }
+
+        public var captureDegraded: Bool {
+            guard captureTelemetryPresent else { return false }
+            return captureConservationMaintained != true
+                || (captureFailuresTotal ?? 0) > 0
+                || (captureShedTotal ?? 0) > 0
+                || (capturePending ?? 0) > 0
+        }
+
+        public var transitionDegraded: Bool {
+            legacyTransitionMeasurementFailed == true
+        }
+
+        private static func safeSum(_ values: [Int]) -> Int? {
+            var total = 0
+            for value in values {
+                let (next, overflow) = total.addingReportingOverflow(value)
+                guard !overflow else { return nil }
+                total = next
+            }
+            return total
+        }
+    }
+
     /// Engine-side LLM health (the `llm` block). When the engine has no LLM
     /// backend the daemon writes only `{"configured": false}`, so every other
     /// field is honestly absent (nil) — never a fabricated "healthy".
@@ -336,6 +591,13 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let consecutiveFailures: Int?
         public let circuitOpen: Bool?
         public let healthy: Bool?
+        /// Fixed-cardinality process-lifetime accounting. nil on older engines
+        /// or when the backend is not configured.
+        public let runtimeTelemetry: LLMRuntimeTelemetrySnapshot?
+        /// The daemon could not encode the typed content-free ledger. A present
+        /// true value is an observability failure, not permission to infer zero
+        /// requests or healthy accounting.
+        public let runtimeTelemetryEncodingFailed: Bool?
 
         private enum CodingKeys: String, CodingKey {
             case configured
@@ -345,6 +607,215 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case consecutiveFailures = "consecutive_failures"
             case circuitOpen = "circuit_open"
             case healthy
+            case runtimeTelemetry = "runtime_telemetry"
+            case runtimeTelemetryEncodingFailed = "runtime_telemetry_encoding_failed"
+        }
+
+        /// All three exact runtime ledgers must conserve globally and for every
+        /// fixed feature. `nil` keeps older heartbeats honestly unknown.
+        public var runtimeConservationMaintained: Bool? {
+            guard let telemetry = runtimeTelemetry else {
+                return runtimeTelemetryEncodingFailed == true ? false : nil
+            }
+            let expectedFeatures = Set(LLMRuntimeFeature.allCases)
+            let observedFeatures = telemetry.perFeature.map(\.feature)
+            guard observedFeatures.count == expectedFeatures.count,
+                  Set(observedFeatures) == expectedFeatures,
+                  Self.featureTotalsMatch(telemetry) else { return false }
+            let counters = [telemetry.totals] + telemetry.perFeature.map(\.counters)
+            return counters.allSatisfy(Self.countersConserve)
+        }
+
+        /// Requests that reached the public API without a fixed feature label.
+        /// Non-zero means the product cannot yet attribute AI cost/reliability
+        /// to the feature that caused it; this is intentionally not hidden in an
+        /// "other" bucket.
+        public var unspecifiedRequestsTotal: UInt64? {
+            runtimeTelemetry?.counters(for: .unspecified)?.requestedTotal
+        }
+
+        /// A configured runtime is degraded when its telemetry cannot be
+        /// encoded, any conservation equation drifts, or calls escape feature
+        /// attribution. Semantic rejection counts remain visible separately:
+        /// fail-closed rejection is a feature-quality signal, not ledger drift.
+        public var runtimeTelemetryDegraded: Bool {
+            runtimeTelemetryEncodingFailed == true
+                || runtimeConservationMaintained == false
+                || (unspecifiedRequestsTotal ?? 0) > 0
+        }
+
+        /// Cross-check the aggregate ledger against the exhaustive fixed
+        /// feature ledgers. Per-ledger equations can each conserve while a
+        /// missed feature update still makes their aggregate disagree.
+        private static func featureTotalsMatch(
+            _ telemetry: LLMRuntimeTelemetrySnapshot
+        ) -> Bool {
+            let features = telemetry.perFeature.map(\.counters)
+            let totals = telemetry.totals
+            func sum(_ values: [UInt64]) -> UInt64? {
+                var result: UInt64 = 0
+                for value in values {
+                    let (next, overflow) = result.addingReportingOverflow(value)
+                    guard !overflow else { return nil }
+                    result = next
+                }
+                return result
+            }
+            func sum(_ values: [Int]) -> Int? {
+                var result = 0
+                for value in values {
+                    let (next, overflow) = result.addingReportingOverflow(value)
+                    guard !overflow else { return nil }
+                    result = next
+                }
+                return result
+            }
+            return sum(features.map(\.requestedTotal)) == totals.requestedTotal
+                && sum(features.map(\.currentInFlight)) == totals.currentInFlight
+                && sum(features.map(\.admittedBackendTotal)) == totals.admittedBackendTotal
+                && sum(features.map(\.currentAdmittedBackendRequests))
+                    == totals.currentAdmittedBackendRequests
+                && sum(features.map(\.backendCallsStartedTotal))
+                    == totals.backendCallsStartedTotal
+                && sum(features.map(\.cancellationsAfterAdmissionTotal))
+                    == totals.cancellationsAfterAdmissionTotal
+                && sum(features.map(\.circuitRecoveryProbesStartedTotal))
+                    == totals.circuitRecoveryProbesStartedTotal
+                && sum(features.map(\.currentCircuitRecoveryProbes))
+                    == totals.currentCircuitRecoveryProbes
+                && sum(features.map(\.circuitRecoveryProbesSucceededTotal))
+                    == totals.circuitRecoveryProbesSucceededTotal
+                && sum(features.map(\.circuitRecoveryProbesDidNotRecoverTotal))
+                    == totals.circuitRecoveryProbesDidNotRecoverTotal
+                && sum(features.map { $0.outcomes.success }) == totals.outcomes.success
+                && sum(features.map { $0.outcomes.cacheHit }) == totals.outcomes.cacheHit
+                && sum(features.map { $0.outcomes.backendFailure })
+                    == totals.outcomes.backendFailure
+                && sum(features.map { $0.outcomes.circuitRejection })
+                    == totals.outcomes.circuitRejection
+                && sum(features.map { $0.outcomes.privacyRejection })
+                    == totals.outcomes.privacyRejection
+                && sum(features.map { $0.outcomes.admissionShed })
+                    == totals.outcomes.admissionShed
+                && sum(features.map { $0.outcomes.cancellation })
+                    == totals.outcomes.cancellation
+                && sum(features.map { $0.outcomes.responseOversize })
+                    == totals.outcomes.responseOversize
+                && sum(features.map { $0.downstreamValidation.accepted })
+                    == totals.downstreamValidation.accepted
+                && sum(features.map { $0.downstreamValidation.operationsStartedTotal })
+                    == totals.downstreamValidation.operationsStartedTotal
+                && sum(features.map { $0.downstreamValidation.currentOperations })
+                    == totals.downstreamValidation.currentOperations
+                && sum(features.map { $0.downstreamValidation.retryRequested })
+                    == totals.downstreamValidation.retryRequested
+                && sum(features.map { $0.downstreamValidation.finalRejection })
+                    == totals.downstreamValidation.finalRejection
+                && sum(features.map(\.requestedInputUTF8BytesTotal))
+                    == totals.requestedInputUTF8BytesTotal
+                && sum(features.map(\.backendInputUTF8BytesTotal))
+                    == totals.backendInputUTF8BytesTotal
+                && sum(features.map(\.backendOutputUTF8BytesTotal))
+                    == totals.backendOutputUTF8BytesTotal
+                && sum(features.map(\.returnedOutputUTF8BytesTotal))
+                    == totals.returnedOutputUTF8BytesTotal
+                && sum(features.map(\.estimatedBackendInputTokensTotal))
+                    == totals.estimatedBackendInputTokensTotal
+                && sum(features.map(\.estimatedBackendOutputTokensTotal))
+                    == totals.estimatedBackendOutputTokensTotal
+                && sum(features.map(\.estimatedReturnedOutputTokensTotal))
+                    == totals.estimatedReturnedOutputTokensTotal
+                && Self.latencyBucketsMatch(telemetry)
+        }
+
+        /// Recompute every conserving equation from the decoded counters. The
+        /// producer verdicts are still required to agree, but cannot turn a
+        /// malformed or stale counter set green by themselves.
+        private static func countersConserve(
+            _ counters: LLMRuntimeCountersSnapshot
+        ) -> Bool {
+            guard counters.currentInFlight >= 0,
+                  counters.currentAdmittedBackendRequests >= 0,
+                  counters.currentCircuitRecoveryProbes >= 0,
+                  counters.downstreamValidation.currentOperations >= 0,
+                  let requestTerminal = sum([
+                      counters.outcomes.success,
+                      counters.outcomes.cacheHit,
+                      counters.outcomes.backendFailure,
+                      counters.outcomes.circuitRejection,
+                      counters.outcomes.privacyRejection,
+                      counters.outcomes.admissionShed,
+                      counters.outcomes.cancellation,
+                      counters.outcomes.responseOversize,
+                  ]),
+                  let requestAccounted = sum([
+                      requestTerminal,
+                      UInt64(counters.currentInFlight),
+                  ]),
+                  let backendTerminal = sum([
+                      counters.outcomes.success,
+                      counters.outcomes.backendFailure,
+                      counters.outcomes.responseOversize,
+                      counters.cancellationsAfterAdmissionTotal,
+                  ]),
+                  let backendAccounted = sum([
+                      backendTerminal,
+                      UInt64(counters.currentAdmittedBackendRequests),
+                  ]),
+                  let recoveryAccounted = sum([
+                      counters.circuitRecoveryProbesSucceededTotal,
+                      counters.circuitRecoveryProbesDidNotRecoverTotal,
+                      UInt64(counters.currentCircuitRecoveryProbes),
+                  ]),
+                  let semanticAccounted = sum([
+                      counters.downstreamValidation.accepted,
+                      counters.downstreamValidation.finalRejection,
+                      UInt64(counters.downstreamValidation.currentOperations),
+                  ]),
+                  let latencyTerminal = sum(
+                      counters.requestLatencyBuckets.map(\.completedRequests)
+                  ) else { return false }
+            return counters.conservationMaintained
+                && counters.backendAdmissionConservationMaintained
+                && counters.circuitRecoveryConservationMaintained
+                && counters.requestedTotal == requestAccounted
+                && counters.admittedBackendTotal == backendAccounted
+                && counters.circuitRecoveryProbesStartedTotal == recoveryAccounted
+                && counters.downstreamValidation.operationsStartedTotal
+                    == semanticAccounted
+                && requestTerminal == latencyTerminal
+        }
+
+        private static func latencyBucketsMatch(
+            _ telemetry: LLMRuntimeTelemetrySnapshot
+        ) -> Bool {
+            let totalBuckets = telemetry.totals.requestLatencyBuckets
+            let featureBuckets = telemetry.perFeature.map {
+                $0.counters.requestLatencyBuckets
+            }
+            guard featureBuckets.allSatisfy({ $0.count == totalBuckets.count })
+            else { return false }
+            for index in totalBuckets.indices {
+                guard featureBuckets.allSatisfy({
+                    $0[index].upperBoundMilliseconds
+                        == totalBuckets[index].upperBoundMilliseconds
+                }), let sum = sum(featureBuckets.map {
+                    $0[index].completedRequests
+                }), sum == totalBuckets[index].completedRequests else {
+                    return false
+                }
+            }
+            return true
+        }
+
+        private static func sum(_ values: [UInt64]) -> UInt64? {
+            var total: UInt64 = 0
+            for value in values {
+                let (next, overflow) = total.addingReportingOverflow(value)
+                guard !overflow else { return nil }
+                total = next
+            }
+            return total
         }
     }
 
@@ -388,6 +859,426 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         }
     }
 
+    /// Conservation for one joinable work plane. In-flight work, coalescing and
+    /// detection's inline overload fallback are owned outcomes, not loss.
+    /// Rejection, explicit overload shedding, accounting drift, or work left
+    /// after close are fail-visible and interpreted according to the lane.
+    public struct TimerLifecycle: Codable, Sendable, Equatable {
+        public let accepting: Bool?
+        public let offeredHandlersTotal: UInt64?
+        public let acceptedHandlersTotal: UInt64?
+        public let completedHandlersTotal: UInt64?
+        public let rejectedHandlersTotal: UInt64?
+        public let closedRejectedHandlersTotal: UInt64?
+        public let overloadShedHandlersTotal: UInt64?
+        public let coalescedHandlersTotal: UInt64?
+        public let coalescedByLabel: [String: UInt64]?
+        public let rejectedByLabel: [String: UInt64]?
+        public let inlineFallbackHandlersTotal: UInt64?
+        public let inlineFallbacksByLabel: [String: UInt64]?
+        public let inFlightHandlers: Int?
+        public let maximumInFlightHandlers: Int?
+        public let conservesAcceptedHandlers: Bool?
+        public let conservesOfferedHandlers: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case accepting
+            case offeredHandlersTotal = "offered_handlers_total"
+            case acceptedHandlersTotal = "accepted_handlers_total"
+            case completedHandlersTotal = "completed_handlers_total"
+            case rejectedHandlersTotal = "rejected_handlers_total"
+            case closedRejectedHandlersTotal = "closed_rejected_handlers_total"
+            case overloadShedHandlersTotal = "overload_shed_handlers_total"
+            case coalescedHandlersTotal = "coalesced_handlers_total"
+            case coalescedByLabel = "coalesced_by_label"
+            case rejectedByLabel = "rejected_by_label"
+            case inlineFallbackHandlersTotal = "inline_fallback_handlers_total"
+            case inlineFallbacksByLabel = "inline_fallbacks_by_label"
+            case inFlightHandlers = "in_flight_handlers"
+            case maximumInFlightHandlers = "maximum_in_flight_handlers"
+            case conservesAcceptedHandlers = "conserves_accepted_handlers"
+            case conservesOfferedHandlers = "conserves_offered_handlers"
+        }
+
+        public var conservationMaintained: Bool? {
+            guard let accepted = conservesAcceptedHandlers,
+                  let offered = conservesOfferedHandlers else { return nil }
+            return accepted && offered
+        }
+
+        /// Old aggregate timer heartbeats predate the offered-outcome ledger.
+        /// Once any extended scalar appears, require the complete scalar
+        /// equation; a partially encoded new block must not render green.
+        public var extendedTelemetryPresent: Bool {
+            offeredHandlersTotal != nil
+                || closedRejectedHandlersTotal != nil
+                || overloadShedHandlersTotal != nil
+                || coalescedHandlersTotal != nil
+                || inlineFallbackHandlersTotal != nil
+                || conservesOfferedHandlers != nil
+        }
+
+        public var extendedTelemetryComplete: Bool {
+            guard extendedTelemetryPresent else { return false }
+            return offeredHandlersTotal != nil
+                && acceptedHandlersTotal != nil
+                && completedHandlersTotal != nil
+                && rejectedHandlersTotal != nil
+                && closedRejectedHandlersTotal != nil
+                && overloadShedHandlersTotal != nil
+                && coalescedHandlersTotal != nil
+                && inlineFallbackHandlersTotal != nil
+                && inFlightHandlers != nil
+                && maximumInFlightHandlers != nil
+                && conservesAcceptedHandlers != nil
+                && conservesOfferedHandlers != nil
+        }
+
+        public var telemetryPresent: Bool {
+            accepting != nil
+                || acceptedHandlersTotal != nil
+                || completedHandlersTotal != nil
+                || rejectedHandlersTotal != nil
+                || inFlightHandlers != nil
+                || conservesAcceptedHandlers != nil
+                || extendedTelemetryPresent
+        }
+
+        public var telemetryComplete: Bool {
+            guard telemetryPresent else { return false }
+            let baseComplete = accepting != nil
+                && acceptedHandlersTotal != nil
+                && completedHandlersTotal != nil
+                && rejectedHandlersTotal != nil
+                && inFlightHandlers != nil
+                && maximumInFlightHandlers != nil
+                && conservesAcceptedHandlers != nil
+            return baseComplete
+                && (!extendedTelemetryPresent || extendedTelemetryComplete)
+        }
+
+        public var telemetryIncomplete: Bool {
+            telemetryPresent && !telemetryComplete
+        }
+
+        /// While a lane accepts work, explicit loss or conservation failure is
+        /// degraded. Reaching the capacity gauge alone is not: the detection
+        /// lane runs inline and liveness may intentionally coalesce a duplicate.
+        public var degradedWhileRunning: Bool {
+            return accepting == true
+                && (conservesAcceptedHandlers == false
+                    || conservesOfferedHandlers == false
+                    || telemetryIncomplete
+                    || (rejectedHandlersTotal ?? 0) > 0
+                    || (overloadShedHandlersTotal ?? 0) > 0)
+        }
+
+        public var uncleanOutstandingAfterClose: Bool {
+            accepting == false
+                && ((inFlightHandlers ?? 0) > 0
+                    || conservesAcceptedHandlers == false
+                    || conservesOfferedHandlers == false
+                    || telemetryIncomplete)
+        }
+
+        /// Generic lifecycle/feature verdict. Security surfaces should use
+        /// ``detectionProtectionDegraded`` for the detection plane so their
+        /// wording explicitly names the protection consequence.
+        public var degraded: Bool {
+            degradedWhileRunning || uncleanOutstandingAfterClose
+        }
+
+        /// Security-plane verdict: every rejection (including a late
+        /// post-seal producer) is a dropped security decision. Inline fallback
+        /// and coalescing are independently measured owned outcomes, not loss.
+        public var detectionProtectionDegraded: Bool {
+            degraded
+                || telemetryIncomplete
+                || (rejectedHandlersTotal ?? 0) > 0
+                || (closedRejectedHandlersTotal ?? 0) > 0
+                || (overloadShedHandlersTotal ?? 0) > 0
+        }
+
+        /// Advisory/output verdict. This deliberately says "feature" rather
+        /// than "protection": deterministic detection has already completed.
+        public var featureDegraded: Bool {
+            degraded
+                || telemetryIncomplete
+                || (rejectedHandlersTotal ?? 0) > 0
+                || (closedRejectedHandlersTotal ?? 0) > 0
+                || (overloadShedHandlersTotal ?? 0) > 0
+        }
+
+        public var losslessPressureObserved: Bool {
+            (coalescedHandlersTotal ?? 0) > 0
+                || (inlineFallbackHandlersTotal ?? 0) > 0
+        }
+    }
+
+    /// Exact ownership of the loopback OTLP receiver's Network.framework
+    /// listener, connection, callback, and body-processing planes. Current work
+    /// is normal while its plane is open and conserving; only loss, broken
+    /// conservation, sealed in-flight work, a stuck lifecycle operation, or an
+    /// unclean shutdown degrades the Agent Traces feature.
+    public struct OTLPReceiverLifecycle: Codable, Sendable, Equatable {
+        public let acceptingListeners: Bool?
+        public let listenersAcceptedTotal: UInt64?
+        public let listenersCompletedTotal: UInt64?
+        public let listenersRejectedAfterSealTotal: UInt64?
+        public let activeListeners: Int?
+        public let readyListeners: Int?
+        public let listenersConserved: Bool?
+        public let acceptingConnections: Bool?
+        public let connectionsAcceptedTotal: UInt64?
+        public let connectionsCompletedTotal: UInt64?
+        public let connectionsRejectedAfterSealTotal: UInt64?
+        public let connectionsRejectedAtCapacityTotal: UInt64?
+        public let activeConnections: Int?
+        public let connectionsConserved: Bool?
+        public let acceptingBodyTasks: Bool?
+        public let bodyTasksAcceptedTotal: UInt64?
+        public let bodyTasksCompletedTotal: UInt64?
+        public let bodyTasksCancelledTotal: UInt64?
+        public let bodyTasksRejectedTotal: UInt64?
+        public let bodyTaskCancellationRequestsTotal: UInt64?
+        public let bodyTasksInFlight: Int?
+        public let maximumBodyTasks: Int?
+        public let bodyTasksConserved: Bool?
+        public let acceptingCallbackTasks: Bool?
+        public let callbackTasksAcceptedTotal: UInt64?
+        public let callbackTasksCompletedTotal: UInt64?
+        public let callbackTasksCancelledTotal: UInt64?
+        public let callbackTasksRejectedTotal: UInt64?
+        public let callbackTaskCancellationRequestsTotal: UInt64?
+        public let callbackTasksInFlight: Int?
+        public let maximumCallbackTasks: Int?
+        public let callbackTasksConserved: Bool?
+        public let lifecycleOperationsInProgress: Int?
+        public let shutdownTimeoutsTotal: UInt64?
+        public let cleanlyStopped: Bool?
+        public let lastShutdownClean: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case acceptingListeners = "accepting_listeners"
+            case listenersAcceptedTotal = "listeners_accepted_total"
+            case listenersCompletedTotal = "listeners_completed_total"
+            case listenersRejectedAfterSealTotal = "listeners_rejected_after_seal_total"
+            case activeListeners = "active_listeners"
+            case readyListeners = "ready_listeners"
+            case listenersConserved = "listeners_conserved"
+            case acceptingConnections = "accepting_connections"
+            case connectionsAcceptedTotal = "connections_accepted_total"
+            case connectionsCompletedTotal = "connections_completed_total"
+            case connectionsRejectedAfterSealTotal = "connections_rejected_after_seal_total"
+            case connectionsRejectedAtCapacityTotal = "connections_rejected_at_capacity_total"
+            case activeConnections = "active_connections"
+            case connectionsConserved = "connections_conserved"
+            case acceptingBodyTasks = "accepting_body_tasks"
+            case bodyTasksAcceptedTotal = "body_tasks_accepted_total"
+            case bodyTasksCompletedTotal = "body_tasks_completed_total"
+            case bodyTasksCancelledTotal = "body_tasks_cancelled_total"
+            case bodyTasksRejectedTotal = "body_tasks_rejected_total"
+            case bodyTaskCancellationRequestsTotal = "body_task_cancellation_requests_total"
+            case bodyTasksInFlight = "body_tasks_in_flight"
+            case maximumBodyTasks = "maximum_body_tasks"
+            case bodyTasksConserved = "body_tasks_conserved"
+            case acceptingCallbackTasks = "accepting_callback_tasks"
+            case callbackTasksAcceptedTotal = "callback_tasks_accepted_total"
+            case callbackTasksCompletedTotal = "callback_tasks_completed_total"
+            case callbackTasksCancelledTotal = "callback_tasks_cancelled_total"
+            case callbackTasksRejectedTotal = "callback_tasks_rejected_total"
+            case callbackTaskCancellationRequestsTotal = "callback_task_cancellation_requests_total"
+            case callbackTasksInFlight = "callback_tasks_in_flight"
+            case maximumCallbackTasks = "maximum_callback_tasks"
+            case callbackTasksConserved = "callback_tasks_conserved"
+            case lifecycleOperationsInProgress = "lifecycle_operations_in_progress"
+            case shutdownTimeoutsTotal = "shutdown_timeouts_total"
+            case cleanlyStopped = "cleanly_stopped"
+            case lastShutdownClean = "last_shutdown_clean"
+        }
+
+        public var conservationMaintained: Bool? {
+            guard let listenersConserved,
+                  let connectionsConserved,
+                  let bodyTasksConserved,
+                  let callbackTasksConserved else {
+                return nil
+            }
+            return listenersConserved
+                && connectionsConserved
+                && bodyTasksConserved
+                && callbackTasksConserved
+        }
+
+        public var telemetryPresent: Bool {
+            acceptingListeners != nil
+                || listenersAcceptedTotal != nil
+                || acceptingConnections != nil
+                || connectionsAcceptedTotal != nil
+                || acceptingBodyTasks != nil
+                || bodyTasksAcceptedTotal != nil
+                || acceptingCallbackTasks != nil
+                || callbackTasksAcceptedTotal != nil
+                || lifecycleOperationsInProgress != nil
+        }
+
+        public var telemetryComplete: Bool {
+            guard telemetryPresent else { return false }
+            return acceptingListeners != nil
+                && listenersAcceptedTotal != nil
+                && listenersCompletedTotal != nil
+                && listenersRejectedAfterSealTotal != nil
+                && activeListeners != nil
+                && readyListeners != nil
+                && listenersConserved != nil
+                && acceptingConnections != nil
+                && connectionsAcceptedTotal != nil
+                && connectionsCompletedTotal != nil
+                && connectionsRejectedAfterSealTotal != nil
+                && connectionsRejectedAtCapacityTotal != nil
+                && activeConnections != nil
+                && connectionsConserved != nil
+                && acceptingBodyTasks != nil
+                && bodyTasksAcceptedTotal != nil
+                && bodyTasksCompletedTotal != nil
+                && bodyTasksCancelledTotal != nil
+                && bodyTasksRejectedTotal != nil
+                && bodyTaskCancellationRequestsTotal != nil
+                && bodyTasksInFlight != nil
+                && maximumBodyTasks != nil
+                && bodyTasksConserved != nil
+                && acceptingCallbackTasks != nil
+                && callbackTasksAcceptedTotal != nil
+                && callbackTasksCompletedTotal != nil
+                && callbackTasksCancelledTotal != nil
+                && callbackTasksRejectedTotal != nil
+                && callbackTaskCancellationRequestsTotal != nil
+                && callbackTasksInFlight != nil
+                && maximumCallbackTasks != nil
+                && callbackTasksConserved != nil
+                && lifecycleOperationsInProgress != nil
+                && shutdownTimeoutsTotal != nil
+                && cleanlyStopped != nil
+        }
+
+        /// A sealed plane retaining owned work cannot accept the callback that
+        /// would normally drive that work to its terminal accounting state.
+        public var sealedWorkInFlight: Bool {
+            (acceptingListeners == false
+                && ((activeListeners ?? 0) > 0 || (readyListeners ?? 0) > 0))
+                || (acceptingConnections == false && (activeConnections ?? 0) > 0)
+                || (acceptingBodyTasks == false && (bodyTasksInFlight ?? 0) > 0)
+                || (acceptingCallbackTasks == false && (callbackTasksInFlight ?? 0) > 0)
+        }
+
+        public var lifecycleOperationLeftInProgress: Bool {
+            (lifecycleOperationsInProgress ?? 0) > 0
+        }
+
+        public var uncleanShutdown: Bool {
+            if (shutdownTimeoutsTotal ?? 0) > 0 || lastShutdownClean == false {
+                return true
+            }
+            return sealedWorkInFlight
+        }
+
+        public var advisoryInputShed: Bool {
+            (listenersRejectedAfterSealTotal ?? 0) > 0
+                || (connectionsRejectedAfterSealTotal ?? 0) > 0
+                || (connectionsRejectedAtCapacityTotal ?? 0) > 0
+                || (bodyTasksRejectedTotal ?? 0) > 0
+                || (callbackTasksRejectedTotal ?? 0) > 0
+        }
+
+        /// Advisory feature health only. A true value must not be promoted to
+        /// a claim that kernel-backed detection is degraded.
+        public var featureDegraded: Bool {
+            (telemetryPresent && !telemetryComplete)
+                || listenersConserved == false
+                || connectionsConserved == false
+                || bodyTasksConserved == false
+                || callbackTasksConserved == false
+                || lifecycleOperationLeftInProgress
+                || uncleanShutdown
+                || advisoryInputShed
+        }
+    }
+
+    /// Integrity/fingerprint-bound sequence recovery telemetry. Wall-clock
+    /// timestamps remain diagnostic; `crashRPOBoundCurrentlyMaintained` is the
+    /// coordinator's monotonic health verdict and is the authoritative gate.
+    public struct SequenceCheckpoint: Codable, Sendable, Equatable {
+        public let restoreStatus: String?
+        public let restoreDetail: String?
+        public let lastRestoreAtUnix: Double?
+        public let lastAttemptAtUnix: Double?
+        public let lastSuccessAtUnix: Double?
+        public let lastFailureAtUnix: Double?
+        public let lastFailure: String?
+        public let checkpointCapturedAtUnix: Double?
+        public let checkpointAgeSeconds: Double?
+        public let checkpointBytes: Int?
+        public let durableCarrierValid: Bool?
+        public let dirty: Bool?
+        public let currentSemanticDigest: String?
+        public let durableSemanticDigest: String?
+        public let currentGeneration: UInt64?
+        public let durableGeneration: UInt64?
+        public let configuredCrashRPOSeconds: Double?
+        public let crashRPOBoundCurrentlyMaintained: Bool?
+        public let periodicWritesLastHour: Int?
+        public let periodicBytesLastHour: Int?
+        public let writesTotal: UInt64?
+        public let bytesWrittenTotal: UInt64?
+        public let unchangedSkipsTotal: UInt64?
+        public let budgetDeferralsTotal: UInt64?
+        public let orphanFilesCurrent: Int?
+        public let orphanBytesCurrent: Int?
+        public let orphanFilesRemovedTotal: UInt64?
+        public let orphanBytesRemovedTotal: UInt64?
+        public let orphanCleanupScanTruncated: Bool?
+        public let lastOrphanCleanupAtUnix: Double?
+        public let carrierInvalidationsTotal: UInt64?
+        public let lastCarrierInvalidationReason: String?
+        public let lastCarrierInvalidationAtUnix: Double?
+
+        private enum CodingKeys: String, CodingKey {
+            case restoreStatus = "restore_status"
+            case restoreDetail = "restore_detail"
+            case lastRestoreAtUnix = "last_restore_at_unix"
+            case lastAttemptAtUnix = "last_attempt_at_unix"
+            case lastSuccessAtUnix = "last_success_at_unix"
+            case lastFailureAtUnix = "last_failure_at_unix"
+            case lastFailure = "last_failure"
+            case checkpointCapturedAtUnix = "checkpoint_captured_at_unix"
+            case checkpointAgeSeconds = "checkpoint_age_seconds"
+            case checkpointBytes = "checkpoint_bytes"
+            case durableCarrierValid = "durable_carrier_valid"
+            case dirty
+            case currentSemanticDigest = "current_semantic_digest"
+            case durableSemanticDigest = "durable_semantic_digest"
+            case currentGeneration = "current_generation"
+            case durableGeneration = "durable_generation"
+            case configuredCrashRPOSeconds = "configured_crash_rpo_seconds"
+            case crashRPOBoundCurrentlyMaintained = "crash_rpo_bound_currently_maintained"
+            case periodicWritesLastHour = "periodic_writes_last_hour"
+            case periodicBytesLastHour = "periodic_bytes_last_hour"
+            case writesTotal = "writes_total"
+            case bytesWrittenTotal = "bytes_written_total"
+            case unchangedSkipsTotal = "unchanged_skips_total"
+            case budgetDeferralsTotal = "budget_deferrals_total"
+            case orphanFilesCurrent = "orphan_files_current"
+            case orphanBytesCurrent = "orphan_bytes_current"
+            case orphanFilesRemovedTotal = "orphan_files_removed_total"
+            case orphanBytesRemovedTotal = "orphan_bytes_removed_total"
+            case orphanCleanupScanTruncated = "orphan_cleanup_scan_truncated"
+            case lastOrphanCleanupAtUnix = "last_orphan_cleanup_at_unix"
+            case carrierInvalidationsTotal = "carrier_invalidations_total"
+            case lastCarrierInvalidationReason = "last_carrier_invalidation_reason"
+            case lastCarrierInvalidationAtUnix = "last_carrier_invalidation_at_unix"
+        }
+    }
+
     /// Authoritative SQLite actor admission state. A blocked store represents a
     /// deliberate forensic-evidence gap while detection continues in memory.
     public struct TraceGraphStorageAdmission: Codable, Sendable, Equatable {
@@ -423,6 +1314,30 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let lastRecoveryFootprintBeforeBytes: Int64?
         public let lastRecoveryFootprintAfterBytes: Int64?
 
+        // Exact rolling-graph persistence accounting. These counters are
+        // cumulative for one process epoch; failed totals therefore remain
+        // sticky even if the SQLite admission latch later returns to Active.
+        public let ingestEventsTotal: Int64?
+        public let ingestEventsCommittedTotal: Int64?
+        public let ingestEventsFailedTotal: Int64?
+        public let ingestEventsInFlight: Int?
+        public let ingestEventsPending: Int?
+        public let entityObservationsTotal: Int64?
+        public let edgeObservationsTotal: Int64?
+        public let relevanceSuppressedFileEventsTotal: Int64?
+        public let relevanceSuppressedRowsTotal: Int64?
+        public let writeAttemptsTotal: Int64?
+        public let writeBatchesCommittedTotal: Int64?
+        public let writeBatchesFailedTotal: Int64?
+        public let writeBatchesInFlight: Int?
+        public let writeRowsAttemptedTotal: Int64?
+        public let writeRowsCommittedTotal: Int64?
+        public let writeRowsFailedTotal: Int64?
+        public let writeRowsInFlight: Int?
+        public let coalescedNoopRowsTotal: Int64?
+        public let pendingEntityRows: Int?
+        public let pendingEdgeRows: Int?
+
         private enum CodingKeys: String, CodingKey {
             case enabled
             case blocked
@@ -451,6 +1366,204 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case recoveryNoPhysicalProgressTotal = "recovery_no_physical_progress_total"
             case lastRecoveryFootprintBeforeBytes = "last_recovery_footprint_before_bytes"
             case lastRecoveryFootprintAfterBytes = "last_recovery_footprint_after_bytes"
+            case ingestEventsTotal = "ingest_events_total"
+            case ingestEventsCommittedTotal = "ingest_events_committed_total"
+            case ingestEventsFailedTotal = "ingest_events_failed_total"
+            case ingestEventsInFlight = "ingest_events_in_flight"
+            case ingestEventsPending = "ingest_events_pending"
+            case entityObservationsTotal = "entity_observations_total"
+            case edgeObservationsTotal = "edge_observations_total"
+            case relevanceSuppressedFileEventsTotal = "relevance_suppressed_file_events_total"
+            case relevanceSuppressedRowsTotal = "relevance_suppressed_rows_total"
+            case writeAttemptsTotal = "write_attempts_total"
+            case writeBatchesCommittedTotal = "write_batches_committed_total"
+            case writeBatchesFailedTotal = "write_batches_failed_total"
+            case writeBatchesInFlight = "write_batches_in_flight"
+            case writeRowsAttemptedTotal = "write_rows_attempted_total"
+            case writeRowsCommittedTotal = "write_rows_committed_total"
+            case writeRowsFailedTotal = "write_rows_failed_total"
+            case writeRowsInFlight = "write_rows_in_flight"
+            case coalescedNoopRowsTotal = "coalesced_noop_rows_total"
+            case pendingEntityRows = "pending_entity_rows"
+            case pendingEdgeRows = "pending_edge_rows"
+        }
+
+        /// input = committed + failed + in-flight + pending.
+        public var ingestConservationMaintained: Bool? {
+            guard let input = ingestEventsTotal,
+                  let committed = ingestEventsCommittedTotal,
+                  let failed = ingestEventsFailedTotal,
+                  let inFlight = ingestEventsInFlight,
+                  let pending = ingestEventsPending else { return nil }
+            return Self.conserves(
+                total: input,
+                terms: [committed, failed, Int64(inFlight), Int64(pending)]
+            )
+        }
+
+        /// attempts = committed batches + failed batches + in-flight batches.
+        public var writeBatchConservationMaintained: Bool? {
+            guard let attempts = writeAttemptsTotal,
+                  let committed = writeBatchesCommittedTotal,
+                  let failed = writeBatchesFailedTotal,
+                  let inFlight = writeBatchesInFlight else { return nil }
+            return Self.conserves(
+                total: attempts,
+                terms: [committed, failed, Int64(inFlight)]
+            )
+        }
+
+        /// attempted rows = committed + failed + in-flight rows.
+        public var writeRowConservationMaintained: Bool? {
+            guard let attempted = writeRowsAttemptedTotal,
+                  let committed = writeRowsCommittedTotal,
+                  let failed = writeRowsFailedTotal,
+                  let inFlight = writeRowsInFlight else { return nil }
+            return Self.conserves(
+                total: attempted,
+                terms: [committed, failed, Int64(inFlight)]
+            )
+        }
+
+        /// entity + edge observations = attempted + coalesced + pending rows.
+        public var observationConservationMaintained: Bool? {
+            guard let entities = entityObservationsTotal,
+                  let edges = edgeObservationsTotal,
+                  let attempted = writeRowsAttemptedTotal,
+                  let coalesced = coalescedNoopRowsTotal,
+                  let pendingEntities = pendingEntityRows,
+                  let pendingEdges = pendingEdgeRows else { return nil }
+            guard let observations = Self.safeSum([entities, edges]) else { return false }
+            return Self.conserves(
+                total: observations,
+                terms: [attempted, coalesced, Int64(pendingEntities), Int64(pendingEdges)]
+            )
+        }
+
+        /// Exact accounting is known only when all four equations are present.
+        public var writeConservationMaintained: Bool? {
+            let equations = [
+                ingestConservationMaintained,
+                writeBatchConservationMaintained,
+                writeRowConservationMaintained,
+                observationConservationMaintained,
+            ]
+            guard equations.allSatisfy({ $0 != nil }) else { return nil }
+            return equations.allSatisfy { $0 == true }
+        }
+
+        /// Cumulative failures are deliberately sticky for the process epoch.
+        public var hasStickyWriteFailure: Bool? {
+            Self.anyPositive([
+                ingestEventsFailedTotal,
+                writeBatchesFailedTotal,
+                writeRowsFailedTotal,
+            ])
+        }
+
+        /// Coalescing normally drains within 250 ms. Pending work caught by the
+        /// much slower heartbeat remains fail-visible; repeated snapshots prove
+        /// it is stuck. In-flight work alone is an active write, not a backlog.
+        public var hasOutstandingBacklog: Bool? {
+            guard let events = ingestEventsPending,
+                  let entities = pendingEntityRows,
+                  let edges = pendingEdgeRows else { return nil }
+            return events < 0 || entities < 0 || edges < 0
+                || events > 0 || entities > 0 || edges > 0
+        }
+
+        /// The SQLite admission block and the rolling writer are independent.
+        /// A green admission latch cannot override failed/dropped work, pending
+        /// backlog, or accounting drift.
+        public var writeTelemetryPresent: Bool {
+            let int64Values: [Int64?] = [
+                ingestEventsTotal,
+                ingestEventsCommittedTotal,
+                ingestEventsFailedTotal,
+                entityObservationsTotal,
+                edgeObservationsTotal,
+                relevanceSuppressedFileEventsTotal,
+                relevanceSuppressedRowsTotal,
+                writeAttemptsTotal,
+                writeBatchesCommittedTotal,
+                writeBatchesFailedTotal,
+                writeRowsAttemptedTotal,
+                writeRowsCommittedTotal,
+                writeRowsFailedTotal,
+                coalescedNoopRowsTotal,
+            ]
+            let intValues: [Int?] = [
+                ingestEventsInFlight,
+                ingestEventsPending,
+                writeBatchesInFlight,
+                writeRowsInFlight,
+                pendingEntityRows,
+                pendingEdgeRows,
+            ]
+            return int64Values.contains { $0 != nil }
+                || intValues.contains { $0 != nil }
+        }
+
+        /// The running producer emits the whole fixed ledger atomically. If a
+        /// newer heartbeat contains only part of it, no operator surface may
+        /// turn the missing counters into a green "Active" verdict.
+        public var writeTelemetryComplete: Bool {
+            let int64Values: [Int64?] = [
+                ingestEventsTotal,
+                ingestEventsCommittedTotal,
+                ingestEventsFailedTotal,
+                entityObservationsTotal,
+                edgeObservationsTotal,
+                relevanceSuppressedFileEventsTotal,
+                relevanceSuppressedRowsTotal,
+                writeAttemptsTotal,
+                writeBatchesCommittedTotal,
+                writeBatchesFailedTotal,
+                writeRowsAttemptedTotal,
+                writeRowsCommittedTotal,
+                writeRowsFailedTotal,
+                coalescedNoopRowsTotal,
+            ]
+            let intValues: [Int?] = [
+                ingestEventsInFlight,
+                ingestEventsPending,
+                writeBatchesInFlight,
+                writeRowsInFlight,
+                pendingEntityRows,
+                pendingEdgeRows,
+            ]
+            return int64Values.allSatisfy { $0 != nil }
+                && intValues.allSatisfy { $0 != nil }
+        }
+
+        public var graphWriteDegraded: Bool {
+            guard writeTelemetryPresent else { return false }
+            return !writeTelemetryComplete
+                || hasStickyWriteFailure != false
+                || hasOutstandingBacklog == true
+                || writeConservationMaintained != true
+        }
+
+        private static func anyPositive(_ values: [Int64?]) -> Bool? {
+            if values.contains(where: { ($0 ?? 0) > 0 }) { return true }
+            guard values.allSatisfy({ $0 != nil }) else { return nil }
+            return values.contains(where: { ($0 ?? 0) < 0 }) ? true : false
+        }
+
+        private static func conserves(total: Int64, terms: [Int64]) -> Bool {
+            guard total >= 0, terms.allSatisfy({ $0 >= 0 }),
+                  let sum = safeSum(terms) else { return false }
+            return total == sum
+        }
+
+        private static func safeSum(_ values: [Int64]) -> Int64? {
+            var total: Int64 = 0
+            for value in values {
+                let (next, overflow) = total.addingReportingOverflow(value)
+                guard !overflow else { return nil }
+                total = next
+            }
+            return total
         }
     }
 

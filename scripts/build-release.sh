@@ -21,8 +21,8 @@
 #             embedded.provisionprofile     (same profile)
 #             MacOS/com.maccrab.agent       (ES daemon, signed with ES entitlement)
 #             _CodeSignature/CodeResources
-#       Resources/bin/maccrabctl             (CLI tool, shared-Keychain entitlement only)
-#       Resources/bin/maccrab-mcp            (MCP server, shared-Keychain entitlement only)
+#       Resources/bin/maccrabctl             (CLI tool, hardened runtime, no entitlements)
+#       Resources/bin/maccrab-mcp            (MCP server, hardened runtime, no entitlements)
 #       Resources/compiled_rules/*.json      (signed built-in detection corpus)
 #   install.sh                               (manual privileged installer)
 #
@@ -229,6 +229,117 @@ cleanup_release_build() {
 }
 # END RELEASE_DMG_EXIT_CLEANUP
 
+# BEGIN BARE_TOOL_RELEASE_GUARDS
+# Bare executables cannot inherit the outer app's provisioning profile. Giving
+# one a restricted entitlement (including keychain-access-groups) makes AMFI
+# reject it before main with Code=-413 even though codesign/notarization pass.
+# Keep signing and verification centralized so loose and in-app copies cannot
+# drift back to different capability sets.
+sign_bare_tool() {
+    local tool="$1"
+    local identity="$2"
+    local name
+    name=$(/usr/bin/basename "$tool")
+    case "$name" in
+        maccrabctl|maccrab-mcp) ;;
+        *)
+            echo "ERROR: refusing bare-tool signing contract for unexpected executable: $tool" >&2
+            return 1
+            ;;
+    esac
+    "$CODESIGN_BIN" --sign "$identity" \
+        --identifier "com.maccrab.$name" \
+        --options runtime \
+        --timestamp \
+        --force \
+        "$tool"
+}
+
+verify_bare_tool_signature_contract() {
+    local tool="$1"
+    local name expected_identifier archs arch metadata entitlements
+    name=$(/usr/bin/basename "$tool")
+    case "$name" in
+        maccrabctl|maccrab-mcp) ;;
+        *)
+            echo "    ✗ unexpected bare tool in signature guard: $tool" >&2
+            return 1
+            ;;
+    esac
+    if [ ! -x "$tool" ] || [ -L "$tool" ]; then
+        echo "    ✗ missing, non-executable, or linked bare tool: $tool" >&2
+        return 1
+    fi
+    if ! archs=$(/usr/bin/lipo -archs "$tool" 2>/dev/null) || [ -z "$archs" ]; then
+        echo "    ✗ cannot inspect Mach-O slices for bare tool: $tool" >&2
+        return 1
+    fi
+    expected_identifier="com.maccrab.$name"
+    for arch in $archs; do
+        if ! metadata=$("$CODESIGN_BIN" -dvv --arch "$arch" "$tool" 2>&1); then
+            echo "    ✗ cannot inspect $arch signature for bare tool: $tool" >&2
+            return 1
+        fi
+        if ! /usr/bin/grep -Fqx "Identifier=$expected_identifier" <<<"$metadata"; then
+            echo "    ✗ $name ($arch) lacks stable identifier $expected_identifier: $tool" >&2
+            return 1
+        fi
+        if ! /usr/bin/grep -Eq '^CodeDirectory .*flags=.*\([^)]*runtime' <<<"$metadata"; then
+            echo "    ✗ $name ($arch) lacks hardened runtime: $tool" >&2
+            return 1
+        fi
+        if ! entitlements=$("$CODESIGN_BIN" -d --arch "$arch" --entitlements - "$tool" 2>&1); then
+            echo "    ✗ cannot inspect $arch entitlements for bare tool: $tool" >&2
+            return 1
+        fi
+        # Xcode 27 prints a [Key] tree; older codesign emits XML <key> nodes.
+        # Zero keys is deliberate: any restricted key would require a matching
+        # per-tool provisioning profile/bundle and can turn a valid signature
+        # into a launch-time AMFI kill.
+        if /usr/bin/grep -Eq '\[Key\]|<key>' <<<"$entitlements"; then
+            echo "    ✗ $name ($arch) carries forbidden bare-tool entitlements: $tool" >&2
+            /usr/bin/grep -E '\[Key\]|<key>' <<<"$entitlements" >&2 || true
+            return 1
+        fi
+    done
+}
+
+verify_bare_tool_runtime() {
+    local app="$1"
+    local phase="$2"
+    local ctl="$app/Contents/Resources/bin/maccrabctl"
+    local mcp="$app/Contents/Resources/bin/maccrab-mcp"
+    local output status
+
+    if output=$("$ctl" version 2>&1); then
+        :
+    else
+        status=$?
+        echo "ERROR: $phase maccrabctl runtime probe exited $status: $output" >&2
+        return 1
+    fi
+    if ! /usr/bin/grep -Fqx "MacCrab Detection Engine v$VERSION" <<<"$output"; then
+        echo "ERROR: $phase maccrabctl runtime probe returned the wrong version:" >&2
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+
+    if output=$("$mcp" --version 2>&1); then
+        :
+    else
+        status=$?
+        echo "ERROR: $phase maccrab-mcp runtime probe exited $status: $output" >&2
+        return 1
+    fi
+    if [ "$output" != "maccrab-mcp $VERSION" ]; then
+        echo "ERROR: $phase maccrab-mcp runtime probe returned the wrong version:" >&2
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    echo "    ✓ $phase bare tools launch under AMFI and report v$VERSION"
+}
+# END BARE_TOOL_RELEASE_GUARDS
+
 # Staging dir + EXIT-cleanup policy depend on the run mode.
 #   all-stages: per-PID dir under /tmp, trap-cleaned on exit (historical).
 #   single-stage: deterministic dir under .build so the next stage finds
@@ -285,8 +396,7 @@ require_tracked_signing_inputs() {
         fi
         for input in \
             Xcode/Resources/MacCrabApp.entitlements \
-            Xcode/Resources/MacCrabAgent.entitlements \
-            Xcode/Resources/MacCrabTools.entitlements; do
+            Xcode/Resources/MacCrabAgent.entitlements; do
             if [ ! -f "$input" ] || [ -L "$input" ]; then
                 echo "ERROR: tracked-only export lacks a regular signing input: $input" >&2
                 return 1
@@ -296,8 +406,7 @@ require_tracked_signing_inputs() {
     fi
     for input in \
         Xcode/Resources/MacCrabApp.entitlements \
-        Xcode/Resources/MacCrabAgent.entitlements \
-        Xcode/Resources/MacCrabTools.entitlements; do
+        Xcode/Resources/MacCrabAgent.entitlements; do
         if ! $GIT_BIN ls-files --error-unmatch "$input" >/dev/null 2>&1; then
             echo "ERROR: release signing input is not tracked by Git: $input" >&2
             echo "       A public source tag must describe every shipped capability." >&2
@@ -407,14 +516,19 @@ STAGE_ENV_EOF
             cp "$ARM_BIN" "$STAGING_DIR/bin/$binary"
             echo "    ✓ $binary (arm64 only)"
         fi
-        # Strip the Mach-O debug map (N_OSO/SO stabs) BEFORE any signing.
-        # Unstripped release binaries embed absolute build paths
-        # (/Users/<operator>/…/.build/…) — leaking the build-machine username +
-        # dev-tree layout into the shipped, public DMG. strip -S removes the
-        # debugging symbol entries while leaving the binary runnable. Must run
-        # here (pre-codesign) — stripping after signing invalidates the signature.
+        # Strip the Mach-O debug map (N_OSO/SO stabs) AND local symbols BEFORE
+        # any signing. Unstripped release binaries embed absolute build paths
+        # (/Users/<operator>/…/.build/…) and the four statically-linked Swift
+        # executables otherwise duplicate roughly 70 MiB of non-runtime local
+        # symbol data in the installed app. `-x` retains externally-visible /
+        # dynamically-required symbols; the post-sign and mounted-DMG execution
+        # probes below prove the final ctl/MCP products still launch. Must run
+        # here (pre-codesign) because any later strip invalidates the signature.
         if [ -f "$STAGING_DIR/bin/$binary" ]; then
-            strip -S "$STAGING_DIR/bin/$binary" 2>/dev/null || true
+            if ! strip -S -x "$STAGING_DIR/bin/$binary"; then
+                echo "ERROR: failed to strip release-only symbols from $binary" >&2
+                exit 1
+            fi
         fi
     done
 
@@ -857,7 +971,6 @@ stage_sign() {
     DEVELOPER_ID="${DEVELOPER_ID:-}"
     APP_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabApp.entitlements"
     AGENT_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabAgent.entitlements"
-    TOOLS_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabTools.entitlements"
 
     if [ -n "$DEVELOPER_ID" ]; then
         echo "  Signing with Developer ID..."
@@ -936,22 +1049,17 @@ ATTESTATION_EOF
         rm -f "$STAGING_DIR/bin/MacCrabApp"
         rm -f "$STAGING_DIR/bin/MacCrabAgent"
 
-        # 1. Command-line products. ctl/MCP need the shared Keychain group to
-        # resolve dashboard-stored LLM keys; every other binary stays
-        # entitlement-free. Never use APP_ENT here — it also carries the
-        # privileged system-extension.install capability.
+        # 1. Command-line products. Bare ctl/MCP executables have no eligible
+        # provisioning-profile container, so they MUST remain entitlement-free;
+        # otherwise AMFI kills them before main. They retain stable identifiers,
+        # Developer ID, hardened runtime, and timestamp. Dashboard-stored cloud
+        # keys are app-only; these tools use env overrides/local Ollama/fallbacks.
         for binary in "$STAGING_DIR"/bin/*; do
             if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
                 case "$(basename "$binary")" in
                     maccrabctl|maccrab-mcp)
-                        $CODESIGN_BIN --sign "$DEVELOPER_ID" \
-                            --identifier "com.maccrab.$(basename "$binary")" \
-                            --options runtime \
-                            --entitlements "$TOOLS_ENT" \
-                            --timestamp \
-                            --force \
-                            "$binary"
-                        echo "    ✓ $(basename "$binary") (hardened runtime + shared Keychain only)"
+                        sign_bare_tool "$binary" "$DEVELOPER_ID"
+                        echo "    ✓ $(basename "$binary") (hardened runtime, no entitlements)"
                         ;;
                     *)
                         $CODESIGN_BIN --sign "$DEVELOPER_ID" \
@@ -976,14 +1084,8 @@ ATTESTATION_EOF
                 if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
                     case "$(basename "$binary")" in
                         maccrabctl|maccrab-mcp)
-                            $CODESIGN_BIN --sign "$DEVELOPER_ID" \
-                                --identifier "com.maccrab.$(basename "$binary")" \
-                                --options runtime \
-                                --entitlements "$TOOLS_ENT" \
-                                --timestamp \
-                                --force \
-                                "$binary"
-                            echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime + shared Keychain only)"
+                            sign_bare_tool "$binary" "$DEVELOPER_ID"
+                            echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime, no entitlements)"
                             ;;
                         *)
                             $CODESIGN_BIN --sign "$DEVELOPER_ID" --options runtime --timestamp --force "$binary"
@@ -1075,24 +1177,6 @@ ATTESTATION_EOF
             install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MacCrab"
             echo "    ✓ Added @executable_path/../Frameworks rpath"
         fi
-
-        # 4a-bin. Sign the bundled CLI binaries that ride inside the app
-        # at Contents/Resources/bin/. ctl/MCP carry only the shared-Keychain
-        # entitlement (plus hardened runtime + Developer ID + timestamp). Without explicit
-        # signing here, --deep on the app-level sign treats them as
-        # ordinary resources and notarization rejects unsigned Mach-Os.
-        for bin in "$APP/Contents/Resources/bin/maccrabctl" \
-                   "$APP/Contents/Resources/bin/maccrab-mcp"; do
-            if [ -x "$bin" ]; then
-                $CODESIGN_BIN --sign "$DEVELOPER_ID" \
-                    --identifier "com.maccrab.$(basename "$bin")" \
-                    --options runtime \
-                    --entitlements "$TOOLS_ENT" \
-                    --timestamp \
-                    --force \
-                    "$bin"
-            fi
-        done
 
         # 4b. App's inner executable. The app needs the
         # system-extension.install entitlement so OSSystemExtensionRequest
@@ -1186,42 +1270,53 @@ ATTESTATION_EOF
         fi
         echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
 
-        # ctl/MCP persistent LLM credentials live in the app/sysext shared
-        # Keychain group. Prove every shipped copy has that one capability and
-        # none of the app/sysext privileged capabilities. This catches both a
-        # missing entitlement (cloud LLM silently falls back) and a dangerous
-        # APP_ENT/AGENT_ENT copy-paste before notarization.
-        echo "  Verifying CLI/MCP least-privilege Keychain entitlements..."
+        # A bare executable with any restricted entitlement but no matching
+        # per-tool provisioning profile is AMFI-killed before main. Prove every
+        # slice of every loose/in-app copy has the stable identifier + hardened
+        # runtime and ZERO entitlement keys. This catches both the rc.3 shared-
+        # Keychain regression and an APP_ENT/AGENT_ENT copy-paste.
+        echo "  Verifying bare CLI/MCP signature contract..."
         tool_entitlement_error=0
         for _tool in "$STAGING_DIR/bin/maccrabctl" \
                      "$STAGING_DIR/bin/maccrab-mcp" \
                      "$APP/Contents/Resources/bin/maccrabctl" \
                      "$APP/Contents/Resources/bin/maccrab-mcp"; do
-            if [ ! -x "$_tool" ]; then
-                echo "    ✗ missing shipped tool: $_tool"
-                tool_entitlement_error=1
-                continue
-            fi
-            _tool_entitlements=$($CODESIGN_BIN -d --entitlements - "$_tool" 2>&1 || true)
-            # Xcode 27's codesign renders `--entitlements -` as a structured
-            # [Key]/[String] tree instead of XML. Match the semantic key and
-            # exact value independently so either supported display form is
-            # accepted, while a bare team identifier elsewhere is not.
-            if ! /usr/bin/grep -Fq 'keychain-access-groups' <<<"$_tool_entitlements" \
-                    || ! /usr/bin/grep -Fq '79S425CW99.com.maccrab.shared' <<<"$_tool_entitlements"; then
-                echo "    ✗ $(basename "$_tool") missing shared Keychain access group: $_tool"
-                tool_entitlement_error=1
-            fi
-            if /usr/bin/grep -qiE 'system-extension\.install|endpoint-security\.client' <<<"$_tool_entitlements"; then
-                echo "    ✗ $(basename "$_tool") carries a privileged app/sysext entitlement: $_tool"
+            if ! verify_bare_tool_signature_contract "$_tool"; then
                 tool_entitlement_error=1
             fi
         done
         if [ "$tool_entitlement_error" != "0" ]; then
-            echo "  ERROR: CLI/MCP Keychain entitlement guard failed — refusing to ship."
+            echo "  ERROR: bare CLI/MCP signature contract failed — refusing to ship."
             exit 1
         fi
-        echo "    ✓ ctl/MCP carry shared Keychain access only (no app/sysext privilege)"
+        echo "    ✓ ctl/MCP have stable IDs + hardened runtime + zero entitlements"
+
+        # Static signature validation does not ask taskgated/AMFI whether a
+        # process may launch. Execute the final signed in-app binaries so a
+        # provisioning-profile mismatch (exit 137 in rc.3–rc.5) blocks release.
+        verify_bare_tool_runtime "$APP" "post-sign"
+
+        # Installed footprint is a product resource budget, not merely a DMG
+        # compression statistic. A regression once left local symbols in four
+        # universal Swift executables and grew MacCrab.app to ~207 MiB while the
+        # compressed image looked comparatively small. Measure allocated bytes
+        # after every nested component and signature is final. The fixed 160 MiB
+        # ceiling leaves growth headroom over the ~136 MiB stripped baseline but
+        # requires an explicit source/policy change before future payload bloat
+        # can silently ship.
+        APP_FOOTPRINT_BUDGET_KIB=163840
+        APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
+        case "$APP_FOOTPRINT_KIB" in
+            ''|*[!0-9]*)
+                echo "ERROR: could not measure final MacCrab.app footprint" >&2
+                exit 1
+                ;;
+        esac
+        if [ "$APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB" ]; then
+            echo "ERROR: MacCrab.app footprint ${APP_FOOTPRINT_KIB} KiB exceeds the fixed ${APP_FOOTPRINT_BUDGET_KIB} KiB release budget" >&2
+            exit 1
+        fi
+        echo "    ✓ installed app footprint ${APP_FOOTPRINT_KIB} KiB (budget: ${APP_FOOTPRINT_BUDGET_KIB} KiB)"
 
         # NOTE on stapling the .app bundle (intentionally NOT done): we validated
         # it and it does NOT work for this app. Even after a standalone app
@@ -1403,6 +1498,9 @@ stage_publish() {
         exit 1
     fi
     echo "    ✓ Mounted DMG app passes strict deep signature verification"
+    # Repeat against the transported HFS copy users receive. A staging-only
+    # probe cannot detect copy/normalization/signature damage in the image.
+    verify_bare_tool_runtime "$DMG_MNT/MacCrab.app" "mounted-DMG"
     /usr/bin/hdiutil detach "$DMG_MNT" -force >/dev/null
     RELEASE_DMG_ATTACH_ATTEMPTED=0
     /bin/rmdir "$DMG_MNT"

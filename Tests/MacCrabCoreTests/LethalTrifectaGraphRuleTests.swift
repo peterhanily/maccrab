@@ -228,7 +228,10 @@ struct LethalTrifectaGraphRuleTests {
             with: Data((fileEntity?.attributesJson ?? "{}").utf8)) as? [String: Any]
         #expect(fattrs?["untrustedContent"] as? Bool == true)
 
-        // Control: no enrichment → untrustedContent defaults false.
+        // Control: an ordinary skill-file open with no taint is intentionally
+        // absent. The relevance policy retains only file substrate consumed by
+        // shipped graph detection (including untrustedContent=true); persisting
+        // every clean path was the rc.5 graph-growth failure mode.
         let cleanPath = "/Users/me/.claude/skills/clean/SKILL.md"
         let clean = Event(
             timestamp: now, eventCategory: .file, eventType: .info, eventAction: "open",
@@ -237,9 +240,10 @@ struct LethalTrifectaGraphRuleTests {
         )
         _ = await bridge.process(clean)
         let cleanEntity = try await store.entity(id: "file:\(pathHashHex(cleanPath))")
-        let cattrs = try JSONSerialization.jsonObject(
-            with: Data((cleanEntity?.attributesJson ?? "{}").utf8)) as? [String: Any]
-        #expect(cattrs?["untrustedContent"] as? Bool == false)
+        #expect(cleanEntity == nil)
+        let telemetry = await bridge.writeTelemetry()
+        #expect(telemetry.relevanceSuppressedFileEventsTotal == 1)
+        #expect(telemetry.relevanceSuppressedRowsTotal == 2)
         await store.close()
     }
 

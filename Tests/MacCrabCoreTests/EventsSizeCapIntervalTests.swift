@@ -8,11 +8,10 @@
 //      `daemon_config.json` AND survives a partial decode (only the
 //      cadence key set; every other field falls back to default —
 //      the v1.6.14 partial-decode guarantee).
-//   2. The adaptive cutoff ladder retains at least two DISTINCT
-//      cutoffs even when `hotTierMinutes == 15` (pre-fix the
-//      `max(15, …)` floor + `NSOrderedSet` dedup collapsed every
-//      rung to a single 15-minute entry, defeating the Layer-2
-//      adaptive design).
+//   2. The adaptive cutoff ladder never invents a cutoff below the
+//      15-minute raw-event forensic/correlation floor. At the floor,
+//      one honest rung is correct; [15, 14, 13] was not progressive
+//      retention, it was silent violation of the promised window.
 //   3. `runAdaptiveRollupSweep` integrates end-to-end: insert events
 //      past the configured cap, trigger the sweep, observe both
 //      Layer-2 (`rollUpAndPrune`) and Layer-3 (`pruneOldest`)
@@ -262,7 +261,12 @@ struct EventsSizeCapIntervalTests {
 
         var config = DaemonConfig.StorageConfig()
         config.eventsMaxSizeMB = 50
-        #expect(config.clampedToSafeFloors().eventsMaxSizeMB == minimumMiB)
+        let clamped = config.clampedToSafeFloors()
+        // eventsMaxSizeMB is the historical event+evidence envelope. Its safe
+        // floor must preserve both the 96 MiB event-family operating window and
+        // the independently budgeted 50 MiB evidence tier.
+        #expect(clamped.eventsMaxSizeMB == minimumMiB + 50)
+        #expect(clamped.effectiveEventsFamilyMaxSizeMB == minimumMiB)
 
         let defaultBoundary = EventsSizeCapBoundary(maxSizeMiB: 420)
         #expect(defaultBoundary.nominalCapBytes == 420 * 1_048_576)
@@ -299,50 +303,92 @@ struct EventsSizeCapIntervalTests {
         }
     }
 
-    // MARK: - 2. Adaptive ladder no-collapse contract
+    // MARK: - 2. Adaptive ladder hard-floor contract
 
-    /// The internal ladder is rebuilt inside `runAdaptiveRollupSweep`.
-    /// We re-derive it here using the same formula, so this test pins
-    /// the algorithm contract — if anyone re-introduces an `NSOrderedSet`
-    /// dedup or moves the floor back to `max(15, …)`, this assertion
-    /// trips before the sweep silently regresses.
-    private func ladderCutoffsMinutes(hotTierMinutes: Int) -> [Int] {
-        let rung1 = hotTierMinutes
-        let rung2 = min(rung1 - 1, max(15, hotTierMinutes / 2))
-        let rung3 = min(rung2 - 1, max(15, hotTierMinutes / 4))
-        return [rung1, rung2, rung3].filter { $0 > 0 }
+    @Test("adaptive ladder stops exactly at the 15-minute hard floor")
+    func ladderStopsAtFloor() {
+        #expect(EventRetentionFloor.adaptiveCutoffs(hotTierMinutes: 15) == [15])
+        #expect(EventRetentionFloor.adaptiveCutoffs(hotTierMinutes: 1) == [15])
     }
 
-    @Test("adaptive ladder has at least 2 entries at hotTierMinutes=15 (no collapse)")
-    func ladderNoCollapseAtFloor() {
-        let ladder = ladderCutoffsMinutes(hotTierMinutes: 15)
-        #expect(ladder.count >= 2,
-                "Pre-fix the [hot, hot/2, hot/4] ladder collapsed to a single 15-min rung at the floor. Post-fix it must retain ≥2 distinct cutoffs so Layer-2 can still tighten progressively.")
-        // Strict monotonic decrease — pre-fix's NSOrderedSet dedup
-        // would leave duplicates intact if the floor swallowed them.
-        for i in 1..<ladder.count {
-            #expect(ladder[i] < ladder[i - 1],
-                    "ladder[\(i)] (\(ladder[i])) must be strictly less than ladder[\(i-1)] (\(ladder[i-1]))")
-        }
-    }
-
-    @Test("adaptive ladder retains three distinct cutoffs at hotTierMinutes=30")
+    @Test("adaptive ladder deduplicates the floor at hotTierMinutes=30")
     func ladderAt30Min() {
-        let ladder = ladderCutoffsMinutes(hotTierMinutes: 30)
-        #expect(ladder.count == 3)
-        #expect(ladder[0] == 30)
-        // Verify strict descent — exact values are implementation detail.
-        #expect(ladder[1] < ladder[0])
-        #expect(ladder[2] < ladder[1])
+        #expect(EventRetentionFloor.adaptiveCutoffs(hotTierMinutes: 30) == [30, 15])
     }
 
     @Test("adaptive ladder retains three distinct cutoffs at hotTierMinutes=120")
     func ladderAt120Min() {
-        let ladder = ladderCutoffsMinutes(hotTierMinutes: 120)
-        #expect(ladder.count == 3)
-        #expect(ladder[0] == 120)
-        #expect(ladder[1] == 60)
-        #expect(ladder[2] == 30)
+        #expect(EventRetentionFloor.adaptiveCutoffs(hotTierMinutes: 120) == [120, 60, 30])
+    }
+
+    @Test("an unmet retention budget stays degraded until a real convergence result")
+    func retentionBudgetHealthIsStickyAndHonest() {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 300)
+        let health = EventRetentionBudgetHealth()
+
+        #expect(health.snapshot().state == "unknown")
+        health.recordSweep(
+            observedFootprintBytes: boundary.targetBytes + 1,
+            boundary: boundary,
+            at: Date(timeIntervalSince1970: 100)
+        )
+        let degraded = health.snapshot()
+        #expect(degraded.state == "degraded_budget_unmet")
+        #expect(degraded.sticky)
+        #expect(degraded.observedFootprintBytes == boundary.targetBytes + 1)
+        #expect(degraded.evaluatedAtUnix == 100)
+
+        // Merely reading/sampling the state cannot turn an infeasible budget
+        // green. A material configuration change returns it to honest-unknown.
+        #expect(health.snapshot() == degraded)
+        health.recordConfigurationChange()
+        #expect(health.snapshot().state == "unknown")
+        #expect(health.snapshot().reason == "configuration_changed_awaiting_sweep")
+
+        health.recordSweep(
+            observedFootprintBytes: boundary.targetBytes,
+            boundary: boundary
+        )
+        #expect(health.snapshot().state == "converged")
+        #expect(!health.snapshot().sticky)
+    }
+
+    @Test("watchdog backoff resets only on convergence or material config change")
+    func watchdogBackoffDoesNotResetOnOrdinarySampling() {
+        let backoff = SizeCapWatchdogBackoff()
+        backoff.observeConfiguration("420:64:30:60")
+        #expect(backoff.mayFire())
+
+        _ = backoff.recordSweep(stillOver: true)
+        #expect(!backoff.mayFire())
+        backoff.observeConfiguration("420:64:30:60")
+        #expect(!backoff.mayFire(),
+                "re-observing unchanged config must not clear an ineffective-sweep backoff")
+
+        backoff.observeConfiguration("512:64:30:60")
+        #expect(backoff.mayFire(), "a material budget change invalidates the old conclusion")
+        _ = backoff.recordSweep(stillOver: true)
+        #expect(!backoff.mayFire())
+        _ = backoff.recordSweep(stillOver: false)
+        #expect(backoff.mayFire(), "only an actual converged sweep re-arms immediately")
+    }
+
+    @Test("retention telemetry names a forensic floor, never a SequenceEngine rebuild")
+    func retentionFloorTruthDoesNotDrift() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let timers = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonTimers.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(timers.contains("events_retention_below_forensic_floor"))
+        #expect(timers.contains("SequenceEngine does not currently rehydrate from events.db"))
+        #expect(!timers.contains("events_retention_below_sequence_floor"))
+        #expect(!timers.localizedCaseInsensitiveContains("sequence-rebuild floor"))
     }
 
     // MARK: - 3. Integration: runAdaptiveRollupSweep drives prune end-to-end
@@ -397,21 +443,18 @@ struct EventsSizeCapIntervalTests {
                 "Sweep should have pruned at least one row (was \(before), now \(after))")
     }
 
-    /// Layer 3's `pruneOldest` fallback must engage when even the
-    /// tightest Layer-2 cutoff leaves the DB over cap. This test
-    /// confirms the fallback fires even when `hotTierMinutes` is at
-    /// the floor (the regime where the pre-fix ladder-collapse hurt
-    /// most).
-    @Test("runAdaptiveRollupSweep engages Layer 3 at hotTierMinutes=15 (post-fix)")
-    func sweepEngagesLayer3AtFloor() async throws {
+    /// Layer 3 may request oldest-first pruning when the tightest Layer-2
+    /// cutoff still leaves the DB over cap, but it must stop at the hard floor.
+    @Test("runAdaptiveRollupSweep refuses to delete rows inside the 15-minute floor")
+    func sweepStopsAtHardFloor() async throws {
         let (store, tmp) = try await makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Use *recent* events so Layer 2 can't touch them (newer than
-        // any rung of the ladder). Layer 3 must still bring the row
-        // count down via `pruneOldest`.
+        // Use *recent* events so Layer 2 cannot touch them. Layer 3 may
+        // attempt a row target, but the hard floor must return short rather
+        // than delete recent evidence merely to make the byte cap look met.
         let now = Date()
-        for i in 0..<12_000 {
+        for i in 0..<2_000 {
             let proc = ProcessInfo(
                 pid: Int32(3000 + i), ppid: 1, rpid: 1,
                 name: "recent\(i)", executable: "/bin/recent\(i)",
@@ -435,58 +478,51 @@ struct EventsSizeCapIntervalTests {
         let dbPath = tmp.appendingPathComponent("events.db").path
 
         let before = try await store.count()
-        #expect(before == 12_000)
+        #expect(before == 2_000)
 
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
             targetSizeBytes: 1_000_000,
             capSizeBytes: 1_000_000,
-            hotTierMinutes: 15,        // FLOOR — pre-fix this collapsed the ladder
+            hotTierMinutes: 15,
             aggregateDays: 90,
             alertsRetentionDays: 365
         )
 
         let after = try await store.count()
-        // Layer 3's bound is `max(10_000, …)` rows dropped, so at the
-        // floor we expect a sizable drop. The contract is "fewer
-        // rows", not an exact count.
-        #expect(after < before,
-                "At hotTierMinutes=15, Layer 3 should still engage and prune (was \(before), now \(after))")
+        #expect(after == before,
+                "an infeasible cap must shed future persistence honestly, not erase the protected raw-event window")
     }
 
     // MARK: - 4. Per-category retention floor (v1.21.4)
 
-    /// The money test: a cheap file-write flood must NOT evict the low-volume
-    /// process/exec channel when a floor is configured — while the size cap
-    /// still converges (the DB shrinks). All rows are recent (within the
-    /// floor + inside the tightest Layer-2 rung) so Layer 2 leaves them and
-    /// Layer 3's category-aware `pruneOldest` does the eviction.
-    @Test("processFloorMinutes: file flood cannot evict exec rows within the floor, cap still converges")
-    func floorProtectsExecUnderFileFlood() async throws {
+    /// A cheap file-write flood must not make the hard all-category floor soft.
+    /// With every row recent, an infeasible byte budget stays visibly unmet.
+    @Test("hard floor preserves recent file and exec rows when the cap is infeasible")
+    func hardFloorPreservesRecentFileFloodAndExec() async throws {
         let (store, tmp) = try await makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let now = Date()
-        for i in 0..<12_000 {
+        for i in 0..<2_000 {
             try await insertCat(store, category: .file, at: now.addingTimeInterval(-Double(i % 240)), tag: "flood\(i)")
         }
-        for i in 0..<500 {
+        for i in 0..<100 {
             try await insertCat(store, category: .process, at: now.addingTimeInterval(-Double(i % 240)), tag: "exec\(i)")
         }
         try await store.vacuum()
         let dbPath = tmp.appendingPathComponent("events.db").path
 
         let before = try await store.count()
-        #expect(before == 12_500)
+        #expect(before == 2_100)
 
-        // Cap just below the current footprint so the overage is small. A
-        // small over-fraction floors Layer 3's dropTarget at 10_000 —
-        // comfortably below the 12_000 eligible file rows — so the valve is
-        // NOT reached and the 500 exec rows are spared deterministically.
+        // Cap below the footprint. Every row is inside the hard 15-minute
+        // floor, so neither the file flood nor the process channel may be
+        // deleted to manufacture convergence.
         let measured = try measureDatabaseFootprintBytes(dbPath: dbPath)
-        #expect(measured >= 2_000_000, "12.5k events should occupy >= 2 MB on disk (was \(measured) bytes)")
-        let capBytes = max(1_000_000, measured - 1_000_000)
+        #expect(measured > 1_000_000, "2.1k events should exceed the forced 1 MB cap (was \(measured) bytes)")
+        let capBytes: Int64 = 1_000_000
 
         await runAdaptiveRollupSweep(
             eventStore: store,
@@ -500,30 +536,27 @@ struct EventsSizeCapIntervalTests {
         )
 
         let byCat = try await store.eventCountsByCategory(since: .distantPast)
-        #expect(byCat["process"] == 500, "all exec rows within the floor survive the file-storm sweep")
-        #expect((byCat["file"] ?? 0) < 12_000, "file rows were evicted")
+        #expect(byCat["process"] == 100, "all exec rows within the floor survive the file-storm sweep")
+        #expect(byCat["file"] == 2_000, "the hard floor applies to every category")
         let after = try await store.count()
-        #expect(after < before, "the size cap still converges — DB shrank (was \(before), now \(after))")
+        #expect(after == before, "an infeasible budget is exposed instead of erasing recent rows")
     }
 
-    /// Soft-floor safety valve at the sweep level: when EVERY row is a
-    /// protected process row within the floor (so nothing is eligible for
-    /// category-aware eviction), the sweep must still fall back to
-    /// oldest-first and shrink the DB. Guarantees events.db can never grow
-    /// unbounded even if the process channel alone breaches the cap.
-    @Test("processFloorMinutes: soft-floor valve still shrinks the DB when all rows are protected")
-    func floorValveConvergesWhenAllProcess() async throws {
+    /// The category-specific process floor remains soft, but its oldest-first
+    /// valve is still bounded by the separate hard all-category floor.
+    @Test("hard floor overrides the process soft-floor valve for recent rows")
+    func hardFloorStopsValveWhenAllProcessRowsAreRecent() async throws {
         let (store, tmp) = try await makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let now = Date()
-        for i in 0..<12_000 {
+        for i in 0..<2_000 {
             try await insertCat(store, category: .process, at: now.addingTimeInterval(-Double(i % 240)), tag: "exec\(i)")
         }
         try await store.vacuum()
         let dbPath = tmp.appendingPathComponent("events.db").path
         let before = try await store.count()
-        #expect(before == 12_000)
+        #expect(before == 2_000)
 
         await runAdaptiveRollupSweep(
             eventStore: store,
@@ -537,7 +570,7 @@ struct EventsSizeCapIntervalTests {
         )
 
         let after = try await store.count()
-        #expect(after < before,
-                "soft-floor valve: with every row protected the sweep must still fall back to oldest-first and shrink (was \(before), now \(after))")
+        #expect(after == before,
+                "the soft category valve cannot cross the hard all-category forensic floor")
     }
 }

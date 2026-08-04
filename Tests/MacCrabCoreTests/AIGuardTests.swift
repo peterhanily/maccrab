@@ -256,6 +256,18 @@ struct CredentialFenceTests {
 @Suite("AI Guard: Project Boundary")
 struct ProjectBoundaryTests {
 
+    @Test("boundary action contract covers mutations, never reads")
+    func mutationActionContract() {
+        for action in [
+            "create", "write", "close_modified", "rename", "unlink", "link",
+            "setmode", "setowner",
+        ] {
+            #expect(ProjectBoundary.mutationEventActions.contains(action))
+        }
+        #expect(!ProjectBoundary.mutationEventActions.contains("open"))
+        #expect(!ProjectBoundary.mutationEventActions.contains("close"))
+    }
+
     @Test("Allows writes within project directory")
     func withinBoundary() async {
         let boundary = ProjectBoundary()
@@ -353,6 +365,21 @@ struct ProjectBoundaryTests {
             projectDir: "/Users/user/Projects/myapp"
         )
         #expect(accepted == true, "A normal user project path must be accepted")
+        #expect(await boundary.projectDirectory(aiPid: 100) == "/Users/user/Projects/myapp")
+    }
+
+    @Test("Registered project directory is removed with the session")
+    func registeredProjectDirectoryIsRemoved() async {
+        let boundary = ProjectBoundary()
+        #expect(await boundary.registerBoundary(
+            aiPid: 100,
+            projectDir: "/Users/user/Projects/myapp"
+        ))
+        #expect(await boundary.projectDirectory(aiPid: 100) == "/Users/user/Projects/myapp")
+
+        await boundary.removeBoundary(aiPid: 100)
+
+        #expect(await boundary.projectDirectory(aiPid: 100) == nil)
     }
 
     @Test("Writes to /dev/null are not flagged as boundary violations")
@@ -368,6 +395,50 @@ struct ProjectBoundaryTests {
             )
             #expect(violation == nil, "\(path) is a legitimate device sink, not a boundary violation")
         }
+    }
+
+    @Test("Violation detection stays exact while duplicate log emission is bounded")
+    func violationLogAmplificationIsBounded() async {
+        final class Clock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: TimeInterval = 100
+            func now() -> TimeInterval { lock.withLock { value } }
+            func advance(_ seconds: TimeInterval) {
+                lock.withLock { value += seconds }
+            }
+        }
+        let clock = Clock()
+        let boundary = ProjectBoundary(monotonicNow: { clock.now() })
+        await boundary.registerBoundary(
+            aiPid: 100,
+            projectDir: "/Users/user/Projects/myapp"
+        )
+
+        for index in 0..<1_000 {
+            let violation = await boundary.checkWrite(
+                filePath: "/Users/user/Library/LaunchAgents/evil-\(index).plist",
+                aiSessionPid: 100,
+                aiToolName: "Claude Code"
+            )
+            #expect(violation != nil)
+        }
+        var telemetry = await boundary.telemetry()
+        #expect(telemetry.checksTotal == 1_000)
+        #expect(telemetry.violationsTotal == 1_000)
+        #expect(telemetry.violationLogsEmittedTotal == 1)
+        #expect(telemetry.violationLogsSuppressedTotal == 999)
+        #expect(telemetry.checksTotal == telemetry.allowedTotal
+            + telemetry.unboundTotal + telemetry.violationsTotal)
+
+        clock.advance(30)
+        #expect(await boundary.checkWrite(
+            filePath: "/Users/user/.ssh/authorized_keys",
+            aiSessionPid: 100,
+            aiToolName: "Claude Code"
+        ) != nil)
+        telemetry = await boundary.telemetry()
+        #expect(telemetry.violationLogsEmittedTotal == 2)
+        #expect(telemetry.violationLogsSuppressedTotal == 999)
     }
 }
 

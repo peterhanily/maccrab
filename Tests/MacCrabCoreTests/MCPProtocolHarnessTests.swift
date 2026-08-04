@@ -198,6 +198,8 @@ struct MCPProtocolHarnessTests {
             let result = byId(objs, id)?["result"] as? [String: Any]
             #expect(result?["isError"] as? Bool == true, "id \(id) should be isError")
         }
+        #expect(resultText(objs, 3).contains("Denied unclassified MCP tool"),
+                "an unknown tool must fail closed at the authority registry, before dispatch")
     }
 
     /// Extract the first text block from a tools/call result payload.
@@ -317,17 +319,14 @@ struct MCPProtocolHarnessTests {
         }
     }
 
-    /// v1.19.0 (D6): fail-open guard for the capability gate. `agentToolCapability`
-    /// (AgentControl.swift) returns nil → ALLOW for any tool not in the map, so a
-    /// new engine-mutating tool added to `handleToolCall` but forgotten in the map
-    /// silently bypasses the gate — the exact class of the v1.18 capability-bypass.
-    /// This pins the set of mutating-verb-prefixed tools advertised by tools/list
-    /// to the known gated surface, so a NEW ungated mutator fails the build. It
+    /// Historical mutation-surface guard. The authority registry now fails
+    /// closed for every unknown name (see MCPTruthAuthorityGuardTests), while
+    /// this test also pins the expected capability-gated public surface. It
     /// executes nothing (safe on any host). The forensics.* / dotted plugin
     /// namespace is local-evidence/analysis, intentionally outside the
     /// engine-mutation tier, and is excluded.
-    @Test("every engine-mutating tool stays in the capability gate (fail-open guard)")
-    func mutatingToolsAreGated() {
+    @Test("every defense, egress, and evidence-export tool stays in the capability gate")
+    func sensitiveToolsAreGated() {
         let objs = drive([
             #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
@@ -348,7 +347,7 @@ struct MCPProtocolHarnessTests {
             "forensics_pin_plugin", "forensics_install_plugin_update",
             // v1.21.4 (audit): these execute plugin/enricher code or read back
             // collected sensitive data and are now .response-gated — pin them so
-            // a future ungate fails the build (the v1.18 fail-open bypass class).
+            // a future ungate fails the build (the historical v1.18 bypass class).
             "forensics_run_collector", "forensics_run_analyzer",
             "forensics_run_all", "forensics_create_case", "forensics_enrich",
         ]
@@ -372,17 +371,20 @@ struct MCPProtocolHarnessTests {
 
         // The canonical gated engine-mutation surface (mirrors agentToolCapability
         // in AgentControl.swift). Adding a mutating tool to handleToolCall means
-        // adding it to agentToolCapability AND here — otherwise it fails OPEN.
+        // adding it to agentToolCapability AND here; otherwise this inventory
+        // test fails (and the exhaustive registry denies it at runtime).
         let expectedGated: Set<String> = [
             "create_rule", "delete_rule",
             "set_builtin_rule_setting", "set_daemon_config",
             "reload_rules", "refresh_threat_intel",
+            "classify_package_intent", "forensics_check_plugin_updates",
+            "forensics_search_catalog", "export_session_bundle",
             "suppress_alert", "suppress_campaign",
             "set_response_action",
             "forensics_install_plugin", "forensics_uninstall_plugin",
             "forensics_pin_plugin", "forensics_install_plugin_update",
             // v1.21.4 (audit): code-executing / case-mutating forensics tools now
-            // .response-gated (the v1.18 fail-open bypass class).
+            // .response-gated (closing the historical v1.18 bypass class).
             "forensics_run_collector", "forensics_run_analyzer",
             "forensics_run_all", "forensics_create_case", "forensics_enrich",
             // v1.21.4 (audit): sensitive-READ forensics tools — the exfil half of
@@ -394,7 +396,7 @@ struct MCPProtocolHarnessTests {
         ]
         for n in observed {
             #expect(expectedGated.contains(n),
-                    "mutating-verb tool '\(n)' is advertised but not in the known capability-gated set — add it to agentToolCapability (AgentControl.swift) AND this test, or it fails OPEN (the v1.18 bypass class)")
+                    "mutating-verb tool '\(n)' is advertised but not in the known capability-gated set — add it to agentToolCapability (AgentControl.swift) AND this inventory; the runtime registry denies unclassified tools")
         }
         for n in expectedGated {
             #expect(names.contains(n), "expected gated tool missing from tools/list: \(n)")
@@ -484,5 +486,77 @@ struct MCPProtocolHarnessTests {
         #expect(text.contains("p(exfiltration)=0.91"), "posterior payload missing: \(text)")
         #expect(text.contains("/usr/local/bin/node@4242"), "tree key missing: \(text)")
         #expect(text.contains("Intent posterior crossed threshold"), "rule title missing: \(text)")
+    }
+
+    @Test("empty AI/campaign results and clean text scans never claim safety")
+    func boundedAbsenceIsNotSafetyVerdict() {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-truth-\(ProcessInfo.processInfo.globallyUniqueString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_campaigns","arguments":{}}}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_ai_alerts","arguments":{"hours":24}}}"#,
+            #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scan_text","arguments":{"text":"ordinary text with no literal marker"}}}"#,
+            #"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"score_text_style","arguments":{"text":"Please review this change.","author":"attacker-controlled-author"}}}"#,
+            #"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"scan_text","arguments":{"text":"short"}}}"#,
+        ], home: home)
+
+        let campaigns = resultText(objs, 2).lowercased()
+        #expect(campaigns.contains("bounded absence"))
+        #expect(campaigns.contains("does not prove"))
+        #expect(!campaigns.contains("this is good"))
+        #expect(!campaigns.contains("no multi-stage attacks identified"))
+
+        let aiAlerts = resultText(objs, 3).lowercased()
+        #expect(aiAlerts.contains("bounded absence"))
+        #expect(aiAlerts.contains("not proof"))
+        #expect(!aiAlerts.contains("operating within safe boundaries"))
+
+        let scan = resultText(objs, 4).lowercased()
+        #expect(scan.contains("known literal marker match: no"))
+        #expect(scan.contains("not proof the text is safe"))
+        #expect(!scan.contains("safe:       true"))
+
+        let style = resultText(objs, 5).lowercased()
+        #expect(style.contains("uncalibrated"))
+        #expect(style.contains("author drift: not evaluated"))
+        #expect(!style.contains("cosine distance"))
+        #expect(!style.contains("call again to start"))
+
+        let shortScan = resultText(objs, 6).lowercased()
+        #expect(shortScan.contains("not evaluated"))
+        #expect(shortScan.contains("no safety verdict was made"))
+        #expect(!shortScan.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                == "known literal marker match: no"
+        })
+    }
+
+    @Test("response-action schema forbids remote destructive auto-execution")
+    func responseActionSchemaStatesPendingOnlyBoundary() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ])
+        let tools = (byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
+        guard let tool = tools?.first(where: { $0["name"] as? String == "set_response_action" }) else {
+            Issue.record("set_response_action missing from tools/list")
+            return
+        }
+        let description = (tool["description"] as? String)?.lowercased() ?? ""
+        #expect(description.contains("confirmation-required per-rule"))
+        #expect(description.contains("require_confirmation:false is rejected"))
+        #expect(description.contains("destructive global default cannot be created"))
+        #expect(!description.contains("auto-execute unless"))
+
+        let schema = tool["inputSchema"] as? [String: Any]
+        let properties = schema?["properties"] as? [String: Any]
+        let confirmation = properties?["require_confirmation"] as? [String: Any]
+        let confirmationDescription = (confirmation?["description"] as? String)?.lowercased() ?? ""
+        #expect(confirmationDescription.contains("always persists true"))
+        #expect(confirmationDescription.contains("rejects false"))
     }
 }

@@ -135,21 +135,19 @@ struct EngineAlertPostCommitTests {
             of: "await fanOut(committed.alert)",
             range: plan.lowerBound..<source.endIndex
         ))
-        let sequence = try #require(source.range(
-            of: "for committed in postCommitPlan.sequenceSurvivors",
-            range: fanOut.lowerBound..<source.endIndex
-        ))
         let triage = try #require(source.range(
             of: "let triageAlert = postCommitPlan.triageAlert",
-            range: sequence.lowerBound..<source.endIndex
+            range: fanOut.lowerBound..<source.endIndex
         ))
 
         #expect(batchCommit.lowerBound < plan.lowerBound)
         #expect(batchCommit.lowerBound < partialRecovery.lowerBound)
         #expect(partialRecovery.lowerBound < plan.lowerBound)
         #expect(plan.lowerBound < fanOut.lowerBound)
-        #expect(fanOut.lowerBound < sequence.lowerBound)
-        #expect(sequence.lowerBound < triage.lowerBound)
+        #expect(fanOut.lowerBound < triage.lowerBound)
+        #expect(!source.contains(
+            "for committed in postCommitPlan.sequenceSurvivors"
+        ), "retired automatic forecast/counterfactual work must stay absent")
 
         let preCommit = source[batchStart.lowerBound..<batchCommit.lowerBound]
         #expect(!preCommit.contains("shouldSuppressAndRecord"))
@@ -181,8 +179,8 @@ struct EngineAlertPostCommitTests {
         for downstream in [
             "if let store = state.campaignStore",
             "await state.notifier.notify(alert: campaignAlert)",
-            "state.ruleGenerator.generateFromCampaign",
-            "Task {",
+            "ruleGenerator.generateFromCampaignEnhanced",
+            "state.advisoryWorkLifecycle.submit(",
         ] {
             let action = try #require(campaignBranch.range(of: downstream))
             #expect(campaignGate.lowerBound < action.lowerBound)

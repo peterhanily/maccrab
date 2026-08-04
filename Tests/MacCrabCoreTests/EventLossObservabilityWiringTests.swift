@@ -75,7 +75,19 @@ struct EventLossObservabilityWiringTests {
             "\"events_storage_write_dropped_total\": eventWriterTelemetry.droppedCount"
         ), "legacy storage-drop meaning must remain the writer's permanent sheds")
         #expect(timers.contains(
+            "\"events_storage_write_offered_by_lane\": eventWriterTelemetry.offeredByLane"
+        ))
+        #expect(timers.contains(
+            "\"events_storage_write_dropped_by_lane\": eventWriterTelemetry.droppedByLane"
+        ))
+        #expect(timers.contains(
             "\"events_storage_write_persisted_total\": eventWriterTelemetry.persistedCount"
+        ))
+        #expect(timers.contains(
+            "\"events_storage_write_persisted_by_lane\": eventWriterTelemetry.persistedByLane"
+        ))
+        #expect(timers.contains(
+            "\"events_storage_write_filtered_by_lane\": eventWriterTelemetry.filteredByLane"
         ))
         #expect(timers.contains(
             "\"events_storage_write_retried_total\": eventWriterTelemetry.retriedCount"
@@ -85,6 +97,12 @@ struct EventLossObservabilityWiringTests {
         ))
         #expect(timers.contains(
             "\"events_storage_write_in_flight_depth\": eventWriterTelemetry.inFlightDepth"
+        ))
+        #expect(timers.contains(
+            "\"events_storage_write_in_flight_depth_by_lane\": eventWriterTelemetry.inFlightDepthByLane"
+        ))
+        #expect(timers.contains(
+            "\"events_retention_budget\": eventRetentionBudget"
         ))
         #expect(timers.contains(
             "payload[\"events_insert_filter_dropped_total\"] = eventInsertFilterCounters.dropped"

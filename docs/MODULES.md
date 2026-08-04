@@ -29,10 +29,10 @@ core for load-bearing decisions.
 | Rule engine | **stable** | Sigma-compatible YAML → JSON predicates. 486 rules (438 single-event + 41 sequence + 7 graph) indexed by category. |
 | Endpoint Security collector | **stable** | Native ES client for exec/fork/exit/file/network/signal events. |
 | Alert + campaign storage | **stable** | Per-tier SQLite stores with retention + size-cap discipline. |
-| Alert deduplicator | **stable** | Single-sink chokepoint for alert insertion. Per-rule dismissal feedback. |
+| Alert deduplicator | **stable** | Single-sink chokepoint for alert insertion with bounded duplicate and suppression telemetry; no adaptive severity authority. |
 | Sequence engine | experimental | 41 multi-step sequence rules with bounded windows (11 of 41 enabled under the default stable profile — see [COVERAGE.md](COVERAGE.md)). |
 | Campaign detector | experimental | Kill chain, alert storm, AI compromise, lateral movement clustering. |
-| Behavioral scoring | experimental | 70+ weighted indicators with feedback-adjusted weights. |
+| Behavioral scoring | experimental | 70+ bounded, deterministic weighted indicators; adaptive promotion remains disabled pending evaluated operator verdicts. |
 | Baseline anomaly | experimental | Welford z-score + 2nd-order Markov process tree anomaly. |
 | Topology anomaly | experimental | Process-graph structural-novelty detection. |
 | Cross-process correlator | experimental | Multi-process activity-pattern correlation across lineage graph. |
@@ -70,7 +70,8 @@ detections for load-bearing decisions.
 | Agent lineage service | experimental | Weaves ES events into per-AI-session timelines. |
 | Credential fence | experimental | Watches AI agents for credential file access. |
 | Project boundary | experimental | Detects AI agent writes outside the active project. |
-| Prompt injection scanner | experimental | Pattern + LLM-based prompt-injection detection. |
+| Prompt injection scanner | experimental | Bounded native marker, Unicode, and content-shape heuristics; not an LLM safety verdict. |
+| MCP behavior profile | experimental | Shadow-only bounded behavior candidates; novel values stay pending until explicit approval. |
 | MCP attributor | experimental | Attributes events back to specific MCP servers. |
 | LLM orchestration | experimental | 5 backend providers. Advisory only — never auto-executes. |
 

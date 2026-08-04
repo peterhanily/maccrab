@@ -12,6 +12,20 @@ import Foundation
 @Suite("MonitorSupervisor")
 struct MonitorSupervisorTests {
 
+    private func waitUntil(
+        timeoutSeconds: TimeInterval = 30,
+        _ predicate: @escaping @Sendable () async -> Bool
+    ) async {
+        let interval = UInt64(max(0, timeoutSeconds) * 1_000_000_000)
+        let addition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(interval)
+        let deadline = addition.overflow ? UInt64.max : addition.partialValue
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if await predicate() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
     @Test("start() launches work that runs to completion")
     func startRuns() async {
         let sup = MonitorSupervisor()
@@ -86,7 +100,11 @@ struct MonitorSupervisorTests {
             await secondCompleted.markDone()
         }
 
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // Task scheduling latency is not the contract under test. During the
+        // full suite, utility-pool saturation can exceed the old fixed 200 ms
+        // sleep even though replacement and cancellation are both correct.
+        // Poll with a coarse hang budget, then retain the exact state checks.
+        await waitUntil { await secondCompleted.done }
         #expect(await firstCompleted.done == true, "first task should have been cancelled + completed")
         #expect(await secondCompleted.done == true, "second task should have run")
         #expect(await sup.activeCount() == 1, "exactly one task under the slot name")
@@ -145,7 +163,7 @@ struct MonitorSupervisorTests {
         #expect(await sup.activeCount() == 0)
     }
 
-    @Test("10 rapid start/shutdown cycles leave no residue")
+    @Test("shutdown is one-shot and leaves no supervised residue")
     func rapidCycles() async {
         let sup = MonitorSupervisor()
         for i in 0..<10 {
@@ -158,14 +176,16 @@ struct MonitorSupervisorTests {
         await sup.shutdown(deadline: 1.0)
         #expect(await sup.activeCount() == 0)
 
-        // Subsequent start() after shutdown works — shutdown clears the
-        // dictionary but doesn't disable the supervisor.
-        await sup.start("post-shutdown") {
-            let stream = AsyncStream<Int> { _ in }
-            for await _ in stream {}
+        // Reopening this producer plane would let a late monitor escape the
+        // process finalization boundary. Admission remains sealed forever.
+        let postShutdownWork = MarkerBox()
+        let accepted = await sup.start("post-shutdown") {
+            await postShutdownWork.markDone()
         }
-        #expect(await sup.activeCount() == 1)
-        await sup.shutdown(deadline: 1.0)
+        #expect(!accepted)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await postShutdownWork.done == false)
+        #expect(await sup.activeCount() == 0)
     }
 }
 

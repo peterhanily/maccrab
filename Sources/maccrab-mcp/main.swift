@@ -19,10 +19,20 @@
 // Usage:
 //   Register in Claude Code settings:
 //   { "mcpServers": { "maccrab": { "command": "/path/to/maccrab-mcp" } } }
+//   Release/runtime probe: maccrab-mcp --version
 
 import Foundation
 import MacCrabCore
 import os.log
+
+// This path must stay before logger creation, Keychain/config resolution,
+// filesystem bootstrap, and parent-process logging. Release qualification
+// executes it to make taskgated/AMFI validate the final signed bare binary
+// without starting an MCP session or touching live state.
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--version" {
+    print("maccrab-mcp \(MacCrabVersion.current)")
+    exit(0)
+}
 
 // Force unbuffered stdout for reliable pipe output
 setbuf(stdout, nil)
@@ -214,10 +224,12 @@ struct AnyCodable: Decodable {
 // MARK: - Response Helpers
 
 /// Walk an MCP tool response dict and run every `content[].text` value
-/// through `LLMSanitizer.sanitize`. Other fields pass through untouched
-/// so structured ids (alert UUIDs, campaign ids, trace ids) are not
-/// scrambled — but free-form text the agent will render to the user is
-/// scrubbed of usernames, paths, IPs, hostnames, and credential shapes.
+/// through `LLMSanitizer.sanitize`. Successful structured evidence fields pass
+/// through untouched so chain-of-custody values are not altered. Structured
+/// ERROR payloads are different: they are control-plane metadata, not evidence,
+/// so every nested string is scrubbed as well. This closes the easy-to-miss
+/// path where a handler sanitized its human-readable error while returning the
+/// same raw path, hostname, or credential in `structuredContent`.
 func sanitizeContent(_ result: Any) -> Any {
     guard var dict = result as? [String: Any] else { return result }
     if let content = dict["content"] as? [[String: Any]] {
@@ -230,7 +242,26 @@ func sanitizeContent(_ result: Any) -> Any {
         }
         dict["content"] = scrubbed
     }
+    if (dict["isError"] as? Bool) == true,
+       let structured = dict["structuredContent"] {
+        dict["structuredContent"] = sanitizeStructuredErrorValue(structured)
+    }
     return dict
+}
+
+/// Error-only recursive scrubber. IDs and fixed enum strings survive the
+/// sanitizer unchanged, while any accidentally-added free-form field is
+/// covered at the dispatch boundary rather than relying on every handler to
+/// remember a second sanitization step.
+private func sanitizeStructuredErrorValue(_ value: Any) -> Any {
+    if let string = value as? String { return LLMSanitizer.sanitize(string) }
+    if let values = value as? [Any] {
+        return values.map(sanitizeStructuredErrorValue)
+    }
+    if let fields = value as? [String: Any] {
+        return fields.mapValues(sanitizeStructuredErrorValue)
+    }
+    return value
 }
 
 func sendResponse(id: RequestId?, result: Any) {
@@ -355,7 +386,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "export_session_bundle",
-        "description": "Export one agent session as a signed, Merkle-rooted, tamper-evident bundle (events + alerts + mutations) — a replayable black box for the session. Returns the bundle path, Merkle root, and signing status.",
+        "description": "Export one agent session as a signed, Merkle-rooted, tamper-evident bundle (events + alerts + mutations) — a replayable black box for the session. This writes potentially sensitive evidence to a local bundle and therefore requires the human-enabled 'response' capability. Returns the bundle path, Merkle root, and signing status.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -438,13 +469,13 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "description": "Max alerts to return (default 20, max 100)", "default": 20],
-                "hours": ["type": "number", "description": "Only alerts from the last N hours (default: 24)", "default": 24],
+                "hours": ["type": "number", "description": "Only alerts from the last N hours (default 24; positive finite value, capped at 8760)", "default": 24],
             ],
         ] as [String: Any],
     ],
     [
         "name": "scan_text",
-        "description": "Scan text for prompt-injection markers using MacCrab's built-in native scanner. An AI agent can call this before processing untrusted input — file contents, web pages, user-supplied prompts. COVERAGE, STATED PLAINLY: 25 literal case-insensitive substring signatures across 7 categories (instruction-override, jailbreak, prompt-extraction, role-manipulation, tool-poisoning, structural-injection, exfiltration) plus an invisible-unicode check. It is substring matching, NOT obfuscation-resistant — base64, homoglyph, and split-token payloads pass — and text shorter than 10 characters is always reported safe. Returns a verdict, a confidence score, and the matched category names. Treat a clean result as 'no known literal marker found', not as proof the input is safe.",
+        "description": "Scan text for prompt-injection markers using MacCrab's bounded native heuristic. An AI agent can call this before processing untrusted input — file contents, web pages, user-supplied prompts. COVERAGE, STATED PLAINLY: 24 literal case-insensitive substring signatures across 7 categories (instruction-override, jailbreak, prompt-extraction, role-manipulation, tool-poisoning, structural-injection, exfiltration) plus an invisible-unicode check. It is NOT obfuscation-resistant — base64, homoglyph, and split-token payloads pass — and text shorter than 10 characters is not evaluated. Returns known-marker matches and an uncalibrated heuristic score, not a safety verdict. A clean result means only 'no known literal marker found within this coverage'.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -595,7 +626,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "classify_package_intent",
-        "description": "LLM-driven structured-intent classifier. Takes a behavior brief (package name + installer lineage + credential reads + network egress + content anomaly flags + AI-agent attribution) and returns a calibrated IntentLabel (benign / credentialHarvest / exfiltration / persistence / destructive / reconnaissance / lateralMovement / unknown) + confidence + ranked reasons. Falls back to a deterministic heuristic classifier when no LLM is configured.",
+        "description": "Structured-intent advisory classifier. Takes a behavior brief (package name + installer lineage + credential reads + network egress + content anomaly flags + AI-agent attribution) and returns an IntentLabel (benign / credentialHarvest / exfiltration / persistence / destructive / reconnaissance / lateralMovement / unknown), an uncalibrated model/heuristic score, provider, abstention state, and ranked reasons. It may send the brief to the operator-configured remote LLM, so it requires the human-enabled 'config' capability; it falls back to a deterministic local heuristic when no LLM is configured. The result is triage advice, not mutation authority or a probability-calibrated verdict.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -629,12 +660,12 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "score_text_style",
-        "description": "Compute stylometric + LLM-text + urgency scores for a text blob (commit message / PR description / README). Used for: maintainer style-drift detection (mockingbird / persona takeover), LLM-generated text detection (em-dash density + hedge phrases + sentence variance), urgency-lexicon scoring (XZ-Utils Jia Tan / polyfill.io social-engineering pattern).",
+        "description": "Compute two local, deterministic, uncalibrated text heuristics for a text blob (commit message / PR description / README): an LLM-like-style score (em-dash density, hedge phrases, sentence variance) and an urgency-lexicon score. These are triage signals, not probabilities, authorship attribution, compromise findings, or proof that an LLM wrote the text. This MCP tool has no authenticated per-author baseline and therefore does not evaluate author drift.",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "text": ["type": "string", "description": "Text to analyse (max 100KB)"],
-                "author": ["type": "string", "description": "Optional author identifier — if provided and a baseline exists, returns a drift result"],
+                "text": ["type": "string", "description": "Text to analyse (max 100,000 characters)"],
+                "author": ["type": "string", "description": "Deprecated compatibility field. It is accepted but never used for drift or attribution because this tool has no authenticated author baseline."],
             ],
             "required": ["text"],
         ] as [String: Any],
@@ -800,7 +831,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_check_plugin_updates",
-        "description": "Read-only. For each installed third-party scanner, report installed_version, the catalog's available_version, whether an update_available, and pin state (is_pinned / pinned_to). Verifies the signed rave catalog before comparing. Returns {plugins:[...], count}.",
+        "description": "Non-mutating catalog lookup. For each installed third-party scanner, report installed_version, the catalog's available_version, whether an update_available, and pin state (is_pinned / pinned_to). It may fetch the signed rave catalog over the network and therefore requires the human-enabled 'config' capability. Returns {plugins:[...], count}.",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -838,7 +869,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "forensics_search_catalog",
-        "description": "Read-only. Search the signed rave plugin catalog for INSTALLABLE third-party scanners (Ed25519-verified before listing), like `maccrabctl plugin search`. Returns matches; an empty query lists the catalog.",
+        "description": "Non-mutating catalog lookup. Search the signed rave plugin catalog for INSTALLABLE third-party scanners (Ed25519-verified before listing), like `maccrabctl plugin search`. It may fetch the catalog over the network and therefore requires the human-enabled 'config' capability. Returns matches; an empty query lists the catalog.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -1035,16 +1066,16 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "set_response_action",
-        "description": "Add or replace a response action in actions.json — what the engine does when a rule fires. Requires the 'response' capability because kill / quarantine / blockNetwork act against the process or file that tripped the rule (defense-affecting). Omit rule_id to set a DEFAULT action (all rules). Destructive actions default to requiring operator confirmation (require_confirmation); they will NOT auto-execute unless you pass require_confirmation:false. Edits take effect on the engine's next reload (~5 s).",
+        "description": "Add or replace a response action in actions.json — what the engine does when a rule fires. Requires the human-enabled 'response' capability. MCP-created kill, quarantine, script, and blockNetwork actions are accepted ONLY as confirmation-required per-rule actions: rule_id is mandatory, require_confirmation:false is rejected, and a destructive global default cannot be created through MCP. Non-destructive log, notify, and escalateNotification actions may still be configured as defaults. Edits take effect on the engine's next reload (~5 s).",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "rule_id": ["type": "string", "description": "rule id to attach the action to; omit for a default action applied to all rules"],
+                "rule_id": ["type": "string", "description": "rule id to attach the action to; mandatory for kill/quarantine/script/blockNetwork, optional only for non-destructive defaults"],
                 "action": ["type": "string", "description": "one of: log, notify, kill, quarantine, script, blockNetwork, escalateNotification", "enum": ["log", "notify", "kill", "quarantine", "script", "blockNetwork", "escalateNotification"]],
                 "min_severity": ["type": "string", "description": "only fire for alerts at/above this severity (default high)", "enum": ["critical", "high", "medium", "low", "informational"]],
                 "script_path": ["type": "string", "description": "required for action 'script': path to the script the engine runs (engine still enforces its root-owned-dir allowlist)"],
-                "require_confirmation": ["type": "boolean", "description": "true gates the action behind operator confirmation; defaults to true for kill/quarantine/blockNetwork"],
-                "block_duration_seconds": ["type": "integer", "description": "for blockNetwork: how long to keep the PF block (default 3600)"],
+                "require_confirmation": ["type": "boolean", "description": "Compatibility field. For kill/quarantine/script/blockNetwork the server always persists true and rejects false. For non-destructive actions it may be omitted."],
+                "block_duration_seconds": ["type": "integer", "description": "for blockNetwork: how long to keep the PF block (default 3600; MCP accepts 1...86400)"],
             ],
             "required": ["action"],
         ] as [String: Any],
@@ -1076,8 +1107,21 @@ let suppressBudget = SuppressBudget()
 let traceGraphPath = resolveTraceGraphPath()
 
 func handleToolCall(name: String, args: [String: Any]) async -> Any {
-    // v1.18 agent control-plane: deny mutating tools whose capability tier the
-    // human hasn't enabled (all tiers off by default). Read-only tools pass.
+    // Dynamic manifest tools cannot live in the exhaustive static authority
+    // registry. Resolve that namespace first only when the name is absent from
+    // BOTH static classifications; a plugin can never shadow/bypass a static
+    // tool's assigned authority. The dynamic handler applies its own fail-closed
+    // `.response` gate.
+    if agentToolCapability[name] == nil,
+       !agentUngatedStaticTools.contains(name) {
+        try? await ForensicsMCPBootstrapper.shared.ensure()
+        if let manifest = await pluginForMCPTool(name) {
+            return await handlePluginMCPTool(name: name, manifest: manifest, args: args)
+        }
+    }
+
+    // Static agent control-plane: every name must be explicitly ungated or
+    // assigned a capability. Unknown/new cases fail closed before the switch.
     if let denial = agentCapabilityDenial(forTool: name, args: args) { return denial }
     switch name {
     // v1.18 agent control-plane (see AgentControl.swift).
@@ -1234,14 +1278,9 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
     case "tierb.verify":
         return await handleTierBVerify()
     default:
-        // Dynamically-registered per-plugin tools (manifest-declared
-        // mcpTools on collector plugins). Forward-compatible: future
-        // installed collector plugins route here automatically.
-        try? await ForensicsMCPBootstrapper.shared.ensure()
-        if let manifest = await pluginForMCPTool(name) {
-            return await handlePluginMCPTool(name: name, manifest: manifest, args: args)
-        }
-        return toolError("Unknown tool: \(name)")
+        // Unreachable for a correctly classified static tool. Keep an explicit
+        // denial as defense in depth if the registry/switch invariant drifts.
+        return toolError("Denied MCP tool '\(name)': no registered dispatch handler")
     }
 }
 
@@ -1303,6 +1342,7 @@ func runMaccrabctl(_ args: [String]) -> (status: Int32, stdout: String, stderr: 
 }
 
 func handleCheckPluginUpdates() -> Any {
+    auditLog("forensics_check_plugin_updates", details: "catalog_egress_may_occur=true ppid=\(getppid())")
     guard let r = runMaccrabctl(["plugin", "check-updates", "--json"]) else {
         return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
     }
@@ -1368,6 +1408,7 @@ func handleForensicsRunAll(_ args: [String: Any]) -> Any {
 
 func handleForensicsSearchCatalog(_ args: [String: Any]) -> Any {
     let query = (args["query"] as? String) ?? ""
+    auditLog("forensics_search_catalog", details: "catalog_egress_may_occur=true ppid=\(getppid())")
     guard let r = runMaccrabctl(["plugin", "search", query]) else {
         return toolError("Could not locate or run maccrabctl (expected alongside maccrab-mcp).")
     }
@@ -1507,12 +1548,16 @@ private let sharedStylometric = StylometricFingerprinter()
 
 /// Resolve an LLM backend for the MCP server (currently only
 /// classify_package_intent uses it). Builds an LLMConfig from the
-/// dashboard-written non-secret `llm_config.json`, shared-Keychain secrets,
+/// dashboard-written non-secret `llm_config.json`, best-effort Keychain lookup,
 /// and env overrides, then lets
 /// `LLMService.makeFromConfig` run its bounded 3 s availability probe.
 /// Returns nil (→ heuristic fallback) when nothing is configured or the
-/// backend is unreachable. Keychain access explicitly forbids authentication
-/// UI so an agent-driven server process can degrade without prompting.
+/// backend is unreachable. The shipped bare executable deliberately has no
+/// access-group entitlement (adding one without a per-tool provisioning bundle
+/// is an AMFI launch failure), so dashboard-stored cloud keys are normally
+/// unavailable here; environment keys and local Ollama remain supported.
+/// Keychain access explicitly forbids authentication UI so an agent-driven
+/// server process degrades without prompting.
 private func resolveMCPLLMService() async -> LLMService? {
     var config = LLMConfig()
     var hasConfig = false
@@ -1668,6 +1713,9 @@ func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
         hasLanguageMismatch: (args["has_language_mismatch"] as? Bool) ?? false,
         aiAgentTriggered: (args["ai_agent_triggered"] as? Bool) ?? false
     )
+    // A configured remote backend may receive the bounded brief. Admission is
+    // .config-gated before this handler and the possible egress is audit logged.
+    auditLog("classify_package_intent", details: "model_egress_may_occur=true ppid=\(getppid())")
     // Use a configured LLM backend when one is available (resolved +
     // availability-probed once per process); IntentClassifier falls back
     // to its deterministic heuristic when this is nil.
@@ -1675,7 +1723,7 @@ func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
     let result = await classifier.classify(brief)
     var lines: [String] = ["Intent classification: \(packageName)"]
     lines.append("Label: \(result.label.rawValue)")
-    lines.append("Confidence: \(String(format: "%.2f", result.confidence))")
+    lines.append("Uncalibrated model/heuristic score: \(String(format: "%.2f", result.confidence))")
     lines.append("Provider: \(result.provider)")
     lines.append("Abstained: \(result.abstained)")
     for reason in result.reasons { lines.append("- \(reason)") }
@@ -1704,24 +1752,24 @@ func handleScoreTextStyle(_ args: [String: Any]) async -> Any {
         return toolError("Error: 'text' required")
     }
     guard text.count <= 100_000 else {
-        return toolError("Error: text too long (max 100KB)")
+        return toolError("Error: text too long (max 100,000 characters)")
     }
-    let llmScore = await sharedStylometric.llmTextScore(text)
-    let urgency = await sharedStylometric.urgencyScore(text)
-    var lines: [String] = ["Stylometric scan"]
-    lines.append("LLM-text score: \(llmScore)/100")
-    lines.append("Urgency score: \(urgency.score)/100")
+    let llmScore = sharedStylometric.llmTextScore(text)
+    let urgency = sharedStylometric.urgencyScore(text)
+    var lines: [String] = [
+        "Text-style heuristic scan",
+        "These scores are uncalibrated triage signals, not probabilities or authorship/compromise verdicts.",
+    ]
+    lines.append("LLM-like-style heuristic (uncalibrated): \(llmScore)/100")
+    lines.append("Urgency-lexicon heuristic (uncalibrated): \(urgency.score)/100")
     if !urgency.matchedTerms.isEmpty {
         lines.append("Urgency terms matched: \(urgency.matchedTerms.joined(separator: ", "))")
     }
     if let author = args["author"] as? String, !author.isEmpty {
-        if let drift = await sharedStylometric.checkDrift(author: author, text: text) {
-            lines.append("Author '\(author)' drift cosine distance: \(String(format: "%.3f", drift.cosineDistance))")
-            lines.append("Flagged: \(drift.flagged ? "YES" : "no")")
-            for reason in drift.reasons { lines.append("  - \(reason)") }
-        } else {
-            lines.append("No baseline yet for author '\(author)' — call again to start the rolling baseline")
-        }
+        // Compatibility only. This process has no trusted producer for the
+        // in-memory baseline, and repeated calls never establish one. Do not
+        // turn an unauthenticated caller-supplied label into identity evidence.
+        lines.append("Author drift: not evaluated (this tool has no authenticated author baseline).")
     }
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
@@ -2054,8 +2102,11 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
         let page = try await store.campaigns(before: cursor, pageSize: limit)
         let campaigns = page.items
 
-        if campaigns.isEmpty && cursor == nil {
-            return ["content": [["type": "text", "text": "No campaigns detected. This is good — no multi-stage attacks identified."]]]
+        if campaigns.isEmpty {
+            let text = cursor == nil
+                ? "No persisted campaign roll-up alerts were found in the accessible MacCrab alert store. This bounded absence is not a safety verdict and does not prove that no multi-stage activity occurred."
+                : "No additional persisted campaign roll-up alerts were found after this cursor. The page is exhausted; this bounded query is not evidence that no multi-stage activity occurred."
+            return ["content": [["type": "text", "text": text]]]
         }
 
         var lines: [String] = ["\(campaigns.count) campaign(s) detected:"]
@@ -2263,6 +2314,7 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
     guard UUID(uuidString: sessionId) != nil else {
         return toolError("'session_id' must be a session UUID (from list_agent_sessions)")
     }
+    auditLog("export_session_bundle", details: "session_id=\(sessionId) ppid=\(getppid())")
     do {
         let store = try EventStore(directory: dataDir)
         let events = try await store.eventsForAgentSession(sessionId, limit: 10000)
@@ -2392,6 +2444,230 @@ func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
 
 enum DaemonLiveness: String { case running = "Running", offline = "Offline", unknown = "Unknown" }
 
+/// Shared-heartbeat TraceGraph verdict for agent operators. Admission can be
+/// Active while a failed batch, pending backlog, or broken conservation ledger
+/// proves causal evidence was not fully persisted.
+func traceGraphPersistenceStatusLines(
+    _ storage: HeartbeatSnapshot.TraceGraphStorageAdmission
+) -> [String] {
+    let admissionUnavailable = storage.blocked == true
+        || storage.storeAvailable == false
+        || storage.enabled == false
+    if !admissionUnavailable, !storage.graphWriteDegraded {
+        return ["TraceGraph: Active"]
+    }
+    if !admissionUnavailable {
+        var lines = ["TraceGraph: Evidence writes degraded"]
+        if storage.hasStickyWriteFailure == true {
+            lines.append(
+                "  Failed since boot: events=\(storage.ingestEventsFailedTotal ?? -1), batches=\(storage.writeBatchesFailedTotal ?? -1), rows=\(storage.writeRowsFailedTotal ?? -1)."
+            )
+        }
+        if storage.writeConservationMaintained == false {
+            lines.append("  Ingest/write accounting does not conserve; persisted evidence totals are not trustworthy.")
+        }
+        if storage.writeTelemetryPresent && !storage.writeTelemetryComplete {
+            lines.append("  TraceGraph write accounting is incomplete; missing counters cannot be treated as healthy.")
+        }
+        if storage.hasOutstandingBacklog == true {
+            let rows = (storage.pendingEntityRows ?? 0) + (storage.pendingEdgeRows ?? 0)
+            lines.append("  Outstanding backlog: \(storage.ingestEventsPending ?? -1) event(s), \(rows) row(s); repeated heartbeats mean the writer is stuck.")
+        }
+        return lines
+    }
+    let reason = storage.reason.flatMap { $0.isEmpty ? nil : $0 }
+        ?? "reason not reported"
+    var lines = [
+        "TraceGraph: Persistence unavailable (\(reason))",
+        "  Detection continues, but new causal evidence is not being recorded.",
+    ]
+    if storage.hasStickyWriteFailure == true {
+        lines.append(
+            "  Failed since boot: events=\(storage.ingestEventsFailedTotal ?? -1), batches=\(storage.writeBatchesFailedTotal ?? -1), rows=\(storage.writeRowsFailedTotal ?? -1)."
+        )
+    }
+    if storage.writeConservationMaintained == false {
+        lines.append("  Ingest/write accounting does not conserve; persisted evidence totals are not trustworthy.")
+    }
+    if storage.writeTelemetryPresent && !storage.writeTelemetryComplete {
+        lines.append("  TraceGraph write accounting is incomplete; missing counters cannot be treated as healthy.")
+    }
+    return lines
+}
+
+/// Fixed-cardinality/content-free AI accounting for MCP `get_status`.
+func llmRuntimeOperatorStatusLines(_ llm: HeartbeatSnapshot.LLMHealth) -> [String] {
+    guard llm.configured == true else { return ["AI Runtime: Not configured"] }
+    guard let runtime = llm.runtimeTelemetry else {
+        return llm.runtimeTelemetryEncodingFailed == true
+            ? ["AI Runtime: Telemetry unavailable (engine encoding failure)"]
+            : ["AI Runtime: Accounting unavailable (older engine)"]
+    }
+    let totals = runtime.totals
+    let outcomes = totals.outcomes
+    let semantic = totals.downstreamValidation
+    let conservation = llm.runtimeConservationMaintained == true
+        ? "conserving" : "DEGRADED"
+    let featureTotals = runtime.perFeature.map {
+        "\($0.feature.rawValue)=\($0.counters.requestedTotal)"
+    }.joined(separator: ", ")
+    return [
+        "AI Runtime: requested=\(totals.requestedTotal), in_flight=\(totals.currentInFlight), backend_calls=\(totals.backendCallsStartedTotal), accounting=\(conservation)",
+        "  Outcomes: success=\(outcomes.success), cache_hit=\(outcomes.cacheHit), backend_failure=\(outcomes.backendFailure), circuit_rejection=\(outcomes.circuitRejection), privacy_rejection=\(outcomes.privacyRejection), admission_shed=\(outcomes.admissionShed), cancellation=\(outcomes.cancellation), response_oversize=\(outcomes.responseOversize)",
+        "  Attribution: unspecified=\(llm.unspecifiedRequestsTotal ?? 0); \(featureTotals)",
+        "  Semantic validation: operations=\(semantic.operationsStartedTotal), current=\(semantic.currentOperations), accepted=\(semantic.accepted), retries=\(semantic.retryRequested), final_rejection=\(semantic.finalRejection)",
+    ]
+}
+
+func alertEvidenceBudgetStatusLines(
+    _ budget: HeartbeatSnapshot.AlertEvidenceBudget
+) -> [String] {
+    func mib(_ bytes: Int64?) -> String {
+        guard let bytes else { return "unknown" }
+        return "\(bytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB"
+    }
+    var lines = [
+        "Storage Caps (live transition-aware): events=\(mib(budget.eventsFamilyEffectiveCapBytes)), alerts+evidence=\(mib(budget.alertsFamilyCombinedCapBytes)), combined=\(mib(budget.eventsAndAlertsTotalCapBytes))",
+        "Storage Caps (steady state): events=\(mib(budget.eventsFamilySteadyStateCapBytes)), combined=\(mib(budget.eventsAndAlertsSteadyStateTotalCapBytes))",
+    ]
+    if (budget.legacyTransitionReserveBytes ?? 0) > 0 {
+        lines.append("Legacy evidence reserve: live=\(mib(budget.legacyTransitionReserveBytes)), maximum=\(mib(budget.legacyTransitionMaxBytes)), rows=\(budget.legacyRowCount ?? -1), charged=\(mib(budget.legacyChargedBytes))")
+    }
+    if budget.legacyTransitionMeasurementFailed == true {
+        lines.append("Legacy evidence transition: DEGRADED measurement; bounded maximum reserve retained fail-closed")
+    }
+    if let offered = budget.captureOfferedTotal {
+        let accepting = budget.captureAccepting.map { $0 ? "yes" : "no" }
+            ?? "unknown"
+        let conserving = budget.captureConservationMaintained
+            .map { $0 ? "yes" : "NO" } ?? "unknown"
+        lines.append("Evidence Worker: offered=\(offered), completed=\(budget.captureCompletedTotal ?? -1), failed=\(budget.captureFailuresTotal ?? -1), shed=\(budget.captureShedTotal ?? -1), pending=\(budget.capturePending ?? -1), in_flight=\(budget.captureInFlight ?? -1), capacity=\(budget.captureQueueCapacity ?? -1), accepting=\(accepting), conserving=\(conserving)")
+        if budget.captureDegraded {
+            lines.append("Evidence Worker: DEGRADED (a single in-flight job is normal; failures, shedding, drift, or repeated pending backlog are not)")
+        }
+    }
+    if budget.allocatedBytesExact != nil
+        || budget.mutationGeneration != nil
+        || budget.fullRefreshesTotal != nil {
+        let exact = budget.allocatedBytesExact.map { $0 ? "yes" : "no" }
+            ?? "unknown"
+        let generation = budget.mutationGeneration.map { String($0) }
+            ?? "unknown"
+        let refreshes = budget.fullRefreshesTotal.map { String($0) }
+            ?? "unknown"
+        lines.append("Evidence Budget: allocated_exact=\(exact), mutation_generation=\(generation), full_refreshes=\(refreshes)")
+    }
+    if budget.allocatedBytesExact == false {
+        lines.append("Evidence Budget: allocation is a conservative upper bound pending an exact DBSTAT refresh")
+    }
+    return lines
+}
+
+func timerLifecycleOperatorStatusLines(
+    _ timers: HeartbeatSnapshot.TimerLifecycle
+) -> [String] {
+    lifecycleOperatorStatusLines(
+        label: "Maintenance",
+        lifecycle: timers,
+        degraded: timers.featureDegraded,
+        degradedDetail: "A maintenance/retention operation was lost, did not join cleanly, or has incomplete accounting; live detection may continue, but that maintenance guarantee is degraded."
+    )
+}
+
+func workLifecycleOperatorStatusLines(
+    _ heartbeat: HeartbeatSnapshot
+) -> [String] {
+    var lines: [String] = []
+    if let lifecycle = heartbeat.timerLifecycle {
+        lines.append(contentsOf: timerLifecycleOperatorStatusLines(lifecycle))
+    }
+    func append(
+        _ label: String,
+        _ lifecycle: HeartbeatSnapshot.TimerLifecycle?,
+        degraded: (HeartbeatSnapshot.TimerLifecycle) -> Bool,
+        detail: String
+    ) {
+        guard let lifecycle else { return }
+        lines.append(contentsOf: lifecycleOperatorStatusLines(
+            label: label,
+            lifecycle: lifecycle,
+            degraded: degraded(lifecycle),
+            degradedDetail: detail
+        ))
+    }
+    append(
+        "Liveness", heartbeat.livenessTimerLifecycle,
+        degraded: { $0.featureDegraded },
+        detail: "The independent liveness heartbeat lost work, did not join cleanly, or has incomplete accounting; external process-health observations may be incomplete."
+    )
+    append(
+        "Startup Work", heartbeat.startupWorkLifecycle,
+        degraded: { $0.featureDegraded },
+        detail: "A boot hydration or startup worker was lost, did not join cleanly, or has incomplete accounting; startup feature completeness is degraded."
+    )
+    append(
+        "Detection Work", heartbeat.detectionWorkLifecycle,
+        degraded: { $0.detectionProtectionDegraded },
+        detail: "PROTECTION DEGRADED: a security decision was rejected, shed, left unjoined, or could not be accounted for completely. Lossless inline overload fallback and intentional coalescing are not loss."
+    )
+    append(
+        "AI Advisory", heartbeat.advisoryWorkLifecycle,
+        degraded: { $0.featureDegraded },
+        detail: "AI/advisory features shed work or reported incomplete ownership; deterministic detection and locally persisted alerts continue."
+    )
+    append(
+        "Alert Outputs", heartbeat.outputWorkLifecycle,
+        degraded: { $0.featureDegraded },
+        detail: "Notification or external delivery shed work or reported incomplete ownership; detection and local alert persistence continue."
+    )
+    let splitPresent = heartbeat.livenessTimerLifecycle != nil
+        || heartbeat.startupWorkLifecycle != nil
+        || heartbeat.detectionWorkLifecycle != nil
+        || heartbeat.advisoryWorkLifecycle != nil
+        || heartbeat.outputWorkLifecycle != nil
+    if !splitPresent {
+        append(
+            "Legacy Derived", heartbeat.legacyDerivedWorkLifecycle,
+            degraded: { $0.featureDegraded },
+            detail: "This older aggregate cannot attribute loss to detection, AI advisory, or output delivery; upgrade for exact lane health."
+        )
+    }
+    return lines
+}
+
+private func lifecycleOperatorStatusLines(
+    label: String,
+    lifecycle: HeartbeatSnapshot.TimerLifecycle,
+    degraded: Bool,
+    degradedDetail: String
+) -> [String] {
+    let state = degraded ? "DEGRADED" : "conserving"
+    var lines = [
+        "\(label): \(state) (offered=\(lifecycle.offeredHandlersTotal ?? 0), accepted=\(lifecycle.acceptedHandlersTotal ?? 0), completed=\(lifecycle.completedHandlersTotal ?? 0), in_flight=\(lifecycle.inFlightHandlers ?? 0)/\(lifecycle.maximumInFlightHandlers ?? 0), rejected=\(lifecycle.rejectedHandlersTotal ?? 0), closed=\(lifecycle.closedRejectedHandlersTotal ?? 0), overload_shed=\(lifecycle.overloadShedHandlersTotal ?? 0), coalesced=\(lifecycle.coalescedHandlersTotal ?? 0), inline_fallback=\(lifecycle.inlineFallbackHandlersTotal ?? 0), accepted_conserves=\(lifecycle.conservesAcceptedHandlers.map { String($0) } ?? "unknown"), offered_conserves=\(lifecycle.conservesOfferedHandlers.map { String($0) } ?? "unknown"))"
+    ]
+    if degraded {
+        lines.append("  \(degradedDetail)")
+    } else if lifecycle.losslessPressureObserved {
+        lines.append("  Capacity pressure was handled without measured loss (coalesced or run inline).")
+    }
+    return lines
+}
+
+func otlpReceiverLifecycleOperatorStatusLines(
+    _ lifecycle: HeartbeatSnapshot.OTLPReceiverLifecycle
+) -> [String] {
+    let state = lifecycle.featureDegraded ? "FEATURE DEGRADED" : "conserving"
+    var lines = [
+        "Agent OTLP Lifecycle: \(state) (listeners accepted=\(lifecycle.listenersAcceptedTotal ?? 0), completed=\(lifecycle.listenersCompletedTotal ?? 0), active=\(lifecycle.activeListeners ?? 0), ready=\(lifecycle.readyListeners ?? 0), rejected_after_seal=\(lifecycle.listenersRejectedAfterSealTotal ?? 0), conserves=\(lifecycle.listenersConserved.map { String($0) } ?? "unknown"); connections accepted=\(lifecycle.connectionsAcceptedTotal ?? 0), completed=\(lifecycle.connectionsCompletedTotal ?? 0), active=\(lifecycle.activeConnections ?? 0), rejected_after_seal=\(lifecycle.connectionsRejectedAfterSealTotal ?? 0), rejected_at_capacity=\(lifecycle.connectionsRejectedAtCapacityTotal ?? 0), conserves=\(lifecycle.connectionsConserved.map { String($0) } ?? "unknown"); body accepted=\(lifecycle.bodyTasksAcceptedTotal ?? 0), completed=\(lifecycle.bodyTasksCompletedTotal ?? 0), cancelled=\(lifecycle.bodyTasksCancelledTotal ?? 0), rejected=\(lifecycle.bodyTasksRejectedTotal ?? 0), in_flight=\(lifecycle.bodyTasksInFlight ?? 0)/\(lifecycle.maximumBodyTasks ?? 0), conserves=\(lifecycle.bodyTasksConserved.map { String($0) } ?? "unknown"); callbacks accepted=\(lifecycle.callbackTasksAcceptedTotal ?? 0), completed=\(lifecycle.callbackTasksCompletedTotal ?? 0), cancelled=\(lifecycle.callbackTasksCancelledTotal ?? 0), rejected=\(lifecycle.callbackTasksRejectedTotal ?? 0), in_flight=\(lifecycle.callbackTasksInFlight ?? 0)/\(lifecycle.maximumCallbackTasks ?? 0), conserves=\(lifecycle.callbackTasksConserved.map { String($0) } ?? "unknown"); lifecycle_operations=\(lifecycle.lifecycleOperationsInProgress ?? 0), cleanly_stopped=\(lifecycle.cleanlyStopped.map { String($0) } ?? "unknown"), last_shutdown_clean=\(lifecycle.lastShutdownClean.map { String($0) } ?? "not_attempted"), shutdown_timeouts=\(lifecycle.shutdownTimeoutsTotal ?? 0))"
+    ]
+    if lifecycle.featureDegraded {
+        lines.append("  Unauthenticated/self-reported OTLP input was rejected, ownership was incomplete/non-conserving, sealed work remains, a lifecycle operation is still in progress, or shutdown was unclean; kernel detection continues.")
+    } else if lifecycle.acceptingListeners == true {
+        lines.append("  Receiver is open; active listeners/connections/callbacks/body tasks and cleanly_stopped=false are normal while all ownership ledgers conserve.")
+    }
+    return lines
+}
+
 /// MCP-5: liveness from HEARTBEAT RECENCY, not just a `-wal` sidecar. A `-wal`
 /// file can linger after a crash, so "WAL present ⇒ running" reported a dead
 /// daemon as Running. The daemon rewrites heartbeat.json frequently; a fresh
@@ -2450,6 +2726,7 @@ func handleGetStatus() async -> Any {
     // only when it is missing or stale.
     let hb = (try? Data(contentsOf: URL(fileURLWithPath: dataDir + "/heartbeat_rich.json")))
         .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let typedHeartbeat = HeartbeatSnapshot.readFreshest(supportDirs: [dataDir])
     if let hb, let active = hb["rules_active"] as? Int, let loaded = hb["rules_loaded"] as? Int {
         let profile = (hb["rule_profile"] as? String) ?? "stable"
         lines.append("Rules: \(active) enabled / \(loaded) compiled (rule_profile: \(profile))")
@@ -2477,6 +2754,55 @@ func handleGetStatus() async -> Any {
             lines.append("  Unauthenticated/self-reported OTLP spans are not being recorded; kernel detection continues.")
         } else {
             lines.append("Agent Trace DB: Active (unauthenticated/self-reported OTLP)")
+        }
+    }
+
+    if let storage = typedHeartbeat?.traceGraphStorageAdmission {
+        lines.append(contentsOf: traceGraphPersistenceStatusLines(storage))
+    }
+
+    if let llm = typedHeartbeat?.llm {
+        lines.append(contentsOf: llmRuntimeOperatorStatusLines(llm))
+    }
+
+    if let budget = typedHeartbeat?.alertEvidenceBudget {
+        lines.append(contentsOf: alertEvidenceBudgetStatusLines(budget))
+    }
+
+    if let typedHeartbeat {
+        lines.append(contentsOf: workLifecycleOperatorStatusLines(typedHeartbeat))
+        if let otlp = typedHeartbeat.otlpReceiverLifecycle {
+            lines.append(contentsOf: otlpReceiverLifecycleOperatorStatusLines(otlp))
+        }
+    }
+
+    // Multi-event detection continuity must be visible to the same agent that
+    // asks whether MacCrab is healthy. A live daemon and current checkpoint do
+    // not compensate for runtime partial/pending eviction or weight drift.
+    if let heartbeat = hb,
+       let checkpoint = heartbeat["sequence_checkpoint"] as? [String: Any] {
+        let runtimeMaintained = heartbeat["sequence_state_continuity_maintained"] as? Bool
+        let rpoMaintained = checkpoint["crash_rpo_bound_currently_maintained"] as? Bool
+        let carrierValid = checkpoint["durable_carrier_valid"] as? Bool
+        let restoreStatus = checkpoint["restore_status"] as? String ?? "unknown"
+        if runtimeMaintained == false {
+            let reason = heartbeat["sequence_state_continuity_detail"] as? String
+                ?? "runtime state loss or accounting drift"
+            lines.append("Sequence State: Runtime continuity degraded (\(reason))")
+            lines.append("  Some in-flight multi-event detections were lost or cannot be accounted for exactly.")
+        } else if carrierValid == false || rpoMaintained == false || restoreStatus == "rejected" {
+            lines.append("Sequence State: Restart continuity degraded")
+            lines.append("  Detection continues, but in-flight multi-event state is not currently restart-safe.")
+        } else if rpoMaintained == true {
+            lines.append("Sequence State: Restart-safe")
+            if let invalidations = checkpoint["carrier_invalidations_total"] as? NSNumber,
+               invalidations.uint64Value > 0 {
+                let reason = checkpoint["last_carrier_invalidation_reason"] as? String
+                    ?? "reason unavailable"
+                lines.append("  Recovered carrier invalidations: \(invalidations.uint64Value) (last: \(reason)).")
+            }
+        } else {
+            lines.append("Sequence State: Status unavailable")
         }
     }
 
@@ -2692,7 +3018,11 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
 
 func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
     let limit = min(max(args["limit"] as? Int ?? 20, 1), 100)
-    let hours = args["hours"] as? Double ?? 24
+    let requestedHours = args["hours"] as? Double ?? 24
+    guard requestedHours.isFinite, requestedHours > 0 else {
+        return toolError("Error: 'hours' must be a positive finite number")
+    }
+    let hours = min(requestedHours, 8_760)
 
     do {
         let store = try AlertStore(directory: dataDir)
@@ -2703,7 +3033,7 @@ func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
         let aiAlerts = try await store.aiAlerts(since: since, limit: limit)
 
         if aiAlerts.isEmpty {
-            return ["content": [["type": "text", "text": "No AI safety alerts in the last \(Int(hours))h. AI tools are operating within safe boundaries."]]]
+            return ["content": [["type": "text", "text": "No matching persisted AI Guard alerts were found in the accessible alert store for the last \(Int(hours))h. This bounded absence is not proof that AI activity was safe or fully observed."]]]
         }
 
         var lines: [String] = ["\(aiAlerts.count) AI safety alert(s) — last \(Int(hours))h:"]
@@ -2729,27 +3059,37 @@ func handleScanText(_ args: [String: Any]) async -> Any {
     guard text.count <= 10_000 else {
         return toolError("Error: text too long (max 10000 characters)")
     }
+    guard text.count >= 10 else {
+        let lines = [
+            "Prompt-injection marker scan (bounded heuristic)",
+            "═══════════════════════════════════",
+            "Known literal marker match: not evaluated",
+            "Heuristic score: not produced",
+            "Input is shorter than the scanner's 10-character minimum. No safety verdict was made.",
+        ]
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    }
 
     // v1.21.6: native `ClipboardInjectionDetector` instead of shelling out to a
     // `forensicate` CLI. The advertised `pip install forensicate-ai` 404s on PyPI,
     // so this tool could only ever return an install hint — an agent calling it
-    // before processing untrusted input got no protection at all.
+    // before processing untrusted input got no scan result at all.
     let result = await ClipboardInjectionDetector().scan(text)
 
-    var lines: [String] = ["Prompt Injection Scan"]
+    var lines: [String] = ["Prompt-injection marker scan (bounded heuristic)"]
     lines.append("═══════════════════════════════════")
-    lines.append("Safe:       \(result == nil)")
-    lines.append("Confidence: \(result?.confidence ?? 0)%")
+    lines.append("Known literal marker match: \(result == nil ? "no" : "yes")")
+    lines.append("Heuristic score (uncalibrated): \(result?.confidence ?? 0)/100")
 
     if let result {
-        lines.append("⚠️  INJECTION DETECTED")
-        lines.append("Severity:   \(String(describing: result.severity).uppercased())")
+        lines.append("⚠️  POTENTIAL PROMPT-INJECTION MARKER MATCH")
+        lines.append("Heuristic severity band: \(String(describing: result.severity).uppercased())")
         lines.append("Patterns:")
         // Pattern labels are static, but sanitize anyway so nothing derived from
         // the scanned text can round-trip back into the agent's context.
         for p in result.patterns.prefix(10) { lines.append("  - \(LLMSanitizer.sanitize(p))") }
     } else {
-        lines.append("✓ No injection patterns detected")
+        lines.append("No known literal marker found within the scanner's stated coverage. This is not proof the text is safe.")
     }
 
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
@@ -3218,8 +3558,8 @@ private func pluginForMCPTool(_ name: String) async -> PluginManifest? {
 func handlePluginMCPTool(name: String, manifest: PluginManifest, args: [String: Any]) async -> Any {
     // SECURITY (fail-CLOSED): the per-plugin collector tools are advertised
     // dynamically from installed collector manifests, so they can't live in the
-    // `agentToolCapability` map — which FAILS OPEN. This is the single plugin
-    // dispatch chokepoint, so gate the whole class at `.response` here (matching
+    // static authority sets. This is the single plugin dispatch chokepoint, so
+    // gate the whole class at `.response` here (matching
     // forensics_run_collector). Without this, a zero-capability agent could run
     // arbitrary personal-data collection by naming a per-plugin tool directly.
     if let denial = perPluginCollectorCapabilityDenial(forTool: name) { return denial }
@@ -3337,19 +3677,22 @@ private func encodeArtifact(_ a: CommittedArtifact) -> [String: Any] {
 }
 
 /// Block non-metadata exposure unless ai_content_allowed is set.
-/// Plan §10.8: returns a structured error naming the case, the
-/// privacy class, and the CLI command the operator runs to grant.
+/// Plan §10.8: returns a structured error naming the case id, privacy class,
+/// and the CLI command the operator runs to grant.
 private func aiContentBlockedError(
-    caseID: String, caseName: String, tool: String, classRaw: String
+    caseID: String, tool: String, classRaw: String
 ) -> [String: Any] {
-    let text = "This tool exposes \(classRaw)-class artifacts. The case '\(caseName)' (id: \(caseID)) has not been granted AI content access. To enable, the operator can run:\n\n  maccrabctl case allow-ai --content \(caseID)\n\nor open the case in the MacCrab dashboard → Case Settings → 'Allow AI access to content'.\n\nThis tool will not proceed until access is granted."
+    // The case name is operator-controlled free-form text and is unnecessary
+    // to authorize this transition. Do not echo it in either the text block or
+    // structuredContent: an attacker-controlled name must not become a second
+    // prompt-bearing channel in an MCP error.
+    let text = "This tool exposes \(classRaw)-class artifacts. Case id \(caseID) has not been granted AI content access. To enable, the operator can run:\n\n  maccrabctl case allow-ai --content \(caseID)\n\nor open the case in the MacCrab dashboard → Case Settings → 'Allow AI access to content'.\n\nThis tool will not proceed until access is granted."
     return [
         "isError": true,
         "content": [["type": "text", "text": text]],
         "structuredContent": [
             "error": "case_content_access_denied",
             "case_id": caseID,
-            "case_name": caseName,
             "tool": tool,
             "exposesPrivacyClass": classRaw,
             "ai_action_required": "operator_grants_content_access",
@@ -3627,7 +3970,6 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
         if let blocked = unfiltered.first(where: { $0.id == Int64(artifactID) }) {
             return aiContentBlockedError(
                 caseID: row.id,
-                caseName: row.name,
                 tool: "forensics_get_artifact",
                 classRaw: blocked.record.privacyClass.rawValue
             )

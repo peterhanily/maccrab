@@ -386,6 +386,49 @@ struct EventStoreProcessFloorTests {
         #expect(try await store.count() == 30)
     }
 
+    @Test("hard forensic floor stops both prune phases across every category")
+    func hardFloorPreservesEveryRecentCategoryAndReturnsShortCount() async throws {
+        let (store, tmp) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let now = Date()
+        let hardFloor = now.addingTimeInterval(-15 * 60)
+        for (index, category) in EventCategory.allCases.enumerated() {
+            try await insert(
+                store,
+                category: category,
+                at: now.addingTimeInterval(-30 * 60 - Double(index)),
+                tag: "old-\(category.rawValue)"
+            )
+            try await insert(
+                store,
+                category: category,
+                at: now.addingTimeInterval(-60 - Double(index)),
+                tag: "recent-\(category.rawValue)"
+            )
+        }
+
+        let requested = 10_000
+        let deleted = try await store.pruneOldest(
+            count: requested,
+            protecting: .process,
+            newerThan: now.addingTimeInterval(-60 * 60),
+            preservingAllNewerThan: hardFloor
+        )
+
+        #expect(deleted == EventCategory.allCases.count)
+        #expect(deleted < requested,
+                "the hard floor must stop pruning rather than manufacture convergence")
+        let survivors = try await store.events(
+            since: .distantPast,
+            limit: EventCategory.allCases.count * 2
+        )
+        #expect(survivors.count == EventCategory.allCases.count)
+        #expect(survivors.allSatisfy { $0.timestamp >= hardFloor })
+        #expect(Set(survivors.map(\.eventCategory)) == Set(EventCategory.allCases),
+                "every category inside the hard floor survives both prune phases")
+    }
+
     @Test("rollUpAndPrune spares process rows within the floor from the time-based rollup")
     func rollUpAndPruneSparesProcessWithinFloor() async throws {
         let (store, tmp) = try await makeStore()

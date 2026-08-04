@@ -405,6 +405,10 @@ public actor RuleEngine {
     /// All rules keyed by ID for individual lookups.
     private var allRules: [String: CompiledRule] = [:]
 
+    /// Derived once when rule definitions enter the engine. Coverage checks
+    /// are on the ingest hot path; walking condition trees per event is not.
+    private var heavyDependencyMasks: [String: HeavyEnrichmentDependencyMask] = [:]
+
     /// Number of rule files that failed to decode on the most recent
     /// `loadRules`. Surfaced for health checks and, critically, consulted by
     /// `reloadRules` to enforce last-known-good rollback: a corrupt compiled
@@ -572,31 +576,29 @@ public actor RuleEngine {
         }
     }
 
-    /// v1.7.4: see MCPBaselineService.snapshotWriteInFlight for rationale.
-    private var snapshotWriteInFlight = false
+    private let snapshotWriter: CoalescingSnapshotWriter<TelemetrySnapshot>
 
-    public func writeTelemetrySnapshot(to path: String) {
-        guard !snapshotWriteInFlight else {
-            logger.info("Skipping rule telemetry snapshot — previous write still in flight")
-            return
-        }
-        snapshotWriteInFlight = true
-        defer { snapshotWriteInFlight = false }
+    public func writeTelemetrySnapshot(to path: String) async {
         let snapshot = TelemetrySnapshot(
             writtenAt: Date(),
             stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount },
             autoDisabledRuleIds: Array(autoDisabledRules).sorted()
         )
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        let tmp = path + ".tmp"
+        await snapshotWriter.publish(snapshot, to: path)
+    }
+
+    public func snapshotWriteTelemetry() async -> CoalescingSnapshotWriterTelemetry {
+        await snapshotWriter.telemetry()
+    }
+
+    @Sendable
+    private nonisolated static func persistTelemetrySnapshot(
+        _ snapshot: TelemetrySnapshot,
+        to path: String
+    ) -> String? {
         do {
-            try data.write(to: URL(fileURLWithPath: tmp), options: .atomic)
-            do {
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            } catch {
-                try? FileManager.default.removeItem(atPath: path)
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            }
+            let data = try JSONEncoder().encode(snapshot)
+            try SecureFileIO.atomicReplace(at: path, data: data, mode: 0o640)
             // 0o640, not 0o644. Per-rule fire counts plus the auto-disabled
             // rule IDs are an evasion-recon surface: they tell a local attacker
             // which detections are hot on THIS host and, more usefully, which
@@ -605,11 +607,12 @@ public actor RuleEngine {
             // the runtime signal does not have to be. The dashboard reads this
             // as an admin-group uid-501 process (AppState / V2LiveDataProvider).
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o640],
+                [.posixPermissions: 0o640, .groupOwnerAccountID: 80],
                 ofItemAtPath: path
             )
+            return nil
         } catch {
-            logger.warning("Failed to write rule telemetry snapshot: \(error.localizedDescription, privacy: .public)")
+            return String(error.localizedDescription.prefix(512))
         }
     }
 
@@ -653,6 +656,10 @@ public actor RuleEngine {
         self.autoDisableMaxBreaches = max(1, autoDisableMaxBreaches)
         self.reloadMinCountFraction = reloadMinCountFraction
         self.allowPushedRules = RuleChannelPolicy.productionEnabled
+        self.snapshotWriter = CoalescingSnapshotWriter(
+            category: "rule-telemetry-snapshot",
+            persistence: Self.persistTelemetrySnapshot
+        )
     }
 
     /// Internal-only override for containment tests. Production targets cannot
@@ -669,6 +676,10 @@ public actor RuleEngine {
         self.autoDisableMaxBreaches = max(1, autoDisableMaxBreaches)
         self.reloadMinCountFraction = reloadMinCountFraction
         self.allowPushedRules = allowPushedRulesForTesting
+        self.snapshotWriter = CoalescingSnapshotWriter(
+            category: "rule-telemetry-snapshot-test",
+            persistence: Self.persistTelemetrySnapshot
+        )
     }
 
     /// Whether a rule whose eval just took `elapsedNs` (with `breaches`
@@ -827,6 +838,10 @@ public actor RuleEngine {
                     ruleIndex[existing.logsource.category]?.removeAll { $0.id == rule.id }
                 }
                 allRules[rule.id] = rule
+                heavyDependencyMasks[rule.id] = HeavyEnrichmentRuleCoverage.dependencyMask(
+                    predicates: rule.predicates,
+                    conditionTree: rule.conditionTree
+                )
                 ruleIndex[rule.logsource.category, default: []].append(rule)
                 loaded += 1
             } catch {
@@ -909,6 +924,10 @@ public actor RuleEngine {
             }
             rule.source = .pushed
             allRules[rule.id] = rule
+            heavyDependencyMasks[rule.id] = HeavyEnrichmentRuleCoverage.dependencyMask(
+                predicates: rule.predicates,
+                conditionTree: rule.conditionTree
+            )
             ruleIndex[rule.logsource.category, default: []].append(rule)
             pushedRuleIDs.insert(rule.id)
             added += 1
@@ -937,6 +956,7 @@ public actor RuleEngine {
         // Snapshot current state so we can roll back if the load fails.
         let snapshotIndex  = ruleIndex
         let snapshotRules  = allRules
+        let snapshotHeavyDependencies = heavyDependencyMasks
         let snapshotRegex  = regexCache
         let snapshotRegexSeq = regexAccessSeq
         let snapshotRegexCounter = regexAccessCounter
@@ -957,6 +977,7 @@ public actor RuleEngine {
             // a separate dict, gets repopulated by loadRules' inserts.
             ruleIndex.removeAll()
             allRules.removeAll()
+            heavyDependencyMasks.removeAll()
             // Pushed rules are not loaded from `directory`; the caller re-applies
             // them via loadPushedRules after a successful base reload, so clear
             // the set now and let it be repopulated (or restored on rollback).
@@ -966,6 +987,7 @@ public actor RuleEngine {
             // Restore previous state — engine must never be left empty.
             ruleIndex       = snapshotIndex
             allRules        = snapshotRules
+            heavyDependencyMasks = snapshotHeavyDependencies
             regexCache      = snapshotRegex
             regexAccessSeq  = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
@@ -985,6 +1007,7 @@ public actor RuleEngine {
             let failed = lastLoadFailedCount
             ruleIndex          = snapshotIndex
             allRules           = snapshotRules
+            heavyDependencyMasks = snapshotHeavyDependencies
             regexCache         = snapshotRegex
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
@@ -1002,6 +1025,7 @@ public actor RuleEngine {
         if !snapshotRules.isEmpty && Double(count) < Double(snapshotRules.count) * reloadMinCountFraction {
             ruleIndex          = snapshotIndex
             allRules           = snapshotRules
+            heavyDependencyMasks = snapshotHeavyDependencies
             regexCache         = snapshotRegex
             regexAccessSeq     = snapshotRegexSeq
             regexAccessCounter = snapshotRegexCounter
@@ -1094,6 +1118,25 @@ public actor RuleEngine {
     /// Only rules whose logsource category matches the event's category are
     /// tested. Returns an array of `RuleMatch` for every rule that fires.
     public func evaluate(_ event: Event) -> [RuleMatch] {
+        evaluate(event, dependencyFilter: nil)
+    }
+
+    /// Re-evaluate only rules that consume evidence supplied by a completed
+    /// heavyweight enrichment. Unrelated rules are not evaluated, do not fire
+    /// again, and do not accrue a second telemetry/budget mutation.
+    public func reevaluate(
+        _ event: Event,
+        forCompleted components: Set<HeavyEnrichmentComponent>
+    ) -> [RuleMatch] {
+        let dependencyFilter = HeavyEnrichmentDependencyMask(components: components)
+        guard !dependencyFilter.isEmpty else { return [] }
+        return evaluate(event, dependencyFilter: dependencyFilter)
+    }
+
+    private func evaluate(
+        _ event: Event,
+        dependencyFilter: HeavyEnrichmentDependencyMask?
+    ) -> [RuleMatch] {
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
         guard let rules = ruleIndex[category] else { return [] }
 
@@ -1105,10 +1148,26 @@ public actor RuleEngine {
         // Bound to `event` and discarded when this call returns — never reused
         // across events (see FieldMemo).
         let fieldMemo = FieldMemo(event: event)
+        let unresolvedMask = HeavyEnrichmentRuleCoverage.unresolvedMask(in: event)
 
         for rule in rules where rule.enabled {
+            let ruleDependencyMask = heavyDependencyMasks[rule.id]
+                ?? HeavyEnrichmentRuleCoverage.dependencyMask(
+                    predicates: rule.predicates,
+                    conditionTree: rule.conditionTree
+                )
+            if let dependencyFilter,
+               ruleDependencyMask.intersection(dependencyFilter).isEmpty {
+                continue
+            }
             let start = DispatchTime.now()
-            let fired = evaluateRule(rule, against: event, memo: fieldMemo)
+            let fired = evaluateRule(
+                rule,
+                against: event,
+                memo: fieldMemo,
+                dependencyMask: ruleDependencyMask,
+                unresolvedMask: unresolvedMask
+            )
             let elapsed = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
 
             // v1.7.1: per-rule telemetry — fire count, total exec ns, last
@@ -1254,9 +1313,20 @@ public actor RuleEngine {
     // MARK: - Private Evaluation Logic
 
     /// Evaluate a single compiled rule against an event.
-    private func evaluateRule(_ rule: CompiledRule, against event: Event, memo: FieldMemo) -> Bool {
+    private func evaluateRule(
+        _ rule: CompiledRule,
+        against event: Event,
+        memo: FieldMemo,
+        dependencyMask: HeavyEnrichmentDependencyMask,
+        unresolvedMask: HeavyEnrichmentDependencyMask
+    ) -> Bool {
         let predicates = rule.predicates
         guard !predicates.isEmpty else { return false }
+
+        // Coverage is a third state, not ordinary field absence. Gate the
+        // entire executable condition before leaf negation OR an enclosing
+        // condition-tree `not` can turn unresolved evidence into a match.
+        guard dependencyMask.intersection(unresolvedMask).isEmpty else { return false }
 
         // Use hierarchical condition tree if available (complex boolean expressions).
         if let tree = rule.conditionTree {

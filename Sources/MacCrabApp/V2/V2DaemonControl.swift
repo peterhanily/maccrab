@@ -270,7 +270,10 @@ public enum V2DaemonControl {
     /// uid-501 file steering a root process's outbound URL + keys is an
     /// SSRF/exfil surface) — only provider, URLs, model names, and the
     /// non-secret enable flag travel this channel; keys travel via the shared
-    /// Keychain. Returns true if the request was queued.
+    /// Keychain. Returns true only if the request file was queued. It does NOT
+    /// mean the engine validated, persisted, loaded, or successfully used the
+    /// configuration; callers must wait for a newer engine heartbeat that
+    /// reports the exact enabled/provider/model state.
     @discardableResult
     public static func sendLLMConfig(_ config: [String: Any]) -> Bool {
         guard let inboxDir = resolveInboxDir() else { return false }

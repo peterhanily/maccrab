@@ -89,13 +89,49 @@ final class AppState: ObservableObject {
         /// false/true are authoritative for daemons that publish the admission
         /// block. These feed the shared degraded-protection signal used by the
         /// menu bar, sidebar, and Overview banner.
+        var traceGraphStorageEnabled: Bool?
         var traceGraphStorageBlocked: Bool?
         var traceGraphStoreAvailable: Bool?
+        /// Exact rolling-writer failure/backlog/accounting health. Cumulative
+        /// failed totals stay degraded for this process epoch even if the
+        /// SQLite admission latch has returned to Active.
+        var traceGraphWriteDegraded: Bool?
+        /// Split joinable work planes. Detection rejection/unclean close is a
+        /// protection gap; advisory/output loss is feature degradation only.
+        var timerLifecycleDegraded: Bool?
+        var livenessTimerLifecycleDegraded: Bool?
+        var startupWorkLifecycleDegraded: Bool?
+        var detectionWorkLifecycleProtectionDegraded: Bool?
+        var advisoryWorkLifecycleFeatureDegraded: Bool?
+        var outputWorkLifecycleFeatureDegraded: Bool?
+        /// Compatibility for a pre-split engine, used only when the dedicated
+        /// detection lane is absent so an old aggregate cannot mask new truth.
+        var legacyDerivedWorkLifecycleDegraded: Bool?
+        /// Agent Traces feature health only; never promoted to kernel protection.
+        var otlpReceiverLifecycleFeatureDegraded: Bool?
+        var alertEvidenceBudgetDegraded: Bool?
 
         /// True when the latest privileged browser-extension walk exhausted its
         /// bounded per-home dirent budget. Nil means an older heartbeat. This is
         /// an explicit visibility gap: displayed/alerted extensions are partial.
         var browserInventoryDegraded: Bool?
+
+        /// Durable restart continuity for multi-event sequence detections.
+        /// A rejected boot restore or an explicit false crash-RPO verdict is a
+        /// detection-quality degradation, even when the daemon itself is live.
+        var sequenceCheckpointRestoreStatus: String?
+        var sequenceCheckpointRPOMaintained: Bool?
+        var sequenceCheckpointDurableCarrierValid: Bool?
+        var sequenceCheckpointOrphanScanTruncated: Bool?
+        var sequenceStateContinuityMaintained: Bool?
+
+        /// Root-engine LLM state from the rich heartbeat. These are the only
+        /// fields that may be presented as applied configuration; the app's
+        /// editable user file and a queued inbox request are not confirmation.
+        var llmConfigured: Bool?
+        var llmProvider: String?
+        var llmModel: String?
+        var llmReportedAt: Date?
 
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
@@ -175,23 +211,149 @@ final class AppState: ObservableObject {
         // possible-evasion file-flood — surface it as degraded protection.
         if let hb = heartbeat, hb.esSensorDegraded == true { return true }
         if let hb = heartbeat, Self.traceGraphEvidenceUnavailable(
+            enabled: hb.traceGraphStorageEnabled,
             blocked: hb.traceGraphStorageBlocked,
-            storeAvailable: hb.traceGraphStoreAvailable
+            storeAvailable: hb.traceGraphStoreAvailable,
+            writeDegraded: hb.traceGraphWriteDegraded
         ) {
             return true
         }
         if let hb = heartbeat, hb.browserInventoryDegraded == true { return true }
+        // Maintenance owns storage caps/checkpoints. Preserve the existing
+        // dashboard-wide warning for a lost maintenance guarantee; the split
+        // below prevents optional advisory/output shedding from joining it.
+        if let hb = heartbeat, hb.timerLifecycleDegraded == true { return true }
+        if let hb = heartbeat, Self.detectionWorkProtectionUnavailable(
+            detectionDegraded: hb.detectionWorkLifecycleProtectionDegraded,
+            legacyDerivedDegraded: hb.legacyDerivedWorkLifecycleDegraded
+        ) { return true }
+        if let hb = heartbeat, hb.alertEvidenceBudgetDegraded == true { return true }
+        if let hb = heartbeat, Self.sequenceCheckpointUnavailable(
+            restoreStatus: hb.sequenceCheckpointRestoreStatus,
+            rpoMaintained: hb.sequenceCheckpointRPOMaintained,
+            durableCarrierValid: hb.sequenceCheckpointDurableCarrierValid,
+            orphanScanTruncated: hb.sequenceCheckpointOrphanScanTruncated,
+            stateContinuityMaintained: hb.sequenceStateContinuityMaintained
+        ) {
+            return true
+        }
         return false
+    }
+
+    nonisolated static func sequenceCheckpointUnavailable(
+        restoreStatus: String?,
+        rpoMaintained: Bool?,
+        durableCarrierValid: Bool? = nil,
+        orphanScanTruncated: Bool? = nil,
+        stateContinuityMaintained: Bool? = nil
+    ) -> Bool {
+        restoreStatus == "rejected"
+            || rpoMaintained == false
+            || durableCarrierValid == false
+            || orphanScanTruncated == true
+            || stateContinuityMaintained == false
     }
 
     /// Pure seam for the dashboard-wide protection signal. Missing fields are
     /// legacy/unknown, not automatically unhealthy; an explicit live block or
     /// unavailable store is always a forensic-evidence gap.
     nonisolated static func traceGraphEvidenceUnavailable(
+        enabled: Bool? = nil,
         blocked: Bool?,
-        storeAvailable: Bool?
+        storeAvailable: Bool?,
+        writeDegraded: Bool? = nil
     ) -> Bool {
-        blocked == true || storeAvailable == false
+        enabled == false
+            || blocked == true
+            || storeAvailable == false
+            || writeDegraded == true
+    }
+
+    /// A split detection lane is authoritative. The pre-split aggregate is a
+    /// compatibility fallback only, so an old degraded value can never mask a
+    /// healthy new detection lane or misclassify advisory/output loss.
+    nonisolated static func detectionWorkProtectionUnavailable(
+        detectionDegraded: Bool?,
+        legacyDerivedDegraded: Bool?
+    ) -> Bool {
+        if let detectionDegraded { return detectionDegraded }
+        return legacyDerivedDegraded == true
+    }
+
+    /// Decode through the shared Core DTO so legacy AppState and the V2 view do
+    /// not implement different conservation equations. No dynamic labels or
+    /// evidence content are retained here.
+    nonisolated private static func traceGraphWriteDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard raw["ingest_events_total"] != nil,
+              JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.TraceGraphStorageAdmission.self,
+                  from: data
+              ) else { return nil }
+        return status.graphWriteDegraded
+    }
+
+    nonisolated private static func timerLifecycleDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.TimerLifecycle.self,
+                  from: data
+              ) else { return nil }
+        return status.featureDegraded
+    }
+
+    nonisolated private static func detectionWorkLifecycleDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.TimerLifecycle.self,
+                  from: data
+              ) else { return nil }
+        return status.detectionProtectionDegraded
+    }
+
+    nonisolated private static func featureWorkLifecycleDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.TimerLifecycle.self,
+                  from: data
+              ) else { return nil }
+        return status.featureDegraded
+    }
+
+    nonisolated private static func otlpReceiverLifecycleDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.OTLPReceiverLifecycle.self,
+                  from: data
+              ) else { return nil }
+        return status.featureDegraded
+    }
+
+    nonisolated private static func alertEvidenceBudgetDegraded(
+        from raw: [String: Any]
+    ) -> Bool? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw),
+              let status = try? JSONDecoder().decode(
+                  MacCrabCore.HeartbeatSnapshot.AlertEvidenceBudget.self,
+                  from: data
+              ) else { return nil }
+        return status.captureDegraded || status.transitionDegraded
     }
 
     /// Treat any internally-inconsistent new browser block as degraded. Only a
@@ -383,8 +545,48 @@ final class AppState: ObservableObject {
         var richSensorDegraded: Bool? = json["es_sensor_degraded"] as? Bool
         var richSensorDegradedDetail: String? = json["es_sensor_degraded_detail"] as? String
         let inlineTraceGraph = json["tracegraph_storage_admission"] as? [String: Any]
+        var richTraceGraphEnabled: Bool? = inlineTraceGraph?["enabled"] as? Bool
         var richTraceGraphBlocked: Bool? = inlineTraceGraph?["blocked"] as? Bool
         var richTraceGraphStoreAvailable: Bool? = inlineTraceGraph?["store_available"] as? Bool
+        var richTraceGraphWriteDegraded: Bool? = inlineTraceGraph.flatMap {
+            Self.traceGraphWriteDegraded(from: $0)
+        }
+        let inlineTimerLifecycle = json["timer_lifecycle"] as? [String: Any]
+        var richTimerLifecycleDegraded: Bool? = inlineTimerLifecycle.flatMap {
+            Self.timerLifecycleDegraded(from: $0)
+        }
+        let inlineLivenessTimerLifecycle = json["liveness_timer_lifecycle"] as? [String: Any]
+        var richLivenessTimerLifecycleDegraded: Bool? = inlineLivenessTimerLifecycle.flatMap {
+            Self.timerLifecycleDegraded(from: $0)
+        }
+        let inlineStartupWorkLifecycle = json["startup_work_lifecycle"] as? [String: Any]
+        var richStartupWorkLifecycleDegraded: Bool? = inlineStartupWorkLifecycle.flatMap {
+            Self.featureWorkLifecycleDegraded(from: $0)
+        }
+        let inlineDetectionWorkLifecycle = json["detection_work_lifecycle"] as? [String: Any]
+        var richDetectionWorkLifecycleDegraded: Bool? = inlineDetectionWorkLifecycle.flatMap {
+            Self.detectionWorkLifecycleDegraded(from: $0)
+        }
+        let inlineAdvisoryWorkLifecycle = json["advisory_work_lifecycle"] as? [String: Any]
+        var richAdvisoryWorkLifecycleDegraded: Bool? = inlineAdvisoryWorkLifecycle.flatMap {
+            Self.featureWorkLifecycleDegraded(from: $0)
+        }
+        let inlineOutputWorkLifecycle = json["output_work_lifecycle"] as? [String: Any]
+        var richOutputWorkLifecycleDegraded: Bool? = inlineOutputWorkLifecycle.flatMap {
+            Self.featureWorkLifecycleDegraded(from: $0)
+        }
+        let inlineLegacyDerivedWorkLifecycle = json["derived_work_lifecycle"] as? [String: Any]
+        var richLegacyDerivedWorkLifecycleDegraded: Bool? = inlineLegacyDerivedWorkLifecycle.flatMap {
+            Self.featureWorkLifecycleDegraded(from: $0)
+        }
+        let inlineOTLPReceiverLifecycle = json["otlp_receiver_lifecycle"] as? [String: Any]
+        var richOTLPReceiverLifecycleDegraded: Bool? = inlineOTLPReceiverLifecycle.flatMap {
+            Self.otlpReceiverLifecycleDegraded(from: $0)
+        }
+        let inlineAlertEvidenceBudget = json["alert_evidence_budget"] as? [String: Any]
+        var richAlertEvidenceBudgetDegraded: Bool? = inlineAlertEvidenceBudget.flatMap {
+            Self.alertEvidenceBudgetDegraded(from: $0)
+        }
         let inlineBrowserInventory = json["browser_inventory"] as? [String: Any]
         var richBrowserInventoryDegraded: Bool? = inlineBrowserInventory.map {
             Self.browserInventoryEvidenceUnavailable(
@@ -394,6 +596,18 @@ final class AppState: ObservableObject {
                 lastScanWasTruncated: $0["last_scan_was_truncated"] as? Bool
             )
         }
+        let inlineSequenceCheckpoint = json["sequence_checkpoint"] as? [String: Any]
+        var richSequenceCheckpointRestoreStatus = inlineSequenceCheckpoint?["restore_status"] as? String
+        var richSequenceCheckpointRPOMaintained = inlineSequenceCheckpoint?["crash_rpo_bound_currently_maintained"] as? Bool
+        var richSequenceCheckpointDurableCarrierValid = inlineSequenceCheckpoint?["durable_carrier_valid"] as? Bool
+        var richSequenceCheckpointOrphanScanTruncated = inlineSequenceCheckpoint?["orphan_cleanup_scan_truncated"] as? Bool
+        var richSequenceStateContinuityMaintained = json["sequence_state_continuity_maintained"] as? Bool
+        let inlineLLM = json["llm"] as? [String: Any]
+        var richLLMConfigured = inlineLLM?["configured"] as? Bool
+        var richLLMProvider = inlineLLM?["provider"] as? String
+        var richLLMModel = inlineLLM?["model"] as? String
+        var richLLMReportedAt: Date? = inlineLLM == nil
+            ? nil : Date(timeIntervalSince1970: writtenAtUnix)
         let richPath = "/Library/Application Support/MacCrab/heartbeat_rich.json"
         if let richData = try? Data(contentsOf: URL(fileURLWithPath: richPath)),
            let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any] {
@@ -433,12 +647,43 @@ final class AppState: ObservableObject {
                 richSensorDegradedDetail = detail
             }
             if let traceGraph = richJSON["tracegraph_storage_admission"] as? [String: Any] {
+                if let enabled = traceGraph["enabled"] as? Bool {
+                    richTraceGraphEnabled = enabled
+                }
                 if let blocked = traceGraph["blocked"] as? Bool {
                     richTraceGraphBlocked = blocked
                 }
                 if let available = traceGraph["store_available"] as? Bool {
                     richTraceGraphStoreAvailable = available
                 }
+                richTraceGraphWriteDegraded = Self.traceGraphWriteDegraded(from: traceGraph)
+            }
+            if let timer = richJSON["timer_lifecycle"] as? [String: Any] {
+                richTimerLifecycleDegraded = Self.timerLifecycleDegraded(from: timer)
+            }
+            if let liveness = richJSON["liveness_timer_lifecycle"] as? [String: Any] {
+                richLivenessTimerLifecycleDegraded = Self.timerLifecycleDegraded(from: liveness)
+            }
+            if let startup = richJSON["startup_work_lifecycle"] as? [String: Any] {
+                richStartupWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: startup)
+            }
+            if let detection = richJSON["detection_work_lifecycle"] as? [String: Any] {
+                richDetectionWorkLifecycleDegraded = Self.detectionWorkLifecycleDegraded(from: detection)
+            }
+            if let advisory = richJSON["advisory_work_lifecycle"] as? [String: Any] {
+                richAdvisoryWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: advisory)
+            }
+            if let output = richJSON["output_work_lifecycle"] as? [String: Any] {
+                richOutputWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: output)
+            }
+            if let legacy = richJSON["derived_work_lifecycle"] as? [String: Any] {
+                richLegacyDerivedWorkLifecycleDegraded = Self.featureWorkLifecycleDegraded(from: legacy)
+            }
+            if let otlp = richJSON["otlp_receiver_lifecycle"] as? [String: Any] {
+                richOTLPReceiverLifecycleDegraded = Self.otlpReceiverLifecycleDegraded(from: otlp)
+            }
+            if let budget = richJSON["alert_evidence_budget"] as? [String: Any] {
+                richAlertEvidenceBudgetDegraded = Self.alertEvidenceBudgetDegraded(from: budget)
             }
             if let browserInventory = richJSON["browser_inventory"] as? [String: Any] {
                 richBrowserInventoryDegraded = Self.browserInventoryEvidenceUnavailable(
@@ -447,6 +692,32 @@ final class AppState: ObservableObject {
                     degraded: browserInventory["degraded"] as? Bool,
                     lastScanWasTruncated: browserInventory["last_scan_was_truncated"] as? Bool
                 )
+            }
+            if let sequenceCheckpoint = richJSON["sequence_checkpoint"] as? [String: Any] {
+                if let status = sequenceCheckpoint["restore_status"] as? String {
+                    richSequenceCheckpointRestoreStatus = status
+                }
+                if let maintained = sequenceCheckpoint["crash_rpo_bound_currently_maintained"] as? Bool {
+                    richSequenceCheckpointRPOMaintained = maintained
+                }
+                if let valid = sequenceCheckpoint["durable_carrier_valid"] as? Bool {
+                    richSequenceCheckpointDurableCarrierValid = valid
+                }
+                if let truncated = sequenceCheckpoint["orphan_cleanup_scan_truncated"] as? Bool {
+                    richSequenceCheckpointOrphanScanTruncated = truncated
+                }
+            }
+            if let maintained = richJSON["sequence_state_continuity_maintained"] as? Bool {
+                richSequenceStateContinuityMaintained = maintained
+            }
+            if let llm = richJSON["llm"] as? [String: Any],
+               let configured = llm["configured"] as? Bool {
+                richLLMConfigured = configured
+                richLLMProvider = llm["provider"] as? String
+                richLLMModel = llm["model"] as? String
+                let llmWrittenAtUnix = richJSON["written_at_unix"] as? TimeInterval
+                    ?? writtenAtUnix
+                richLLMReportedAt = Date(timeIntervalSince1970: llmWrittenAtUnix)
             }
         }
 
@@ -464,9 +735,29 @@ final class AppState: ObservableObject {
         )
         snapshot.esSensorDegraded = richSensorDegraded
         snapshot.esSensorDegradedDetail = richSensorDegradedDetail
+        snapshot.traceGraphStorageEnabled = richTraceGraphEnabled
         snapshot.traceGraphStorageBlocked = richTraceGraphBlocked
         snapshot.traceGraphStoreAvailable = richTraceGraphStoreAvailable
+        snapshot.traceGraphWriteDegraded = richTraceGraphWriteDegraded
+        snapshot.timerLifecycleDegraded = richTimerLifecycleDegraded
+        snapshot.livenessTimerLifecycleDegraded = richLivenessTimerLifecycleDegraded
+        snapshot.startupWorkLifecycleDegraded = richStartupWorkLifecycleDegraded
+        snapshot.detectionWorkLifecycleProtectionDegraded = richDetectionWorkLifecycleDegraded
+        snapshot.advisoryWorkLifecycleFeatureDegraded = richAdvisoryWorkLifecycleDegraded
+        snapshot.outputWorkLifecycleFeatureDegraded = richOutputWorkLifecycleDegraded
+        snapshot.legacyDerivedWorkLifecycleDegraded = richLegacyDerivedWorkLifecycleDegraded
+        snapshot.otlpReceiverLifecycleFeatureDegraded = richOTLPReceiverLifecycleDegraded
+        snapshot.alertEvidenceBudgetDegraded = richAlertEvidenceBudgetDegraded
         snapshot.browserInventoryDegraded = richBrowserInventoryDegraded
+        snapshot.sequenceCheckpointRestoreStatus = richSequenceCheckpointRestoreStatus
+        snapshot.sequenceCheckpointRPOMaintained = richSequenceCheckpointRPOMaintained
+        snapshot.sequenceCheckpointDurableCarrierValid = richSequenceCheckpointDurableCarrierValid
+        snapshot.sequenceCheckpointOrphanScanTruncated = richSequenceCheckpointOrphanScanTruncated
+        snapshot.sequenceStateContinuityMaintained = richSequenceStateContinuityMaintained
+        snapshot.llmConfigured = richLLMConfigured
+        snapshot.llmProvider = richLLMProvider
+        snapshot.llmModel = richLLMModel
+        snapshot.llmReportedAt = richLLMReportedAt
         // v1.12.0 RC15: pull the boot-phase tracker out of the payload
         // when it's there. Older daemons (v1.11.x and earlier) won't
         // write this field; snapshot.isReady falls back to liveness for
@@ -476,6 +767,21 @@ final class AppState: ObservableObject {
             snapshot.startedAt = Date(timeIntervalSince1970: startedAt)
         }
         heartbeat = snapshot
+        if let configured = snapshot.llmConfigured,
+           let reportedAt = snapshot.llmReportedAt {
+            let nextLLMStatus = LLMStatus(
+                heartbeatReported: true,
+                isConfigured: configured,
+                provider: snapshot.llmProvider ?? "",
+                model: snapshot.llmModel ?? "",
+                heartbeatWrittenAt: reportedAt
+            )
+            if llmStatus != nextLLMStatus { llmStatus = nextLLMStatus }
+        } else if llmStatus.heartbeatReported {
+            // A newer heartbeat from an older/downgraded engine that omits the
+            // LLM block invalidates the prior applied-state claim.
+            llmStatus = LLMStatus()
+        }
         // Record successful parse so the next call short-circuits when
         // neither heartbeat.json nor heartbeat_rich.json have been
         // re-written by the daemon.
@@ -751,9 +1057,21 @@ final class AppState: ObservableObject {
     @Published var fleetStatus = FleetStatus()
 
     /// LLM backend status
-    struct LLMStatus {
+    struct LLMStatus: Equatable {
+        var heartbeatReported: Bool = false
         var isConfigured: Bool = false
         var provider: String = ""
+        var model: String = ""
+        var heartbeatWrittenAt: Date?
+
+        var appliedConfiguration: LLMEngineConfiguration? {
+            guard heartbeatReported else { return nil }
+            return LLMEngineConfiguration(
+                enabled: isConfigured,
+                provider: provider,
+                model: model
+            )
+        }
     }
     @Published var llmStatus = LLMStatus()
 
@@ -1993,35 +2311,9 @@ final class AppState: ObservableObject {
         fleetStatus.isConfigured = !fleetURL.isEmpty
         fleetStatus.fleetURL = fleetURL
 
-        // Check LLM configuration (from config file or env vars)
-        var detectedLLMProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
-        var llmConfigured = !detectedLLMProvider.isEmpty
-        if !llmConfigured {
-            // Settings writes llm_config.json to user-home. Read from the same
-            // place (not the event-store-selected dataDir), scrub legacy key
-            // copies in this owning app context, and use the shared migration
-            // parser so the status tile cannot drift from runtime readers.
-            let currentPath = "\(uiStateDir)/llm_config.json"
-            let legacyPath = "\(dataDir)/llm_config.json"
-            let migration = LLMLegacySecretMigration.sharedKeychain(
-                interaction: .allowed
-            )
-            let json = (try? LLMConfigFile.loadAndScrub(
-                atPath: currentPath,
-                legacySecretMigration: migration
-            )) ?? (legacyPath == currentPath ? nil : try? LLMConfigFile.loadAndScrub(
-                atPath: legacyPath,
-                legacySecretMigration: migration
-            ))
-            if let json {
-                var statusConfig = LLMConfig()
-                LLMConfigFile.applyNonSecretValues(json, to: &statusConfig)
-                detectedLLMProvider = statusConfig.provider.rawValue
-                llmConfigured = statusConfig.enabled
-            }
-        }
-        llmStatus.isConfigured = llmConfigured
-        llmStatus.provider = detectedLLMProvider
+        // Applied LLM configuration is reconciled exclusively from the root
+        // engine's rich heartbeat in refreshHeartbeat(). The editable user
+        // config and an inbox request prove intent/queueing, not application.
 
         // Read the same root-owned capability document the MCP server trusts.
         // This runs before the DB-exists guard so Settings remains honest even
@@ -2768,17 +3060,15 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// v1.8.0: read the surrounding ±60s window of events that the daemon
-    /// snapshotted into `alert_evidence` when this alert fired. The list
-    /// is empty for alerts predating v1.8 evidence capture, and for any
-    /// alert where the snapshot transaction failed (best-effort by design).
+    /// Read the bounded preceding context owned by alerts.db. Existing
+    /// events.db evidence remains a read-only fallback when a new snapshot is
+    /// absent; this preserves user data without an implicit migration.
     func fetchEvidence(alertId: String) async -> [Event] {
-        do {
-            let store = try eventStore()
-            return try await store.evidenceFor(alertId: alertId)
-        } catch {
-            return []
-        }
+        return await AlertEvidenceResolver.evidenceFor(
+            alertId: alertId,
+            alertStore: try? alertStore(),
+            legacyEventStore: try? eventStore()
+        )
     }
 
     /// v1.8.0: read aggregate counts (day, category, signer, path) from the

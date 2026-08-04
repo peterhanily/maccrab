@@ -101,6 +101,33 @@ public actor ResponseEngine {
     /// detections but can never reach kill / quarantine / blockNetwork.
     public var detectionOnlyRuleIDs: Set<String> = []
 
+    /// Rules whose conclusion is produced by a heuristic/model rather than a
+    /// deterministic observation are advisory evidence, not authorization to
+    /// mutate the host. Keep the Sigma rule id here because `Alert` currently
+    /// carries the originating id but not the rule tags. The focused drift test
+    /// walks the rule corpus and requires every intent-classifier/LLM-verdict
+    /// rule to remain represented by this boundary.
+    ///
+    /// The prefixes protect all built-in model commentary, counterfactual,
+    /// forecast, Bayesian-intent, and prompt-intent alerts if they are routed
+    /// through ResponseEngine in the future. Today those alerts are persisted
+    /// directly and do not reach this actor. `maccrab.behavior.composite` is
+    /// deliberately absent: it is deterministic observed-behavior evidence and
+    /// remains eligible for the operator's response policy.
+    nonisolated static let advisoryOnlyRuleIDs: Set<String> = [
+        "d1a2b3c4-2059-4000-a000-000000002059",
+    ]
+    nonisolated static let advisoryOnlyRuleIDPrefixes: [String] = [
+        "maccrab.intent.",
+        "maccrab.prompt-intent.",
+        "maccrab.llm.",
+        "maccrab.mcp.baseline-anomaly.",
+        "maccrab.counterfactual.",
+        "maccrab.predict.",
+    ]
+    nonisolated static let advisoryOnlyDenialTarget =
+        "policy:model-derived-alert-advisory-only"
+
     /// Replace the detection-only id set (called by the reload path with the
     /// engine's current pushed-rule ids).
     public func setDetectionOnlyRuleIDs(_ ids: Set<String>) { detectionOnlyRuleIDs = ids }
@@ -118,10 +145,9 @@ public actor ResponseEngine {
     /// alerts when an action is gated by requireConfirmation. v1.6.21:
     /// the gating mechanism (v1.6.20) skipped + logged silently, leaving
     /// the operator no surface to act on. Now: a synthetic alert flows
-    /// to AlertStore + dashboard, where existing AlertDetailView manual-
-    /// action buttons (kill / quarantine / blockNetwork via
-    /// ManualResponse) become the "Run now" surface and the existing
-    /// suppression UI becomes "Dismiss".
+    /// to AlertStore + dashboard as an auditable pending record. It does not
+    /// grant or execute the action; containment still requires a separately
+    /// authorized manual workflow. Suppression remains the dismiss path.
     private var alertSinkForPending: AlertSink?
 
     /// Tracks info about a temporary PF block rule.
@@ -258,12 +284,55 @@ public actor ResponseEngine {
 
     // MARK: - Execution
 
+    /// True when this alert is model/heuristic-derived advisory output rather
+    /// than a directly observed behavior. Internal so the corpus drift guard
+    /// can pin the rule-to-policy mapping without widening the product API.
+    nonisolated static func isAdvisoryOnlyRuleID(_ ruleID: String) -> Bool {
+        advisoryOnlyRuleIDs.contains(ruleID)
+            || advisoryOnlyRuleIDPrefixes.contains { ruleID.hasPrefix($0) }
+    }
+
+    /// Host-mutating actions require deterministic evidence or an explicit,
+    /// rule-specific human-confirmation workflow. This exhaustive switch is a
+    /// compiler guard: adding a new ResponseActionType requires an intentional
+    /// decision here instead of silently inheriting permission.
+    nonisolated static func mutatesHost(_ action: ResponseActionType) -> Bool {
+        switch action {
+        case .log, .notify, .escalateNotification:
+            return false
+        case .kill, .quarantine, .script, .blockNetwork:
+            return true
+        }
+    }
+
+    private func appendExecutionAudit(
+        ruleID: String,
+        action: ResponseActionType,
+        target: String,
+        success: Bool
+    ) {
+        executionLog.append((
+            timestamp: Date(),
+            ruleId: ruleID,
+            action: action,
+            target: target,
+            success: success
+        ))
+        // Bound attempted, denied, and pending entries alike. Previously only
+        // completed action attempts reached this cap, so a confirmation flood
+        // could grow the same audit array without limit.
+        if executionLog.count > 50_000 {
+            executionLog.removeFirst(5_000)
+        }
+    }
+
     /// Execute all configured response actions for an alert.
     public func execute(alert: Alert, event: Event) async {
         // Detection-only rules (e.g. those pushed via the signed rule-update
         // channel) never arm an action — not even the global default. This is
         // the response-side half of the pushed-rule trust boundary.
         if detectionOnlyRuleIDs.contains(alert.ruleId) { return }
+        let hasExplicitRuleActions = ruleActions[alert.ruleId] != nil
         let actions = ruleActions[alert.ruleId] ?? defaultActions
         guard !actions.isEmpty else { return }
 
@@ -276,22 +345,46 @@ public actor ResponseEngine {
             // Skip log action (handled elsewhere)
             if config.action == .log { continue }
 
+            // A model or heuristic may raise an alert, feed logs, and notify an
+            // operator, but its verdict is never authority for an automated
+            // host mutation. This is deliberately enforced here rather than in
+            // UI defaults: actions.json, MCP, CLI, and global defaults all
+            // converge on this actor.
+            //
+            // Preserve one safe opt-in: a destructive action attached to THIS
+            // exact rule with requireConfirmation=true may proceed to the
+            // existing pending-only branch below. It records intent and never
+            // executes. A global confirmation default is not specific enough
+            // to count as an operator decision for an advisory-derived rule.
+            if Self.isAdvisoryOnlyRuleID(alert.ruleId),
+               Self.mutatesHost(config.action),
+               !(hasExplicitRuleActions && config.requireConfirmation) {
+                logger.error("REFUSED automated \(config.action.rawValue) for model/heuristic-derived rule \(alert.ruleId); advisory evidence cannot authorize a host mutation")
+                appendExecutionAudit(
+                    ruleID: alert.ruleId,
+                    action: config.action,
+                    target: Self.advisoryOnlyDenialTarget,
+                    success: false
+                )
+                continue
+            }
+
             // v1.6.20: respect requireConfirmation. Pre-v1.6.20 the field
             // was decoded but ignored — operators who set it expecting a
             // "click to fire" gate got instant execution instead.
             // v1.6.21: also emit a synthetic informational alert so the
             // pending action shows up in the operator's dashboard. The
-            // existing AlertDetailView manual-action buttons become the
-            // "Run now" surface; existing suppression UI becomes "Dismiss".
+            // synthetic record is evidence of operator intent only. It does not
+            // itself authorize execution; a separately authorized manual
+            // workflow is required to perform the action.
             if config.requireConfirmation {
                 logger.notice("Action \(config.action.rawValue) for rule \(alert.ruleId) PENDING operator confirmation")
-                executionLog.append((
-                    timestamp: Date(),
-                    ruleId: alert.ruleId,
+                appendExecutionAudit(
+                    ruleID: alert.ruleId,
                     action: config.action,
                     target: "pending-confirmation",
                     success: false
-                ))
+                )
                 if let sink = alertSinkForPending {
                     let pendingAlert = Alert(
                         ruleId: "maccrab.pending-action.\(config.action.rawValue)",
@@ -300,7 +393,7 @@ public actor ResponseEngine {
                         eventId: alert.eventId,
                         processPath: alert.processPath,
                         processName: alert.processName,
-                        description: "MacCrab gated this \(config.action.rawValue) action because \"Require operator confirmation\" is enabled for rule \(alert.ruleId). Original alert: \(alert.id). Use the Run buttons in the alert detail to fire it manually, or suppress this notification to dismiss.",
+                        description: "MacCrab gated this \(config.action.rawValue) action because \"Require operator confirmation\" is enabled for rule \(alert.ruleId). Original alert: \(alert.id). This pending record does not authorize or execute the action; review the evidence and use a separately authorized manual workflow if containment is warranted, or suppress this notification to dismiss.",
                         mitreTactics: alert.mitreTactics,
                         mitreTechniques: alert.mitreTechniques,
                         suppressed: false
@@ -377,20 +470,12 @@ public actor ResponseEngine {
                 continue
             }
 
-            executionLog.append((
-                timestamp: Date(),
-                ruleId: alert.ruleId,
+            appendExecutionAudit(
+                ruleID: alert.ruleId,
                 action: config.action,
                 target: target,
                 success: success
-            ))
-            // v1.6.21 HIGH fix: cap executionLog at 50K entries to avoid
-            // unbounded memory growth under sustained action firing. LRU-
-            // evict oldest 5K when cap exceeded so we don't churn on every
-            // append.
-            if executionLog.count > 50_000 {
-                executionLog.removeFirst(5_000)
-            }
+            )
         }
     }
 

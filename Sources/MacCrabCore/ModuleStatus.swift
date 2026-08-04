@@ -61,7 +61,7 @@ public struct ModuleStatus: Sendable {
               summary: "Per-tier SQLite stores with retention + size-cap discipline."),
         .init(id: "deduplicator", name: "Alert deduplicator",
               category: "detection", maturity: .stable,
-              summary: "Single-sink chokepoint for all alert insertion. Per-rule dismissal feedback."),
+              summary: "Single-sink chokepoint for alert insertion with bounded duplicate and suppression telemetry; no adaptive severity authority."),
 
         // ─── Detection (experimental — actively iterating) ──────────
         .init(id: "sequence-engine", name: "Sequence engine",
@@ -72,7 +72,7 @@ public struct ModuleStatus: Sendable {
               summary: "Kill chain, alert storm, AI compromise, lateral movement clustering."),
         .init(id: "behavior-scoring", name: "Behavioral scoring",
               category: "detection", maturity: .experimental,
-              summary: "70+ weighted indicators with feedback-adjusted weights."),
+              summary: "70+ bounded, deterministic weighted indicators; adaptive promotion remains disabled pending evaluated operator verdicts."),
         .init(id: "baseline-engine", name: "Baseline anomaly",
               category: "detection", maturity: .experimental,
               summary: "Welford z-score + 2nd-order Markov process tree anomaly."),
@@ -148,10 +148,13 @@ public struct ModuleStatus: Sendable {
               summary: "Detects AI agent writes outside the active project."),
         .init(id: "prompt-injection", name: "Prompt injection scanner",
               category: "ai", maturity: .experimental,
-              summary: "Pattern + LLM-based prompt-injection detection in agent inputs."),
+              summary: "Bounded native marker, Unicode, and content-shape heuristics; not an LLM safety verdict."),
         .init(id: "mcp-attributor", name: "MCP attributor",
               category: "ai", maturity: .experimental,
               summary: "Attributes events back to specific MCP servers via process ancestry."),
+        .init(id: "mcp-behavior-profile", name: "MCP behavior profile",
+              category: "ai", maturity: .experimental,
+              summary: "Shadow-only bounded behavior candidates; novel values stay pending until explicit approval."),
 
         // ─── Outputs (mostly stable) ────────────────────────────────
         .init(id: "notification-output", name: "OS notifications",

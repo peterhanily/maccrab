@@ -29,11 +29,11 @@ struct BatchedEventWriterTests {
         )
     }
 
-    private func makeFileEvent(_ i: Int) -> Event {
+    private func makeFileEvent(_ i: Int, processName: String = "flood") -> Event {
         let proc = ProcessInfo(
             pid: Int32(9000 + i), ppid: 1, rpid: 1,
-            name: "flood", executable: "/bin/flood",
-            commandLine: "/bin/flood", args: [], workingDirectory: "/",
+            name: processName, executable: "/bin/\(processName)",
+            commandLine: "/bin/\(processName)", args: [], workingDirectory: "/",
             userId: 501, userName: "t", groupId: 20,
             startTime: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), ancestors: [],
             isPlatformBinary: false)
@@ -159,6 +159,23 @@ struct BatchedEventWriterTests {
         func releaseInsert() { release.signal() }
     }
 
+    private final class CompletionFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+
+        func markCompleted() {
+            lock.lock()
+            completed = true
+            lock.unlock()
+        }
+
+        func isCompleted() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return completed
+        }
+    }
+
     /// Blocks inside the store actor after the writer has detached its batch.
     /// The writer actor itself remains available at the `await`, which lets the
     /// test inspect the exact heartbeat state during the insert.
@@ -177,6 +194,42 @@ struct BatchedEventWriterTests {
                 committedTransactionCount: events.isEmpty ? 0 : 1
             )
         }
+    }
+
+    /// Captures the store-facing batch boundaries. The writer must never mix
+    /// lanes in one call because EventStore returns aggregate counts only; a
+    /// mixed batch would make per-lane persistence/filter telemetry guesswork.
+    private actor RecordingInserter: EventBatchInserting {
+        private(set) var calls: [[Event]] = []
+
+        func insert(events: [Event]) throws -> EventBatchInsertResult {
+            calls.append(events)
+            return EventBatchInsertResult(
+                inputCount: events.count,
+                persistedCount: events.count,
+                filteredCount: 0,
+                committedTransactionCount: events.isEmpty ? 0 : 1
+            )
+        }
+    }
+
+    private func expectConserved(
+        _ snapshot: BatchedEventWriter.TelemetrySnapshot,
+        lane: EventPipelineLane,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let key = lane.key
+        let offered = snapshot.offeredByLane[key] ?? 0
+        let terminalAndOutstanding = (snapshot.persistedByLane[key] ?? 0)
+            + (snapshot.filteredByLane[key] ?? 0)
+            + (snapshot.droppedByLane[key] ?? 0)
+            + (snapshot.bufferDepthByLane[key] ?? 0)
+            + (snapshot.inFlightDepthByLane[key] ?? 0)
+        #expect(
+            offered == terminalAndOutstanding,
+            "\(key) lane must conserve exactly: offered \(offered), accounted \(terminalAndOutstanding)",
+            sourceLocation: sourceLocation
+        )
     }
 
     private func tempStore() throws -> (EventStore, URL) {
@@ -269,6 +322,41 @@ struct BatchedEventWriterTests {
         await writer.shutdown()
     }
 
+    @Test("shutdown joins a threshold-triggered in-flight database flush")
+    func shutdownJoinsThresholdDrain() async throws {
+        let gate = InsertGate()
+        let completion = CompletionFlag()
+        let writer = BatchedEventWriter(
+            store: SuspendedInserter(gate: gate),
+            flushThreshold: 2,
+            hardCap: 100
+        )
+        await writer.enqueue(makeEvent(0), lane: .priority)
+        await writer.enqueue(makeEvent(1), lane: .priority)
+
+        for _ in 0..<100 where !gate.hasEntered() {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(gate.hasEntered())
+
+        let shutdown = Task {
+            await writer.shutdown()
+            completion.markCompleted()
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        #expect(!completion.isCompleted(),
+                "shutdown must wait for the detached threshold drain")
+
+        gate.releaseInsert()
+        await shutdown.value
+        #expect(completion.isCompleted())
+        let telemetry = await writer.telemetrySnapshot()
+        #expect(telemetry.persistedCount == 2)
+        #expect(telemetry.bufferDepth == 0)
+        #expect(telemetry.inFlightDepth == 0)
+        expectConserved(telemetry, lane: .priority)
+    }
+
     @Test("In-flight rows are accounted before any error-reporting suspension")
     func inFlightFailureAccountingDriftGuard() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -286,10 +374,10 @@ struct BatchedEventWriterTests {
         // StorageErrorTracker.shared is a process singleton and cannot be paused
         // safely in a parallel test run.
         let partialDrop = try #require(source.range(
-            of: "drops.add(suffix.count)"
+            of: "recordDrop(suffix.count, lane: lane)"
         ))
         let partialClear = try #require(source.range(
-            of: "inFlightDepth = 0",
+            of: "clearInFlight(lane: lane)",
             range: partialDrop.upperBound..<source.endIndex
         ))
         let partialReport = try #require(source.range(
@@ -303,11 +391,11 @@ struct BatchedEventWriterTests {
             of: "catch let e as EventStoreError where isTransient(e)"
         ))
         let transientDrop = try #require(source.range(
-            of: "drops.add(batch.count)",
+            of: "recordDrop(batch.count, lane: lane)",
             range: transientCatch.lowerBound..<source.endIndex
         ))
         let transientClear = try #require(source.range(
-            of: "inFlightDepth = 0",
+            of: "clearInFlight(lane: lane)",
             range: transientDrop.upperBound..<source.endIndex
         ))
         let transientReport = try #require(source.range(
@@ -321,11 +409,11 @@ struct BatchedEventWriterTests {
             of: "// PERMANENT (disk full, corruption, encoding)"
         ))
         let permanentDrop = try #require(source.range(
-            of: "drops.add(batch.count)",
+            of: "recordDrop(batch.count, lane: lane)",
             range: permanentComment.lowerBound..<source.endIndex
         ))
         let permanentClear = try #require(source.range(
-            of: "inFlightDepth = 0",
+            of: "clearInFlight(lane: lane)",
             range: permanentDrop.upperBound..<source.endIndex
         ))
         let permanentReport = try #require(source.range(
@@ -340,26 +428,125 @@ struct BatchedEventWriterTests {
     func insertFilterLedgerIsDistinct() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await store.setInsertFilter(EventInsertFilter(processNames: ["bw0"]))
+        await store.setInsertFilter(EventInsertFilter(
+            processNames: ["bw0", "blocked-file"]
+        ))
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100_000,
             hardCap: 100_000
         )
 
-        await writer.enqueue(makeEvent(0)) // policy-filtered by process name
-        await writer.enqueue(makeEvent(1)) // persisted
+        await writer.enqueue(makeEvent(0), lane: .priority) // filtered
+        await writer.enqueue(makeEvent(1), lane: .priority) // persisted
+        await writer.enqueue(
+            makeFileEvent(0, processName: "blocked-file"), lane: .file
+        ) // filtered
+        await writer.enqueue(
+            makeFileEvent(1, processName: "kept-file"), lane: .file
+        ) // persisted
         await writer.shutdown()
 
         let filter = try #require(await store.insertFilterCounters())
         let telemetry = await writer.telemetrySnapshot()
-        #expect(filter.dropped == 1)
-        #expect(filter.passed == 1)
-        #expect(telemetry.persistedCount == 1)
+        #expect(filter.dropped == 2)
+        #expect(filter.passed == 2)
+        #expect(telemetry.persistedCount == 2)
+        #expect(telemetry.filteredCount == 2)
+        #expect(telemetry.persistedByLane == ["priority": 1, "file": 1])
+        #expect(telemetry.filteredByLane == ["priority": 1, "file": 1])
         #expect(telemetry.droppedCount == 0,
                 "intentional insert filtering is not a storage writer shed")
         #expect(telemetry.bufferDepth == 0)
         #expect(telemetry.inFlightDepth == 0)
+        expectConserved(telemetry, lane: .priority)
+        expectConserved(telemetry, lane: .file)
+    }
+
+    @Test("priority drains first and every store batch is lane-homogeneous")
+    func laneHomogeneousPriorityFirstDrain() async throws {
+        let store = RecordingInserter()
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: 100_000
+        )
+
+        for i in 0..<4 {
+            await writer.enqueue(makeFileEvent(i), lane: .file)
+        }
+        for i in 0..<2 {
+            await writer.enqueue(makeEvent(i), lane: .priority)
+        }
+        await writer.shutdown()
+
+        let calls = await store.calls
+        #expect(calls.count == 2)
+        #expect(calls[0].count == 2)
+        #expect(calls[0].allSatisfy { $0.eventCategory == .process })
+        #expect(calls[1].count == 4)
+        #expect(calls[1].allSatisfy { $0.eventCategory == .file })
+
+        let telemetry = await writer.telemetrySnapshot()
+        #expect(telemetry.offeredByLane == ["priority": 2, "file": 4])
+        #expect(telemetry.persistedByLane == ["priority": 2, "file": 4])
+        expectConserved(telemetry, lane: .priority)
+        expectConserved(telemetry, lane: .file)
+    }
+
+    @Test("saturated file lane uses O(1) tail eviction and conserves both lanes")
+    func saturatedFileLaneHasConstantTimeEvictionGuard() async throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/BatchedEventWriter.swift"
+            ),
+            encoding: .utf8
+        )
+        let enqueueStart = try #require(source.range(
+            of: "func enqueue("
+        ))
+        let enqueueEnd = try #require(source.range(
+            of: "private func isTransient",
+            range: enqueueStart.upperBound..<source.endIndex
+        ))
+        let enqueueSource = source[enqueueStart.lowerBound..<enqueueEnd.lowerBound]
+        #expect(enqueueSource.contains(
+            "buffers[EventPipelineLane.file.rawValue].removeLast()"
+        ))
+        #expect(!enqueueSource.contains(".firstIndex(where:"))
+        #expect(!enqueueSource.contains(".remove(at:"))
+        #expect(!enqueueSource.contains(
+            "buffers[EventPipelineLane.file.rawValue].removeFirst()"
+        ))
+
+        // A bounded saturation exercise complements the source guard: every
+        // priority admission replaces one file row without changing the cap or
+        // losing ledger conservation.
+        let store = RecordingInserter()
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: 4_000
+        )
+        for i in 0..<4_000 {
+            await writer.enqueue(makeFileEvent(i), lane: .file)
+        }
+        for i in 0..<1_000 {
+            await writer.enqueue(makeEvent(i), lane: .priority)
+        }
+        let saturated = await writer.telemetrySnapshot()
+        #expect(saturated.bufferDepth == 4_000)
+        #expect(saturated.bufferDepthByLane["file"] == 3_000)
+        #expect(saturated.bufferDepthByLane["priority"] == 1_000)
+        #expect(saturated.droppedByLane["file"] == 1_000)
+        #expect(saturated.droppedByLane["priority"] == 0)
+        expectConserved(saturated, lane: .priority)
+        expectConserved(saturated, lane: .file)
+        await writer.shutdown()
     }
 
     @Test("hard cap drops the NEWEST events and counts them distinctly")
@@ -382,7 +569,7 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(store: store, flushThreshold: 100_000, hardCap: 10)
         // Fill the buffer to the cap with a file/write flood.
         for i in 0..<10 { await writer.enqueue(makeFileEvent(i)) }
-        // A high-value process event at the cap → evict the oldest file, keep it.
+        // A priority process event at the cap → evict the newest file, keep it.
         await writer.enqueue(makeEvent(999))          // pid 3999, category .process
         #expect(writer.droppedCount == 1, "one file row shed to make room for the process event")
         // Another FILE event at the cap → nothing cheaper to shed → drop incoming.

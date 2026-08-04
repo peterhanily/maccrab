@@ -45,6 +45,20 @@ public actor BehaviorScoring {
     /// Set of process keys that have already triggered alerts (avoid re-alerting).
     private var alerted: Set<ProcessKey> = []
 
+    /// Threshold crossings remain pending until the alert sink has either
+    /// committed the corresponding composite alert or deliberately filtered /
+    /// collapsed it. Returning a result is not delivery: callers may fail while
+    /// persisting, and spending the one-shot latch before that boundary silently
+    /// disabled the detector on its most common non-rule indicator paths.
+    private var pendingThresholds: [ProcessKey: ScoringResult] = [:]
+    private var thresholdTokenToProcess: [UInt64: ProcessKey] = [:]
+    private var nextThresholdToken: UInt64 = 0
+    private var thresholdCrossingsTotal: UInt64 = 0
+    private var thresholdCommittedTotal: UInt64 = 0
+    private var thresholdSuppressedTotal: UInt64 = 0
+    private var thresholdAbandonedTotal: UInt64 = 0
+    private var thresholdDeliveryFailuresTotal: UInt64 = 0
+
     // MARK: - Types
 
     private struct ProcessKey: Hashable {
@@ -104,11 +118,34 @@ public actor BehaviorScoring {
 
     /// Result of scoring an event.
     public struct ScoringResult: Sendable {
+        /// Opaque acknowledgement token. A caller must resolve it only after
+        /// the durable alert boundary reports committed or intentionally
+        /// suppressed/collapsed. Storage failures leave it retryable.
+        public let deliveryToken: UInt64
         public let processPath: String
         public let pid: Int32
         public let totalScore: Double
         public let indicators: [(name: String, weight: Double, detail: String)]
         public let severity: Severity
+    }
+
+    public enum ThresholdResolution: Sendable {
+        case committed
+        case filteredOrSuppressed
+    }
+
+    public struct ThresholdTelemetry: Sendable, Equatable {
+        public let crossings: UInt64
+        public let committed: UInt64
+        public let filteredOrSuppressed: UInt64
+        public let abandoned: UInt64
+        public let pending: Int
+        public let deliveryFailures: UInt64
+
+        public var conservesCrossings: Bool {
+            crossings == committed + filteredOrSuppressed + abandoned
+                + UInt64(pending)
+        }
     }
 
     // MARK: - Indicator Weights
@@ -220,58 +257,18 @@ public actor BehaviorScoring {
         "mcp_server_suspicious":         4.0,
         "anomalous_process_tree":        4.0,   // ProcessTreeAnalyzer Markov tree anomaly
         "statistical_frequency_anomaly": 3.0,   // StatisticalAnomalyDetector z-score drift
+        "statistical_process_shape_anomaly": 3.0, // argument-count / command-entropy drift
         "fresh_package_install":         2.0,   // supply-chain freshness breadcrumb
     ]
 
-    // MARK: - Weight Adjustment (learning from suppression feedback)
-
-    /// Adjusted weights: starts as a copy of `weights`, modified by feedback.
-    private var adjustedWeights: [String: Double] = weights
-
-    /// Per-indicator feedback counts: (alerts_fired, alerts_suppressed).
-    private var indicatorFeedback: [String: (fired: Int, suppressed: Int)] = [:]
-
-    /// Record that an alert containing these indicators was suppressed (FP signal).
-    /// Gradually decreases weights for frequently-suppressed indicators.
-    public func recordSuppression(indicatorNames: [String]) {
-        for name in indicatorNames {
-            indicatorFeedback[name, default: (fired: 0, suppressed: 0)].suppressed += 1
-            adjustWeight(name)
-        }
-    }
-
-    /// Record that an alert containing these indicators was investigated (TP signal).
-    public func recordInvestigation(indicatorNames: [String]) {
-        for name in indicatorNames {
-            indicatorFeedback[name, default: (fired: 0, suppressed: 0)].fired += 1
-            adjustWeight(name)
-        }
-    }
-
-    /// Adjust weight using EMA of suppression rate.
-    /// If >60% of alerts are suppressed for an indicator, reduce its weight.
-    /// If <20% are suppressed, slightly increase it (up to 1.5x original).
-    private func adjustWeight(_ name: String) {
-        guard let feedback = indicatorFeedback[name] else { return }
-        let total = feedback.fired + feedback.suppressed
-        guard total >= 5 else { return } // Need enough data
-
-        let suppressionRate = Double(feedback.suppressed) / Double(total)
-        let originalWeight = Self.weights[name] ?? 3.0
-
-        if suppressionRate > 0.6 {
-            // High FP rate: reduce weight (min 20% of original)
-            adjustedWeights[name] = max(originalWeight * 0.2, adjustedWeights[name, default: originalWeight] * 0.9)
-        } else if suppressionRate < 0.2 {
-            // Low FP rate: slightly boost (max 1.5x original)
-            adjustedWeights[name] = min(originalWeight * 1.5, adjustedWeights[name, default: originalWeight] * 1.05)
-        }
-    }
-
-    /// Get the effective weight for an indicator (adjusted if feedback exists).
-    public func effectiveWeight(for name: String) -> Double {
-        adjustedWeights[name] ?? Self.weights[name] ?? 3.0
-    }
+    // Weights stay deterministic in production. An earlier, unwired API
+    // claimed to learn from alert suppression, but no durable mapping existed
+    // from an operator verdict back to the exact indicator set and model
+    // version that produced an alert. Enabling that code would therefore make
+    // host-local behavior irreproducible and let dismissals silently weaken
+    // detections. Adaptive weights belong behind the versioned evaluation rail
+    // and an explicit promote/rollback workflow; until then the shipped table
+    // above is the sole source of weight authority.
 
     // MARK: - Initialization
 
@@ -318,6 +315,7 @@ public actor BehaviorScoring {
         // new indicators are silently ignored.
         if entry.rawScore < alertThreshold {
             alerted.remove(key)
+            abandonPendingThreshold(for: key)
         }
 
         // Indicator cooldown: a single indicator of the same name contributes
@@ -328,7 +326,7 @@ public actor BehaviorScoring {
         let now = Date()
         if let last = entry.indicatorLastAdd[indicator.name],
            now.timeIntervalSince(last) < Self.indicatorCooldown {
-            return nil
+            return pendingThresholds[key]
         }
         entry.indicatorLastAdd[indicator.name] = now
 
@@ -369,8 +367,11 @@ public actor BehaviorScoring {
         let score = entry
 
         // Check threshold
+        if let pending = pendingThresholds[key] {
+            return pending
+        }
+
         if score.rawScore >= alertThreshold && !alerted.contains(key) {
-            alerted.insert(key)
 
             let severity: Severity
             if score.rawScore >= criticalThreshold {
@@ -379,7 +380,12 @@ public actor BehaviorScoring {
                 severity = .high
             }
 
+            nextThresholdToken &+= 1
+            // Keep zero reserved as an unmistakable invalid/default token even
+            // after UInt64 wrap in an unrealistically long-lived process.
+            if nextThresholdToken == 0 { nextThresholdToken = 1 }
             let result = ScoringResult(
+                deliveryToken: nextThresholdToken,
                 processPath: path,
                 pid: pid,
                 totalScore: score.rawScore,
@@ -387,11 +393,57 @@ public actor BehaviorScoring {
                 severity: severity
             )
 
+            pendingThresholds[key] = result
+            thresholdTokenToProcess[result.deliveryToken] = key
+            thresholdCrossingsTotal &+= 1
+
             logger.warning("Behavioral score threshold crossed: \(path) (PID \(pid)) score=\(score.rawScore)")
             return result
         }
 
         return nil
+    }
+
+    /// Resolve one exact pending crossing. Unknown/stale tokens are rejected so
+    /// a late completion cannot spend a newer process generation's latch.
+    @discardableResult
+    public func resolveThreshold(
+        deliveryToken: UInt64,
+        as resolution: ThresholdResolution
+    ) -> Bool {
+        guard let key = thresholdTokenToProcess.removeValue(
+            forKey: deliveryToken
+        ), pendingThresholds[key]?.deliveryToken == deliveryToken else {
+            return false
+        }
+        pendingThresholds.removeValue(forKey: key)
+        alerted.insert(key)
+        switch resolution {
+        case .committed:
+            thresholdCommittedTotal &+= 1
+        case .filteredOrSuppressed:
+            thresholdSuppressedTotal &+= 1
+        }
+        return true
+    }
+
+    /// A storage/output failure is observable but intentionally does not resolve
+    /// the token. The next indicator for this process returns the same crossing
+    /// and retries without inflating the score or minting a duplicate token.
+    public func recordThresholdDeliveryFailure(deliveryToken: UInt64) {
+        guard thresholdTokenToProcess[deliveryToken] != nil else { return }
+        thresholdDeliveryFailuresTotal &+= 1
+    }
+
+    public func thresholdTelemetry() -> ThresholdTelemetry {
+        ThresholdTelemetry(
+            crossings: thresholdCrossingsTotal,
+            committed: thresholdCommittedTotal,
+            filteredOrSuppressed: thresholdSuppressedTotal,
+            abandoned: thresholdAbandonedTotal,
+            pending: pendingThresholds.count,
+            deliveryFailures: thresholdDeliveryFailuresTotal
+        )
     }
 
     /// Convenience: add a standard indicator by name.
@@ -402,7 +454,7 @@ public actor BehaviorScoring {
         forProcess pid: Int32,
         path: String
     ) -> ScoringResult? {
-        let weight = effectiveWeight(for: name)
+        let weight = Self.weights[name] ?? 3.0
         return addIndicator(
             Indicator(name: name, weight: weight, detail: detail),
             forProcess: pid,
@@ -472,6 +524,10 @@ public actor BehaviorScoring {
         }
         insertionOrder = insertionOrder.filter { processScores[$0] != nil }
         alerted = alerted.filter { processScores[$0] != nil }
+        for key in Array(pendingThresholds.keys)
+        where processScores[key] == nil {
+            abandonPendingThreshold(for: key)
+        }
     }
 
     // MARK: - Private
@@ -524,9 +580,18 @@ public actor BehaviorScoring {
             guard let evict = victim else { break }
             processScores.removeValue(forKey: evict)
             alerted.remove(evict)
+            abandonPendingThreshold(for: evict)
             if let idx = insertionOrder.firstIndex(of: evict) {
                 insertionOrder.remove(at: idx)
             }
         }
+    }
+
+    private func abandonPendingThreshold(for key: ProcessKey) {
+        guard let pending = pendingThresholds.removeValue(forKey: key) else {
+            return
+        }
+        thresholdTokenToProcess.removeValue(forKey: pending.deliveryToken)
+        thresholdAbandonedTotal &+= 1
     }
 }

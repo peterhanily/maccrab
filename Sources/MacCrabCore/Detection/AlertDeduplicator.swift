@@ -473,71 +473,11 @@ public actor AlertDeduplicator {
         }.sorted { $0.rate > $1.rate }
     }
 
-    // MARK: - User-Dismissal Feedback
-
-    /// Per-rule user-dismissal counts. Tracked separately from
-    /// internal dedup-driven suppression: a user actively clicking "suppress"
-    /// in the UI is a much stronger signal than the in-memory dedup window
-    /// firing. Used by the event loop to auto-downgrade severity on rules
-    /// the operator keeps flagging as false positives.
-    private var dismissalCounts: [String: Int] = [:]
-    /// Alert IDs we have already processed for feedback, so the periodic
-    /// sweep from the database doesn't double-count the same dismissal.
-    private var processedDismissals: Set<String> = []
-
-    /// Record a user-initiated dismissal of an alert. Idempotent on
-    /// `alertId` — safe to call from a periodic sweep.
-    public func recordDismissal(alertId: String, ruleId: String) {
-        guard !processedDismissals.contains(alertId) else { return }
-        processedDismissals.insert(alertId)
-        dismissalCounts[ruleId, default: 0] += 1
-    }
-
-    /// Total user-dismissals for a rule since daemon start.
-    public func dismissalCount(forRule ruleId: String) -> Int {
-        dismissalCounts[ruleId] ?? 0
-    }
-
-    /// Fraction of emitted alerts the user has dismissed (0.0-1.0).
-    /// Needs at least 3 dismissals before returning a non-zero rate — one
-    /// dismissal isn't enough signal to auto-tune on.
-    public func dismissalRate(forRule ruleId: String) -> Double {
-        let dismissals = dismissalCounts[ruleId] ?? 0
-        guard dismissals >= 3 else { return 0 }
-        let emitted = ruleStats[ruleId]?.emitted ?? 0
-        let denom = max(emitted, dismissals)
-        return Double(dismissals) / Double(denom)
-    }
-
-    /// Auto-downgrade severity for rules the user keeps dismissing. Never
-    /// returns a value higher than the input severity, and never downgrades
-    /// below `.medium` — something the user dismisses repeatedly is still
-    /// worth logging, just not flashing a notification.
-    public func effectiveSeverity(ruleId: String, original: Severity) -> Severity {
-        // Critical stays critical. The user shouldn't be able to turn off
-        // ransomware/SIP-disabled alerts by muting their dashboard.
-        if original == .critical { return original }
-        let rate = dismissalRate(forRule: ruleId)
-        if rate >= 0.7 {
-            // Very noisy in this environment: push down one level.
-            switch original {
-            case .high:   return .medium
-            case .medium: return .low
-            case .low, .informational, .critical: return original
-            }
-        }
-        return original
-    }
-
-    /// Bound the processed-dismissal set so it doesn't grow without limit
-    /// across a long-running daemon.
-    public func prunePrcessedDismissals(keepingLast limit: Int = 50_000) {
-        guard processedDismissals.count > limit else { return }
-        // Rebuild as a fresh, empty set — feedback for long-gone alerts is no
-        // longer relevant, and the next sweep will re-populate with current
-        // dismissals.
-        processedDismissals.removeAll(keepingCapacity: false)
-    }
+    // Alert suppression is an operator policy action, not a labelled
+    // false-positive verdict. It must never mutate severity or response
+    // authority for later alerts. A future evaluation rail may copy explicit,
+    // versioned TP/FP verdicts into an offline/shadow corpus, but runtime
+    // deduplication remains deterministic.
 
     // MARK: - Private Helpers
 

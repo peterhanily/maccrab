@@ -286,6 +286,140 @@ struct EventsSizeCapBoundary: Sendable, Equatable {
     }
 }
 
+/// Raw-event history that byte-cap maintenance may not delete. Fifteen minutes
+/// is a forensic/correlation service floor: graph/cross-process reconstruction,
+/// alert context and hunt all need a meaningful recent window. It is NOT a
+/// claim that SequenceEngine currently rehydrates from events.db (it does not;
+/// durable sequence checkpoint/chronological rehydrate remains separate work).
+struct EventRetentionFloor {
+    static let minutes = 15
+
+    /// Progressively tighten only until the hard floor. At the floor there is
+    /// deliberately one rung: inventing 14/13-minute rungs makes the configured
+    /// guarantee false and hands churn to the row-count fallback.
+    static func adaptiveCutoffs(hotTierMinutes: Int) -> [Int] {
+        let hot = max(minutes, hotTierMinutes)
+        let candidates = [hot, max(minutes, hot / 2), max(minutes, hot / 4)]
+        var result: [Int] = []
+        for candidate in candidates where result.last != candidate {
+            result.append(candidate)
+        }
+        return result
+    }
+}
+
+/// Sticky truth surface for the configured events.db budget. A post-sweep
+/// target miss stays degraded even if subsequent ingest/prune oscillation
+/// briefly dips below the watchdog boundary. It clears only after an actual
+/// sweep demonstrates convergence or a configuration change invalidates the
+/// old conclusion and returns the state to honest-unknown.
+final class EventRetentionBudgetHealth: @unchecked Sendable {
+    struct Snapshot: Sendable, Equatable {
+        let state: String
+        let reason: String
+        let sticky: Bool
+        let observedFootprintBytes: Int64?
+        let targetBytes: Int64?
+        let proactiveBoundaryBytes: Int64?
+        let nominalCapBytes: Int64?
+        let evaluatedAtUnix: Double?
+
+        var dictionary: [String: Any] {
+            var result: [String: Any] = [
+                "state": state,
+                "reason": reason,
+                "sticky": sticky,
+                "forensic_floor_minutes": EventRetentionFloor.minutes,
+            ]
+            if let observedFootprintBytes {
+                result["observed_footprint_bytes"] = observedFootprintBytes
+            }
+            if let targetBytes { result["target_bytes"] = targetBytes }
+            if let proactiveBoundaryBytes {
+                result["proactive_boundary_bytes"] = proactiveBoundaryBytes
+            }
+            if let nominalCapBytes {
+                result["nominal_cap_bytes"] = nominalCapBytes
+            }
+            if let evaluatedAtUnix {
+                result["evaluated_at_unix"] = evaluatedAtUnix
+            }
+            return result
+        }
+    }
+
+    private struct State {
+        var snapshot = Snapshot(
+            state: "unknown",
+            reason: "awaiting_post_sweep_measurement",
+            sticky: false,
+            observedFootprintBytes: nil,
+            targetBytes: nil,
+            proactiveBoundaryBytes: nil,
+            nominalCapBytes: nil,
+            evaluatedAtUnix: nil
+        )
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+
+    func recordSweep(
+        observedFootprintBytes: Int64?,
+        boundary: EventsSizeCapBoundary,
+        at date: Date = Date()
+    ) {
+        lock.lock(); defer { lock.unlock() }
+        let converged = observedFootprintBytes.map { $0 <= boundary.targetBytes }
+        let stateName: String
+        let reason: String
+        let sticky: Bool
+        switch converged {
+        case .some(true):
+            stateName = "converged"
+            reason = "post_sweep_at_or_below_target"
+            sticky = false
+        case .some(false):
+            stateName = "degraded_budget_unmet"
+            reason = "post_sweep_above_target"
+            sticky = true
+        case .none:
+            stateName = "degraded_budget_unknown"
+            reason = "post_sweep_measurement_failed"
+            sticky = true
+        }
+        state.snapshot = Snapshot(
+            state: stateName,
+            reason: reason,
+            sticky: sticky,
+            observedFootprintBytes: observedFootprintBytes,
+            targetBytes: boundary.targetBytes,
+            proactiveBoundaryBytes: boundary.proactiveSweepBoundaryBytes,
+            nominalCapBytes: boundary.nominalCapBytes,
+            evaluatedAtUnix: date.timeIntervalSince1970
+        )
+    }
+
+    func recordConfigurationChange() {
+        lock.lock(); defer { lock.unlock() }
+        state.snapshot = Snapshot(
+            state: "unknown",
+            reason: "configuration_changed_awaiting_sweep",
+            sticky: false,
+            observedFootprintBytes: nil,
+            targetBytes: nil,
+            proactiveBoundaryBytes: nil,
+            nominalCapBytes: nil,
+            evaluatedAtUnix: Date().timeIntervalSince1970
+        )
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return state.snapshot
+    }
+}
+
 /// v1.21.6 (audit DL-03): back-off state for the early-fire size-cap watchdog.
 ///
 /// The watchdog is a BURST catcher, not a second scheduler: it exists to react
@@ -307,6 +441,7 @@ final class SizeCapWatchdogBackoff: @unchecked Sendable {
     private let lock = NSLock()
     private var ineffectiveStreak = 0
     private var nextEligible = Date.distantPast
+    private var configurationToken: String?
 
     /// Base cadence — matches the timer's `repeating:` interval.
     private static let baseInterval: TimeInterval = 60
@@ -318,6 +453,17 @@ final class SizeCapWatchdogBackoff: @unchecked Sendable {
     func mayFire() -> Bool {
         lock.lock(); defer { lock.unlock() }
         return Date() >= nextEligible
+    }
+
+    /// A materially changed budget invalidates the prior convergence result.
+    /// This is the only reset other than an actual fired sweep that lands at or
+    /// below target; an ordinary under-boundary sampling tick is not evidence.
+    func observeConfiguration(_ token: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard configurationToken != token else { return }
+        configurationToken = token
+        ineffectiveStreak = 0
+        nextEligible = .distantPast
     }
 
     /// Record a fired sweep's outcome. Returns the seconds until the next
@@ -689,9 +835,17 @@ enum DaemonTimers {
     }
 
     struct Handles {
+        let lifecycle: DaemonTimerLifecycle
+        /// Reserved capacity for the minimal no-actor liveness write. Slow
+        /// maintenance/rich-heartbeat/model work can never consume this slot.
+        let livenessLifecycle: DaemonTimerLifecycle
         let forensicTimer: DispatchSourceTimer
         let hourlyTimer: DispatchSourceTimer
         let statsTimer: DispatchSourceTimer
+        /// Short owned drain for heavyweight results that finish after the last
+        /// input event. Without it, a quiet host can retain completed evidence
+        /// indefinitely and never run dependency-filtered detection replay.
+        let deferredEnrichmentTimer: DispatchSourceTimer
         /// v1.8.0: split from one shared `pruneTimer` so events / alerts /
         /// campaigns each have their own retention cadence + size cap.
         let alertsPruneTimer: DispatchSourceTimer
@@ -707,7 +861,6 @@ enum DaemonTimers {
         /// v1.10.0 fix for the trace/tracegraph prune timers).
         let sizeCapWatchdogTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
-        let feedbackTimer: DispatchSourceTimer
         let heartbeatTimer: DispatchSourceTimer
         /// v1.7.5: minimal liveness heartbeat decoupled from the rich
         /// payload. Synchronous dispatch-thread file write of
@@ -739,6 +892,109 @@ enum DaemonTimers {
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
         let engineIdentity = DaemonProcessIdentity.current
+        let timerLifecycle = DaemonTimerLifecycle(coalesceByLabel: true)
+        let livenessLifecycle = DaemonTimerLifecycle(
+            maximumInFlightHandlers: 1,
+            coalesceByLabel: true
+        )
+        let deferredEnrichmentTimer = DispatchSource.makeTimerSource(
+            queue: .global()
+        )
+        deferredEnrichmentTimer.schedule(
+            deadline: .now() + .milliseconds(100),
+            repeating: .milliseconds(100),
+            leeway: .milliseconds(25)
+        )
+        deferredEnrichmentTimer.setEventHandler {
+            timerLifecycle.submit(label: "deferred-enrichment-drain") {
+                await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+            }
+        }
+        deferredEnrichmentTimer.resume()
+        @Sendable func liveEventsFamilyCapMiB() -> Int {
+            let transition = state.legacyEvidenceTransitionBudget.snapshot()
+            return state.storage.effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    transition.appliedReserveMiB
+            )
+        }
+
+        /// Re-measure only after a maintenance boundary. Alert capture never
+        /// grows the legacy table, so DBSTAT stays entirely off the hot path.
+        @discardableResult
+        @Sendable func refreshLegacyEvidenceTransitionBudget(
+            context: String
+        ) async -> LegacyEvidenceTransitionBudgetSnapshot {
+            let ticket = state.legacyEvidenceTransitionBudget
+                .measurementTicket()
+            let before = state.legacyEvidenceTransitionBudget.snapshot()
+            guard before.configurationGeneration
+                    == ticket.configurationGeneration else {
+                return before
+            }
+            let maximum = ticket.storage.evidenceMaxSizeMB
+            let measurement: LegacyAlertEvidenceTransitionMeasurement?
+            do {
+                measurement = try await state.eventStore
+                    .legacyAlertEvidenceTransitionMeasurement(
+                        maxBytes: SQLitePersistentStorePolicy.capBytes(
+                            maxSizeMiB: maximum
+                        )
+                    )
+            } catch {
+                measurement = nil
+                logger.warning("\(context, privacy: .public): legacy alert-evidence ownership probe failed; retaining the full \(maximum) MiB transition reserve: \(error.localizedDescription, privacy: .public)")
+            }
+            let after = state.legacyEvidenceTransitionBudget.update(
+                measurement: measurement,
+                ticket: ticket
+            )
+            guard after.configurationGeneration
+                    == ticket.configurationGeneration else {
+                logger.info("\(context, privacy: .public): discarded stale legacy-evidence measurement for storage generation \(ticket.configurationGeneration); current generation is \(after.configurationGeneration)")
+                return after
+            }
+            guard let pending = after.pendingReserveMiB else { return after }
+            guard after.pendingReserveFitsHardBoundary == true else {
+                logger.warning("\(context, privacy: .public): legacy-evidence reserve candidate \(pending) MiB remains pending; WAL/family footprint does not yet prove the lower hard boundary")
+                return after
+            }
+            let oldCap = ticket.storage.effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    before.appliedReserveMiB
+            )
+            let newCap = ticket.storage.effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    pending
+            )
+            do {
+                let admission = try await state.eventStore.updateStorageAdmission(
+                    SQLitePersistentStorePolicy(
+                        maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                            maxSizeMiB: newCap
+                        ),
+                        freeSpaceFloorBytes: SQLitePersistentStorePolicy
+                            .freeSpaceFloorBytes,
+                        transactionReserveBytes: SQLitePersistentStorePolicy
+                            .eventTransactionReserveBytes,
+                        storageVolumePath: state.supportDir
+                    )
+                )
+                let committed = state.legacyEvidenceTransitionBudget
+                    .commitPendingReserve(pending, ticket: ticket)
+                guard committed.appliedReserveMiB == pending,
+                      committed.pendingReserveMiB == nil else {
+                    logger.error("\(context, privacy: .public): events-family policy reached \(newCap) MiB, but storage generation changed before the reserve commit; the current configuration will re-apply its authoritative policy")
+                    return committed
+                }
+                state.eventRetentionBudgetHealth.recordConfigurationChange()
+                logger.notice("\(context, privacy: .public): applied legacy evidence reserve \(before.appliedReserveMiB)->\(committed.appliedReserveMiB) MiB; events-family cap \(oldCap)->\(newCap) MiB; admission=\(admission?.latchedFailure ?? "active", privacy: .public)")
+                return committed
+            } catch {
+                logger.fault("\(context, privacy: .public): failed to apply measured events-family transition cap \(newCap) MiB: \(error.localizedDescription, privacy: .public)")
+            }
+            return after
+        }
         // Periodic forensic scans (crash reports, power anomalies, library inventory)
         let forensicTimer = DispatchSource.makeTimerSource(queue: .global())
         forensicTimer.schedule(deadline: .now() + 120, repeating: 300) // First at 2min, then every 5min
@@ -749,7 +1005,7 @@ enum DaemonTimers {
         // every fire and the scan only runs on odd values.
         let libraryInventoryTickCounter = LockedCounter()
         forensicTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "forensic") {
                 // Crash report mining.
                 // Route every synthetic alert here through the shared
                 // AlertDeduplicator. Without it, a single long-lived process
@@ -835,7 +1091,7 @@ enum DaemonTimers {
         let hourlyTimer = DispatchSource.makeTimerSource(queue: .global())
         hourlyTimer.schedule(deadline: .now() + 3600, repeating: 3600)
         hourlyTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "hourly") {
                 // Refresh security score
                 let score = await state.securityScorer.calculate()
                 logger.info("Security score: \(score.totalScore)/100 (\(score.grade))")
@@ -846,14 +1102,17 @@ enum DaemonTimers {
                     let grade = score.grade
                     let factors = score.factors.map { ($0.name, $0.category, $0.score, $0.maxScore, $0.status, $0.detail) }
                     let recs = score.recommendations
-                    Task {
+                    state.advisoryWorkLifecycle.submit(
+                        label: "hourly.llm-posture"
+                    ) {
                         if let analysis = await llm.commentary(
                             systemPrompt: LLMPrompts.securityScoreSystem,
                             userPrompt: LLMPrompts.securityScoreUser(
                                 totalScore: totalScore, grade: grade,
                                 factors: factors, recommendations: recs
                             ),
-                            maxTokens: 512, temperature: 0.3
+                            maxTokens: 512, temperature: 0.3,
+                            feature: .securityPosture
                         ) {
                             // AI-14: this alert had no explicit id, so every
                             // hourly emission minted a fresh UUID and appended a
@@ -995,27 +1254,55 @@ enum DaemonTimers {
         let statsTimer = DispatchSource.makeTimerSource(queue: .global())
         statsTimer.schedule(deadline: .now() + 60, repeating: 60)
         statsTimer.setEventHandler {
-            let ec = eventCount()
-            let ac = alertCount()
-            let uptime = Int(Date().timeIntervalSince(startTime))
-            let hours = uptime / 3600
-            let minutes = (uptime % 3600) / 60
-            logger.info("Stats: \(ec) events processed, \(ac) alerts, uptime \(hours)h\(minutes)m")
+            // Reconcile missed AI-root EXITs on the existing owned/joined timer
+            // plane. This is deliberately a separate coalescing label from
+            // stats: slow event-store health work cannot queue reconciliation,
+            // and shutdown cancels/joins the exact accepted task prefix.
+            timerLifecycle.submit(label: "ai-session-reconcile") {
+                let result = await state.aiSessionLifecycleCoordinator.reconcile(
+                    tracker: state.aiTracker,
+                    projectBoundary: state.projectBoundary,
+                    lineageService: state.agentLineageService,
+                    sessionRegistry: state.agentSessionRegistry
+                )
+                if result.removedDead > 0 || result.removedReplaced > 0 {
+                    logger.notice("AI session reconciliation: examined=\(result.examined), dead=\(result.removedDead), replaced=\(result.removedReplaced), cas_misses=\(result.generationCASMisses), callback_snapshot_accepted=\(result.callbackSnapshotAccepted)")
+                }
+            }
+            timerLifecycle.submit(label: "stats") {
+                let ec = eventCount()
+                let ac = alertCount()
+                let uptime = Int(Date().timeIntervalSince(startTime))
+                let hours = uptime / 3600
+                let minutes = (uptime % 3600) / 60
+                logger.info("Stats: \(ec) events processed, \(ac) alerts, uptime \(hours)h\(minutes)m")
 
-            // Report eslogger sequence-gap drops (buffer overflow indicator)
-            if let eslogger = state.esloggerCollector {
-                Task {
+                // Learned intent state is explicitly bounded and decaying;
+                // prune it on an owned timer rather than relying only on future
+                // observations to discover idle scopes. Conservation failures
+                // or capacity eviction are health signals, not debug trivia.
+                let intentPrune = await state.bayesianIntent.prune(asOf: Date())
+                let intentStats = await state.bayesianIntent.statistics()
+                if !intentStats.observationsConserved
+                    || !intentStats.treeLifecycleConserved
+                    || !intentStats.treeCapacityRespected {
+                    logger.error("Intent advisory invariant failed: observations=\(intentStats.observations), accepted=\(intentStats.acceptedObservations), suppressed=\(intentStats.suppressedObservations), active_trees=\(intentStats.activeTrees), max_trees=\(intentStats.maximumTrees)")
+                } else if intentPrune.treesRemoved > 0
+                    || intentPrune.evidenceRecordsExpired > 0 {
+                    logger.info("Intent advisory prune: trees=\(intentPrune.treesRemoved), evidence=\(intentPrune.evidenceRecordsExpired), active=\(intentStats.activeTrees)")
+                }
+
+                // Report eslogger sequence-gap drops (buffer overflow indicator)
+                if let eslogger = state.esloggerCollector {
                     let dropped = await eslogger.getDroppedEventCount()
                     if dropped > 0 {
                         logger.warning("eslogger: \(dropped) events dropped (sequence gaps)")
                     }
                 }
-            }
 
-            // Event flow health check: warn if no new events stored in the last 5 minutes.
-            // Skips the first 2 minutes of uptime to allow collectors to start up.
-            guard uptime > 120 else { return }
-            Task {
+                // Event flow health check: warn if no new events stored in the last 5 minutes.
+                // Skips the first 2 minutes of uptime to allow collectors to start up.
+                guard uptime > 120 else { return }
                 if let latestEvent = try? await state.eventStore.events(since: Date.distantPast, limit: 1).first {
                     let staleness = Date().timeIntervalSince(latestEvent.timestamp)
                     if staleness > 300 {
@@ -1047,7 +1334,7 @@ enum DaemonTimers {
         let alertsPruneTimer = DispatchSource.makeTimerSource(queue: .global())
         alertsPruneTimer.schedule(deadline: .now() + 3600, repeating: 86400)
         alertsPruneTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "alerts-retention") {
                 let days = max(1, min(state.storage.alertsRetentionDays, 3650))
                 let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                 let pruned = (try? await state.alertStore.prune(olderThan: cutoff)) ?? 0
@@ -1063,7 +1350,7 @@ enum DaemonTimers {
             let t = DispatchSource.makeTimerSource(queue: .global())
             t.schedule(deadline: .now() + 3600, repeating: 86400)
             t.setEventHandler {
-                Task {
+                timerLifecycle.submit(label: "campaigns-retention") {
                     let days = max(1, min(state.storage.campaignsRetentionDays, 3650))
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                     let pruned = (try? await campaignStore.prune(olderThan: cutoff)) ?? 0
@@ -1102,7 +1389,7 @@ enum DaemonTimers {
             // and incremental: no online full-file VACUUM rewrite.
             t.schedule(deadline: .now() + 30, repeating: 300)
             t.setEventHandler {
-                Task {
+                timerLifecycle.submit(label: "tracegraph-recovery") {
                     let days = max(1, min(state.storage.tracegraphRetentionDays, 3650))
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                     let orphanCutoff = Date().addingTimeInterval(-3600)  // 1h ≫ the 5-min trace window
@@ -1146,7 +1433,7 @@ enum DaemonTimers {
         // OTLP insert.
         t.schedule(deadline: .now() + 180, repeating: 86400)
         t.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "traces-recovery") {
                 guard let traceStore = state.traceStore else { return }
                 let days = max(1, min(state.storage.tracesRetentionDays, 3650))
                 let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
@@ -1184,6 +1471,7 @@ enum DaemonTimers {
         let reportsRetentionDays = state.storage.reportsRetentionDays
         let autoGeneratedRulesMax = state.storage.autoGeneratedRulesMax
         artifactsTimer.setEventHandler {
+            timerLifecycle.submit(label: "artifact-retention") {
             let fm = FileManager.default
             if reportsRetentionDays > 0 {
                 let dir = artifactsSupportDir + "/reports"
@@ -1216,6 +1504,7 @@ enum DaemonTimers {
                     }
                 }
             }
+            }
         }
         artifactsTimer.resume()
         artifactsPruneTimer = artifactsTimer
@@ -1238,16 +1527,22 @@ enum DaemonTimers {
         //     cutoff can't bring the DB under cap, force pruneOldest() so
         //     we never exceed the user's disk-budget intent.
         //
-        // Configurable via state.storage.{eventsHotTierHours, eventsMaxSizeMB}.
-        // Defaults: 1h / 200 MB. Target = 80% of cap.
+        // Fresh installs use the steady-state event allocation after moving
+        // evidence to alerts.db. Upgrades add only the measured, bounded
+        // legacy-evidence transition reserve so preserved rows cannot strand
+        // event admission.
         let dbFilePath = state.supportDir + "/events.db"
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
+        let startupTransition = state.legacyEvidenceTransitionBudget.snapshot()
         let startupBoundary = EventsSizeCapBoundary(
-            maxSizeMiB: state.storage.eventsMaxSizeMB
+            maxSizeMiB: liveEventsFamilyCapMiB()
         )
         let startupCapMiB = startupBoundary.nominalCapBytes
             / SQLitePersistentStorePolicy.bytesPerMiB
-        let startupHotMinutes = max(15, state.storage.eventsHotTierMinutes)
+        let startupHotMinutes = max(
+            EventRetentionFloor.minutes,
+            state.storage.eventsHotTierMinutes
+        )
         // v1.12.6: cadence is now user-configurable via
         // storage.eventsSizeCapIntervalMinutes. The default (60 min)
         // replaces the v1.10.0 hardcoded 6h interval that left field
@@ -1262,7 +1557,7 @@ enum DaemonTimers {
             sweepIntervalMinutes = 60
             logger.warning("eventsSizeCapIntervalMinutes=\(configuredSweepMinutes) is non-positive — falling back to default 60 min cadence.")
         }
-        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMiB) MiB, proactive boundary=\(startupBoundary.proactiveSweepBoundaryBytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
+        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, live events-family cap=\(startupCapMiB) MiB (steady=\(state.storage.effectiveEventsFamilyMaxSizeMB) MiB, applied legacy evidence reserve=\(startupTransition.appliedReserveMiB) MiB, pending reserve=\(startupTransition.pendingReserveMiB ?? -1) MiB, evidence allocation=\(state.storage.evidenceMaxSizeMB) MiB), proactive boundary=\(startupBoundary.proactiveSweepBoundaryBytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
 
         // v1.10.0 audit fix: first sweep at .now() + 60 s instead of
         // + 900 s. If the user is booting into a sysext that
@@ -1278,17 +1573,38 @@ enum DaemonTimers {
         // configurable via daemon_config.json or user_overrides.json).
         // The hardcoded 6h interval that this replaces let a busy host's
         // events.db overrun a 300 MB cap by ~17 GB between sweeps.
+        // Shared by scheduled and watchdog sweeps. A changed token is explicit
+        // operator intent and invalidates the previous convergence conclusion.
+        let watchdogBackoff = SizeCapWatchdogBackoff()
+        @Sendable func retentionConfigurationToken() -> String {
+            let transition = state.legacyEvidenceTransitionBudget.snapshot()
+            return [
+                state.storage.eventsMaxSizeMB,
+                state.storage.evidenceMaxSizeMB,
+                transition.appliedReserveMiB,
+                transition.pendingReserveMiB ?? -1,
+                state.storage.eventsHotTierMinutes,
+                state.storage.processEventsFloorMinutes,
+            ].map(String.init).joined(separator: ":")
+        }
+
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapTimer.schedule(
             deadline: .now() + 60,
             repeating: .seconds(sweepIntervalMinutes * 60)
         )
         sizeCapTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "events-size-cap") {
                 let boundary = EventsSizeCapBoundary(
-                    maxSizeMiB: state.storage.eventsMaxSizeMB
+                    maxSizeMiB: liveEventsFamilyCapMiB()
                 )
-                let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
+                watchdogBackoff.observeConfiguration(
+                    retentionConfigurationToken()
+                )
+                let hotMinutes = max(
+                    EventRetentionFloor.minutes,
+                    state.storage.eventsHotTierMinutes
+                )
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
                 // v1.12.6: serialize scheduled sweeps with the early-fire
@@ -1301,7 +1617,7 @@ enum DaemonTimers {
                     logger.info("Tier-rollup scheduled sweep: another sweep already in flight, skipping.")
                     return
                 }
-                defer { Task { await state.eventStore.endSizeCapPrune() } }
+                await { () async -> Void in
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
@@ -1313,6 +1629,32 @@ enum DaemonTimers {
                     evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB),
                     processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
                 )
+                let refreshedTransition = await refreshLegacyEvidenceTransitionBudget(
+                    context: "Tier-rollup scheduled sweep"
+                )
+                let postSweepBoundary = EventsSizeCapBoundary(
+                    maxSizeMiB: state.storage.effectiveEventsFamilyMaxSizeMB(
+                        appliedLegacyEvidenceTransitionReserveMiB:
+                            refreshedTransition.appliedReserveMiB
+                    )
+                )
+                let afterBytes = try? measureDatabaseFootprintBytes(
+                    dbPath: dbFilePath
+                )
+                state.eventRetentionBudgetHealth.recordSweep(
+                    observedFootprintBytes: afterBytes,
+                    boundary: postSweepBoundary
+                )
+                // Only an actual sweep at/below TARGET proves enough headroom
+                // to re-arm the one-minute burst catcher. A transient ordinary
+                // tick below the wider proactive boundary proves nothing.
+                watchdogBackoff.recordSweep(
+                    stillOver: afterBytes.map {
+                        $0 > postSweepBoundary.targetBytes
+                    } ?? true
+                )
+                }()
+                await state.eventStore.endSizeCapPrune()
             }
         }
         sizeCapTimer.resume()
@@ -1335,11 +1677,13 @@ enum DaemonTimers {
         // v1.21.6 (audit DL-03): back-off box captured by the handler below, so
         // a structurally-over-cap host degrades to a periodic reminder instead
         // of re-arming a full FTS optimize + vacuum every single minute.
-        let watchdogBackoff = SizeCapWatchdogBackoff()
         sizeCapWatchdogTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "events-size-watchdog") {
                 let boundary = EventsSizeCapBoundary(
-                    maxSizeMiB: state.storage.eventsMaxSizeMB
+                    maxSizeMiB: liveEventsFamilyCapMiB()
+                )
+                watchdogBackoff.observeConfiguration(
+                    retentionConfigurationToken()
                 )
                 let nowBytes: Int64
                 do {
@@ -1349,10 +1693,10 @@ enum DaemonTimers {
                     return
                 }
                 guard boundary.requiresMaintenance(footprintBytes: nowBytes) else {
-                    // Under threshold: the previous sweep (or ordinary decay)
-                    // worked — clear any accumulated back-off so the next real
-                    // burst still gets a 60 s response.
-                    watchdogBackoff.recordSweep(stillOver: false)
+                    // A sampling tick can catch the sawtooth just after prune /
+                    // checkpoint and before the firehose refills it. Do NOT reset
+                    // sticky backoff here; only a fired sweep at/below TARGET or
+                    // a material configuration change can prove recovery.
                     return
                 }
                 // v1.21.6 (audit DL-03): over threshold is NOT sufficient to
@@ -1368,8 +1712,11 @@ enum DaemonTimers {
                     // — no need to queue another.
                     return
                 }
-                defer { Task { await state.eventStore.endSizeCapPrune() } }
-                let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
+                await { () async -> Void in
+                let hotMinutes = max(
+                    EventRetentionFloor.minutes,
+                    state.storage.eventsHotTierMinutes
+                )
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
                 logger.warning("Tier-rollup early-fire watchdog: events.db family \(nowBytes) bytes exceeds proactive boundary \(boundary.proactiveSweepBoundaryBytes) bytes (hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)) — running sweep now.")
@@ -1384,6 +1731,15 @@ enum DaemonTimers {
                     evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB),
                     processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
                 )
+                let refreshedTransition = await refreshLegacyEvidenceTransitionBudget(
+                    context: "Tier-rollup watchdog sweep"
+                )
+                let postSweepBoundary = EventsSizeCapBoundary(
+                    maxSizeMiB: state.storage.effectiveEventsFamilyMaxSizeMB(
+                        appliedLegacyEvidenceTransitionReserveMiB:
+                            refreshedTransition.appliedReserveMiB
+                    )
+                )
                 // v1.21.6 (audit DL-03): did the sweep actually achieve
                 // anything? Feed the answer back into the back-off, and when it
                 // did not, say so ONCE per back-off window at fault level with
@@ -1396,24 +1752,35 @@ enum DaemonTimers {
                     afterBytes = try measureDatabaseFootprintBytes(dbPath: dbFilePath)
                 } catch {
                     let backoffSeconds = watchdogBackoff.recordSweep(stillOver: true)
+                    state.eventRetentionBudgetHealth.recordSweep(
+                        observedFootprintBytes: nil,
+                        boundary: postSweepBoundary
+                    )
                     logger.fault("Tier-rollup early-fire watchdog: post-sweep events.db family probe failed; treating the sweep as ineffective and backing off to \(backoffSeconds)s: \(error.localizedDescription, privacy: .public)")
                     return
                 }
-                let stillOver = boundary.requiresMaintenance(
+                let stillOver = postSweepBoundary.requiresMaintenance(
                     footprintBytes: afterBytes
                 )
-                let backoffSeconds = watchdogBackoff.recordSweep(stillOver: stillOver)
+                state.eventRetentionBudgetHealth.recordSweep(
+                    observedFootprintBytes: afterBytes,
+                    boundary: postSweepBoundary
+                )
+                let backoffSeconds = watchdogBackoff.recordSweep(
+                    stillOver: afterBytes > postSweepBoundary.targetBytes
+                )
                 if stillOver {
-                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterBytes) bytes — still over the proactive \(boundary.proactiveSweepBoundaryBytes)-byte boundary. The configured disk budget is NOT reachable on this host: alert_evidence plus the events_fts index alone can exceed it regardless of how few events are retained. Raise storage.eventsMaxSizeMB, and/or lower storage.evidenceMaxSizeMB / storage.eventsHotTierMinutes. Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
+                    logger.fault("Tier-rollup early-fire watchdog: sweep left events.db at \(afterBytes) bytes — still over the live proactive \(postSweepBoundary.proactiveSweepBoundaryBytes)-byte boundary. The event-family budget is NOT reachable on this host. New alert evidence no longer grows events.db; the applied legacy transition reserve is \(refreshedTransition.appliedReserveMiB) MiB (pending \(refreshedTransition.pendingReserveMiB ?? -1) MiB). Backing the watchdog off to \(backoffSeconds)s to stop the prune+VACUUM rewrite loop.")
                 }
+                }()
+                await state.eventStore.endSizeCapPrune()
             }
         }
         sizeCapWatchdogTimer.resume()
 
-        // Hourly size-cap defense for alerts.db. Alert volume is orders of
-        // magnitude lower than events, so this rarely fires — but if a
-        // pathological rule-author commits an alert-spamming rule, the cap
-        // bounds the blast radius.
+        // Hourly ownership + family defense for alerts.db. Alert rows and slim
+        // evidence have independent budgets, while SQLite hard admission counts
+        // their exact combined DB+WAL+SHM family ceiling.
         //
         // Wave 9B (v1.12.6): on a low-disk host the post-prune VACUUM
         // would skip silently. We now run incremental_vacuum first
@@ -1422,16 +1789,73 @@ enum DaemonTimers {
         let alertsSizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         alertsSizeCapTimer.schedule(deadline: .now() + 1800, repeating: 3600)
         alertsSizeCapTimer.setEventHandler {
-            Task {
-                let capMB = max(50, state.storage.alertsMaxSizeMB)
+            timerLifecycle.submit(label: "alerts-size-cap") {
                 let alertsPath = state.supportDir + "/alerts.db"
-                let nowMB = measureDatabaseFootprintMB(dbPath: alertsPath)
-                guard nowMB > capMB else { return }
-                let total = (try? await state.alertStore.count()) ?? 0
-                let overFraction = Double(nowMB - capMB) / Double(max(1, nowMB))
-                let dropTarget = max(1_000, Int(Double(total) * (overFraction + 0.1)))
-                let dropped = (try? await state.alertStore.pruneOldest(count: dropTarget)) ?? 0
-                logger.warning("Alerts size cap: pruned \(dropped) oldest alerts (\(nowMB) MB > \(capMB) MB cap, target drop \(dropTarget))")
+                let evidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
+                    maxSizeMiB: state.storage.evidenceMaxSizeMB
+                )
+                let alertCapBytes = SQLitePersistentStorePolicy.capBytes(
+                    maxSizeMiB: state.storage.alertsMaxSizeMB
+                )
+                let familyCapBytes = AlertStore.combinedFamilyCapBytes(
+                    alertsMaxSizeMiB: state.storage.alertsMaxSizeMB,
+                    evidenceMaxSizeMiB: state.storage.evidenceMaxSizeMB
+                )
+                var changed = false
+
+                do {
+                    let pruned = try await state.alertStore
+                        .enforceAlertEvidenceBudget(maxBytes: evidenceCapBytes)
+                    if pruned.perAlert > 0 || pruned.bySize > 0 {
+                        changed = true
+                        logger.warning("Alert evidence cap: pruned \(pruned.perAlert) over per-alert row ceiling and \(pruned.bySize) over the \(state.storage.evidenceMaxSizeMB) MiB evidence ownership budget")
+                    }
+                } catch {
+                    logger.error("Alert evidence cap enforcement failed: \(error.localizedDescription, privacy: .public)")
+                }
+
+                // Enforce the alert-row ownership budget using DBSTAT pages
+                // belonging only to alerts + its indexes (not evidence).
+                if let alertOwned = try? await state.alertStore.alertsAllocatedBytes(),
+                   alertOwned > alertCapBytes {
+                    let total = (try? await state.alertStore.count()) ?? 0
+                    let overFraction = Double(alertOwned - alertCapBytes)
+                        / Double(max(1, alertOwned))
+                    let dropTarget = max(
+                        1,
+                        Int(Double(total) * min(1, overFraction + 0.1))
+                    )
+                    let dropped = (try? await state.alertStore.pruneOldest(
+                        count: dropTarget
+                    )) ?? 0
+                    changed = changed || dropped > 0
+                    logger.warning("Alert-row cap: pruned \(dropped) oldest alerts (owned=\(alertOwned) bytes > \(alertCapBytes), target=\(dropTarget)); evidence cascaded with each parent")
+                }
+
+                // Defense in depth for allocator/page overhead: even when both
+                // table allocations are individually at target, the exact
+                // SQLite family may still be over its combined cap.
+                let beforeFamily = try? measureDatabaseFootprintBytes(
+                    dbPath: alertsPath
+                )
+                if let beforeFamily, beforeFamily > familyCapBytes {
+                    let total = (try? await state.alertStore.count()) ?? 0
+                    let overFraction = Double(beforeFamily - familyCapBytes)
+                        / Double(max(1, beforeFamily))
+                    let dropTarget = max(
+                        1,
+                        Int(Double(total) * min(1, overFraction + 0.1))
+                    )
+                    let dropped = (try? await state.alertStore.pruneOldest(
+                        count: dropTarget
+                    )) ?? 0
+                    changed = changed || dropped > 0
+                    logger.warning("Alerts family cap: pruned \(dropped) oldest alerts (db+wal+shm=\(beforeFamily) bytes > combined \(familyCapBytes), target=\(dropTarget))")
+                }
+
+                guard changed || (beforeFamily ?? 0) > familyCapBytes else {
+                    return
+                }
 
                 // Phase 2a: incremental_vacuum first — free, in-place
                 // truncate of end-of-file freelist pages. No-op if the
@@ -1477,7 +1901,7 @@ enum DaemonTimers {
             let t = DispatchSource.makeTimerSource(queue: .global())
             t.schedule(deadline: .now() + 1800, repeating: 3600)
             t.setEventHandler {
-                Task {
+                timerLifecycle.submit(label: "campaigns-size-cap") {
                     let capMB = max(50, state.storage.campaignsMaxSizeMB)
                     let cPath = state.supportDir + "/campaigns.db"
                     let nowMB = measureDatabaseFootprintMB(dbPath: cPath)
@@ -1519,13 +1943,16 @@ enum DaemonTimers {
             campaignsSizeCapTimer = nil
         }
 
-        // Periodic baseline save + dedup sweep (every 5 minutes)
+        // Periodic learned-state save + bounded-state sweeps (every 5 minutes)
         let maintenanceTimer = DispatchSource.makeTimerSource(queue: .global())
         maintenanceTimer.schedule(deadline: .now() + 300, repeating: 300)
         maintenanceTimer.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "maintenance") {
                 try? await state.baselineEngine.save()
                 try? await state.processTreeAnalyzer.save()
+                if let ueba = state.uebaEngine, !(await ueba.save()) {
+                    logger.error("UEBA periodic persistence failed; the in-memory model remains active but restart continuity is degraded")
+                }
                 await state.deduplicator.sweep()
                 await state.crossProcessCorrelator.purgeStale()
                 await state.topologyAnomalyDetector.purgeStale()
@@ -1538,7 +1965,6 @@ enum DaemonTimers {
                 if !expired.isEmpty {
                     logger.info("Allowlist sweep expired \(expired.count) suppression(s)")
                 }
-                await state.deduplicator.prunePrcessedDismissals()
                 // v1.11.1 (audit scalability HIGH): drain ProcessLineage's
                 // pendingPromotions buffer so under PID-recycle storms
                 // skeleton records aren't silently truncated by the
@@ -1555,27 +1981,6 @@ enum DaemonTimers {
             }
         }
         maintenanceTimer.resume()
-
-        // Feedback sweep: every 60s, pull IDs of alerts the user has marked
-        // suppressed in the dashboard and feed them into the deduplicator's
-        // dismissal tracker. The deduplicator uses this signal to auto-
-        // downgrade severity for rules with a high dismissal rate on future
-        // firings. Small sweep interval so the feedback feels responsive.
-        let feedbackTimer = DispatchSource.makeTimerSource(queue: .global())
-        feedbackTimer.schedule(deadline: .now() + 60, repeating: 60)
-        feedbackTimer.setEventHandler {
-            Task {
-                do {
-                    let dismissed = try await state.alertStore.listSuppressed(limit: 500)
-                    for (alertId, ruleId) in dismissed {
-                        await state.deduplicator.recordDismissal(alertId: alertId, ruleId: ruleId)
-                    }
-                } catch {
-                    logger.error("Feedback sweep failed: \(error.localizedDescription)")
-                }
-            }
-        }
-        feedbackTimer.resume()
 
         // v1.7.5 design split: TWO heartbeat-related timers.
         //
@@ -1607,9 +2012,10 @@ enum DaemonTimers {
         let livenessTimer = DispatchSource.makeTimerSource(queue: .global())
         livenessTimer.schedule(deadline: .now() + 0.5, repeating: 30)
         livenessTimer.setEventHandler {
-            // Synchronous on the dispatch queue. No Task wrapper, no
-            // actor hops. The probeSysextFDA call is itself sync —
-            // it opens TCC.db directly via sqlite3_open_v2 + close.
+            // Joinable even though the body itself has no actor hops. A
+            // shutdown must not race its temp-file publication with the final
+            // heartbeat/store boundary.
+            livenessLifecycle.submit(label: "liveness-heartbeat") {
             //
             // v1.8.0 audit: wrap JSONSerialization in autoreleasepool.
             // DispatchSource timer event handlers run on a long-lived
@@ -1656,6 +2062,7 @@ enum DaemonTimers {
                     try? FileManager.default.moveItem(atPath: tmp, toPath: path)
                 }
             }
+            }
         }
         livenessTimer.resume()
 
@@ -1692,7 +2099,7 @@ enum DaemonTimers {
             // actor isolation. The dispatch-timer event handler itself
             // is synchronous; spawning a Task lets the body run async
             // without blocking the timer queue.
-            Task {
+            timerLifecycle.submit(label: "rich-heartbeat") {
             // Probe sysext Full Disk Access authoritatively. The sysext
             // runs as root but TCC still gates its access to the user and
             // system TCC databases. If we can open + query the system
@@ -1727,7 +2134,7 @@ enum DaemonTimers {
             // the footprint under cap. Nothing surfaced that, so a whole tactic's
             // worth of write-time correlation was blind with a green heartbeat.
             // Publish the actual span, and warn when a category with real volume
-            // has fallen under the 15-minute SequenceEngine rebuild floor.
+            // has fallen under the 15-minute raw-event forensic/correlation floor.
             var retainedSpanByCategory: [String: Int] = [:]
             do {
                 retainedSpanByCategory = try await state.eventStore.retainedSpanSecondsByCategory()
@@ -1739,15 +2146,15 @@ enum DaemonTimers {
             // flagging that would ship a false red (the mistake this batch is
             // explicitly avoiding). 1000 retained rows inside 15 minutes is the
             // signature of a pruned firehose, not of a quiet channel.
-            let sequenceFloorSeconds = 15 * 60
+            let forensicFloorSeconds = EventRetentionFloor.minutes * 60
             let starvedCategories = retainedSpanByCategory
-                .filter { $0.value < sequenceFloorSeconds && (eventTypeCounts[$0.key] ?? 0) >= 1000 }
+                .filter { $0.value < forensicFloorSeconds && (eventTypeCounts[$0.key] ?? 0) >= 1000 }
                 .keys.sorted()
             if !starvedCategories.isEmpty {
                 let detail = starvedCategories
                     .map { "\($0)=\(retainedSpanByCategory[$0] ?? 0)s" }
                     .joined(separator: ", ")
-                logger.warning("Event retention BELOW the 15-minute sequence-rebuild floor: \(detail, privacy: .public). Sequence rules, graph rules, cross-process correlation and `hunt` are blind past that window for those categories — the size-cap sweep is evicting them to hold events.db under storage.eventsMaxSizeMB. Reduce ingest or raise the cap; do not read this as a quiet host.")
+                logger.warning("Event retention BELOW the 15-minute raw-event forensic/correlation floor: \(detail, privacy: .public). Graph reconstruction, cross-process correlation and `hunt` are blind past that window for those categories — the size-cap sweep or storage admission has created an evidence gap. SequenceEngine does not currently rehydrate from events.db; its restart continuity is tracked separately. Do not read this as a quiet host.")
             }
 
             // v1.7.2: collector liveness + drop counter.
@@ -1765,6 +2172,150 @@ enum DaemonTimers {
             let priorityTerminated = eventPipeline.mergedTerminatedByLane["priority"] ?? 0
             let fileTerminated = eventPipeline.mergedTerminatedByLane["file"] ?? 0
             let eventWriterTelemetry = await state.eventWriter.telemetrySnapshot()
+            let eventRetentionBudget = state.eventRetentionBudgetHealth
+                .snapshot().dictionary
+            let evidenceBudgetBytes = SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: state.storage.evidenceMaxSizeMB
+            )
+            let evidenceSnapshot = try? await state.alertStore
+                .evidenceBudgetSnapshot(maxBytes: evidenceBudgetBytes)
+            let alertsAdmission = await state.alertStore
+                .storageAdmissionSnapshot()
+            let evidenceCaptureStats = await state.alertSink.evidenceStats()
+            let legacyTransition = state.legacyEvidenceTransitionBudget.snapshot()
+            let liveEventsFamilyCapMiB = state.storage
+                .effectiveEventsFamilyMaxSizeMB(
+                    appliedLegacyEvidenceTransitionReserveMiB:
+                        legacyTransition.appliedReserveMiB
+                )
+            var alertEvidenceBudget: [String: Any] = [
+                "events_family_effective_cap_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: liveEventsFamilyCapMiB
+                    ),
+                "events_family_steady_state_cap_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage
+                            .effectiveEventsFamilyMaxSizeMB
+                    ),
+                "events_legacy_envelope_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage.eventsMaxSizeMB
+                    ),
+                "alert_rows_max_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage.alertsMaxSizeMB
+                    ),
+                "evidence_max_bytes": evidenceBudgetBytes,
+                "alerts_family_combined_cap_bytes":
+                    AlertStore.combinedFamilyCapBytes(
+                        alertsMaxSizeMiB: state.storage.alertsMaxSizeMB,
+                        evidenceMaxSizeMiB: state.storage.evidenceMaxSizeMB
+                    ),
+                "events_and_alerts_total_cap_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage
+                            .configuredEventsAndAlertsTotalMaxSizeMB(
+                                appliedLegacyEvidenceTransitionReserveMiB:
+                                    legacyTransition.appliedReserveMiB
+                            )
+                    ),
+                "events_and_alerts_steady_state_total_cap_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage
+                            .configuredEventsAndAlertsTotalMaxSizeMB
+                    ),
+                "legacy_transition_reserve_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: legacyTransition.appliedReserveMiB
+                    ),
+                "legacy_transition_applied_reserve_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: legacyTransition.appliedReserveMiB
+                    ),
+                "legacy_transition_max_bytes":
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: legacyTransition.maximumReserveMiB
+                    ),
+                "legacy_transition_measurement_failed":
+                    legacyTransition.measurementFailed,
+                "legacy_transition_generation":
+                    legacyTransition.configurationGeneration,
+                "legacy_transition_stale_measurements_discarded":
+                    legacyTransition.staleMeasurementsDiscarded,
+                "legacy_transition_transaction_reserve_bytes":
+                    legacyTransition.transactionReserveBytes,
+                "capture_rows_total": evidenceCaptureStats.capturedRows,
+                "capture_pruned_rows_total": evidenceCaptureStats.prunedRows,
+                "capture_offered_total": evidenceCaptureStats.offered,
+                "capture_completed_total": evidenceCaptureStats.completed,
+                "capture_failures_total": evidenceCaptureStats.failures,
+                "capture_shed_total": evidenceCaptureStats.shed,
+                "capture_pending": evidenceCaptureStats.pending,
+                "capture_in_flight": evidenceCaptureStats.inFlight,
+                "capture_queue_capacity": evidenceCaptureStats.queueCapacity,
+                "capture_accepting": evidenceCaptureStats.accepting,
+                "capture_conserved": evidenceCaptureStats.conserved,
+            ]
+            if let rowCount = legacyTransition.rowCount {
+                alertEvidenceBudget["legacy_row_count"] = rowCount
+            }
+            if let chargedBytes = legacyTransition.chargedBytes {
+                alertEvidenceBudget["legacy_charged_bytes"] = chargedBytes
+            }
+            if let pendingReserveMiB = legacyTransition.pendingReserveMiB {
+                alertEvidenceBudget["legacy_transition_pending_reserve_bytes"] =
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: pendingReserveMiB
+                    )
+            }
+            if let pendingFits = legacyTransition
+                .pendingReserveFitsHardBoundary {
+                alertEvidenceBudget["legacy_transition_pending_fits_boundary"] =
+                    pendingFits
+            }
+            if let footprint = legacyTransition.familyFootprintBytes {
+                alertEvidenceBudget["legacy_transition_family_footprint_bytes"] =
+                    footprint
+            }
+            if let boundary = legacyTransition
+                .proposedHardAdmissionBoundaryBytes {
+                alertEvidenceBudget["legacy_transition_proposed_boundary_bytes"] =
+                    boundary
+            }
+            if let drained = legacyTransition.walCheckpointDrained {
+                alertEvidenceBudget["legacy_transition_wal_checkpoint_drained"] =
+                    drained
+            }
+            if let freelist = legacyTransition.freelistBytes {
+                alertEvidenceBudget["legacy_transition_freelist_bytes"] =
+                    freelist
+            }
+            if let evidenceSnapshot {
+                alertEvidenceBudget["row_count"] = evidenceSnapshot.rowCount
+                alertEvidenceBudget["logical_bytes"] = evidenceSnapshot.logicalBytes
+                alertEvidenceBudget["allocated_bytes"] = evidenceSnapshot.allocatedBytes
+                alertEvidenceBudget["charged_bytes"] = evidenceSnapshot.chargedBytes
+                alertEvidenceBudget["over_budget"] = evidenceSnapshot.overBudget
+                alertEvidenceBudget["allocated_bytes_exact"] =
+                    evidenceSnapshot.allocatedBytesExact
+                alertEvidenceBudget["mutation_generation"] =
+                    evidenceSnapshot.mutationGeneration
+                alertEvidenceBudget["full_refreshes_total"] =
+                    evidenceSnapshot.fullRefreshesTotal
+            }
+            if let alertsAdmission {
+                if let value = alertsAdmission.footprintBytes {
+                    alertEvidenceBudget["alerts_family_footprint_bytes"] = value
+                }
+                if let value = alertsAdmission.maxFootprintBytes {
+                    alertEvidenceBudget["alerts_family_admission_cap_bytes"] = value
+                }
+                alertEvidenceBudget["alerts_family_blocked"] =
+                    alertsAdmission.latchedFailure != nil
+                alertEvidenceBudget["alerts_family_reason"] =
+                    alertsAdmission.latchedFailure ?? ""
+            }
             let unifiedLogDelivery = upstreamCollectorBuffers[.unifiedLog]
             let registryDroppedTotal = await state.collectorRegistry.droppedEventsTotal()
             let addSaturating: (UInt64, UInt64) -> UInt64 = { lhs, rhs in
@@ -1883,7 +2434,98 @@ enum DaemonTimers {
             // in-flight parked near the cap with evictions climbing is the
             // signature of the flush, whether accidental or deliberate.
             let sequencePartialsEvicted = await state.sequenceEngine.partialsEvictedTotal
-            let sequencePartialsInFlight = await state.sequenceEngine.activePartialMatchCount
+            let sequencePendingStepsEvicted = await state.sequenceEngine.pendingStepsEvictedTotal
+            let sequenceWeight = await state.sequenceEngine.checkpointWeightDiagnostics()
+            let sequencePartialsInFlight = sequenceWeight.partialCount
+            let sequencePendingStepsCurrent = sequenceWeight.pendingCount
+            let sequenceStateContinuityMaintained: Bool
+            let sequenceStateContinuityDetail: String
+            if sequencePartialsInFlight < 0 || sequencePendingStepsCurrent < 0 {
+                sequenceStateContinuityMaintained = false
+                sequenceStateContinuityDetail = "negative_runtime_count"
+            } else if sequenceWeight.cachedWeight != sequenceWeight.recomputedWeight {
+                sequenceStateContinuityMaintained = false
+                sequenceStateContinuityDetail = "checkpoint_weight_accounting_drift"
+            } else if sequenceWeight.cachedWeight > sequenceWeight.maximumWeight {
+                sequenceStateContinuityMaintained = false
+                sequenceStateContinuityDetail = "checkpoint_weight_limit_exceeded"
+            } else if sequencePartialsEvicted > 0 {
+                sequenceStateContinuityMaintained = false
+                sequenceStateContinuityDetail = "partial_match_eviction"
+            } else if sequencePendingStepsEvicted > 0 {
+                sequenceStateContinuityMaintained = false
+                sequenceStateContinuityDetail = "pending_step_eviction"
+            } else {
+                sequenceStateContinuityMaintained = true
+                sequenceStateContinuityDetail = "nominal"
+            }
+            let sequenceCheckpoint = await state.sequenceCheckpointCoordinator.telemetry(
+                engine: state.sequenceEngine,
+                now: Date(timeIntervalSince1970: nowUnix)
+            )
+            var sequenceCheckpointDict: [String: Any] = [
+                "restore_status": sequenceCheckpoint.restoreStatus.rawValue,
+                "checkpoint_bytes": sequenceCheckpoint.checkpointBytes,
+                "durable_carrier_valid": sequenceCheckpoint.durableCarrierValid,
+                "dirty": sequenceCheckpoint.dirty,
+                "current_generation": sequenceCheckpoint.currentGeneration,
+                "configured_crash_rpo_seconds": sequenceCheckpoint.configuredCrashRPOSeconds,
+                "crash_rpo_bound_currently_maintained": sequenceCheckpoint.crashRPOBoundCurrentlyMaintained,
+                "periodic_writes_last_hour": sequenceCheckpoint.periodicWritesLastHour,
+                "periodic_bytes_last_hour": sequenceCheckpoint.periodicBytesLastHour,
+                "writes_total": sequenceCheckpoint.writesTotal,
+                "bytes_written_total": sequenceCheckpoint.bytesWrittenTotal,
+                "unchanged_skips_total": sequenceCheckpoint.unchangedSkipsTotal,
+                "budget_deferrals_total": sequenceCheckpoint.budgetDeferralsTotal,
+                "orphan_files_current": sequenceCheckpoint.orphanFilesCurrent,
+                "orphan_bytes_current": sequenceCheckpoint.orphanBytesCurrent,
+                "orphan_files_removed_total": sequenceCheckpoint.orphanFilesRemovedTotal,
+                "orphan_bytes_removed_total": sequenceCheckpoint.orphanBytesRemovedTotal,
+                "orphan_cleanup_scan_truncated": sequenceCheckpoint.orphanCleanupScanTruncated,
+                "carrier_invalidations_total": sequenceCheckpoint.carrierInvalidationsTotal,
+            ]
+            if let value = sequenceCheckpoint.restoreDetail {
+                sequenceCheckpointDict["restore_detail"] = value
+            }
+            if let value = sequenceCheckpoint.lastRestoreAt {
+                sequenceCheckpointDict["last_restore_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.lastAttemptAt {
+                sequenceCheckpointDict["last_attempt_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.lastSuccessAt {
+                sequenceCheckpointDict["last_success_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.lastFailureAt {
+                sequenceCheckpointDict["last_failure_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.lastFailure {
+                sequenceCheckpointDict["last_failure"] = value
+            }
+            if let value = sequenceCheckpoint.checkpointCapturedAt {
+                sequenceCheckpointDict["checkpoint_captured_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.checkpointAgeSeconds {
+                sequenceCheckpointDict["checkpoint_age_seconds"] = value
+            }
+            if let value = sequenceCheckpoint.currentSemanticDigest {
+                sequenceCheckpointDict["current_semantic_digest"] = value
+            }
+            if let value = sequenceCheckpoint.durableSemanticDigest {
+                sequenceCheckpointDict["durable_semantic_digest"] = value
+            }
+            if let value = sequenceCheckpoint.durableGeneration {
+                sequenceCheckpointDict["durable_generation"] = value
+            }
+            if let value = sequenceCheckpoint.lastOrphanCleanupAt {
+                sequenceCheckpointDict["last_orphan_cleanup_at_unix"] = value.timeIntervalSince1970
+            }
+            if let value = sequenceCheckpoint.lastCarrierInvalidationReason {
+                sequenceCheckpointDict["last_carrier_invalidation_reason"] = value.rawValue
+            }
+            if let value = sequenceCheckpoint.lastCarrierInvalidationAt {
+                sequenceCheckpointDict["last_carrier_invalidation_at_unix"] = value.timeIntervalSince1970
+            }
 
             // v1.21.4 Phase-1 D2: sensor-degraded / possible-evasion meta-alert.
             // Fold the D1/D4 cumulative counters into per-tick deltas and gate on
@@ -1985,7 +2627,9 @@ enum DaemonTimers {
             // misconfigured model" instead of failing silently. nil service
             // → not configured for the engine.
             let llmHealthDict: [String: Any]
-            if let h = await state.llmService?.healthSnapshot() {
+            if let llm = state.llmService {
+                let h = await llm.healthSnapshot()
+                let runtime = await llm.runtimeTelemetrySnapshot()
                 // AI-08: `healthy` is now LLMService.isUsable() — the SAME
                 // predicate that gates `maccrab.llm.*` emission, so the gauge
                 // cannot claim healthy while commentary is being withheld. The
@@ -2002,6 +2646,17 @@ enum DaemonTimers {
                     "circuit_open": h.circuitOpen,
                     "healthy": h.usable,
                 ]
+                // Fixed-cardinality/content-free accounting only. Encode the
+                // typed snapshot and immediately convert it to a JSON object;
+                // prompt/response text and dynamic feature labels never enter
+                // the heartbeat.
+                if let runtimeData = try? JSONEncoder().encode(runtime),
+                   let object = try? JSONSerialization.jsonObject(with: runtimeData),
+                   let runtimeObject = object as? [String: Any] {
+                    llmDict["runtime_telemetry"] = runtimeObject
+                } else {
+                    llmDict["runtime_telemetry_encoding_failed"] = true
+                }
                 // Omit rather than write epoch-0 when the backend has never
                 // answered — the same honesty rule the collector block follows
                 // for `last_tick_unix`. A fabricated 0 reads as "last succeeded
@@ -2110,6 +2765,29 @@ enum DaemonTimers {
                 if let value = s.freeSpaceFloorBytes { d["free_space_floor_bytes"] = value }
                 if let value = s.lastRecoveryFootprintBeforeBytes { d["last_recovery_footprint_before_bytes"] = value }
                 if let value = s.lastRecoveryFootprintAfterBytes { d["last_recovery_footprint_after_bytes"] = value }
+                if let bridge = state.causalGraphBridge {
+                    let w = await bridge.writeTelemetry()
+                    d["ingest_events_total"] = Int64(clamping: w.inputEventsTotal)
+                    d["ingest_events_committed_total"] = Int64(clamping: w.eventsCommittedTotal)
+                    d["ingest_events_failed_total"] = Int64(clamping: w.eventsFailedTotal)
+                    d["ingest_events_in_flight"] = w.eventsInFlight
+                    d["ingest_events_pending"] = w.eventsPending
+                    d["entity_observations_total"] = Int64(clamping: w.entityObservationsTotal)
+                    d["edge_observations_total"] = Int64(clamping: w.edgeObservationsTotal)
+                    d["relevance_suppressed_file_events_total"] = Int64(clamping: w.relevanceSuppressedFileEventsTotal)
+                    d["relevance_suppressed_rows_total"] = Int64(clamping: w.relevanceSuppressedRowsTotal)
+                    d["write_attempts_total"] = Int64(clamping: w.writeAttemptsTotal)
+                    d["write_batches_committed_total"] = Int64(clamping: w.writeBatchesCommittedTotal)
+                    d["write_batches_failed_total"] = Int64(clamping: w.writeBatchesFailedTotal)
+                    d["write_batches_in_flight"] = w.writeBatchesInFlight
+                    d["write_rows_attempted_total"] = Int64(clamping: w.writeRowsAttemptedTotal)
+                    d["write_rows_committed_total"] = Int64(clamping: w.writeRowsCommittedTotal)
+                    d["write_rows_failed_total"] = Int64(clamping: w.writeRowsFailedTotal)
+                    d["write_rows_in_flight"] = w.writeRowsInFlight
+                    d["coalesced_noop_rows_total"] = Int64(clamping: w.coalescedNoopRowsTotal)
+                    d["pending_entity_rows"] = w.pendingEntityRows
+                    d["pending_edge_rows"] = w.pendingEdgeRows
+                }
                 traceGraphStorageDict = d
             } else if let startupAdmission = state.causalStoreStartupAdmission {
                 traceGraphStorageDict = startupAdmission.heartbeatDictionary
@@ -2209,6 +2887,119 @@ enum DaemonTimers {
                 _ = try? await state.alertSink.submit(alert: tamperAlert)
             }
             let rulesActive = await state.ruleEngine.enabledRuleCount
+            let timerPlane = timerLifecycle.snapshot()
+            let livenessPlane = livenessLifecycle.snapshot()
+            let startupWorkPlane = state.startupWorkLifecycle.snapshot()
+            let detectionWorkPlane = state.detectionWorkLifecycle.snapshot()
+            let advisoryWorkPlane = state.advisoryWorkLifecycle.snapshot()
+            let outputWorkPlane = state.outputWorkLifecycle.snapshot()
+            let heavyEnrichmentPlane = await state.enricher
+                .heavyEnrichmentSnapshot()
+            let deferredEnrichmentBuffer = await state.deferredEnrichmentBuffer
+                .snapshot()
+
+            func workLifecycleDictionary(
+                _ plane: DaemonTimerLifecycleSnapshot
+            ) -> [String: Any] {
+                [
+                    "accepting": plane.accepting,
+                    "offered_handlers_total": plane.offeredHandlers,
+                    "accepted_handlers_total": plane.acceptedHandlers,
+                    "completed_handlers_total": plane.completedHandlers,
+                    "rejected_handlers_total": plane.rejectedHandlers,
+                    "closed_rejected_handlers_total":
+                        plane.closedRejectedHandlers,
+                    "overload_shed_handlers_total":
+                        plane.overloadShedHandlers,
+                    "coalesced_handlers_total": plane.coalescedHandlers,
+                    "coalesced_by_label": plane.coalescedByLabel,
+                    "rejected_by_label": plane.rejectedByLabel,
+                    "inline_fallback_handlers_total":
+                        plane.inlineFallbackHandlers,
+                    "inline_fallbacks_by_label":
+                        plane.inlineFallbacksByLabel,
+                    "in_flight_handlers": plane.inFlightHandlers,
+                    "maximum_in_flight_handlers":
+                        plane.maximumInFlightHandlers,
+                    "conserves_accepted_handlers":
+                        plane.conservesAcceptedHandlers,
+                    "conserves_offered_handlers":
+                        plane.conservesOfferedHandlers,
+                ]
+            }
+
+            let heavyEnrichmentPlaneDict: [String: Any] = [
+                "accepting": heavyEnrichmentPlane.accepting,
+                "offered_requests_total":
+                    heavyEnrichmentPlane.offeredRequestsTotal,
+                "completed_requests_total":
+                    heavyEnrichmentPlane.completedRequestsTotal,
+                "timed_out_requests_total":
+                    heavyEnrichmentPlane.timedOutRequestsTotal,
+                "cancelled_requests_total":
+                    heavyEnrichmentPlane.cancelledRequestsTotal,
+                "rejected_requests_total":
+                    heavyEnrichmentPlane.rejectedRequestsTotal,
+                "cache_hits_total": heavyEnrichmentPlane.cacheHitsTotal,
+                "coalesced_requests_total":
+                    heavyEnrichmentPlane.coalescedRequestsTotal,
+                "late_worker_exits_total":
+                    heavyEnrichmentPlane.lateWorkerExitsTotal,
+                "queued_requests": heavyEnrichmentPlane.queuedRequests,
+                "running_requests": heavyEnrichmentPlane.runningRequests,
+                "physical_workers": heavyEnrichmentPlane.physicalWorkers,
+                "lingering_timed_out_or_cancelled_workers":
+                    heavyEnrichmentPlane
+                        .lingeringTimedOutOrCancelledWorkers,
+                "deferred_results": heavyEnrichmentPlane.deferredResults,
+                "cached_results": heavyEnrichmentPlane.cachedResults,
+                "maximum_concurrent_workers":
+                    heavyEnrichmentPlane.maximumConcurrentWorkers,
+                "requests_conserved": heavyEnrichmentPlane.requestsConserved,
+                "physical_capacity_conserved":
+                    heavyEnrichmentPlane.physicalCapacityConserved,
+                "cleanly_drained": heavyEnrichmentPlane.cleanlyDrained,
+            ]
+            let deferredEnrichmentBufferDict: [String: Any] = [
+                "accepting_reservations":
+                    deferredEnrichmentBuffer.acceptingReservations,
+                "event_capacity": deferredEnrichmentBuffer.eventCapacity,
+                "patch_capacity": deferredEnrichmentBuffer.patchCapacity,
+                "reserved_slots": deferredEnrichmentBuffer.reservedSlots,
+                "retained_events": deferredEnrichmentBuffer.retainedEvents,
+                "buffered_patches": deferredEnrichmentBuffer.bufferedPatches,
+                "orphan_patches": deferredEnrichmentBuffer.orphanPatches,
+                "waiting_reservations":
+                    deferredEnrichmentBuffer.waitingReservations,
+                "drain_capacity_claimed":
+                    deferredEnrichmentBuffer.drainCapacityClaimed,
+                "reservation_requests_total":
+                    deferredEnrichmentBuffer.reservationRequestsTotal,
+                "reservations_granted_total":
+                    deferredEnrichmentBuffer.reservationsGrantedTotal,
+                "reservations_rejected_after_seal_total":
+                    deferredEnrichmentBuffer
+                        .reservationsRejectedAfterSealTotal,
+                "slots_released_total":
+                    deferredEnrichmentBuffer.slotsReleasedTotal,
+                "retained_events_total":
+                    deferredEnrichmentBuffer.retainedEventsTotal,
+                "closed_events_total":
+                    deferredEnrichmentBuffer.closedEventsTotal,
+                "patches_received_total":
+                    deferredEnrichmentBuffer.patchesReceivedTotal,
+                "patches_consumed_total":
+                    deferredEnrichmentBuffer.patchesConsumedTotal,
+                "identity_rejected_patches_total":
+                    deferredEnrichmentBuffer.identityRejectedPatchesTotal,
+                "reservation_conserved":
+                    deferredEnrichmentBuffer.reservationConserved,
+                "slots_conserved": deferredEnrichmentBuffer.slotsConserved,
+                "events_conserved": deferredEnrichmentBuffer.eventsConserved,
+                "patches_conserved": deferredEnrichmentBuffer.patchesConserved,
+                "within_capacity": deferredEnrichmentBuffer.withinCapacity,
+                "cleanly_drained": deferredEnrichmentBuffer.cleanlyDrained,
+            ]
 
             var payload: [String: Any] = [
                 "written_at_unix": nowUnix,
@@ -2217,6 +3008,20 @@ enum DaemonTimers {
                 "engine_version": engineIdentity.version,
                 "engine_build": engineIdentity.build,
                 "llm": llmHealthDict,
+                "timer_lifecycle": workLifecycleDictionary(timerPlane),
+                "liveness_timer_lifecycle":
+                    workLifecycleDictionary(livenessPlane),
+                "startup_work_lifecycle":
+                    workLifecycleDictionary(startupWorkPlane),
+                "detection_work_lifecycle":
+                    workLifecycleDictionary(detectionWorkPlane),
+                "advisory_work_lifecycle":
+                    workLifecycleDictionary(advisoryWorkPlane),
+                "output_work_lifecycle":
+                    workLifecycleDictionary(outputWorkPlane),
+                "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
+                "deferred_enrichment_buffer":
+                    deferredEnrichmentBufferDict,
                 "prevention": preventionDict,
                 "browser_inventory": browserInventoryDict,
                 "uptime_seconds": uptime,
@@ -2226,11 +3031,11 @@ enum DaemonTimers {
                 "fda_checked_at_unix": nowUnix,
                 "event_type_counts_1h": eventTypeCounts,
                 // v1.21.6 (PERF-04): the DELIVERED retention window per category,
-                // which is not the configured one. `..._below_sequence_floor` is
-                // the categories whose delivered window is under the 15-minute
-                // SequenceEngine rebuild floor despite holding real volume.
+                // which is not the configured one. The companion list is the
+                // categories under the 15-minute raw-event forensic/correlation
+                // floor despite holding real volume.
                 "events_retained_span_seconds_by_category": retainedSpanByCategory,
-                "events_retention_below_sequence_floor": starvedCategories,
+                "events_retention_below_forensic_floor": starvedCategories,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,
                 // v1.21.6 (DET event-loss re-audit): cumulative causality
@@ -2361,6 +3166,14 @@ enum DaemonTimers {
                 // signal. Both were previously invisible outside one log line.
                 "sequence_partials_evicted_total": sequencePartialsEvicted,
                 "sequence_partials_in_flight": sequencePartialsInFlight,
+                "sequence_pending_steps_current": sequencePendingStepsCurrent,
+                "sequence_pending_steps_evicted_total": sequencePendingStepsEvicted,
+                "sequence_checkpoint_state_weight_bytes": sequenceWeight.cachedWeight,
+                "sequence_checkpoint_state_weight_recomputed_bytes": sequenceWeight.recomputedWeight,
+                "sequence_checkpoint_state_weight_limit_bytes": sequenceWeight.maximumWeight,
+                "sequence_state_continuity_maintained": sequenceStateContinuityMaintained,
+                "sequence_state_continuity_detail": sequenceStateContinuityDetail,
+                "sequence_checkpoint": sequenceCheckpointDict,
                 // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
                 // detection-input drops folded into `events_dropped`; surfaced
                 // distinctly so a file-noise flood (file) is not read as a lost
@@ -2375,10 +3188,20 @@ enum DaemonTimers {
                 // CollectorRegistry's non-pipeline loss counter.
                 "detection_input_dropped_total": detectionInputDroppedTotal,
                 "events_storage_write_dropped_total": eventWriterTelemetry.droppedCount,
+                "events_storage_write_offered_by_lane": eventWriterTelemetry.offeredByLane,
+                "events_storage_write_dropped_by_lane": eventWriterTelemetry.droppedByLane,
                 "events_storage_write_persisted_total": eventWriterTelemetry.persistedCount,
+                "events_storage_write_persisted_by_lane": eventWriterTelemetry.persistedByLane,
+                "events_storage_write_filtered_total": eventWriterTelemetry.filteredCount,
+                "events_storage_write_filtered_by_lane": eventWriterTelemetry.filteredByLane,
                 "events_storage_write_retried_total": eventWriterTelemetry.retriedCount,
+                "events_storage_write_retried_by_lane": eventWriterTelemetry.retriedByLane,
                 "events_storage_write_buffer_depth": eventWriterTelemetry.bufferDepth,
+                "events_storage_write_buffer_depth_by_lane": eventWriterTelemetry.bufferDepthByLane,
                 "events_storage_write_in_flight_depth": eventWriterTelemetry.inFlightDepth,
+                "events_storage_write_in_flight_depth_by_lane": eventWriterTelemetry.inFlightDepthByLane,
+                "events_retention_budget": eventRetentionBudget,
+                "alert_evidence_budget": alertEvidenceBudget,
                 "trace_registry": traceRegistryDict,
                 "tracegraph_storage_admission": traceGraphStorageDict,
                 "traces_storage_admission": traceStoreStorageDict,
@@ -2390,6 +3213,56 @@ enum DaemonTimers {
             if let eventInsertFilterCounters {
                 payload["events_insert_filter_dropped_total"] = eventInsertFilterCounters.dropped
                 payload["events_insert_filter_passed_total"] = eventInsertFilterCounters.passed
+            }
+            if let receiver = state.otlpReceiver {
+                let lifecycle = await receiver.lifecycleSnapshot()
+                var otlpLifecycle: [String: Any] = [
+                    "accepting_listeners": lifecycle.acceptingListeners,
+                    "listeners_accepted_total": lifecycle.listenersAccepted,
+                    "listeners_completed_total": lifecycle.listenersCompleted,
+                    "listeners_rejected_after_seal_total":
+                        lifecycle.listenersRejectedAfterSeal,
+                    "active_listeners": lifecycle.activeListeners,
+                    "ready_listeners": lifecycle.readyListeners,
+                    "listeners_conserved": lifecycle.listenersConserved,
+                    "accepting_connections": lifecycle.acceptingConnections,
+                    "connections_accepted_total": lifecycle.connectionsAccepted,
+                    "connections_completed_total": lifecycle.connectionsCompleted,
+                    "connections_rejected_after_seal_total":
+                        lifecycle.connectionsRejectedAfterSeal,
+                    "connections_rejected_at_capacity_total":
+                        lifecycle.connectionsRejectedAtCapacity,
+                    "active_connections": lifecycle.activeConnections,
+                    "connections_conserved": lifecycle.connectionsConserved,
+                    "accepting_body_tasks": lifecycle.acceptingBodyTasks,
+                    "body_tasks_accepted_total": lifecycle.bodyTasksAccepted,
+                    "body_tasks_completed_total": lifecycle.bodyTasksCompleted,
+                    "body_tasks_cancelled_total": lifecycle.bodyTasksCancelled,
+                    "body_tasks_rejected_total": lifecycle.bodyTasksRejected,
+                    "body_task_cancellation_requests_total":
+                        lifecycle.bodyTaskCancellationRequests,
+                    "body_tasks_in_flight": lifecycle.bodyTasksInFlight,
+                    "maximum_body_tasks": lifecycle.maximumBodyTasks,
+                    "body_tasks_conserved": lifecycle.bodyTasksConserved,
+                    "accepting_callback_tasks": lifecycle.acceptingCallbackTasks,
+                    "callback_tasks_accepted_total": lifecycle.callbackTasksAccepted,
+                    "callback_tasks_completed_total": lifecycle.callbackTasksCompleted,
+                    "callback_tasks_cancelled_total": lifecycle.callbackTasksCancelled,
+                    "callback_tasks_rejected_total": lifecycle.callbackTasksRejected,
+                    "callback_task_cancellation_requests_total":
+                        lifecycle.callbackTaskCancellationRequests,
+                    "callback_tasks_in_flight": lifecycle.callbackTasksInFlight,
+                    "maximum_callback_tasks": lifecycle.maximumCallbackTasks,
+                    "callback_tasks_conserved": lifecycle.callbackTasksConserved,
+                    "lifecycle_operations_in_progress":
+                        lifecycle.lifecycleOperationsInProgress,
+                    "shutdown_timeouts_total": lifecycle.shutdownTimeouts,
+                    "cleanly_stopped": lifecycle.cleanlyStopped,
+                ]
+                if let lastShutdownClean = lifecycle.lastShutdownClean {
+                    otlpLifecycle["last_shutdown_clean"] = lastShutdownClean
+                }
+                payload["otlp_receiver_lifecycle"] = otlpLifecycle
             }
 
             // Metrics export — Prometheus-textfile-style JSON at a world-
@@ -2482,23 +3355,27 @@ enum DaemonTimers {
                 try? FileManager.default.moveItem(atPath: tmp, toPath: path)
             }
 
-            // v1.7.4: snapshot writes back to fire-and-forget Tasks.
-            // Each writer's per-instance `snapshotWriteInFlight`
-            // guard drops concurrent calls to that writer specifically
-            // — the v1.7.0 actor-queue leak is closed at the writer,
-            // not at the heartbeat. The heartbeat itself stays fast.
+            // Run independent snapshots concurrently, but join all four to the
+            // timer handler. Their per-writer in-flight guards still prevent
+            // overlap; terminal shutdown can now prove none remain after the
+            // timer plane joins.
             let lineagePath = state.supportDir + "/agent_lineage.json"
-            Task { await state.agentLineageService.writeSnapshot(to: lineagePath) }
+            async let lineageWrite: Void = state.agentLineageService
+                .writeSnapshot(to: lineagePath)
 
             let mcpBaselinePath = state.supportDir + "/mcp_baselines.json"
-            Task { await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath) }
+            async let baselineWrite: Void = state.mcpBaseline
+                .writeSnapshot(to: mcpBaselinePath)
 
             let ruleTelemetryPath = state.supportDir + "/rule_telemetry.json"
-            Task { await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath) }
+            async let ruleWrite: Void = state.ruleEngine
+                .writeTelemetrySnapshot(to: ruleTelemetryPath)
 
             let tccSnapshotPath = state.supportDir + "/tcc_snapshot.json"
-            Task { await state.tccMonitor.writeSnapshot(to: tccSnapshotPath) }
-            } // end outer Task wrapper around heartbeat body
+            async let tccWrite: Void = state.tccMonitor
+                .writeSnapshot(to: tccSnapshotPath)
+            _ = await (lineageWrite, baselineWrite, ruleWrite, tccWrite)
+            } // end lifecycle-tracked heartbeat body
         }
         heartbeatTimer.resume()
 
@@ -2539,7 +3416,7 @@ enum DaemonTimers {
         // are interactive — keep them snappy.
         inboxPoller.schedule(deadline: .now() + 5, repeating: 5)
         inboxPoller.setEventHandler {
-            Task {
+            timerLifecycle.submit(label: "inbox") {
                 // v1.11.0 (audit stability HIGH): skip this tick if a
                 // previous Task is still draining (campaign suppress
                 // fan-out can take tens of seconds at 5-10K alerts).
@@ -2655,14 +3532,43 @@ enum DaemonTimers {
             // Re-arm for the next jittered fire immediately; the probe itself
             // runs off-timer in a Task (spawn NEVER happens in the ES callback).
             coverageCanaryTimer.schedule(deadline: .now() + canaryJitterSeconds(), repeating: .never)
-            Task { await runCoverageCanary(state: state) }
+            timerLifecycle.submit(label: "coverage-canary") {
+                await runCoverageCanary(state: state)
+            }
         }
         coverageCanaryTimer.resume()
 
+        let retainedTimers: [DispatchSourceTimer?] = [
+            forensicTimer,
+            hourlyTimer,
+            statsTimer,
+            deferredEnrichmentTimer,
+            alertsPruneTimer,
+            alertsSizeCapTimer,
+            campaignsPruneTimer,
+            campaignsSizeCapTimer,
+            sizeCapTimer,
+            sizeCapWatchdogTimer,
+            maintenanceTimer,
+            heartbeatTimer,
+            tracegraphPruneTimer,
+            tracesPruneTimer,
+            artifactsPruneTimer,
+            inboxPoller,
+            coverageCanaryTimer,
+        ]
+        for timer in retainedTimers.compactMap({ $0 }) {
+            timerLifecycle.register(timer)
+        }
+        livenessLifecycle.register(livenessTimer)
+
         return Handles(
+            lifecycle: timerLifecycle,
+            livenessLifecycle: livenessLifecycle,
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
             statsTimer: statsTimer,
+            deferredEnrichmentTimer: deferredEnrichmentTimer,
             alertsPruneTimer: alertsPruneTimer,
             alertsSizeCapTimer: alertsSizeCapTimer,
             campaignsPruneTimer: campaignsPruneTimer,
@@ -2670,7 +3576,6 @@ enum DaemonTimers {
             sizeCapTimer: sizeCapTimer,
             sizeCapWatchdogTimer: sizeCapWatchdogTimer,
             maintenanceTimer: maintenanceTimer,
-            feedbackTimer: feedbackTimer,
             heartbeatTimer: heartbeatTimer,
             livenessTimer: livenessTimer,
             tracegraphPruneTimer: tracegraphPruneTimer,
@@ -3213,8 +4118,8 @@ enum DaemonTimers {
     /// require a root-owned request; other permitted changes may still be
     /// driven by an authorized console-admin process, so make every accepted
     /// high-impact transition loud.
-    /// Inserted directly into the alert store (recorded, dashboard/CLI/MCP-
-    /// visible, bypasses the noise filter); NOT OS-notified, to avoid spamming
+    /// Routed through AlertSink (recorded, dashboard/CLI/MCP-visible, with the
+    /// same dedup/evidence/counter/gating semantics); NOT OS-notified, to avoid spamming
     /// the operator on their own legitimate changes. Observe-only — the verb
     /// itself already executed; this never blocks it.
     private static func emitSelfProtectionAlert(state: DaemonState, action: String, detail: String) async {
@@ -3230,7 +4135,7 @@ enum DaemonTimers {
             mitreTechniques: "attack.t1562.001",
             suppressed: false
         )
-        do { try await state.alertStore.insert(alert: alert) }
+        do { _ = try await state.alertSink.submit(alert: alert) }
         catch { print("[self-protection] failed to record '\(action)' alert: \(error)") }
     }
 
@@ -3508,13 +4413,12 @@ enum DaemonTimers {
             }
             do {
                 let removed = try await state.alertStore.delete(alertId: id)
-                // corr-storage #284: the alert's evidence copy lives in
-                // events.db (`alert_evidence`), a DIFFERENT store — deleting the
-                // alert row alone left that copy (with its PII: command lines,
-                // paths, user names) until retention. Purge it in the same
-                // authorized operation so a user-initiated delete is a complete
-                // wipe. Best-effort: a failure here must not fail the alert
-                // delete that already succeeded.
+                // Schema-v8 alert-owned evidence cascades atomically with the
+                // parent row. Preserve the explicit events.db cleanup for legacy
+                // evidence that is intentionally not auto-migrated; a user-
+                // initiated wipe must remove both generations. Best-effort:
+                // failure here cannot undo the already-complete alert/new-
+                // evidence transaction.
                 var evidenceRemoved = 0
                 do {
                     evidenceRemoved = try await state.eventStore.deleteEvidence(alertId: id)
@@ -3882,15 +4786,30 @@ enum DaemonTimers {
         let allowedKeys = ["enabled", "provider", "ollama_url", "ollama_model",
                            "openai_url", "openai_model", "claude_model",
                            "mistral_model", "gemini_model"]
+        // Reject the request atomically when it tries to steer a remote URL
+        // without explicit approval. Applying provider/model while silently
+        // skipping only the endpoint leaves the engine on a stale/default URL
+        // and makes Settings disagree with production.
+        let unapprovedRemoteKeys = urlKeys.sorted().filter { key in
+            guard let url = chosen.payload[key] as? String else { return false }
+            return !isLoopbackEndpoint(url) && !allowRemote
+        }
+        if !unapprovedRemoteKeys.isEmpty {
+            for key in unapprovedRemoteKeys {
+                auditLogInbox(
+                    state: state,
+                    prefix: "llm-config",
+                    id: key,
+                    uid: chosen.uid,
+                    result: "request_rejected_nonloopback"
+                )
+            }
+            print("[inbox] llm-config: rejected entire request; remote endpoint approval missing for \(unapprovedRemoteKeys.joined(separator: ","))")
+            return
+        }
         var sanitized: [String: Any] = [:]
         for key in allowedKeys {
             guard let value = chosen.payload[key] else { continue }
-            if urlKeys.contains(key), let urlStr = value as? String,
-               !isLoopbackEndpoint(urlStr), !allowRemote {
-                print("[inbox] llm-config: rejected non-loopback \(key)=\(urlStr) (set allow_remote_endpoint to override)")
-                auditLogInbox(state: state, prefix: "llm-config", id: key, uid: chosen.uid, result: "url_rejected_nonloopback")
-                continue
-            }
             sanitized[key] = value
         }
         guard !sanitized.isEmpty else { return }
@@ -4338,8 +5257,8 @@ func measureWalMB(dbPath: String) -> Int {
 ///
 /// Tries the configured `hotTierMinutes` cutoff first. If the DB is still
 /// over `targetSizeBytes` afterwards, tightens the cutoff progressively
-/// (hotTier, /2, /4) — but never below 15 minutes (the SequenceEngine
-/// rebuild floor; the longest sequence rule has a 10-minute window).
+/// (hotTier, /2, /4) — but never below the 15-minute raw-event forensic and
+/// correlation floor.
 ///
 /// If after the tightest cutoff the DB STILL exceeds `capSizeBytes` (the
 /// proactive reserve boundary, before hard admission pauses ingestion), Layer
@@ -4402,38 +5321,15 @@ func runAdaptiveRollupSweep(
         }
     }
 
-    // Build a progressively-tightening cutoff ladder from the configured
-    // hot-tier window. Floors at 15 min (sequence-rebuild safety: the
-    // longest single sequence rule has a 10-minute window; below 15 we'd
-    // risk dropping events mid-sequence on rule reload).
-    //
-    // v1.12.6 fix: the prior implementation built `[hot, hot/2, hot/4]`,
-    // applied `max(15, …)` to each, then `NSOrderedSet` dedup'd. When
-    // `hotTierMinutes ≤ 15`, all three rungs collapsed to 15 and the
-    // dedup left a single-entry ladder — meaning the Layer-2 adaptive
-    // pass had no progressively-tighter cutoffs to try, and Layer 3
-    // (the row-count fallback) had to do all the work alone. On a host
-    // already running with a 15 min hot tier (a deliberate "minimum
-    // safe" setting), this defeated the adaptive design entirely.
-    //
-    // New ladder construction: explicit fractional cutoffs with strict
-    // monotonic decrease enforced via `min(prev - 1, candidate)` before
-    // the 15-minute floor is applied. At `hotTierMinutes == 15` this
-    // yields `[15, 14, 13]` (still adaptive, still above the 10-minute
-    // sequence-window). At `hotTierMinutes == 30` it yields
-    // `[30, 15, 13]`. The minimum floor of 13 (15 − 2) was picked so
-    // even the pathological-floor case retains *some* tightening room;
-    // the Layer-3 row-count fallback below still handles any overflow.
-    let hotMinutes = hotTierMinutes
-    let rung1 = hotMinutes
-    let rung2 = min(rung1 - 1, max(15, hotMinutes / 2))
-    let rung3 = min(rung2 - 1, max(15, hotMinutes / 4))
-    let rawLadder = [rung1, rung2, rung3]
-    // Filter to strictly-positive cutoffs (rung2/rung3 can dip if the
-    // operator sets a 1-minute hot tier — defense against bogus config
-    // rather than expected operation).
-    let cutoffsMinutes: [Double] = rawLadder
-        .filter { $0 > 0 }
+    // Tighten only to the hard forensic/correlation floor. The previous code
+    // deliberately generated [15, 14, 13] at a configured 15-minute floor;
+    // runtime measurement then retained just 101–221 seconds because Layer 3's
+    // valve continued through the remaining recent rows. A byte budget that
+    // cannot hold the floor must be surfaced as degraded/infeasible and shed
+    // future persistence honestly — it must not falsify the window by deleting
+    // newer evidence until the file happens to fit.
+    let cutoffsMinutes = EventRetentionFloor
+        .adaptiveCutoffs(hotTierMinutes: hotTierMinutes)
         .map(Double.init)
     var totalPruned = 0
 
@@ -4489,12 +5385,19 @@ func runAdaptiveRollupSweep(
             let overFraction = Double(sizeAfterAdaptiveBytes - capSizeBytes)
                 / Double(sizeAfterAdaptiveBytes)
             let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
+            let hardFloorCutoff = Date().addingTimeInterval(
+                -Double(EventRetentionFloor.minutes) * 60
+            )
             let dropped = (try? await eventStore.pruneOldest(
                 count: dropTarget,
                 protecting: processFloorCategory,
-                newerThan: processFloorCutoff
+                newerThan: processFloorCutoff,
+                preservingAllNewerThan: hardFloorCutoff
             )) ?? 0
             logger.notice("Layer 3 cap: pruned \(dropped) oldest events (target \(dropTarget))")
+            if dropped < dropTarget {
+                logger.fault("Layer 3 cap stopped at the \(EventRetentionFloor.minutes)-minute raw-event floor after pruning \(dropped)/\(dropTarget) rows. The configured events.db budget is currently infeasible without shedding new persistence; recent evidence was NOT deleted to manufacture convergence.")
+            }
             // v1.10.0 audit fix: feed Layer 3's drop count into the
             // shared totalPruned counter so the VACUUM gate below
             // ("if totalPruned > 0") fires. Pre-fix Layer 3 deleted
@@ -4628,7 +5531,7 @@ func runAdaptiveRollupSweep(
                     return
                 }
                 if SizeCapConvergence.record(converged: afterVacuumBytes <= targetSizeBytes) {
-                    logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumBytes) bytes against a \(targetSizeBytes)-byte target. The measured floor (schema + alert_evidence + events_fts + the WAL sidecar) exceeds the target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Raise storage.events_max_size_mb (shipped default 420) or lower storage.evidence_max_size_mb.")
+                    logger.error("Tier-rollup: events.db size cap is UNREACHABLE — \(SizeCapConvergence.failureLimit) consecutive full VACUUMs left the footprint at \(afterVacuumBytes) bytes against a \(targetSizeBytes)-byte target. The measured floor (schema + legacy alert_evidence + events_fts + retained rows + WAL) exceeds the effective event-family target, so rebuilding cannot converge and was rewriting the whole file every sweep. Full VACUUM suppressed for \(Int(SizeCapConvergence.backoffSeconds / 3600)) h. Adjust the legacy events envelope/evidence allocation or reduce indexed event bytes.")
                 }
             } else {
                 logger.notice("Tier-rollup: full VACUUM suppressed — the size cap was measured unreachable (see the cap-unreachable error). Checkpointing the WAL instead; prune + incremental_vacuum still ran, so the working set stays bounded.")
@@ -4722,15 +5625,28 @@ func fullVacuumHeadroom(
 @discardableResult
 func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
     let boundary = EventsSizeCapBoundary(
-        maxSizeMiB: state.storage.eventsMaxSizeMB
+        maxSizeMiB: state.storage.effectiveEventsFamilyMaxSizeMB(
+            appliedLegacyEvidenceTransitionReserveMiB:
+                state.legacyEvidenceTransitionBudget.snapshot()
+                    .appliedReserveMiB
+        )
     )
     let dbFilePath = state.supportDir + "/events.db"
-    return await enforceDatabaseSizeCap(
+    let ran = await enforceDatabaseSizeCap(
         dbPath: dbFilePath,
         boundary: boundary,
         eventStore: state.eventStore,
         processFloorMinutes: max(0, state.storage.processEventsFloorMinutes)
     )
+    if ran {
+        state.eventRetentionBudgetHealth.recordSweep(
+            observedFootprintBytes: try? measureDatabaseFootprintBytes(
+                dbPath: dbFilePath
+            ),
+            boundary: boundary
+        )
+    }
+    return ran
 }
 
 // MARK: - Size-cap enforcement (hardened in v1.6.13)
@@ -4774,7 +5690,7 @@ private func enforceDatabaseSizeCap(
         logger.info("Size-cap enforcer: another sweep already active, skipping")
         return false
     }
-    defer { Task { await eventStore.endSizeCapPrune() } }
+    let result = await { () async -> Bool in
 
     func currentSizeBytes(_ phase: String) -> Int64? {
         do {
@@ -4818,7 +5734,10 @@ private func enforceDatabaseSizeCap(
     let pruned = (try? await eventStore.pruneOldest(
         count: pruneCount,
         protecting: processFloorMinutes > 0 ? .process : nil,
-        newerThan: processFloorCutoff
+        newerThan: processFloorCutoff,
+        preservingAllNewerThan: Date().addingTimeInterval(
+            -Double(EventRetentionFloor.minutes) * 60
+        )
     )) ?? 0
     guard let sizeAfterPruneBytes = currentSizeBytes("after row prune") else {
         return true
@@ -4911,6 +5830,9 @@ private func enforceDatabaseSizeCap(
     }
     logger.notice("Size-cap sweep complete: \(initialBytes) bytes → \(finalBytes) bytes (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
     return true
+    }()
+    await eventStore.endSizeCapPrune()
+    return result
 }
 
 /// Probe whether this sysext process currently has Full Disk Access.

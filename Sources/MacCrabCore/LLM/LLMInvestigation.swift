@@ -19,9 +19,9 @@ public struct LLMInvestigation: Codable, Sendable, Hashable {
     /// The alert this investigation analyzed. Same as Alert.id.
     public let alertId: String
 
-    /// Calibrated probability the alert is a true positive (0.0–1.0).
-    /// The LLM is instructed to err on the side of caution — high
-    /// confidence requires multiple independent signals.
+    /// Model-reported true-positive score (0.0–1.0). This is not a
+    /// calibrated probability until a versioned, operator-labelled
+    /// evaluation corpus demonstrates calibration for the active model.
     public let confidence: Double
 
     /// Top-line assessment.
@@ -36,8 +36,8 @@ public struct LLMInvestigation: Codable, Sendable, Hashable {
     /// looked at — keeps the assessment auditable.
     public let evidenceChain: [Evidence]
 
-    /// MITRE ATT&CK mappings the LLM inferred (may extend beyond what
-    /// the detection rule itself tagged).
+    /// MITRE ATT&CK mappings grounded in identifiers supplied with the
+    /// alert. The parser rejects identifiers that were not in its input.
     public let mitreReasoning: [MITREMap]
 
     /// Actions the LLM suggests. Every action carries a D3FEND reference,
@@ -107,7 +107,7 @@ public struct Evidence: Codable, Sendable, Hashable {
         case event, alert, enrichment, threatIntel = "threat_intel"
     }
     public let kind: Kind
-    public let id: String           // Event UUID, Alert id, or arbitrary ref
+    public let id: String           // Event UUID or Alert id supplied as input
     public let note: String         // one-line reason this piece matters
 
     public init(kind: Kind, id: String, note: String) {
@@ -168,8 +168,9 @@ public struct SuggestedAction: Codable, Sendable, Hashable {
     public let d3fendRef: String?           // e.g. "D3-PL" (Process Lockout)
     public let blastRadius: BlastRadius
     public let requiresConfirmation: Bool   // every destructive action → true
-    /// Exact command or payload that would run. Empty string for
-    /// document/escalate. Surfaced in the UI preview before confirmation.
+    /// Advisory display text supplied by the model. It must never be executed
+    /// directly; any future response executor must reconstruct a typed action
+    /// from trusted identifiers and render its own deterministic preview.
     public let previewCommand: String?
 
     public init(

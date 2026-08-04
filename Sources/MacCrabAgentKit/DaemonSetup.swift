@@ -362,6 +362,9 @@ enum DaemonSetup {
     static func initialize() async -> DaemonState {
         let startupBegin = DispatchTime.now()
         let startedAt = Date()
+        let startupWorkLifecycle = DaemonTimerLifecycle(
+            maximumInFlightHandlers: 32
+        )
 
         // Check if running as root (required for ES framework, optional for other sources)
         let isRoot = getuid() == 0
@@ -494,7 +497,13 @@ enum DaemonSetup {
         // sites silently defeats the operator's configured hard cap.
         let eventStoragePolicy = SQLitePersistentStorePolicy(
             maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
-                maxSizeMiB: bootStorage.eventsMaxSizeMB
+                // Startup must be safe before the legacy evidence table can be
+                // measured. Retain the complete bounded transition reserve,
+                // then narrow it immediately after EventStore opens.
+                maxSizeMiB: bootStorage.effectiveEventsFamilyMaxSizeMB(
+                    appliedLegacyEvidenceTransitionReserveMiB:
+                        bootStorage.evidenceMaxSizeMB
+                )
             ),
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
@@ -502,8 +511,9 @@ enum DaemonSetup {
             storageVolumePath: supportDir
         )
         let alertStoragePolicy = SQLitePersistentStorePolicy(
-            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
-                maxSizeMiB: bootStorage.alertsMaxSizeMB
+            maxFootprintBytes: AlertStore.combinedFamilyCapBytes(
+                alertsMaxSizeMiB: bootStorage.alertsMaxSizeMB,
+                evidenceMaxSizeMiB: bootStorage.evidenceMaxSizeMB
             ),
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             storageVolumePath: supportDir
@@ -626,6 +636,66 @@ enum DaemonSetup {
             )
         }
 
+        let legacyEvidenceTransitionBudget = LegacyEvidenceTransitionBudget(
+            storageConfig: bootStorage
+        )
+        let legacyEvidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
+            maxSizeMiB: bootStorage.evidenceMaxSizeMB
+        )
+        let legacyEvidenceTicket = legacyEvidenceTransitionBudget
+            .measurementTicket()
+        let legacyEvidenceMeasurement: LegacyAlertEvidenceTransitionMeasurement?
+        do {
+            legacyEvidenceMeasurement = try await eventStore
+                .legacyAlertEvidenceTransitionMeasurement(
+                    maxBytes: legacyEvidenceCapBytes
+                )
+        } catch {
+            legacyEvidenceMeasurement = nil
+            logger.warning("Legacy alert-evidence ownership could not be measured; retaining the full \(bootStorage.evidenceMaxSizeMB) MiB upgrade reserve: \(error.localizedDescription, privacy: .public)")
+        }
+        var transition = legacyEvidenceTransitionBudget.update(
+            measurement: legacyEvidenceMeasurement,
+            ticket: legacyEvidenceTicket
+        )
+        let policyReserve = transition.pendingReserveFitsHardBoundary == true
+            ? transition.pendingReserveMiB ?? transition.appliedReserveMiB
+            : transition.appliedReserveMiB
+        let measuredEventsFamilyCap = bootStorage
+            .effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    policyReserve
+            )
+        do {
+            _ = try await eventStore.updateStorageAdmission(
+                SQLitePersistentStorePolicy(
+                    maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: measuredEventsFamilyCap
+                    ),
+                    freeSpaceFloorBytes: SQLitePersistentStorePolicy
+                        .freeSpaceFloorBytes,
+                    transactionReserveBytes: SQLitePersistentStorePolicy
+                        .eventTransactionReserveBytes,
+                    storageVolumePath: supportDir
+                )
+            )
+            if transition.pendingReserveFitsHardBoundary == true,
+               let pending = transition.pendingReserveMiB {
+                transition = legacyEvidenceTransitionBudget
+                    .commitPendingReserve(
+                        pending,
+                        ticket: legacyEvidenceTicket
+                    )
+            }
+            let liveCap = bootStorage.effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    transition.appliedReserveMiB
+            )
+            logger.notice("events.db upgrade budget: steady-state=\(bootStorage.effectiveEventsFamilyMaxSizeMB) MiB, applied legacy reserve=\(transition.appliedReserveMiB) MiB, pending reserve=\(transition.pendingReserveMiB ?? -1) MiB, live cap=\(liveCap) MiB, legacy rows=\(transition.rowCount ?? -1), WAL drained=\(transition.walCheckpointDrained ?? false)")
+        } catch {
+            logger.fault("events.db measured upgrade budget could not be applied fail-closed: \(error.localizedDescription, privacy: .public)")
+        }
+
         do {
             alertStore = try AlertStore(
                 directory: supportDir,
@@ -706,7 +776,7 @@ enum DaemonSetup {
                 // loads the bounded manifest and activates event enrichment.
                 logger.info("Deception detection enabled; decoy deployment is delegated to user-run maccrabctl")
             } else {
-                Task {
+                startupWorkLifecycle.submit(label: "deception-deploy") {
                     do {
                         let deployed = try await mgr.deploy()
                         logger.info("Deployed \(deployed.count) honeyfiles (deception tier enabled)")
@@ -767,49 +837,10 @@ enum DaemonSetup {
         let responseEngine = ResponseEngine(supportDirectory: supportDir)
 
         Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
-        // Self-defense: tamper detection.
-        // v1.12.0 RC21: the await selfDefense.start() pre-fix was on
-        // the boot critical path. SelfDefense's startup does a baseline
-        // scan of the rules dir + binary + WAL pages — easily multi-
-        // second on first launch after install. Tamper detection
-        // doesn't need to be ready by event #1; deferring .start() to
-        // a Task gets the daemon serving events ~10× sooner while
-        // losing only the tamper baseline for the first ~1 s.
-        // (RC22 caught the constructor itself doing 3.6 s of binary
-        // SHA-256 + rule dir hash — addressed in RC24 by lazy-hashing
-        // inside SelfDefense rather than at-construct time. v1.12.1.)
+        // Construct now; MonitorTasks starts and owns this only after
+        // DaemonState/AlertSink exist, so there is one alert chokepoint and one
+        // joinable shutdown owner.
         let selfDefense = SelfDefense(dataDir: supportDir, rulesDir: compiledRulesDir)
-        Task.detached(priority: .utility) {
-            await selfDefense.start { event in
-            logger.critical("SELF-DEFENSE: [\(event.type.rawValue)] \(event.description)")
-            print("[TAMPER] \(event.type.rawValue): \(event.description)")
-
-            // Create an alert for tamper events
-            let alert = Alert(
-                ruleId: "maccrab.self-defense.\(event.type.rawValue)",
-                ruleTitle: "MacCrab Tamper Detection: \(event.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
-                severity: event.severity,
-                eventId: UUID().uuidString,
-                processPath: event.path,
-                processName: "maccrabd",
-                description: event.description,
-                mitreTactics: "attack.defense_evasion",
-                mitreTechniques: "attack.t1562.001",
-                suppressed: false
-            )
-            Task {
-                // Audited AlertSink exception #1 of 2: SelfDefense alerts are
-                // already debounced upstream (sustainedTamperAlerted in
-                // SelfDefense.swift fires once per consecutive-tamper run) and
-                // this closure is captured before DaemonState/AlertSink exist
-                // in the setup order. Re-routing would force a major setup
-                // reshuffle for zero dedup benefit.
-                try? await alertStore.insert(alert: alert)
-                await notifier.notify(alert: alert)
-            }
-        }
-            print("Self-defense active (deferred — baseline forming in background)")
-        }
         Self.logBootStep(label: "after_self_defense", startedAt: startedAt)
 
         // ES infrastructure health monitor.
@@ -817,45 +848,10 @@ enum DaemonSetup {
         // talk to xprotectd / syspolicyd / endpointsecurityd via private
         // OS APIs and can each block several seconds on a cold launch
         // (system services may be mid-init themselves). The status is
-        // purely informational on the boot path — defer the whole probe
-        // to a Task so the daemon doesn't wait on Apple's bootstrap.
+        // purely informational. MonitorTasks owns the deferred probe, event
+        // consumer, producer stop, and task join.
         let esHealthMonitor = ESClientMonitor(pollInterval: config.esHealthPollInterval)
-        Task.detached(priority: .utility) {
-            await esHealthMonitor.start()
-            let esHealth = await esHealthMonitor.currentStatus()
-            if esHealth.isHealthy {
-                print("ES infrastructure (deferred probe): healthy (xprotectd, syspolicyd, endpointsecurityd running)")
-            } else {
-                print("ES infrastructure (deferred probe): DEGRADED -- \(esHealth.issues.joined(separator: ", "))")
-            }
-        }
         Self.logBootStep(label: "after_es_health", startedAt: startedAt)
-
-        // ES health monitoring task
-        Task {
-            for await healthEvent in esHealthMonitor.events {
-                let alert = Alert(
-                    ruleId: "maccrab.self-defense.\(healthEvent.type.rawValue)",
-                    ruleTitle: "ES Infrastructure: \(healthEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
-                    severity: healthEvent.severity,
-                    eventId: UUID().uuidString,
-                    processPath: nil,
-                    processName: "maccrabd",
-                    description: healthEvent.description,
-                    mitreTactics: "attack.defense_evasion",
-                    mitreTechniques: "attack.t1562.001",
-                    suppressed: false
-                )
-                // Audited AlertSink exception #2 of 2: ESClientMonitor only
-                // emits on state transitions (e.g. xprotectd died), so each
-                // alert is already a one-shot. Same setup-order constraint as
-                // exception #1 — closure captures alertStore before the
-                // AlertSink instance is built.
-                try? await alertStore.insert(alert: alert)
-                await notifier.notify(alert: alert)
-                print("[ES-HEALTH] \(healthEvent.type.rawValue): \(healthEvent.description)")
-            }
-        }
 
         // Threat intelligence feed. v1.12.0 RC16 (TURBO): construct
         // the actor immediately (cheap), but defer the `.start()`
@@ -869,9 +865,13 @@ enum DaemonSetup {
         // Local hydration + bundled IOCs still load; only the outbound fetch is
         // gated. Capture a Sendable Bool for the detached task.
         let threatIntelNetworkEnabled = config.threatIntelEnabled
-        Task.detached(priority: .utility) {
-            await threatIntel.start(networkRefresh: threatIntelNetworkEnabled)
+        startupWorkLifecycle.submit(label: "threat-intel-hydration") {
+            let started = await threatIntel.start(
+                networkRefresh: threatIntelNetworkEnabled
+            )
+            guard started, !Task.isCancelled else { return }
             await BundledThreatIntel.loadInto(threatIntel)
+            guard !Task.isCancelled else { return }
             // v1.12.6 Wave 9F: write the cache file to disk RIGHT NOW
             // so a dashboard launched before the initial network fetch
             // completes (~14 min on a fresh install across all three
@@ -1040,7 +1040,13 @@ enum DaemonSetup {
             )
             let rollingGraph = RollingCausalGraph(
                 store: causalStore,
-                materializer: materializer
+                materializer: materializer,
+                // One event previously meant one SQLite transaction even when
+                // hundreds of adjacent observations rewrote the same process /
+                // file / edge rows. Novel anchors still force a synchronous
+                // flush before materialization; non-anchor substrate writes are
+                // coalesced behind strict time/event/row bounds.
+                ingestionWritePolicy: .daemonCoalesced
             )
             // v1.17.4 (perf): gate graph ingest on the same default noise
             // filter the EventStore insert path uses (own instance — keeps
@@ -1210,10 +1216,6 @@ enum DaemonSetup {
         // happy path but blocks if IOKit power-management is mid-state.
         // Defer to a Task.
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
-        Task.detached(priority: .utility) {
-            await usbMonitor.start()
-            print("USB device monitor active (deferred)")
-        }
 
         // Database encryption -- AES-256 field encryption, key in Keychain.
         // v1.9.0 (audit Sec-H2): default ON to match the dashboard's
@@ -1249,31 +1251,35 @@ enum DaemonSetup {
         let clickFixDetector = ClickFixDetector()
 
         // v1.21.4: per-user entity behaviour analytics. OFF unless the operator
-        // opts in via `ueba_enabled` — see DaemonConfig.uebaEnabled. In-memory
-        // only (no persistencePath): profiles rebuild from the cold-start window
-        // on each start, so there is no save-timer dependency. When enabled the
-        // event loop feeds process-exec events in (EventLoop) and routes any
-        // UEBAAnomaly to the alert sink.
-        let uebaEngine: UEBAEngine? = config.uebaEnabled ? UEBAEngine() : nil
+        // opts in via `ueba_enabled`. Persistence has an explicit readiness
+        // boundary: a corrupt/unreadable prior model disables UEBA for this boot
+        // instead of racing new observations and later overwriting the evidence.
+        // Periodic maintenance and the central finalizer own subsequent saves.
+        let uebaPersistencePath = supportDir + "/ueba_profiles.json"
+        let uebaEngine: UEBAEngine?
+        var uebaLoadFailed = false
         if config.uebaEnabled {
-            print("UEBA enabled — per-user behavioural baselining active (silent for first 100 obs/user)")
+            let candidate = UEBAEngine(persistencePath: uebaPersistencePath)
+            if await candidate.loadPersistedProfiles() {
+                uebaEngine = candidate
+                print("UEBA enabled — bounded per-user behavioural baselining active (silent for first 100 obs/user)")
+            } else {
+                uebaEngine = nil
+                uebaLoadFailed = true
+                logger.fault("UEBA disabled for this boot because its persisted model failed validation: \(uebaPersistencePath, privacy: .public)")
+                print("WARNING: UEBA is disabled for this boot; its persisted model is unreadable or invalid and was preserved for recovery")
+            }
+        } else {
+            uebaEngine = nil
         }
 
         let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval, clickFix: clickFixDetector)
-        Task.detached(priority: .utility) {
-            await clipboardMonitor.start()
-            print("Clipboard monitor active (deferred, sensitive data + injection detection)")
-        }
         let clipboardInjectionDetector = ClipboardInjectionDetector()
 
         // Browser extension monitor -- scans Chrome/Firefox/Brave/Edge/Arc.
         // v1.12.0 RC21 (TURBO): startup scans 5 browser profile dirs +
         // enumerates each extension manifest — disk-heavy. Defer.
         let browserExtMonitor = BrowserExtensionMonitor(pollInterval: config.browserExtensionPollInterval)
-        Task.detached(priority: .utility) {
-            await browserExtMonitor.start()
-            print("Browser extension monitor active (deferred)")
-        }
 
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
         // Opt-in: requires microphone access which triggers a TCC permission popup.
@@ -1315,10 +1321,6 @@ enum DaemonSetup {
         // Rootkit detector — dual-API cross-reference of process tables.
         // v1.12.0 RC21 (TURBO): polled (120 s default) — defer .start().
         let rootkitDetector = RootkitDetector(pollInterval: config.rootkitPollInterval)
-        Task.detached(priority: .utility) {
-            await rootkitDetector.start()
-            print("Rootkit detector active (deferred, dual-API cross-reference)")
-        }
 
         // EDR/RMM tool monitor — scans for EDR, insider threat, MDM, and remote access tools.
         // v1.12.0 RC21 (TURBO): scans for 30+ tool signatures = disk +
@@ -1326,28 +1328,16 @@ enum DaemonSetup {
         // already deferred for SecurityToolIntegrations, but EDRMonitor
         // is a SEPARATE actor doing similar work. Defer.
         let edrMonitor = EDRMonitor(pollInterval: 120)
-        Task.detached(priority: .utility) {
-            await edrMonitor.start()
-            print("EDR/RMM monitor active (deferred — CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
-        }
 
         // SDR device + display-hotplug monitor (USB SDR enumeration + display
         // hotplug anomalies; no electromagnetic analysis).
         let sdrDeviceMonitor = SDRDeviceMonitor(pollInterval: 60)
-        Task.detached(priority: .utility) {
-            await sdrDeviceMonitor.start()
-            print("SDR device monitor active (deferred — SDR device + display-hotplug detection)")
-        }
 
         // BTM / SMAppService reconciliation monitor (read-only `sfltool dumpbtm`
         // snapshot; flags newly-seen enabled launch items with weak attribution —
         // the ghost-login-item persistence the real-time ES BTM sensor missed
         // because it predates this session or was added while ES was offline).
         let btmSnapshotMonitor = BTMSnapshotMonitor(pollInterval: config.btmPollInterval)
-        Task.detached(priority: .utility) {
-            await btmSnapshotMonitor.start()
-            print("BTM snapshot monitor active (deferred — SMAppService/BTM ghost-login-item reconcile)")
-        }
 
         // Library inventory -- scans for injected dylibs
         let libraryInventory = LibraryInventory()
@@ -1486,7 +1476,7 @@ enum DaemonSetup {
         // score lands at first heartbeat tick (30 s) which is also
         // when the deferred calculation completes.
         let securityScorer = SecurityScorer()
-        Task.detached(priority: .utility) {
+        startupWorkLifecycle.submit(label: "initial-security-score") {
             let initialScore = await securityScorer.calculate()
             print("Security score (deferred): \(initialScore.totalScore)/100 (\(initialScore.grade))\(initialScore.recommendations.isEmpty ? "" : " -- \(initialScore.recommendations.first ?? "")")")
         }
@@ -1531,7 +1521,7 @@ enum DaemonSetup {
         // remote service. Worst case: rules referencing MISP-sourced
         // IOCs miss matches for the first second of daemon life.
         let mispClient = MISPClient()
-        Task.detached(priority: .utility) {
+        startupWorkLifecycle.submit(label: "misp-hydration") {
             if await mispClient.isConfigured {
                 print("MISP integration: configured (deferred fetch)")
                 let mispIOCs = await mispClient.fetchCategorized(lastDays: 7)
@@ -1551,7 +1541,7 @@ enum DaemonSetup {
         // dashboard's IntegrationsView reads the snapshot once it's
         // written.
         let toolIntegrations = SecurityToolIntegrations()
-        Task.detached(priority: .utility) {
+        startupWorkLifecycle.submit(label: "security-tool-inventory") {
             let installedTools = await toolIntegrations.detectInstalledTools()
             if !installedTools.isEmpty {
                 let running = installedTools.filter(\.isRunning).map(\.name)
@@ -1596,8 +1586,11 @@ enum DaemonSetup {
         // keyholder could feed poisoned "fleet-wide" IOCs to every endpoint.
         let fleetClient = FleetClient()
         if let fleet = fleetClient {
-            await fleet.start()
-            print("Fleet client active")
+            if await fleet.start() {
+                print("Fleet client active")
+            } else {
+                print("Warning: fleet client could not start")
+            }
         } else if ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] != nil {
             // v1.21.5: surface the transport refusal on stdout too — the
             // os.log warning inside FleetClient.init is easy to miss, and an
@@ -1731,6 +1724,11 @@ enum DaemonSetup {
             print("LLM backend: \(llmConfig.provider.rawValue) (\(model)) — availability checked lazily")
             return service
         }()
+        // RuleGenerator is constructed earlier with the deterministic engines.
+        // Complete the optional dependency explicitly now; otherwise the
+        // production "enhanced" path silently remains deterministic forever.
+        // EventLoop invokes it only through the bounded advisory lifecycle.
+        await ruleGenerator.configureLLMService(llmService)
 
         // DNS collector (BPF capture or passive mode)
         Self.logBootStep(label: "before_dns_collector", startedAt: startedAt)
@@ -1790,7 +1788,7 @@ enum DaemonSetup {
         let baselineEngine = BaselineEngine(
             persistPath: supportDir + "/baseline.json"
         )
-        Task.detached(priority: .utility) {
+        startupWorkLifecycle.submit(label: "baseline-hydration") {
             do {
                 try await baselineEngine.load()
                 let status = await baselineEngine.status()
@@ -1884,8 +1882,6 @@ enum DaemonSetup {
 
         // Initialize network collector (Phase 3)
         let networkCollector = NetworkCollector()
-        Task { await networkCollector.start() }
-        print("Network connection collector active (5s poll)")
 
         Self.logBootStep(label: "before_load_rules", startedAt: startedAt)
         // Load compiled rules (single-event)
@@ -1981,6 +1977,7 @@ enum DaemonSetup {
         // alerts.db → dashboard, `maccrabctl alerts`, MCP get_alerts.
         // Checked AFTER bundled + user-override loads. The release-disabled
         // pushed-rule channel is intentionally not a boot-time rule source.
+        var bootstrapAlerts: [Alert] = []
         let bootRuleCount = await ruleEngine.ruleCount
         if bootRuleCount == 0 {
             logger.critical("No detection rules loaded from \(effectiveRulesDir) — tier-1 detection is INACTIVE")
@@ -1999,7 +1996,21 @@ enum DaemonSetup {
                 mitreTechniques: "attack.t1562.001",
                 suppressed: false
             )
-            try? await alertStore.insert(alert: noRulesAlert)
+            bootstrapAlerts.append(noRulesAlert)
+        }
+        if uebaLoadFailed {
+            bootstrapAlerts.append(Alert(
+                ruleId: "maccrab.self-defense.ueba_persistence_unavailable",
+                ruleTitle: "UEBA Baseline Unavailable",
+                severity: .medium,
+                eventId: UUID().uuidString,
+                processPath: CommandLine.arguments[0],
+                processName: "maccrabd",
+                description: "UEBA was enabled, but its persisted profile model failed bounded validation. Behavioural anomaly scoring is disabled for this boot; the original model was preserved at \(uebaPersistencePath) for recovery.",
+                mitreTactics: "attack.defense_evasion",
+                mitreTechniques: "attack.t1562.001",
+                suppressed: false
+            ))
         }
 
         // Load sequence rules (use same effective dir as single-event rules).
@@ -2016,6 +2027,34 @@ enum DaemonSetup {
             logger.info("No sequence rules loaded (this is fine for initial setup)")
         }
 
+        // Restart continuity is part of sequence-engine correctness, not a
+        // background convenience. Restore only after the complete active rule
+        // corpus is known (the checkpoint is fingerprint-bound to it) and
+        // before DaemonBootstrap starts either event consumer.
+        let sequenceCheckpointCoordinator = SequenceCheckpointCoordinator(
+            checkpointURL: URL(fileURLWithPath: supportDir, isDirectory: true)
+                .appendingPathComponent(SequenceCheckpointCoordinator.defaultFileName)
+        )
+        let sequenceRestore = await sequenceCheckpointCoordinator.restore(
+            into: sequenceEngine
+        )
+        switch sequenceRestore {
+        case .absent:
+            logger.info("No sequence checkpoint present; starting with empty in-flight state")
+        case .restored(
+            let partials,
+            let pendingSteps,
+            let expiredPartials,
+            let expiredPendingSteps
+        ):
+            logger.notice("Restored sequence checkpoint: \(partials) partial(s), \(pendingSteps) pending step(s), \(expiredPartials) expired partial(s), \(expiredPendingSteps) expired pending step(s)")
+        case .rejected(let detail):
+            // Detection remains fail-open with empty in-flight state, but the
+            // promised restart-continuity layer is degraded and must be loud.
+            logger.fault("Sequence checkpoint rejected: \(detail, privacy: .public)")
+            print("WARNING: sequence checkpoint rejected; restart continuity is degraded: \(detail)")
+        }
+
         Self.writeBootPhase(supportDir: supportDir, phase: "rules_loaded", startedAt: startedAt)
         Self.logBootStep(label: "rules_loaded", startedAt: startedAt)
 
@@ -2029,7 +2068,7 @@ enum DaemonSetup {
         let userOverridesDirForWatcher = userOverridesDir
         let tickPath = userOverridesDirForWatcher + "/.reload_tick"
         let liveCompiledRulesURL = rulesURL
-        Task.detached(priority: .utility) {
+        startupWorkLifecycle.submit(label: "user-rule-watch") {
             var lastSeen: Date = (try? FileManager.default
                 .attributesOfItem(atPath: tickPath))?[.modificationDate] as? Date ?? .distantPast
             while !Task.isCancelled {
@@ -2075,8 +2114,6 @@ enum DaemonSetup {
 
         // Start TCC monitor (Phase 2: permission change detection)
         let tccMonitor = TCCMonitor()
-        Task { await tccMonitor.start() }
-        logger.info("TCC permission monitor active")
 
         // Start Unified Log collector (Phase 2: system log events)
         var ulCollector: UnifiedLogCollector? = nil
@@ -2198,10 +2235,16 @@ enum DaemonSetup {
             sequenceRulesDir: sequenceRulesDir,
             effectiveRulesDir: effectiveRulesDir,
             eventStore: eventStore,
+            legacyEvidenceTransitionBudget: legacyEvidenceTransitionBudget,
             alertStore: alertStore,
+            evidenceBudgetBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: bootStorage.evidenceMaxSizeMB
+            ),
+            startupWorkLifecycle: startupWorkLifecycle,
             enricher: enricher,
             ruleEngine: ruleEngine,
             sequenceEngine: sequenceEngine,
+            sequenceCheckpointCoordinator: sequenceCheckpointCoordinator,
             baselineEngine: baselineEngine,
             behaviorScoring: behaviorScoring,
             deduplicator: deduplicator,
@@ -2300,6 +2343,17 @@ enum DaemonSetup {
             uebaEngine: uebaEngine
         )
 
+        // AlertSink does not exist until DaemonState construction. Flush the
+        // bounded bootstrap queue through it immediately afterward rather than
+        // maintaining a second raw AlertStore insertion path.
+        for alert in bootstrapAlerts {
+            do {
+                _ = try await state.alertSink.submit(alert: alert)
+            } catch {
+                await StorageErrorTracker.shared.recordAlertError(error)
+            }
+        }
+
         // v1.6.21: wire AlertSink into ResponseEngine so the
         // requireConfirmation skip path emits a synthetic informational
         // alert visible to the operator. Pre-fix the gate logged silently.
@@ -2354,7 +2408,7 @@ enum DaemonSetup {
             state.traceRegistry = registry
             if let collector = collector {
                 let bindings = collector.traceBindings
-                Task.detached(priority: .utility) { [weak registry] in
+                startupWorkLifecycle.submit(label: "trace-binding-consumer") { [weak registry] in
                     for await signal in bindings {
                         guard let registry else { return }
                         switch signal.kind {
@@ -2561,7 +2615,20 @@ enum DaemonSetup {
         if let existing = state.otlpReceiver {
             let existingPort = await existing.currentPort()
             if !shouldRun {
-                await existing.stop()
+                let stopped = await existing.stop()
+                guard stopped.cleanlyStopped else {
+                    AgentTracesStatusStore.write(
+                        AgentTracesStatus(
+                            running: false,
+                            port: existingPort,
+                            lastError: "receiver shutdown did not drain owned work",
+                            lastErrorAt: Date()
+                        ),
+                        to: supportDir
+                    )
+                    logger.error("Refusing to discard unclean OTLPReceiver owner during SIGHUP disable")
+                    return
+                }
                 state.otlpReceiver = nil
                 state.traceStore = nil
                 state.traceStoreStartupAdmission = nil
@@ -2587,7 +2654,11 @@ enum DaemonSetup {
                     logger.error("OTLP TraceStore admission reload failed: \(error.localizedDescription, privacy: .public)")
                     // A same-port reload must not leave the receiver accepting
                     // after its cap/page backstop failed to reconfigure.
-                    await existing.stop()
+                    let stopped = await existing.stop()
+                    if !stopped.cleanlyStopped {
+                        logger.error("OTLPReceiver did not drain after storage-admission failure; retaining sealed owner")
+                        return
+                    }
                     state.otlpReceiver = nil
                     state.traceStore = nil
                     if let pressure = error as? TraceStoreStorageAdmissionError {
@@ -2619,10 +2690,19 @@ enum DaemonSetup {
                 // live listener and publishes running:false, but the owner
                 // object remains in DaemonState. Drop that stale owner and
                 // fall through so SIGHUP can recover on the same port.
+                let stopped = await existing.stop()
+                guard stopped.cleanlyStopped else {
+                    logger.error("Refusing same-port OTLP restart because prior owned work did not drain")
+                    return
+                }
                 state.otlpReceiver = nil
                 logger.warning("OTLPReceiver is no longer running; retrying the same port via SIGHUP")
             } else {
-                await existing.stop()
+                let stopped = await existing.stop()
+                guard stopped.cleanlyStopped else {
+                    logger.error("Refusing OTLP port change because prior receiver did not drain")
+                    return
+                }
                 state.otlpReceiver = nil
             }
             // fall through to start on new port

@@ -136,6 +136,7 @@ else
         "storage.eventsMaxSizeMB:syncStorageOverrides"
         "storage.alertsRetentionDays:syncStorageOverrides"
         "storage.alertsMaxSizeMB:syncStorageOverrides"
+        "storage.evidenceMaxSizeMB:syncStorageOverrides"
         "storage.campaignsRetentionDays:syncStorageOverrides"
         "storage.campaignsMaxSizeMB:syncStorageOverrides"
         # v1.11.0 alert notifications → alert_notifications.json
@@ -148,6 +149,10 @@ else
         "llm.openaiURL:syncLLMConfig"
         "llm.model:syncLLMConfig"
         "llm.enabled:syncLLMConfig"
+        # The endpoint string stays app-side as the exact consent token, but
+        # changing it must regenerate the daemon config's derived
+        # allow_remote_endpoint flag through syncLLMConfig().
+        "llm.approvedRemoteEndpoint:syncLLMConfig"
         "webhookSlackURL:syncWebhookConfig"
         "webhookTeamsURL:syncWebhookConfig"
         "webhookDiscordURL:syncWebhookConfig"

@@ -92,6 +92,100 @@ struct HeartbeatSnapshotTests {
       "llm": { "configured": true, "provider": "ollama", "model": "llama3.1:8b",
                "last_success_unix": 1699999999.0, "consecutive_failures": 0,
                "circuit_open": false, "healthy": true },
+      "timer_lifecycle": { "accepting": true, "offered_handlers_total": 10,
+               "accepted_handlers_total": 10, "completed_handlers_total": 9,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 0,
+               "coalesced_by_label": {}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 0, "inline_fallbacks_by_label": {},
+               "in_flight_handlers": 1, "maximum_in_flight_handlers": 256,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "liveness_timer_lifecycle": { "accepting": true, "offered_handlers_total": 5,
+               "accepted_handlers_total": 4, "completed_handlers_total": 3,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 1,
+               "coalesced_by_label": {"liveness-heartbeat": 1}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 0, "inline_fallbacks_by_label": {},
+               "in_flight_handlers": 1, "maximum_in_flight_handlers": 1,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "startup_work_lifecycle": { "accepting": true, "offered_handlers_total": 3,
+               "accepted_handlers_total": 3, "completed_handlers_total": 3,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 0,
+               "coalesced_by_label": {}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 0, "inline_fallbacks_by_label": {},
+               "in_flight_handlers": 0, "maximum_in_flight_handlers": 64,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "detection_work_lifecycle": { "accepting": true, "offered_handlers_total": 5,
+               "accepted_handlers_total": 4, "completed_handlers_total": 4,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 0,
+               "coalesced_by_label": {}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 1,
+               "inline_fallbacks_by_label": {"active-defense": 1},
+               "in_flight_handlers": 0, "maximum_in_flight_handlers": 256,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "advisory_work_lifecycle": { "accepting": true, "offered_handlers_total": 4,
+               "accepted_handlers_total": 3, "completed_handlers_total": 3,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 1,
+               "coalesced_by_label": {"campaign-llm": 1}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 0, "inline_fallbacks_by_label": {},
+               "in_flight_handlers": 0, "maximum_in_flight_handlers": 64,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "output_work_lifecycle": { "accepting": true, "offered_handlers_total": 2,
+               "accepted_handlers_total": 2, "completed_handlers_total": 2,
+               "rejected_handlers_total": 0, "closed_rejected_handlers_total": 0,
+               "overload_shed_handlers_total": 0, "coalesced_handlers_total": 0,
+               "coalesced_by_label": {}, "rejected_by_label": {},
+               "inline_fallback_handlers_total": 0, "inline_fallbacks_by_label": {},
+               "in_flight_handlers": 0, "maximum_in_flight_handlers": 128,
+               "conserves_accepted_handlers": true, "conserves_offered_handlers": true },
+      "otlp_receiver_lifecycle": {
+               "accepting_listeners": true, "listeners_accepted_total": 1,
+               "listeners_completed_total": 0,
+               "listeners_rejected_after_seal_total": 0,
+               "active_listeners": 1, "ready_listeners": 1,
+               "listeners_conserved": true,
+               "accepting_connections": true, "connections_accepted_total": 5,
+               "connections_completed_total": 4,
+               "connections_rejected_after_seal_total": 0,
+               "connections_rejected_at_capacity_total": 0,
+               "active_connections": 1, "connections_conserved": true,
+               "accepting_body_tasks": true, "body_tasks_accepted_total": 3,
+               "body_tasks_completed_total": 2, "body_tasks_cancelled_total": 0,
+               "body_tasks_rejected_total": 0,
+               "body_task_cancellation_requests_total": 0,
+               "body_tasks_in_flight": 1, "maximum_body_tasks": 64,
+               "body_tasks_conserved": true,
+               "accepting_callback_tasks": true,
+               "callback_tasks_accepted_total": 2,
+               "callback_tasks_completed_total": 1,
+               "callback_tasks_cancelled_total": 0,
+               "callback_tasks_rejected_total": 0,
+               "callback_task_cancellation_requests_total": 0,
+               "callback_tasks_in_flight": 1,
+               "maximum_callback_tasks": 256,
+               "callback_tasks_conserved": true,
+               "lifecycle_operations_in_progress": 0,
+               "shutdown_timeouts_total": 0,
+               "cleanly_stopped": false },
+      "alert_evidence_budget": {
+        "events_family_effective_cap_bytes": 440401920,
+        "events_family_steady_state_cap_bytes": 335544320,
+        "alerts_family_combined_cap_bytes": 209715200,
+        "events_and_alerts_total_cap_bytes": 650117120,
+        "events_and_alerts_steady_state_total_cap_bytes": 545259520,
+        "legacy_transition_reserve_bytes": 104857600,
+        "legacy_transition_max_bytes": 104857600,
+        "legacy_transition_measurement_failed": false,
+        "capture_offered_total": 1, "capture_completed_total": 0,
+        "capture_failures_total": 0, "capture_shed_total": 0,
+        "capture_pending": 0, "capture_in_flight": 1,
+        "capture_queue_capacity": 256, "capture_accepting": true,
+        "capture_conserved": true, "allocated_bytes_exact": true,
+        "mutation_generation": 7, "full_refreshes_total": 1
+      },
       "prevention": {
         "sinkhole": { "enabled": true, "count": 7 },
         "network_blocker": { "enabled": false, "count": 0 },
@@ -99,6 +193,48 @@ struct HeartbeatSnapshotTests {
       },
       "trace_registry": { "enabled": true, "live_bindings": 5, "cap": 4096,
                           "pid_recycle_rejected": 1, "cap_evictions": 0, "ttl_evictions": 2 },
+      "sequence_checkpoint": {
+        "restore_status": "restored",
+        "restore_detail": "restored 17 partial(s), 2 pending step(s)",
+        "last_restore_at_unix": 1699996400.5,
+        "last_attempt_at_unix": 1700000000.0,
+        "last_success_at_unix": 1700000000.0,
+        "checkpoint_captured_at_unix": 1699999999.9,
+        "checkpoint_age_seconds": 0.6,
+        "checkpoint_bytes": 8192,
+        "durable_carrier_valid": true,
+        "dirty": false,
+        "current_semantic_digest": "current-digest",
+        "durable_semantic_digest": "current-digest",
+        "current_generation": 44,
+        "durable_generation": 44,
+        "configured_crash_rpo_seconds": 30.0,
+        "crash_rpo_bound_currently_maintained": true,
+        "periodic_writes_last_hour": 14,
+        "periodic_bytes_last_hour": 114688,
+        "writes_total": 21,
+        "bytes_written_total": 172032,
+        "unchanged_skips_total": 3,
+        "budget_deferrals_total": 0,
+        "orphan_files_current": 0,
+        "orphan_bytes_current": 0,
+        "orphan_files_removed_total": 2,
+        "orphan_bytes_removed_total": 4096,
+        "orphan_cleanup_scan_truncated": false,
+        "last_orphan_cleanup_at_unix": 1699999998.0,
+        "carrier_invalidations_total": 1,
+        "last_carrier_invalidation_reason": "integrity_mismatch",
+        "last_carrier_invalidation_at_unix": 1699999997.0
+      },
+      "sequence_partials_evicted_total": 0,
+      "sequence_partials_in_flight": 17,
+      "sequence_pending_steps_current": 2,
+      "sequence_pending_steps_evicted_total": 0,
+      "sequence_checkpoint_state_weight_bytes": 4096,
+      "sequence_checkpoint_state_weight_recomputed_bytes": 4096,
+      "sequence_checkpoint_state_weight_limit_bytes": 8388608,
+      "sequence_state_continuity_maintained": true,
+      "sequence_state_continuity_detail": "nominal",
       "tracegraph_storage_admission": {
         "enabled": true, "blocked": true, "reason": "footprint_limit",
         "store_available": true, "startup_blocked": false,
@@ -145,10 +281,29 @@ struct HeartbeatSnapshotTests {
       "merged_file_terminated_total": 2,
       "detection_input_dropped_total": 12,
       "events_storage_write_dropped_total": 3605,
+      "events_storage_write_offered_by_lane": { "priority": 3000, "file": 5765 },
+      "events_storage_write_dropped_by_lane": { "priority": 0, "file": 3605 },
       "events_storage_write_persisted_total": 4700,
+      "events_storage_write_persisted_by_lane": { "priority": 2600, "file": 2100 },
+      "events_storage_write_filtered_total": 5,
+      "events_storage_write_filtered_by_lane": { "priority": 0, "file": 5 },
       "events_storage_write_retried_total": 17,
+      "events_storage_write_retried_by_lane": { "priority": 7, "file": 10 },
       "events_storage_write_buffer_depth": 55,
+      "events_storage_write_buffer_depth_by_lane": { "priority": 0, "file": 55 },
       "events_storage_write_in_flight_depth": 400,
+      "events_storage_write_in_flight_depth_by_lane": { "priority": 400, "file": 0 },
+      "events_retention_budget": {
+        "state": "degraded_budget_unmet",
+        "reason": "post_sweep_above_target",
+        "sticky": true,
+        "forensic_floor_minutes": 15,
+        "observed_footprint_bytes": 440401921,
+        "target_bytes": 373293056,
+        "proactive_boundary_bytes": 373293056,
+        "nominal_cap_bytes": 440401920,
+        "evaluated_at_unix": 1700000000.25
+      },
       "events_insert_filter_dropped_total": 200,
       "events_insert_filter_passed_total": 8305,
       "payload_truncated_total": 1,
@@ -216,10 +371,26 @@ struct HeartbeatSnapshotTests {
         #expect(h.mergedFileTerminatedTotal == 2)
         #expect(h.detectionInputDroppedTotal == 12)
         #expect(h.eventsStorageWriteDroppedTotal == 3605)
+        #expect(h.eventsStorageWriteOfferedByLane?["priority"] == 3000)
+        #expect(h.eventsStorageWriteOfferedByLane?["file"] == 5765)
+        #expect(h.eventsStorageWriteDroppedByLane?["file"] == 3605)
         #expect(h.eventsStorageWritePersistedTotal == 4700)
+        #expect(h.eventsStorageWritePersistedByLane?["priority"] == 2600)
+        #expect(h.eventsStorageWriteFilteredTotal == 5)
+        #expect(h.eventsStorageWriteFilteredByLane?["file"] == 5)
         #expect(h.eventsStorageWriteRetriedTotal == 17)
+        #expect(h.eventsStorageWriteRetriedByLane?["priority"] == 7)
         #expect(h.eventsStorageWriteBufferDepth == 55)
+        #expect(h.eventsStorageWriteBufferDepthByLane?["file"] == 55)
         #expect(h.eventsStorageWriteInFlightDepth == 400)
+        #expect(h.eventsStorageWriteInFlightDepthByLane?["priority"] == 400)
+        #expect(h.eventsRetentionBudget?.state == "degraded_budget_unmet")
+        #expect(h.eventsRetentionBudget?.reason == "post_sweep_above_target")
+        #expect(h.eventsRetentionBudget?.sticky == true)
+        #expect(h.eventsRetentionBudget?.forensicFloorMinutes == 15)
+        #expect(h.eventsRetentionBudget?.observedFootprintBytes == 440_401_921)
+        #expect(h.eventsRetentionBudget?.targetBytes == 373_293_056)
+        #expect(h.eventsRetentionBudget?.evaluatedAtUnix == 1700000000.25)
         #expect(h.eventsInsertFilterDroppedTotal == 200)
         #expect(h.eventsInsertFilterPassedTotal == 8305)
         #expect(h.payloadTruncatedTotal == 1)
@@ -251,10 +422,52 @@ struct HeartbeatSnapshotTests {
         #expect(dns?.lastError == "bpf attach failed")
         #expect(h.llm?.provider == "ollama")
         #expect(h.llm?.circuitOpen == false)
+        #expect(h.timerLifecycle?.inFlightHandlers == 1)
+        #expect(h.timerLifecycle?.degraded == false)
+        #expect(h.timerLifecycle?.conservationMaintained == true)
+        #expect(h.livenessTimerLifecycle?.coalescedHandlersTotal == 1)
+        #expect(h.livenessTimerLifecycle?.degraded == false)
+        #expect(h.startupWorkLifecycle?.acceptedHandlersTotal == 3)
+        #expect(h.detectionWorkLifecycle?.inlineFallbackHandlersTotal == 1)
+        #expect(h.detectionWorkLifecycle?.detectionProtectionDegraded == false)
+        #expect(h.advisoryWorkLifecycle?.coalescedByLabel?["campaign-llm"] == 1)
+        #expect(h.advisoryWorkLifecycle?.featureDegraded == false)
+        #expect(h.outputWorkLifecycle?.acceptedHandlersTotal == 2)
+        #expect(h.otlpReceiverLifecycle?.readyListeners == 1)
+        #expect(h.otlpReceiverLifecycle?.callbackTasksInFlight == 1)
+        #expect(h.otlpReceiverLifecycle?.lifecycleOperationsInProgress == 0)
+        #expect(h.otlpReceiverLifecycle?.activeConnections == 1)
+        #expect(h.otlpReceiverLifecycle?.conservationMaintained == true)
+        #expect(h.otlpReceiverLifecycle?.featureDegraded == false)
+        #expect(h.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(620) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes == Int64(520) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.captureDegraded == false)
         #expect(h.prevention?.sinkhole?.enabled == true)
         #expect(h.prevention?.networkBlocker?.count == 0)
         #expect(h.traceRegistry?.liveBindings == 5)
         #expect(h.traceRegistry?.ttlEvictions == 2)
+        #expect(h.sequenceCheckpoint?.restoreStatus == "restored")
+        #expect(h.sequenceCheckpoint?.restoreDetail?.contains("17 partial") == true)
+        #expect(h.sequenceCheckpoint?.checkpointBytes == 8_192)
+        #expect(h.sequenceCheckpoint?.durableCarrierValid == true)
+        #expect(h.sequenceCheckpoint?.dirty == false)
+        #expect(h.sequenceCheckpoint?.currentGeneration == 44)
+        #expect(h.sequenceCheckpoint?.durableGeneration == 44)
+        #expect(h.sequenceCheckpoint?.crashRPOBoundCurrentlyMaintained == true)
+        #expect(h.sequenceCheckpoint?.periodicWritesLastHour == 14)
+        #expect(h.sequenceCheckpoint?.writesTotal == 21)
+        #expect(h.sequenceCheckpoint?.orphanFilesRemovedTotal == 2)
+        #expect(h.sequenceCheckpoint?.carrierInvalidationsTotal == 1)
+        #expect(h.sequenceCheckpoint?.lastCarrierInvalidationReason == "integrity_mismatch")
+        #expect(h.sequencePartialsEvictedTotal == 0)
+        #expect(h.sequencePartialsInFlight == 17)
+        #expect(h.sequencePendingStepsCurrent == 2)
+        #expect(h.sequencePendingStepsEvictedTotal == 0)
+        #expect(h.sequenceCheckpointStateWeightBytes == 4_096)
+        #expect(h.sequenceCheckpointStateWeightRecomputedBytes == 4_096)
+        #expect(h.sequenceCheckpointStateWeightLimitBytes == 8_388_608)
+        #expect(h.sequenceStateContinuityMaintained == true)
+        #expect(h.sequenceStateContinuityDetail == "nominal")
         #expect(h.traceGraphStorageAdmission?.enabled == true)
         #expect(h.traceGraphStorageAdmission?.blocked == true)
         #expect(h.traceGraphStorageAdmission?.storeAvailable == true)
@@ -305,6 +518,512 @@ struct HeartbeatSnapshotTests {
         #expect(h.traceGraphStorageAdmission?.freeSpaceBytes == 104_857_600)
     }
 
+    @Test("Active TraceGraph admission cannot hide a failed conserving batch")
+    func traceGraphFailedBatchHealth() throws {
+        let h = try decode("""
+        {
+          "schema_version": 5,
+          "tracegraph_storage_admission": {
+            "enabled": true, "blocked": false, "store_available": true,
+            "startup_blocked": false, "reason": "",
+            "ingest_events_total": 2,
+            "ingest_events_committed_total": 0,
+            "ingest_events_failed_total": 2,
+            "ingest_events_in_flight": 0,
+            "ingest_events_pending": 0,
+            "entity_observations_total": 2,
+            "edge_observations_total": 0,
+            "relevance_suppressed_file_events_total": 0,
+            "relevance_suppressed_rows_total": 0,
+            "write_attempts_total": 1,
+            "write_batches_committed_total": 0,
+            "write_batches_failed_total": 1,
+            "write_batches_in_flight": 0,
+            "write_rows_attempted_total": 1,
+            "write_rows_committed_total": 0,
+            "write_rows_failed_total": 1,
+            "write_rows_in_flight": 0,
+            "coalesced_noop_rows_total": 1,
+            "pending_entity_rows": 0,
+            "pending_edge_rows": 0
+          }
+        }
+        """)
+        let storage = try #require(h.traceGraphStorageAdmission)
+        #expect(storage.ingestConservationMaintained == true)
+        #expect(storage.writeBatchConservationMaintained == true)
+        #expect(storage.writeRowConservationMaintained == true)
+        #expect(storage.observationConservationMaintained == true)
+        #expect(storage.writeConservationMaintained == true)
+        #expect(storage.hasStickyWriteFailure == true)
+        #expect(storage.hasOutstandingBacklog == false)
+        #expect(storage.graphWriteDegraded)
+
+        let drift = try decode("""
+        {"tracegraph_storage_admission":{
+          "ingest_events_total":2,"ingest_events_committed_total":2,
+          "ingest_events_failed_total":1,"ingest_events_in_flight":0,
+          "ingest_events_pending":0,"entity_observations_total":0,
+          "edge_observations_total":0,"write_attempts_total":0,
+          "write_batches_committed_total":0,"write_batches_failed_total":0,
+          "write_batches_in_flight":0,"write_rows_attempted_total":0,
+          "write_rows_committed_total":0,"write_rows_failed_total":0,
+          "write_rows_in_flight":0,"coalesced_noop_rows_total":0,
+          "pending_entity_rows":0,"pending_edge_rows":0}}
+        """)
+        #expect(drift.traceGraphStorageAdmission?.writeConservationMaintained == false)
+        #expect(drift.traceGraphStorageAdmission?.graphWriteDegraded == true)
+
+        let partial = try decode("""
+        {"tracegraph_storage_admission":{"enabled":true,"blocked":false,
+        "store_available":true,"ingest_events_total":1}}
+        """)
+        #expect(partial.traceGraphStorageAdmission?.writeTelemetryPresent == true)
+        #expect(partial.traceGraphStorageAdmission?.writeTelemetryComplete == false)
+        #expect(partial.traceGraphStorageAdmission?.graphWriteDegraded == true)
+    }
+
+    @Test("transition-aware evidence and timer ledgers remain fail-visible")
+    func evidenceAndTimerHealth() throws {
+        let h = try decode("""
+        {
+          "alert_evidence_budget": {
+            "events_family_effective_cap_bytes": 440401920,
+            "events_family_steady_state_cap_bytes": 335544320,
+            "alerts_family_combined_cap_bytes": 209715200,
+            "events_and_alerts_total_cap_bytes": 650117120,
+            "events_and_alerts_steady_state_total_cap_bytes": 545259520,
+            "legacy_transition_reserve_bytes": 104857600,
+            "legacy_transition_max_bytes": 104857600,
+            "legacy_transition_measurement_failed": true,
+            "legacy_row_count": 42,
+            "legacy_charged_bytes": 73400320,
+            "capture_offered_total": 8,
+            "capture_completed_total": 5,
+            "capture_failures_total": 1,
+            "capture_shed_total": 1,
+            "capture_pending": 1,
+            "capture_in_flight": 0,
+            "capture_queue_capacity": 256,
+            "capture_accepting": true,
+            "capture_conserved": true,
+            "allocated_bytes_exact": false,
+            "mutation_generation": 19,
+            "full_refreshes_total": 3
+          },
+          "timer_lifecycle": {
+            "accepting": true,
+            "offered_handlers_total": 11,
+            "accepted_handlers_total": 10,
+            "completed_handlers_total": 8,
+            "rejected_handlers_total": 1,
+            "closed_rejected_handlers_total": 0,
+            "overload_shed_handlers_total": 1,
+            "coalesced_handlers_total": 0,
+            "coalesced_by_label": {},
+            "rejected_by_label": {"retention": 1},
+            "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": {},
+            "in_flight_handlers": 1,
+            "maximum_in_flight_handlers": 256,
+            "conserves_accepted_handlers": false,
+            "conserves_offered_handlers": true
+          },
+          "liveness_timer_lifecycle": {
+            "accepting": true,
+            "offered_handlers_total": 2,
+            "accepted_handlers_total": 1,
+            "completed_handlers_total": 0,
+            "rejected_handlers_total": 0,
+            "closed_rejected_handlers_total": 0,
+            "overload_shed_handlers_total": 0,
+            "coalesced_handlers_total": 1,
+            "coalesced_by_label": {"liveness": 1},
+            "rejected_by_label": {},
+            "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": {},
+            "in_flight_handlers": 1,
+            "maximum_in_flight_handlers": 1,
+            "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true
+          },
+          "detection_work_lifecycle": {
+            "accepting": false,
+            "offered_handlers_total": 4,
+            "accepted_handlers_total": 3,
+            "completed_handlers_total": 3,
+            "rejected_handlers_total": 1,
+            "closed_rejected_handlers_total": 1,
+            "overload_shed_handlers_total": 0,
+            "coalesced_handlers_total": 0,
+            "coalesced_by_label": {},
+            "rejected_by_label": {"active-defense": 1},
+            "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": {},
+            "in_flight_handlers": 0,
+            "maximum_in_flight_handlers": 256,
+            "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true
+          },
+          "advisory_work_lifecycle": {
+            "accepting": true,
+            "offered_handlers_total": 6,
+            "accepted_handlers_total": 5,
+            "completed_handlers_total": 5,
+            "rejected_handlers_total": 1,
+            "closed_rejected_handlers_total": 0,
+            "overload_shed_handlers_total": 1,
+            "coalesced_handlers_total": 0,
+            "coalesced_by_label": {},
+            "rejected_by_label": {"campaign-llm": 1},
+            "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": {},
+            "in_flight_handlers": 0,
+            "maximum_in_flight_handlers": 64,
+            "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true
+          },
+          "output_work_lifecycle": {
+            "accepting": false,
+            "offered_handlers_total": 3,
+            "accepted_handlers_total": 3,
+            "completed_handlers_total": 2,
+            "rejected_handlers_total": 0,
+            "closed_rejected_handlers_total": 0,
+            "overload_shed_handlers_total": 0,
+            "coalesced_handlers_total": 0,
+            "coalesced_by_label": {},
+            "rejected_by_label": {},
+            "inline_fallback_handlers_total": 0,
+            "inline_fallbacks_by_label": {},
+            "in_flight_handlers": 1,
+            "maximum_in_flight_handlers": 128,
+            "conserves_accepted_handlers": true,
+            "conserves_offered_handlers": true
+          },
+          "otlp_receiver_lifecycle": {
+            "accepting_listeners": false,
+            "listeners_accepted_total": 2,
+            "listeners_completed_total": 1,
+            "listeners_rejected_after_seal_total": 1,
+            "active_listeners": 1,
+            "ready_listeners": 1,
+            "listeners_conserved": true,
+            "accepting_connections": false,
+            "connections_accepted_total": 2,
+            "connections_completed_total": 1,
+            "connections_rejected_after_seal_total": 1,
+            "connections_rejected_at_capacity_total": 0,
+            "active_connections": 1,
+            "connections_conserved": true,
+            "accepting_body_tasks": false,
+            "body_tasks_accepted_total": 1,
+            "body_tasks_completed_total": 0,
+            "body_tasks_cancelled_total": 0,
+            "body_tasks_rejected_total": 1,
+            "body_task_cancellation_requests_total": 1,
+            "body_tasks_in_flight": 1,
+            "maximum_body_tasks": 64,
+            "body_tasks_conserved": true,
+            "accepting_callback_tasks": false,
+            "callback_tasks_accepted_total": 2,
+            "callback_tasks_completed_total": 1,
+            "callback_tasks_cancelled_total": 0,
+            "callback_tasks_rejected_total": 1,
+            "callback_task_cancellation_requests_total": 1,
+            "callback_tasks_in_flight": 1,
+            "maximum_callback_tasks": 256,
+            "callback_tasks_conserved": true,
+            "lifecycle_operations_in_progress": 1,
+            "shutdown_timeouts_total": 1,
+            "cleanly_stopped": false,
+            "last_shutdown_clean": false
+          }
+        }
+        """)
+        let budget = try #require(h.alertEvidenceBudget)
+        #expect(budget.eventsFamilyEffectiveCapBytes == Int64(420) * 1_048_576)
+        #expect(budget.eventsFamilySteadyStateCapBytes == Int64(320) * 1_048_576)
+        #expect(budget.eventsAndAlertsTotalCapBytes == Int64(620) * 1_048_576)
+        #expect(budget.eventsAndAlertsSteadyStateTotalCapBytes == Int64(520) * 1_048_576)
+        #expect(budget.legacyTransitionReserveBytes == Int64(100) * 1_048_576)
+        #expect(budget.legacyTransitionMeasurementFailed == true)
+        #expect(budget.captureConserved == true)
+        #expect(budget.captureConservationMaintained == true)
+        #expect(budget.captureDegraded)
+        #expect(budget.transitionDegraded)
+        #expect(budget.allocatedBytesExact == false)
+        #expect(budget.mutationGeneration == 19)
+
+        let timer = try #require(h.timerLifecycle)
+        #expect(timer.inFlightHandlers == 1)
+        #expect(timer.degradedWhileRunning)
+        #expect(timer.offeredHandlersTotal == 11)
+        #expect(timer.conservationMaintained == false)
+        #expect(h.livenessTimerLifecycle?.losslessPressureObserved == true)
+        #expect(h.livenessTimerLifecycle?.degraded == false)
+        #expect(h.detectionWorkLifecycle?.closedRejectedHandlersTotal == 1)
+        #expect(h.detectionWorkLifecycle?.detectionProtectionDegraded == true)
+        #expect(h.advisoryWorkLifecycle?.overloadShedHandlersTotal == 1)
+        #expect(h.advisoryWorkLifecycle?.featureDegraded == true)
+        #expect(h.outputWorkLifecycle?.uncleanOutstandingAfterClose == true)
+        #expect(h.otlpReceiverLifecycle?.uncleanShutdown == true)
+        #expect(h.otlpReceiverLifecycle?.advisoryInputShed == true)
+        #expect(h.otlpReceiverLifecycle?.sealedWorkInFlight == true)
+        #expect(h.otlpReceiverLifecycle?.lifecycleOperationLeftInProgress == true)
+        #expect(h.otlpReceiverLifecycle?.featureDegraded == true)
+
+        let normal = try decode("""
+        {"timer_lifecycle":{"accepting":true,"offered_handlers_total":10,
+        "accepted_handlers_total":10,
+        "completed_handlers_total":9,"rejected_handlers_total":0,
+        "closed_rejected_handlers_total":0,"overload_shed_handlers_total":0,
+        "coalesced_handlers_total":0,"inline_fallback_handlers_total":0,
+        "in_flight_handlers":1,"maximum_in_flight_handlers":256,
+        "conserves_accepted_handlers":true,"conserves_offered_handlers":true}}
+        """)
+        #expect(normal.timerLifecycle?.degradedWhileRunning == false)
+
+        let incomplete = try decode("""
+        {"detection_work_lifecycle":{"offered_handlers_total":1},
+         "otlp_receiver_lifecycle":{"accepting_connections":true}}
+        """)
+        #expect(incomplete.detectionWorkLifecycle?.telemetryIncomplete == true)
+        #expect(incomplete.detectionWorkLifecycle?.detectionProtectionDegraded == true)
+        #expect(incomplete.otlpReceiverLifecycle?.telemetryPresent == true)
+        #expect(incomplete.otlpReceiverLifecycle?.telemetryComplete == false)
+        #expect(incomplete.otlpReceiverLifecycle?.featureDegraded == true)
+
+        let incompleteLegacyTimer = try decode("""
+        {"timer_lifecycle":{"accepting":true}}
+        """)
+        #expect(incompleteLegacyTimer.timerLifecycle?.telemetryIncomplete == true)
+        #expect(incompleteLegacyTimer.timerLifecycle?.featureDegraded == true)
+
+        let cleanOTLPStop = try decode("""
+        {"otlp_receiver_lifecycle":{"accepting_listeners":false,
+        "listeners_accepted_total":1,"listeners_completed_total":1,
+        "listeners_rejected_after_seal_total":0,"active_listeners":0,
+        "ready_listeners":0,"listeners_conserved":true,
+        "accepting_connections":false,
+        "connections_accepted_total":1,"connections_completed_total":1,
+        "connections_rejected_after_seal_total":0,
+        "connections_rejected_at_capacity_total":0,"active_connections":0,
+        "connections_conserved":true,"accepting_body_tasks":false,
+        "body_tasks_accepted_total":1,"body_tasks_completed_total":0,
+        "body_tasks_cancelled_total":1,"body_tasks_rejected_total":0,
+        "body_task_cancellation_requests_total":1,"body_tasks_in_flight":0,
+        "maximum_body_tasks":64,"body_tasks_conserved":true,
+        "accepting_callback_tasks":false,"callback_tasks_accepted_total":1,
+        "callback_tasks_completed_total":0,"callback_tasks_cancelled_total":1,
+        "callback_tasks_rejected_total":0,
+        "callback_task_cancellation_requests_total":1,
+        "callback_tasks_in_flight":0,"maximum_callback_tasks":256,
+        "callback_tasks_conserved":true,"lifecycle_operations_in_progress":0,
+        "shutdown_timeouts_total":0,"cleanly_stopped":true,
+        "last_shutdown_clean":true}}
+        """)
+        #expect(cleanOTLPStop.otlpReceiverLifecycle?.uncleanShutdown == false)
+        #expect(cleanOTLPStop.otlpReceiverLifecycle?.advisoryInputShed == false)
+        #expect(cleanOTLPStop.otlpReceiverLifecycle?.featureDegraded == false)
+
+        let legacy = try decode("""
+        {"derived_work_lifecycle":{"accepting":false,
+        "accepted_handlers_total":2,"completed_handlers_total":1,
+        "rejected_handlers_total":0,"in_flight_handlers":1,
+        "maximum_in_flight_handlers":64,
+        "conserves_accepted_handlers":true}}
+        """)
+        #expect(legacy.legacyDerivedWorkLifecycle?.uncleanOutstandingAfterClose == true)
+        #expect(legacy.detectionWorkLifecycle == nil)
+
+        let partialCapture = try decode("""
+        {"alert_evidence_budget":{"capture_offered_total":1}}
+        """)
+        #expect(partialCapture.alertEvidenceBudget?.captureTelemetryPresent == true)
+        #expect(partialCapture.alertEvidenceBudget?.captureConservationMaintained == nil)
+        #expect(partialCapture.alertEvidenceBudget?.captureDegraded == true)
+    }
+
+    @Test("OTLP listener and callback ledgers distinguish live work from loss")
+    func otlpListenerAndCallbackHealth() throws {
+        func lifecycle(
+            overriding overrides: [String: Any] = [:]
+        ) throws -> HeartbeatSnapshot.OTLPReceiverLifecycle {
+            var block: [String: Any] = [
+                "accepting_listeners": true,
+                "listeners_accepted_total": 1,
+                "listeners_completed_total": 0,
+                "listeners_rejected_after_seal_total": 0,
+                "active_listeners": 1,
+                "ready_listeners": 1,
+                "listeners_conserved": true,
+                "accepting_connections": true,
+                "connections_accepted_total": 1,
+                "connections_completed_total": 0,
+                "connections_rejected_after_seal_total": 0,
+                "connections_rejected_at_capacity_total": 0,
+                "active_connections": 1,
+                "connections_conserved": true,
+                "accepting_body_tasks": true,
+                "body_tasks_accepted_total": 1,
+                "body_tasks_completed_total": 0,
+                "body_tasks_cancelled_total": 0,
+                "body_tasks_rejected_total": 0,
+                "body_task_cancellation_requests_total": 0,
+                "body_tasks_in_flight": 1,
+                "maximum_body_tasks": 64,
+                "body_tasks_conserved": true,
+                "accepting_callback_tasks": true,
+                "callback_tasks_accepted_total": 1,
+                "callback_tasks_completed_total": 0,
+                "callback_tasks_cancelled_total": 0,
+                "callback_tasks_rejected_total": 0,
+                "callback_task_cancellation_requests_total": 0,
+                "callback_tasks_in_flight": 1,
+                "maximum_callback_tasks": 256,
+                "callback_tasks_conserved": true,
+                "lifecycle_operations_in_progress": 0,
+                "shutdown_timeouts_total": 0,
+                "cleanly_stopped": false,
+            ]
+            for (key, value) in overrides { block[key] = value }
+            let data = try JSONSerialization.data(
+                withJSONObject: ["otlp_receiver_lifecycle": block]
+            )
+            return try #require(
+                JSONDecoder().decode(HeartbeatSnapshot.self, from: data)
+                    .otlpReceiverLifecycle
+            )
+        }
+
+        let open = try lifecycle()
+        #expect(open.telemetryComplete)
+        #expect(open.conservationMaintained == true)
+        #expect(!open.sealedWorkInFlight)
+        #expect(!open.featureDegraded)
+
+        #expect(try lifecycle(overriding: [
+            "listeners_rejected_after_seal_total": 1,
+        ]).featureDegraded)
+        #expect(try lifecycle(overriding: [
+            "listeners_conserved": false,
+        ]).featureDegraded)
+        #expect(try lifecycle(overriding: [
+            "accepting_listeners": false,
+        ]).sealedWorkInFlight)
+        #expect(try lifecycle(overriding: [
+            "callback_tasks_rejected_total": 1,
+        ]).featureDegraded)
+        #expect(try lifecycle(overriding: [
+            "callback_tasks_conserved": false,
+        ]).featureDegraded)
+        #expect(try lifecycle(overriding: [
+            "accepting_callback_tasks": false,
+        ]).sealedWorkInFlight)
+        #expect(try lifecycle(overriding: [
+            "lifecycle_operations_in_progress": 1,
+        ]).lifecycleOperationLeftInProgress)
+        #expect(try lifecycle(overriding: [
+            "last_shutdown_clean": false,
+        ]).featureDegraded)
+    }
+
+    @Test("LLM runtime ledger decodes fixed outcomes, attribution, and semantic validation")
+    func llmRuntimeTelemetryHealth() throws {
+        func counters(
+            requested: Int = 0,
+            success: Int = 0,
+            cache: Int = 0,
+            admitted: Int = 0,
+            accepted: Int = 0,
+            retries: Int = 0,
+            finalRejections: Int = 0
+        ) -> [String: Any] {
+            [
+                "requestedTotal": requested,
+                "currentInFlight": 0,
+                "admittedBackendTotal": admitted,
+                "currentAdmittedBackendRequests": 0,
+                "backendCallsStartedTotal": admitted,
+                "cancellationsAfterAdmissionTotal": 0,
+                "outcomes": [
+                    "success": success, "cacheHit": cache,
+                    "backendFailure": 0, "circuitRejection": 0,
+                    "privacyRejection": 0, "admissionShed": 0,
+                    "cancellation": 0, "responseOversize": 0,
+                ],
+                "circuitRecoveryProbesStartedTotal": 0,
+                "currentCircuitRecoveryProbes": 0,
+                "circuitRecoveryProbesSucceededTotal": 0,
+                "circuitRecoveryProbesDidNotRecoverTotal": 0,
+                "downstreamValidation": [
+                    "operationsStartedTotal": accepted + finalRejections,
+                    "currentOperations": 0,
+                    "accepted": accepted,
+                    "retryRequested": retries,
+                    "finalRejection": finalRejections,
+                ],
+                "requestLatencyBuckets": [[
+                    "upperBoundMilliseconds": 120_000,
+                    "completedRequests": requested,
+                ]],
+                "requestedInputUTF8BytesTotal": 0,
+                "backendInputUTF8BytesTotal": 0,
+                "backendOutputUTF8BytesTotal": 0,
+                "returnedOutputUTF8BytesTotal": 0,
+                "estimatedBackendInputTokensTotal": 0,
+                "estimatedBackendOutputTokensTotal": 0,
+                "estimatedReturnedOutputTokensTotal": 0,
+                "conservationMaintained": true,
+                "backendAdmissionConservationMaintained": true,
+                "circuitRecoveryConservationMaintained": true,
+            ]
+        }
+
+        let perFeature: [[String: Any]] = LLMRuntimeFeature.allCases.map { feature in
+            let value: [String: Any]
+            switch feature {
+            case .unspecified:
+                value = counters(requested: 1, cache: 1)
+            case .alertInvestigation:
+                value = counters(
+                    requested: 2, success: 2, admitted: 2,
+                    accepted: 1, retries: 1, finalRejections: 1
+                )
+            default:
+                value = counters()
+            }
+            return ["feature": feature.rawValue, "counters": value]
+        }
+        let heartbeat: [String: Any] = [
+            "schema_version": 5,
+            "llm": [
+                "configured": true,
+                "provider": "fixture",
+                "model": "content-free",
+                "healthy": true,
+                "runtime_telemetry": [
+                    "schemaVersion": 1,
+                    "capturedAtUnix": 1_700_000_000.0,
+                    "totals": counters(
+                        requested: 3, success: 2, cache: 1, admitted: 2,
+                        accepted: 1, retries: 1, finalRejections: 1
+                    ),
+                    "perFeature": perFeature,
+                ],
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: heartbeat)
+        let h = try JSONDecoder().decode(HeartbeatSnapshot.self, from: data)
+        #expect(h.llm?.runtimeTelemetry?.totals.requestedTotal == 3)
+        #expect(h.llm?.runtimeConservationMaintained == true)
+        #expect(h.llm?.unspecifiedRequestsTotal == 1)
+        #expect(h.llm?.runtimeTelemetry?.totals.downstreamValidation.retryRequested == 1)
+        #expect(h.llm?.runtimeTelemetry?.totals.downstreamValidation.finalRejection == 1)
+        #expect(h.llm?.runtimeTelemetryDegraded == true)
+    }
+
     @Test("Missing drop-attribution keys decode as nil, never zero (honest-absent)")
     func honestAbsent() throws {
         // An older-schema heartbeat missing the drop-attribution gauges.
@@ -328,11 +1047,24 @@ struct HeartbeatSnapshotTests {
         #expect(h.engineBuild == nil)
         #expect(h.esIntentionallyFilteredBeforeWorkerByType == nil)
         #expect(h.eventsStorageWritePersistedTotal == nil)
+        #expect(h.eventsStorageWriteOfferedByLane == nil)
+        #expect(h.eventsStorageWriteFilteredTotal == nil)
         #expect(h.eventsStorageWriteInFlightDepth == nil)
+        #expect(h.eventsRetentionBudget == nil)
         #expect(h.eventsInsertFilterDroppedTotal == nil)
         #expect(h.traceGraphStorageAdmission == nil)
         #expect(h.traceStoreStorageAdmission == nil)
         #expect(h.browserInventory == nil)
+        #expect(h.sequenceCheckpoint == nil)
+        #expect(h.timerLifecycle == nil)
+        #expect(h.livenessTimerLifecycle == nil)
+        #expect(h.startupWorkLifecycle == nil)
+        #expect(h.detectionWorkLifecycle == nil)
+        #expect(h.advisoryWorkLifecycle == nil)
+        #expect(h.outputWorkLifecycle == nil)
+        #expect(h.legacyDerivedWorkLifecycle == nil)
+        #expect(h.otlpReceiverLifecycle == nil)
+        #expect(h.alertEvidenceBudget == nil)
         #expect(h.sysextHasFDA == nil)
     }
 

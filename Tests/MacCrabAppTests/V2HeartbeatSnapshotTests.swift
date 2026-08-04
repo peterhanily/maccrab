@@ -10,6 +10,7 @@
 import Testing
 import Foundation
 @testable import MacCrabApp
+@testable import MacCrabCore
 
 @Suite("V2HeartbeatSnapshot")
 struct V2HeartbeatSnapshotTests {
@@ -225,6 +226,48 @@ struct V2HeartbeatSnapshotTests {
         #expect(status.reason == nil)
     }
 
+    @Test("failed TraceGraph batch degrades an otherwise active admission")
+    func traceGraphFailedBatchDecode() throws {
+        let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
+            "enabled": true,
+            "blocked": false,
+            "store_available": true,
+            "startup_blocked": false,
+            "reason": "",
+            "ingest_events_total": 2,
+            "ingest_events_committed_total": 0,
+            "ingest_events_failed_total": 2,
+            "ingest_events_in_flight": 0,
+            "ingest_events_pending": 0,
+            "entity_observations_total": 2,
+            "edge_observations_total": 0,
+            "write_attempts_total": 1,
+            "write_batches_committed_total": 0,
+            "write_batches_failed_total": 1,
+            "write_batches_in_flight": 0,
+            "write_rows_attempted_total": 1,
+            "write_rows_committed_total": 0,
+            "write_rows_failed_total": 1,
+            "write_rows_in_flight": 0,
+            "coalesced_noop_rows_total": 1,
+            "pending_entity_rows": 0,
+            "pending_edge_rows": 0,
+        ]))
+
+        #expect(status.writeTelemetry?.writeConservationMaintained == true)
+        #expect(status.writeTelemetry?.hasStickyWriteFailure == true)
+        #expect(status.graphWriteDegraded)
+        #expect(status.evidenceUnavailable)
+        #expect(status.operatorDetail.contains("admission is active"))
+        #expect(status.operatorDetail.contains("2 input event(s) failed"))
+        #expect(status.diagnosticDictionary["write_degraded"] as? Bool == true)
+        #expect(AppState.traceGraphEvidenceUnavailable(
+            blocked: false,
+            storeAvailable: true,
+            writeDegraded: true
+        ))
+    }
+
     @Test("Agent Trace admission uses the shared wire shape without implying trust")
     func traceStoreAdmissionDecode() throws {
         let status = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
@@ -245,10 +288,312 @@ struct V2HeartbeatSnapshotTests {
 
     @Test("TraceGraph evidence gaps degrade every shared dashboard surface")
     func traceGraphGlobalDegradedSignal() {
+        #expect(AppState.traceGraphEvidenceUnavailable(
+            enabled: false,
+            blocked: false,
+            storeAvailable: true
+        ))
         #expect(AppState.traceGraphEvidenceUnavailable(blocked: true, storeAvailable: true))
         #expect(AppState.traceGraphEvidenceUnavailable(blocked: false, storeAvailable: false))
         #expect(!AppState.traceGraphEvidenceUnavailable(blocked: false, storeAvailable: true))
         #expect(!AppState.traceGraphEvidenceUnavailable(blocked: nil, storeAvailable: nil))
+    }
+
+    @Test("LLM runtime quality is content-free, conserving, and fail-visible")
+    func llmRuntimeQualityDecode() throws {
+        func counters(
+            requested: Int = 0,
+            cache: Int = 0,
+            success: Int = 0,
+            backendFailures: Int = 0,
+            retries: Int = 0,
+            finalRejections: Int = 0
+        ) -> [String: Any] {
+            let admitted = success + backendFailures
+            return [
+                "requestedTotal": requested,
+                "currentInFlight": 0,
+                "admittedBackendTotal": admitted,
+                "currentAdmittedBackendRequests": 0,
+                "backendCallsStartedTotal": admitted,
+                "cancellationsAfterAdmissionTotal": 0,
+                "outcomes": [
+                    "success": success, "cacheHit": cache,
+                    "backendFailure": backendFailures, "circuitRejection": 0,
+                    "privacyRejection": 0, "admissionShed": 0,
+                    "cancellation": 0, "responseOversize": 0,
+                ],
+                "circuitRecoveryProbesStartedTotal": 0,
+                "currentCircuitRecoveryProbes": 0,
+                "circuitRecoveryProbesSucceededTotal": 0,
+                "circuitRecoveryProbesDidNotRecoverTotal": 0,
+                "downstreamValidation": [
+                    "operationsStartedTotal": finalRejections,
+                    "currentOperations": 0,
+                    "accepted": 0,
+                    "retryRequested": retries,
+                    "finalRejection": finalRejections,
+                ],
+                "requestLatencyBuckets": [["completedRequests": requested]],
+                "requestedInputUTF8BytesTotal": 0,
+                "backendInputUTF8BytesTotal": 0,
+                "backendOutputUTF8BytesTotal": 0,
+                "returnedOutputUTF8BytesTotal": 0,
+                "estimatedBackendInputTokensTotal": 0,
+                "estimatedBackendOutputTokensTotal": 0,
+                "estimatedReturnedOutputTokensTotal": 0,
+                "conservationMaintained": true,
+                "backendAdmissionConservationMaintained": true,
+                "circuitRecoveryConservationMaintained": true,
+            ]
+        }
+        let perFeature: [[String: Any]] = LLMRuntimeFeature.allCases.map { feature in
+            let value = feature == .unspecified
+                ? counters(requested: 1, cache: 1, retries: 1, finalRejections: 1)
+                : counters()
+            return ["feature": feature.rawValue, "counters": value]
+        }
+        let llm = V2HeartbeatSnapshot.LLMHealth(from: [
+            "configured": true,
+            "provider": "fixture",
+            "model": "content-free",
+            "healthy": true,
+            "runtime_telemetry": [
+                "schemaVersion": 1,
+                "capturedAtUnix": 1_700_000_000.0,
+                "totals": counters(
+                    requested: 1, cache: 1, retries: 1, finalRejections: 1
+                ),
+                "perFeature": perFeature,
+            ],
+        ])
+
+        #expect(llm.runtimeTelemetry?.totals.requestedTotal == 1)
+        #expect(llm.runtimeConservationMaintained == true)
+        #expect(llm.unspecifiedRequestsTotal == 1)
+        #expect(llm.semanticRetriesTotal == 1)
+        #expect(llm.semanticFinalRejectionsTotal == 1)
+        #expect(llm.runtimeRequiresAttention)
+        #expect(llm.runtimeOperatorDetail.contains("No prompt or response content"))
+        #expect(llm.summary.contains("needs attention"))
+        #expect(llm.diagnosticDictionary["runtime_telemetry"] != nil)
+
+        let recoveredFeatures: [[String: Any]] = LLMRuntimeFeature.allCases.map { feature in
+            let value = feature == .intentClassification
+                ? counters(requested: 2, success: 1, backendFailures: 1)
+                : counters()
+            return ["feature": feature.rawValue, "counters": value]
+        }
+        let recovered = V2HeartbeatSnapshot.LLMHealth(from: [
+            "configured": true,
+            "provider": "fixture",
+            "model": "recovered",
+            "last_success_unix": 1_700_000_010.0,
+            "consecutive_failures": 0,
+            "circuit_open": false,
+            "healthy": true,
+            "runtime_telemetry": [
+                "schemaVersion": 1,
+                "capturedAtUnix": 1_700_000_020.0,
+                "totals": counters(requested: 2, success: 1, backendFailures: 1),
+                "perFeature": recoveredFeatures,
+            ],
+        ])
+        #expect(!recovered.runtimeRequiresAttention,
+                "A historical failure must not pin a recovered runtime red")
+        #expect(recovered.summary.contains("healthy"))
+        #expect(recovered.runtimeOperatorDetail.contains(
+            "Historical outcome counts do not describe current health"
+        ))
+
+        let currentlyFailing = V2HeartbeatSnapshot.LLMHealth(from: [
+            "configured": true,
+            "provider": "fixture",
+            "model": "failing",
+            "last_success_unix": 1_700_000_010.0,
+            "consecutive_failures": 1,
+            "circuit_open": false,
+            "healthy": false,
+        ])
+        #expect(currentlyFailing.runtimeRequiresAttention)
+    }
+
+    @Test("V2 decodes live versus steady storage and lifecycle degradation")
+    func transitionAndTimerDecode() throws {
+        let path = try writeFixture([
+            "written_at_unix": Date().timeIntervalSince1970,
+            "alert_evidence_budget": [
+                "events_family_effective_cap_bytes": 440_401_920,
+                "events_family_steady_state_cap_bytes": 335_544_320,
+                "alerts_family_combined_cap_bytes": 209_715_200,
+                "events_and_alerts_total_cap_bytes": 650_117_120,
+                "events_and_alerts_steady_state_total_cap_bytes": 545_259_520,
+                "legacy_transition_reserve_bytes": 104_857_600,
+                "legacy_transition_max_bytes": 104_857_600,
+                "legacy_transition_measurement_failed": false,
+                "capture_offered_total": 4,
+                "capture_completed_total": 2,
+                "capture_failures_total": 1,
+                "capture_shed_total": 0,
+                "capture_pending": 0,
+                "capture_in_flight": 1,
+                "capture_queue_capacity": 256,
+                "capture_accepting": true,
+                "capture_conserved": true,
+            ],
+            "timer_lifecycle": [
+                "accepting": true,
+                "offered_handlers_total": 11,
+                "accepted_handlers_total": 10,
+                "completed_handlers_total": 8,
+                "rejected_handlers_total": 1,
+                "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": 1,
+                "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 1,
+                "maximum_in_flight_handlers": 256,
+                "conserves_accepted_handlers": false,
+                "conserves_offered_handlers": true,
+            ],
+            "liveness_timer_lifecycle": [
+                "accepting": true,
+                "offered_handlers_total": 2,
+                "accepted_handlers_total": 1,
+                "completed_handlers_total": 0,
+                "rejected_handlers_total": 0,
+                "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": 0,
+                "coalesced_handlers_total": 1,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 1,
+                "maximum_in_flight_handlers": 1,
+                "conserves_accepted_handlers": true,
+                "conserves_offered_handlers": true,
+            ],
+            "detection_work_lifecycle": [
+                "accepting": false,
+                "offered_handlers_total": 4,
+                "accepted_handlers_total": 3,
+                "completed_handlers_total": 3,
+                "rejected_handlers_total": 1,
+                "closed_rejected_handlers_total": 1,
+                "overload_shed_handlers_total": 0,
+                "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 0,
+                "maximum_in_flight_handlers": 256,
+                "conserves_accepted_handlers": true,
+                "conserves_offered_handlers": true,
+            ],
+            "advisory_work_lifecycle": [
+                "accepting": true,
+                "offered_handlers_total": 2,
+                "accepted_handlers_total": 1,
+                "completed_handlers_total": 1,
+                "rejected_handlers_total": 1,
+                "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": 1,
+                "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 0,
+                "maximum_in_flight_handlers": 64,
+                "conserves_accepted_handlers": true,
+                "conserves_offered_handlers": true,
+            ],
+            "output_work_lifecycle": [
+                "accepting": true,
+                "offered_handlers_total": 1,
+                "accepted_handlers_total": 1,
+                "completed_handlers_total": 1,
+                "rejected_handlers_total": 0,
+                "closed_rejected_handlers_total": 0,
+                "overload_shed_handlers_total": 0,
+                "coalesced_handlers_total": 0,
+                "inline_fallback_handlers_total": 0,
+                "in_flight_handlers": 0,
+                "maximum_in_flight_handlers": 128,
+                "conserves_accepted_handlers": true,
+                "conserves_offered_handlers": true,
+            ],
+            "otlp_receiver_lifecycle": [
+                "accepting_listeners": false,
+                "listeners_accepted_total": 2,
+                "listeners_completed_total": 1,
+                "listeners_rejected_after_seal_total": 1,
+                "active_listeners": 1,
+                "ready_listeners": 1,
+                "listeners_conserved": true,
+                "accepting_connections": false,
+                "connections_accepted_total": 2,
+                "connections_completed_total": 1,
+                "connections_rejected_after_seal_total": 1,
+                "connections_rejected_at_capacity_total": 0,
+                "active_connections": 1,
+                "connections_conserved": true,
+                "accepting_body_tasks": false,
+                "body_tasks_accepted_total": 1,
+                "body_tasks_completed_total": 0,
+                "body_tasks_cancelled_total": 0,
+                "body_tasks_rejected_total": 1,
+                "body_task_cancellation_requests_total": 1,
+                "body_tasks_in_flight": 1,
+                "maximum_body_tasks": 64,
+                "body_tasks_conserved": true,
+                "accepting_callback_tasks": false,
+                "callback_tasks_accepted_total": 2,
+                "callback_tasks_completed_total": 1,
+                "callback_tasks_cancelled_total": 0,
+                "callback_tasks_rejected_total": 1,
+                "callback_task_cancellation_requests_total": 1,
+                "callback_tasks_in_flight": 1,
+                "maximum_callback_tasks": 256,
+                "callback_tasks_conserved": true,
+                "lifecycle_operations_in_progress": 1,
+                "shutdown_timeouts_total": 1,
+                "cleanly_stopped": false,
+                "last_shutdown_clean": false,
+            ],
+        ])
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let snapshot = try #require(V2HeartbeatSnapshot.decode(at: path.path))
+        #expect(snapshot.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes
+            == 620 * 1_048_576)
+        #expect(snapshot.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes
+            == 520 * 1_048_576)
+        #expect(snapshot.alertEvidenceBudget?.captureConservationMaintained == true)
+        #expect(snapshot.alertEvidenceBudget?.captureDegraded == true)
+        #expect(snapshot.timerLifecycle?.inFlightHandlers == 1)
+        #expect(snapshot.timerLifecycle?.degradedWhileRunning == true)
+        #expect(snapshot.livenessTimerLifecycle?.losslessPressureObserved == true)
+        #expect(snapshot.livenessTimerLifecycle?.degraded == false)
+        #expect(snapshot.detectionWorkLifecycle?.detectionProtectionDegraded == true)
+        #expect(snapshot.advisoryWorkLifecycle?.featureDegraded == true)
+        #expect(snapshot.outputWorkLifecycle?.featureDegraded == false)
+        #expect(snapshot.otlpReceiverLifecycle?.readyListeners == 1)
+        #expect(snapshot.otlpReceiverLifecycle?.callbackTasksInFlight == 1)
+        #expect(snapshot.otlpReceiverLifecycle?.lifecycleOperationLeftInProgress == true)
+        #expect(snapshot.otlpReceiverLifecycle?.featureDegraded == true)
+    }
+
+    @Test("split detection lane is authoritative for global protection health")
+    func splitDetectionProtectionVerdict() {
+        #expect(AppState.detectionWorkProtectionUnavailable(
+            detectionDegraded: true,
+            legacyDerivedDegraded: false
+        ))
+        #expect(!AppState.detectionWorkProtectionUnavailable(
+            detectionDegraded: false,
+            legacyDerivedDegraded: true
+        ))
+        #expect(AppState.detectionWorkProtectionUnavailable(
+            detectionDegraded: nil,
+            legacyDerivedDegraded: true
+        ))
+        #expect(!AppState.detectionWorkProtectionUnavailable(
+            detectionDegraded: nil,
+            legacyDerivedDegraded: nil
+        ))
     }
 
     @Test("browser inventory truncation decodes as an explicit coverage gap")
@@ -303,6 +648,74 @@ struct V2HeartbeatSnapshotTests {
         #expect(contradictory.degraded)
     }
 
+    @Test("sequence checkpoint exposes honest restart continuity")
+    func sequenceCheckpointDecode() throws {
+        let healthy = try #require(V2HeartbeatSnapshot.SequenceCheckpoint(from: [
+            "restore_status": "restored",
+            "dirty": false,
+            "configured_crash_rpo_seconds": 30,
+            "crash_rpo_bound_currently_maintained": true,
+        ]))
+        #expect(!healthy.degraded)
+        #expect(healthy.operatorDetail.contains("30-second"))
+        #expect(healthy.diagnosticDictionary["dirty"] as? Bool == false)
+
+        let rejected = try #require(V2HeartbeatSnapshot.SequenceCheckpoint(from: [
+            "restore_status": "rejected",
+            "crash_rpo_bound_currently_maintained": true,
+        ]))
+        #expect(rejected.degraded)
+        #expect(rejected.operatorDetail.contains("could not be recovered"))
+
+        #expect(AppState.sequenceCheckpointUnavailable(
+            restoreStatus: "rejected",
+            rpoMaintained: true
+        ))
+        #expect(AppState.sequenceCheckpointUnavailable(
+            restoreStatus: "restored",
+            rpoMaintained: false
+        ))
+        #expect(!AppState.sequenceCheckpointUnavailable(
+            restoreStatus: nil,
+            rpoMaintained: nil
+        ))
+        #expect(AppState.sequenceCheckpointUnavailable(
+            restoreStatus: "recovered",
+            rpoMaintained: true,
+            durableCarrierValid: false
+        ))
+        #expect(AppState.sequenceCheckpointUnavailable(
+            restoreStatus: "restored",
+            rpoMaintained: true,
+            stateContinuityMaintained: false
+        ))
+
+        let evicted = try #require(V2HeartbeatSnapshot.SequenceCheckpoint(
+            from: [
+                "restore_status": "recovered",
+                "durable_carrier_valid": true,
+                "crash_rpo_bound_currently_maintained": true,
+                "carrier_invalidations_total": 1,
+                "last_carrier_invalidation_reason": "integrity_mismatch",
+            ],
+            runtimeRaw: [
+                "sequence_state_continuity_maintained": false,
+                "sequence_state_continuity_detail": "pending_step_eviction",
+                "sequence_partials_evicted_total": 0,
+                "sequence_partials_in_flight": 3,
+                "sequence_pending_steps_current": 8,
+                "sequence_pending_steps_evicted_total": 2,
+                "sequence_checkpoint_state_weight_bytes": 2048,
+                "sequence_checkpoint_state_weight_recomputed_bytes": 2048,
+                "sequence_checkpoint_state_weight_limit_bytes": 8388608,
+            ]
+        ))
+        #expect(evicted.degraded)
+        #expect(evicted.operatorDetail.contains("pending_step_eviction"))
+        #expect(evicted.pendingStepsEvictedTotal == 2)
+        #expect(evicted.carrierInvalidationsTotal == 1)
+    }
+
     // MARK: - readFreshest behavior
 
     @Test("readFreshest returns nil when no candidate heartbeat exists")
@@ -345,8 +758,18 @@ struct V2HeartbeatSnapshotTests {
             prevention: nil,
             traceGraphStorageAdmission: nil,
             traceStoreStorageAdmission: nil,
+            alertEvidenceBudget: nil,
+            timerLifecycle: nil,
+            livenessTimerLifecycle: nil,
+            startupWorkLifecycle: nil,
+            detectionWorkLifecycle: nil,
+            advisoryWorkLifecycle: nil,
+            outputWorkLifecycle: nil,
+            legacyDerivedWorkLifecycle: nil,
+            otlpReceiverLifecycle: nil,
             eventPipeline: nil,
-            browserInventory: nil
+            browserInventory: nil,
+            sequenceCheckpoint: nil
         )
     }
 }

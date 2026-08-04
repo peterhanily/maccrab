@@ -339,8 +339,11 @@ extension MacCrabCtl {
             break
         }
 
-        // Persistent credentials come only from the shared Keychain. CLI is an
-        // interactive user command, so the normal Keychain access policy is OK.
+        // Best-effort only: the shipped bare CLI intentionally has no shared-
+        // group entitlement because a restricted entitlement without its own
+        // provisioning bundle is an AMFI launch failure. Dashboard-stored cloud
+        // keys are therefore normally app-only; env keys and local Ollama keep
+        // the CLI inference paths usable. The loader handles missing access.
         LLMSecretLoader.applyKeychainSecrets(to: &config, interaction: .allowed)
 
         // Env vars override everything (explicit ephemeral override + CI).

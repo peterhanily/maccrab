@@ -8,6 +8,51 @@ import Testing
 import Foundation
 @testable import MacCrabCore
 
+private final class LineageSnapshotPersistenceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let firstEntered = DispatchSemaphore(value: 0)
+    private let releaseFirst = DispatchSemaphore(value: 0)
+    private var invocationCount = 0
+    private var persistedEventCounts: [Int] = []
+
+    func persist(
+        snapshot: AgentLineageService.LineageSnapshot,
+        path _: String
+    ) -> String? {
+        lock.lock()
+        let invocation = invocationCount
+        invocationCount += 1
+        lock.unlock()
+
+        if invocation == 0 {
+            firstEntered.signal()
+            releaseFirst.wait()
+        }
+
+        lock.lock()
+        persistedEventCounts.append(snapshot.sessions.reduce(0) { $0 + $1.events.count })
+        lock.unlock()
+        return nil
+    }
+
+    func waitUntilFirstEntered(timeout: TimeInterval = 30) async -> Bool {
+        let semaphore = firstEntered
+        return await Task.detached {
+            semaphore.wait(timeout: .now() + timeout) == .success
+        }.value
+    }
+
+    func releaseFirstWrite() {
+        releaseFirst.signal()
+    }
+
+    func eventCounts() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return persistedEventCounts
+    }
+}
+
 @Suite("AgentLineageService: session lifecycle")
 struct AgentLineageLifecycleTests {
 
@@ -52,6 +97,88 @@ struct AgentLineageLifecycleTests {
 
 @Suite("AgentLineageService: timeline assembly")
 struct AgentLineageTimelineTests {
+
+    @Test("file timeline materializes completed text context, not raw callback volume or credentials")
+    func boundedFileMaterializationContract() {
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/project/README.md",
+            eventAction: "open"
+        ) == .fileRead(path: "/Users/test/project/README.md"))
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/project/main.swift",
+            eventAction: "close_modified"
+        ) == .fileWrite(path: "/Users/test/project/main.swift"))
+
+        // Incomplete write callbacks cannot become a clean/scanned timeline
+        // entry; the completed CLOSE is the canonical write observation.
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/project/main.swift",
+            eventAction: "write"
+        ) == nil)
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/private/var/folders/hf/cache.bin",
+            eventAction: "close_modified"
+        ) == nil)
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/Documents/report.pdf",
+            eventAction: "open"
+        ) == nil)
+
+        // The persisted lineage snapshot is not a credential-path side
+        // channel, even though `.env` is otherwise a supported text file.
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/project/.env",
+            eventAction: "open"
+        ) == nil)
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/.aws/credentials",
+            eventAction: "open"
+        ) == nil)
+        #expect(AgentLineageService.materializedFileEventKind(
+            path: "/Users/test/.aws/sso/cache/session.json",
+            eventAction: "open"
+        ) == nil)
+    }
+
+    @Test("bounded lineage context still drives PromptIntentBridge")
+    func boundedContextFeedsPromptIntent() async throws {
+        let service = AgentLineageService()
+        let pid: Int32 = 444
+        let path = "/Users/test/project/README.md"
+        let now = Date()
+        await service.startSession(
+            aiPid: pid,
+            toolType: .claudeCode,
+            projectDir: "/Users/test/project",
+            startTime: now.addingTimeInterval(-30)
+        )
+        let kind = try #require(AgentLineageService.materializedFileEventKind(
+            path: path,
+            eventAction: "open"
+        ))
+        await service.record(
+            aiPid: pid,
+            kind: kind,
+            timestamp: now.addingTimeInterval(-10)
+        )
+
+        let bridge = PromptIntentBridge(
+            snapshotProvider: { requestedPID in
+                await service.snapshot(aiPid: requestedPID)
+            },
+            fileReader: { requestedPath in
+                requestedPath == path
+                    ? "Install swift-argument-parser for command parsing."
+                    : nil
+            }
+        )
+        let result = await bridge.analyzeInstall(
+            aiPid: pid,
+            packageName: "swift-argument-parser",
+            destructiveBlastRadius: 0
+        )
+        #expect(result.label == .userInitiated)
+    }
 
     @Test("Events return in chronological order regardless of insert order")
     func chronologicalReassembly() async {
@@ -172,5 +299,108 @@ struct AgentLineageCapacityTests {
         #expect(await svc.snapshot(aiPid: 1) == nil, "Oldest session should have been evicted")
         #expect(await svc.snapshot(aiPid: 2) != nil)
         #expect(await svc.snapshot(aiPid: 3) != nil)
+    }
+}
+
+@Suite("AgentLineageService: snapshot writer lifecycle")
+struct AgentLineageSnapshotWriterTests {
+
+    @Test("slow snapshot persistence does not block live lineage recording")
+    func slowPersistenceDoesNotBlockActor() async {
+        let probe = LineageSnapshotPersistenceProbe()
+        let service = AgentLineageService(
+            snapshotPersistence: probe.persist(snapshot:path:)
+        )
+        await service.startSession(aiPid: 91, toolType: .codex, projectDir: "/project")
+
+        let writer = Task {
+            await service.writeSnapshot(to: "/unused/lineage.json")
+        }
+        let writerEntered = await probe.waitUntilFirstEntered()
+        #expect(writerEntered)
+
+        let recordFinished = DispatchSemaphore(value: 0)
+        let recorder = Task {
+            await service.record(aiPid: 91, kind: .fileRead(path: "/project/a.swift"))
+            recordFinished.signal()
+        }
+        let actorStayedAvailable = await Task.detached {
+            // A full parallel run can delay both the recorder and this waiter;
+            // use a coarse hang detector while preserving the semantic proof
+            // that blocked persistence does not occupy the lineage actor.
+            recordFinished.wait(timeout: .now() + 30) == .success
+        }.value
+
+        probe.releaseFirstWrite()
+        await writer.value
+        await recorder.value
+
+        #expect(actorStayedAvailable, "disk publication must not occupy the lineage actor")
+        #expect(await service.snapshot(aiPid: 91)?.eventCount == 1)
+        let telemetry = await service.snapshotWriteTelemetry()
+        #expect(telemetry.offered == 1)
+        #expect(telemetry.completed == 1)
+        #expect(telemetry.inFlight == 0)
+        #expect(telemetry.pending == 0)
+        #expect(telemetry.conserved)
+    }
+
+    @Test("concurrent snapshots retain only the latest pending generation")
+    func latestPendingGenerationWins() async {
+        let probe = LineageSnapshotPersistenceProbe()
+        let service = AgentLineageService(
+            snapshotPersistence: probe.persist(snapshot:path:)
+        )
+        await service.startSession(aiPid: 92, toolType: .claudeCode, projectDir: "/project")
+        await service.record(aiPid: 92, kind: .fileRead(path: "/project/one"))
+
+        let first = Task {
+            await service.writeSnapshot(to: "/unused/lineage.json")
+        }
+        #expect(await probe.waitUntilFirstEntered())
+
+        await service.record(aiPid: 92, kind: .fileRead(path: "/project/two"))
+        await service.writeSnapshot(to: "/unused/lineage.json")
+        await service.record(aiPid: 92, kind: .fileRead(path: "/project/three"))
+        await service.writeSnapshot(to: "/unused/lineage.json")
+
+        let blocked = await service.snapshotWriteTelemetry()
+        #expect(blocked.offered == 3)
+        #expect(blocked.started == 1)
+        #expect(blocked.superseded == 1)
+        #expect(blocked.inFlight == 1)
+        #expect(blocked.pending == 1)
+        #expect(blocked.conserved)
+
+        probe.releaseFirstWrite()
+        await first.value
+
+        #expect(probe.eventCounts() == [1, 3], "the superseded two-event snapshot must never be encoded or written")
+        let drained = await service.snapshotWriteTelemetry()
+        #expect(drained.offered == 3)
+        #expect(drained.started == 2)
+        #expect(drained.completed == 2)
+        #expect(drained.failed == 0)
+        #expect(drained.superseded == 1)
+        #expect(drained.inFlight == 0)
+        #expect(drained.pending == 0)
+        #expect(drained.conserved)
+    }
+
+    @Test("snapshot persistence failures are terminal and conserved")
+    func failuresAreAccounted() async {
+        let service = AgentLineageService(
+            snapshotPersistence: { _, _ in "injected write failure" }
+        )
+        await service.writeSnapshot(to: "/unused/lineage.json")
+
+        let telemetry = await service.snapshotWriteTelemetry()
+        #expect(telemetry.offered == 1)
+        #expect(telemetry.started == 1)
+        #expect(telemetry.completed == 0)
+        #expect(telemetry.failed == 1)
+        #expect(telemetry.inFlight == 0)
+        #expect(telemetry.pending == 0)
+        #expect(telemetry.conserved)
     }
 }

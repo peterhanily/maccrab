@@ -31,6 +31,7 @@ public actor EDRMonitor {
 
     /// Active task.
     private var scanTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     // MARK: - Types
 
@@ -295,7 +296,8 @@ public actor EDRMonitor {
 
     /// Start periodic scanning.
     public func start() {
-        guard scanTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("EDR monitor starting (scan every \(self.pollInterval)s)")
 
         scanTask = Task { [weak self] in
@@ -317,9 +319,25 @@ public actor EDRMonitor {
 
     /// Stop scanning.
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { scanTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = scanTask
         scanTask?.cancel()
-        scanTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     /// Get a snapshot of all currently detected tools.

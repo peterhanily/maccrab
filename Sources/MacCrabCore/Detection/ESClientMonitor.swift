@@ -55,6 +55,7 @@ public actor ESClientMonitor {
     public nonisolated let events: AsyncStream<ESHealthEvent>
     private var continuation: AsyncStream<ESHealthEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     /// Previous health state for change detection
     private var previousXprotectd: Bool = true
@@ -73,7 +74,8 @@ public actor ESClientMonitor {
     }
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("ES client monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
@@ -86,9 +88,31 @@ public actor ESClientMonitor {
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            task.map { [$0] } ?? [],
+            deadline: deadline
+        )
+        if joined {
+            pollTask = nil
+            lifecyclePhase = .stopped
+        }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
         pollTask?.cancel()
-        pollTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     /// Get current health status (one-shot, no events)

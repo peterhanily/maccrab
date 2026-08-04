@@ -14,13 +14,27 @@ enum SignalHandlers {
         let sigUsr2Source: DispatchSourceSignal
     }
 
-    static func install(state: DaemonState, supervisor: MonitorSupervisor) -> Handles {
+    static func install(
+        state: DaemonState,
+        supervisor: MonitorSupervisor,
+        timerLifecycle: DaemonTimerLifecycle,
+        livenessLifecycle: DaemonTimerLifecycle
+    ) -> Handles {
         // Handle SIGHUP for rule reload
         let sigHupSource = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
         signal(SIGHUP, SIG_IGN) // Ignore default handler
         sigHupSource.setEventHandler {
-            Task {
+            let accepted = timerLifecycle.submit(label: "signal.rule-reload") {
+                guard await state.daemonLifecycle.beginRuleReload() else {
+                    let reason = await state.daemonLifecycle.isShuttingDown()
+                        ? "daemon shutdown is in progress"
+                        : "rule reload is already in progress"
+                    print("[SIGHUP] Ignoring reload: \(reason)")
+                    return
+                }
+
                 do {
+                    try Task.checkCancellation()
                     print("[SIGHUP] Reloading rules from: \(state.rulesURL.path)")
                     let singleCount = try await state.ruleEngine.reloadRules(from: state.rulesURL)
                     print("[SIGHUP] Single-event rules: \(singleCount)")
@@ -51,7 +65,39 @@ enum SignalHandlers {
                     // deprecated / outside the tightened profile / deleted actually
                     // STOPS firing. loadRules is additive and would keep the stale
                     // enabled copy alive until restart (mother-of-all-audits #6).
-                    let seqCount = try await state.sequenceEngine.reloadRules(from: URL(fileURLWithPath: state.sequenceRulesDir), enabledStatuses: ruleStatuses)
+                    // Treat the active sequence corpus and its durable
+                    // checkpoint as one reload transaction. Join any in-flight
+                    // periodic write before replacing rules so an old-corpus
+                    // checkpoint cannot race the new fingerprint. If reload
+                    // fails, the engine retains its last-known-good corpus and
+                    // the old durable checkpoint remains valid.
+                    await state.sequenceCheckpointCoordinator.stopPeriodicCheckpointing()
+                    let seqCount: Int
+                    do {
+                        seqCount = try await state.sequenceEngine.reloadRules(
+                            from: URL(fileURLWithPath: state.sequenceRulesDir),
+                            enabledStatuses: ruleStatuses
+                        )
+                    } catch {
+                        await state.sequenceCheckpointCoordinator.startPeriodicCheckpointing(
+                            engine: state.sequenceEngine
+                        )
+                        throw error
+                    }
+                    let sequenceCheckpointResult = await state.sequenceCheckpointCoordinator
+                        .forceFlush(engine: state.sequenceEngine)
+                    let sequenceCheckpointTelemetry = await state.sequenceCheckpointCoordinator
+                        .telemetry(engine: state.sequenceEngine)
+                    DaemonBootstrap.reportSequenceCheckpointFlush(
+                        sequenceCheckpointResult,
+                        context: "SIGHUP sequence-rule reload",
+                        requiresCleanBoundary: false,
+                        ingestionQuiesced: false,
+                        dirtyAfterFlush: sequenceCheckpointTelemetry.dirty
+                    )
+                    await state.sequenceCheckpointCoordinator.startPeriodicCheckpointing(
+                        engine: state.sequenceEngine
+                    )
                     // v1.21.5 (audit): the fresh profile governs ONLY the
                     // sequence/graph reload — RuleEngine.reloadRules re-applies
                     // its boot-stored profile internally (pre-existing,
@@ -68,6 +114,16 @@ enum SignalHandlers {
                     // them picked up without a daemon restart. The
                     // evaluator holds its rules immutably, so swap in a
                     // freshly-constructed instance.
+                    // Flush the bounded rolling batch first: a newly loaded
+                    // graph rule must never begin against a substrate that is
+                    // still only resident in the old ingestion epoch.
+                    if let bridge = state.causalGraphBridge {
+                        do {
+                            try await bridge.flushPending()
+                        } catch {
+                            print("[SIGHUP] TraceGraph pending-write flush failed: \(error.localizedDescription)")
+                        }
+                    }
                     let graphRulesDir = URL(fileURLWithPath: state.supportDir + "/compiled_rules/graph")
                     var graphRules = GraphRuleLoader.loadRules(from: graphRulesDir, enabledStatuses: ruleStatuses)
                     if graphRules.isEmpty {
@@ -82,6 +138,7 @@ enum SignalHandlers {
                     // ruleEngine.reloadRules which fully replaces.
                     state.setGraphEvaluator(GraphRuleEvaluator(rules: graphRules))
                     print("[SIGHUP] Graph rules: \(graphRules.count)")
+                    try Task.checkCancellation()
                     // v1.21.6 (PERF-02): re-point the demand-gated ES families at
                     // the ruleset just loaded. Without this the boot-time gate
                     // would create exactly the failure it exists to avoid — an
@@ -108,6 +165,7 @@ enum SignalHandlers {
                     let recentEvents = try await state.eventStore.events(since: retroSince, limit: 10_000)
                     var retroMatches = 0
                     for event in recentEvents {
+                        try Task.checkCancellation()
                         var matches = await state.ruleEngine.evaluate(event)
                         NoiseFilter.apply(&matches, event: event, isWarmingUp: state.isWarmingUp)
                         for match in matches {
@@ -154,6 +212,7 @@ enum SignalHandlers {
                     // sentinel which didn't actually mute critical
                     // alerts).
                     let notifConfig = loadAlertNotificationConfig(supportDir: state.supportDir)
+                    try Task.checkCancellation()
                     await state.notifier.setMinimumSeverity(notifConfig.minSeverity)
                     await state.notifier.setEnabled(notifConfig.enabled)
                     print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue)")
@@ -165,13 +224,61 @@ enum SignalHandlers {
                     // fallen eight knobs behind it, so a reload could re-admit a
                     // `traces_retention_days: 0` that boot would have clamped.
                     let newStorage = freshConfig.storage.clampedToSafeFloors()
+                    let previousTransition = state
+                        .legacyEvidenceTransitionBudget.snapshot()
+                    let transitionTicket = state
+                        .legacyEvidenceTransitionBudget
+                        .installStorageConfig(newStorage)
+                    let legacyMeasurement: LegacyAlertEvidenceTransitionMeasurement?
+                    do {
+                        legacyMeasurement = try await state.eventStore
+                            .legacyAlertEvidenceTransitionMeasurement(
+                                maxBytes: SQLitePersistentStorePolicy.capBytes(
+                                    maxSizeMiB: newStorage.evidenceMaxSizeMB
+                                )
+                            )
+                    } catch {
+                        legacyMeasurement = nil
+                        print("[SIGHUP] Legacy evidence measurement failed; retaining full transition reserve: \(error.localizedDescription)")
+                    }
+                    var newTransition = state.legacyEvidenceTransitionBudget
+                        .update(
+                            measurement: legacyMeasurement,
+                            ticket: transitionTicket
+                        )
+                    let oldEventsFamilyCap = old
+                        .effectiveEventsFamilyMaxSizeMB(
+                            appliedLegacyEvidenceTransitionReserveMiB:
+                                previousTransition.appliedReserveMiB
+                        )
+                    let proposedReserve = newTransition
+                        .pendingReserveFitsHardBoundary == true
+                        ? newTransition.pendingReserveMiB
+                            ?? newTransition.appliedReserveMiB
+                        : newTransition.appliedReserveMiB
+                    var newEventsFamilyCap = newStorage
+                        .effectiveEventsFamilyMaxSizeMB(
+                            appliedLegacyEvidenceTransitionReserveMiB:
+                                proposedReserve
+                        )
+                    let oldAlertsFamilyCap = old.effectiveAlertsFamilyMaxSizeMB
+                    let newAlertsFamilyCap = newStorage.effectiveAlertsFamilyMaxSizeMB
                     let tracegraphCapChanged = old.tracegraphMaxSizeMB != newStorage.tracegraphMaxSizeMB
                     let tracegraphCapLowered = newStorage.tracegraphMaxSizeMB < old.tracegraphMaxSizeMB
-                    let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
-                    let eventsCapLowered = newStorage.eventsMaxSizeMB < old.eventsMaxSizeMB
-                    let alertsCapChanged = old.alertsMaxSizeMB != newStorage.alertsMaxSizeMB
+                    let eventsCapChanged = oldEventsFamilyCap != newEventsFamilyCap
+                    let eventsCapLowered = newEventsFamilyCap < oldEventsFamilyCap
+                    let eventsRetentionBudgetChanged = eventsCapChanged
+                        || old.evidenceMaxSizeMB != newStorage.evidenceMaxSizeMB
+                        || old.eventsHotTierMinutes != newStorage.eventsHotTierMinutes
+                        || old.processEventsFloorMinutes != newStorage.processEventsFloorMinutes
+                    let alertsCapChanged = oldAlertsFamilyCap != newAlertsFamilyCap
+                    let evidenceBudgetChanged = old.evidenceMaxSizeMB
+                        != newStorage.evidenceMaxSizeMB
                     let campaignsCapChanged = old.campaignsMaxSizeMB != newStorage.campaignsMaxSizeMB
                     state.storage = newStorage
+                    if eventsRetentionBudgetChanged {
+                        state.eventRetentionBudgetHealth.recordConfigurationChange()
+                    }
 
                     func persistentPolicy(
                         maxSizeMiB: Int,
@@ -196,22 +303,53 @@ enum SignalHandlers {
                         do {
                             let snapshot = try await state.eventStore.updateStorageAdmission(
                                 persistentPolicy(
-                                    maxSizeMiB: newStorage.eventsMaxSizeMB,
+                                    maxSizeMiB: newEventsFamilyCap,
                                     transactionReserveBytes: SQLitePersistentStorePolicy
                                         .eventTransactionReserveBytes
                                 )
                             )
+                            if newTransition.pendingReserveFitsHardBoundary == true,
+                               let pendingReserve = newTransition
+                                    .pendingReserveMiB {
+                                newTransition = state
+                                    .legacyEvidenceTransitionBudget
+                                    .commitPendingReserve(
+                                        pendingReserve,
+                                        ticket: transitionTicket
+                                    )
+                                newEventsFamilyCap = newStorage
+                                    .effectiveEventsFamilyMaxSizeMB(
+                                        appliedLegacyEvidenceTransitionReserveMiB:
+                                            newTransition.appliedReserveMiB
+                                    )
+                            }
                             let latch = snapshot?.latchedFailure ?? "none"
                             let pending = snapshot?.pageLimitPending ?? false
                             print("[SIGHUP] events.db hard admission: latch=\(latch), page_limit_pending=\(pending)")
                         } catch {
+                            newEventsFamilyCap = newStorage
+                                .effectiveEventsFamilyMaxSizeMB(
+                                    appliedLegacyEvidenceTransitionReserveMiB:
+                                        newTransition.appliedReserveMiB
+                                )
                             print("[SIGHUP] events.db hard admission reload failed closed: \(error.localizedDescription)")
                         }
+                    } else if newTransition.pendingReserveFitsHardBoundary == true,
+                              let pendingReserve = newTransition
+                                .pendingReserveMiB {
+                        // The numeric ceiling is already identical (possible
+                        // only through saturation/offsetting config changes),
+                        // so no actor policy mutation is needed before commit.
+                        newTransition = state.legacyEvidenceTransitionBudget
+                            .commitPendingReserve(
+                                pendingReserve,
+                                ticket: transitionTicket
+                            )
                     }
                     if alertsCapChanged {
                         do {
                             let snapshot = try await state.alertStore.updateStorageAdmission(
-                                persistentPolicy(maxSizeMiB: newStorage.alertsMaxSizeMB)
+                                persistentPolicy(maxSizeMiB: newAlertsFamilyCap)
                             )
                             let latch = snapshot?.latchedFailure ?? "none"
                             let pending = snapshot?.pageLimitPending ?? false
@@ -219,6 +357,13 @@ enum SignalHandlers {
                         } catch {
                             print("[SIGHUP] alerts.db hard admission reload failed closed: \(error.localizedDescription)")
                         }
+                    }
+                    if evidenceBudgetChanged {
+                        await state.alertSink.updateEvidenceBudget(
+                            maxBytes: SQLitePersistentStorePolicy.capBytes(
+                                maxSizeMiB: newStorage.evidenceMaxSizeMB
+                            )
+                        )
                     }
                     if campaignsCapChanged, let campaignStore = state.campaignStore {
                         do {
@@ -274,6 +419,7 @@ enum SignalHandlers {
                                  || old.aggregateDays         != newStorage.aggregateDays
                                  || old.alertsRetentionDays   != newStorage.alertsRetentionDays
                                  || old.alertsMaxSizeMB       != newStorage.alertsMaxSizeMB
+                                 || evidenceBudgetChanged
                                  || old.campaignsRetentionDays != newStorage.campaignsRetentionDays
                                  || old.campaignsMaxSizeMB    != newStorage.campaignsMaxSizeMB
                                  || old.tracesRetentionDays   != newStorage.tracesRetentionDays
@@ -281,7 +427,12 @@ enum SignalHandlers {
                                  || old.tracegraphRetentionDays != newStorage.tracegraphRetentionDays
                                  || tracegraphCapChanged
                     if anyChange {
-                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierMinutes)m/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, traces=\(newStorage.tracesRetentionDays)d/\(newStorage.tracesMaxSizeMB)MB, tracegraph=\(newStorage.tracegraphRetentionDays)d/\(newStorage.tracegraphMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
+                        let liveTotal = newStorage
+                            .configuredEventsAndAlertsTotalMaxSizeMB(
+                                appliedLegacyEvidenceTransitionReserveMiB:
+                                    newTransition.appliedReserveMiB
+                            )
+                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierMinutes)m/\(newEventsFamilyCap)MB live (steady \(newStorage.effectiveEventsFamilyMaxSizeMB)MB + applied legacy reserve \(newTransition.appliedReserveMiB)MB, pending \(newTransition.pendingReserveMiB ?? -1)MB), alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB + evidence=\(newStorage.evidenceMaxSizeMB)MB (family \(newAlertsFamilyCap)MB), events+alerts live total=\(liveTotal)MB (steady \(newStorage.configuredEventsAndAlertsTotalMaxSizeMB)MB), campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, traces=\(newStorage.tracesRetentionDays)d/\(newStorage.tracesMaxSizeMB)MB, tracegraph=\(newStorage.tracegraphRetentionDays)d/\(newStorage.tracegraphMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
                         if eventsCapLowered {
                             // Lowered events cap: kick an immediate sweep so the
                             // operator sees the DB shrink in seconds instead of
@@ -331,6 +482,8 @@ enum SignalHandlers {
                         dbEncryption: state.dbEncryption
                     )
 
+                    try Task.checkCancellation()
+
                     // v1.10.0: SIGHUP also triggers a one-shot threat-intel
                     // refresh. The dashboard's "Refresh feeds" button signals
                     // SIGHUP via maccrabctl rather than waiting on the 4-hour
@@ -350,6 +503,10 @@ enum SignalHandlers {
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }
+                await state.daemonLifecycle.endRuleReload()
+            }
+            if !accepted {
+                print("[SIGHUP] Reload not admitted: another reload is active, runtime work capacity is unavailable, or shutdown has begun")
             }
         }
         sigHupSource.resume()
@@ -366,21 +523,16 @@ enum SignalHandlers {
             logger.info("MacCrab daemon shutting down...")
             print("\nShutting down MacCrab daemon...")
             Task {
-                // v1.9 PR-5: drain the OTLP receiver first so the
-                // NWListener is closed before launchd respawns the
-                // daemon. Avoids leaving the kernel socket in
-                // TIME_WAIT, which would make the next start fail to
-                // bind 4318. Cheap (no new actor hops) and idempotent.
-                await state.otlpReceiver?.stop()
-                // v1.21.4 (audit): flush the batched events writer BEFORE exit —
-                // the F2/A1 writer buffers up to flushThreshold/250ms of events,
-                // and the driveSource tasks never end on their own, so
-                // runEventLoop's post-stream shutdown flush is unreachable on a
-                // signal. Without this, the last partial batch is lost on every
-                // graceful SIGTERM/SIGINT (a regression vs the pre-F2 sync write).
-                await state.eventWriter.shutdown()
-                await supervisor.shutdown(deadline: 3.0)
-                exit(0)
+                if await DaemonShutdownCoordinator.finalize(
+                    state: state,
+                    supervisor: supervisor,
+                    timerLifecycle: timerLifecycle,
+                    livenessLifecycle: livenessLifecycle,
+                    totalDeadline: 3.75,
+                    context: "SIGTERM/SIGINT shutdown",
+                ) != nil {
+                    exit(DaemonExitRequest.exitCode())
+                }
             }
             // Hard fallback: if the Task above gets stuck (supervisor
             // actor deadlocked, scheduler starved), make sure we still
@@ -388,7 +540,7 @@ enum SignalHandlers {
             // fine once we're past the graceful window.
             DispatchQueue.global().asyncAfter(deadline: .now() + 4.0) {
                 logger.warning("MacCrab daemon shutdown deadline exceeded — forcing exit")
-                exit(0)
+                exit(DaemonExitRequest.exitCode())
             }
         }
 
@@ -410,9 +562,14 @@ enum SignalHandlers {
         signal(SIGUSR1, SIG_IGN)
         sigUsr1Source.setEventHandler {
             print("[SIGUSR1] Threat intel feed refresh requested by dashboard")
-            Task {
+            let accepted = timerLifecycle.submit(
+                label: "signal.threat-intel-refresh"
+            ) {
                 await state.threatIntel.refreshNow()
                 print("[SIGUSR1] Threat intel refresh complete")
+            }
+            if !accepted {
+                print("[SIGUSR1] Refresh not admitted: already active, capacity unavailable, or shutdown in progress")
             }
         }
         sigUsr1Source.resume()
@@ -427,7 +584,9 @@ enum SignalHandlers {
         signal(SIGUSR2, SIG_IGN)
         sigUsr2Source.setEventHandler {
             print("[SIGUSR2] Manual events.db size-cap sweep requested by dashboard")
-            Task {
+            let accepted = timerLifecycle.submit(
+                label: "signal.events-size-cap"
+            ) {
                 let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
                 let started = Date()
                 let didRun = await enforceDatabaseSizeCapNow(state: state)
@@ -452,6 +611,9 @@ enum SignalHandlers {
                 } else {
                     print("[SIGUSR2] events.db sweep skipped — another sweep is already in progress; preserving its pending status")
                 }
+            }
+            if !accepted {
+                print("[SIGUSR2] Sweep not admitted: already active, capacity unavailable, or shutdown in progress")
             }
         }
         sigUsr2Source.resume()

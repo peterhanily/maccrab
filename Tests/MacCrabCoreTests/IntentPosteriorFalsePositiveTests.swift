@@ -17,17 +17,19 @@
 //      extracting a package's `.npmrc`) were scored at full weight as
 //      persistence / config / destructive evidence.
 //
-// Fix (IntentEvidenceClassifier.extract): discount the low-specificity,
-// write-shaped / destructive evidence types for a PLATFORM-TRUSTED actor
-// only, while keeping the high-signal evidence (credentialRead,
-// nonRegistryEgress, …) that a real worm relies on — and keeping full
-// evidence for UNTRUSTED (unsigned / ad-hoc) actors.
+// Two independent safeguards now close that failure mode:
+//   - IntentEvidenceClassifier discounts low-specificity write/destructive
+//     evidence for a PLATFORM-TRUSTED actor only.
+//   - BayesianIntentEngine keeps at most one decaying contribution per coarse
+//     evidence type. Repeated callbacks refresh it instead of being treated as
+//     independent support, and exact event-token/type pairs are deduplicated.
 //
 // These tests pin:
 //   (a) each reported FP tool, as a SOLE trusted actor, no longer crosses
 //       the alert gate (let alone HIGH);
-//   (b) a real credential-read → data-exfiltration chain from an
-//       untrusted payload STILL crosses the gate;
+//   (b) a real, multi-primitive persistence chain from an untrusted payload
+//       STILL crosses the gate, while repeated copies of one egress primitive
+//       do not manufacture confidence;
 //   (c) the discount is trust-scoped: the SAME actions from an untrusted
 //       actor still produce the discounted evidence (not a feature kill).
 
@@ -127,7 +129,12 @@ struct IntentPosteriorFalsePositiveTests {
         for _ in 0..<repeatCount {
             for e in events {
                 for ev in IntentEvidenceClassifier.extract(e) {
-                    last = await engine.observe(ev, treeKey: treeKey)
+                    last = await engine.observe(
+                        ev,
+                        treeKey: treeKey,
+                        observationToken: e.id.uuidString,
+                        observedAt: e.timestamp
+                    )
                 }
             }
         }
@@ -238,41 +245,33 @@ struct IntentPosteriorFalsePositiveTests {
         #expect(posterior == nil)
     }
 
-    // MARK: - (b) A real credential-read → exfil chain still fires
+    // MARK: - (b) Diverse, independent malicious evidence still fires
 
-    @Test("Untrusted worm: credential read + config tamper + repeated exfil STILL crosses HIGH")
-    func untrustedExfilChainStillFires() async throws {
-        // A dropped, unsigned payload steals credentials, tampers a package
-        // config to self-propagate, and beacons stolen data to a webhook.
-        // None of this evidence is discounted (actor is untrusted), and the
-        // repeated egress concentrates the posterior on exfiltration well
-        // past the gate. Pins current LikelihoodTable tuning — if that is
-        // retuned, revisit this expectation deliberately.
+    @Test("Untrusted persistence chain with three distinct primitives STILL crosses HIGH")
+    func untrustedPersistenceChainStillFires() async throws {
+        // The evidence combiner deliberately no longer treats repeated
+        // callbacks of one coarse signal as independent observations. A real
+        // threshold crossing therefore requires multiple distinct primitives.
         let payload = "/private/tmp/npm-x/postinstall.js"
-        var events: [Event] = [
-            Self.fileEvent(exe: payload, action: "read", path: "/Users/dev/.aws/credentials", trust: .unsigned),
-            Self.fileEvent(exe: payload, action: "write", path: "/Users/dev/repo/.npmrc", trust: .unsigned),
+        let events: [Event] = [
+            Self.fileEvent(exe: payload, action: "write", path: "/Users/dev/Library/LaunchAgents/com.evil.agent.plist", trust: .unsigned),
+            Self.fileEvent(exe: payload, action: "write", path: "/Users/dev/.zshrc", trust: .unsigned),
+            Self.fileEvent(exe: payload, action: "write", path: "/Users/dev/repo/.github/workflows/persist.yml", trust: .unsigned),
         ]
-        for _ in 0..<6 {
-            events.append(Self.netConnect(exe: payload, host: "exfil.evil-webhook.example", ip: "203.0.113.7", trust: .unsigned))
-        }
-        // Evidence is fully retained for the untrusted actor.
-        #expect(IntentEvidenceClassifier.extract(events[0]) == [.credentialRead])
-        #expect(IntentEvidenceClassifier.extract(events[1]) == [.configFileTampered])
-        #expect(IntentEvidenceClassifier.extract(events[2]) == [.nonRegistryEgress])
+        #expect(IntentEvidenceClassifier.extract(events[0]) == [.launchAgentWrite])
+        #expect(IntentEvidenceClassifier.extract(events[1]) == [.shellRcWrite])
+        #expect(IntentEvidenceClassifier.extract(events[2]) == [.workflowWrite])
 
         let posterior = await Self.drive(events, repeatCount: 1, treeKey: payload + "@4242")
         let p = try #require(posterior)
-        #expect(Self.crossesAlertGate(p), "real exfil chain failed to cross: \(p.topGoal) p=\(p.topProbability) distinct=\(p.distinctEvidenceCount)")
-        #expect(p.topGoal == .exfiltration || p.topGoal == .credentialHarvest)
-        #expect(p.distinctEvidenceCount >= 3)
-        #expect(p.topProbability >= 0.85)
+        #expect(Self.crossesAlertGate(p), "real persistence chain failed to cross: \(p.topGoal) score=\(p.topProbability) distinct=\(p.distinctEvidenceCount)")
+        #expect(p.topGoal == .persistence)
+        #expect(p.distinctEvidenceCount == 3)
+        #expect(p.topProbability >= 0.95)
     }
 
-    @Test("Untrusted worm reaches HIGH severity (>=0.95)")
-    func untrustedExfilChainReachesHigh() async throws {
-        // Same shape with more beacons: a genuine campaign should reach the
-        // HIGH (≥0.95) severity band, not just the medium alert floor.
+    @Test("Repeated exfil callbacks cannot manufacture an alert-gate crossing")
+    func repeatedExfilCallbacksDoNotCompound() async throws {
         let payload = "/private/tmp/npm-x/postinstall.js"
         var events: [Event] = [
             Self.fileEvent(exe: payload, action: "read", path: "/Users/dev/.aws/credentials", trust: .unsigned),
@@ -282,7 +281,8 @@ struct IntentPosteriorFalsePositiveTests {
             events.append(Self.netConnect(exe: payload, host: "exfil.evil-webhook.example", ip: "203.0.113.7", trust: .unsigned))
         }
         let p = try #require(await Self.drive(events, repeatCount: 1, treeKey: payload + "@hi"))
-        #expect(p.topProbability >= 0.95)
+        #expect(p.distinctEvidenceCount == 3)
+        #expect(!Self.crossesAlertGate(p), "repeated copies of one egress type must not compound into a high-confidence claim")
     }
 
     // MARK: - (c) The discount is trust-scoped, not a feature kill

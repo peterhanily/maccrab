@@ -134,7 +134,7 @@ struct AlertStoreSchemaV5Tests {
 
     // MARK: - Schema shape
 
-    @Test("Fresh install lands at user_version = 5 with all attribution columns")
+    @Test("Fresh install lands at latest schema with attribution and alert-owned evidence")
     func freshInstallV5() throws {
         let path = makeTempPath()
         defer { cleanup(path) }
@@ -158,7 +158,7 @@ struct AlertStoreSchemaV5Tests {
             #expect(columns.contains(required), "regressed column \(required)")
         }
 
-        // PRAGMA user_version reflects v5.
+        // PRAGMA user_version reflects the latest migration.
         let version = try #require(try? SchemaMigrator.readVersion(db: raw))
         #expect(version >= 5, "user_version=\(version), expected ≥ 5")
     }
@@ -238,7 +238,7 @@ struct AlertStoreSchemaV5Tests {
         #expect(version >= 5)
     }
 
-    @Test("Migration is idempotent — re-opening DB preserves user_version (v7)")
+    @Test("Migration is idempotent — re-opening DB preserves user_version (v8)")
     func migrationIdempotent() async throws {
         let path = makeTempPath()
         defer { cleanup(path) }
@@ -255,7 +255,7 @@ struct AlertStoreSchemaV5Tests {
         let raw = try #require(openRaw(path))
         defer { sqlite3_close(raw) }
         let version = try #require(try? SchemaMigrator.readVersion(db: raw))
-        #expect(version == 7, "version should be exactly 7 after multiple opens, got \(version)")
+        #expect(version == 8, "version should be exactly 8 after multiple opens, got \(version)")
     }
 
     @Test("v2-shape DB opens cleanly on v5 binary — forward-compatible migration")

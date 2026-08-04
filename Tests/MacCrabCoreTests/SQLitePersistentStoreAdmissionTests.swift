@@ -696,14 +696,13 @@ struct SQLitePersistentStoreAdmissionTests {
         let timers = try repositoryText("Sources/MacCrabAgentKit/DaemonTimers.swift")
         let signals = try repositoryText("Sources/MacCrabAgentKit/SignalHandlers.swift")
 
-        for field in [
-            "bootStorage.eventsMaxSizeMB",
-            "bootStorage.alertsMaxSizeMB",
-            "bootStorage.campaignsMaxSizeMB",
-        ] {
-            #expect(setup.contains("maxSizeMiB: \(field)"),
-                    "boot policy stopped using the overflow-safe shared converter")
-        }
+        #expect(setup.contains(
+            "maxSizeMiB: bootStorage.effectiveEventsFamilyMaxSizeMB"
+        ))
+        #expect(setup.contains("AlertStore.combinedFamilyCapBytes("))
+        #expect(setup.contains(
+            "maxSizeMiB: bootStorage.campaignsMaxSizeMB"
+        ))
         #expect(occurrences(of: "eventStoragePolicy: eventStoragePolicy", in: setup) == 1)
         #expect(occurrences(of: "alertStoragePolicy: alertStoragePolicy", in: setup) == 1)
         #expect(occurrences(of: "storagePolicy: eventStoragePolicy", in: setup) == 2)
@@ -726,14 +725,14 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(signals.contains(
             "campaignStore.updateStorageAdmission("
         ))
-        for field in [
-            "newStorage.alertsMaxSizeMB",
-            "newStorage.campaignsMaxSizeMB",
-        ] {
-            #expect(signals.contains("persistentPolicy(maxSizeMiB: \(field))"))
-        }
-        #expect(signals.contains("maxSizeMiB: newStorage.eventsMaxSizeMB"),
-                "event live reload lost the configured cap")
+        #expect(signals.contains(
+            "persistentPolicy(maxSizeMiB: newAlertsFamilyCap)"
+        ))
+        #expect(signals.contains(
+            "persistentPolicy(maxSizeMiB: newStorage.campaignsMaxSizeMB)"
+        ))
+        #expect(signals.contains("maxSizeMiB: newEventsFamilyCap"),
+                "event live reload lost the effective family cap")
         #expect(signals.contains(
             "freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes"
         ))
@@ -1090,9 +1089,9 @@ struct SQLitePersistentStoreAdmissionTests {
         let alertSnapshot = try #require(await alerts?.storageAdmissionSnapshot())
         let campaignSnapshot = try #require(await campaigns?.storageAdmissionSnapshot())
         #expect(eventSnapshot.maxFootprintBytes
-            == Int64(420) * SQLitePersistentStorePolicy.bytesPerMiB)
+            == Int64(320) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(alertSnapshot.maxFootprintBytes
-            == Int64(100) * SQLitePersistentStorePolicy.bytesPerMiB)
+            == Int64(200) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(campaignSnapshot.maxFootprintBytes
             == Int64(50) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(eventSnapshot.freeSpaceFloorBytes
@@ -1417,7 +1416,10 @@ struct SQLitePersistentStoreAdmissionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let alertPath = dir.appendingPathComponent("alerts.db").path
         let campaignPath = dir.appendingPathComponent("campaigns.db").path
-        let reserve = 2 * SQLitePersistentStorePolicy.bytesPerMiB
+        // One alert transaction's current conservative estimate is slightly
+        // above 2 MiB. This test exercises statement reacquisition, not reserve
+        // rejection, so provision a valid bounded transaction reserve.
+        let reserve = 4 * SQLitePersistentStorePolicy.bytesPerMiB
         let roomy = policy(
             directory: dir,
             max: 128 * SQLitePersistentStorePolicy.bytesPerMiB,

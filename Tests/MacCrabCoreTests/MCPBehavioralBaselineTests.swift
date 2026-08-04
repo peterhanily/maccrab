@@ -53,8 +53,8 @@ struct BaselineLearningEnforcingTests {
         #expect(after?.state == .enforcing)
     }
 
-    @Test("After promotion, a previously-unseen file basename emits a deviation")
-    func enforcementEmitsDeviation() async {
+    @Test("After promotion, a new basename becomes pending without self-authorizing")
+    func comparisonCreatesPendingCandidate() async {
         let svc = MCPBaselineService(learningObservations: 2, learningWindow: 0.1)
         let t0 = Date()
         _ = await svc.observe(.init(tool: "cursor", serverName: "notes", filePath: "/a/notes.md", timestamp: t0))
@@ -69,6 +69,23 @@ struct BaselineLearningEnforcingTests {
         #expect(emitted.count == 1)
         #expect(emitted.first?.kind == .newFileBasename)
         #expect(emitted.first?.observedValue == "steal-keychain")
+        let accepted = await svc.baseline(for: "cursor", serverName: "notes")
+        let pending = await svc.pendingBaseline(for: "cursor", serverName: "notes")
+        #expect(accepted?.fileBasenames.contains("steal-keychain") == false)
+        #expect(pending?.fileBasenames.contains("steal-keychain") == true)
+
+        let repeated = await svc.observe(.init(
+            tool: "cursor", serverName: "notes",
+            filePath: "/malicious/steal-keychain",
+            timestamp: t0.addingTimeInterval(2.0)
+        ))
+        #expect(repeated.isEmpty,
+                "A pending value is retained and deduplicated, not accepted or re-emitted")
+
+        #expect(await svc.approvePending(tool: "cursor", serverName: "notes"))
+        let approved = await svc.baseline(for: "cursor", serverName: "notes")
+        #expect(approved?.fileBasenames.contains("steal-keychain") == true)
+        #expect(await svc.pendingBaseline(for: "cursor", serverName: "notes") == nil)
     }
 
     @Test("Single observation can emit multiple deviations across fields")
@@ -91,17 +108,35 @@ struct BaselineLearningEnforcingTests {
         let kinds = Set(emitted.map(\.kind))
         #expect(kinds == [.newFileBasename, .newDomain, .newChildBasename],
                 "All three fields must emit their deviation on one observation")
+        let accepted = await svc.baseline(for: "claude", serverName: "svc")
+        let pending = await svc.pendingBaseline(for: "claude", serverName: "svc")
+        #expect(accepted?.fileBasenames.contains("b") == false)
+        #expect(accepted?.domains.contains("evil.ru") == false)
+        #expect(accepted?.childBasenames.contains("curl") == false)
+        #expect(pending?.fileBasenames.contains("b") == true)
+        #expect(pending?.domains.contains("evil.ru") == true)
+        #expect(pending?.childBasenames.contains("curl") == true)
+        let telemetry = await svc.telemetry()
+        #expect(telemetry.mode == .shadow)
+        #expect(telemetry.shadowCandidatesTotal == 3)
+        #expect(telemetry.publicationAttemptsTotal == 0)
+        #expect(telemetry.publishedCandidatesTotal == 0,
+                "Production default is shadow-only until evaluated")
+        #expect(telemetry.publicationConserved)
+        #expect(telemetry.capacityRespected)
     }
 }
 
 @Suite("MCPBaselineService: domain normalisation")
 struct BaselineDomainNormalisationTests {
 
-    @Test("Subdomains collapse to eTLD+1")
-    func eTLDPlusOne() {
-        #expect(MCPBaselineService.normalizeDomain("api.github.com") == "github.com")
-        #expect(MCPBaselineService.normalizeDomain("www.example.com") == "example.com")
-        #expect(MCPBaselineService.normalizeDomain("a.b.c.example.com") == "example.com")
+    @Test("Exact host identity is preserved until a PSL parser exists")
+    func exactHostIdentity() {
+        #expect(MCPBaselineService.normalizeDomain("api.github.com") == "api.github.com")
+        #expect(MCPBaselineService.normalizeDomain("www.example.com") == "www.example.com")
+        #expect(MCPBaselineService.normalizeDomain("a.b.c.example.com") == "a.b.c.example.com")
+        #expect(MCPBaselineService.normalizeDomain("victim.github.io") !=
+                MCPBaselineService.normalizeDomain("attacker.github.io"))
     }
 
     @Test("Single-label and already-eTLD+1 inputs pass through")
@@ -112,7 +147,7 @@ struct BaselineDomainNormalisationTests {
 
     @Test("Leading/trailing dots and case are normalised")
     func cleansPunctuation() {
-        #expect(MCPBaselineService.normalizeDomain(".API.GITHUB.COM.") == "github.com")
+        #expect(MCPBaselineService.normalizeDomain(".API.GITHUB.COM.") == "api.github.com")
     }
 }
 
@@ -192,6 +227,77 @@ struct BaselineDoSHardeningTests {
         #expect(b.fileBasenames.count <= 3)
         #expect(b.domains.count <= 3)
         #expect(b.childBasenames.count <= 3)
+    }
+
+    @Test("Pending overflow is rejected without an undeduplicated alert stream")
+    func pendingOverflowFailsClosed() async {
+        let svc = MCPBaselineService(
+            learningObservations: 1, learningWindow: 0,
+            maxBaselines: 2, maxSetSize: 1,
+            operatingMode: .reviewAlerts
+        )
+        _ = await svc.observe(.init(
+            tool: "claude", serverName: "s1", filePath: "/accepted"
+        ))
+        let retained = await svc.observe(.init(
+            tool: "claude", serverName: "s1", filePath: "/pending"
+        ))
+        let rejected = await svc.observe(.init(
+            tool: "claude", serverName: "s1", filePath: "/overflow"
+        ))
+        let repeated = await svc.observe(.init(
+            tool: "claude", serverName: "s1", filePath: "/overflow"
+        ))
+
+        #expect(retained.count == 1)
+        #expect(rejected.isEmpty)
+        #expect(repeated.isEmpty)
+        let accepted = await svc.baseline(for: "claude", serverName: "s1")
+        let pending = await svc.pendingBaseline(for: "claude", serverName: "s1")
+        #expect(accepted?.fileBasenames == ["accepted"])
+        #expect(pending?.fileBasenames == ["pending"])
+        let telemetry = await svc.telemetry()
+        #expect(telemetry.pendingCapacityRejectionsTotal == 2)
+        #expect(telemetry.shadowCandidatesTotal == 1)
+        #expect(telemetry.publicationAttemptsTotal == 1)
+        #expect(telemetry.publishedCandidatesTotal == 1)
+        #expect(telemetry.capacityRespected)
+        #expect(telemetry.publicationConserved)
+
+        #expect(!(await svc.approvePending(tool: "claude", serverName: "s1")),
+                "An approval that cannot fit must report no promotion")
+        #expect(await svc.baseline(
+            for: "claude", serverName: "s1"
+        )?.fileBasenames == ["accepted"])
+        #expect(await svc.pendingBaseline(
+            for: "claude", serverName: "s1"
+        )?.fileBasenames == ["pending"])
+    }
+}
+
+@Suite("MCPBaselineService: snapshot compatibility")
+struct BaselineSnapshotCompatibilityTests {
+    private struct LegacySnapshot: Codable {
+        let writtenAt: Date
+        let baselines: [MCPServerBaseline]
+    }
+
+    @Test("Legacy snapshot decodes as schema 1 shadow state without pending trust")
+    func legacyDecodeIsObservableButNotTrusted() throws {
+        let legacy = LegacySnapshot(
+            writtenAt: Date(timeIntervalSince1970: 1_700_000_000),
+            baselines: [MCPServerBaseline(
+                serverKey: "claude::github", tool: "claude", serverName: "github"
+            )]
+        )
+        let data = try JSONEncoder().encode(legacy)
+        let decoded = try JSONDecoder().decode(
+            MCPBaselineService.BaselineSnapshot.self, from: data
+        )
+        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.mode == .shadow)
+        #expect(decoded.pendingBaselines.isEmpty)
+        #expect(decoded.baselines.count == 1)
     }
 }
 

@@ -101,6 +101,9 @@ public actor HoneyfileManager {
 
     /// path → entry, fast lookup for isHoneyfile().
     private var deployed: [String: Honeyfile] = [:]
+    /// False after any rejected load. A callback snapshot may be restrictive
+    /// only when this actor knows its path set is complete.
+    private var manifestStateKnown = false
 
     // MARK: - Init
 
@@ -140,7 +143,16 @@ public actor HoneyfileManager {
         let path = manifestPath
             ?? "\(homeDir)/Library/Application Support/MacCrab/honeyfiles.json"
         self.manifestURL = URL(fileURLWithPath: path)
-        Task { await self.loadManifest() }
+        // Load synchronously before publishing the actor. The former detached
+        // Task allowed the first enrichment/deploy/snapshot call to observe an
+        // empty dictionary while a valid manifest was still in flight.
+        switch Self.readManifest(at: path) {
+        case .complete(let entries):
+            self.deployed = entries
+            self.manifestStateKnown = true
+        case .rejected(let reason):
+            logger.error("Honeyfile manifest load failed: \(reason, privacy: .public)")
+        }
     }
 
     // MARK: - Public API
@@ -152,6 +164,7 @@ public actor HoneyfileManager {
     /// user has real data at a honeyfile path, that path is skipped.
     @discardableResult
     public func deploy() throws -> [Honeyfile] {
+        manifestStateKnown = false
         var written: [Honeyfile] = []
         for entry in Self.defaultHoneyfileSet(homeDir: homeDir) {
             let expandedPath = entry.path
@@ -198,6 +211,7 @@ public actor HoneyfileManager {
             logger.info("Deployed honeyfile at \(expandedPath, privacy: .public)")
         }
         saveManifest()
+        manifestStateKnown = true
         return written
     }
 
@@ -206,6 +220,7 @@ public actor HoneyfileManager {
     /// should have already fired. Returns the entries removed.
     @discardableResult
     public func remove() -> [Honeyfile] {
+        manifestStateKnown = false
         var removed: [Honeyfile] = []
         for entry in deployed.values {
             try? FileManager.default.removeItem(atPath: entry.path)
@@ -214,6 +229,7 @@ public actor HoneyfileManager {
         }
         deployed.removeAll()
         saveManifest()
+        manifestStateKnown = true
         return removed
     }
 
@@ -259,27 +275,72 @@ public actor HoneyfileManager {
     /// Current deployed count (diagnostics).
     public func deployedCount() -> Int { deployed.count }
 
+    /// Complete immutable path set for synchronous callback admission. The
+    /// registry owner invalidates before reload/deploy/remove and publishes
+    /// this only after the mutation completes.
+    public func callbackPathSnapshot(
+        validUntilUptimeNanoseconds: UInt64
+    ) -> HoneyfilePathSnapshot {
+        guard manifestStateKnown else { return .unknown }
+        return .current(
+            paths: Set(deployed.keys),
+            validUntilUptimeNanoseconds: validUntilUptimeNanoseconds
+        )
+    }
+
+    /// Re-read a user-updated manifest into a temporary value and swap only
+    /// after the entire bounded carrier decodes successfully. A rejection
+    /// leaves the actor's prior complete view intact; callers must keep the
+    /// callback registry invalidated until a later successful reload.
+    @discardableResult
+    public func reloadManifest() -> Bool {
+        switch Self.readManifest(at: manifestURL.path) {
+        case .complete(let entries):
+            deployed = entries
+            manifestStateKnown = true
+            return true
+        case .rejected(let reason):
+            manifestStateKnown = false
+            logger.error("Honeyfile manifest reload failed: \(reason, privacy: .public)")
+            return false
+        }
+    }
+
     // MARK: - Manifest persistence
 
-    private func loadManifest() {
+    private enum ManifestLoad {
+        case complete([String: Honeyfile])
+        case rejected(String)
+    }
+
+    private nonisolated static func readManifest(at path: String) -> ManifestLoad {
         let data: Data
         switch BoundedRegularFileReader.readOutcome(
-            at: manifestURL.path,
+            at: path,
             maximumBytes: Self.maxManifestBytes
         ) {
         case .success(let snapshot):
             data = snapshot.data
         case .rejected(.notFound):
-            return // First deployment has no manifest yet.
+            return .complete([:]) // First deployment has no manifest yet.
         case .rejected(let reason):
-            logger.error("Honeyfile manifest carrier rejected: \(String(describing: reason), privacy: .public)")
-            return
+            return .rejected("carrier rejected: \(String(describing: reason))")
         }
         do {
             let entries = try JSONDecoder().decode([Honeyfile].self, from: data)
-            deployed = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
+            var indexed: [String: Honeyfile] = [:]
+            indexed.reserveCapacity(entries.count)
+            for entry in entries {
+                guard !entry.path.isEmpty else {
+                    return .rejected("manifest contains an empty path")
+                }
+                guard indexed.updateValue(entry, forKey: entry.path) == nil else {
+                    return .rejected("manifest contains a duplicate path")
+                }
+            }
+            return .complete(indexed)
         } catch {
-            logger.error("Honeyfile manifest decode failed: \(error.localizedDescription)")
+            return .rejected("decode failed: \(error.localizedDescription)")
         }
     }
 

@@ -12,6 +12,46 @@ import Foundation
 import Network
 @testable import MacCrabCore
 
+private actor OTLPBodyTaskBlocker {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func runIgnoringCancellation() async {
+        started = true
+        let waitingForStart = startWaiters
+        startWaiters.removeAll()
+        for waiter in waitingForStart { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func runUntilCancelled() async {
+        started = true
+        let waitingForStart = startWaiters
+        startWaiters.removeAll()
+        for waiter in waitingForStart { waiter.resume() }
+        while !Task.isCancelled { await Task.yield() }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+}
+
 // MARK: - Hand-rolled protobuf encoding helpers
 
 /// Tiny protobuf wire-format encoder. We only use it in tests so we can
@@ -273,10 +313,19 @@ struct OTLPReceiverLoopbackTests {
             // so we treat it as inconclusive rather than a fail.
             return
         }
-        defer { Task { await receiver.stop() } }
         await #expect(throws: OTLPReceiverError.alreadyRunning) {
             try await receiver.start()
         }
+        let shutdown = await receiver.stop(joinTimeoutSeconds: 1.0)
+        #expect(shutdown.cleanlyStopped)
+        #expect(shutdown.listenersAccepted == 1)
+        #expect(shutdown.listenersCompleted == 1)
+        #expect(shutdown.activeListeners == 0)
+        #expect(shutdown.readyListeners == 0)
+        #expect(shutdown.listenersConserved)
+        #expect(shutdown.connectionsConserved)
+        #expect(shutdown.bodyTasksConserved)
+        #expect(shutdown.callbackTasksConserved)
     }
 
     @Test("Initial metrics are all zero")
@@ -289,6 +338,199 @@ struct OTLPReceiverLoopbackTests {
         #expect(m.bodyDecodeErrors == 0)
         #expect(m.resourceSpansSeen == 0)
         #expect(m.bytesReceived == 0)
+    }
+}
+
+// MARK: - OTLPReceiver shutdown ownership
+
+@Suite("OTLPReceiver: shutdown ownership")
+struct OTLPReceiverShutdownOwnershipTests {
+    @Test("listener cancelled before start is terminal without a callback")
+    func neverStartedListenerIsConserved() throws {
+        let lifecycle = OTLPListenerLifecycle()
+        let listener = try NWListener(using: .tcp)
+        let generation = try #require(lifecycle.open())
+        #expect(lifecycle.register(listener, generation: generation))
+
+        lifecycle.sealAndCancel()
+        let snapshot = lifecycle.snapshot()
+        #expect(!snapshot.accepting)
+        #expect(snapshot.accepted == 1)
+        #expect(snapshot.completed == 1)
+        #expect(snapshot.active == 0)
+        #expect(snapshot.conservesAccepted)
+    }
+
+    @Test("listener cancellation is not complete until its terminal callback")
+    func listenerCancellationRequiresTerminalAcknowledgement() async throws {
+        let lifecycle = OTLPListenerLifecycle()
+        let listener = try NWListener(using: .tcp)
+        let generation = try #require(lifecycle.open())
+        #expect(lifecycle.register(listener, generation: generation))
+        #expect(lifecycle.start(
+            listener,
+            generation: generation,
+            queue: .global(qos: .utility)
+        ))
+        #expect(lifecycle.publishReady(
+            listener,
+            generation: generation,
+            onReady: nil
+        ))
+        var snapshot = lifecycle.snapshot()
+        #expect(snapshot.accepting)
+        #expect(snapshot.accepted == 1)
+        #expect(snapshot.completed == 0)
+        #expect(snapshot.active == 1)
+        #expect(snapshot.ready == 1)
+        #expect(snapshot.conservesAccepted)
+
+        lifecycle.sealAndCancel()
+        snapshot = lifecycle.snapshot()
+        #expect(!snapshot.accepting)
+        #expect(snapshot.active == 1,
+                "cancel is a request; terminal state still owns the socket")
+        #expect(!(await lifecycle.waitForDrain(deadline: 0.001)),
+                "bounded join must not relabel a cancel request as completion")
+
+        let completion = try #require(lifecycle.complete(listener))
+        #expect(completion.wasReady)
+        #expect(completion.cancellationWasRequested)
+        snapshot = lifecycle.snapshot()
+        #expect(snapshot.completed == 1)
+        #expect(snapshot.active == 0)
+        #expect(snapshot.ready == 0)
+        #expect(snapshot.conservesAccepted)
+    }
+
+    @Test("body task lifecycle conserves a clean cancellation join")
+    func cleanCancellationJoin() async {
+        let lifecycle = OTLPBodyTaskLifecycle(maximumInFlight: 4)
+        #expect(lifecycle.open())
+        let blocker = OTLPBodyTaskBlocker()
+        #expect(lifecycle.submit {
+            await blocker.runUntilCancelled()
+        })
+        await blocker.waitUntilStarted()
+
+        #expect(await lifecycle.shutdown(deadline: 1.0))
+        let snapshot = lifecycle.snapshot()
+        #expect(!snapshot.accepting)
+        #expect(snapshot.accepted == 1)
+        #expect(snapshot.completed + snapshot.cancelled == 1)
+        #expect(snapshot.cancellationRequests == 1)
+        #expect(snapshot.inFlight == 0)
+        #expect(snapshot.lastShutdownClean == true)
+        #expect(snapshot.conservesAccepted)
+    }
+
+    @Test("bounded join reports an uncooperative body task as explicitly unclean")
+    func uncleanDeadlineIsTruthful() async {
+        let lifecycle = OTLPBodyTaskLifecycle(maximumInFlight: 1)
+        #expect(lifecycle.open())
+        let blocker = OTLPBodyTaskBlocker()
+        #expect(lifecycle.submit {
+            // Models a task already awaiting a cancellation-unaware SQLite
+            // operation when receiver shutdown begins.
+            await blocker.runIgnoringCancellation()
+        })
+        await blocker.waitUntilStarted()
+
+        #expect(!(await lifecycle.shutdown(deadline: 0.01)))
+        #expect(!lifecycle.submit {})
+        var snapshot = lifecycle.snapshot()
+        #expect(!snapshot.accepting)
+        #expect(snapshot.accepted == 1)
+        #expect(snapshot.inFlight == 1)
+        #expect(snapshot.rejected == 1)
+        #expect(snapshot.cancellationRequests == 1)
+        #expect(snapshot.lastShutdownClean == false)
+        #expect(snapshot.shutdownTimeouts == 1)
+        #expect(snapshot.conservesAccepted)
+
+        await blocker.release()
+        // A yield count is not a scheduling bound: the body task runs at
+        // utility priority and may remain queued while the full suite is
+        // saturating that executor. Retry the owned join with a coarse,
+        // test-only hang budget instead.
+        #expect(await lifecycle.shutdown(deadline: 60.0))
+        snapshot = lifecycle.snapshot()
+        #expect(snapshot.completed + snapshot.cancelled == 1)
+        #expect(snapshot.inFlight == 0)
+        #expect(snapshot.conservesAccepted)
+
+        // The retry may become clean, but the original timeout history remains
+        // visible instead of being erased by the eventual completion.
+        #expect(snapshot.lastShutdownClean == true)
+        #expect(snapshot.shutdownTimeouts == 1)
+    }
+
+    @Test("receiver stop returns a conserved post-join lifecycle snapshot")
+    func emptyReceiverStopsCleanly() async {
+        let receiver = OTLPReceiver(port: 4318)
+        let snapshot = await receiver.stop(joinTimeoutSeconds: 0.1)
+        #expect(snapshot.cleanlyStopped)
+        #expect(snapshot.listenersConserved)
+        #expect(snapshot.connectionsConserved)
+        #expect(snapshot.bodyTasksConserved)
+        #expect(snapshot.callbackTasksConserved)
+        #expect(snapshot.activeListeners == 0)
+        #expect(snapshot.activeConnections == 0)
+        #expect(snapshot.bodyTasksInFlight == 0)
+        #expect(snapshot.callbackTasksInFlight == 0)
+        #expect(snapshot.maximumBodyTasks == OTLPReceiver.maxConcurrentConnections)
+        #expect(snapshot.maximumCallbackTasks == OTLPReceiver.maxCallbackTasks)
+    }
+
+    @Test("shipping callback and stop paths preserve synchronous ownership order")
+    func sourceWiringGuard() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabCore/Network/OTLPReceiver.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try #require(source.range(of: "listener.newConnectionHandler"))
+        let stop = try #require(source.range(of: "public func stop(", range: start.upperBound..<source.endIndex))
+        let connectionBody = String(source[start.lowerBound..<stop.lowerBound])
+        #expect(connectionBody.contains("connectionRegistry.admit("))
+        #expect(connectionBody.contains("generation: connectionGeneration"))
+        #expect(connectionBody.contains("case .accepted(let entry):"))
+        #expect(connectionBody.contains("self.handleNewConnection(entry)"))
+        let admission = try #require(connectionBody.range(of: "connectionRegistry.admit("))
+        let synchronousOwner = try #require(connectionBody.range(of: "self.handleNewConnection(entry)"))
+        #expect(admission.lowerBound < synchronousOwner.lowerBound,
+                "connection ownership must publish before network work starts")
+
+        let stopEnd = try #require(source.range(
+            of: "// MARK: - Connection handling",
+            range: stop.upperBound..<source.endIndex
+        ))
+        let stopBody = String(source[stop.lowerBound..<stopEnd.lowerBound])
+        let listenerSeal = try #require(stopBody.range(of: "listeners.sealAndCancel()"))
+        let connectionSeal = try #require(stopBody.range(of: "connections.sealAndCancel()"))
+        let bodySeal = try #require(stopBody.range(of: "bodyTasks.sealAndCancel()"))
+        let callbackSeal = try #require(stopBody.range(of: "callbackTasks.sealAndCancel()"))
+        let listenerJoin = try #require(stopBody.range(of: "listeners.waitForDrain"))
+        let connectionJoin = try #require(stopBody.range(of: "connections.waitForDrain"))
+        let callbackJoin = try #require(stopBody.range(of: "callbackTasks.shutdown(deadline:"))
+        let join = try #require(stopBody.range(of: "bodyTasks.shutdown(deadline:"))
+        #expect(connectionSeal.lowerBound < join.lowerBound)
+        #expect(bodySeal.lowerBound < join.lowerBound)
+        #expect(callbackSeal.lowerBound < callbackJoin.lowerBound)
+        #expect(listenerSeal.lowerBound < listenerJoin.lowerBound)
+        #expect(connectionSeal.lowerBound < connectionJoin.lowerBound)
+        #expect(stopBody.contains("return snapshot"))
+        #expect(source.contains("let accepted = bodyTasks.submit"),
+                "every live decode/persist body must enter the owned task ledger")
+        #expect(source.contains("receiver.submitBodyProcessing("),
+                "fully-buffered bodies must synchronously enter admission")
+        #expect(!source.contains("Task {"),
+                "Network.framework callbacks must not launch unowned actor tasks")
     }
 }
 
@@ -337,6 +579,17 @@ struct OTLPReceiverStartupGateTests {
         #expect(outcome == .cancelled)
     }
 
+    @Test("caller cancellation resolves the startup gate immediately")
+    func callerCancellationSurfaces() async {
+        let gate = OTLPListenerStartupGate()
+        let waiting = Task {
+            await gate.wait(timeoutSeconds: 30) {}
+        }
+        await Task.yield()
+        gate.cancel()
+        #expect(await waiting.value == .cancelled)
+    }
+
     @Test("startup wait is bounded when Network.framework never terminates")
     func startupTimeout() async {
         let gate = OTLPListenerStartupGate()
@@ -370,13 +623,16 @@ struct OTLPReceiverStartupGateTests {
         )
 
         guard let start = source.range(of: "public func start() async throws"),
-              let stop = source.range(of: "public func stop()", range: start.upperBound..<source.endIndex)
+              let stop = source.range(of: "public func stop(", range: start.upperBound..<source.endIndex)
         else {
             Issue.record("could not isolate the production OTLP start method")
             return
         }
         let body = String(source[start.lowerBound..<stop.lowerBound])
-        #expect(body.contains("let outcome = await startupGate.wait"))
+        #expect(body.contains("await startupGate.wait("))
+        #expect(body.contains("withTaskCancellationHandler"))
+        #expect(body.contains("startupGate.cancel()"))
+        #expect(body.contains("listeners.publishReady("))
         #expect(body.contains("case .ready:"))
         #expect(body.contains("self.listener = listener"))
         let readyIndex = body.firstRange(of: "case .ready:")?.lowerBound

@@ -22,6 +22,7 @@ public actor EventTapMonitor {
     public nonisolated let events: AsyncStream<EventTapInfo>
     private var continuation: AsyncStream<EventTapInfo>.Continuation?
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     private var knownTaps: Set<UInt32> = []  // Tap IDs we've already alerted on
     private let pollInterval: TimeInterval
 
@@ -66,7 +67,8 @@ public actor EventTapMonitor {
     // MARK: - Lifecycle
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("Event tap monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
@@ -79,9 +81,25 @@ public actor EventTapMonitor {
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { pollTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
         pollTask?.cancel()
-        pollTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     // MARK: - System Process Allowlist

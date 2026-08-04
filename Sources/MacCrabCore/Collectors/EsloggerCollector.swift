@@ -41,6 +41,8 @@ public actor EsloggerCollector {
     private var process: Process?
     private var readTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private var lifecycleGeneration: UInt64 = 0
 
     /// Event types to subscribe to — core 14 from ESCollector plus valuable extras.
     private static let eventTypes = [
@@ -77,9 +79,10 @@ public actor EsloggerCollector {
     /// including intentionally muted ones.
     private static let globalSequenceKeyBytes = Array("global_seq_num".utf8)
 
-    /// Track sequence numbers for gap detection.
-    private var lastGlobalSeq: UInt64 = 0
-    private var droppedEvents: UInt64 = 0
+    /// Callback-boundary gap accounting must not spawn an unowned actor-hop
+    /// task for every gap. The reader updates this lock-backed monotonic value
+    /// directly and the actor exposes snapshots below.
+    private nonisolated let droppedEvents = EsloggerDropCounter()
 
     /// Watchdog state.
     private var backoffSeconds: Double = 1.0
@@ -140,26 +143,60 @@ public actor EsloggerCollector {
     // MARK: - Start / Stop
 
     public func start() {
-        guard process == nil else { return }
-        launchEslogger()
+        guard lifecyclePhase == .initialized else {
+            logger.warning("eslogger start rejected after its one-shot lifecycle advanced")
+            return
+        }
+        lifecyclePhase = .running
+        lifecycleGeneration &+= 1
+        launchEslogger(generation: lifecycleGeneration)
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    /// Cancels and joins both the blocking stdout reader and any pending
+    /// watchdog restart. A timeout is returned honestly instead of erasing the
+    /// handles and claiming a clean stop while work can still run.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let tasks = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            tasks,
+            deadline: deadline
+        )
+        if joined {
+            readTask = nil
+            watchdogTask = nil
+            lifecyclePhase = .stopped
+            logger.info("eslogger collector stopped cleanly")
+        } else {
+            logger.error("eslogger stop deadline expired with owned work still active")
+        }
+        return joined
+    }
+
+    private func beginStop() -> [Task<Void, Never>] {
+        if lifecyclePhase == .stopped { return [] }
+        lifecyclePhase = .stopping
+        let tasks = [readTask, watchdogTask].compactMap { $0 }
         watchdogTask?.cancel()
-        watchdogTask = nil
         readTask?.cancel()
-        readTask = nil
         if let proc = process, proc.isRunning {
             proc.terminate()
         }
         process = nil
         continuation?.finish()
         continuation = nil
+        return tasks
     }
 
     // MARK: - Launch eslogger subprocess
 
-    private func launchEslogger() {
+    private func launchEslogger(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/eslogger")
         proc.arguments = Self.eventTypes + ["--format", "json"]
@@ -179,28 +216,29 @@ public actor EsloggerCollector {
             let continuation = self.continuation
             let selfPid = Int32(self.selfPid)
             let deliveryTelemetry = self.deliveryTelemetry
+            let droppedEvents = self.droppedEvents
+            let logger = self.logger
 
             readTask = Task.detached { [weak self] in
-                // Bind the weak capture to a `let` once. The nested `Task`s below
-                // run concurrently; capturing the `[weak self]` var directly trips
-                // Swift-6 strict concurrency ("reference to captured var 'self' in
-                // concurrently-executing code"). A `let` actor reference is Sendable
-                // and capture-safe.
-                let weakSelf = self
                 Self.readLoop(
                     fileHandle: fileHandle,
                     continuation: continuation,
                     selfPid: selfPid,
                     deliveryTelemetry: deliveryTelemetry,
                     onGap: { dropped in
-                        Task { await weakSelf?.recordDropped(dropped) }
+                        let total = droppedEvents.add(dropped)
+                        logger.warning("eslogger sequence gap: \(dropped) events likely dropped (total: \(total))")
                     }
                 )
-                // eslogger exited — trigger watchdog
-                Task { await weakSelf?.handleEsloggerExit() }
+                // This actor hop is part of the retained read-task handle. A
+                // stop that wins the race changes the phase first, so the exit
+                // path cannot resurrect the subprocess afterward.
+                await self?.handleEsloggerExit(generation: generation)
             }
         } catch {
             logger.error("Failed to launch eslogger: \(error.localizedDescription)")
+            process = nil
+            scheduleRestart(generation: generation)
         }
     }
 
@@ -449,8 +487,10 @@ public actor EsloggerCollector {
 
     // MARK: - Watchdog Restart
 
-    private func handleEsloggerExit() {
-        guard continuation != nil else { return }  // Intentional stop
+    private func handleEsloggerExit(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
+        process = nil
 
         // Reset backoff if it ran for > 60 seconds
         if let lastStart = lastSuccessfulStart,
@@ -458,16 +498,33 @@ public actor EsloggerCollector {
             backoffSeconds = 1.0
         }
 
-        logger.warning("eslogger exited — restarting in \(self.backoffSeconds)s")
+        scheduleRestart(generation: generation)
+    }
 
-        watchdogTask = Task {
-            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
+    private func scheduleRestart(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
+        let delay = backoffSeconds
+        logger.warning("eslogger exited — restarting in \(delay)s")
 
-            // Exponential backoff capped at 30s
-            self.backoffSeconds = min(self.backoffSeconds * 2, 30.0)
-            self.launchEslogger()
+        watchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            await self?.restartAfterBackoff(generation: generation)
         }
+    }
+
+    private func restartAfterBackoff(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration,
+              !Task.isCancelled else { return }
+        backoffSeconds = min(backoffSeconds * 2, 30.0)
+        launchEslogger(generation: generation)
     }
 
     /// Pure sequence-gap math, lifted out of the FileHandle read loop so it is
@@ -494,22 +551,37 @@ public actor EsloggerCollector {
         )
     }
 
-    private func recordDropped(_ count: UInt64) {
-        let (updated, overflow) = droppedEvents.addingReportingOverflow(count)
-        droppedEvents = overflow ? UInt64.max : updated
-        logger.warning("eslogger sequence gap: \(count) events likely dropped (total: \(self.droppedEvents))")
-    }
-
     /// Number of events dropped due to sequence gaps.
     public func getDroppedEventCount() -> UInt64 {
-        droppedEvents
+        droppedEvents.get()
     }
 
     // MARK: - Deinit
 
     deinit {
+        readTask?.cancel()
+        watchdogTask?.cancel()
         if let proc = process, proc.isRunning {
             proc.terminate()
         }
+    }
+}
+
+private final class EsloggerDropCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func add(_ count: UInt64) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let (updated, overflow) = value.addingReportingOverflow(count)
+        value = overflow ? UInt64.max : updated
+        return value
+    }
+
+    func get() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

@@ -85,7 +85,7 @@ public struct AlertBatchInsertFailure: Error, LocalizedError,
 ///
 /// ## Schema
 ///
-/// One table, `alerts`:
+/// Two lifetime-coupled tables, `alerts` and slim `alert_evidence`:
 ///
 /// | Column                    | Type    | Notes                                              |
 /// |---------------------------|---------|----------------------------------------------------|
@@ -113,6 +113,11 @@ public struct AlertBatchInsertFailure: Error, LocalizedError,
 /// | `parent_executable`       | TEXT?   | First ancestor executable path (v5)                |
 /// | `process_sha256`          | TEXT?   | SHA-256 of triggering process executable (v5)      |
 /// | `host_name`               | TEXT?   | Host where alert was generated (v5)                |
+///
+/// `alert_evidence` stores only `(alert_id, event_id, timestamp, raw_json)`.
+/// Its composite primary key supports lookup/idempotency and its foreign key
+/// cascades on alert deletion. It deliberately does not repeat EventStore's
+/// projected search columns or secondary indexes.
 ///
 /// Indexes cover the common query patterns: time-range, rule, severity,
 /// the composite triage path `(timestamp, severity, suppressed)`, plus
@@ -144,6 +149,41 @@ public actor AlertStore {
     private var sqlitePageSizeBytes: Int64
     private var maintenanceRowMutationHighWaterBytes: Int64? = nil
     private var maintenanceHighWaterScannedExistingRows = false
+    private var evidenceMaintenanceRowMutationHighWaterBytes: Int64? = nil
+    private var evidenceMaintenanceHighWaterScannedExistingRows = false
+
+    /// Exact logical ownership plus a conservative physical-page upper bound.
+    /// A full COUNT/SUM + DBSTAT pass seeds (or explicitly refreshes) this cache;
+    /// ordinary capture then updates it in O(rows inserted/deleted), avoiding a
+    /// whole-table scan on every alert. Until the next DBSTAT refresh, allocated
+    /// growth is charged by the same conservative mutation estimate admitted for
+    /// SQLite, so stale physical accounting can only overstate usage.
+    private struct EvidenceAccountingCache {
+        var rowCount: Int
+        var logicalBytes: Int64
+        var observedAllocatedBytes: Int64
+        var conservativeAllocatedBytes: Int64
+        var allocatedBytesExact: Bool
+        var mutationGeneration: UInt64
+    }
+    private struct EvidenceDeletionImpact {
+        let rows: Int
+        let logicalBytes: Int64
+        let maximumLogicalRowBytes: Int64
+
+        static let zero = EvidenceDeletionImpact(
+            rows: 0,
+            logicalBytes: 0,
+            maximumLogicalRowBytes: 0
+        )
+    }
+    private struct CascadeAlertDeletionItem {
+        let id: String
+        let evidence: EvidenceDeletionImpact
+        let rowMutationBytes: Int64
+    }
+    private var evidenceAccountingCache: EvidenceAccountingCache?
+    private var evidenceAccountingFullRefreshes: UInt64 = 0
 
     // MARK: Prepared statement cache
 
@@ -274,6 +314,29 @@ public actor AlertStore {
                 "CREATE INDEX IF NOT EXISTS idx_alerts_ai_session_ts ON alerts(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL",
             ]
         ),
+        // v8: alert context has the same owner and lifetime as its alert, so it
+        // belongs in alerts.db. The legacy events.db.alert_evidence table had 25
+        // projected columns plus raw_json and two extra indexes; rc.5 measured
+        // 98 MB of that duplicated shape inside the event-store budget. The new
+        // WITHOUT ROWID table stores only identity, ordering, and the lossless
+        // payload. Its composite primary key is simultaneously the alert lookup,
+        // idempotency, and cascade index — no secondary indexes are needed.
+        Migration(
+            version: 8,
+            name: "add_alert_owned_evidence",
+            sql: [
+                """
+                CREATE TABLE IF NOT EXISTS alert_evidence (
+                    alert_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    raw_json TEXT NOT NULL,
+                    PRIMARY KEY (alert_id, event_id),
+                    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+                ) WITHOUT ROWID
+                """,
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -289,11 +352,34 @@ public actor AlertStore {
         }
     }
 
+    /// The alerts and evidence knobs are separate ownership budgets, but both
+    /// tables share one SQLite family. The hard family ceiling therefore is the
+    /// exact saturating sum; DB + WAL + SHM are admitted together by
+    /// SQLitePersistentStoreAdmission.
+    public nonisolated static func combinedFamilyCapBytes(
+        alertsMaxSizeMiB: Int,
+        evidenceMaxSizeMiB: Int
+    ) -> Int64 {
+        SQLitePersistentStoreAdmission.saturatingAdd(
+            SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: alertsMaxSizeMiB
+            ),
+            SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: evidenceMaxSizeMiB
+            )
+        )
+    }
+
     private static func defaultStoragePolicy(
         for databasePath: String
     ) -> SQLitePersistentStorePolicy {
         SQLitePersistentStorePolicy(
-            maxFootprintBytes: 100 * SQLitePersistentStorePolicy.bytesPerMiB,
+            // Defaults mirror DaemonConfig's 100 MiB alerts + 100 MiB evidence
+            // ownership budgets. Daemon startup supplies the configured sum.
+            maxFootprintBytes: combinedFamilyCapBytes(
+                alertsMaxSizeMiB: 100,
+                evidenceMaxSizeMiB: 100
+            ),
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             storageVolumePath: (databasePath as NSString).deletingLastPathComponent
         )
@@ -485,6 +571,16 @@ public actor AlertStore {
                 ai_tool_session_id TEXT
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS alert_evidence (
+                alert_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                raw_json TEXT NOT NULL,
+                PRIMARY KEY (alert_id, event_id),
+                FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            ) WITHOUT ROWID
+            """,
             "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)",
@@ -540,7 +636,7 @@ public actor AlertStore {
 
         // Prepare insert statement
         let insertSQL = """
-            INSERT OR REPLACE INTO alerts (
+            INSERT INTO alerts (
                 id, timestamp, rule_id, rule_title, severity,
                 event_id, process_path, process_name, description,
                 mitre_tactics, mitre_techniques, suppressed,
@@ -551,6 +647,32 @@ public actor AlertStore {
                 ai_tool, parent_executable, process_sha256, host_name,
                 triggering_events_json, ai_tool_session_id
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+            ON CONFLICT(id) DO UPDATE SET
+                timestamp = excluded.timestamp,
+                rule_id = excluded.rule_id,
+                rule_title = excluded.rule_title,
+                severity = excluded.severity,
+                event_id = excluded.event_id,
+                process_path = excluded.process_path,
+                process_name = excluded.process_name,
+                description = excluded.description,
+                mitre_tactics = excluded.mitre_tactics,
+                mitre_techniques = excluded.mitre_techniques,
+                suppressed = excluded.suppressed,
+                llm_investigation_json = excluded.llm_investigation_json,
+                d3fend_techniques = excluded.d3fend_techniques,
+                remediation_hint = excluded.remediation_hint,
+                analyst_metadata_json = excluded.analyst_metadata_json,
+                campaign_id = excluded.campaign_id,
+                user_id = excluded.user_id,
+                user_name = excluded.user_name,
+                working_directory = excluded.working_directory,
+                ai_tool = excluded.ai_tool,
+                parent_executable = excluded.parent_executable,
+                process_sha256 = excluded.process_sha256,
+                host_name = excluded.host_name,
+                triggering_events_json = excluded.triggering_events_json,
+                ai_tool_session_id = excluded.ai_tool_session_id
             """
         var insertStmt: OpaquePointer?
         let prepareRC = !writerInitializationAllowed
@@ -947,9 +1069,11 @@ public actor AlertStore {
             )
     }
 
-    /// `INSERT OR REPLACE` deletes the prior row and all of its index entries
-    /// before inserting the new representation. Read the authoritative stored
-    /// values so an old large row cannot hide outside the incoming estimate.
+    /// The idempotent UPSERT rewrites the prior row and its changed index
+    /// entries. Read the authoritative stored values so an old large row
+    /// cannot hide outside the incoming estimate. UPSERT (not REPLACE) is
+    /// required now that alert_evidence has ON DELETE CASCADE: REPLACE's
+    /// implicit delete would erase a valid snapshot on a harmless retry.
     private func existingAlertMutationBytes(id: String) throws -> Int64 {
         guard let db else { return 0 }
         let sql = """
@@ -1012,8 +1136,9 @@ public actor AlertStore {
         )
     }
 
-    /// Persists alerts in reserve-bounded transactions. Alert ids use REPLACE,
-    /// so retrying the caller array after a later chunk fails is idempotent.
+    /// Persists alerts in reserve-bounded transactions. Alert ids use an UPSERT,
+    /// so retrying the caller array after a later chunk fails is idempotent
+    /// without triggering the evidence foreign-key cascade.
     /// A failure after at least one commit is wrapped in
     /// ``AlertBatchInsertFailure`` with the exact durable prefix. A failure before
     /// any commit preserves the original error type for existing callers.
@@ -1591,26 +1716,562 @@ public actor AlertStore {
     /// trail of the deletion lives in `dashboard_audit.log`.
     @discardableResult
     public func delete(alertId id: String) throws -> Bool {
-        try admitStorageMaintenanceWrite(
-            estimatedTransactionBytes:
-                SQLitePersistentStoreAdmission.conservativeRowMutationBytes
-        )
-        let sql = "DELETE FROM alerts WHERE id = ?1"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bindText(stmt, index: 1, value: id)
-        let rc = sqlite3_step(stmt)
-        guard rc == SQLITE_DONE else {
-            try throwLatchedStoragePressureIfPresent(resultCode: rc)
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw AlertStoreError.stepFailed(msg)
-        }
-        return Int(sqlite3_changes(db)) > 0
+        return try deleteAlertsCascadeAware(ids: [id]) > 0
     }
 
-    /// List `(id, ruleId)` pairs for alerts currently marked suppressed.
-    /// Used by the feedback-loop sweeper in DaemonTimers to plumb UI
-    /// dismissals back into the deduplicator's FP-rate tracking.
+    // MARK: - Alert-owned evidence (schema v8)
+
+    /// Capture a bounded evidence snapshot after its parent alert has committed.
+    /// The alert insert is intentionally a separate transaction: a best-effort
+    /// context failure must never roll back the detection itself.
+    ///
+    /// Candidate payloads are validated as real Events with matching ids before
+    /// storage. The table-level `(alert_id, event_id)` key makes retries
+    /// idempotent; the fixed per-alert ceiling applies across existing + new
+    /// rows, not merely to this call's input array.
+    @discardableResult
+    public func captureEvidence(
+        alertId: String,
+        candidates: [AlertEvidenceCandidate],
+        maxBytes: Int64
+    ) async throws -> AlertEvidenceCaptureResult {
+        guard maxBytes > 0, !candidates.isEmpty else {
+            return AlertEvidenceCaptureResult(
+                insertedRows: 0,
+                duplicateRows: 0,
+                prunedRows: 0
+            )
+        }
+        guard try tableExists("alert_evidence") else {
+            throw AlertStoreError.stepFailed(
+                "alert-owned evidence schema is unavailable"
+            )
+        }
+        guard let parentTimestamp = try alertTimestamp(id: alertId) else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence parent does not exist"
+            )
+        }
+        // Seed exact accounting once per store-open. Subsequent captures update
+        // logical ownership and a conservative allocated-page upper bound in
+        // O(inserted rows); they do not rescan the complete evidence table.
+        _ = try evidenceBudgetSnapshot(maxBytes: maxBytes)
+
+        let decoder = JSONDecoder()
+        var seenInput: Set<String> = []
+        var valid: [AlertEvidenceCandidate] = []
+        for candidate in candidates {
+            let byteCount = candidate.rawJSON.lengthOfBytes(using: .utf8)
+            guard byteCount > 0,
+                  byteCount <= AlertEvidencePolicy.maximumRawPayloadBytes,
+                  seenInput.insert(candidate.eventId).inserted,
+                  let data = candidate.rawJSON.data(using: .utf8),
+                  let event = try? decoder.decode(Event.self, from: data),
+                  event.timestamp <= parentTimestamp,
+                  event.timestamp >= parentTimestamp.addingTimeInterval(
+                    -AlertEvidencePolicy.lookbackSeconds
+                  ),
+                  event.id.uuidString.caseInsensitiveCompare(candidate.eventId)
+                    == .orderedSame else {
+                continue
+            }
+            valid.append(AlertEvidenceCandidate(
+                eventId: event.id.uuidString,
+                timestamp: event.timestamp,
+                rawJSON: candidate.rawJSON
+            ))
+        }
+        valid.sort {
+            if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+            return $0.eventId < $1.eventId
+        }
+        guard !valid.isEmpty else {
+            return AlertEvidenceCaptureResult(
+                insertedRows: 0,
+                duplicateRows: 0,
+                prunedRows: 0
+            )
+        }
+
+        let existingIDs = try evidenceEventIDs(alertId: alertId)
+        let duplicates = valid.filter { existingIDs.contains($0.eventId) }.count
+        let remaining = max(
+            0,
+            AlertEvidencePolicy.maximumEventsPerAlert - existingIDs.count
+        )
+        let pending = Array(
+            valid.lazy
+                .filter { !existingIDs.contains($0.eventId) }
+                .prefix(remaining)
+        )
+        guard !pending.isEmpty else {
+            let pruned = try await pruneAlertEvidenceToBudget(maxBytes: maxBytes)
+            return AlertEvidenceCaptureResult(
+                insertedRows: 0,
+                duplicateRows: duplicates,
+                prunedRows: pruned
+            )
+        }
+
+        struct PlannedRow {
+            let candidate: AlertEvidenceCandidate
+            let mutationBytes: Int64
+        }
+        let planned = pending.map { candidate in
+            PlannedRow(
+                candidate: candidate,
+                mutationBytes: evidenceRowMutationEstimate(candidate)
+            )
+        }
+        let reserve = storageTransactionReserveBytes
+        var chunks: [[PlannedRow]] = []
+        var current: [PlannedRow] = []
+        var currentBytes: Int64 = 0
+        for row in planned {
+            let nextBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                currentBytes, row.mutationBytes
+            )
+            if !current.isEmpty,
+               evidenceTransactionEstimate(rowMutationBytes: nextBytes) > reserve {
+                chunks.append(current)
+                current = []
+                currentBytes = 0
+            }
+            let singleEstimate = evidenceTransactionEstimate(
+                rowMutationBytes: row.mutationBytes
+            )
+            guard singleEstimate <= reserve else {
+                throw SQLitePersistentStoreAdmissionError
+                    .transactionEstimateExceedsReserve(
+                        estimatedBytes: singleEstimate,
+                        reserveBytes: reserve
+                    )
+            }
+            current.append(row)
+            currentBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                currentBytes, row.mutationBytes
+            )
+        }
+        if !current.isEmpty { chunks.append(current) }
+
+        let insertSQL = """
+            INSERT OR IGNORE INTO alert_evidence (
+                alert_id, event_id, timestamp, raw_json
+            ) VALUES (?1, ?2, ?3, ?4)
+            """
+        var inserted = 0
+        for chunk in chunks {
+            let rowBytes = chunk.reduce(Int64(0)) {
+                SQLitePersistentStoreAdmission.saturatingAdd(
+                    $0, $1.mutationBytes
+                )
+            }
+            var transactionOpen = false
+            var insertedLogicalBytes: Int64 = 0
+            var insertedAllocatedUpperBound: Int64 = 0
+            var insertedMaximumRowMutationBytes: Int64 = 0
+            var insertedInChunk = 0
+            do {
+                try execute(
+                    "BEGIN TRANSACTION",
+                    estimatedTransactionBytes: evidenceTransactionEstimate(
+                        rowMutationBytes: rowBytes
+                    )
+                )
+                transactionOpen = true
+                for row in chunk {
+                    let statement = try prepare(insertSQL)
+                    bindText(statement, index: 1, value: alertId)
+                    bindText(statement, index: 2, value: row.candidate.eventId)
+                    sqlite3_bind_double(
+                        statement, 3,
+                        row.candidate.timestamp.timeIntervalSince1970
+                    )
+                    bindText(
+                        statement, index: 4,
+                        value: row.candidate.rawJSON
+                    )
+                    let rc = sqlite3_step(statement)
+                    sqlite3_finalize(statement)
+                    guard rc == SQLITE_DONE else {
+                        try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                        let message = db.map { String(cString: sqlite3_errmsg($0)) }
+                            ?? "unknown error"
+                        throw AlertStoreError.stepFailed(
+                            "alert evidence insert failed: \(message)"
+                        )
+                    }
+                    if sqlite3_changes(db) > 0 {
+                        insertedInChunk += 1
+                        insertedLogicalBytes = SQLitePersistentStoreAdmission
+                            .saturatingAdd(
+                                insertedLogicalBytes,
+                                evidenceLogicalBytes(
+                                    alertId: alertId,
+                                    candidate: row.candidate
+                                )
+                            )
+                        insertedAllocatedUpperBound =
+                            SQLitePersistentStoreAdmission.saturatingAdd(
+                                insertedAllocatedUpperBound,
+                                row.mutationBytes
+                            )
+                        insertedMaximumRowMutationBytes = max(
+                            insertedMaximumRowMutationBytes,
+                            row.mutationBytes
+                        )
+                    }
+                }
+                try execute("COMMIT")
+                transactionOpen = false
+                inserted += insertedInChunk
+                recordEvidenceInsertion(
+                    rows: insertedInChunk,
+                    logicalBytes: insertedLogicalBytes,
+                    allocatedUpperBoundBytes: insertedAllocatedUpperBound,
+                    maximumRowMutationBytes:
+                        insertedMaximumRowMutationBytes
+                )
+            } catch {
+                if transactionOpen { try? execute("ROLLBACK") }
+                throw error
+            }
+        }
+
+        // Newest context displaces oldest context when the evidence ownership
+        // budget is full. The combined alerts.db family ceiling was already
+        // enforced before every insert transaction; this sub-cap decides which
+        // of those admitted pages belong to evidence rather than alert rows.
+        let pruned = try await pruneAlertEvidenceToBudget(maxBytes: maxBytes)
+        return AlertEvidenceCaptureResult(
+            insertedRows: inserted,
+            duplicateRows: duplicates,
+            prunedRows: pruned
+        )
+    }
+
+    /// Read new schema-v8 evidence in chronological order. A read-only handle
+    /// on a pre-v8 database returns an empty array so callers can fall back to
+    /// the preserved legacy events.db table.
+    public func evidenceFor(alertId: String) throws -> [Event] {
+        guard try tableExists("alert_evidence") else { return [] }
+        let statement = try prepare(
+            "SELECT raw_json FROM alert_evidence WHERE alert_id = ?1 ORDER BY timestamp ASC, event_id ASC"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: alertId)
+        let decoder = JSONDecoder()
+        var events: [Event] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else {
+                throw AlertStoreError.stepFailed(
+                    "alert evidence read failed"
+                )
+            }
+            let byteCount = Int(sqlite3_column_bytes(statement, 0))
+            guard byteCount > 0,
+                  byteCount <= AlertEvidencePolicy.maximumRawPayloadBytes,
+                  let bytes = sqlite3_column_text(statement, 0),
+                  let data = String(cString: bytes).data(using: .utf8),
+                  let event = try? decoder.decode(Event.self, from: data) else {
+                continue
+            }
+            events.append(event)
+        }
+        return events
+    }
+
+    /// Current ownership accounting for the slim evidence table. The first call
+    /// after open performs one exact COUNT/SUM + DBSTAT pass. Later calls are O(1)
+    /// and return exact logical counters plus a conservative physical upper bound
+    /// until an explicit refresh or an over-budget slow path re-measures DBSTAT.
+    public func evidenceBudgetSnapshot(
+        maxBytes: Int64
+    ) throws -> AlertEvidenceBudgetSnapshot {
+        if evidenceAccountingCache == nil {
+            try refreshEvidenceAccounting()
+        }
+        return cachedEvidenceBudgetSnapshot(maxBytes: maxBytes)
+    }
+
+    /// Force a full ownership refresh. Periodic maintenance/diagnostics should
+    /// use this when they need exact DBSTAT page ownership; the capture hot path
+    /// deliberately uses `evidenceBudgetSnapshot` and remains scan-free.
+    public func refreshEvidenceBudgetSnapshot(
+        maxBytes: Int64
+    ) throws -> AlertEvidenceBudgetSnapshot {
+        try refreshEvidenceAccounting()
+        return cachedEvidenceBudgetSnapshot(maxBytes: maxBytes)
+    }
+
+    private func refreshEvidenceAccounting() throws {
+        guard try tableExists("alert_evidence") else {
+            evidenceAccountingCache = EvidenceAccountingCache(
+                rowCount: 0,
+                logicalBytes: 0,
+                observedAllocatedBytes: 0,
+                conservativeAllocatedBytes: 0,
+                allocatedBytesExact: true,
+                mutationGeneration:
+                    evidenceAccountingCache?.mutationGeneration ?? 0
+            )
+            if evidenceAccountingFullRefreshes < .max {
+                evidenceAccountingFullRefreshes += 1
+            }
+            return
+        }
+        let logicalStatement = try prepare(
+            """
+            SELECT COUNT(*), COALESCE(SUM(
+                LENGTH(CAST(alert_id AS BLOB))
+              + LENGTH(CAST(event_id AS BLOB))
+              + 8
+              + LENGTH(CAST(raw_json AS BLOB))
+            ), 0)
+            FROM alert_evidence
+            """
+        )
+        defer { sqlite3_finalize(logicalStatement) }
+        guard sqlite3_step(logicalStatement) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence logical-size query failed"
+            )
+        }
+        let rowCount = Int(sqlite3_column_int64(logicalStatement, 0))
+        let logicalBytes = sqlite3_column_int64(logicalStatement, 1)
+        let allocatedBytes = try allocatedBytes(
+            table: "alert_evidence",
+            includeIndexes: true
+        )
+        evidenceAccountingCache = EvidenceAccountingCache(
+            rowCount: rowCount,
+            logicalBytes: logicalBytes,
+            observedAllocatedBytes: allocatedBytes,
+            conservativeAllocatedBytes: allocatedBytes,
+            allocatedBytesExact: true,
+            mutationGeneration:
+                evidenceAccountingCache?.mutationGeneration ?? 0
+        )
+        if evidenceAccountingFullRefreshes < .max {
+            evidenceAccountingFullRefreshes += 1
+        }
+    }
+
+    private func cachedEvidenceBudgetSnapshot(
+        maxBytes: Int64
+    ) -> AlertEvidenceBudgetSnapshot {
+        let cache = evidenceAccountingCache ?? EvidenceAccountingCache(
+            rowCount: 0,
+            logicalBytes: 0,
+            observedAllocatedBytes: 0,
+            conservativeAllocatedBytes: 0,
+            allocatedBytesExact: true,
+            mutationGeneration: 0
+        )
+        return AlertEvidenceBudgetSnapshot(
+            rowCount: cache.rowCount,
+            logicalBytes: cache.logicalBytes,
+            allocatedBytes: cache.observedAllocatedBytes,
+            chargedBytes: max(
+                cache.logicalBytes,
+                cache.conservativeAllocatedBytes
+            ),
+            maxBytes: max(0, maxBytes),
+            allocatedBytesExact: cache.allocatedBytesExact,
+            mutationGeneration: cache.mutationGeneration,
+            fullRefreshesTotal: evidenceAccountingFullRefreshes
+        )
+    }
+
+    /// SQLite pages owned by alerts plus its explicit/automatic indexes, but
+    /// not alert_evidence. Used to enforce the alert-row budget independently
+    /// from the evidence-row budget inside their shared family.
+    public func alertsAllocatedBytes() throws -> Int64 {
+        try allocatedBytes(table: "alerts", includeIndexes: true)
+    }
+
+    /// Repair an adversarial/legacy over-per-alert shape. Normal capture never
+    /// creates it, but maintenance must not trust that invariant blindly.
+    @discardableResult
+    public func pruneAlertEvidencePerAlertCap(
+        _ perAlertMax: Int = AlertEvidencePolicy.maximumEventsPerAlert
+    ) async throws -> Int {
+        guard perAlertMax >= 0,
+              try tableExists("alert_evidence") else { return 0 }
+        _ = try evidenceBudgetSnapshot(maxBytes: .max)
+        let batch = evidenceMaintenanceBatchRowLimit()
+        var deletedTotal = 0
+        while true {
+            let selection = """
+                SELECT alert_id, event_id,
+                       \(Self.evidenceLogicalSQL) AS logical_bytes
+                FROM (
+                    SELECT alert_id, event_id, timestamp, raw_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY alert_id
+                               ORDER BY timestamp DESC, event_id DESC
+                           ) AS rank
+                    FROM alert_evidence
+                ) ranked
+                WHERE rank > ?1
+                LIMIT ?2
+                """
+            let impact = try evidenceDeletionImpact(
+                selecting: selection
+            ) { statement in
+                sqlite3_bind_int(
+                    statement, 1, Int32(clamping: perAlertMax)
+                )
+                sqlite3_bind_int(statement, 2, batch)
+            }
+            guard impact.rows > 0 else { break }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: evidenceMaintenanceEstimate(
+                    rowCount: impact.rows
+                )
+            )
+            let statement = try prepare(
+                """
+                DELETE FROM alert_evidence
+                WHERE (alert_id, event_id) IN (
+                    SELECT alert_id, event_id FROM (
+                        SELECT alert_id, event_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY alert_id
+                                   ORDER BY timestamp DESC, event_id DESC
+                               ) AS rank
+                        FROM alert_evidence
+                    ) ranked
+                    WHERE rank > ?1
+                    LIMIT ?2
+                )
+                """
+            )
+            sqlite3_bind_int(statement, 1, Int32(clamping: perAlertMax))
+            sqlite3_bind_int(statement, 2, batch)
+            let rc = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                throw AlertStoreError.stepFailed(
+                    "alert evidence per-alert prune failed"
+                )
+            }
+            let deleted = Int(sqlite3_changes(db))
+            deletedTotal += deleted
+            if deleted == impact.rows {
+                recordEvidenceDeletion(
+                    rows: deleted,
+                    logicalBytes: impact.logicalBytes
+                )
+            } else {
+                try refreshEvidenceAccounting()
+            }
+            if deleted == 0 { break }
+            await Task.yield()
+        }
+        return deletedTotal
+    }
+
+    /// Evict oldest context until both logical ownership and SQLite table-page
+    /// ownership fit the evidence sub-budget. Free pages may remain in the
+    /// alerts.db family until incremental vacuum; the independent combined
+    /// family admission continues to count those DB/WAL/SHM bytes exactly.
+    @discardableResult
+    public func pruneAlertEvidenceToBudget(
+        maxBytes: Int64
+    ) async throws -> Int {
+        guard maxBytes >= 0,
+              try tableExists("alert_evidence") else { return 0 }
+        _ = try evidenceBudgetSnapshot(maxBytes: maxBytes)
+        let batch = evidenceMaintenanceBatchRowLimit()
+        var deletedTotal = 0
+        for _ in 0..<4096 {
+            var snapshot = try evidenceBudgetSnapshot(maxBytes: maxBytes)
+            if snapshot.overBudget, !snapshot.allocatedBytesExact {
+                // Conservative insert charging may intentionally overstate page
+                // ownership. Pay for DBSTAT only on this cold over-budget edge,
+                // then prune solely when the exact boundary still fails.
+                try refreshEvidenceAllocatedAccounting()
+                snapshot = try evidenceBudgetSnapshot(maxBytes: maxBytes)
+            }
+            guard snapshot.overBudget, snapshot.rowCount > 0 else { break }
+            let selection = """
+                SELECT alert_id, event_id,
+                       \(Self.evidenceLogicalSQL) AS logical_bytes
+                FROM alert_evidence
+                ORDER BY timestamp ASC, alert_id ASC, event_id ASC
+                LIMIT ?1
+                """
+            let impact = try evidenceDeletionImpact(
+                selecting: selection
+            ) { statement in
+                sqlite3_bind_int(statement, 1, batch)
+            }
+            guard impact.rows > 0 else { break }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: evidenceMaintenanceEstimate(
+                    rowCount: impact.rows
+                )
+            )
+            let statement = try prepare(
+                """
+                DELETE FROM alert_evidence
+                WHERE (alert_id, event_id) IN (
+                    SELECT alert_id, event_id
+                    FROM alert_evidence
+                    ORDER BY timestamp ASC, alert_id ASC, event_id ASC
+                    LIMIT ?1
+                )
+                """
+            )
+            sqlite3_bind_int(statement, 1, batch)
+            let rc = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                throw AlertStoreError.stepFailed(
+                    "alert evidence size prune failed"
+                )
+            }
+            let deleted = Int(sqlite3_changes(db))
+            deletedTotal += deleted
+            if deleted == impact.rows {
+                recordEvidenceDeletion(
+                    rows: deleted,
+                    logicalBytes: impact.logicalBytes
+                )
+                // DELETE page release is not derivable from row bytes. This is
+                // a cap-maintenance slow path, so re-measure allocation once per
+                // reserve-bounded batch instead of once per alert capture.
+                try refreshEvidenceAllocatedAccounting()
+            } else {
+                try refreshEvidenceAccounting()
+            }
+            if deleted == 0 { break }
+            await Task.yield()
+        }
+        return deletedTotal
+    }
+
+    @discardableResult
+    public func enforceAlertEvidenceBudget(
+        maxBytes: Int64,
+        perAlertMax: Int = AlertEvidencePolicy.maximumEventsPerAlert
+    ) async throws -> (perAlert: Int, bySize: Int) {
+        // Scheduled maintenance is the deliberate exact-accounting boundary;
+        // ordinary capture remains incremental between these cold passes.
+        try refreshEvidenceAccounting()
+        let perAlert = try await pruneAlertEvidencePerAlertCap(perAlertMax)
+        let bySize = try await pruneAlertEvidenceToBudget(maxBytes: maxBytes)
+        return (perAlert, bySize)
+    }
+
+    /// List `(id, ruleId)` pairs for administrative suppression reporting.
+    /// Suppression is policy state, not a TP/FP verdict, and this query must not
+    /// feed runtime severity or response authority.
     public func listSuppressed(limit: Int = 500) throws -> [(id: String, ruleId: String)] {
         let sql = "SELECT id, rule_id FROM alerts WHERE suppressed = 1 ORDER BY timestamp DESC LIMIT ?1"
         let stmt = try prepare(sql)
@@ -1626,44 +2287,292 @@ public actor AlertStore {
         return out
     }
 
+    // MARK: - Cascade-aware alert deletion planning
+
+    private func alertIDsForRetention(
+        before timestamp: Double,
+        limit: Int
+    ) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let statement = try prepare(
+            "SELECT id FROM alerts WHERE timestamp < ?1 ORDER BY rowid LIMIT ?2"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, timestamp)
+        sqlite3_bind_int(statement, 2, Int32(clamping: limit))
+        return try textColumnRows(statement, context: "retention id selection")
+    }
+
+    private func oldestAlertIDs(limit: Int) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let statement = try prepare(
+            "SELECT id FROM alerts ORDER BY timestamp ASC, rowid ASC LIMIT ?1"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(clamping: limit))
+        return try textColumnRows(statement, context: "oldest alert selection")
+    }
+
+    private func textColumnRows(
+        _ statement: OpaquePointer,
+        context: String
+    ) throws -> [String] {
+        var values: [String] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return values }
+            guard step == SQLITE_ROW else {
+                throw AlertStoreError.stepFailed("\(context) failed")
+            }
+            if let value = columnTextOrNil(statement, index: 0) {
+                values.append(value)
+            }
+        }
+    }
+
+    private func evidenceImpact(alertId: String) throws -> EvidenceDeletionImpact {
+        try evidenceDeletionImpact(
+            selecting: """
+                SELECT alert_id, event_id,
+                       \(Self.evidenceLogicalSQL) AS logical_bytes
+                FROM alert_evidence
+                WHERE alert_id = ?1
+                """
+        ) { statement in
+            bindText(statement, index: 1, value: alertId)
+        }
+    }
+
+    private func evidenceCascadeMutationBytes(
+        _ impact: EvidenceDeletionImpact
+    ) -> Int64 {
+        guard impact.rows > 0 else { return 0 }
+        let perRow = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: impact.maximumLogicalRowBytes,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: 2
+            )
+        return SQLitePersistentStoreAdmission.saturatingMultiply(
+            Int64(impact.rows),
+            by: perRow
+        )
+    }
+
+    private func cascadeTransactionEstimate(
+        rowMutationBytes: Int64
+    ) -> Int64 {
+        SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: rowMutationBytes,
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 40
+        )
+    }
+
+    /// If an adversarial parent exceeds the normal 50-row invariant, its one-
+    /// statement FK cascade may not fit the reserve. Drain children through
+    /// independently admitted batches before deleting the childless parent.
+    private func deleteEvidenceReserveBounded(alertId: String) throws {
+        let batch = evidenceMaintenanceBatchRowLimit()
+        for _ in 0..<4096 {
+            let selection = """
+                SELECT alert_id, event_id,
+                       \(Self.evidenceLogicalSQL) AS logical_bytes
+                FROM alert_evidence
+                WHERE alert_id = ?1
+                ORDER BY timestamp ASC, event_id ASC
+                LIMIT ?2
+                """
+            let impact = try evidenceDeletionImpact(
+                selecting: selection
+            ) { statement in
+                bindText(statement, index: 1, value: alertId)
+                sqlite3_bind_int(statement, 2, batch)
+            }
+            guard impact.rows > 0 else { return }
+            try admitStorageMaintenanceWrite(
+                estimatedTransactionBytes: evidenceMaintenanceEstimate(
+                    rowCount: impact.rows
+                )
+            )
+            let statement = try prepare(
+                """
+                DELETE FROM alert_evidence
+                WHERE (alert_id, event_id) IN (
+                    SELECT alert_id, event_id
+                    FROM alert_evidence
+                    WHERE alert_id = ?1
+                    ORDER BY timestamp ASC, event_id ASC
+                    LIMIT ?2
+                )
+                """
+            )
+            bindText(statement, index: 1, value: alertId)
+            sqlite3_bind_int(statement, 2, batch)
+            let rc = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard rc == SQLITE_DONE else {
+                try throwLatchedStoragePressureIfPresent(resultCode: rc)
+                throw AlertStoreError.stepFailed(
+                    "reserve-bounded alert evidence delete failed"
+                )
+            }
+            let deleted = Int(sqlite3_changes(db))
+            guard deleted > 0 else { return }
+            if deleted == impact.rows {
+                recordEvidenceDeletion(
+                    rows: deleted,
+                    logicalBytes: impact.logicalBytes
+                )
+            } else {
+                try refreshEvidenceAccounting()
+            }
+        }
+        throw AlertStoreError.stepFailed(
+            "reserve-bounded alert evidence delete exceeded iteration limit"
+        )
+    }
+
+    private func executeCascadeDelete(
+        _ items: [CascadeAlertDeletionItem]
+    ) throws -> Int {
+        guard !items.isEmpty else { return 0 }
+        let rowBytes = items.reduce(Int64(0)) {
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                $0, $1.rowMutationBytes
+            )
+        }
+        try admitStorageMaintenanceWrite(
+            estimatedTransactionBytes: cascadeTransactionEstimate(
+                rowMutationBytes: rowBytes
+            )
+        )
+        let placeholders = (1...items.count)
+            .map { "?\($0)" }
+            .joined(separator: ",")
+        let statement = try prepare(
+            "DELETE FROM alerts WHERE id IN (\(placeholders))"
+        )
+        for (index, item) in items.enumerated() {
+            bindText(
+                statement,
+                index: Int32(index + 1),
+                value: item.id
+            )
+        }
+        let rc = sqlite3_step(statement)
+        sqlite3_finalize(statement)
+        guard rc == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            let message = db.map { String(cString: sqlite3_errmsg($0)) }
+                ?? "unknown error"
+            throw AlertStoreError.stepFailed(
+                "cascade-aware alert delete failed: \(message)"
+            )
+        }
+        let deleted = Int(sqlite3_changes(db))
+        if deleted == items.count {
+            let evidenceRows = items.reduce(0) { $0 + $1.evidence.rows }
+            let evidenceLogical = items.reduce(Int64(0)) {
+                SQLitePersistentStoreAdmission.saturatingAdd(
+                    $0, $1.evidence.logicalBytes
+                )
+            }
+            recordEvidenceDeletion(
+                rows: evidenceRows,
+                logicalBytes: evidenceLogical
+            )
+        } else if items.contains(where: { $0.evidence.rows > 0 }) {
+            try refreshEvidenceAccounting()
+        }
+        return deleted
+    }
+
+    private func deleteAlertsCascadeAware(ids: [String]) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let reserve = storageTransactionReserveBytes
+        let parentRowBytes = maintenanceRowMutationUpperBound()
+        var chunk: [CascadeAlertDeletionItem] = []
+        var chunkRowBytes: Int64 = 0
+        var totalDeleted = 0
+
+        func flushChunk() throws {
+            guard !chunk.isEmpty else { return }
+            totalDeleted += try executeCascadeDelete(chunk)
+            chunk.removeAll(keepingCapacity: true)
+            chunkRowBytes = 0
+        }
+
+        for id in ids {
+            var impact = try evidenceImpact(alertId: id)
+            var itemBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                parentRowBytes,
+                evidenceCascadeMutationBytes(impact)
+            )
+            if cascadeTransactionEstimate(rowMutationBytes: itemBytes) > reserve {
+                try flushChunk()
+                try deleteEvidenceReserveBounded(alertId: id)
+                impact = try evidenceImpact(alertId: id)
+                itemBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                    parentRowBytes,
+                    evidenceCascadeMutationBytes(impact)
+                )
+            }
+            let itemEstimate = cascadeTransactionEstimate(
+                rowMutationBytes: itemBytes
+            )
+            guard itemEstimate <= reserve else {
+                throw SQLitePersistentStoreAdmissionError
+                    .transactionEstimateExceedsReserve(
+                        estimatedBytes: itemEstimate,
+                        reserveBytes: reserve
+                    )
+            }
+            let prospective = SQLitePersistentStoreAdmission.saturatingAdd(
+                chunkRowBytes,
+                itemBytes
+            )
+            if !chunk.isEmpty,
+               cascadeTransactionEstimate(rowMutationBytes: prospective) > reserve {
+                try flushChunk()
+            }
+            chunk.append(CascadeAlertDeletionItem(
+                id: id,
+                evidence: impact,
+                rowMutationBytes: itemBytes
+            ))
+            chunkRowBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                chunkRowBytes,
+                itemBytes
+            )
+        }
+        try flushChunk()
+        return totalDeleted
+    }
+
     // MARK: - Pruning
 
     /// Deletes alerts older than the specified date for data retention.
     ///
-    /// Deletes in batches of 100,000 rows and yields between batches so that
-    /// concurrent alert inserts are not blocked for extended periods.
+    /// Plans at most 256 parents at a time, then splits them again by the exact
+    /// parent + FK-evidence mutation estimate so every transaction fits the
+    /// configured reserve. Yields between candidate windows.
     ///
     /// - Parameter date: Alerts with timestamps before this date will be deleted.
     /// - Returns: The total number of alerts deleted across all batches.
     @discardableResult
     public func prune(olderThan date: Date) async throws -> Int {
-        let batchSize = maintenanceBatchRowLimit()
-        let estimate = maintenanceEstimate(rowCount: Int(batchSize))
         let timestamp = date.timeIntervalSince1970
         var totalDeleted = 0
-
-        let sql = """
-            DELETE FROM alerts WHERE rowid IN (
-                SELECT rowid FROM alerts WHERE timestamp < ?1
-                ORDER BY rowid LIMIT ?2
-            )
-            """
+        let candidateLimit = min(256, Int(maintenanceBatchRowLimit()))
 
         while true {
-            try admitStorageMaintenanceWrite(
-                estimatedTransactionBytes: estimate
+            let ids = try alertIDsForRetention(
+                before: timestamp,
+                limit: candidateLimit
             )
-            let stmt = try prepare(sql)
-            sqlite3_bind_double(stmt, 1, timestamp)
-            sqlite3_bind_int(stmt, 2, batchSize)
-            let rc = sqlite3_step(stmt)
-            sqlite3_finalize(stmt)
-            guard rc == SQLITE_DONE else {
-                try throwLatchedStoragePressureIfPresent(resultCode: rc)
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw AlertStoreError.stepFailed(msg)
-            }
-            let rowsDeleted = Int(sqlite3_changes(db))
+            guard !ids.isEmpty else { break }
+            let rowsDeleted = try deleteAlertsCascadeAware(ids: ids)
             totalDeleted += rowsDeleted
             if rowsDeleted == 0 { break }
             await Task.yield()
@@ -1678,35 +2587,18 @@ public actor AlertStore {
     @discardableResult
     public func pruneOldest(count: Int) async throws -> Int {
         guard count > 0 else { return 0 }
-        let batchSize: Int32 = min(
-            maintenanceBatchRowLimit(),
-            Int32(clamping: count)
-        )
         var remaining = count
         var totalDeleted = 0
 
-        let sql = """
-            DELETE FROM alerts WHERE rowid IN (
-                SELECT rowid FROM alerts ORDER BY timestamp ASC LIMIT ?1
-            )
-            """
-
         while remaining > 0 {
-            let thisBatch = min(batchSize, Int32(clamping: remaining))
-            try admitStorageMaintenanceWrite(
-                estimatedTransactionBytes:
-                    maintenanceEstimate(rowCount: Int(thisBatch))
+            let ids = try oldestAlertIDs(
+                limit: min(
+                    remaining,
+                    min(256, Int(maintenanceBatchRowLimit()))
+                )
             )
-            let stmt = try prepare(sql)
-            sqlite3_bind_int(stmt, 1, thisBatch)
-            let rc = sqlite3_step(stmt)
-            sqlite3_finalize(stmt)
-            guard rc == SQLITE_DONE else {
-                try throwLatchedStoragePressureIfPresent(resultCode: rc)
-                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-                throw AlertStoreError.stepFailed(msg)
-            }
-            let rowsDeleted = Int(sqlite3_changes(db))
+            guard !ids.isEmpty else { break }
+            let rowsDeleted = try deleteAlertsCascadeAware(ids: ids)
             totalDeleted += rowsDeleted
             remaining -= rowsDeleted
             if rowsDeleted == 0 { break }
@@ -1881,6 +2773,310 @@ public actor AlertStore {
         case double(Double)
         case int(Int32)
         case null
+    }
+
+    private func tableExists(_ name: String) throws -> Bool {
+        let statement = try prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: name)
+        let step = sqlite3_step(statement)
+        if step == SQLITE_ROW { return true }
+        if step == SQLITE_DONE { return false }
+        throw AlertStoreError.stepFailed("schema lookup failed for \(name)")
+    }
+
+    private func evidenceEventIDs(alertId: String) throws -> Set<String> {
+        let statement = try prepare(
+            "SELECT event_id FROM alert_evidence WHERE alert_id = ?1 LIMIT ?2"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: alertId)
+        sqlite3_bind_int(
+            statement, 2,
+            Int32(AlertEvidencePolicy.maximumEventsPerAlert + 1)
+        )
+        var ids: Set<String> = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else {
+                throw AlertStoreError.stepFailed(
+                    "alert evidence identity query failed"
+                )
+            }
+            if let value = columnTextOrNil(statement, index: 0) {
+                ids.insert(value)
+            }
+        }
+        return ids
+    }
+
+    private func alertTimestamp(id: String) throws -> Date? {
+        let statement = try prepare(
+            "SELECT timestamp FROM alerts WHERE id = ?1 LIMIT 1"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: id)
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return nil }
+        guard step == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence parent lookup failed"
+            )
+        }
+        return Date(
+            timeIntervalSince1970: sqlite3_column_double(statement, 0)
+        )
+    }
+
+    private static let evidenceLogicalSQL = """
+        LENGTH(CAST(alert_id AS BLOB))
+        + LENGTH(CAST(event_id AS BLOB))
+        + 8
+        + LENGTH(CAST(raw_json AS BLOB))
+        """
+
+    private func evidenceDeletionImpact(
+        selecting selectionSQL: String,
+        bind: (OpaquePointer) -> Void = { _ in }
+    ) throws -> EvidenceDeletionImpact {
+        let statement = try prepare(
+            """
+            SELECT COUNT(*),
+                   COALESCE(SUM(logical_bytes), 0),
+                   COALESCE(MAX(logical_bytes), 0)
+            FROM (
+                \(selectionSQL)
+            ) selected_evidence
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        bind(statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence deletion accounting query failed"
+            )
+        }
+        return EvidenceDeletionImpact(
+            rows: Int(clamping: sqlite3_column_int64(statement, 0)),
+            logicalBytes: max(0, sqlite3_column_int64(statement, 1)),
+            maximumLogicalRowBytes: max(0, sqlite3_column_int64(statement, 2))
+        )
+    }
+
+    private func refreshEvidenceAllocatedAccounting() throws {
+        guard var cache = evidenceAccountingCache else {
+            try refreshEvidenceAccounting()
+            return
+        }
+        let allocated = try allocatedBytes(
+            table: "alert_evidence",
+            includeIndexes: true
+        )
+        cache.observedAllocatedBytes = allocated
+        cache.conservativeAllocatedBytes = allocated
+        cache.allocatedBytesExact = true
+        evidenceAccountingCache = cache
+        if evidenceAccountingFullRefreshes < .max {
+            evidenceAccountingFullRefreshes += 1
+        }
+    }
+
+    /// DBSTAT page ownership. This is deliberately fail-closed: if the SQLite
+    /// build cannot account for table pages, evidence capture logs a failure
+    /// after preserving the parent alert rather than pretending the sub-budget
+    /// is healthy.
+    private func allocatedBytes(
+        table: String,
+        includeIndexes: Bool
+    ) throws -> Int64 {
+        let sql: String
+        if includeIndexes {
+            sql = """
+                SELECT COALESCE(SUM(pgsize), 0)
+                FROM dbstat
+                WHERE name = ?1
+                   OR name IN (
+                       SELECT name FROM sqlite_master
+                       WHERE type = 'index' AND tbl_name = ?1
+                   )
+                """
+        } else {
+            sql = "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = ?1"
+        }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: table)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed(
+                "dbstat ownership query failed for \(table)"
+            )
+        }
+        return max(0, sqlite3_column_int64(statement, 0))
+    }
+
+    private func evidenceRowMutationEstimate(
+        _ candidate: AlertEvidenceCandidate
+    ) -> Int64 {
+        let logical = Int64(
+            candidate.eventId.utf8.count
+                + candidate.rawJSON.utf8.count
+                + 8
+                + 4 * 16
+        )
+        return SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logical,
+                pageSizeBytes: sqlitePageSizeBytes,
+                // One WITHOUT ROWID b-tree; two leaf touches covers a split.
+                maximumLeafPageTouches: 2
+            )
+    }
+
+    private func evidenceLogicalBytes(
+        alertId: String,
+        candidate: AlertEvidenceCandidate
+    ) -> Int64 {
+        SQLitePersistentStoreAdmission.saturatingAdd(
+            Int64(alertId.utf8.count + candidate.eventId.utf8.count + 8),
+            Int64(candidate.rawJSON.utf8.count)
+        )
+    }
+
+    private func advanceEvidenceMutationGeneration(
+        _ cache: inout EvidenceAccountingCache
+    ) {
+        if cache.mutationGeneration < .max {
+            cache.mutationGeneration += 1
+        }
+    }
+
+    private func recordEvidenceInsertion(
+        rows: Int,
+        logicalBytes: Int64,
+        allocatedUpperBoundBytes: Int64,
+        maximumRowMutationBytes: Int64
+    ) {
+        guard rows > 0, var cache = evidenceAccountingCache else { return }
+        cache.rowCount = Int(clamping: SQLitePersistentStoreAdmission
+            .saturatingAdd(Int64(cache.rowCount), Int64(rows)))
+        cache.logicalBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+            cache.logicalBytes,
+            max(0, logicalBytes)
+        )
+        cache.conservativeAllocatedBytes = SQLitePersistentStoreAdmission
+            .saturatingAdd(
+                cache.conservativeAllocatedBytes,
+                max(0, allocatedUpperBoundBytes)
+            )
+        cache.allocatedBytesExact = false
+        advanceEvidenceMutationGeneration(&cache)
+        evidenceAccountingCache = cache
+        evidenceMaintenanceRowMutationHighWaterBytes = max(
+            evidenceMaintenanceRowMutationHighWaterBytes ?? 0,
+            maximumRowMutationBytes
+        )
+    }
+
+    private func recordEvidenceDeletion(rows: Int, logicalBytes: Int64) {
+        guard rows > 0, var cache = evidenceAccountingCache else { return }
+        cache.rowCount = max(0, cache.rowCount - rows)
+        cache.logicalBytes = max(0, cache.logicalBytes - max(0, logicalBytes))
+        // DELETE can free table pages but does not prove how SQLite reassigned
+        // them. Keep the prior upper bound until one cold-path DBSTAT refresh.
+        cache.allocatedBytesExact = false
+        advanceEvidenceMutationGeneration(&cache)
+        evidenceAccountingCache = cache
+    }
+
+    private func evidenceTransactionEstimate(
+        rowMutationBytes: Int64
+    ) -> Int64 {
+        SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: rowMutationBytes,
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumTreePathPageTouches: 8
+        )
+    }
+
+    private func evidenceMaintenanceRowMutationUpperBound() -> Int64 {
+        if evidenceMaintenanceHighWaterScannedExistingRows,
+           let cached = evidenceMaintenanceRowMutationHighWaterBytes {
+            return max(
+                cached,
+                SQLitePersistentStoreAdmission.conservativeRowMutationBytes
+            )
+        }
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT COALESCE(MAX(
+                LENGTH(CAST(alert_id AS BLOB))
+              + LENGTH(CAST(event_id AS BLOB))
+              + LENGTH(CAST(raw_json AS BLOB))
+              + 8 + 64
+            ), 0)
+            FROM alert_evidence
+            """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            sqlite3_finalize(statement)
+            return storageTransactionReserveBytes
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return storageTransactionReserveBytes
+        }
+        let logical = max(
+            Int64(128),
+            sqlite3_column_int64(statement, 0)
+        )
+        let upper = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logical,
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumLeafPageTouches: 2
+            )
+        evidenceMaintenanceRowMutationHighWaterBytes = max(
+            evidenceMaintenanceRowMutationHighWaterBytes ?? 0,
+            upper
+        )
+        evidenceMaintenanceHighWaterScannedExistingRows = true
+        return max(
+            upper,
+            SQLitePersistentStoreAdmission.conservativeRowMutationBytes
+        )
+    }
+
+    private func evidenceMaintenanceBatchRowLimit() -> Int32 {
+        let fixed = SQLitePersistentStoreAdmission
+            .transactionFixedOverheadBytes(
+                pageSizeBytes: sqlitePageSizeBytes,
+                maximumTreePathPageTouches: 8
+            )
+        return Int32(clamping: max(
+            1,
+            min(
+                1_000,
+                SQLitePersistentStoreAdmission.maximumRowsPerTransaction(
+                    reserveBytes: max(
+                        0, storageTransactionReserveBytes - fixed
+                    ),
+                    bytesPerRow: evidenceMaintenanceRowMutationUpperBound()
+                )
+            )
+        ))
+    }
+
+    private func evidenceMaintenanceEstimate(rowCount: Int) -> Int64 {
+        evidenceTransactionEstimate(
+            rowMutationBytes: SQLitePersistentStoreAdmission
+                .saturatingMultiply(
+                    Int64(max(0, rowCount)),
+                    by: evidenceMaintenanceRowMutationUpperBound()
+                )
+        )
     }
 
     /// Executes a SQL statement that does not return rows.
@@ -2192,6 +3388,11 @@ public actor AlertStore {
         storageAdmission = newAdmission
         sqlitePageSizeBytes = newPageSizeBytes
         checkpointController = newCheckpointController
+        evidenceAccountingCache = nil
+        maintenanceRowMutationHighWaterBytes = nil
+        maintenanceHighWaterScannedExistingRows = false
+        evidenceMaintenanceRowMutationHighWaterBytes = nil
+        evidenceMaintenanceHighWaterScannedExistingRows = false
     }
 
     /// Prepares a SQL statement.

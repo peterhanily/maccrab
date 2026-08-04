@@ -182,4 +182,49 @@ struct LocalizationCoverageTests {
                 \(regressions.joined(separator: "\n"))
                 """)
     }
+
+    @Test("AI Guard empty state never becomes a safety verdict in any locale")
+    func aiGuardEmptyStateTranslationParity() throws {
+        let resources = Self.packageRoot()
+            .appendingPathComponent("Sources/MacCrabApp/Resources")
+        let oldUnsafeValues: Set<String> = [
+            "Les outils IA fonctionnent dans les limites de sécurité",
+            "AI 도구가 안전한 범위 내에서 작동 중입니다",
+            "AI 工具在安全範圍內運作",
+            "AIツールは安全な範囲内で動作しています",
+            "AI工具在安全范围内运行",
+            "AI-verktyg arbetar inom säkra gränser",
+            "Las herramientas IA están operando dentro de límites seguros",
+            "ИИ-инструменты работают в безопасных границах",
+            "Gli strumenti IA operano entro limiti sicuri",
+            "Narzędzia AI działają w bezpiecznych granicach",
+            "AI-tools werken binnen veilige grenzen",
+            "Ferramentas de IA estão operando dentro dos limites seguros",
+            "KI-Tools arbeiten innerhalb sicherer Grenzen",
+        ]
+        let row = try NSRegularExpression(
+            pattern: #"^\s*"aiGuard\.noAlertsDesc"\s*=\s*"(.*)";\s*$"#
+        )
+        let locales = try FileManager.default.contentsOfDirectory(
+            at: resources,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "lproj" }
+        #expect(locales.count >= 14)
+
+        for locale in locales {
+            let table = locale.appendingPathComponent("Localizable.strings")
+            let text = try String(contentsOf: table, encoding: .utf8)
+            let match = text.components(separatedBy: "\n").compactMap { line -> String? in
+                let ns = line as NSString
+                guard let result = row.firstMatch(
+                    in: line,
+                    range: NSRange(location: 0, length: ns.length)
+                ) else { return nil }
+                return ns.substring(with: result.range(at: 1))
+            }.first
+            let value = try #require(match, "Missing aiGuard.noAlertsDesc in \(locale.lastPathComponent)")
+            #expect(!oldUnsafeValues.contains(value),
+                    "\(locale.lastPathComponent) still turns an empty result into a safety verdict")
+        }
+    }
 }

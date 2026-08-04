@@ -21,13 +21,17 @@
 //     • config    — tune detection: built-in rule settings, reload, refresh
 //                   intel, safe daemon tunables (thresholds / poll intervals).
 //     • authoring — create / delete detection rules.
-//     • response  — flip DEFENSE-AFFECTING config (ES introspection / file-open
-//                   subscriptions, ultrasonic). Disabling these reduces
-//                   coverage, so they require the top tier.
+//     • response  — flip DEFENSE-AFFECTING config, suppress findings, run
+//                   forensic collectors, and create response-action records.
+//                   MCP-created host mutations are restricted to exact-rule,
+//                   confirmation-pending proposals; the tier does not grant an
+//                   agent automatic kill/quarantine/script/network authority.
 //
-//   Every mutation goes through the privileged inbox IPC (uid + symlink/
-//   hardlink gated, audit-logged by the daemon). Response actions are
-//   untouched: they still never auto-execute.
+//   Most mutations go through the privileged inbox IPC (uid + symlink/
+//   hardlink gated, audit-logged by the daemon). Response-action writes are the
+//   documented exception below. Host-mutating response actions written by MCP
+//   are always exact-rule and confirmation-pending; global destructive defaults
+//   and require_confirmation:false are rejected server-side.
 //
 //   EXCEPTION (audit #15): `set_response_action` does NOT write through the
 //   inbox — it writes the user-home `actions.json` directly, and the root engine
@@ -125,12 +129,10 @@ func readTrustedAgentCapabilities(
     return granted
 }
 
-/// Tool → required capability. Tools not listed are read-only and always
-/// allowed (subject to the MCP transport's own scoping).
-///
-/// NOTE (the load-bearing trap): this map FAILS OPEN — `agentCapabilityDenial`
-/// returns nil (allow) for any tool not listed here. So EVERY new mutating MCP
-/// tool MUST be added below, or it silently bypasses the capability gate.
+/// Tool → required capability. This is one half of an exhaustive static-tool
+/// classification; `agentUngatedStaticTools` below is the other. A name in
+/// neither set is denied before dispatch, so a newly-added switch case cannot
+/// silently inherit read-only authority.
 let agentToolCapability: [String: AgentCapability] = [
     "set_builtin_rule_setting": .config,
     "reload_rules": .config,
@@ -149,6 +151,14 @@ let agentToolCapability: [String: AgentCapability] = [
     // human-granted capability tier is the gate that actually works here.
     "analyze_package_metadata": .config,
     "verify_package_attestation": .config,
+    // May send the behavior brief to the operator-configured remote LLM.
+    // Deterministic fallback is local, but the caller cannot choose which path
+    // is active, so admission follows the possible egress path.
+    "classify_package_intent": .config,
+    // Signed-catalog reads are non-mutating but may fetch over the network from
+    // this host. Match the other operator-visible egress tools.
+    "forensics_check_plugin_updates": .config,
+    "forensics_search_catalog": .config,
     "set_daemon_config": .config,        // defense-affecting keys re-checked → .response
     "create_rule": .authoring,
     "delete_rule": .authoring,
@@ -158,15 +168,19 @@ let agentToolCapability: [String: AgentCapability] = [
     // default) could still suppress up to the per-session budget.
     "suppress_alert": .response,
     "suppress_campaign": .response,
-    // Arming a response action (kill / quarantine / blockNetwork) is the most
-    // defense-affecting agent mutation, so it sits at the top tier. The map
-    // FAILS OPEN — any set_-prefixed tool absent here bypasses the gate — so
-    // this entry is load-bearing (and pinned by mutatingToolsAreGated).
+    // Writes a signed bundle containing potentially sensitive session events,
+    // alerts, tool calls, and mutation history to local disk for export.
+    "export_session_bundle": .response,
+    // Proposing a response action (kill / quarantine / script / blockNetwork)
+    // is defense-affecting even though MCP restricts host-mutating records to
+    // exact-rule, confirmation-pending entries, so it sits at the top tier.
+    // This entry is load-bearing and pinned by the exhaustive classification
+    // guard; removing it makes the tool unclassified and denied.
     "set_response_action": .response,
     // Updating an installed plugin replaces executable code on disk (via the
     // verified install path). Forward-only + signer-pinned, but still
-    // code-changing, so it sits at the top tier. (The read-only
-    // forensics_check_plugin_updates is intentionally absent — it never mutates.)
+    // code-changing, so it sits at the top tier. The non-mutating catalog check
+    // is separately .config-gated because it can cause network egress.
     "forensics_install_plugin_update": .response,
     // Plugin lifecycle (parity with the CLI). Install/uninstall change executable
     // scanner code on disk; pin changes update policy. All code/config-changing,
@@ -179,7 +193,7 @@ let agentToolCapability: [String: AgentCapability] = [
     // sensitive local data (messages, mail, browser history, TCC state) into a
     // case. create_case opens the container; run_collector / run_analyzer /
     // run_all execute the scanner/analyzer plugins. Previously ALL of these were
-    // absent here, so the fail-open default let an agent with ZERO granted tiers
+    // absent here, so the old fail-open default let an agent with ZERO granted tiers
     // run arbitrary forensic collection. Gated at the top tier to match the other
     // code-executing plugin tools above (this is a read/scan of local state, not
     // a defense-config change, but .response is the tightest existing tier and
@@ -194,7 +208,7 @@ let agentToolCapability: [String: AgentCapability] = [
     "forensics_run_all": .response,
     // forensics_enrich EXECUTES enricher plugin code against an operator-named
     // path — the same code-execution class as run_collector / run_analyzer — so
-    // it sits at the top tier too. Previously absent: the map's fail-open
+    // it sits at the top tier too. Previously absent: the map's old fail-open
     // default let an agent with ZERO granted tiers run arbitrary enricher code.
     "forensics_enrich": .response,
     // Reading COLLECTED forensic artifacts back out of a case (Safari visits,
@@ -212,6 +226,31 @@ let agentToolCapability: [String: AgentCapability] = [
     "forensics_timeline": .response,
     "forensics_explain_case": .response,
     "forensics_posture_findings": .response,
+]
+
+/// Static tools deliberately callable without an agent-control mutation tier.
+/// "Ungated" is intentional terminology: most are read-only, but a few export
+/// evidence or perform other explicitly reviewed local operations. Tool-specific
+/// privacy/consent checks still apply. Dynamic manifest-declared collector tools
+/// are not listed here; `handleToolCall` resolves them separately and their
+/// dedicated gate requires `.response`.
+let agentUngatedStaticTools: Set<String> = [
+    "agent_capabilities", "list_builtin_rules", "list_rules",
+    "explain_alert", "get_vulns", "get_privacy_alerts",
+    "get_browser_extensions", "get_audit_log", "list_response_actions",
+    "get_alerts", "get_events", "get_campaigns", "get_status",
+    "list_agent_sessions", "get_agent_session",
+    "verify_session_bundle", "hunt", "get_security_score",
+    "get_alert_detail", "get_ai_alerts", "scan_text", "cluster_alerts",
+    "get_traces", "get_trace_detail", "hunt_trace", "get_agent_spans",
+    "verify_bundle", "trace_from_event", "check_typosquat_score",
+    "scan_package_content",
+    "predict_next_technique", "score_text_style", "get_intent_posterior",
+    "forensics_list_plugins", "forensics_list_installed_plugins",
+    "forensics_verify_installed_plugins",
+    "forensics_list_cases", "get_daemon_config",
+    // Legacy, non-advertised aliases retained only for protocol compatibility.
+    "tierb.list_plugins", "tierb.verify",
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +
@@ -245,12 +284,16 @@ func dropInboxRequest(verb: String, payload: [String: Any]) -> String? {
 
 // MARK: - Capability gate (called from handleToolCall before dispatch)
 
-/// Returns a toolError dict if `name` is a mutating tool whose tier isn't
-/// granted; nil if the call may proceed. `set_daemon_config` is special-cased:
-/// defense-affecting keys require the `response` tier even though the tool's
-/// base tier is `config`.
+/// Returns a toolError dict if a classified capability is not granted OR if a
+/// static name has no authority classification; nil only for an explicitly
+/// ungated static tool or a granted capability. `set_daemon_config` is
+/// special-cased: defense-affecting keys require the `response` tier even though
+/// the tool's base tier is `config`.
 func agentCapabilityDenial(forTool name: String, args: [String: Any]) -> [String: Any]? {
-    guard let base = agentToolCapability[name] else { return nil }  // read-only tool
+    guard let base = agentToolCapability[name] else {
+        if agentUngatedStaticTools.contains(name) { return nil }
+        return toolError("Denied unclassified MCP tool '\(name)' before dispatch. The server has no static authority classification for this name; update the explicit tool registry before enabling it.")
+    }
     let granted = loadAgentCapabilities()
     // Escalate set_daemon_config to .response when the key is defense-affecting.
     var required = base
@@ -266,8 +309,8 @@ func agentCapabilityDenial(forTool name: String, args: [String: Any]) -> [String
 /// (imessage_*, mail_*, safari_*, knowledgec_*, quarantine_*, launchd_*, tcc_*,
 /// macho_analyze_path, pkg_analyze_path, …). These names are declared by
 /// installed collector manifests and advertised via `pluginMCPTools()`, so they
-/// can NEVER appear in the static `agentToolCapability` map — and that map FAILS
-/// OPEN. Each one executes plugin scanner code and commits (often sensitive:
+/// do not appear in the static authority sets. Each one executes plugin scanner
+/// code and commits (often sensitive:
 /// messages / mail / browser history / TCC state) artifacts into a case, i.e.
 /// exactly what forensics_run_collector does, so it requires the top `.response`
 /// tier. Called at the single plugin-dispatch chokepoint (handlePluginMCPTool);
@@ -288,14 +331,14 @@ func handleAgentCapabilities() -> Any {
         let on = granted.contains(cap)
         let desc: String
         switch cap {
-        case .config:    desc = "tune detection — built-in rule settings, reload rules, refresh intel, safe daemon tunables"
+        case .config:    desc = "tune detection and permit explicit network lookups/model classification — built-in settings, reload, intel/catalog refresh, package intent"
         case .authoring: desc = "create / delete detection rules"
-        case .response:  desc = "change DEFENSE-AFFECTING config (ES introspection / file-open subscriptions, ultrasonic)"
+        case .response:  desc = "change defense-affecting config, suppress findings, export session evidence, run forensic collectors, and create exact-rule confirmation-pending host-response proposals (never remote auto-execution)"
         }
         lines.append("  [\(on ? "ON " : "off")] \(cap.rawValue) — \(desc)")
     }
     lines.append("")
-    lines.append("A human can grant a tier with `sudo maccrabctl agent-capabilities set <tier> on`. Grants are stored in root-owned state that agents cannot write. Every change an agent makes is routed through the privileged inbox and audit-logged by the engine.")
+    lines.append("A human can grant a tier with `sudo maccrabctl agent-capabilities set <tier> on`. Grants are stored in root-owned state that agents cannot write. Mutations are audit-logged. Most route through the privileged inbox; set_response_action writes the admin user's actions.json, but MCP can only create confirmation-pending, exact-rule host mutations and cannot create a destructive global default.")
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 

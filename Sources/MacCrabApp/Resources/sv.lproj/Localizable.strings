@@ -186,7 +186,7 @@
 "aiGuard.title" = "AI-verktygaktivitet";
 "aiGuard.subtitle" = "Övervakar Claude Code, Codex, OpenClaw, Cursor och deras barnprocesser";
 "aiGuard.noAlerts" = "Inga AI-säkerhetsvarningar";
-"aiGuard.noAlertsDesc" = "AI-verktyg arbetar inom säkra gränser";
+"aiGuard.noAlertsDesc" = "Frånvaro av varningar är inget säkerhetsbesked när händelsetäckningen eller sessionslagringen är ofullständig.";
 
 /* ── Components ── */
 "components.suppress" = "Dölj";
@@ -613,7 +613,7 @@
 "settings.llmGeminiModel" = "Modell";
 "settings.llmInfo" = "Så fungerar det";
 "settings.llmInfoDesc" = "AI-backenden kan lägga till strukturerade larmutredningar, kampanjsammanfattningar, försvarsrekommendationer och förfining av paketavsikt. Modellens utdata är rådgivande och utför aldrig någon åtgärd.";
-"settings.llmLocalPrivacy" = "Körs lokalt. Inga data lämnar din dator.";
+"settings.llmLocalPrivacy" = "MacCrab skickar ingen utgående internettrafik för den här loopback-slutpunkten.";
 "settings.llmMistralHelp" = "Skaffa en API-nyckel på console.mistral.ai";
 "settings.llmMistralKey" = "Mistral API-nyckel";
 "settings.llmMistralModel" = "Modell";

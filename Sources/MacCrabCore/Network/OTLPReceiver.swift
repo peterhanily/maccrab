@@ -100,6 +100,509 @@ public struct OTLPReceiverIngestResult: Sendable, Equatable {
     }
 }
 
+/// Exact ownership ledger for the receiver's two asynchronous planes. This is
+/// intentionally separate from ``OTLPReceiverMetrics``: those counters describe
+/// OTLP payload semantics, while this snapshot answers the lifecycle question
+/// an operator needs during reload/shutdown: did every admitted connection and
+/// body-processing task reach a terminal owner?
+public struct OTLPReceiverLifecycleSnapshot: Sendable, Codable, Equatable {
+    public let acceptingListeners: Bool
+    public let listenersAccepted: UInt64
+    public let listenersCompleted: UInt64
+    public let listenersRejectedAfterSeal: UInt64
+    public let activeListeners: Int
+    public let readyListeners: Int
+    public let acceptingConnections: Bool
+    public let connectionsAccepted: UInt64
+    public let connectionsCompleted: UInt64
+    public let connectionsRejectedAfterSeal: UInt64
+    public let connectionsRejectedAtCapacity: UInt64
+    public let activeConnections: Int
+    public let acceptingBodyTasks: Bool
+    public let bodyTasksAccepted: UInt64
+    public let bodyTasksCompleted: UInt64
+    public let bodyTasksCancelled: UInt64
+    public let bodyTasksRejected: UInt64
+    public let bodyTaskCancellationRequests: UInt64
+    public let bodyTasksInFlight: Int
+    public let maximumBodyTasks: Int
+    public let acceptingCallbackTasks: Bool
+    public let callbackTasksAccepted: UInt64
+    public let callbackTasksCompleted: UInt64
+    public let callbackTasksCancelled: UInt64
+    public let callbackTasksRejected: UInt64
+    public let callbackTaskCancellationRequests: UInt64
+    public let callbackTasksInFlight: Int
+    public let maximumCallbackTasks: Int
+    /// Includes the caller while `stop()` is taking its return snapshot. Values
+    /// above one mean another start/stop/terminal transition is still suspended.
+    public let lifecycleOperationsInProgress: Int
+    /// Result of the most recent bounded shutdown join. Nil means this receiver
+    /// has not yet attempted a shutdown.
+    public let lastShutdownClean: Bool?
+    public let shutdownTimeouts: UInt64
+
+    public var connectionsConserved: Bool {
+        connectionsAccepted == connectionsCompleted + UInt64(activeConnections)
+    }
+
+    public var listenersConserved: Bool {
+        listenersAccepted == listenersCompleted + UInt64(activeListeners)
+    }
+
+    public var bodyTasksConserved: Bool {
+        bodyTasksAccepted
+            == bodyTasksCompleted + bodyTasksCancelled + UInt64(bodyTasksInFlight)
+    }
+
+    public var callbackTasksConserved: Bool {
+        callbackTasksAccepted
+            == callbackTasksCompleted + callbackTasksCancelled
+                + UInt64(callbackTasksInFlight)
+    }
+
+    public var cleanlyStopped: Bool {
+        !acceptingListeners
+            && activeListeners == 0
+            && readyListeners == 0
+            && !acceptingConnections
+            && !acceptingBodyTasks
+            && !acceptingCallbackTasks
+            && activeConnections == 0
+            && bodyTasksInFlight == 0
+            && callbackTasksInFlight == 0
+            && lifecycleOperationsInProgress <= 1
+            && listenersConserved
+            && connectionsConserved
+            && bodyTasksConserved
+            && callbackTasksConserved
+            && lastShutdownClean == true
+    }
+}
+
+/// Lock-backed task ownership used because Network.framework calls arrive on a
+/// dispatch queue, outside the receiver actor. Registration happens before the
+/// task can escape, shutdown seals registration before taking the task handles,
+/// and completion removes exactly one handle. The exact conservation equation
+/// is therefore stable even when a cancellation-uncooperative store operation
+/// outlives the bounded join deadline.
+final class OTLPBodyTaskLifecycle: @unchecked Sendable {
+    struct Snapshot: Sendable, Equatable {
+        let accepting: Bool
+        let accepted: UInt64
+        let completed: UInt64
+        let cancelled: UInt64
+        let rejected: UInt64
+        let cancellationRequests: UInt64
+        let inFlight: Int
+        let maximumInFlight: Int
+        let lastShutdownClean: Bool?
+        let shutdownTimeouts: UInt64
+
+        var conservesAccepted: Bool {
+            accepted == completed + cancelled + UInt64(inFlight)
+        }
+    }
+
+    private let lock = NSLock()
+    private let maximumInFlight: Int
+    private var accepting = false
+    private var nextID: UInt64 = 0
+    private var tasks: [UInt64: Task<Void, Never>] = [:]
+    private var cancellationRequestedIDs: Set<UInt64> = []
+    private var accepted: UInt64 = 0
+    private var completed: UInt64 = 0
+    private var cancelled: UInt64 = 0
+    private var rejected: UInt64 = 0
+    private var cancellationRequests: UInt64 = 0
+    private var lastShutdownClean: Bool?
+    private var shutdownTimeouts: UInt64 = 0
+    init(maximumInFlight: Int) {
+        self.maximumInFlight = max(1, maximumInFlight)
+    }
+
+    /// Re-open only after every task from the prior generation has terminated.
+    /// A timed-out shutdown can therefore never be hidden by a listener restart.
+    func open() -> Bool {
+        lock.withLock {
+            guard !accepting, tasks.isEmpty else { return false }
+            accepting = true
+            lastShutdownClean = nil
+            return true
+        }
+    }
+
+    @discardableResult
+    func submit(
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Bool {
+        lock.lock()
+        guard accepting, tasks.count < maximumInFlight else {
+            rejected &+= 1
+            lock.unlock()
+            return false
+        }
+        nextID &+= 1
+        let id = nextID
+        accepted &+= 1
+        // The lock remains held until the handle is installed. A very short
+        // operation may reach `finish` immediately, but it cannot remove a
+        // handle that registration has not yet published.
+        let task = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else {
+                self?.finish(id: id, observedCancellation: true)
+                return
+            }
+            await operation()
+            self?.finish(id: id, observedCancellation: Task.isCancelled)
+        }
+        tasks[id] = task
+        lock.unlock()
+        return true
+    }
+
+    /// Used when a fully-buffered body reaches the receiver after connection
+    /// admission has already been sealed. It was never accepted, but the drop
+    /// must remain visible rather than disappearing between ledgers.
+    func recordRejected() {
+        lock.withLock { rejected &+= 1 }
+    }
+
+    private func finish(id: UInt64, observedCancellation: Bool) {
+        lock.withLock {
+            guard tasks.removeValue(forKey: id) != nil else { return }
+            cancellationRequestedIDs.remove(id)
+            if observedCancellation {
+                cancelled &+= 1
+            } else {
+                completed &+= 1
+            }
+        }
+    }
+
+    /// Synchronously closes admission and sends cancellation to every owned
+    /// handle. The returned handles are a point-in-time join set; later
+    /// registration is impossible until `open()` succeeds after a clean drain.
+    @discardableResult
+    func sealAndCancel() -> [Task<Void, Never>] {
+        let captured: [Task<Void, Never>] = lock.withLock {
+            accepting = false
+            for (id, _) in tasks where cancellationRequestedIDs.insert(id).inserted {
+                cancellationRequests &+= 1
+            }
+            return Array(tasks.values)
+        }
+        for task in captured { task.cancel() }
+        return captured
+    }
+
+    func shutdown(deadline: TimeInterval) async -> Bool {
+        let captured = sealAndCancel()
+        let joined = await OTLPBoundedTaskJoin.waitForAll(
+            captured,
+            deadline: max(0, deadline)
+        )
+        return lock.withLock {
+            // `waitForAll == true` proves its captured prefix terminated. The
+            // empty check also protects against implementation drift.
+            let clean = joined && tasks.isEmpty
+            lastShutdownClean = clean
+            if !clean { shutdownTimeouts &+= 1 }
+            return clean
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                accepting: accepting,
+                accepted: accepted,
+                completed: completed,
+                cancelled: cancelled,
+                rejected: rejected,
+                cancellationRequests: cancellationRequests,
+                inFlight: tasks.count,
+                maximumInFlight: maximumInFlight,
+                lastShutdownClean: lastShutdownClean,
+                shutdownTimeouts: shutdownTimeouts
+            )
+        }
+    }
+}
+
+/// A task-group timeout is not a timeout: leaving the group still waits for all
+/// children. This one-shot race lets shutdown return an explicit unclean result
+/// while the lifecycle continues to retain and account for an uncooperative
+/// body task until it actually terminates.
+private final class OTLPJoinDeadlineRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var resolved = false
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resolve(_ value: Bool) {
+        let pending: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard !resolved else { return nil }
+            resolved = true
+            let result = continuation
+            continuation = nil
+            return result
+        }
+        pending?.resume(returning: value)
+    }
+}
+
+private enum OTLPBoundedTaskJoin {
+    static func waitForAll(
+        _ tasks: [Task<Void, Never>],
+        deadline: TimeInterval
+    ) async -> Bool {
+        guard !tasks.isEmpty else { return true }
+        return await withCheckedContinuation { continuation in
+            let race = OTLPJoinDeadlineRace(continuation)
+            Task.detached(priority: .utility) {
+                for task in tasks { await task.value }
+                race.resolve(true)
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + .nanoseconds(
+                    OTLPDeadline.nanoseconds(deadline)
+                )
+            ) {
+                race.resolve(false)
+            }
+        }
+    }
+}
+
+private enum OTLPDeadline {
+    static func nanoseconds(_ seconds: TimeInterval) -> Int {
+        guard !seconds.isNaN, seconds > 0 else { return 0 }
+        guard seconds.isFinite else { return Int.max }
+        let maximumSeconds = Double(Int.max) / 1_000_000_000
+        return Int(min(seconds, maximumSeconds) * 1_000_000_000)
+    }
+}
+
+/// Synchronous ownership for the Network.framework listener itself. Cancelling
+/// an `NWListener` is only a request; the socket is not known to be released
+/// until its state handler publishes `.cancelled` or `.failed`. Keeping that
+/// terminal acknowledgement in the same conservation ledger prevents a reload
+/// from racing a still-owned port after `stop()` returned.
+final class OTLPListenerLifecycle: @unchecked Sendable {
+    struct Snapshot: Sendable, Equatable {
+        let accepting: Bool
+        let accepted: UInt64
+        let completed: UInt64
+        let rejectedAfterSeal: UInt64
+        let active: Int
+        let ready: Int
+
+        var conservesAccepted: Bool {
+            accepted == completed + UInt64(active)
+        }
+    }
+
+    struct Completion: Sendable, Equatable {
+        let wasReady: Bool
+        let cancellationWasRequested: Bool
+    }
+
+    private struct Entry: @unchecked Sendable {
+        let generation: UInt64
+        let listener: NWListener
+        var started = false
+        var ready = false
+        var cancellationRequested = false
+    }
+
+    /// Atomically cross the start/cancel boundary. `NWListener.start` is
+    /// asynchronous and non-throwing; holding the ownership lock across that
+    /// call ensures shutdown either removes a listener that never started or
+    /// cancels one whose terminal callback is guaranteed to be armed.
+    @discardableResult
+    func start(
+        _ listener: NWListener,
+        generation expected: UInt64,
+        queue: DispatchQueue
+    ) -> Bool {
+        lock.lock()
+        let id = ObjectIdentifier(listener)
+        guard accepting,
+              var entry = entries[id],
+              entry.generation == expected,
+              !entry.cancellationRequested else {
+            lock.unlock()
+            return false
+        }
+        entry.started = true
+        entries[id] = entry
+        listener.start(queue: queue)
+        lock.unlock()
+        return true
+    }
+
+    private let lock = NSLock()
+    private var accepting = false
+    private var generation: UInt64 = 0
+    private var entries: [ObjectIdentifier: Entry] = [:]
+    private var accepted: UInt64 = 0
+    private var completed: UInt64 = 0
+    private var rejectedAfterSeal: UInt64 = 0
+    private var nextDrainWaiterID: UInt64 = 0
+    private var drainWaiters: [UInt64: OTLPJoinDeadlineRace] = [:]
+
+    func open() -> UInt64? {
+        lock.withLock {
+            guard !accepting, entries.isEmpty else { return nil }
+            generation &+= 1
+            accepting = true
+            return generation
+        }
+    }
+
+    @discardableResult
+    func register(_ listener: NWListener, generation expected: UInt64) -> Bool {
+        lock.withLock {
+            guard accepting, generation == expected else {
+                rejectedAfterSeal &+= 1
+                return false
+            }
+            let id = ObjectIdentifier(listener)
+            guard entries[id] == nil else { return false }
+            entries[id] = Entry(generation: generation, listener: listener)
+            accepted &+= 1
+            return true
+        }
+    }
+
+    /// Publish readiness and its external status callback under one ordering
+    /// lock. A terminal Network.framework callback either wins first (and this
+    /// returns false without publishing ready), or waits until `onReady` has
+    /// completed and can then publish the terminal status after it. This closes
+    /// the ready-then-immediate-failure inversion that otherwise leaves the
+    /// persisted status saying `running: true` for a dead listener.
+    func publishReady(
+        _ listener: NWListener,
+        generation expected: UInt64,
+        onReady: (@Sendable () -> Void)?
+    ) -> Bool {
+        lock.withLock {
+            let id = ObjectIdentifier(listener)
+            guard accepting,
+                  var entry = entries[id],
+                  entry.generation == expected,
+                  !entry.cancellationRequested
+            else { return false }
+            entry.ready = true
+            entries[id] = entry
+            onReady?()
+            return true
+        }
+    }
+
+    /// The state handler calls this synchronously, before launching or
+    /// resuming any actor work. Exactly one terminal state removes the owner.
+    func complete(
+        _ listener: NWListener,
+        beforeRelease: @Sendable (Completion) -> Void = { _ in }
+    ) -> Completion? {
+        let result: (Completion?, [OTLPJoinDeadlineRace]) = lock.withLock {
+            let id = ObjectIdentifier(listener)
+            guard let entry = entries.removeValue(forKey: id) else {
+                return (nil, [])
+            }
+            accepting = false
+            completed &+= 1
+            let completion = Completion(
+                wasReady: entry.ready,
+                cancellationWasRequested: entry.cancellationRequested
+            )
+            // Run cross-plane sealing while the listener generation lock is
+            // still held. A concurrent restart therefore cannot open a new
+            // listener and then have this old terminal callback seal its body,
+            // connection, or callback ledgers underneath it.
+            beforeRelease(completion)
+            guard entries.isEmpty else { return (completion, []) }
+            let waiters = Array(drainWaiters.values)
+            drainWaiters.removeAll(keepingCapacity: false)
+            return (completion, waiters)
+        }
+        for waiter in result.1 { waiter.resolve(true) }
+        return result.0
+    }
+
+    /// Seal before cancellation so a synchronous terminal callback can see the
+    /// cancellation as expected and never report an operator-requested stop as
+    /// an unexpected listener failure.
+    func sealAndCancel() {
+        let result: (listeners: [NWListener], waiters: [OTLPJoinDeadlineRace]) = lock.withLock {
+            accepting = false
+            for id in Array(entries.keys) {
+                entries[id]?.cancellationRequested = true
+            }
+            let toCancel = entries.values.map(\.listener)
+            let neverStartedIDs = entries
+                .filter { !$0.value.started }
+                .map(\.key)
+            for id in neverStartedIDs where entries.removeValue(forKey: id) != nil {
+                completed &+= 1
+            }
+            guard entries.isEmpty else { return (toCancel, []) }
+            let waiters = Array(drainWaiters.values)
+            drainWaiters.removeAll(keepingCapacity: false)
+            return (toCancel, waiters)
+        }
+        for listener in result.listeners { listener.cancel() }
+        for waiter in result.waiters { waiter.resolve(true) }
+    }
+
+    func waitForDrain(deadline: TimeInterval) async -> Bool {
+        if lock.withLock({ entries.isEmpty }) { return true }
+        return await withCheckedContinuation { continuation in
+            let race = OTLPJoinDeadlineRace(continuation)
+            let waiterID: UInt64? = lock.withLock {
+                guard !entries.isEmpty else { return nil }
+                nextDrainWaiterID &+= 1
+                drainWaiters[nextDrainWaiterID] = race
+                return nextDrainWaiterID
+            }
+            guard let waiterID else {
+                race.resolve(true)
+                return
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + .nanoseconds(
+                    OTLPDeadline.nanoseconds(deadline)
+                )
+            ) { [weak self] in
+                self?.timeOutDrainWaiter(waiterID)
+            }
+        }
+    }
+
+    private func timeOutDrainWaiter(_ id: UInt64) {
+        let waiter = lock.withLock { drainWaiters.removeValue(forKey: id) }
+        waiter?.resolve(false)
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                accepting: accepting,
+                accepted: accepted,
+                completed: completed,
+                rejectedAfterSeal: rejectedAfterSeal,
+                active: entries.count,
+                ready: entries.values.lazy.filter { $0.ready }.count
+            )
+        }
+    }
+}
+
 /// Thread-safe bridge from Network.framework's callback-driven listener state
 /// to `OTLPReceiver.start()`'s async readiness contract. Construction success
 /// is not bind success: `NWListener.start(queue:)` returns before the socket is
@@ -161,6 +664,10 @@ final class OTLPListenerStartupGate: @unchecked Sendable {
         }
     }
 
+    func cancel() {
+        resolve(.cancelled)
+    }
+
     private func resolve(_ newOutcome: Outcome) {
         let continuation: CheckedContinuation<Outcome, Never>?
         let timeout: DispatchWorkItem?
@@ -203,12 +710,227 @@ public actor OTLPReceiver {
     /// half-open sockets — each pinning a file descriptor under the
     /// 10 s slow-loris deadline. 64 covers any plausible legitimate
     /// burst (Claude Code spans rarely exceed ~10 simultaneous) with
-    /// headroom; excess connections close immediately with 503.
+    /// headroom; excess connections are cancelled before they start.
     public static let maxConcurrentConnections: Int = 64
+    /// Network.framework receive callbacks only enqueue tiny actor bookkeeping
+    /// hops here. The connection cap makes their natural concurrency small;
+    /// this larger independent ceiling keeps malformed-request bursts bounded
+    /// without letting optional telemetry compete with body persistence.
+    public static let maxCallbackTasks: Int = 256
     /// `NWListener.start(queue:)` is asynchronous. Refuse to advertise the
     /// receiver as running unless Network.framework reaches `.ready` within a
     /// bounded interval.
     public static let startupTimeoutSeconds: Double = 5.0
+    /// Shutdown first cancels listener/connection/deadline ownership, then gives
+    /// already-admitted decode/persist work this long to acknowledge
+    /// cancellation or finish. A miss is returned and retained as explicitly
+    /// unclean telemetry; it is never relabelled as a successful stop.
+    public static let shutdownJoinTimeoutSeconds: Double = 5.0
+
+    /// Synchronous ownership boundary between Network.framework callbacks and
+    /// the receiver actor. A callback registers its connection here before it
+    /// launches an actor hop. Consequently `stop()` can seal and cancel even a
+    /// connection whose actor task has not started yet.
+    private final class ConnectionRegistry: @unchecked Sendable {
+        struct Entry: @unchecked Sendable {
+            let id: UInt64
+            let generation: UInt64
+            let connection: NWConnection
+            let buffer: ConnectionBuffer
+            var started: Bool
+        }
+
+        enum Admission {
+            case accepted(Entry)
+            case rejectedAfterSeal
+            case rejectedAtCapacity
+        }
+
+        struct Snapshot: Sendable {
+            let accepting: Bool
+            let accepted: UInt64
+            let completed: UInt64
+            let rejectedAfterSeal: UInt64
+            let rejectedAtCapacity: UInt64
+            let active: Int
+        }
+
+        private let lock = NSLock()
+        private let maximumConnections: Int
+        private var accepting = false
+        private var generation: UInt64 = 0
+        private var nextID: UInt64 = 0
+        private var entries: [UInt64: Entry] = [:]
+        private var accepted: UInt64 = 0
+        private var completed: UInt64 = 0
+        private var rejectedAfterSeal: UInt64 = 0
+        private var rejectedAtCapacity: UInt64 = 0
+        private var nextDrainWaiterID: UInt64 = 0
+        private var drainWaiters: [UInt64: OTLPJoinDeadlineRace] = [:]
+
+        init(maximumConnections: Int) {
+            self.maximumConnections = max(1, maximumConnections)
+        }
+
+        func open() -> UInt64? {
+            lock.withLock {
+                guard !accepting, entries.isEmpty else { return nil }
+                generation &+= 1
+                accepting = true
+                return generation
+            }
+        }
+
+        func admit(
+            _ connection: NWConnection,
+            generation expectedGeneration: UInt64
+        ) -> Admission {
+            lock.withLock {
+                guard accepting, generation == expectedGeneration else {
+                    rejectedAfterSeal &+= 1
+                    return .rejectedAfterSeal
+                }
+                guard entries.count < maximumConnections else {
+                    rejectedAtCapacity &+= 1
+                    return .rejectedAtCapacity
+                }
+                nextID &+= 1
+                let entry = Entry(
+                    id: nextID,
+                    generation: generation,
+                    connection: connection,
+                    buffer: ConnectionBuffer(
+                        connectionID: nextID,
+                        connectionGeneration: generation
+                    ),
+                    started: false
+                )
+                entries[entry.id] = entry
+                accepted &+= 1
+                return .accepted(entry)
+            }
+        }
+
+        func contains(_ id: UInt64) -> Bool {
+            lock.withLock { entries[id] != nil }
+        }
+
+        func isAccepting(generation expectedGeneration: UInt64) -> Bool {
+            lock.withLock { accepting && generation == expectedGeneration }
+        }
+
+        /// Called only after the terminal state handler and deadline are
+        /// installed. Holding the registry lock across Network.framework's
+        /// asynchronous/non-throwing start call makes the start/cancel boundary
+        /// exact: shutdown either removes a never-started entry or cancels one
+        /// whose callbacks are fully armed, never both.
+        func start(_ id: UInt64, queue: DispatchQueue) -> Bool {
+            lock.lock()
+            guard accepting, var entry = entries[id] else {
+                lock.unlock()
+                return false
+            }
+            entry.started = true
+            entries[id] = entry
+            entry.connection.start(queue: queue)
+            lock.unlock()
+            return true
+        }
+
+        /// Serialize the final response registration with shutdown sealing.
+        /// Once `sealAndCancel()` acquires this lock no later send can begin.
+        func performIfActive(_ id: UInt64, _ operation: () -> Void) -> Bool {
+            lock.withLock {
+                guard accepting, entries[id] != nil else { return false }
+                operation()
+                return true
+            }
+        }
+
+        func complete(_ id: UInt64) {
+            let result: (Entry?, [OTLPJoinDeadlineRace]) = lock.withLock {
+                guard let removed = entries.removeValue(forKey: id) else {
+                    return (nil, [])
+                }
+                completed &+= 1
+                guard entries.isEmpty else { return (removed, []) }
+                let waiters = Array(drainWaiters.values)
+                drainWaiters.removeAll(keepingCapacity: false)
+                return (removed, waiters)
+            }
+            result.0?.buffer.seal()
+            for waiter in result.1 { waiter.resolve(true) }
+        }
+
+        /// Seal first and capture the exact owned set under the same lock, then
+        /// cancel timers and sockets outside it. Never-started connections are
+        /// terminal at cancellation; started connections remain retained until
+        /// their Network.framework terminal callback or the bounded join times
+        /// out, so an in-flight socket cannot disappear from telemetry.
+        func sealAndCancel() {
+            let result: (cancel: [Entry], completedWaiters: [OTLPJoinDeadlineRace]) = lock.withLock {
+                accepting = false
+                let toCancel = Array(entries.values)
+                let neverStartedIDs = entries.values
+                    .filter { !$0.started }
+                    .map(\.id)
+                for id in neverStartedIDs where entries.removeValue(forKey: id) != nil {
+                    completed &+= 1
+                }
+                guard entries.isEmpty else { return (toCancel, []) }
+                let waiters = Array(drainWaiters.values)
+                drainWaiters.removeAll(keepingCapacity: false)
+                return (toCancel, waiters)
+            }
+            for entry in result.cancel {
+                entry.buffer.seal()
+                entry.connection.cancel()
+            }
+            for waiter in result.completedWaiters { waiter.resolve(true) }
+        }
+
+        func waitForDrain(deadline: TimeInterval) async -> Bool {
+            if lock.withLock({ entries.isEmpty }) { return true }
+            return await withCheckedContinuation { continuation in
+                let race = OTLPJoinDeadlineRace(continuation)
+                let waiterID: UInt64? = lock.withLock {
+                    guard !entries.isEmpty else { return nil }
+                    nextDrainWaiterID &+= 1
+                    drainWaiters[nextDrainWaiterID] = race
+                    return nextDrainWaiterID
+                }
+                guard let waiterID else {
+                    race.resolve(true)
+                    return
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: .now() + .nanoseconds(
+                        OTLPDeadline.nanoseconds(deadline)
+                    )
+                ) {
+                    self.timeOutDrainWaiter(waiterID)
+                }
+            }
+        }
+
+        private func timeOutDrainWaiter(_ id: UInt64) {
+            let waiter = lock.withLock { drainWaiters.removeValue(forKey: id) }
+            waiter?.resolve(false)
+        }
+
+        func snapshot() -> Snapshot {
+            lock.withLock {
+                Snapshot(
+                    accepting: accepting,
+                    accepted: accepted,
+                    completed: completed,
+                    rejectedAfterSeal: rejectedAfterSeal,
+                    rejectedAtCapacity: rejectedAtCapacity,
+                    active: entries.count
+                )
+            }
+        }
+    }
 
     // MARK: - State
 
@@ -217,13 +939,27 @@ public actor OTLPReceiver {
     /// `.ready`. Kept separate so `isRunning` cannot lie during startup and so
     /// `stop()` can cancel a concurrent start while the actor is re-entrant.
     private var startingListener: NWListener?
+    private var startingGate: OTLPListenerStartupGate?
     private let port: UInt16
     private var metrics = OTLPReceiverMetrics()
     private let logger = Logger(subsystem: "com.maccrab.network", category: "otlp-receiver")
-    /// Open-connection counter. Incremented on accept, decremented on
-    /// every connection-end path (HTTP response sent, error, cancel,
-    /// deadline). Compared against `maxConcurrentConnections` at accept.
-    private var activeConnections: Int = 0
+    nonisolated private let listeners = OTLPListenerLifecycle()
+    nonisolated private let connections = ConnectionRegistry(
+        maximumConnections: OTLPReceiver.maxConcurrentConnections
+    )
+    nonisolated private let bodyTasks = OTLPBodyTaskLifecycle(
+        maximumInFlight: OTLPReceiver.maxConcurrentConnections
+    )
+    nonisolated private let callbackTasks = OTLPBodyTaskLifecycle(
+        maximumInFlight: OTLPReceiver.maxCallbackTasks
+    )
+    /// Actor re-entrancy allows start/stop joins to overlap while awaiting
+    /// Network.framework or storage. A new start is forbidden until every older
+    /// lifecycle operation has returned, so one generation cannot resurrect
+    /// behind another caller's shutdown snapshot.
+    private var lifecycleOperationsInProgress: Int = 0
+    private var lastShutdownClean: Bool?
+    private var shutdownTimeouts: UInt64 = 0
 
     /// Optional `TraceStore`. When nil (PR-3a behaviour) the receiver
     /// decodes-and-drops; when set (PR-3b) it decodes → sanitises →
@@ -293,7 +1029,7 @@ public actor OTLPReceiver {
         self.onTerminalFailure = onTerminalFailure
     }
 
-    public var isRunning: Bool { listener != nil }
+    public var isRunning: Bool { listeners.snapshot().ready == 1 }
 
     public func metricsSnapshot() -> OTLPReceiverMetrics { metrics }
 
@@ -303,7 +1039,47 @@ public actor OTLPReceiver {
     /// panels. Counts strictly the connections currently held; not a
     /// monotonic accept counter (use `metrics.requestsAccepted` for
     /// that).
-    public func activeConnectionCount() -> Int { activeConnections }
+    public func activeConnectionCount() -> Int { connections.snapshot().active }
+
+    public func lifecycleSnapshot() -> OTLPReceiverLifecycleSnapshot {
+        let listenerSnapshot = listeners.snapshot()
+        let connectionSnapshot = connections.snapshot()
+        let bodySnapshot = bodyTasks.snapshot()
+        let callbackSnapshot = callbackTasks.snapshot()
+        return OTLPReceiverLifecycleSnapshot(
+            acceptingListeners: listenerSnapshot.accepting,
+            listenersAccepted: listenerSnapshot.accepted,
+            listenersCompleted: listenerSnapshot.completed,
+            listenersRejectedAfterSeal: listenerSnapshot.rejectedAfterSeal,
+            activeListeners: listenerSnapshot.active,
+            readyListeners: listenerSnapshot.ready,
+            acceptingConnections: connectionSnapshot.accepting,
+            connectionsAccepted: connectionSnapshot.accepted,
+            connectionsCompleted: connectionSnapshot.completed,
+            connectionsRejectedAfterSeal: connectionSnapshot.rejectedAfterSeal,
+            connectionsRejectedAtCapacity: connectionSnapshot.rejectedAtCapacity,
+            activeConnections: connectionSnapshot.active,
+            acceptingBodyTasks: bodySnapshot.accepting,
+            bodyTasksAccepted: bodySnapshot.accepted,
+            bodyTasksCompleted: bodySnapshot.completed,
+            bodyTasksCancelled: bodySnapshot.cancelled,
+            bodyTasksRejected: bodySnapshot.rejected,
+            bodyTaskCancellationRequests: bodySnapshot.cancellationRequests,
+            bodyTasksInFlight: bodySnapshot.inFlight,
+            maximumBodyTasks: bodySnapshot.maximumInFlight,
+            acceptingCallbackTasks: callbackSnapshot.accepting,
+            callbackTasksAccepted: callbackSnapshot.accepted,
+            callbackTasksCompleted: callbackSnapshot.completed,
+            callbackTasksCancelled: callbackSnapshot.cancelled,
+            callbackTasksRejected: callbackSnapshot.rejected,
+            callbackTaskCancellationRequests: callbackSnapshot.cancellationRequests,
+            callbackTasksInFlight: callbackSnapshot.inFlight,
+            maximumCallbackTasks: callbackSnapshot.maximumInFlight,
+            lifecycleOperationsInProgress: lifecycleOperationsInProgress,
+            lastShutdownClean: lastShutdownClean,
+            shutdownTimeouts: shutdownTimeouts
+        )
+    }
 
     // MARK: - Lifecycle
 
@@ -311,9 +1087,19 @@ public actor OTLPReceiver {
     /// `.ready`; asynchronous bind failure/cancellation/timeout throws instead
     /// of letting DaemonSetup persist a false `running: true` status.
     public func start() async throws {
-        guard listener == nil, startingListener == nil else {
+        let listenerState = listeners.snapshot()
+        guard listenerState.active == 0,
+              lifecycleOperationsInProgress == 0 else {
             throw OTLPReceiverError.alreadyRunning
         }
+        // An unexpected terminal callback intentionally does not need an actor
+        // hop to relinquish the port. Reconcile its now-stale presentation
+        // references before opening the next generation.
+        listener = nil
+        startingListener = nil
+        startingGate = nil
+        lifecycleOperationsInProgress += 1
+        defer { lifecycleOperationsInProgress -= 1 }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw OTLPReceiverError.invalidPort(Int(port))
         }
@@ -347,22 +1133,152 @@ public actor OTLPReceiver {
         } catch {
             throw OTLPReceiverError.bindFailed("\(error)")
         }
+        // Open every admission plane before Network.framework can publish a
+        // connection callback. A prior unclean stop with a still-running body
+        // task refuses restart rather than mixing lifecycle generations.
+        guard let listenerGeneration = listeners.open() else {
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(
+                "previous listener ownership has not terminated"
+            )
+        }
+        guard bodyTasks.open() else {
+            listeners.sealAndCancel()
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(
+                "previous body-processing work has not terminated"
+            )
+        }
+        guard callbackTasks.open() else {
+            listeners.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(
+                "previous callback work has not terminated"
+            )
+        }
+        guard let connectionGeneration = connections.open() else {
+            listeners.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            callbackTasks.sealAndCancel()
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed(
+                "previous connection ownership has not terminated"
+            )
+        }
+        lastShutdownClean = nil
+        let connectionRegistry = connections
         listener.newConnectionHandler = { [weak self] conn in
             // Verify peer is loopback before doing any work.
             guard let self else { conn.cancel(); return }
-            Task { await self.handleNewConnection(conn) }
+            guard Self.isLoopback(conn.endpoint) else {
+                conn.cancel()
+                self.submitCallbackActorHop {
+                    await self.recordNonLoopbackRejection(
+                        generation: connectionGeneration
+                    )
+                }
+                return
+            }
+            switch connectionRegistry.admit(
+                conn,
+                generation: connectionGeneration
+            ) {
+            case .accepted(let entry):
+                self.handleNewConnection(entry)
+            case .rejectedAfterSeal:
+                // Stop owns the seal; never start a connection delivered after
+                // it, even if Network.framework had already queued the callback.
+                conn.cancel()
+            case .rejectedAtCapacity:
+                conn.cancel()
+                self.submitCallbackActorHop {
+                    await self.recordConnectionCapacityRejection(
+                        generation: connectionGeneration
+                    )
+                }
+            }
         }
         let startupGate = OTLPListenerStartupGate()
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            startupGate.observe(state)
-            guard let self, let listener else { return }
-            Task { await self.handleListenerState(state, source: listener) }
+        let listenerLifecycle = listeners
+        let bodyTaskLifecycle = bodyTasks
+        let callbackTaskLifecycle = callbackTasks
+        let terminalFailureCallback = onTerminalFailure
+        listener.stateUpdateHandler = { [weak listener, weak listenerLifecycle] state in
+            switch state {
+            case .failed(let error):
+                guard let listener,
+                      let completion = listenerLifecycle?.complete(
+                        listener,
+                        beforeRelease: { _ in
+                            callbackTaskLifecycle.sealAndCancel()
+                            connectionRegistry.sealAndCancel()
+                            bodyTaskLifecycle.sealAndCancel()
+                        }
+                      )
+                else {
+                    startupGate.observe(state)
+                    return
+                }
+                // Terminal socket ownership closes every downstream admission
+                // plane synchronously, before the startup continuation or any
+                // status callback can run.
+                startupGate.observe(state)
+                if completion.wasReady, !completion.cancellationWasRequested {
+                    terminalFailureCallback?(error.localizedDescription)
+                }
+            case .cancelled:
+                guard let listener,
+                      let completion = listenerLifecycle?.complete(
+                        listener,
+                        beforeRelease: { _ in
+                            callbackTaskLifecycle.sealAndCancel()
+                            connectionRegistry.sealAndCancel()
+                            bodyTaskLifecycle.sealAndCancel()
+                        }
+                      )
+                else {
+                    startupGate.observe(state)
+                    return
+                }
+                startupGate.observe(state)
+                if completion.wasReady, !completion.cancellationWasRequested {
+                    terminalFailureCallback?("listener cancelled after readiness")
+                }
+            default:
+                startupGate.observe(state)
+            }
+        }
+        guard listeners.register(listener, generation: listenerGeneration) else {
+            listeners.sealAndCancel()
+            connections.sealAndCancel()
+            callbackTasks.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            listener.cancel()
+            throw OTLPReceiverError.bindFailed("listener admission closed before start")
         }
         startingListener = listener
-        let outcome = await startupGate.wait(
-            timeoutSeconds: Self.startupTimeoutSeconds
-        ) {
-            listener.start(queue: .global(qos: .utility))
+        startingGate = startupGate
+        let outcome = await withTaskCancellationHandler {
+            await startupGate.wait(
+                timeoutSeconds: Self.startupTimeoutSeconds
+            ) {
+                if !listenerLifecycle.start(
+                    listener,
+                    generation: listenerGeneration,
+                    queue: .global(qos: .utility)
+                ) {
+                    startupGate.cancel()
+                }
+            }
+        } onCancel: {
+            // Task cancellation must be an actual ownership transition, not a
+            // five-second wait that can still publish a ready listener.
+            callbackTaskLifecycle.sealAndCancel()
+            connectionRegistry.sealAndCancel()
+            bodyTaskLifecycle.sealAndCancel()
+            listenerLifecycle.sealAndCancel()
+            startupGate.cancel()
         }
 
         switch outcome {
@@ -370,22 +1286,64 @@ public actor OTLPReceiver {
             // `stop()` can run while this actor is suspended in `wait`.
             // Never resurrect a listener that was cancelled during startup.
             guard startingListener === listener else {
+                if startingGate === startupGate { startingGate = nil }
+                connections.sealAndCancel()
+                bodyTasks.sealAndCancel()
+                callbackTasks.sealAndCancel()
+                listeners.sealAndCancel()
                 listener.cancel()
+                _ = await joinOwnedWork(
+                    deadline: Self.shutdownJoinTimeoutSeconds
+                )
                 throw OTLPReceiverError.bindFailed("listener cancelled before readiness")
             }
             startingListener = nil
+            if startingGate === startupGate { startingGate = nil }
             self.listener = listener
-            onReady?()
+            guard listeners.publishReady(
+                listener,
+                generation: listenerGeneration,
+                onReady: onReady
+            ) else {
+                self.listener = nil
+                connections.sealAndCancel()
+                bodyTasks.sealAndCancel()
+                callbackTasks.sealAndCancel()
+                listeners.sealAndCancel()
+                listener.cancel()
+                _ = await joinOwnedWork(
+                    deadline: Self.shutdownJoinTimeoutSeconds
+                )
+                throw OTLPReceiverError.bindFailed(
+                    "listener terminated before readiness publication"
+                )
+            }
         case .failed(let message):
             if startingListener === listener { startingListener = nil }
-            listener.cancel()
+            if startingGate === startupGate { startingGate = nil }
+            connections.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            callbackTasks.sealAndCancel()
+            listeners.sealAndCancel()
+            _ = await joinOwnedWork(deadline: Self.shutdownJoinTimeoutSeconds)
             throw OTLPReceiverError.bindFailed(message)
         case .cancelled:
             if startingListener === listener { startingListener = nil }
+            if startingGate === startupGate { startingGate = nil }
+            connections.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            callbackTasks.sealAndCancel()
+            listeners.sealAndCancel()
+            _ = await joinOwnedWork(deadline: Self.shutdownJoinTimeoutSeconds)
             throw OTLPReceiverError.bindFailed("listener cancelled before readiness")
         case .timedOut:
             if startingListener === listener { startingListener = nil }
-            listener.cancel()
+            if startingGate === startupGate { startingGate = nil }
+            connections.sealAndCancel()
+            bodyTasks.sealAndCancel()
+            callbackTasks.sealAndCancel()
+            listeners.sealAndCancel()
+            _ = await joinOwnedWork(deadline: Self.shutdownJoinTimeoutSeconds)
             throw OTLPReceiverError.bindFailed(
                 "listener did not reach ready within \(Self.startupTimeoutSeconds) seconds"
             )
@@ -393,80 +1351,94 @@ public actor OTLPReceiver {
         logger.notice("OTLPReceiver started on 127.0.0.1:\(self.port, privacy: .public)")
     }
 
-    public func stop() {
-        startingListener?.cancel()
+    /// Seal both admission planes, cancel every retained listener, connection,
+    /// and deadline timer, then bounded-join every accepted body task. The
+    /// return value is the exact post-join ledger; callers must treat
+    /// `cleanlyStopped == false` as an unclean shutdown rather than assuming
+    /// cancellation was completion.
+    @discardableResult
+    public func stop(
+        joinTimeoutSeconds: Double = OTLPReceiver.shutdownJoinTimeoutSeconds
+    ) async -> OTLPReceiverLifecycleSnapshot {
+        lifecycleOperationsInProgress += 1
+        defer { lifecycleOperationsInProgress -= 1 }
+        // Ordering is load-bearing: callback admission closes before any handle
+        // is cancelled or detached from ownership.
+        callbackTasks.sealAndCancel()
+        connections.sealAndCancel()
+        bodyTasks.sealAndCancel()
+        listeners.sealAndCancel()
+        startingGate?.cancel()
+        startingGate = nil
         startingListener = nil
-        listener?.cancel()
         listener = nil
-        logger.notice("OTLPReceiver stopped")
+        let joined = await joinOwnedWork(deadline: joinTimeoutSeconds)
+        // Reassert this caller's result immediately before taking its return
+        // snapshot. Concurrent signal/reload stop callers may be awaiting the
+        // same owned prefix with a different deadline.
+        lastShutdownClean = joined
+        let snapshot = lifecycleSnapshot()
+        if joined, snapshot.cleanlyStopped {
+            logger.notice("OTLPReceiver stopped cleanly")
+        } else {
+            logger.error(
+                "OTLPReceiver stop was unclean: \(snapshot.activeListeners, privacy: .public) listener(s), \(snapshot.activeConnections, privacy: .public) connection(s), \(snapshot.callbackTasksInFlight, privacy: .public) callback task(s), \(snapshot.bodyTasksInFlight, privacy: .public) body task(s), \(snapshot.lifecycleOperationsInProgress, privacy: .public) lifecycle operation(s) in progress"
+            )
+        }
+        return snapshot
     }
 
-    private func handleListenerState(_ state: NWListener.State, source: NWListener) {
-        switch state {
-        case .failed(let err):
-            logger.error("OTLPReceiver listener failed: \(err.localizedDescription, privacy: .public)")
-            // A cancelled old listener can deliver its terminal callback after
-            // a replacement has reached `.ready`. Clear only the listener that
-            // emitted this state; never erase the replacement's ownership.
-            let failedAfterReadiness = listener === source
-            if failedAfterReadiness { listener = nil }
-            if startingListener === source { startingListener = nil }
-            if failedAfterReadiness {
-                onTerminalFailure?(err.localizedDescription)
-            }
-        case .cancelled:
-            let cancelledAfterReadiness = listener === source
-            if cancelledAfterReadiness { listener = nil }
-            if startingListener === source { startingListener = nil }
-            if cancelledAfterReadiness {
-                onTerminalFailure?("listener cancelled after readiness")
-            }
-        default:
-            break
-        }
+    private func joinOwnedWork(deadline: TimeInterval) async -> Bool {
+        async let listenersJoined = listeners.waitForDrain(deadline: deadline)
+        async let connectionsJoined = connections.waitForDrain(deadline: deadline)
+        async let callbackTasksJoined = callbackTasks.shutdown(deadline: deadline)
+        async let bodyTasksJoined = bodyTasks.shutdown(deadline: deadline)
+        let (listenerResult, connectionResult, callbackResult, bodyResult) = await (
+            listenersJoined,
+            connectionsJoined,
+            callbackTasksJoined,
+            bodyTasksJoined
+        )
+        let clean = listenerResult
+            && connectionResult
+            && callbackResult
+            && bodyResult
+        lastShutdownClean = clean
+        if !clean { shutdownTimeouts &+= 1 }
+        return clean
     }
 
     // MARK: - Connection handling
 
-    private func handleNewConnection(_ conn: NWConnection) {
-        // Non-loopback rejection. Network framework does sometimes deliver
-        // a remote endpoint string we have to inspect to be sure.
-        if !Self.isLoopback(conn.endpoint) {
-            metrics.requestsRejectedNonLoopback &+= 1
+    /// The only permitted bridge from a Network.framework/dispatch callback to
+    /// actor-isolated bookkeeping. Admission publishes the task handle before
+    /// it can run; shutdown seals and bounded-joins this ledger.
+    @discardableResult
+    nonisolated private func submitCallbackActorHop(
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Bool {
+        callbackTasks.submit(operation)
+    }
+
+    nonisolated private func handleNewConnection(_ entry: ConnectionRegistry.Entry) {
+        let conn = entry.connection
+        let connectionID = entry.id
+        // Stop may have synchronously detached/cancelled this connection while
+        // Network.framework was delivering the callback. The registry is the
+        // authority for whether any network work may begin.
+        guard connections.contains(connectionID) else {
             conn.cancel()
             return
         }
-        // v1.9.0 (audit Sec-M2): connection-count cap. A local agent
-        // could otherwise keep 1000+ half-open sockets pinned under
-        // the slow-loris deadline. Connections past the cap get a
-        // 503 response and immediate close; metric `requestsBadRequest`
-        // doubles as the "too-many-connections" counter.
-        if activeConnections >= Self.maxConcurrentConnections {
-            metrics.requestsBadRequest &+= 1
-            logger.warning("OTLPReceiver: connection cap reached (\(Self.maxConcurrentConnections, privacy: .public)) — refusing")
-            // No state handler / no increment — `respond` cancels and
-            // `releaseConnection` is never tapped.
-            conn.start(queue: .global(qos: .utility))
-            Self.respond(conn, status: 503, body: "too many concurrent connections")
-            return
-        }
-        activeConnections += 1
-        // v1.9.0 (audit Sec-M2): single release point. Attach a state
-        // update handler that decrements the counter exactly once on
-        // terminal cancel/fail. Covers every exit path below — receive
-        // errors, validation rejects, deadline timer, post-respond
-        // cancel — without scattering manual decrements through 16
-        // callsites. Set BEFORE start so the handler is in place even
-        // if the connection transitions immediately.
-        conn.stateUpdateHandler = { [weak self] state in
+        let connectionRegistry = connections
+        conn.stateUpdateHandler = { state in
             switch state {
             case .cancelled, .failed:
-                Task { await self?.releaseConnection() }
+                connectionRegistry.complete(connectionID)
             default:
                 break
             }
         }
-        conn.start(queue: .global(qos: .utility))
         // v1.9 audit (Phase-1.1): a class-wrapped buffer keeps the
         // accumulator mutable across closure-captures so chunk appends
         // are amortized O(1) instead of the prior recursive
@@ -475,33 +1447,87 @@ public actor OTLPReceiver {
         // Buffer also carries the per-connection slow-loris deadline
         // (Phase-1.4) — a oneshot timer cancels the connection if the
         // full request hasn't been read by then.
-        let buffer = ConnectionBuffer()
-        buffer.startDeadline(on: conn, after: Self.connectionDeadlineSeconds, receiver: self)
-        Self.receiveRequestHead(on: conn, buffer: buffer, receiver: self)
+        entry.buffer.startDeadline(
+            on: conn,
+            connectionID: connectionID,
+            connectionGeneration: entry.generation,
+            after: Self.connectionDeadlineSeconds,
+            receiver: self
+        )
+        guard connectionRegistry.start(
+            connectionID,
+            queue: .global(qos: .utility)
+        ) else {
+            entry.buffer.seal()
+            conn.cancel()
+            return
+        }
+        Self.receiveRequestHead(on: conn, buffer: entry.buffer, receiver: self)
     }
 
-    /// Decrement the active-connection counter on terminal exit. Used
-    /// by every code path that closes a connection — receive errors,
-    /// validation rejects, deadline timer, and the post-respond
-    /// completion handler in `respond(...)`.
-    fileprivate func releaseConnection() {
-        if activeConnections > 0 {
-            activeConnections -= 1
+    private func recordNonLoopbackRejection(generation: UInt64) {
+        guard connections.isAccepting(generation: generation) else { return }
+        metrics.requestsRejectedNonLoopback &+= 1
+    }
+
+    private func recordConnectionCapacityRejection(generation: UInt64) {
+        guard connections.isAccepting(generation: generation) else { return }
+        metrics.requestsBadRequest &+= 1
+        logger.warning(
+            "OTLPReceiver: connection cap reached (\(Self.maxConcurrentConnections, privacy: .public)) — refusing"
+        )
+    }
+
+    fileprivate func connectionDeadlineDidFire(
+        _ connectionID: UInt64,
+        generation: UInt64
+    ) {
+        // A deadline callback already queued when stop cancelled its timer must
+        // not mutate post-shutdown telemetry or claim a stop-induced cancel was
+        // a slow-loris expiry.
+        guard connections.isAccepting(generation: generation) else { return }
+        metrics.connectionDeadlineExceeded &+= 1
+        logger.debug("connection \(connectionID, privacy: .public) deadline exceeded")
+    }
+
+    nonisolated private func respondIfConnectionIsActive(
+        _ conn: NWConnection,
+        connectionID: UInt64,
+        result: OTLPReceiverIngestResult
+    ) {
+        guard !Task.isCancelled,
+              connections.performIfActive(connectionID, {
+                Self.respond(conn, status: result.status, body: result.body)
+              }) else {
+            conn.cancel()
+            return
         }
     }
 
     /// Reference-typed scratch buffer for one connection. Captured by
     /// reference into NWConnection callbacks so mutations are in-place.
     /// Marked `@unchecked Sendable` because NWConnection serialises its
-    /// own `receive` callbacks for a given connection — there's no
-    /// concurrent mutation of `data` on the main path. The deadline
-    /// timer fires on a separate queue but only ever flips `timedOut`
-    /// from false to true and cancels the connection; receive
+    /// own `receive` callbacks for a given connection — there's no concurrent
+    /// mutation of `data` on the main path. Deadline state is separately
+    /// lock-protected because its timer fires on another queue; receive
     /// callbacks observe `timedOut` and bail without touching `data`.
     fileprivate final class ConnectionBuffer: @unchecked Sendable {
+        let connectionID: UInt64
+        let connectionGeneration: UInt64
         var data = Data()
+        private let deadlineLock = NSLock()
         private var deadlineTimer: DispatchSourceTimer?
-        var timedOut: Bool = false
+        private var didTimeOut = false
+        private var isSealed = false
+
+        var inactive: Bool {
+            deadlineLock.withLock { didTimeOut || isSealed }
+        }
+
+        init(connectionID: UInt64, connectionGeneration: UInt64) {
+            self.connectionID = connectionID
+            self.connectionGeneration = connectionGeneration
+        }
 
         /// v1.9.0 (audit Stab-M3): defensive deinit. Apple's
         /// DispatchSourceTimer requires `cancel()` before deallocating
@@ -510,27 +1536,69 @@ public actor OTLPReceiver {
         /// a future code change that misses one would crash on dealloc.
         /// `cancel()` is idempotent — safe to call after a prior cancel.
         deinit {
-            deadlineTimer?.cancel()
+            cancelDeadline()
         }
 
-        func startDeadline(on conn: NWConnection, after seconds: Double, receiver: OTLPReceiver) {
+        func startDeadline(
+            on conn: NWConnection,
+            connectionID: UInt64,
+            connectionGeneration: UInt64,
+            after seconds: Double,
+            receiver: OTLPReceiver
+        ) {
             let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
             timer.schedule(deadline: .now() + seconds)
             timer.setEventHandler { [weak self, weak conn, weak receiver] in
                 guard let self else { return }
-                self.timedOut = true
-                Task { await receiver?.bumpDeadlineExceeded() }
+                let shouldFire = self.deadlineLock.withLock {
+                    guard self.deadlineTimer != nil,
+                          !self.didTimeOut,
+                          !self.isSealed else {
+                        return false
+                    }
+                    self.didTimeOut = true
+                    return true
+                }
+                guard shouldFire else { return }
+                receiver?.submitCallbackActorHop { [weak receiver] in
+                    guard !Task.isCancelled else { return }
+                    await receiver?.connectionDeadlineDidFire(
+                        connectionID,
+                        generation: connectionGeneration
+                    )
+                }
                 conn?.cancel()
             }
+            deadlineLock.withLock {
+                didTimeOut = false
+                deadlineTimer = timer
+            }
             timer.resume()
-            self.deadlineTimer = timer
         }
 
         /// Cancel the timer when we hand the body off to handleBody —
         /// the work after that is decode/persist, not network-bound.
         func cancelDeadline() {
-            deadlineTimer?.cancel()
-            deadlineTimer = nil
+            let timer: DispatchSourceTimer? = deadlineLock.withLock {
+                let result = deadlineTimer
+                deadlineTimer = nil
+                return result
+            }
+            timer?.cancel()
+        }
+
+        /// Terminal connection ownership seals the parser as well as its
+        /// timer. A receive completion that was already queued when shutdown
+        /// cancelled the socket can then neither recurse into another receive
+        /// nor send a response after the clean-stop boundary.
+        func seal() {
+            let timer: DispatchSourceTimer? = deadlineLock.withLock {
+                isSealed = true
+                let result = deadlineTimer
+                deadlineTimer = nil
+                return result
+            }
+            timer?.cancel()
         }
     }
 
@@ -566,9 +1634,15 @@ public actor OTLPReceiver {
         receiver: OTLPReceiver
     ) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-            if buffer.timedOut { return }
+            if buffer.inactive { return }
             if let error {
-                Task { await receiver.completeWithLog("recv head failed: \(error)") }
+                receiver.submitCallbackActorHop { [weak receiver] in
+                    guard !Task.isCancelled else { return }
+                    await receiver?.completeWithLog(
+                        "recv head failed: \(error)",
+                        generation: buffer.connectionGeneration
+                    )
+                }
                 buffer.cancelDeadline()
                 conn.cancel()
                 return
@@ -582,7 +1656,13 @@ public actor OTLPReceiver {
             }
             buffer.data.append(chunk)
             if buffer.data.count > 256 * 1024 {
-                Task { await receiver.bumpBadRequest("request head too large") }
+                receiver.submitCallbackActorHop { [weak receiver] in
+                    guard !Task.isCancelled else { return }
+                    await receiver?.bumpBadRequest(
+                        "request head too large",
+                        generation: buffer.connectionGeneration
+                    )
+                }
                 buffer.cancelDeadline()
                 Self.respond(conn, status: 413, body: "head too large")
                 return
@@ -617,21 +1697,39 @@ public actor OTLPReceiver {
         receiver: OTLPReceiver
     ) {
         guard let headStr = String(data: head, encoding: .utf8) else {
-            Task { await receiver.bumpBadRequest("non-utf8 head") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "non-utf8 head",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 400, body: "bad request")
             return
         }
         let lines = headStr.split(separator: "\r\n", omittingEmptySubsequences: false).map(String.init)
         guard let requestLine = lines.first else {
-            Task { await receiver.bumpBadRequest("empty head") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "empty head",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 400, body: "bad request")
             return
         }
         let parts = requestLine.split(separator: " ", maxSplits: 2).map(String.init)
         guard parts.count == 3 else {
-            Task { await receiver.bumpBadRequest("bad request line") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "bad request line",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 400, body: "bad request")
             return
@@ -664,20 +1762,38 @@ public actor OTLPReceiver {
         }
 
         if contentLength <= 0 {
-            Task { await receiver.bumpBadRequest("no content-length") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "no content-length",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 411, body: "length required")
             return
         }
         if contentLength > Self.maxBodyBytes {
-            Task { await receiver.bumpBadRequest("content-length too large") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "content-length too large",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 413, body: "payload too large")
             return
         }
         if !contentType.contains("application/x-protobuf")
             && !contentType.contains("application/protobuf") {
-            Task { await receiver.bumpBadRequest("unsupported content-type") }
+            receiver.submitCallbackActorHop { [weak receiver] in
+                guard !Task.isCancelled else { return }
+                await receiver?.bumpBadRequest(
+                    "unsupported content-type",
+                    generation: buffer.connectionGeneration
+                )
+            }
             buffer.cancelDeadline()
             Self.respond(conn, status: 415, body: "unsupported media type")
             return
@@ -706,13 +1822,24 @@ public actor OTLPReceiver {
             // slow-loris deadline so the decode/persist phase doesn't
             // race the timer.
             buffer.cancelDeadline()
-            Self.handleBody(conn: conn, body: buffer.data, receiver: receiver)
+            Self.handleBody(
+                conn: conn,
+                connectionID: buffer.connectionID,
+                body: buffer.data,
+                receiver: receiver
+            )
             return
         }
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, _, error in
-            if buffer.timedOut { return }
+            if buffer.inactive { return }
             if let error {
-                Task { await receiver.completeWithLog("recv body failed: \(error)") }
+                receiver.submitCallbackActorHop { [weak receiver] in
+                    guard !Task.isCancelled else { return }
+                    await receiver?.completeWithLog(
+                        "recv body failed: \(error)",
+                        generation: buffer.connectionGeneration
+                    )
+                }
                 buffer.cancelDeadline()
                 conn.cancel()
                 return
@@ -728,7 +1855,13 @@ public actor OTLPReceiver {
             // length could keep streaming bytes that grow `data` past
             // 8 MiB.
             if buffer.data.count > Self.maxBodyBytes {
-                Task { await receiver.bumpBadRequest("body exceeded maxBodyBytes during recv") }
+                receiver.submitCallbackActorHop { [weak receiver] in
+                    guard !Task.isCancelled else { return }
+                    await receiver?.bumpBadRequest(
+                        "body exceeded maxBodyBytes during recv",
+                        generation: buffer.connectionGeneration
+                    )
+                }
                 buffer.cancelDeadline()
                 Self.respond(conn, status: 413, body: "payload too large")
                 return
@@ -744,12 +1877,39 @@ public actor OTLPReceiver {
 
     nonisolated private static func handleBody(
         conn: NWConnection,
+        connectionID: UInt64,
         body: Data,
         receiver: OTLPReceiver
     ) {
-        Task {
-            let result = await receiver.processBody(body)
-            Self.respond(conn, status: result.status, body: result.body)
+        receiver.submitBodyProcessing(
+            conn: conn,
+            connectionID: connectionID,
+            body: body
+        )
+    }
+
+    nonisolated private func submitBodyProcessing(
+        conn: NWConnection,
+        connectionID: UInt64,
+        body: Data
+    ) {
+        guard connections.contains(connectionID) else {
+            bodyTasks.recordRejected()
+            conn.cancel()
+            return
+        }
+        let accepted = bodyTasks.submit { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            let result = await self.processBody(body)
+            self.respondIfConnectionIsActive(
+                conn,
+                connectionID: connectionID,
+                result: result
+            )
+        }
+        guard accepted else {
+            conn.cancel()
+            return
         }
     }
 
@@ -757,11 +1917,17 @@ public actor OTLPReceiver {
     /// tests. Storage admission runs once before protobuf decode and again with
     /// the exact decoded records before persistence; TraceStore repeats the
     /// latter centrally inside `insertSpans`.
-    public func ingestBodyForTesting(_ body: Data) async -> OTLPReceiverIngestResult {
+    /// Internal test seam. Keeping this out of the public product API prevents
+    /// callers from bypassing listener/body-task admission and creating work
+    /// that `stop()` cannot own.
+    func ingestBodyForTesting(_ body: Data) async -> OTLPReceiverIngestResult {
         await processBody(body)
     }
 
     private func processBody(_ body: Data) async -> OTLPReceiverIngestResult {
+        guard !Task.isCancelled else {
+            return OTLPReceiverIngestResult(status: 503, body: "receiver stopping")
+        }
         recordBody(body)
         // v1.21.5 (audit S-04): bound unauthenticated local traffic by rate.
         guard admitIngest(bytes: body.count) else {
@@ -775,6 +1941,17 @@ public actor OTLPReceiver {
             do {
                 try await traceStore.preflightStorageAdmission(
                     estimatedGrowthBytes: Int64(body.count)
+                )
+                guard !Task.isCancelled else {
+                    return OTLPReceiverIngestResult(
+                        status: 503,
+                        body: "receiver stopping"
+                    )
+                }
+            } catch is CancellationError {
+                return OTLPReceiverIngestResult(
+                    status: 503,
+                    body: "receiver stopping"
                 )
             } catch let pressure as TraceStoreStorageAdmissionError {
                 recordSpanInsertError(pressure.localizedDescription)
@@ -817,16 +1994,27 @@ public actor OTLPReceiver {
         let valid = extraction.spans.filter {
             $0.traceId.count == 32 && $0.spanId.count == 16
         }
+        guard !Task.isCancelled else {
+            return OTLPReceiverIngestResult(status: 503, body: "receiver stopping")
+        }
         do {
             // Receiver-level exact decoded-batch gate, then the store repeats
             // it immediately before BEGIN so no alternate writer can bypass it.
             try await traceStore.preflightInsertSpans(valid)
+            guard !Task.isCancelled else {
+                return OTLPReceiverIngestResult(
+                    status: 503,
+                    body: "receiver stopping"
+                )
+            }
             let result = try await traceStore.insertSpans(valid)
             for _ in 0..<result.succeeded { recordSpanPersisted() }
             for _ in 0..<result.failed {
                 recordSpanInsertError("batch insert: row failed")
             }
             return OTLPReceiverIngestResult(status: 200, body: "")
+        } catch is CancellationError {
+            return OTLPReceiverIngestResult(status: 503, body: "receiver stopping")
         } catch let pressure as TraceStoreStorageAdmissionError {
             for _ in 0..<max(1, valid.count) {
                 recordSpanInsertError(pressure.localizedDescription)
@@ -851,7 +2039,8 @@ public actor OTLPReceiver {
         metrics.resourceSpansSeen &+= UInt64(summary.resourceSpansCount)
     }
 
-    private func bumpBadRequest(_ reason: String) {
+    private func bumpBadRequest(_ reason: String, generation: UInt64) {
+        guard connections.isAccepting(generation: generation) else { return }
         metrics.requestsBadRequest &+= 1
         logger.debug("400: \(reason, privacy: .public)")
     }
@@ -875,18 +2064,13 @@ public actor OTLPReceiver {
         logger.debug("span insert error: \(reason, privacy: .public)")
     }
 
-    /// v1.9 audit Phase-1.4: connection-deadline expired (slow-loris).
-    fileprivate func bumpDeadlineExceeded() {
-        metrics.connectionDeadlineExceeded &+= 1
-        logger.debug("connection deadline exceeded")
-    }
-
     /// Accessor for the optional store. Read-only — the receiver never
     /// rebinds the store at runtime; PR-4's "Receive agent traces"
     /// toggle starts/stops the receiver wholesale.
     private func storeRef() -> TraceStore? { traceStore }
 
-    private func completeWithLog(_ msg: String) {
+    private func completeWithLog(_ msg: String, generation: UInt64) {
+        guard connections.isAccepting(generation: generation) else { return }
         logger.debug("\(msg, privacy: .public)")
     }
 
@@ -923,8 +2107,3 @@ public actor OTLPReceiver {
         })
     }
 }
-
-// MARK: - v1.9.0 audit Sec-M2: connection-count bookkeeping at exit
-// Each terminal path in the receive pipeline taps `releaseConnection()`
-// via a Task hop, mirroring the metric mutators. Counter never goes
-// below zero (releaseConnection clamps).

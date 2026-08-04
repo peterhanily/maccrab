@@ -15,9 +15,10 @@ struct CausalGraphUpsertBatchTests {
             .appendingPathComponent("batch-\(UUID().uuidString).db")
         return (try await SQLiteCausalGraphStore(databasePath: path.path), path)
     }
-    private func ent(_ id: String) -> TraceEntity {
+    private func ent(_ id: String, observationCount: Int = 1) -> TraceEntity {
         TraceEntity(id: id, entityType: "process", stableKey: id, displayName: id,
-                    firstSeen: now, lastSeen: now, attributesJson: "{}", source: "test")
+                    firstSeen: now, lastSeen: now, attributesJson: "{}", source: "test",
+                    observationCount: observationCount)
     }
     private func edg(_ id: String, from: String, to: String) -> TraceEdge {
         TraceEdge(id: id, sourceEntityId: from, targetEntityId: to, relation: "spawned",
@@ -35,6 +36,16 @@ struct CausalGraphUpsertBatchTests {
         #expect(try await store.entity(id: "a") != nil)
         #expect(try await store.entity(id: "b") != nil)
         #expect(try await store.edge(id: "e") != nil)
+        await store.close()
+    }
+
+    @Test("Aggregated observation weights equal sequential entity upserts")
+    func batchObservationWeightsAreExact() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        try await store.upsertBatch(entities: [ent("weighted", observationCount: 257)], edges: [])
+        try await store.upsertBatch(entities: [ent("weighted", observationCount: 743)], edges: [])
+        #expect(try await store.entity(id: "weighted")?.observationCount == 1_000)
         await store.close()
     }
 

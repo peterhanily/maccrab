@@ -70,7 +70,24 @@ struct ESCredentialReadAllowlistTests {
             "/var/db/dslocal/nodes/Default/users/admin.plist",
             "/private/var/db/dslocal/nodes/Default/users/admin.plist",
         ]
-        for p in yes { #expect(ESCollector.isCredentialReadPath(p), "expected emit: \(p)") }
+        for p in yes {
+            #expect(ESCollector.isCredentialReadPath(p), "expected emit: \(p)")
+            let kind = RollingCausalGraph.inferFileKind(path: p)
+            #expect(
+                RollingCausalGraph.fileObservationIsRelevant(
+                    path: p,
+                    kind: kind,
+                    untrustedContent: false
+                ),
+                "ES admits a sensitive OPEN but the graph would suppress its file node: \(p)"
+            )
+        }
+        #expect(
+            RollingCausalGraph.inferFileKind(
+                path: "/Users/x/Library/Safari/History.db"
+            ) == .unknown,
+            "sensitive history must not be mislabeled as credential material"
+        )
     }
 
     /// ES-OPEN-2 drift guard: the OPEN allowlist comment promises it mirrors

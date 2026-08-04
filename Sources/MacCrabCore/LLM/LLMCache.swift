@@ -80,6 +80,14 @@ public actor LLMCache {
         }
     }
 
+    /// Evict a response that passed transport checks but failed the consuming
+    /// feature's semantic/safety policy. Without this, one poisoned advisory
+    /// would be replayed from cache for the full six-hour TTL and prevent the
+    /// backend from producing a corrected answer.
+    func remove(key: String) {
+        entries.removeValue(forKey: key)
+    }
+
     /// Remove the `count` entries with the smallest `lastAccessedSeq`.
     /// O(n × count); for the typical count=1 path this is a single
     /// O(n) scan.

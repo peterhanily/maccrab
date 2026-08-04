@@ -29,15 +29,29 @@ public actor FleetClient {
     /// Pseudonymous host ID.
     private let hostId: String
 
-    /// Buffered alerts for next push.
-    private var pendingAlerts: [FleetAlertSummary] = []
-    private var pendingIOCs: [FleetIOCSighting] = []
+    /// Buffered telemetry carries stable local sequence numbers. HTTP success
+    /// removes only the exact entries represented by that request, even if the
+    /// bounded queue shed older entries or accepted new ones while awaiting.
+    private struct BufferedAlert: Sendable {
+        let sequence: UInt64
+        let value: FleetAlertSummary
+    }
+    private struct BufferedIOC: Sendable {
+        let sequence: UInt64
+        let value: FleetIOCSighting
+    }
+    private var nextBufferSequence: UInt64 = 0
+    private var pendingAlerts: [BufferedAlert] = []
+    private var pendingIOCs: [BufferedIOC] = []
 
     /// Push interval (default: 60 seconds).
     private let pushInterval: TimeInterval
 
     /// Whether the client is active.
     private var isRunning = false
+    private var pushTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private var shutdownTask: Task<Bool, Never>?
 
     /// Consecutive push failures (for exponential backoff).
     private var consecutivePushFailures: Int = 0
@@ -82,50 +96,115 @@ public actor FleetClient {
     // MARK: - Public API
 
     /// Start the fleet client (push-only).
-    public func start() {
+    @discardableResult
+    public func start() -> Bool {
+        if lifecyclePhase == .running { return true }
+        guard lifecyclePhase == .initialized, pushTask == nil else {
+            return false
+        }
+        lifecyclePhase = .running
         self.isRunning = true
 
         // Push task with exponential backoff on failure
-        Task {
-            while isRunning {
-                let interval = pushBackoffInterval()
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                guard isRunning else { break }
-                await push()
-            }
+        pushTask = Task { [weak self] in
+            await self?.runPushLoop()
+            await self?.finishPushLoop()
         }
 
         logger.info("Fleet client started (outbound-only): \(self.collectorURL.absoluteString)")
+        return true
     }
 
-    public func stop() {
+    private func runPushLoop() async {
+        while lifecyclePhase == .running,
+              isRunning,
+              !Task.isCancelled {
+            let interval = pushBackoffInterval()
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(interval * 1_000_000_000)
+                )
+            } catch {
+                break
+            }
+            guard lifecyclePhase == .running,
+                  isRunning,
+                  !Task.isCancelled else { break }
+            await push()
+        }
+    }
+
+    private func finishPushLoop() {
+        guard lifecyclePhase == .running else { return }
+        pushTask = nil
+    }
+
+    @discardableResult
+    public func stop(deadline: TimeInterval = 1.0) async -> Bool {
+        if let shutdownTask { return await shutdownTask.value }
+        if lifecyclePhase == .stopped { return true }
+        lifecyclePhase = .stopping
         isRunning = false
+        let task = pushTask
+        task?.cancel()
+        let accepted = task.map { [$0] } ?? []
+        let waiter = Task {
+            await CollectorBoundedTaskJoin.waitForAll(
+                accepted,
+                deadline: deadline
+            )
+        }
+        shutdownTask = waiter
+        let joined = await waiter.value
+        lifecyclePhase = .stopped
+        if joined { pushTask = nil }
+        return joined
     }
 
     /// Buffer an alert for the next push cycle.
-    public func bufferAlert(_ summary: FleetAlertSummary) {
-        pendingAlerts.append(summary)
+    @discardableResult
+    public func bufferAlert(_ summary: FleetAlertSummary) -> Bool {
+        guard lifecyclePhase == .running, isRunning else { return false }
+        nextBufferSequence &+= 1
+        pendingAlerts.append(BufferedAlert(
+            sequence: nextBufferSequence,
+            value: summary
+        ))
         // Cap buffer
         if pendingAlerts.count > 1000 { pendingAlerts.removeFirst(500) }
+        return true
     }
 
     /// Buffer an IOC sighting for the next push cycle.
-    public func bufferIOC(_ sighting: FleetIOCSighting) {
-        pendingIOCs.append(sighting)
+    @discardableResult
+    public func bufferIOC(_ sighting: FleetIOCSighting) -> Bool {
+        guard lifecyclePhase == .running, isRunning else { return false }
+        nextBufferSequence &+= 1
+        pendingIOCs.append(BufferedIOC(
+            sequence: nextBufferSequence,
+            value: sighting
+        ))
         if pendingIOCs.count > 500 { pendingIOCs.removeFirst(250) }
+        return true
     }
 
     // MARK: - Push
 
     private func push() async {
+        guard lifecyclePhase == .running,
+              isRunning,
+              !Task.isCancelled else { return }
         guard !pendingAlerts.isEmpty || !pendingIOCs.isEmpty else { return }
+
+        let alertsToSend = pendingAlerts
+        let iocsToSend = pendingIOCs
 
         let telemetry = FleetTelemetry(
             hostId: hostId,
             timestamp: Date(),
             version: "0.5.0",
-            alerts: pendingAlerts,
-            iocSightings: pendingIOCs,
+            alerts: alertsToSend.map(\.value),
+            iocSightings: iocsToSend.map(\.value),
             behaviorScores: [] // Populated by caller if needed
         )
 
@@ -144,18 +223,39 @@ public actor FleetClient {
             request.httpBody = try encoder.encode(telemetry)
 
             let (_, response) = try await SecureURLSession.shared.data(for: request)
+            guard lifecyclePhase == .running,
+                  isRunning,
+                  !Task.isCancelled else { return }
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                // Remove only the sequence IDs represented by this request.
+                // Telemetry buffered while HTTP was in flight belongs to the
+                // next batch and must not be acknowledged accidentally.
+                let sentAlertSequences = Set(
+                    alertsToSend.map(\.sequence)
+                )
+                let sentIOCSequences = Set(
+                    iocsToSend.map(\.sequence)
+                )
                 let alertCount = pendingAlerts.count
+                pendingAlerts.removeAll {
+                    sentAlertSequences.contains($0.sequence)
+                }
+                let acknowledgedAlerts = alertCount - pendingAlerts.count
                 let iocCount = pendingIOCs.count
-                pendingAlerts.removeAll()
-                pendingIOCs.removeAll()
+                pendingIOCs.removeAll {
+                    sentIOCSequences.contains($0.sequence)
+                }
+                let acknowledgedIOCs = iocCount - pendingIOCs.count
                 consecutivePushFailures = 0
-                logger.info("Fleet push: sent \(alertCount) alerts, \(iocCount) IOCs")
+                logger.info("Fleet push: acknowledged \(acknowledgedAlerts) alerts, \(acknowledgedIOCs) IOCs")
             } else {
                 consecutivePushFailures += 1
                 logger.warning("Fleet push failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) (attempt \(self.consecutivePushFailures))")
             }
         } catch {
+            guard lifecyclePhase == .running,
+                  isRunning,
+                  !Task.isCancelled else { return }
             consecutivePushFailures += 1
             logger.warning("Fleet push error: \(error.localizedDescription) (attempt \(self.consecutivePushFailures))")
         }

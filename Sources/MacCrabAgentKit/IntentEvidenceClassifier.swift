@@ -3,7 +3,7 @@
 //
 // v1.12.0 — translates an enriched `Event` into zero or more
 // `BayesianIntentEngine.Evidence` values. EventLoop feeds the result
-// into `state.bayesianIntent.observe(...)` so the per-tree posterior
+// into `state.bayesianIntent.observe(...)` so the per-intent-scope posterior
 // over attacker `Goal` accumulates as the kill chain develops.
 //
 // Detection-only: only the engine's posterior is updated. EventLoop
@@ -15,13 +15,109 @@ import MacCrabCore
 
 enum IntentEvidenceClassifier {
 
-    /// Stable tree key for the engine. Prefers the root ancestor's
-    /// (executable, pid) tuple, falling back to the current process.
-    static func treeKey(for event: Event) -> String {
-        if let root = event.process.ancestors.last {
-            return "\(root.executable)@\(root.pid)"
+    /// Canonical posterior key used by every EventLoop intent operation.
+    ///
+    /// AI activity is scoped to one command/process subtree inside the durable
+    /// `ai_tool_session_id`, not to the entire long-lived agent session. The
+    /// direct child below `ai_root_pid` is stable for that command and shared by
+    /// its descendants. This prevents package A's evidence from becoming the
+    /// BehaviorBrief for package B merely because one Codex/Claude process ran
+    /// both commands.
+    ///
+    /// Non-AI events use the subject's kernel audit identity when available.
+    /// `pidversion` is macOS's anti-PID-reuse generation; the key also commits
+    /// to audit session/user and executable identity.
+    /// Collectors without an audit token fall back to pid + exact process start
+    /// time + user + executable hash. A dubious fallback may split evidence,
+    /// but it must never merge a fresh process into a recycled PID's posterior.
+    static func scopeKey(for event: Event) -> String {
+        let sessionID = event.enrichments["ai_tool_session_id"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sessionID, !sessionID.isEmpty {
+            let boundedSessionID = String(sessionID.prefix(256))
+            return "ai-operation:\(boundedSessionID):\(aiOperationIdentity(for: event))"
         }
-        return "\(event.process.executable)@\(event.process.pid)"
+
+        return processIdentity(for: event)
+    }
+
+    private static func processIdentity(for event: Event) -> String {
+        let process = event.process
+        let pathHash = ProcessIdentity.fnv1a64(process.executable)
+        if let auditIdentity = process.auditIdentity {
+            // Keep ProcessIdentity.processKey's canonical identity fields but
+            // avoid a CryptoKit SHA-256 on EventLoop's per-event hot path.
+            return [
+                "process-audit",
+                String(auditIdentity.auid, radix: 16),
+                String(auditIdentity.euid, radix: 16),
+                String(UInt32(bitPattern: auditIdentity.pid), radix: 16),
+                String(auditIdentity.pidversion, radix: 16),
+                String(UInt32(bitPattern: auditIdentity.asid), radix: 16),
+                String(pathHash, radix: 16),
+            ].joined(separator: ":")
+        }
+
+        let pidBits = UInt32(bitPattern: process.pid)
+        let startBits = process.startTime.timeIntervalSince1970.bitPattern
+        return [
+            "process-start",
+            String(process.userId, radix: 16),
+            String(pidBits, radix: 16),
+            String(startBits, radix: 16),
+            String(pathHash, radix: 16),
+        ].joined(separator: ":")
+    }
+
+    /// Identify the direct command subtree below the tracked AI root. Ancestors
+    /// are closest-parent first, so the entry immediately before the root is the
+    /// root's child on this event's lineage. Direct-child events use their full
+    /// audit/start identity; descendant events use that child's pid+path inside
+    /// the already anti-reuse AI session.
+    private static func aiOperationIdentity(for event: Event) -> String {
+        let process = event.process
+        // A direct W3C trace/span is the strongest operation boundary available
+        // and survives helper-process fan-out. Accept only canonical hex IDs so
+        // an untrusted enrichment cannot create an unbounded/delimiter-confused
+        // posterior key.
+        if let traceID = canonicalHexID(
+            event.enrichments[TraceCorrelator.EnrichmentKey.traceId],
+            exactLength: 32
+        ), let spanID = canonicalHexID(
+            event.enrichments[TraceCorrelator.EnrichmentKey.spanId],
+            exactLength: 16
+        ) {
+            return "trace-span:\(traceID):\(spanID)"
+        }
+        guard let rawRoot = event.enrichments["ai_root_pid"],
+              let rootPID = Int32(rawRoot) else {
+            return processIdentity(for: event)
+        }
+        if process.pid == rootPID {
+            return processIdentity(for: event)
+        }
+        guard let rootIndex = process.ancestors.firstIndex(where: { $0.pid == rootPID }) else {
+            return processIdentity(for: event)
+        }
+        if rootIndex == 0 {
+            return processIdentity(for: event)
+        }
+        let operationRoot = process.ancestors[rootIndex - 1]
+        let pathHash = ProcessIdentity.fnv1a64(operationRoot.executable)
+        return [
+            "root-child",
+            String(UInt32(bitPattern: operationRoot.pid), radix: 16),
+            String(pathHash, radix: 16),
+        ].joined(separator: ":")
+    }
+
+    private static func canonicalHexID(_ value: String?, exactLength: Int) -> String? {
+        guard let value, value.utf8.count == exactLength,
+              value.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (65...70).contains(byte)
+                      || (97...102).contains(byte)
+              }) else { return nil }
+        return value.lowercased()
     }
 
     /// Map an enriched event to zero or more Evidence values. Returns
@@ -34,13 +130,13 @@ enum IntentEvidenceClassifier {
     /// the raw predicates score as persistence / config / destructive
     /// evidence — git checking out `.github/workflows/*.yml`, bsdtar
     /// extracting a package's `.npmrc`, `rm -rf ~/build`, `sed -i ~/.zshrc`.
-    /// Because the tree key anchors on the ROOT ancestor (the long-lived
-    /// login shell / terminal session), these individually-benign signals
-    /// from many UNRELATED processes pool into one posterior, sail past
-    /// the ≥3-distinct + 0.85 alert gate, and — the posterior being
-    /// sticky — re-fire on every subsequent evidence-producing leaf,
-    /// attributed to whichever benign tool ran (git/gh/rm/sed/touch/
-    /// bsdtar). That is the observed HIGH false-positive class.
+    /// The pre-fix key anchored on the ROOT ancestor (the long-lived login
+    /// shell / terminal session), so individually-benign signals from many
+    /// UNRELATED processes pooled into one posterior, sailed past the
+    /// ≥3-distinct + 0.85 alert gate, and — the posterior being sticky —
+    /// re-fired on every subsequent evidence-producing leaf. `scopeKey(for:)`
+    /// now closes that structural pooling path; the trust discount below
+    /// remains defense in depth against noisy evidence within a valid scope.
     ///
     /// The discount is deliberately NARROW and conjunction-safe:
     ///  - It drops ONLY the low-specificity, write-shaped / destructive

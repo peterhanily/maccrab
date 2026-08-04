@@ -22,6 +22,7 @@ public actor SystemPolicyMonitor {
     public nonisolated let events: AsyncStream<SystemPolicyEvent>
     private var continuation: AsyncStream<SystemPolicyEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     private let pollInterval: TimeInterval
     private let homesProvider: @Sendable () -> [RealUserHome]
 
@@ -114,7 +115,8 @@ public actor SystemPolicyMonitor {
     // MARK: - Lifecycle
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("System policy monitor starting")
 
         // Initial baseline
@@ -139,9 +141,25 @@ public actor SystemPolicyMonitor {
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { pollTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
         pollTask?.cancel()
-        pollTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     // MARK: - Full Scan

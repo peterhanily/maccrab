@@ -7,7 +7,7 @@
 import Foundation
 import os.log
 
-public actor OpenAIBackend: LLMBackend {
+public actor OpenAIBackend: LLMBackend, BoundedLLMBackend {
     public let providerName = "OpenAI"
     // `nonisolated` + `internal` (not private) so the baseURL allowlist +
     // cleartext-scheme guard is unit-tested synchronously. Immutable Sendable,
@@ -112,6 +112,20 @@ public actor OpenAIBackend: LLMBackend {
 
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ).value
+    }
+
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
         let url = baseURL.appendingPathComponent("chat/completions")
 
         struct Request: Encodable {
@@ -145,19 +159,25 @@ public actor OpenAIBackend: LLMBackend {
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("OpenAI response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("OpenAI network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("OpenAI API error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         struct Response: Decodable {
@@ -169,7 +189,9 @@ public actor OpenAIBackend: LLMBackend {
         }
 
         guard let resp = try? JSONDecoder().decode(Response.self, from: data),
-              let text = resp.choices.first?.message.content else { return nil }
-        return text
+              let text = resp.choices.first?.message.content else {
+            return .failure
+        }
+        return .response(text)
     }
 }

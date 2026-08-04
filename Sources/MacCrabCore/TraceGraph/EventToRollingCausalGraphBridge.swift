@@ -91,6 +91,16 @@ public actor EventToRollingCausalGraphBridge {
         }
     }
 
+    /// Exact rolling-writer conservation counters for heartbeat/runtime probes.
+    public func writeTelemetry() async -> CausalGraphIngestionWriteTelemetry {
+        await rollingGraph.writeTelemetry()
+    }
+
+    /// Establish a stable persistence boundary for lifecycle owners/probes.
+    public func flushPending() async throws {
+        try await rollingGraph.flushPending()
+    }
+
     // MARK: - Translation
 
     private func normalize(_ event: Event) -> RollingCausalGraph.NormalizedEventInput? {
@@ -253,23 +263,18 @@ public actor EventToRollingCausalGraphBridge {
     // the v1.17.4 file-action mapping can be pinned directly by
     // EventToRollingCausalGraphBridgeTests (ES-OPEN-3).
     nonisolated func mapAction(_ action: String) -> RollingCausalGraph.NormalizedEventInput.Action? {
+        if let fileAction = TraceGraphFileObservationPolicy.callbackAction(eventAction: action) {
+            switch fileAction {
+            case .read: return .fileRead
+            case .write: return .fileWrite
+            case .create: return .fileCreate
+            case .rename: return .fileRename
+            case .delete: return .fileDelete
+            }
+        }
         switch action.lowercased() {
         case "exec":         return .exec
         case "exit":         return .exit
-        case "create":       return .fileCreate
-        case "write":        return .fileWrite
-        // "open" is the credential-read action emitted by ESCollector /
-        // KdebugCollector NOTIFY_OPEN (v1.17.4); "read" is a legacy alias
-        // no collector emits but kept so a future one maps cleanly. Without
-        // these the headline credential-READ leg never enters the causal
-        // substrate. (ES-OPEN-3)
-        case "open", "read": return .fileRead
-        // A modified-close is a completed write session; map to .fileWrite
-        // (not .fileRead) so it lands on the write side of the graph.
-        case "close_modified": return .fileWrite
-        case "rename":       return .fileRename
-        case "unlink",
-             "delete":       return .fileDelete
         case "connect":      return .netConnect
         case "tcc_grant":    return .tccGrant
         default:

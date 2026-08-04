@@ -6,7 +6,7 @@
 import Foundation
 import os.log
 
-public actor MistralBackend: LLMBackend {
+public actor MistralBackend: LLMBackend, BoundedLLMBackend {
     public let providerName = "Mistral"
     private let apiKey: String
     private let model: String
@@ -24,7 +24,23 @@ public actor MistralBackend: LLMBackend {
 
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
-        guard let url = URL(string: "https://api.mistral.ai/v1/chat/completions") else { return nil }
+        await completeResult(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ).value
+    }
+
+    func completeResult(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int,
+        temperature: Double
+    ) async -> LLMBackendCompletionResult {
+        guard let url = URL(string: "https://api.mistral.ai/v1/chat/completions") else {
+            return .failure
+        }
 
         struct Request: Encodable {
             let model: String
@@ -52,19 +68,25 @@ public actor MistralBackend: LLMBackend {
         request.httpBody = try? JSONEncoder().encode(body)
         request.timeoutInterval = 60
 
-        let data: Data
-        let response: URLResponse
+        let bounded: LLMBoundedHTTPResponse
         do {
-            (data, response) = try await session.data(for: request)
+            bounded = try await LLMBoundedHTTPReader.read(
+                request: request,
+                using: session
+            )
+        } catch LLMBoundedHTTPError.responseTooLarge {
+            logger.error("Mistral response exceeded the bounded HTTP body limit")
+            return .responseOversize
         } catch {
             logger.error("Mistral network error: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
-        guard let http = response as? HTTPURLResponse else { return nil }
+        let data = bounded.data
+        let http = bounded.response
         guard http.statusCode == 200 else {
             let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
             logger.error("Mistral API error \(http.statusCode): \(body)")
-            return nil
+            return .failure
         }
 
         // Mistral uses OpenAI-compatible response format
@@ -77,7 +99,9 @@ public actor MistralBackend: LLMBackend {
         }
 
         guard let resp = try? JSONDecoder().decode(Response.self, from: data),
-              let text = resp.choices.first?.message.content else { return nil }
-        return text
+              let text = resp.choices.first?.message.content else {
+            return .failure
+        }
+        return .response(text)
     }
 }

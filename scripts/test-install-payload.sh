@@ -423,6 +423,45 @@ for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; 
 done
 pass "both casks consume in-app binaries and leave installed rules to the atomic sysext transaction"
 
+# Exercise the exact release signature contract against both sides of the AMFI
+# regression. A hardened, stable-ID bare executable with zero entitlements must
+# pass; adding the restricted shared-Keychain group must fail even though
+# codesign itself accepts the signature.
+BARE_TOOL_GUARDS="$TMP_ROOT/bare-tool-release-guards.sh"
+/usr/bin/sed -n \
+    '/^# BEGIN BARE_TOOL_RELEASE_GUARDS$/,/^# END BARE_TOOL_RELEASE_GUARDS$/p' \
+    "$SCRIPT_DIR/build-release.sh" > "$BARE_TOOL_GUARDS"
+# shellcheck source=/dev/null
+source "$BARE_TOOL_GUARDS"
+CODESIGN_BIN=/usr/bin/codesign
+BARE_TOOL_FIXTURE="$TMP_ROOT/bare-tool-signatures"
+/bin/mkdir -p "$BARE_TOOL_FIXTURE/clean" "$BARE_TOOL_FIXTURE/restricted"
+/bin/cp /bin/echo "$BARE_TOOL_FIXTURE/clean/maccrabctl"
+"$CODESIGN_BIN" --force --sign - \
+    --identifier com.maccrab.maccrabctl --options runtime \
+    "$BARE_TOOL_FIXTURE/clean/maccrabctl" >/dev/null
+verify_bare_tool_signature_contract "$BARE_TOOL_FIXTURE/clean/maccrabctl" \
+    || fail "zero-entitlement hardened bare tool was rejected"
+
+RESTRICTED_ENTITLEMENTS="$BARE_TOOL_FIXTURE/restricted.plist"
+/usr/bin/plutil -create xml1 "$RESTRICTED_ENTITLEMENTS"
+/usr/bin/plutil -insert keychain-access-groups \
+    -json '["79S425CW99.com.maccrab.shared"]' "$RESTRICTED_ENTITLEMENTS"
+/bin/cp /bin/echo "$BARE_TOOL_FIXTURE/restricted/maccrab-mcp"
+"$CODESIGN_BIN" --force --sign - \
+    --identifier com.maccrab.maccrab-mcp --options runtime \
+    --entitlements "$RESTRICTED_ENTITLEMENTS" \
+    "$BARE_TOOL_FIXTURE/restricted/maccrab-mcp" >/dev/null
+if verify_bare_tool_signature_contract \
+        "$BARE_TOOL_FIXTURE/restricted/maccrab-mcp" \
+        >"$BARE_TOOL_FIXTURE/restricted/output.log" 2>&1; then
+    fail "release guard accepted a restricted entitlement on a bare tool"
+fi
+/usr/bin/grep -q 'carries forbidden bare-tool entitlements' \
+    "$BARE_TOOL_FIXTURE/restricted/output.log" \
+    || fail "release guard did not diagnose the restricted bare-tool entitlement"
+pass "release signature contract rejects restricted entitlements on bare tools"
+
 /usr/bin/grep -qF 'prepare-dmg-payload.sh" "$STAGING_DIR"' "$SCRIPT_DIR/build-release.sh" \
     || fail "release publish stage does not prepare/prune the final payload"
 stage_prepare_line=$(/usr/bin/grep -nF '"$SCRIPT_DIR/prepare-dmg-payload.sh" "$STAGING_DIR"' \
@@ -433,11 +472,24 @@ mount_prepare_line=$(/usr/bin/grep -nF '"$SCRIPT_DIR/prepare-dmg-payload.sh" "$D
     "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
 mount_verify_line=$(/usr/bin/grep -nF '$CODESIGN_BIN --verify --deep --strict "$DMG_MNT/MacCrab.app"' \
     "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+post_sign_verify_line=$(/usr/bin/grep -nF '$CODESIGN_BIN --verify --deep --strict --verbose=2 "$APP"' \
+    "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+post_sign_runtime_line=$(/usr/bin/grep -nF 'verify_bare_tool_runtime "$APP" "post-sign"' \
+    "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+mount_runtime_line=$(/usr/bin/grep -nF 'verify_bare_tool_runtime "$DMG_MNT/MacCrab.app" "mounted-DMG"' \
+    "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+mount_detach_line=$(/usr/bin/grep -nF '/usr/bin/hdiutil detach "$DMG_MNT" -force' \
+    "$SCRIPT_DIR/build-release.sh" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
 [ -n "$stage_prepare_line" ] && [ -n "$stage_verify_line" ] \
     && [ "$stage_prepare_line" -lt "$stage_verify_line" ] \
     && [ -n "$mount_prepare_line" ] && [ -n "$mount_verify_line" ] \
     && [ "$mount_prepare_line" -lt "$mount_verify_line" ] \
-    || fail "release does not strictly verify both post-normalization app copies"
+    && [ -n "$post_sign_verify_line" ] && [ -n "$post_sign_runtime_line" ] \
+    && [ "$post_sign_verify_line" -lt "$post_sign_runtime_line" ] \
+    && [ -n "$mount_runtime_line" ] && [ -n "$mount_detach_line" ] \
+    && [ "$mount_verify_line" -lt "$mount_runtime_line" ] \
+    && [ "$mount_runtime_line" -lt "$mount_detach_line" ] \
+    || fail "release does not verify and execute both final app copies in order"
 
 # Exercise the EXIT helper in isolation with adversarial neighbour paths.  The
 # cleanup must remove only the exact per-run mount directory and RW work image;

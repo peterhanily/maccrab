@@ -2,6 +2,348 @@ import Foundation
 import MacCrabCore
 import os.log
 
+/// Thread-safe runtime ownership for the bounded schema-v8 upgrade reserve.
+///
+/// Candidate ownership and the actually-applied hard ceiling are deliberately
+/// separate. A candidate can shrink only after a generation-matched,
+/// post-checkpoint measurement proves that the complete events.db family plus
+/// the 32 MiB event transaction reserve fits below the proposed ceiling.
+struct LegacyEvidenceTransitionBudgetSnapshot: Sendable, Equatable {
+    var rowCount: Int?
+    var chargedBytes: Int64?
+    var appliedReserveMiB: Int
+    var pendingReserveMiB: Int?
+    var pendingReserveFitsHardBoundary: Bool?
+    var maximumReserveMiB: Int
+    var measurementFailed: Bool
+    var familyFootprintBytes: Int64?
+    var proposedHardAdmissionBoundaryBytes: Int64?
+    var transactionReserveBytes: Int64
+    var walCheckpointDrained: Bool?
+    var freelistBytes: Int64?
+    var configurationGeneration: UInt64
+    var staleMeasurementsDiscarded: UInt64
+    var measuredAt: Date
+
+    /// Compatibility name used by existing readers. This is the applied, not
+    /// merely measured, reserve.
+    var reserveMiB: Int { appliedReserveMiB }
+
+    var transitionPending: Bool { pendingReserveMiB != nil }
+}
+
+struct LegacyEvidenceTransitionMeasurementTicket: Sendable, Equatable {
+    let configurationGeneration: UInt64
+    let storage: DaemonConfig.StorageConfig
+}
+
+final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
+    private struct RuntimeState: Sendable {
+        var storage: DaemonConfig.StorageConfig
+        var snapshot: LegacyEvidenceTransitionBudgetSnapshot
+    }
+
+    private let lock: OSAllocatedUnfairLock<RuntimeState>
+
+    init(maximumReserveMiB: Int) {
+        var storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
+        storage.evidenceMaxSizeMB = max(0, maximumReserveMiB)
+        self.lock = Self.makeLock(storage: storage)
+    }
+
+    init(storageConfig: DaemonConfig.StorageConfig) {
+        self.lock = Self.makeLock(
+            storage: storageConfig.clampedToSafeFloors()
+        )
+    }
+
+    private static func makeLock(
+        storage: DaemonConfig.StorageConfig
+    ) -> OSAllocatedUnfairLock<RuntimeState> {
+        let maximum = max(0, storage.evidenceMaxSizeMB)
+        let liveCap = storage.effectiveEventsFamilyMaxSizeMB(
+            appliedLegacyEvidenceTransitionReserveMiB: maximum
+        )
+        return OSAllocatedUnfairLock(initialState:
+            RuntimeState(
+                storage: storage,
+                snapshot: LegacyEvidenceTransitionBudgetSnapshot(
+                rowCount: nil,
+                chargedBytes: nil,
+                appliedReserveMiB: maximum,
+                pendingReserveMiB: nil,
+                pendingReserveFitsHardBoundary: nil,
+                maximumReserveMiB: maximum,
+                measurementFailed: true,
+                familyFootprintBytes: nil,
+                proposedHardAdmissionBoundaryBytes:
+                    SQLitePersistentStorePolicy.capBytes(maxSizeMiB: liveCap),
+                transactionReserveBytes: SQLitePersistentStorePolicy
+                    .eventTransactionReserveBytes,
+                walCheckpointDrained: nil,
+                freelistBytes: nil,
+                configurationGeneration: 0,
+                staleMeasurementsDiscarded: 0,
+                measuredAt: Date()
+                )
+            )
+        )
+    }
+
+    func storageConfig() -> DaemonConfig.StorageConfig {
+        lock.withLock { $0.storage }
+    }
+
+    /// Publish one clamped config generation and return the ticket its
+    /// asynchronous footprint measurement must present. An older timer probe
+    /// can no longer overwrite a newer SIGHUP result.
+    @discardableResult
+    func installStorageConfig(
+        _ requested: DaemonConfig.StorageConfig
+    ) -> LegacyEvidenceTransitionMeasurementTicket {
+        let storage = requested.clampedToSafeFloors()
+        return lock.withLock { state in
+            guard state.storage != storage else {
+                return LegacyEvidenceTransitionMeasurementTicket(
+                    configurationGeneration:
+                        state.snapshot.configurationGeneration,
+                    storage: state.storage
+                )
+            }
+            state.storage = storage
+            state.snapshot.configurationGeneration &+= 1
+            let maximum = max(0, storage.evidenceMaxSizeMB)
+            if maximum != state.snapshot.appliedReserveMiB {
+                state.snapshot.pendingReserveMiB = maximum
+                // Growth is footprint-safe, but remains pending until the
+                // EventStore policy update succeeds. Shrink needs a new proof.
+                state.snapshot.pendingReserveFitsHardBoundary =
+                    maximum > state.snapshot.appliedReserveMiB
+            } else {
+                state.snapshot.pendingReserveMiB = nil
+                state.snapshot.pendingReserveFitsHardBoundary = nil
+            }
+            state.snapshot.maximumReserveMiB = maximum
+            state.snapshot.measurementFailed = true
+            state.snapshot.rowCount = nil
+            state.snapshot.chargedBytes = nil
+            state.snapshot.familyFootprintBytes = nil
+            state.snapshot.walCheckpointDrained = nil
+            state.snapshot.freelistBytes = nil
+            let candidate = state.snapshot.pendingReserveMiB
+                ?? state.snapshot.appliedReserveMiB
+            state.snapshot.proposedHardAdmissionBoundaryBytes =
+                SQLitePersistentStorePolicy.capBytes(
+                    maxSizeMiB: storage.effectiveEventsFamilyMaxSizeMB(
+                        appliedLegacyEvidenceTransitionReserveMiB: candidate
+                    )
+                )
+            state.snapshot.measuredAt = Date()
+            return LegacyEvidenceTransitionMeasurementTicket(
+                configurationGeneration:
+                    state.snapshot.configurationGeneration,
+                storage: state.storage
+            )
+        }
+    }
+
+    func measurementTicket() -> LegacyEvidenceTransitionMeasurementTicket {
+        lock.withLock { state in
+            LegacyEvidenceTransitionMeasurementTicket(
+                configurationGeneration: state.snapshot.configurationGeneration,
+                storage: state.storage
+            )
+        }
+    }
+
+    @discardableResult
+    func update(
+        measurement: LegacyAlertEvidenceTransitionMeasurement?,
+        ticket: LegacyEvidenceTransitionMeasurementTicket
+    ) -> LegacyEvidenceTransitionBudgetSnapshot {
+        lock.withLock { state in
+            guard ticket.configurationGeneration
+                    == state.snapshot.configurationGeneration,
+                  ticket.storage == state.storage else {
+                state.snapshot.staleMeasurementsDiscarded &+= 1
+                return state.snapshot
+            }
+
+            let maximum = max(0, state.storage.evidenceMaxSizeMB)
+            state.snapshot.maximumReserveMiB = maximum
+            state.snapshot.measuredAt = Date()
+            state.snapshot.transactionReserveBytes =
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes
+
+            guard let measurement else {
+                // Measurement failure may grow to the complete configured
+                // allowance, but can never shrink an already-applied reserve.
+                if maximum != state.snapshot.appliedReserveMiB {
+                    state.snapshot.pendingReserveMiB = maximum
+                    state.snapshot.pendingReserveFitsHardBoundary =
+                        maximum > state.snapshot.appliedReserveMiB
+                } else {
+                    state.snapshot.pendingReserveMiB = nil
+                    state.snapshot.pendingReserveFitsHardBoundary = nil
+                }
+                state.snapshot.measurementFailed = true
+                state.snapshot.rowCount = nil
+                state.snapshot.chargedBytes = nil
+                state.snapshot.familyFootprintBytes = nil
+                state.snapshot.walCheckpointDrained = nil
+                state.snapshot.freelistBytes = nil
+                let candidate = state.snapshot.pendingReserveMiB
+                    ?? state.snapshot.appliedReserveMiB
+                state.snapshot.proposedHardAdmissionBoundaryBytes =
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage
+                            .effectiveEventsFamilyMaxSizeMB(
+                                appliedLegacyEvidenceTransitionReserveMiB:
+                                    candidate
+                            )
+                    )
+                return state.snapshot
+            }
+
+            let evidence = measurement.evidence
+            let maximumBytes = SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: maximum
+            )
+            let charged = min(maximumBytes, max(0, evidence.chargedBytes))
+            let candidate = evidence.rowCount == 0 || charged == 0
+                ? 0
+                : Int(
+                    (charged - 1) / SQLitePersistentStorePolicy.bytesPerMiB + 1
+                )
+            let boundedCandidate = min(maximum, max(0, candidate))
+            let proposedCapMiB = state.storage
+                .effectiveEventsFamilyMaxSizeMB(
+                    appliedLegacyEvidenceTransitionReserveMiB:
+                        boundedCandidate
+                )
+            let proposedBoundary = SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: proposedCapMiB
+            )
+            let required = SQLitePersistentStoreAdmission.saturatingAdd(
+                measurement.familyFootprintBytes,
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes
+            )
+            let physicalMeasurementValid = measurement.familyFootprintBytes >= 0
+                && measurement.pageSizeBytes > 0
+                && measurement.pageCount >= 0
+                && measurement.freelistCount >= 0
+                && measurement.freelistCount <= measurement.pageCount
+            let shrinkIsSafe = physicalMeasurementValid
+                && measurement.walCheckpointDrained
+                && required <= proposedBoundary
+
+            if boundedCandidate == state.snapshot.appliedReserveMiB {
+                state.snapshot.pendingReserveMiB = nil
+                state.snapshot.pendingReserveFitsHardBoundary = nil
+            } else {
+                state.snapshot.pendingReserveMiB = boundedCandidate
+                state.snapshot.pendingReserveFitsHardBoundary =
+                    boundedCandidate > state.snapshot.appliedReserveMiB
+                        || shrinkIsSafe
+            }
+
+            state.snapshot.rowCount = evidence.rowCount
+            state.snapshot.chargedBytes = evidence.chargedBytes
+            state.snapshot.measurementFailed = !physicalMeasurementValid
+            state.snapshot.familyFootprintBytes =
+                measurement.familyFootprintBytes
+            state.snapshot.proposedHardAdmissionBoundaryBytes =
+                proposedBoundary
+            state.snapshot.walCheckpointDrained =
+                measurement.walCheckpointDrained
+            state.snapshot.freelistBytes = measurement.freelistBytes
+            return state.snapshot
+        }
+    }
+
+    /// Commit a measured candidate only after EventStore has adopted the
+    /// matching hard-admission policy. This makes `appliedReserveMiB` honest:
+    /// a failed policy update leaves the old ceiling active and the candidate
+    /// visible as pending for retry.
+    @discardableResult
+    func commitPendingReserve(
+        _ expectedReserveMiB: Int,
+        ticket: LegacyEvidenceTransitionMeasurementTicket
+    ) -> LegacyEvidenceTransitionBudgetSnapshot {
+        lock.withLock { state in
+            guard ticket.configurationGeneration
+                    == state.snapshot.configurationGeneration,
+                  ticket.storage == state.storage,
+                  state.snapshot.pendingReserveMiB == expectedReserveMiB,
+                  state.snapshot.pendingReserveFitsHardBoundary == true else {
+                return state.snapshot
+            }
+            state.snapshot.appliedReserveMiB = max(0, expectedReserveMiB)
+            state.snapshot.pendingReserveMiB = nil
+            state.snapshot.pendingReserveFitsHardBoundary = nil
+            state.snapshot.measuredAt = Date()
+            return state.snapshot
+        }
+    }
+
+    /// Compatibility path for older integration sites. Evidence-only DBSTAT
+    /// cannot authorize a physical cap reduction, so it deliberately retains
+    /// the current applied reserve and exposes the measured candidate as
+    /// pending until the caller adopts `legacyAlertEvidenceTransitionMeasurement`.
+    @discardableResult
+    func update(
+        measurement: AlertEvidenceBudgetSnapshot?,
+        maximumReserveMiB: Int
+    ) -> LegacyEvidenceTransitionBudgetSnapshot {
+        var updated = storageConfig()
+        updated.evidenceMaxSizeMB = max(0, maximumReserveMiB)
+        let ticket = installStorageConfig(updated)
+        return lock.withLock { state in
+            guard ticket.configurationGeneration
+                    == state.snapshot.configurationGeneration else {
+                state.snapshot.staleMeasurementsDiscarded &+= 1
+                return state.snapshot
+            }
+            state.snapshot.measurementFailed = true
+            state.snapshot.rowCount = measurement?.rowCount
+            state.snapshot.chargedBytes = measurement?.chargedBytes
+            state.snapshot.familyFootprintBytes = nil
+            state.snapshot.walCheckpointDrained = nil
+            state.snapshot.freelistBytes = nil
+            if let measurement {
+                let maximum = max(0, maximumReserveMiB)
+                let charged = min(
+                    SQLitePersistentStorePolicy.capBytes(maxSizeMiB: maximum),
+                    max(0, measurement.chargedBytes)
+                )
+                let candidate = measurement.rowCount == 0 || charged == 0
+                    ? 0
+                    : Int(
+                        (charged - 1)
+                            / SQLitePersistentStorePolicy.bytesPerMiB + 1
+                    )
+                let bounded = min(maximum, max(0, candidate))
+                state.snapshot.pendingReserveMiB = bounded
+                state.snapshot.pendingReserveFitsHardBoundary = false
+                state.snapshot.proposedHardAdmissionBoundaryBytes =
+                    SQLitePersistentStorePolicy.capBytes(
+                        maxSizeMiB: state.storage
+                            .effectiveEventsFamilyMaxSizeMB(
+                                appliedLegacyEvidenceTransitionReserveMiB:
+                                    bounded
+                            )
+                    )
+            }
+            state.snapshot.measuredAt = Date()
+            return state.snapshot
+        }
+    }
+
+    func snapshot() -> LegacyEvidenceTransitionBudgetSnapshot {
+        lock.withLock { $0.snapshot }
+    }
+}
+
 /// Fail-visible snapshot of a TraceGraph store that could not open because the
 /// storage-admission gate fired during initialization.  The store actor does
 /// not exist in this state, so its live `storageAdmissionStatus()` cannot be
@@ -143,11 +485,19 @@ final class DaemonState {
 
     // MARK: - Storage
     let eventStore: EventStore
+    /// Temporary, measured allowance for preserved legacy
+    /// events.db.alert_evidence. Fresh installs hold zero; measurement failure
+    /// retains the full configured evidence tier so an upgrade cannot latch
+    /// event persistence merely because DBSTAT is unavailable.
+    let legacyEvidenceTransitionBudget: LegacyEvidenceTransitionBudget
     /// v1.21.4 (F2/A1): async batched writer sitting in FRONT of `eventStore`
     /// for the hot detection path. The event loop hands events here (O(1))
     /// instead of blocking on a per-event SQLite transaction; the writer flushes
     /// them in batches off the consumer's critical path. See BatchedEventWriter.
     let eventWriter: BatchedEventWriter
+    /// Sticky post-sweep truth: a configured budget miss remains degraded until
+    /// a later sweep proves convergence or a config change invalidates it.
+    let eventRetentionBudgetHealth = EventRetentionBudgetHealth()
     let alertStore: AlertStore
     /// Single chokepoint for all alert insertion. Routes everything through
     /// AlertDeduplicator before reaching AlertStore, closing the v1.6.9
@@ -166,10 +516,43 @@ final class DaemonState {
     /// DispatchSource thread and any spawned Task.
     let inboxPollerLock = OSAllocatedUnfairLock<Bool>(initialState: false)
 
+    /// Serializes rule reload with terminal shutdown and owns the joinable main
+    /// ingestion plane. These are separate from MonitorSupervisor because the
+    /// six source drivers and two EventLoop consumers are the primary detector,
+    /// not optional background monitors.
+    let daemonLifecycle = DaemonLifecycleCoordinator()
+    let eventIngestionLifecycle = EventIngestionLifecycle()
+    /// One-shot hydration/scans plus the rule-watch and trace-binding workers
+    /// launched while DaemonSetup is assembling state. The instance is created
+    /// before those tasks and then transferred here for shutdown ownership.
+    let startupWorkLifecycle: DaemonTimerLifecycle
+    /// Bounded, joinable lanes for work spawned by EventLoop/monitor producers.
+    /// Security detection never competes with slow model or external-output
+    /// calls for capacity; each plane has independent conservation and overload
+    /// telemetry and is sealed before final persistence.
+    let detectionWorkLifecycle = DaemonTimerLifecycle(
+        maximumInFlightHandlers: 256
+    )
+    let advisoryWorkLifecycle = DaemonTimerLifecycle(
+        maximumInFlightHandlers: 64
+    )
+    let outputWorkLifecycle = DaemonTimerLifecycle(
+        maximumInFlightHandlers: 128
+    )
+
     // MARK: - Core Engines
     let enricher: EventEnricher
+    /// Bounded external ownership for events awaiting deferred heavyweight
+    /// evidence. Its capacity matches HeavyEnrichmentPlane's 512-result cap;
+    /// the two ingestion lanes reserve before enrichment so pressure is
+    /// back-pressured rather than converted into an unreported evidence drop.
+    let deferredEnrichmentBuffer = DeferredEnrichmentBuffer()
     let ruleEngine: RuleEngine
     let sequenceEngine: SequenceEngine
+    /// Owns the bounded, integrity-checked recovery point for in-flight
+    /// multi-event detections. It is constructed/restored only after the full
+    /// active sequence corpus loads and before event-loop ingestion starts.
+    let sequenceCheckpointCoordinator: SequenceCheckpointCoordinator
     let baselineEngine: BaselineEngine
     let behaviorScoring: BehaviorScoring
     let deduplicator: AlertDeduplicator
@@ -201,6 +584,9 @@ final class DaemonState {
     // MARK: - AI Guard
     let aiRegistry: AIToolRegistry
     let aiTracker: AIProcessTracker
+    /// Serializes root registration, EXIT, missed-EXIT reconciliation, and the
+    /// final synchronous ES callback snapshot across all derivative AI stores.
+    let aiSessionLifecycleCoordinator = AISessionLifecycleCoordinator()
     let credentialFence: CredentialFence
     let projectBoundary: ProjectBoundary
     let aiNetworkSandbox: AINetworkSandbox
@@ -446,7 +832,10 @@ final class DaemonState {
     /// Pre-v1.8 used a single `retentionDays` + `maxDatabaseSizeMB` pair
     /// shared across all three tiers. The split here lets event-firehose
     /// churn coexist with multi-year alert/campaign history.
-    var storage: DaemonConfig.StorageConfig = DaemonConfig.StorageConfig()
+    var storage: DaemonConfig.StorageConfig {
+        get { legacyEvidenceTransitionBudget.storageConfig() }
+        set { legacyEvidenceTransitionBudget.installStorageConfig(newValue) }
+    }
 
     /// v1.19.1: opt-in network-enrichment switches, OFF by default. Set by
     /// DaemonSetup from config and re-applied live by the SIGHUP handler.
@@ -522,10 +911,14 @@ final class DaemonState {
         sequenceRulesDir: String,
         effectiveRulesDir: String,
         eventStore: EventStore,
+        legacyEvidenceTransitionBudget: LegacyEvidenceTransitionBudget,
         alertStore: AlertStore,
+        evidenceBudgetBytes: Int64,
+        startupWorkLifecycle: DaemonTimerLifecycle,
         enricher: EventEnricher,
         ruleEngine: RuleEngine,
         sequenceEngine: SequenceEngine,
+        sequenceCheckpointCoordinator: SequenceCheckpointCoordinator,
         baselineEngine: BaselineEngine,
         behaviorScoring: BehaviorScoring,
         deduplicator: AlertDeduplicator,
@@ -631,6 +1024,7 @@ final class DaemonState {
         self.sequenceRulesDir = sequenceRulesDir
         self.effectiveRulesDir = effectiveRulesDir
         self.eventStore = eventStore
+        self.legacyEvidenceTransitionBudget = legacyEvidenceTransitionBudget
         // Constructed with default flushThreshold/hardCap/flush-interval — these
         // are intentionally NOT config-surfaced (no daemon_config.json key),
         // unlike the priority/file stream caps below (DaemonSetup wires those
@@ -638,15 +1032,20 @@ final class DaemonState {
         // volumePath wires the disk admission check to the store volume: below the
         // free-space floor the writer pauses persistence and says so, instead of
         // writing until the boot volume is 100% full.
-        self.eventWriter = BatchedEventWriter(store: eventStore, volumePath: supportDir)
+        let eventWriter = BatchedEventWriter(
+            store: eventStore,
+            volumePath: supportDir
+        )
+        self.eventWriter = eventWriter
         self.alertStore = alertStore
+        self.startupWorkLifecycle = startupWorkLifecycle
         // Build AlertSink from the already-stored alertStore + deduplicator so
         // we don't need a new initializer parameter. Construction is cheap
         // (the actor is empty); first use is what triggers any work.
-        // v1.8.0: pass eventStore so the sink can snapshot the ±60s
-        // event window into `alert_evidence` on every alert insert.
-        // Backs the dashboard's alert detail view after the 24h hot
-        // tier drops the originating events.
+        // EventStore selects the fixed preceding candidate window; AlertStore
+        // owns the slim snapshot in alerts.db after the alert commits. The
+        // evidence sub-budget is independent from alert rows even though the
+        // two share one combined-family hard admission policy.
         // Inject the SAME shared "alerts emitted" counter the heartbeat reads
         // (`_sharedAlertCount`, file-scope in DaemonBootstrap). The sink
         // increments it once per emitted alert across every path, so
@@ -658,11 +1057,19 @@ final class DaemonState {
             deduplicator: deduplicator,
             eventStore: eventStore,
             builtinSettingsDir: supportDir,
-            alertCounter: _sharedAlertCount
+            alertCounter: _sharedAlertCount,
+            evidenceBudgetBytes: evidenceBudgetBytes,
+            evidencePrefixGeneration: {
+                await eventWriter.evidencePrefixGeneration()
+            },
+            evidencePrefixBarrier: { generation in
+                await eventWriter.awaitEvidencePrefix(through: generation)
+            }
         )
         self.enricher = enricher
         self.ruleEngine = ruleEngine
         self.sequenceEngine = sequenceEngine
+        self.sequenceCheckpointCoordinator = sequenceCheckpointCoordinator
         self.baselineEngine = baselineEngine
         self.behaviorScoring = behaviorScoring
         self.deduplicator = deduplicator
@@ -833,7 +1240,7 @@ final class DaemonState {
     /// after a back-off so the source recovers without a daemon restart. A
     /// single source (e.g. ESCollector) emits BOTH families; the yield closure
     /// routes each event by `eventCategory` into the correct stream.
-    func mergedEventStreams() -> (
+    func mergedEventStreams() async -> (
         priority: AsyncStream<EventPipelineEnvelope>,
         file: AsyncStream<EventPipelineEnvelope>
     ) {
@@ -849,6 +1256,10 @@ final class DaemonState {
         // actual yield result and attributes `.dropped` to the OLD envelope.
         let pCont = priorityCont!
         let fCont = fileCont!
+        await eventIngestionLifecycle.configure(
+            priority: pCont,
+            file: fCont
+        )
         let pipelineTelemetry = eventPipelineTelemetry
         let yield: @Sendable (EventPipelineSource, Event) -> Void = { source, event in
             let lane: EventPipelineLane = DaemonState.ridesFileStream(
@@ -882,21 +1293,33 @@ final class DaemonState {
             // yields a fresh process that re-runs es_new_client.
             let sd = supportDir
             if let es = collector {
-                Task { await driveSource(.endpointSecurity, logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield) }
+                await eventIngestionLifecycle.spawnDriver {
+                    await driveSource(.endpointSecurity, logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield)
+                }
             }
             if let kdebug = kdebugCollector {
-                Task { await driveSource(.kdebug, logger: logger, events: { kdebug.events }, yield: yield) }
+                await eventIngestionLifecycle.spawnDriver {
+                    await driveSource(.kdebug, logger: logger, events: { kdebug.events }, yield: yield)
+                }
             }
             if let eslogger = esloggerCollector {
-                Task { await driveSource(.eslogger, logger: logger, essential: true, supportDir: sd, events: { eslogger.events }, yield: yield) }
+                await eventIngestionLifecycle.spawnDriver {
+                    await driveSource(.eslogger, logger: logger, essential: true, supportDir: sd, events: { eslogger.events }, yield: yield)
+                }
             }
             if let ul = ulCollector {
-                Task { await driveSource(.unifiedLog, logger: logger, events: { ul.events }, yield: yield) }
+                await eventIngestionLifecycle.spawnDriver {
+                    await driveSource(.unifiedLog, logger: logger, events: { ul.events }, yield: yield)
+                }
             }
             let tcc = tccMonitor
-            Task { await driveSource(.tcc, logger: logger, events: { tcc.events }, yield: yield) }
+            await eventIngestionLifecycle.spawnDriver {
+                await driveSource(.tcc, logger: logger, events: { tcc.events }, yield: yield)
+            }
             let net = networkCollector
-            Task { await driveSource(.network, logger: logger, events: { net.events }, yield: yield) }
+            await eventIngestionLifecycle.spawnDriver {
+                await driveSource(.network, logger: logger, events: { net.events }, yield: yield)
+            }
         return continuationPair
     }
 }
@@ -937,7 +1360,13 @@ private func driveSource(
             // in-process (the ES client is invalidated). Request a guarded
             // daemon relaunch so a fresh process re-establishes es_new_client.
             if essential, let supportDir {
-                recoverEssentialSourceOrStayDegraded(name: name, supportDir: supportDir, logger: logger)
+                if recoverEssentialSourceOrStayDegraded(
+                    name: name,
+                    supportDir: supportDir,
+                    logger: logger
+                ) {
+                    return
+                }
             }
         }
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -957,19 +1386,23 @@ private let daemonProcessStart = Date()
 ///     degraded (the CRITICAL fault is already logged) rather than thrash.
 /// NEEDS ON-DEVICE VERIFICATION: relies on the system relaunching the ES
 /// extension after exit (standard for kept-alive security extensions).
-private func recoverEssentialSourceOrStayDegraded(name: String, supportDir: String, logger: Logger) {
+private func recoverEssentialSourceOrStayDegraded(
+    name: String,
+    supportDir: String,
+    logger: Logger
+) -> Bool {
     // Only a supervised, non-interactive process is relaunched on exit (the
     // sysext / LaunchDaemon). A developer running `swift run maccrabd` from a
     // terminal would just have it quit — so never exit when stdin is a TTY;
     // stay degraded instead.
     guard isatty(STDIN_FILENO) == 0 else {
         logger.fault("\(name) DOWN in an interactive session — not relaunching (no supervisor); staying degraded")
-        return
+        return false
     }
     let uptime = Date().timeIntervalSince(daemonProcessStart)
     guard uptime > 180 else {
         logger.fault("\(name) DOWN \(Int(uptime))s after start — within startup guard window; staying up, not relaunching")
-        return
+        return false
     }
     let markerPath = supportDir + "/.collector_restart"
     let now = Date().timeIntervalSince1970
@@ -980,7 +1413,7 @@ private func recoverEssentialSourceOrStayDegraded(name: String, supportDir: Stri
     }()
     guard recent.count < 3 else {
         logger.fault("\(name) DOWN but already relaunched \(recent.count)× in 10 min — giving up auto-recovery to avoid a restart loop; host stays degraded until manual restart")
-        return
+        return false
     }
     let updated = (recent + [now]).map { String($0) }.joined(separator: "\n") + "\n"
     // Atomic write (temp + rename): if ES + eslogger escalate concurrently and
@@ -989,7 +1422,8 @@ private func recoverEssentialSourceOrStayDegraded(name: String, supportDir: Stri
     // exit() below ends the process before a second writer matters.)
     try? updated.data(using: .utf8)?.write(to: URL(fileURLWithPath: markerPath), options: .atomic)
     logger.fault("\(name) confirmed dead — exiting for a clean relaunch so a fresh ES client can be established (relaunch \(recent.count + 1) in the last 10 min)")
-    // EX_TEMPFAIL(75): a transient failure; the supervising system should
-    // relaunch us. Flush os_log first.
-    exit(75)
+    // Preserve EX_TEMPFAIL(75), but route through the central SIGTERM
+    // finalizer so writer/evidence/graph/checkpoint state is closed first.
+    DaemonExitRequest.requestRelaunch()
+    return true
 }

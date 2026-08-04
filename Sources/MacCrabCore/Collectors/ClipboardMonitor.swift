@@ -25,6 +25,7 @@ public actor ClipboardMonitor {
     public nonisolated let events: AsyncStream<ClipboardEvent>
     private var continuation: AsyncStream<ClipboardEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     private var lastChangeCount: Int = 0
     private let pollInterval: TimeInterval
 
@@ -55,7 +56,8 @@ public actor ClipboardMonitor {
     }
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         // Capture initial state
         lastChangeCount = NSPasteboard.general.changeCount
 
@@ -74,12 +76,28 @@ public actor ClipboardMonitor {
     }
 
     public func stop() {
-        pollTask?.cancel()
-        pollTask = nil
-        continuation?.finish()
+        _ = beginStop()
     }
 
-    private func check() {
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { pollTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
+        pollTask?.cancel()
+        continuation?.finish()
+        continuation = nil
+        return task
+    }
+
+    private func check() async {
         let currentCount = NSPasteboard.general.changeCount
         guard currentCount != lastChangeCount else { return }
         lastChangeCount = currentCount
@@ -96,7 +114,8 @@ public actor ClipboardMonitor {
             // to fetch-piped-to-shell text, so this is cheap on normal copies.
             if let clickFix {
                 let ts = Date()
-                Task { await clickFix.recordClipboard(content, at: ts) }
+                await clickFix.recordClipboard(content, at: ts)
+                guard lifecyclePhase == .running, !Task.isCancelled else { return }
             }
         }
 

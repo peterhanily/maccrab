@@ -1,24 +1,25 @@
 // CrossProcessCorrelator.swift
 // MacCrabCore
 //
-// Connects events across unrelated process trees by shared artifacts:
-// files, network destinations, and domains. When Process A downloads a
-// file, Process B executes it, and Process C reaches out to a C2 server,
-// these form a single attack chain even though the processes share no
-// lineage. This engine discovers those chains in real time.
+// Connects events from distinct PID values through shared artifacts: files,
+// network destinations, and domains. When one PID downloads a file, another
+// executes it, and a third reaches out to a C2 server, the shared artifacts
+// are useful evidence for one attack chain. This API receives neither stable
+// process-start identity nor ancestry, so it does not claim the PIDs belong to
+// unrelated process trees.
 
 import Foundation
 import os.log
 
 /// Correlates events across process boundaries using shared artifacts.
 ///
-/// Unlike `IncidentGrouper` (which clusters alerts within the same process
-/// tree), this actor links *unrelated* process trees that touch the same
-/// file, network destination, or domain within a sliding time window.
+/// Links distinct PID values that touch the same file, network destination,
+/// or domain within a sliding time window. A distinct PID is cross-process
+/// evidence, but is not proof of distinct process lifetimes or ancestry.
 ///
 /// **Typical chain:** curl writes `/tmp/payload` → bash executes `/tmp/payload`
-/// → payload connects to 198.51.100.7:443.  Three different process trees,
-/// one attack chain.
+/// → payload connects to 198.51.100.7:443. Three PID values, one candidate
+/// attack chain.
 public actor CrossProcessCorrelator {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "cross-process")
@@ -55,16 +56,256 @@ public actor CrossProcessCorrelator {
         }
     }
 
-    /// A completed correlation chain spanning multiple processes.
+    /// A completed correlation chain spanning multiple PID values.
     public struct CorrelationChain: Sendable {
         public let id: String
         public let events: [ChainEvent]
         public let sharedArtifact: String
         public let artifactType: String   // "file", "network", "domain"
         public let timeSpanSeconds: Double
-        public let processCount: Int
+        /// Number of distinct PID values in `events`. This does not establish
+        /// stable process lifetime or lineage identity.
+        public let distinctPIDCount: Int
+
+        /// Compatibility spelling retained for existing consumers. New copy
+        /// should use `distinctPIDCount` and say "distinct PIDs", not infer
+        /// unrelated processes or process trees.
+        @available(*, deprecated, renamed: "distinctPIDCount")
+        public var processCount: Int { distinctPIDCount }
         public let severity: Severity
         public let description: String
+    }
+
+    /// Fixed-cardinality capacity accounting for one artifact map. The two
+    /// conservation equations make silent loss or accidental unbounded state
+    /// visible without exposing any paths, hosts, or process data.
+    public struct ArtifactMapTelemetry: Sendable, Equatable {
+        public let acceptedEvents: UInt64
+        public let uniqueArtifactInsertions: UInt64
+        public let trackedArtifacts: Int
+        public let recencyIndexEntries: Int
+        public let peakTrackedArtifacts: Int
+        public let retainedEvents: Int
+        public let staleArtifactsRemoved: UInt64
+        public let capacityArtifactsEvicted: UInt64
+        public let evictionSelectionOperations: UInt64
+        public let staleEventsRemoved: UInt64
+        public let capacityEventsEvicted: UInt64
+        public let perArtifactEventsEvicted: UInt64
+
+        public var artifactConservationMaintained: Bool {
+            uniqueArtifactInsertions == UInt64(trackedArtifacts)
+                &+ staleArtifactsRemoved
+                &+ capacityArtifactsEvicted
+        }
+
+        public var eventConservationMaintained: Bool {
+            acceptedEvents == UInt64(retainedEvents)
+                &+ staleEventsRemoved
+                &+ capacityEventsEvicted
+                &+ perArtifactEventsEvicted
+        }
+
+        public var indexConservationMaintained: Bool {
+            recencyIndexEntries == trackedArtifacts
+        }
+
+        /// One indexed selection per capacity eviction. A value of `false`
+        /// would mean the constant-work eviction contract has drifted.
+        public var constantWorkEvictionMaintained: Bool {
+            evictionSelectionOperations == capacityArtifactsEvicted
+        }
+    }
+
+    /// Capacity state for all three artifact maps. Counters are fixed in
+    /// cardinality; artifact values never become metric labels.
+    public struct Telemetry: Sendable, Equatable {
+        public let maximumArtifactsPerMap: Int
+        public let maximumEventsPerArtifact: Int
+        public let filePIDIndexEntries: Int
+        public let file: ArtifactMapTelemetry
+        public let network: ArtifactMapTelemetry
+        public let domain: ArtifactMapTelemetry
+
+        public var conservationMaintained: Bool {
+            [file, network, domain].allSatisfy {
+                $0.artifactConservationMaintained
+                    && $0.eventConservationMaintained
+                    && $0.indexConservationMaintained
+                    && $0.constantWorkEvictionMaintained
+            }
+                && filePIDIndexEntries == file.trackedArtifacts
+        }
+
+        public var capacityMaintained: Bool {
+            [file, network, domain].allSatisfy {
+                $0.trackedArtifacts <= maximumArtifactsPerMap
+                    && $0.peakTrackedArtifacts <= maximumArtifactsPerMap
+            }
+        }
+    }
+
+    /// Intrusive dictionary-backed LRU. Unlike a lazy heap, this index has
+    /// exactly one node per retained artifact, so repeated touches cannot grow
+    /// auxiliary state. Selection and removal are deterministic O(1).
+    private struct ArtifactRecencyIndex {
+        private struct Node {
+            var previous: String?
+            var next: String?
+        }
+
+        private var nodes: [String: Node] = [:]
+        private var oldest: String?
+        private var newest: String?
+
+        var count: Int { nodes.count }
+
+        mutating func touch(_ key: String) {
+            if let node = nodes[key] {
+                guard newest != key else { return }
+                if let previous = node.previous {
+                    nodes[previous]?.next = node.next
+                } else {
+                    oldest = node.next
+                }
+                if let next = node.next {
+                    nodes[next]?.previous = node.previous
+                }
+            } else if oldest == nil {
+                oldest = key
+            }
+
+            let previousNewest = newest
+            nodes[key] = Node(previous: previousNewest, next: nil)
+            if let previousNewest {
+                nodes[previousNewest]?.next = key
+            }
+            newest = key
+        }
+
+        @discardableResult
+        mutating func remove(_ key: String) -> Bool {
+            guard let node = nodes.removeValue(forKey: key) else { return false }
+            if let previous = node.previous {
+                nodes[previous]?.next = node.next
+            } else {
+                oldest = node.next
+            }
+            if let next = node.next {
+                nodes[next]?.previous = node.previous
+            } else {
+                newest = node.previous
+            }
+            return true
+        }
+
+        mutating func removeOldest() -> String? {
+            guard let key = oldest else { return nil }
+            precondition(remove(key), "oldest artifact must exist in recency index")
+            return key
+        }
+    }
+
+    private struct ArtifactAppendOutcome {
+        let capacityEvictedKey: String?
+        let trimmedEvents: Bool
+    }
+
+    /// Bounded storage and exact lifetime accounting for one artifact class.
+    private struct ArtifactStore {
+        var eventsByKey: [String: [ChainEvent]] = [:]
+        private var recency = ArtifactRecencyIndex()
+        private var acceptedEvents: UInt64 = 0
+        private var uniqueArtifactInsertions: UInt64 = 0
+        private var peakTrackedArtifacts: Int = 0
+        private var staleArtifactsRemoved: UInt64 = 0
+        private var capacityArtifactsEvicted: UInt64 = 0
+        private var evictionSelectionOperations: UInt64 = 0
+        private var staleEventsRemoved: UInt64 = 0
+        private var capacityEventsEvicted: UInt64 = 0
+        private var perArtifactEventsEvicted: UInt64 = 0
+
+        mutating func append(
+            key: String,
+            event: ChainEvent,
+            maximumArtifacts: Int,
+            maximumEventsPerArtifact: Int
+        ) -> ArtifactAppendOutcome {
+            var capacityEvictedKey: String?
+            if eventsByKey[key] == nil {
+                uniqueArtifactInsertions &+= 1
+                if eventsByKey.count >= maximumArtifacts {
+                    evictionSelectionOperations &+= 1
+                    guard let victim = recency.removeOldest(),
+                          let evictedEvents = eventsByKey.removeValue(forKey: victim) else {
+                        preconditionFailure("artifact map and recency index diverged")
+                    }
+                    capacityArtifactsEvicted &+= 1
+                    capacityEventsEvicted &+= UInt64(evictedEvents.count)
+                    capacityEvictedKey = victim
+                }
+            }
+
+            acceptedEvents &+= 1
+            eventsByKey[key, default: []].append(event)
+
+            var trimmedEvents = false
+            if var events = eventsByKey[key], events.count > maximumEventsPerArtifact {
+                // At most one event is over the cap after one append. Remove
+                // the oldest timestamp; equal timestamps retain arrival order.
+                var oldestIndex = events.startIndex
+                for index in events.indices.dropFirst()
+                    where events[index].timestamp < events[oldestIndex].timestamp {
+                    oldestIndex = index
+                }
+                events.remove(at: oldestIndex)
+                eventsByKey[key] = events
+                perArtifactEventsEvicted &+= 1
+                trimmedEvents = true
+            }
+
+            recency.touch(key)
+            peakTrackedArtifacts = max(peakTrackedArtifacts, eventsByKey.count)
+            return ArtifactAppendOutcome(
+                capacityEvictedKey: capacityEvictedKey,
+                trimmedEvents: trimmedEvents
+            )
+        }
+
+        mutating func purge(cutoff: Date) {
+            // Materializing at most `maximumArtifacts` keys is bounded. Map
+            // iteration order does not affect results or the LRU order of the
+            // surviving keys.
+            for key in Array(eventsByKey.keys) {
+                guard let events = eventsByKey[key] else { continue }
+                let live = events.filter { $0.timestamp >= cutoff }
+                staleEventsRemoved &+= UInt64(events.count - live.count)
+                if live.isEmpty {
+                    eventsByKey.removeValue(forKey: key)
+                    precondition(recency.remove(key), "artifact map and recency index diverged")
+                    staleArtifactsRemoved &+= 1
+                } else if live.count != events.count {
+                    eventsByKey[key] = live
+                }
+            }
+        }
+
+        func telemetry() -> ArtifactMapTelemetry {
+            ArtifactMapTelemetry(
+                acceptedEvents: acceptedEvents,
+                uniqueArtifactInsertions: uniqueArtifactInsertions,
+                trackedArtifacts: eventsByKey.count,
+                recencyIndexEntries: recency.count,
+                peakTrackedArtifacts: peakTrackedArtifacts,
+                retainedEvents: eventsByKey.values.reduce(0) { $0 + $1.count },
+                staleArtifactsRemoved: staleArtifactsRemoved,
+                capacityArtifactsEvicted: capacityArtifactsEvicted,
+                evictionSelectionOperations: evictionSelectionOperations,
+                staleEventsRemoved: staleEventsRemoved,
+                capacityEventsEvicted: capacityEventsEvicted,
+                perArtifactEventsEvicted: perArtifactEventsEvicted
+            )
+        }
     }
 
     // MARK: - Configuration
@@ -80,39 +321,36 @@ public actor CrossProcessCorrelator {
 
     /// Minimum number of distinct PIDs required to emit a FILE chain. Defaults
     /// to 2 so the canonical write→execute handoff fires: process A writes
-    /// `/tmp/payload`, an *unrelated* process B executes it — two distinct PIDs,
-    /// no shared lineage. This is the engine's flagship cross-tree signal, and
-    /// lineage-based correlation (SequenceEngine) cannot catch it. File chains
-    /// are already gated on action diversity (write+execute, not write+write)
-    /// and the shell-utility guard, so 2 PIDs here is a strong signal, not noise.
+    /// `/tmp/payload`, another PID executes it. This is the engine's flagship
+    /// cross-PID signal. File chains are already gated on action diversity
+    /// (write+execute, not write+write) and the shell-utility guard, so 2 PID
+    /// values here are useful evidence without making an ancestry claim.
     private let minFileChainLength: Int
 
     /// Maximum number of distinct artifacts tracked per map before eviction.
-    private let maxArtifactsPerMap: Int = 10_000
+    private let maxArtifactsPerMap: Int
 
     /// Maximum number of events retained per artifact key. Bounds the per-key
     /// list so one hot key (e.g. a shared log file hammered by many worker
     /// PIDs) can't grow unbounded and turn the per-call correlation scan into
     /// O(n^2). Well above the largest real-world single-key chain observed in
     /// the field (~140 events), so detection behavior is unchanged.
-    private let maxEventsPerKey: Int = 512
+    private let maxEventsPerKey: Int
 
     // MARK: - State
 
-    /// File path -> ordered list of events touching that path.
-    private var fileArtifacts: [String: [ChainEvent]] = [:]
-
-    /// "ip:port" -> ordered list of events contacting that destination.
-    private var networkArtifacts: [String: [ChainEvent]] = [:]
-
-    /// Domain name -> ordered list of events resolving/contacting that domain.
-    private var domainArtifacts: [String: [ChainEvent]] = [:]
+    /// Each artifact store owns its event map, a bounded O(1) LRU index, and
+    /// exact conservation counters. Capacity is enforced before every new key
+    /// is inserted; the periodic stale purge is cleanup, not the safety rail.
+    private var fileArtifacts = ArtifactStore()
+    private var networkArtifacts = ArtifactStore()
+    private var domainArtifacts = ArtifactStore()
 
     /// File path -> distinct PIDs observed touching that path. A conservative
     /// UPPER BOUND on the windowed distinct-PID count used by
-    /// `evaluateFileChain`: grown on every append and never shrunk between
-    /// purges, then rebuilt from the surviving events on purge/eviction, so it
-    /// can never UNDER-count the in-window distinct PIDs. That lets
+    /// `evaluateFileChain`: updated on every append, rebuilt when a per-key
+    /// event trim occurs, removed with capacity eviction, and rebuilt after a
+    /// stale purge. It can never UNDER-count the retained distinct PIDs. That lets
     /// `evaluateFileChain` bail in O(1) when a key provably can't reach
     /// `minFileChainLength`, skipping the window scan + pid-Set alloc on the
     /// single-PID same-file flood (the log/build-writer hot path).
@@ -439,17 +677,24 @@ public actor CrossProcessCorrelator {
     ///     NETWORK / domain fan-out chain. Defaults to 3 (reduces noise from
     ///     normal multi-process traffic like browsers + git to same CDN).
     ///   - minFileChainLength: Minimum number of distinct PIDs required to emit
-    ///     a FILE chain. Defaults to 2 so the canonical unrelated-tree
-    ///     write→execute handoff fires; file chains are already gated on action
-    ///     diversity + the shell-utility guard, which hold FP noise down.
+    ///     a FILE chain. Defaults to 2 so the canonical cross-PID write→execute
+    ///     handoff fires; file chains are already gated on action diversity and
+    ///     the shell-utility guard, which hold FP noise down.
+    ///   - maxArtifactsPerMap: Hard cap independently enforced for file, IP,
+    ///     and domain keys. Values below one are clamped to one.
+    ///   - maxEventsPerArtifact: Hard event-list cap for each retained key.
     public init(
         correlationWindow: TimeInterval = 300,
         minChainLength: Int = 3,
-        minFileChainLength: Int = 2
+        minFileChainLength: Int = 2,
+        maxArtifactsPerMap: Int = 10_000,
+        maxEventsPerArtifact: Int = 512
     ) {
         self.correlationWindow = correlationWindow
         self.minChainLength = minChainLength
         self.minFileChainLength = minFileChainLength
+        self.maxArtifactsPerMap = max(1, maxArtifactsPerMap)
+        self.maxEventsPerKey = max(1, maxEventsPerArtifact)
         self.lastPurge = Date()
     }
 
@@ -478,8 +723,20 @@ public actor CrossProcessCorrelator {
             action: action
         )
 
-        appendArtifact(to: &fileArtifacts, key: path, event: event)
+        let outcome = fileArtifacts.append(
+            key: path,
+            event: event,
+            maximumArtifacts: maxArtifactsPerMap,
+            maximumEventsPerArtifact: maxEventsPerKey
+        )
+        if let evictedKey = outcome.capacityEvictedKey {
+            fileArtifactPIDs.removeValue(forKey: evictedKey)
+        }
         fileArtifactPIDs[path, default: []].insert(pid)
+        if outcome.trimmedEvents,
+           let retained = fileArtifacts.eventsByKey[path] {
+            fileArtifactPIDs[path] = Set(retained.map(\.pid))
+        }
         purgeIfNeeded()
 
         return evaluateFileChain(path: path)
@@ -510,15 +767,26 @@ public actor CrossProcessCorrelator {
         )
 
         let ipKey = "\(destinationIP):\(destinationPort)"
-        appendArtifact(to: &networkArtifacts, key: ipKey, event: event)
+        _ = networkArtifacts.append(
+            key: ipKey,
+            event: event,
+            maximumArtifacts: maxArtifactsPerMap,
+            maximumEventsPerArtifact: maxEventsPerKey
+        )
 
         var chain = evaluateNetworkChain(key: ipKey, artifactType: "network")
 
         // Also track by domain if provided.
-        if let domain = destinationDomain, !domain.isEmpty {
-            appendArtifact(to: &domainArtifacts, key: domain, event: event)
+        if let domain = destinationDomain,
+           let domainKey = Self.normalizedDomain(domain) {
+            _ = domainArtifacts.append(
+                key: domainKey,
+                event: event,
+                maximumArtifacts: maxArtifactsPerMap,
+                maximumEventsPerArtifact: maxEventsPerKey
+            )
             if chain == nil {
-                chain = evaluateNetworkChain(key: domain, artifactType: "domain")
+                chain = evaluateNetworkChain(key: domainKey, artifactType: "domain")
             }
         }
 
@@ -526,46 +794,53 @@ public actor CrossProcessCorrelator {
         return chain
     }
 
-    /// Remove all artifacts whose most recent event is older than the
-    /// correlation window. Call periodically to bound memory.
+    /// Remove stale events and any artifact left empty. The hard capacity rail
+    /// is enforced at insertion; this periodic pass controls data age.
     public func purgeStale() {
         let cutoff = Date().addingTimeInterval(-correlationWindow)
 
-        fileArtifacts = purgeArtifactMap(fileArtifacts, cutoff: cutoff)
-        networkArtifacts = purgeArtifactMap(networkArtifacts, cutoff: cutoff)
-        domainArtifacts = purgeArtifactMap(domainArtifacts, cutoff: cutoff)
-
-        // Enforce hard cap per map: evict oldest artifacts if still over limit
-        fileArtifacts = evictIfOverLimit(fileArtifacts)
-        networkArtifacts = evictIfOverLimit(networkArtifacts)
-        domainArtifacts = evictIfOverLimit(domainArtifacts)
+        fileArtifacts.purge(cutoff: cutoff)
+        networkArtifacts.purge(cutoff: cutoff)
+        domainArtifacts.purge(cutoff: cutoff)
 
         // Rebuild the file-PID upper-bound index from the surviving file
         // artifacts so it stays in sync with pruning/eviction: this bounds its
         // memory (its keys track `fileArtifacts` exactly) and keeps it a valid
         // upper bound (distinct PIDs of all stored events ⊇ in-window PIDs).
-        fileArtifactPIDs = rebuildFilePIDIndex(fileArtifacts)
+        fileArtifactPIDs = rebuildFilePIDIndex(fileArtifacts.eventsByKey)
 
         lastPurge = Date()
-        logger.debug("Purge complete — files: \(self.fileArtifacts.count), network: \(self.networkArtifacts.count), domains: \(self.domainArtifacts.count)")
+        logger.debug("Purge complete — files: \(self.fileArtifacts.eventsByKey.count), network: \(self.networkArtifacts.eventsByKey.count), domains: \(self.domainArtifacts.eventsByKey.count)")
     }
 
     // MARK: - Diagnostics
 
     /// Number of distinct file artifacts currently tracked.
-    public var trackedFileCount: Int { fileArtifacts.count }
+    public var trackedFileCount: Int { fileArtifacts.eventsByKey.count }
 
     /// Number of distinct network artifacts currently tracked.
-    public var trackedNetworkCount: Int { networkArtifacts.count }
+    public var trackedNetworkCount: Int { networkArtifacts.eventsByKey.count }
 
     /// Number of distinct domain artifacts currently tracked.
-    public var trackedDomainCount: Int { domainArtifacts.count }
+    public var trackedDomainCount: Int { domainArtifacts.eventsByKey.count }
 
     /// Total number of individual events stored across all artifact maps.
     public var totalEventCount: Int {
-        fileArtifacts.values.reduce(0) { $0 + $1.count }
-            + networkArtifacts.values.reduce(0) { $0 + $1.count }
-            + domainArtifacts.values.reduce(0) { $0 + $1.count }
+        fileArtifacts.eventsByKey.values.reduce(0) { $0 + $1.count }
+            + networkArtifacts.eventsByKey.values.reduce(0) { $0 + $1.count }
+            + domainArtifacts.eventsByKey.values.reduce(0) { $0 + $1.count }
+    }
+
+    /// Fixed-cardinality capacity and conservation snapshot.
+    public func telemetrySnapshot() -> Telemetry {
+        Telemetry(
+            maximumArtifactsPerMap: maxArtifactsPerMap,
+            maximumEventsPerArtifact: maxEventsPerKey,
+            filePIDIndexEntries: fileArtifactPIDs.count,
+            file: fileArtifacts.telemetry(),
+            network: networkArtifacts.telemetry(),
+            domain: domainArtifacts.telemetry()
+        )
     }
 
     // MARK: - Chain Evaluation
@@ -583,14 +858,14 @@ public actor CrossProcessCorrelator {
         if let pids = fileArtifactPIDs[path], pids.count < minFileChainLength {
             return nil
         }
-        guard let events = fileArtifacts[path] else { return nil }
+        guard let events = fileArtifacts.eventsByKey[path] else { return nil }
 
         // Filter to events within the correlation window.
         let windowEvents = eventsWithinWindow(events)
 
         // Must involve multiple distinct PIDs. File chains fire at
         // `minFileChainLength` (2 by default) — the write→execute handoff
-        // across unrelated trees — while network fan-out needs `minChainLength`
+        // across distinct PIDs — while network fan-out needs `minChainLength`
         // (3) to be meaningful.
         let distinctPIDs = Set(windowEvents.map(\.pid))
         guard distinctPIDs.count >= minFileChainLength else { return nil }
@@ -641,10 +916,10 @@ public actor CrossProcessCorrelator {
     private func evaluateNetworkChain(key: String, artifactType: String) -> CorrelationChain? {
         let events: [ChainEvent]
         if artifactType == "domain" {
-            guard let stored = domainArtifacts[key] else { return nil }
+            guard let stored = domainArtifacts.eventsByKey[key] else { return nil }
             events = stored
         } else {
-            guard let stored = networkArtifacts[key] else { return nil }
+            guard let stored = networkArtifacts.eventsByKey[key] else { return nil }
             events = stored
         }
 
@@ -722,12 +997,35 @@ public actor CrossProcessCorrelator {
                 return true
             }
         } else if artifactType == "domain" {
-            let lower = key.lowercased()
-            for suffix in Self.trustedCloudDomains where lower.hasSuffix(suffix) {
-                return true
-            }
+            return Self.isTrustedCloudDomain(key)
         }
         return false
+    }
+
+    /// Whether a DNS host is exactly a trusted domain or one of its
+    /// subdomains. Character suffixes alone are unsafe: `evilopenai.com`
+    /// ends with `openai.com` but is not beneath it in the DNS hierarchy.
+    public nonisolated static func isTrustedCloudDomain(_ domain: String) -> Bool {
+        guard let host = normalizedDomain(domain) else { return false }
+        return trustedCloudDomains.contains { trusted in
+            host == trusted || host.hasSuffix("." + trusted)
+        }
+    }
+
+    /// Canonical form used both for domain map keys and trust decisions.
+    /// A fully-qualified trailing dot is accepted; empty labels are not.
+    private nonisolated static func normalizedDomain(_ domain: String) -> String? {
+        var host = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+        guard !host.isEmpty,
+              !host.hasPrefix("."),
+              !host.hasSuffix("."),
+              !host.contains("..") else {
+            return nil
+        }
+        return host
     }
 
     /// True when every event's process lives under the same `.app` bundle.
@@ -970,7 +1268,7 @@ public actor CrossProcessCorrelator {
         return .medium
     }
 
-    /// Compute severity for a network-based chain (multiple unrelated processes
+    /// Compute severity for a network-based chain (multiple distinct PID values
     /// contacting the same destination).
     private func computeNetworkSeverity(events: [ChainEvent]) -> Severity {
         let distinctPIDs = Set(events.map(\.pid)).count
@@ -1003,11 +1301,11 @@ public actor CrossProcessCorrelator {
             let actions = sorted.map(\.action).joined(separator: " -> ")
             desc = "\(processNames.sorted().joined(separator: ", ")) touched \(artifact) [\(actions)] over \(Int(span))s"
         case "network":
-            desc = "\(distinctPIDs.count) unrelated processes contacted \(artifact) over \(Int(span))s"
+            desc = "\(distinctPIDs.count) distinct PIDs contacted \(artifact) over \(Int(span))s"
         case "domain":
-            desc = "\(distinctPIDs.count) unrelated processes resolved \(artifact) over \(Int(span))s"
+            desc = "\(distinctPIDs.count) distinct PIDs resolved \(artifact) over \(Int(span))s"
         default:
-            desc = "\(distinctPIDs.count) processes share artifact \(artifact)"
+            desc = "\(distinctPIDs.count) distinct PIDs share artifact \(artifact)"
         }
 
         return CorrelationChain(
@@ -1016,7 +1314,7 @@ public actor CrossProcessCorrelator {
             sharedArtifact: artifact,
             artifactType: artifactType,
             timeSpanSeconds: span,
-            processCount: distinctPIDs.count,
+            distinctPIDCount: distinctPIDs.count,
             severity: severity,
             description: desc
         )
@@ -1067,9 +1365,9 @@ public actor CrossProcessCorrelator {
     /// empty `destinationIp`, and without this guard every one of them keys
     /// into the artifact map as `":443"` — collapsing every HTTPS flow on
     /// the box into a single bucket and producing a permanent flood of
-    /// "N unrelated processes contacted :443" convergence alerts. The fix
-    /// is to drop these at ingress; DNS-correlated events will still be
-    /// recorded under the domain key via `destinationDomain`.
+    /// "N distinct PIDs contacted :443" convergence alerts. The fix
+    /// is to drop these at ingress. A later event carrying a resolved IP and
+    /// domain can populate both keys; this unresolved event itself is discarded.
     private func shouldIgnoreNetworkDestination(_ ip: String) -> Bool {
         // Empty / unresolved / wildcard IPs can never belong to a real
         // convergence signal — they're the product of enrichment gaps.
@@ -1096,21 +1394,6 @@ public actor CrossProcessCorrelator {
 
     // MARK: - Purge Helpers
 
-    /// Purge stale entries from an artifact map.
-    private func purgeArtifactMap(
-        _ map: [String: [ChainEvent]],
-        cutoff: Date
-    ) -> [String: [ChainEvent]] {
-        var result: [String: [ChainEvent]] = [:]
-        for (key, events) in map {
-            let live = events.filter { $0.timestamp >= cutoff }
-            if !live.isEmpty {
-                result[key] = live
-            }
-        }
-        return result
-    }
-
     /// Rebuild the per-file distinct-PID upper-bound index (`fileArtifactPIDs`)
     /// from the surviving artifact map. Called after pruning/eviction so the
     /// index tracks exactly the keys still present in `fileArtifacts` (bounding
@@ -1126,44 +1409,6 @@ public actor CrossProcessCorrelator {
             result[key] = Set(events.map(\.pid))
         }
         return result
-    }
-
-    /// Append an event to an artifact key's list, evicting the oldest events
-    /// within that key if the list exceeds `maxEventsPerKey`. "Oldest" is by
-    /// event timestamp (same semantics as `evictIfOverLimit`), so this is
-    /// robust to out-of-order timestamps. Trimming only runs on the over-cap
-    /// path, so it's amortized O(1) per append and bounds the per-call
-    /// correlation scan that iterates the full per-key list.
-    private func appendArtifact(
-        to map: inout [String: [ChainEvent]],
-        key: String,
-        event: ChainEvent
-    ) {
-        map[key, default: []].append(event)
-        guard let list = map[key], list.count > maxEventsPerKey else { return }
-        let trimmed = list
-            .sorted { $0.timestamp < $1.timestamp }
-            .suffix(maxEventsPerKey)
-        map[key] = Array(trimmed)
-    }
-
-    /// Evict the oldest artifacts if the map exceeds `maxArtifactsPerMap`.
-    /// "Oldest" is determined by the most recent event timestamp in each artifact's list.
-    private func evictIfOverLimit(
-        _ map: [String: [ChainEvent]]
-    ) -> [String: [ChainEvent]] {
-        guard map.count > maxArtifactsPerMap else { return map }
-
-        // Sort by newest event timestamp (ascending) and keep only the most recent entries
-        let sorted = map.sorted { lhs, rhs in
-            let lhsLatest = lhs.value.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? .distantPast
-            let rhsLatest = rhs.value.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? .distantPast
-            return lhsLatest < rhsLatest
-        }
-        let toKeep = sorted.suffix(maxArtifactsPerMap)
-        let evicted = map.count - maxArtifactsPerMap
-        logger.warning("Evicted \(evicted) oldest artifact entries to enforce \(self.maxArtifactsPerMap) cap")
-        return Dictionary(uniqueKeysWithValues: toKeep.map { ($0.key, $0.value) })
     }
 
     /// Run a purge pass if enough time has elapsed since the last one

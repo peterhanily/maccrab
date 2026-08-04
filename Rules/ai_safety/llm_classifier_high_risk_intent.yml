@@ -1,30 +1,31 @@
-title: MacCrab IntentClassifier Returned High-Risk Verdict
+title: MacCrab Deterministic Intent Heuristic Found High-Risk Shape
 id: d1a2b3c4-2059-4000-a000-000000002059
 status: experimental
 description: >
-    A downstream alert that fires when MacCrab's IntentClassifier
-    (LLM-driven, falls back to deterministic heuristic) labels a
+    A downstream advisory alert that fires when MacCrab's deterministic
+    package-behavior heuristic labels a
     package-install behavior brief as one of the high-risk classes
     — `credentialHarvest`, `exfiltration`, `destructive`,
     `lateralMovement`. Distinct from the rule layer (which fires on
     individual primitives) because the classifier weighs the *whole
-    brief* into a single verdict: per NDSS 2025 "Mind the Gap"
-    benchmarks, LLM classifiers (Llama 3.3 70B local, F1 0.77 / GPT-
-    4.1 cloud, F1 0.99) routinely catch full kill-chain shapes that
-    no single rule sees. Treat this alert as "the classifier says
-    this looks like Goal X" rather than as proof of a specific
-    technique.
+    brief* into a review signal. Treat this alert as "the bounded
+    heuristic says this looks like Goal X" rather than as proof of a
+    specific technique. Cached model advice is stored under separate
+    IntentModel* fields and cannot replace these deterministic fields.
+    This rule is advisory-only at the response boundary:
+    it can alert, log, and notify, but cannot automatically kill,
+    quarantine, run a script, or block the network. An explicitly
+    confirmation-gated per-rule action can create a pending record,
+    but the record does not itself authorize execution.
 author: MacCrab Community
 date: 2026/05/14
 references:
-    - https://www.ndss-symposium.org/wp-content/uploads/2025-1491-paper.pdf
-    - https://arxiv.org/abs/2601.12148
     - https://attack.mitre.org/
 tags:
     - attack.initial_access
     - attack.t1195
     - maccrab.intent_classifier
-    - maccrab.llm_verdict
+    - maccrab.intent_heuristic
 logsource:
     category: process_creation
     product: macos
@@ -55,8 +56,8 @@ detection:
             - 'lateralMovement'
     # v1.12.0 RC6 fix (Int-R6-N1) + RC7 fix (Int-R7-N1): gate on
     # confidence threshold. EventLoop stamps a boolean
-    # `IntentHighConfidence: 'true'` enrichment when the heuristic /
-    # LLM verdict crosses 0.5, so the rule can express the threshold
+    # `IntentHighConfidence: 'true'` legacy enrichment when the heuristic
+    # score crosses 0.5, so the rule can express the review threshold
     # via plain Sigma string equality. RC7 lowered the gate from 0.7
     # to 0.5 because the heuristic's max single-label score is 4–5/8
     # = confidence 0.5–0.625 — a 0.7 gate would have been unreachable
@@ -65,6 +66,6 @@ detection:
         IntentHighConfidence: 'true'
     condition: selection_install and selection_intent_label and selection_high_confidence
 falsepositives:
-    - LLM classifier produces a high-risk label with ≥ 0.5 confidence on an ambiguous brief — review the BehaviorBrief contents (`maccrabctl alerts show <id> --include-brief`) before suppressing
-    - Legitimate package whose install legitimately matches a high-risk profile at moderate confidence (e.g., `awscli` install which legitimately reads `~/.aws/credentials`); allowlist by package name + IntentLabel
+    - Deterministic heuristic produces a high-risk label with score ≥ 0.5 on an ambiguous brief — review the BehaviorBrief contents (`maccrabctl alerts show <id> --include-brief`) before suppressing
+    - Legitimate package whose install matches a high-risk shape (e.g., `awscli` install which legitimately reads `~/.aws/credentials`); allowlist by package name + IntentLabel
 level: medium

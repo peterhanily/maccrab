@@ -186,7 +186,7 @@
 "aiGuard.title" = "KI-Tool-Aktivität";
 "aiGuard.subtitle" = "Überwacht Claude Code, Codex, OpenClaw, Cursor und deren Kindprozesse";
 "aiGuard.noAlerts" = "Keine KI-Sicherheitsalarme";
-"aiGuard.noAlertsDesc" = "KI-Tools arbeiten innerhalb sicherer Grenzen";
+"aiGuard.noAlertsDesc" = "Das Ausbleiben einer Warnung ist kein Sicherheitsurteil, wenn Ereignisabdeckung oder Sitzungsspeicherung unvollständig sind.";
 
 /* ── Components ── */
 "components.suppress" = "Unterdrücken";
@@ -613,7 +613,7 @@
 "settings.llmGeminiModel" = "Modell";
 "settings.llmInfo" = "Funktionsweise";
 "settings.llmInfoDesc" = "Das KI-Backend kann strukturierte Alarmuntersuchungen, Kampagnenzusammenfassungen, Abwehrempfehlungen und die Verfeinerung der Paketabsicht ergänzen. Modellausgaben sind nur beratend und führen niemals eine Aktion aus.";
-"settings.llmLocalPrivacy" = "Läuft lokal. Keine Daten verlassen Ihren Rechner.";
+"settings.llmLocalPrivacy" = "MacCrab sendet für diesen Loopback-Endpunkt keinen ausgehenden Internetverkehr.";
 "settings.llmMistralHelp" = "API-Schlüssel erhalten Sie unter console.mistral.ai";
 "settings.llmMistralKey" = "Mistral-API-Schlüssel";
 "settings.llmMistralModel" = "Modell";

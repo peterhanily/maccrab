@@ -1,0 +1,733 @@
+import Foundation
+import Testing
+import CSQLCipher
+@testable import MacCrabCore
+@testable import MacCrabAgentKit
+
+@Suite("Alert-owned evidence budget split")
+struct AlertEvidenceOwnershipTests {
+    private func tempDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-alert-evidence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true
+        )
+        return url
+    }
+
+    private func event(
+        id: UUID = UUID(),
+        timestamp: Date,
+        severity: Severity = .informational,
+        padding: Int = 0
+    ) -> Event {
+        let command = "/usr/bin/tool " + String(repeating: "x", count: padding)
+        let process = ProcessInfo(
+            pid: 123,
+            ppid: 1,
+            rpid: 1,
+            name: "tool",
+            executable: "/usr/bin/tool",
+            commandLine: command,
+            args: [command],
+            workingDirectory: "/tmp",
+            userId: 501,
+            userName: "tester",
+            groupId: 20,
+            startTime: timestamp,
+            exitCode: nil,
+            codeSignature: nil,
+            ancestors: [],
+            architecture: "arm64",
+            isPlatformBinary: false
+        )
+        return Event(
+            id: id,
+            timestamp: timestamp,
+            eventCategory: .process,
+            eventType: .creation,
+            eventAction: "exec",
+            process: process,
+            enrichments: [:],
+            severity: severity
+        )
+    }
+
+    private func candidate(_ event: Event) throws -> AlertEvidenceCandidate {
+        let data = try JSONEncoder().encode(event)
+        return AlertEvidenceCandidate(
+            eventId: event.id.uuidString,
+            timestamp: event.timestamp,
+            rawJSON: String(decoding: data, as: UTF8.self)
+        )
+    }
+
+    private func alert(id: String, event: Event) -> Alert {
+        Alert(
+            id: id,
+            timestamp: event.timestamp,
+            ruleId: "test.alert-evidence",
+            ruleTitle: "Evidence test",
+            severity: .high,
+            eventId: event.id.uuidString
+        )
+    }
+
+    @Test("candidate selection is backward-only, bounded, deterministic, and chronological")
+    func boundedSelection() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try EventStore(directory: dir.path)
+        let alertTime = Date(timeIntervalSince1970: 10_000)
+        for index in 0..<80 {
+            let e = event(
+                timestamp: alertTime.addingTimeInterval(
+                    Double(index - 60) / 2
+                ),
+                severity: index % 11 == 0 ? .critical : .informational
+            )
+            try await store.insert(event: e)
+        }
+        let candidates = try await store.alertEvidenceCandidates(
+            alertTimestamp: alertTime,
+            windowSeconds: 10_000,
+            maxRows: 10_000
+        )
+        #expect(candidates.count == AlertEvidencePolicy.maximumEventsPerAlert)
+        #expect(candidates.allSatisfy {
+            $0.timestamp <= alertTime
+                && $0.timestamp >= alertTime.addingTimeInterval(-30)
+        })
+        #expect(candidates.map(\.timestamp) == candidates.map(\.timestamp).sorted())
+        let second = try await store.alertEvidenceCandidates(
+            alertTimestamp: alertTime,
+            windowSeconds: 30,
+            maxRows: 50
+        )
+        #expect(second == candidates)
+    }
+
+    @Test("capture is idempotent, capped per alert, and cascades on delete")
+    func idempotentCascade() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 20_000)
+        let events = (0..<70).map {
+            event(timestamp: base.addingTimeInterval(Double($0) * 0.4))
+        }
+        let parent = alert(id: "alert-1", event: events.last!)
+        try await store.insert(alert: parent)
+        let candidates = try events.map(candidate)
+        let first = try await store.captureEvidence(
+            alertId: parent.id,
+            candidates: candidates,
+            maxBytes: 10 * 1_048_576
+        )
+        let second = try await store.captureEvidence(
+            alertId: parent.id,
+            candidates: candidates,
+            maxBytes: 10 * 1_048_576
+        )
+        #expect(first.insertedRows == AlertEvidencePolicy.maximumEventsPerAlert)
+        #expect(second.insertedRows == 0)
+        #expect(try await store.evidenceFor(alertId: parent.id).count == 50)
+
+        // UPSERT must not invoke the delete cascade on a harmless retry.
+        try await store.insert(alert: parent)
+        #expect(try await store.evidenceFor(alertId: parent.id).count == 50)
+        #expect(try await store.delete(alertId: parent.id))
+        #expect(try await store.evidenceFor(alertId: parent.id).isEmpty)
+    }
+
+    @Test("oldest evidence is evicted until the charged physical budget fits")
+    func totalEvidenceCap() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 30_000)
+        let events = (0..<20).map {
+            event(timestamp: base.addingTimeInterval(Double($0)), padding: 3_000)
+        }
+        let parent = alert(id: "budgeted", event: events.last!)
+        try await store.insert(alert: parent)
+        let budget: Int64 = 32 * 1024
+        _ = try await store.captureEvidence(
+            alertId: parent.id,
+            candidates: try events.map(candidate),
+            maxBytes: budget
+        )
+        let snapshot = try await store.evidenceBudgetSnapshot(maxBytes: budget)
+        #expect(snapshot.chargedBytes <= budget)
+        let retained = try await store.evidenceFor(alertId: parent.id)
+        #expect(retained.count < events.count)
+        if let first = retained.first {
+            #expect(first.timestamp > events.first!.timestamp)
+        }
+    }
+
+    @Test("destination revalidates the fixed preceding window instead of trusting candidates")
+    func destinationWindowValidation() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let timestamp = Date(timeIntervalSince1970: 25_000)
+        let parentEvent = event(timestamp: timestamp)
+        let parent = alert(id: "window-guard", event: parentEvent)
+        try await store.insert(alert: parent)
+        let valid = event(timestamp: timestamp.addingTimeInterval(-1))
+        let tooOld = event(timestamp: timestamp.addingTimeInterval(-31))
+        let future = event(timestamp: timestamp.addingTimeInterval(0.001))
+        let result = try await store.captureEvidence(
+            alertId: parent.id,
+            candidates: try [valid, tooOld, future].map(candidate),
+            maxBytes: 1_048_576
+        )
+        #expect(result.insertedRows == 1)
+        #expect(try await store.evidenceFor(alertId: parent.id).map(\.id) == [valid.id])
+    }
+
+    @Test("DBSTAT proves the slim table avoids projected-column duplication")
+    func slimSchemaFootprint() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 35_000)
+        let events = (0..<20).map {
+            // Make duplicated projected payload dominate SQLite's fixed page
+            // and index overhead so the ratio remains meaningful across page
+            // layouts and SQLCipher/SQLite versions.
+            event(timestamp: base.addingTimeInterval(Double($0)), padding: 30_000)
+        }
+        let parent = alert(id: "slim", event: events.last!)
+        try await store.insert(alert: parent)
+        _ = try await store.captureEvidence(
+            alertId: parent.id,
+            candidates: try events.map(candidate),
+            maxBytes: 10 * 1_048_576
+        )
+        let slim = try await store.refreshEvidenceBudgetSnapshot(
+            maxBytes: 10 * 1_048_576
+        ).allocatedBytes
+
+        let legacyPath = dir.appendingPathComponent("legacy.db").path
+        var db: OpaquePointer?
+        #expect(sqlite3_open(legacyPath, &db) == SQLITE_OK)
+        guard let db else { return }
+        defer { sqlite3_close(db) }
+        let schema = """
+            CREATE TABLE alert_evidence (
+              alert_id TEXT NOT NULL, id TEXT NOT NULL, timestamp REAL NOT NULL,
+              event_category TEXT NOT NULL, event_type TEXT NOT NULL,
+              event_action TEXT NOT NULL, severity TEXT NOT NULL,
+              process_pid INTEGER, process_name TEXT, process_path TEXT,
+              process_commandline TEXT, process_ppid INTEGER,
+              process_signer TEXT, process_team_id TEXT, process_signing_id TEXT,
+              file_path TEXT, file_action TEXT, network_dest_ip TEXT,
+              network_dest_port INTEGER, tcc_service TEXT, tcc_client TEXT,
+              raw_json TEXT NOT NULL, mcp_server_name TEXT,
+              mcp_server_category TEXT, ai_tool_session_id TEXT,
+              PRIMARY KEY(alert_id,id)
+            );
+            CREATE INDEX idx_evidence_alert_ts ON alert_evidence(alert_id,timestamp);
+            CREATE INDEX idx_evidence_event ON alert_evidence(id);
+            """
+        #expect(sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK)
+        var insert: OpaquePointer?
+        let sql = """
+            INSERT INTO alert_evidence(
+              alert_id,id,timestamp,event_category,event_type,event_action,
+              severity,process_name,process_path,process_commandline,raw_json
+            ) VALUES(?1,?2,?3,'process','creation','exec','informational',
+                     'tool','/usr/bin/tool',?4,?5)
+            """
+        #expect(sqlite3_prepare_v2(db, sql, -1, &insert, nil) == SQLITE_OK)
+        guard let insert else { return }
+        defer { sqlite3_finalize(insert) }
+        func bind(_ value: String, _ index: Int32) {
+            _ = value.withCString {
+                sqlite3_bind_text(
+                    insert, index, $0, -1,
+                    unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                )
+            }
+        }
+        for event in events {
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+            let raw = String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
+            bind("slim", 1)
+            bind(event.id.uuidString, 2)
+            sqlite3_bind_double(insert, 3, event.timestamp.timeIntervalSince1970)
+            bind(event.process.commandLine, 4)
+            bind(raw, 5)
+            #expect(sqlite3_step(insert) == SQLITE_DONE)
+        }
+        var stat: OpaquePointer?
+        #expect(sqlite3_prepare_v2(
+            db,
+            "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name='alert_evidence' OR name IN ('sqlite_autoindex_alert_evidence_1','idx_evidence_alert_ts','idx_evidence_event')",
+            -1, &stat, nil
+        ) == SQLITE_OK)
+        guard let stat else { return }
+        defer { sqlite3_finalize(stat) }
+        #expect(sqlite3_step(stat) == SQLITE_ROW)
+        let legacy = sqlite3_column_int64(stat, 0)
+        #expect(legacy > slim)
+        #expect(Double(slim) / Double(legacy) < 0.75)
+    }
+
+    @Test("new evidence wins; absent new evidence falls back to legacy without migration")
+    func legacyFallback() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let events = try EventStore(directory: dir.path)
+        let alerts = try AlertStore(directory: dir.path)
+        let legacy = event(timestamp: Date(timeIntervalSince1970: 40_000))
+        try await events.insert(event: legacy)
+        try await events.recordAlertEvidence(
+            alertId: "legacy-alert",
+            alertTimestamp: legacy.timestamp
+        )
+        let fallback = await AlertEvidenceResolver.evidenceFor(
+            alertId: "legacy-alert",
+            alertStore: alerts,
+            legacyEventStore: events
+        )
+        #expect(fallback.map(\.id) == [legacy.id])
+
+        let current = event(timestamp: legacy.timestamp.addingTimeInterval(1))
+        try await alerts.insert(alert: alert(id: "legacy-alert", event: current))
+        _ = try await alerts.captureEvidence(
+            alertId: "legacy-alert",
+            candidates: [try candidate(current)],
+            maxBytes: 1_048_576
+        )
+        let preferred = await AlertEvidenceResolver.evidenceFor(
+            alertId: "legacy-alert",
+            alertStore: alerts,
+            legacyEventStore: events
+        )
+        #expect(preferred.map(\.id) == [current.id])
+    }
+
+    @Test("evidence failure after commit does not roll back the alert")
+    func postCommitFailure() async throws {
+        enum SyntheticFailure: Error { case expected }
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let sink = AlertSink(
+            alertStore: store,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            evidenceCaptureOverride: { _, _ in throw SyntheticFailure.expected }
+        )
+        #expect(try await sink.submit(alert: makeAlert()))
+        #expect(try await store.count() == 1)
+        await sink.flushEvidenceCapture()
+        #expect(await sink.evidenceStats().failures == 1)
+    }
+
+    @Test("post-commit evidence uses a bounded single-worker conservation lane")
+    func boundedCaptureLane() async throws {
+        actor Gate {
+            var released = false
+            var waiters: [CheckedContinuation<Void, Never>] = []
+
+            func capture() async -> AlertEvidenceCaptureResult {
+                if !released {
+                    await withCheckedContinuation { continuation in
+                        waiters.append(continuation)
+                    }
+                }
+                return AlertEvidenceCaptureResult(
+                    insertedRows: 0,
+                    duplicateRows: 0,
+                    prunedRows: 0
+                )
+            }
+
+            func release() {
+                released = true
+                let pending = waiters
+                waiters.removeAll()
+                for waiter in pending { waiter.resume() }
+            }
+        }
+
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let gate = Gate()
+        let sink = AlertSink(
+            alertStore: store,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            evidenceQueueCapacity: 2,
+            evidenceCaptureOverride: { _, _ in await gate.capture() }
+        )
+        let base = Date(timeIntervalSince1970: 45_000)
+        let trigger = event(timestamp: base)
+        let alerts = (0..<6).map {
+            alert(id: "queued-\($0)", event: trigger)
+        }
+
+        // This returns while the capture gate is closed; evidence work is no
+        // longer serialized into the alert commit path.
+        #expect(try await sink.insertEngineBatch(alerts: alerts).count == 6)
+        let blocked = await sink.evidenceStats()
+        #expect(blocked.offered == 6)
+        #expect(blocked.shed == 4)
+        #expect(blocked.pending + blocked.inFlight == 2)
+        #expect(blocked.conserved)
+
+        await gate.release()
+        await sink.flushEvidenceCapture()
+        let drained = await sink.evidenceStats()
+        #expect(drained.completed == 2)
+        #expect(drained.shed == 4)
+        #expect(drained.pending == 0)
+        #expect(drained.inFlight == 0)
+        #expect(drained.conserved)
+
+        let shutdown = await sink.shutdownEvidenceCapture()
+        #expect(shutdown.clean)
+        let late = try await sink.insertEngineBatch(
+            alerts: [alert(id: "after-shutdown", event: trigger)]
+        )
+        #expect(late.isEmpty)
+        #expect(try await store.count() == 6)
+        let sealed = await sink.evidenceStats()
+        #expect(sealed.offered == 6)
+        #expect(sealed.shed == 4)
+        #expect(!sealed.accepting)
+        #expect(sealed.alertsRejectedAfterSeal == 1)
+        #expect(sealed.conserved)
+    }
+
+    @Test("evidence waits for the admitted batched-writer prefix on a real store")
+    func writerPrefixBarrier() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let events = try EventStore(directory: dir.path)
+        let alerts = try AlertStore(directory: dir.path)
+        let writer = BatchedEventWriter(
+            store: events,
+            flushThreshold: 10_000,
+            hardCap: 10_000
+        )
+        let sink = AlertSink(
+            alertStore: alerts,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            eventStore: events,
+            evidencePrefixGeneration: {
+                await writer.evidencePrefixGeneration()
+            },
+            evidencePrefixBarrier: { generation in
+                await writer.awaitEvidencePrefix(
+                    through: generation,
+                    timeout: .seconds(1)
+                )
+            }
+        )
+        let trigger = event(timestamp: Date(timeIntervalSince1970: 45_500))
+        let generation = await writer.enqueue(trigger)
+        #expect(generation != nil)
+        #expect(writer.persistedCount == 0)
+
+        // No Event context is passed to the sink, so this can succeed only if
+        // the generation barrier makes the unflushed writer prefix durable.
+        #expect(try await sink.submit(alert: alert(
+            id: "writer-prefix",
+            event: trigger
+        )))
+        await sink.flushEvidenceCapture()
+
+        let captured = try await alerts.evidenceFor(alertId: "writer-prefix")
+        #expect(captured.map(\.id) == [trigger.id])
+        #expect(writer.persistedCount == 1)
+        #expect(await sink.evidenceStats().prefixBarrierTimeouts == 0)
+        _ = await sink.shutdownEvidenceCapture()
+        await writer.shutdown()
+    }
+
+    @Test("trigger snapshot survives a bounded writer-prefix timeout")
+    func writerPrefixTimeoutFallback() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let events = try EventStore(directory: dir.path)
+        let alerts = try AlertStore(directory: dir.path)
+        let sink = AlertSink(
+            alertStore: alerts,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            eventStore: events,
+            evidencePrefixGeneration: { 7 },
+            evidencePrefixBarrier: { _ in false }
+        )
+        let trigger = event(timestamp: Date(timeIntervalSince1970: 45_600))
+        #expect(try await sink.submit(
+            alert: alert(id: "prefix-timeout", event: trigger),
+            event: trigger
+        ))
+        await sink.flushEvidenceCapture()
+
+        let captured = try await alerts.evidenceFor(alertId: "prefix-timeout")
+        #expect(captured.map(\.id) == [trigger.id])
+        #expect(await sink.evidenceStats().prefixBarrierTimeouts == 1)
+        _ = await sink.shutdownEvidenceCapture()
+    }
+
+    @Test("bounded shutdown sheds queued evidence and reports an uncooperative job")
+    func boundedShutdownDeadline() async throws {
+        actor Gate {
+            var waiter: CheckedContinuation<Void, Never>?
+
+            func capture() async -> AlertEvidenceCaptureResult {
+                await withCheckedContinuation { waiter = $0 }
+                return AlertEvidenceCaptureResult(
+                    insertedRows: 0,
+                    duplicateRows: 0,
+                    prunedRows: 0
+                )
+            }
+
+            func release() {
+                waiter?.resume()
+                waiter = nil
+            }
+        }
+
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let gate = Gate()
+        let sink = AlertSink(
+            alertStore: store,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            evidenceQueueCapacity: 2,
+            evidenceCaptureOverride: { _, _ in await gate.capture() }
+        )
+        let trigger = event(timestamp: Date(timeIntervalSince1970: 45_750))
+        #expect(try await sink.insertEngineBatch(alerts: [
+            alert(id: "deadline-1", event: trigger),
+            alert(id: "deadline-2", event: trigger),
+        ]).count == 2)
+
+        // Let the worker move one job into the uncooperative capture call.
+        for _ in 0..<100 {
+            if await sink.evidenceStats().inFlight == 1 { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        let shutdown = await sink.shutdownEvidenceCapture(
+            timeout: .milliseconds(20)
+        )
+        #expect(shutdown.deadlineExpired)
+        #expect(shutdown.shedAtDeadline == 1)
+        #expect(shutdown.pending == 1)
+        #expect(!shutdown.clean)
+
+        let late = try await sink.submit(alert: alert(
+            id: "deadline-late",
+            event: trigger
+        ))
+        #expect(!late)
+        #expect(await sink.evidenceStats().alertsRejectedAfterSeal == 1)
+
+        await gate.release()
+        await sink.flushEvidenceCapture()
+        let settled = await sink.evidenceStats()
+        #expect(settled.completed == 1)
+        #expect(settled.shedAtShutdownDeadline == 1)
+        #expect(settled.pending == 0)
+        #expect(settled.inFlight == 0)
+        #expect(settled.conserved)
+    }
+
+    @Test("capture accounting is incremental between explicit DBSTAT refreshes")
+    func incrementalAccounting() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 46_000)
+        for index in 0..<2 {
+            let trigger = event(timestamp: base.addingTimeInterval(Double(index)))
+            let parent = alert(id: "accounting-\(index)", event: trigger)
+            try await store.insert(alert: parent)
+            _ = try await store.captureEvidence(
+                alertId: parent.id,
+                candidates: [try candidate(trigger)],
+                maxBytes: 100 * 1_048_576
+            )
+        }
+        let cached = try await store.evidenceBudgetSnapshot(
+            maxBytes: 100 * 1_048_576
+        )
+        #expect(cached.rowCount == 2)
+        #expect(cached.fullRefreshesTotal == 1)
+        #expect(!cached.allocatedBytesExact)
+
+        let exact = try await store.refreshEvidenceBudgetSnapshot(
+            maxBytes: 100 * 1_048_576
+        )
+        #expect(exact.rowCount == 2)
+        #expect(exact.fullRefreshesTotal == 2)
+        #expect(exact.allocatedBytesExact)
+        #expect(exact.chargedBytes == max(exact.logicalBytes, exact.allocatedBytes))
+    }
+
+    @Test("max-payload cascades remain reserve-bounded for delete and both pruners")
+    func cascadeReserveAccounting() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 47_000)
+        var parents: [Alert] = []
+
+        for parentIndex in 0..<3 {
+            let parentTime = base.addingTimeInterval(Double(parentIndex) * 100)
+            let evidenceEvents = (0..<AlertEvidencePolicy.maximumEventsPerAlert)
+                .map { row in
+                    event(
+                        timestamp: parentTime.addingTimeInterval(
+                            -25 + Double(row) * 0.5
+                        ),
+                        padding: 20_000
+                    )
+                }
+            let parent = alert(
+                id: "cascade-\(parentIndex)",
+                event: event(timestamp: parentTime)
+            )
+            parents.append(parent)
+            try await store.insert(alert: parent)
+            let candidates = try evidenceEvents.map(candidate)
+            #expect(candidates.allSatisfy {
+                $0.rawJSON.utf8.count <= AlertEvidencePolicy.maximumRawPayloadBytes
+            })
+            let result = try await store.captureEvidence(
+                alertId: parent.id,
+                candidates: candidates,
+                maxBytes: 100 * 1_048_576
+            )
+            #expect(result.insertedRows == AlertEvidencePolicy.maximumEventsPerAlert)
+        }
+
+        // Lower the reserve only after schema/capture. Each parent cascade is
+        // larger than this, so deletion must drain children through admitted
+        // chunks rather than issue one under-estimated FK transaction.
+        _ = try await store.updateStorageAdmission(
+            SQLitePersistentStorePolicy(
+                maxFootprintBytes: 200 * 1_048_576,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: 512 * 1_024,
+                storageVolumePath: dir.path
+            )
+        )
+
+        #expect(try await store.delete(alertId: parents[0].id))
+        #expect(try await store.evidenceFor(alertId: parents[0].id).isEmpty)
+        #expect(try await store.prune(
+            olderThan: base.addingTimeInterval(150)
+        ) == 1)
+        #expect(try await store.evidenceFor(alertId: parents[1].id).isEmpty)
+        #expect(try await store.pruneOldest(count: 1) == 1)
+        #expect(try await store.evidenceFor(alertId: parents[2].id).isEmpty)
+        #expect(try await store.count() == 0)
+    }
+
+    @Test("default, low, and extreme config caps conserve the historical total")
+    func capConservation() {
+        func assertConserved(_ storage: DaemonConfig.StorageConfig) {
+            let clamped = storage.clampedToSafeFloors()
+            #expect(clamped.effectiveEventsFamilyMaxSizeMB >= 96)
+            #expect(
+                clamped.effectiveEventsFamilyMaxSizeMB
+                    + clamped.effectiveAlertsFamilyMaxSizeMB
+                    == clamped.configuredEventsAndAlertsTotalMaxSizeMB
+            )
+        }
+        let defaults = DaemonConfig.StorageConfig().clampedToSafeFloors()
+        #expect(defaults.effectiveEventsFamilyMaxSizeMB == 320)
+        #expect(defaults.effectiveAlertsFamilyMaxSizeMB == 200)
+        #expect(defaults.configuredEventsAndAlertsTotalMaxSizeMB == 520)
+        assertConserved(defaults)
+
+        var low = DaemonConfig.StorageConfig()
+        low.eventsMaxSizeMB = 0
+        low.evidenceMaxSizeMB = .max
+        assertConserved(low)
+        let lowClamped = low.clampedToSafeFloors()
+        #expect(lowClamped.eventsMaxSizeMB == 146)
+        #expect(lowClamped.evidenceMaxSizeMB == 50)
+
+        var extreme = DaemonConfig.StorageConfig()
+        extreme.eventsMaxSizeMB = .max
+        extreme.alertsMaxSizeMB = .max
+        extreme.evidenceMaxSizeMB = .max
+        assertConserved(extreme)
+        #expect(extreme.clampedToSafeFloors().effectiveEventsFamilyMaxSizeMB == 96)
+    }
+
+    @Test("heartbeat decodes effective caps rather than relabeling the envelope")
+    func heartbeatCaps() throws {
+        let data = Data(#"{"schema_version":5,"alert_evidence_budget":{"events_family_effective_cap_bytes":335544320,"events_legacy_envelope_bytes":440401920,"alerts_family_combined_cap_bytes":209715200,"events_and_alerts_total_cap_bytes":545259520,"over_budget":false}}"#.utf8)
+        let heartbeat = try JSONDecoder().decode(HeartbeatSnapshot.self, from: data)
+        #expect(heartbeat.alertEvidenceBudget?.eventsFamilyEffectiveCapBytes == Int64(320) * 1_048_576)
+        #expect(heartbeat.alertEvidenceBudget?.eventsLegacyEnvelopeBytes == Int64(420) * 1_048_576)
+        #expect(heartbeat.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(520) * 1_048_576)
+    }
+
+    @Test("production capture and boot/reload cap wiring cannot drift to legacy paths")
+    func sourceDriftGuards() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        func source(_ relative: String) throws -> String {
+            try String(contentsOf: root.appendingPathComponent(relative), encoding: .utf8)
+        }
+        let sink = try source("Sources/MacCrabCore/Detection/AlertSink.swift")
+        #expect(!sink.contains("recordAlertEvidence("))
+        #expect(sink.contains("alertEvidenceCandidates("))
+        #expect(sink.contains("alertStore.captureEvidence("))
+
+        let setup = try source("Sources/MacCrabAgentKit/DaemonSetup.swift")
+        #expect(setup.contains("bootStorage.effectiveEventsFamilyMaxSizeMB"))
+        #expect(setup.contains("AlertStore.combinedFamilyCapBytes("))
+        #expect(setup.contains("legacyAlertEvidenceTransitionMeasurement("))
+        #expect(setup.contains("measurementTicket()"))
+        #expect(setup.contains("commitPendingReserve("))
+        #expect(!setup.contains("legacyEvidenceTransitionReserveMiB:"))
+        let reload = try source("Sources/MacCrabAgentKit/SignalHandlers.swift")
+        #expect(reload.contains("newStorage.effectiveEventsFamilyMaxSizeMB"))
+        #expect(reload.contains("newStorage.effectiveAlertsFamilyMaxSizeMB"))
+        #expect(reload.contains("installStorageConfig(newStorage)"))
+        #expect(reload.contains("legacyAlertEvidenceTransitionMeasurement("))
+        #expect(reload.contains("commitPendingReserve("))
+        #expect(reload.contains(
+            "appliedLegacyEvidenceTransitionReserveMiB:"
+        ))
+        #expect(!reload.contains("legacyEvidenceTransitionReserveMiB:"))
+        #expect(!reload.contains("maxSizeMiB: newStorage.eventsMaxSizeMB,"))
+
+        let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
+        #expect(timers.contains("legacyAlertEvidenceTransitionMeasurement("))
+        #expect(timers.contains("ticket: ticket"))
+        #expect(timers.contains("commitPendingReserve(pending, ticket: ticket)"))
+        #expect(timers.contains(
+            "after.configurationGeneration"
+        ))
+        #expect(timers.contains(
+            "ticket.configurationGeneration"
+        ))
+        #expect(!timers.contains("legacyEvidenceTransitionReserveMiB:"))
+
+        for transitionSource in [setup, reload, timers] {
+            let policy = try #require(
+                transitionSource.range(of: "updateStorageAdmission(")
+            )
+            let commit = try #require(
+                transitionSource.range(of: "commitPendingReserve(")
+            )
+            #expect(policy.lowerBound < commit.lowerBound)
+        }
+    }
+}

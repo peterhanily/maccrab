@@ -44,6 +44,8 @@ public actor KdebugCollector {
     private var process: Process?
     private var readTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
+    private var lifecycleGeneration: UInt64 = 0
 
     /// Watchdog state.
     private var backoffSeconds: Double = 1.0
@@ -87,21 +89,52 @@ public actor KdebugCollector {
     // MARK: - Start / Stop
 
     public func start() {
-        guard process == nil else { return }
-        launchFsUsage()
+        guard lifecyclePhase == .initialized else {
+            logger.warning("kdebug start rejected after its one-shot lifecycle advanced")
+            return
+        }
+        lifecyclePhase = .running
+        lifecycleGeneration &+= 1
+        launchFsUsage(generation: lifecycleGeneration)
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    /// Cancels and joins the blocking stdout reader plus watchdog restart.
+    /// Returning false means an owned task outlived the deadline.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let tasks = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            tasks,
+            deadline: deadline
+        )
+        if joined {
+            readTask = nil
+            watchdogTask = nil
+            lifecyclePhase = .stopped
+            logger.info("kdebug collector stopped cleanly")
+        } else {
+            logger.error("kdebug stop deadline expired with owned work still active")
+        }
+        return joined
+    }
+
+    private func beginStop() -> [Task<Void, Never>] {
+        if lifecyclePhase == .stopped { return [] }
+        lifecyclePhase = .stopping
+        let tasks = [readTask, watchdogTask].compactMap { $0 }
         watchdogTask?.cancel()
-        watchdogTask = nil
         readTask?.cancel()
-        readTask = nil
         if let proc = process, proc.isRunning {
             proc.terminate()
         }
         process = nil
         continuation?.finish()
         continuation = nil
+        return tasks
     }
 
     /// Number of events emitted since start.
@@ -109,7 +142,9 @@ public actor KdebugCollector {
 
     // MARK: - Launch fs_usage subprocess
 
-    private func launchFsUsage() {
+    private func launchFsUsage(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/fs_usage")
         // -w: wide output (full paths, no truncation)
@@ -138,10 +173,12 @@ public actor KdebugCollector {
                     selfPid: selfPid,
                     deliveryTelemetry: deliveryTelemetry
                 )
-                Task { [weak self] in await self?.handleExit() }
+                await self?.handleExit(generation: generation)
             }
         } catch {
             logger.error("Failed to launch fs_usage: \(error.localizedDescription)")
+            process = nil
+            scheduleRestart(generation: generation)
         }
     }
 
@@ -405,8 +442,10 @@ public actor KdebugCollector {
 
     // MARK: - Watchdog Restart
 
-    private func handleExit() {
-        guard continuation != nil else { return }  // Intentional stop
+    private func handleExit(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
+        process = nil
 
         // Reset backoff if it ran for > 60 seconds
         if let lastStart = lastSuccessfulStart,
@@ -414,21 +453,40 @@ public actor KdebugCollector {
             backoffSeconds = 1.0
         }
 
-        logger.warning("fs_usage exited — restarting in \(self.backoffSeconds)s")
+        scheduleRestart(generation: generation)
+    }
 
-        watchdogTask = Task {
-            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
+    private func scheduleRestart(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration else { return }
+        let delay = backoffSeconds
+        logger.warning("fs_usage exited — restarting in \(delay)s")
 
-            // Exponential backoff capped at 30s
-            self.backoffSeconds = min(self.backoffSeconds * 2, 30.0)
-            self.launchFsUsage()
+        watchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            await self?.restartAfterBackoff(generation: generation)
         }
+    }
+
+    private func restartAfterBackoff(generation: UInt64) {
+        guard lifecyclePhase == .running,
+              generation == lifecycleGeneration,
+              !Task.isCancelled else { return }
+        backoffSeconds = min(backoffSeconds * 2, 30.0)
+        launchFsUsage(generation: generation)
     }
 
     // MARK: - Deinit
 
     deinit {
+        readTask?.cancel()
+        watchdogTask?.cancel()
         if let proc = process, proc.isRunning {
             proc.terminate()
         }

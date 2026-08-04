@@ -39,7 +39,7 @@ struct AIMonitorPostCommitWiringTests {
         let edr = try section(
             text,
             from: "// EDR/RMM tool monitoring task",
-            to: "await Task.yield()\n            }\n        }"
+            to: "// DNS event processing task"
         )
 
         for block in [sdr, edr] {

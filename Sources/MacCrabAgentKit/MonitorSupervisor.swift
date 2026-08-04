@@ -24,6 +24,9 @@ import os.log
 public actor MonitorSupervisor {
 
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var accepting = true
+    private var shutdownResult: Bool?
+    private var shutdownWaiters: [CheckedContinuation<Bool, Never>] = []
     private let logger = Logger(subsystem: "com.maccrab.agent", category: "MonitorSupervisor")
 
     public init() {}
@@ -45,19 +48,39 @@ public actor MonitorSupervisor {
     ///
     /// The `!Task.isCancelled` gate is load-bearing: `shutdown()` cancels every
     /// task, which is a normal loop exit and must not be reported as a fault.
+    @discardableResult
     public func start(
         _ name: String,
         collector: String? = nil,
         registry: CollectorRegistry? = nil,
         _ work: @escaping @Sendable () async -> Void
-    ) {
-        tasks[name]?.cancel()
+    ) async -> Bool {
+        guard accepting else {
+            logger.warning("MonitorSupervisor: refusing \(name, privacy: .public) after shutdown began")
+            return false
+        }
+        if let previous = tasks[name] {
+            previous.cancel()
+            let joined = await BoundedTaskJoin.waitForAll(
+                [previous],
+                deadline: 0.5
+            )
+            guard joined else {
+                logger.fault("MonitorSupervisor: refusing replacement for \(name, privacy: .public); prior task did not join")
+                return false
+            }
+            guard accepting else {
+                logger.warning("MonitorSupervisor: refusing \(name, privacy: .public); shutdown began during replacement join")
+                return false
+            }
+        }
         tasks[name] = Task {
             await work()
             if !Task.isCancelled, let collector, let registry {
                 await registry.recordStreamEnded(name: collector)
             }
         }
+        return true
     }
 
     /// Cancel every tracked task and await their completion, bounded by
@@ -68,30 +91,43 @@ public actor MonitorSupervisor {
     /// `exit()`. After this returns, `tasks` is empty and subsequent
     /// `start` calls are silently ignored — the supervisor is one-shot
     /// with respect to shutdown.
-    public func shutdown(deadline: TimeInterval = 3.0) async {
+    @discardableResult
+    public func shutdown(deadline: TimeInterval = 3.0) async -> Bool {
+        if let shutdownResult { return shutdownResult }
+        if !accepting {
+            return await withCheckedContinuation { continuation in
+                shutdownWaiters.append(continuation)
+            }
+        }
+        accepting = false
         let count = tasks.count
-        guard count > 0 else { return }
+        guard count > 0 else {
+            shutdownResult = true
+            return true
+        }
 
         logger.info("MonitorSupervisor: cancelling \(count) supervised tasks (deadline \(deadline)s)")
         let stored = Array(tasks.values)
         for task in stored { task.cancel() }
 
-        // Race: either every task finishes unwinding, or the deadline fires.
-        // `withTaskGroup` + `group.next()` completes on the first arrival;
-        // `cancelAll()` then drops the losing siblings so they don't linger.
-        let deadlineNs = UInt64(max(0, deadline) * 1_000_000_000)
-        await withTaskGroup(of: Void.self) { group in
-            for task in stored {
-                group.addTask { _ = await task.value }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: deadlineNs)
-            }
-            _ = await group.next()
-            group.cancelAll()
-        }
+        // One completion means nothing when N-1 producers are still live. The
+        // shared join races ALL stored task values against the deadline without
+        // structured-task-group teardown accidentally waiting forever.
+        let allStopped = await BoundedTaskJoin.waitForAll(
+            stored,
+            deadline: max(0, deadline)
+        )
         tasks.removeAll()
-        logger.info("MonitorSupervisor: shutdown complete")
+        shutdownResult = allStopped
+        let waiters = shutdownWaiters
+        shutdownWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume(returning: allStopped) }
+        if allStopped {
+            logger.info("MonitorSupervisor: all monitored tasks stopped")
+        } else {
+            logger.warning("MonitorSupervisor: shutdown deadline expired with one or more monitored tasks still unwinding")
+        }
+        return allStopped
     }
 
     /// Number of currently-supervised tasks. Diagnostic only.

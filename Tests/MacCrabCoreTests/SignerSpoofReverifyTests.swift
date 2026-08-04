@@ -49,8 +49,30 @@ struct SignerSpoofReverifyTests {
             eventCategory: .process, eventType: .start, eventAction: "exec",
             process: proc
         )
-        let enriched = await EventEnricher().enrich(event)
-        return enriched.process.codeSignature?.signerType
+        let enricher = EventEnricher(heavyEnrichmentPlane: HeavyEnrichmentPlane(
+            // Security.framework verification is the contract under test; a
+            // saturated utility executor is not. Keep a coarse test-only cap.
+            configuration: .init(operationTimeoutSeconds: 30)
+        ))
+        let initiallyEnriched = await enricher.enrich(event)
+        if let signer = initiallyEnriched.process.codeSignature?.signerType {
+            _ = await enricher.shutdownHeavyEnrichment()
+            return signer
+        }
+        let addition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(30_000_000_000)
+        let deadline = addition.overflow ? UInt64.max : addition.partialValue
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if let patch = await enricher.drainDeferredEnrichments(limit: 16).first(where: {
+                $0.component == .codeSignature
+            }), let applied = patch.applying(to: initiallyEnriched) {
+                _ = await enricher.shutdownHeavyEnrichment()
+                return applied.process.codeSignature?.signerType
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        _ = await enricher.shutdownHeavyEnrichment()
+        return nil
     }
 
     /// Create a real ad-hoc-signed Mach-O at a temp path whose code-signature

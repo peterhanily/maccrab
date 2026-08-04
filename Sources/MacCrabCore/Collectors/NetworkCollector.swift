@@ -66,6 +66,7 @@ public actor NetworkCollector {
 
     /// Background polling task; `nil` when the collector is stopped.
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     /// Continuation for yielding events into the `events` stream.
     private var continuation: AsyncStream<Event>.Continuation?
@@ -110,13 +111,14 @@ public actor NetworkCollector {
 
     /// Begins periodic socket enumeration.
     ///
-    /// Safe to call multiple times; subsequent calls are no-ops while the
-    /// collector is already running.
+    /// This stream is one-shot: a call after shutdown is rejected rather than
+    /// starting a worker whose finished continuation cannot deliver events.
     public func start() {
-        guard pollTask == nil else {
-            logger.warning("NetworkCollector.start() called but collector is already running.")
+        guard lifecyclePhase == .initialized else {
+            logger.warning("NetworkCollector.start() rejected in non-initial lifecycle phase.")
             return
         }
+        lifecyclePhase = .running
 
         logger.info("NetworkCollector starting — poll interval \(self.pollInterval)s.")
 
@@ -139,11 +141,37 @@ public actor NetworkCollector {
 
     /// Stops polling and finishes the event stream.
     public func stop() {
-        pollTask?.cancel()
-        pollTask = nil
+        _ = beginStop()
+    }
+
+    /// Seal the one-shot stream, cancel its exact worker, and wait for that
+    /// worker to terminate. `false` is an explicit unclean boundary: callers
+    /// must not assume cancellation completed merely because the deadline did.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            task.map { [$0] } ?? [],
+            deadline: deadline
+        )
+        if joined {
+            pollTask = nil
+            lifecyclePhase = .stopped
+            logger.info("NetworkCollector stopped cleanly.")
+        } else {
+            logger.error("NetworkCollector stop deadline expired with its poll worker still active.")
+        }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
+        task?.cancel()
         continuation?.finish()
         continuation = nil
-        logger.info("NetworkCollector stopped.")
+        return task
     }
 
     // MARK: - Sweep
@@ -151,33 +179,36 @@ public actor NetworkCollector {
     /// Performs a single enumeration of all process sockets, emitting events
     /// for newly discovered connections and pruning stale entries from the
     /// known set.
-    private func sweep() {
-        let currentConnections = enumerateAllConnections()
+    private func sweep() async {
+        let priorKeys = knownConnections
+        // libproc enumeration can issue thousands of syscalls. Keep it off the
+        // actor so stopAndJoin can seal/cancel promptly instead of sitting
+        // behind a long synchronous sweep before its deadline even begins.
+        let result = await Task.detached(priority: .utility) { [self] in
+            let current = enumerateAllConnections()
+            let newEvents = current.compactMap { key, info -> Event? in
+                priorKeys.contains(key) ? nil : buildEvent(from: info)
+            }
+            return (keys: Set(current.keys), events: newEvents)
+        }.value
 
-        var newKeys = Set<ConnectionKey>()
-        for (key, info) in currentConnections {
-            newKeys.insert(key)
-
-            // Only emit an event if this connection was not seen on the
-            // previous sweep.
-            if !knownConnections.contains(key) {
-                let event = buildEvent(from: info)
-                if let continuation {
-                    let result = continuation.yield(event)
-                    deliveryTelemetry.recordYield(offered: event, result: result)
-                }
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
+        for event in result.events {
+            if let continuation {
+                let yieldResult = continuation.yield(event)
+                deliveryTelemetry.recordYield(offered: event, result: yieldResult)
             }
         }
 
         // Update known connections — stale entries are implicitly removed
         // because we replace the entire set.
-        knownConnections = newKeys
+        knownConnections = result.keys
     }
 
     // MARK: - PID Enumeration
 
     /// Returns an array of all active PIDs on the system.
-    private func listAllPIDs() -> [Int32] {
+    private nonisolated func listAllPIDs() -> [Int32] {
         var bufferSize = Self.initialPIDBufferCount
         var pids = [Int32](repeating: 0, count: bufferSize)
 
@@ -214,7 +245,7 @@ public actor NetworkCollector {
     // MARK: - Socket Enumeration
 
     /// Information about a single observed socket, used to build an `Event`.
-    private struct SocketConnectionInfo {
+    private struct SocketConnectionInfo: Sendable {
         let key: ConnectionKey
         let pid: Int32
         let localIp: String
@@ -230,7 +261,7 @@ public actor NetworkCollector {
     /// process on the system.
     ///
     /// - Returns: Dictionary keyed by `ConnectionKey` for deduplication.
-    private func enumerateAllConnections() -> [ConnectionKey: SocketConnectionInfo] {
+    private nonisolated func enumerateAllConnections() -> [ConnectionKey: SocketConnectionInfo] {
         let pids = listAllPIDs()
         var results: [ConnectionKey: SocketConnectionInfo] = [:]
 
@@ -254,7 +285,7 @@ public actor NetworkCollector {
     /// 2. Filter to socket FDs (`PROX_FDTYPE_SOCKET`).
     /// 3. `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` to get socket details.
     /// 4. Extract IP/port/protocol and filter out loopback and listeners.
-    private func enumerateSocketsForPID(_ pid: Int32) -> [SocketConnectionInfo] {
+    private nonisolated func enumerateSocketsForPID(_ pid: Int32) -> [SocketConnectionInfo] {
         // Step 1: Get the list of file descriptors for this process.
         let fdInfoSize = Int32(MemoryLayout<proc_fdinfo>.size)
         let bufferSize = proc_pidinfo(
@@ -401,7 +432,7 @@ public actor NetworkCollector {
     ///   - addr6: The `in6_addr` (IPv6) component from the socket info structure.
     ///   - family: `AF_INET` or `AF_INET6`.
     /// - Returns: Dotted-decimal (IPv4) or colon-hex (IPv6) string.
-    private func extractIPAddress(addr4: in_addr, addr6: in6_addr, family: Int32) -> String {
+    private nonisolated func extractIPAddress(addr4: in_addr, addr6: in6_addr, family: Int32) -> String {
         if family == AF_INET {
             var addr4 = addr4
             var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
@@ -432,7 +463,7 @@ public actor NetworkCollector {
     // MARK: - Loopback Detection
 
     /// Returns `true` when the address is a loopback address.
-    private func isLoopback(_ ip: String) -> Bool {
+    private nonisolated func isLoopback(_ ip: String) -> Bool {
         if ip == "::1" { return true }
         if ip.hasPrefix("127.") { return true }
         if ip == "0.0.0.0" || ip == "::" { return true }
@@ -442,7 +473,7 @@ public actor NetworkCollector {
     // MARK: - Process Info Helpers
 
     /// Retrieves the executable path for a PID using `proc_pidpath`.
-    private func executablePath(for pid: Int32) -> String {
+    private nonisolated func executablePath(for pid: Int32) -> String {
         var pathBuffer = [CChar](repeating: 0, count: Self.maxPathLength)
         let length = proc_pidpath(pid, &pathBuffer, UInt32(Self.maxPathLength))
         guard length > 0 else { return "" }
@@ -450,7 +481,7 @@ public actor NetworkCollector {
     }
 
     /// Retrieves the process name (basename of the executable path).
-    private func processName(for pid: Int32) -> String {
+    private nonisolated func processName(for pid: Int32) -> String {
         let path = executablePath(for: pid)
         guard !path.isEmpty else {
             // Fallback: use proc_name
@@ -463,7 +494,7 @@ public actor NetworkCollector {
     }
 
     /// Retrieves the parent PID for a process using `proc_pidinfo`.
-    private func parentPID(for pid: Int32) -> Int32 {
+    private nonisolated func parentPID(for pid: Int32) -> Int32 {
         var bsdInfo = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, size)
@@ -472,7 +503,7 @@ public actor NetworkCollector {
     }
 
     /// Retrieves the UID for a process using `proc_pidinfo`.
-    private func processUID(for pid: Int32) -> UInt32 {
+    private nonisolated func processUID(for pid: Int32) -> UInt32 {
         var bsdInfo = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, size)
@@ -487,7 +518,7 @@ public actor NetworkCollector {
     /// Uses a simple heuristic: if the remote port is a well-known port
     /// (< 1024) or a common service port, the connection is likely outbound.
     /// If the local port is well-known, it is likely inbound.
-    private func inferDirection(localPort: UInt16, remotePort: UInt16) -> NetworkDirection {
+    private nonisolated func inferDirection(localPort: UInt16, remotePort: UInt16) -> NetworkDirection {
         let wellKnownPorts: Set<UInt16> = [
             20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
             3306, 5432, 6379, 8080, 8443, 9200,
@@ -503,7 +534,7 @@ public actor NetworkCollector {
     // MARK: - Event Building
 
     /// Builds a MacCrab `Event` from an observed socket connection.
-    private func buildEvent(from conn: SocketConnectionInfo) -> Event {
+    private nonisolated func buildEvent(from conn: SocketConnectionInfo) -> Event {
         let pid = conn.pid
         let exePath = executablePath(for: pid)
         let procName = processName(for: pid)
@@ -580,7 +611,7 @@ public actor NetworkCollector {
     // MARK: - TCP State Names
 
     /// Human-readable name for a TCP state constant from `<netinet/tcp_fsm.h>`.
-    private func tcpStateName(_ state: Int32) -> String {
+    private nonisolated func tcpStateName(_ state: Int32) -> String {
         switch state {
         case 0:  return "CLOSED"
         case 1:  return "LISTEN"

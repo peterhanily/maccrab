@@ -102,7 +102,198 @@ struct RecentAnchorDedupCache: Sendable {
     }
 }
 
+/// Bounds the write-behind window used by the daemon's rolling graph.
+///
+/// Detection-bearing anchors always force a flush before materialization, so
+/// this policy delays only non-anchor substrate visibility. The immediate
+/// policy remains the default for API compatibility and deterministic tools;
+/// the daemon explicitly opts into `daemonCoalesced`.
+public struct CausalGraphIngestionWritePolicy: Sendable, Equatable {
+    public let maximumDelaySeconds: TimeInterval
+    public let maximumPendingEvents: Int
+    public let maximumPendingRows: Int
+
+    public init(
+        maximumDelaySeconds: TimeInterval,
+        maximumPendingEvents: Int,
+        maximumPendingRows: Int
+    ) {
+        precondition(maximumDelaySeconds >= 0)
+        precondition(maximumPendingEvents > 0)
+        precondition(maximumPendingRows > 0)
+        self.maximumDelaySeconds = maximumDelaySeconds
+        self.maximumPendingEvents = maximumPendingEvents
+        self.maximumPendingRows = maximumPendingRows
+    }
+
+    public static let immediate = CausalGraphIngestionWritePolicy(
+        maximumDelaySeconds: 0,
+        maximumPendingEvents: 1,
+        maximumPendingRows: 1
+    )
+
+    /// At the observed 5,917 file events/s this caps the normal hot path at
+    /// roughly 24 graph transactions/s instead of one transaction per event.
+    /// A novel anchor bypasses all three bounds and flushes immediately.
+    public static let daemonCoalesced = CausalGraphIngestionWritePolicy(
+        maximumDelaySeconds: 0.25,
+        maximumPendingEvents: 256,
+        maximumPendingRows: 1_024
+    )
+}
+
+/// Exact conservation counters for rolling-graph persistence.
+///
+/// At an actor-isolated snapshot:
+///
+///     inputEvents = committed + failed + inFlight + pending
+///     writeAttempts = committedBatches + failedBatches + inFlightBatches
+///     rowObservations = writeRowsAttempted + coalescedNoopRows + pendingRows
+///     writeRowsAttempted = committedRows + failedRows + inFlightRows
+///
+/// `coalescedNoopRows` counts redundant per-event UPSERTs removed before
+/// SQLite. It does not mean an observation was lost: entity observation
+/// weights are summed exactly, while edge last-seen/evidence retains the same
+/// final value sequential UPSERTs would have produced.
+public struct CausalGraphIngestionWriteTelemetry: Sendable, Equatable {
+    public let inputEventsTotal: UInt64
+    public let eventsCommittedTotal: UInt64
+    public let eventsFailedTotal: UInt64
+    public let eventsInFlight: Int
+    public let eventsPending: Int
+    public let entityObservationsTotal: UInt64
+    public let edgeObservationsTotal: UInt64
+    public let relevanceSuppressedFileEventsTotal: UInt64
+    public let relevanceSuppressedRowsTotal: UInt64
+    public let writeAttemptsTotal: UInt64
+    public let writeBatchesCommittedTotal: UInt64
+    public let writeBatchesFailedTotal: UInt64
+    public let writeBatchesInFlight: Int
+    public let writeRowsAttemptedTotal: UInt64
+    public let writeRowsCommittedTotal: UInt64
+    public let writeRowsFailedTotal: UInt64
+    public let writeRowsInFlight: Int
+    public let coalescedNoopRowsTotal: UInt64
+    public let pendingEntityRows: Int
+    public let pendingEdgeRows: Int
+}
+
 public actor RollingCausalGraph {
+
+    private struct EntityNaturalKey: Hashable {
+        let entityType: String
+        let stableKey: String
+    }
+
+    private struct EdgeNaturalKey: Hashable {
+        let sourceEntityId: String
+        let targetEntityId: String
+        let relation: String
+    }
+
+    /// One bounded group of observations waiting for a SQLite transaction.
+    /// Dictionary values are the exact result of applying the same rows in
+    /// arrival order, except that redundant physical UPSERTs are removed.
+    private struct PendingWriteBatch {
+        var entities: [EntityNaturalKey: TraceEntity] = [:]
+        var edges: [EdgeNaturalKey: TraceEdge] = [:]
+        var eventCount = 0
+
+        var rowCount: Int { entities.count + edges.count }
+
+        mutating func append(
+            entities newEntities: [TraceEntity],
+            edges newEdges: [TraceEdge]
+        ) -> Int {
+            var coalescedRows = 0
+            eventCount += 1
+
+            for entity in newEntities {
+                let key = EntityNaturalKey(
+                    entityType: entity.entityType,
+                    stableKey: entity.stableKey
+                )
+                let observationWeight = max(1, entity.observationCount)
+                if let existing = entities[key] {
+                    coalescedRows += 1
+                    entities[key] = TraceEntity(
+                        // SQLite preserves the first row id on natural-key
+                        // conflict, so retain it here as well.
+                        id: existing.id,
+                        entityType: existing.entityType,
+                        stableKey: existing.stableKey,
+                        displayName: entity.displayName,
+                        firstSeen: existing.firstSeen,
+                        lastSeen: max(existing.lastSeen, entity.lastSeen),
+                        attributesJson: entity.attributesJson,
+                        // `source` is insert-only in the SQLite conflict
+                        // clause, so preserve the first observation here.
+                        source: existing.source,
+                        confidence: entity.confidence,
+                        observationCount: Self.saturatingAdd(
+                            existing.observationCount,
+                            observationWeight
+                        )
+                    )
+                } else {
+                    entities[key] = TraceEntity(
+                        id: entity.id,
+                        entityType: entity.entityType,
+                        stableKey: entity.stableKey,
+                        displayName: entity.displayName,
+                        firstSeen: entity.firstSeen,
+                        lastSeen: entity.lastSeen,
+                        attributesJson: entity.attributesJson,
+                        source: entity.source,
+                        confidence: entity.confidence,
+                        observationCount: observationWeight
+                    )
+                }
+            }
+
+            for edge in newEdges {
+                let key = EdgeNaturalKey(
+                    sourceEntityId: edge.sourceEntityId,
+                    targetEntityId: edge.targetEntityId,
+                    relation: edge.relation
+                )
+                if let existing = edges[key] {
+                    coalescedRows += 1
+                    edges[key] = TraceEdge(
+                        // Same conflict semantics as SQLite: the first id and
+                        // first_seen survive; mutable fields come from the last
+                        // observation, with last_seen monotonic.
+                        id: existing.id,
+                        sourceEntityId: existing.sourceEntityId,
+                        targetEntityId: existing.targetEntityId,
+                        relation: existing.relation,
+                        firstSeen: existing.firstSeen,
+                        lastSeen: max(existing.lastSeen, edge.lastSeen),
+                        confidence: edge.confidence,
+                        confidenceTier: edge.confidenceTier,
+                        evidenceJson: edge.evidenceJson,
+                        eventIdsJson: edge.eventIdsJson
+                    )
+                } else {
+                    edges[key] = edge
+                }
+            }
+            return coalescedRows
+        }
+
+        var sortedEntities: [TraceEntity] {
+            entities.values.sorted { $0.id < $1.id }
+        }
+
+        var sortedEdges: [TraceEdge] {
+            edges.values.sorted { $0.id < $1.id }
+        }
+
+        private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+            let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+            return overflow ? Int.max : sum
+        }
+    }
 
     // MARK: - Input
 
@@ -268,8 +459,38 @@ public actor RollingCausalGraph {
     private let store: CausalGraphStore
     private let materializer: TraceMaterializer
     private let policy: TracePolicy
+    private let ingestionWritePolicy: CausalGraphIngestionWritePolicy
     private let anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)?
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "rolling-graph")
+
+    private var pendingWriteBatch = PendingWriteBatch()
+    private var scheduledFlush: Task<Void, Never>?
+    private var scheduledFlushGeneration: UInt64 = 0
+    /// Joinable handle for the physical store write. Actor reentrancy permits a
+    /// lifecycle flush to enter while an earlier flush is suspended in the
+    /// store actor; an empty pending batch does not mean that write completed.
+    private var inFlightStoreWrite: Task<Void, Error>?
+
+    // Exact write-conservation counters. These are intentionally owned by the
+    // rolling actor: only this layer knows how many input events and redundant
+    // row observations one physical SQLite batch represents.
+    private var inputEventsTotal: UInt64 = 0
+    private var eventsCommittedTotal: UInt64 = 0
+    private var eventsFailedTotal: UInt64 = 0
+    private var eventsInFlight = 0
+    private var entityObservationsTotal: UInt64 = 0
+    private var edgeObservationsTotal: UInt64 = 0
+    private var relevanceSuppressedFileEventsTotal: UInt64 = 0
+    private var relevanceSuppressedRowsTotal: UInt64 = 0
+    private var writeAttemptsTotal: UInt64 = 0
+    private var writeBatchesCommittedTotal: UInt64 = 0
+    private var writeBatchesFailedTotal: UInt64 = 0
+    private var writeBatchesInFlight = 0
+    private var writeRowsAttemptedTotal: UInt64 = 0
+    private var writeRowsCommittedTotal: UInt64 = 0
+    private var writeRowsFailedTotal: UInt64 = 0
+    private var writeRowsInFlight = 0
+    private var coalescedNoopRowsTotal: UInt64 = 0
 
     /// Anchors already materialized this window, keyed by anchor identity.
     /// High-rate anchors are aggregated by stable behavioural identity. Process
@@ -284,11 +505,13 @@ public actor RollingCausalGraph {
         store: CausalGraphStore,
         materializer: TraceMaterializer,
         policy: TracePolicy = .default,
+        ingestionWritePolicy: CausalGraphIngestionWritePolicy = .immediate,
         anchorCallback: (@Sendable (Trace, AnchorTrigger) async -> Void)? = nil
     ) {
         self.store = store
         self.materializer = materializer
         self.policy = policy
+        self.ingestionWritePolicy = ingestionWritePolicy
         self.anchorCallback = anchorCallback
     }
 
@@ -322,11 +545,10 @@ public actor RollingCausalGraph {
 
     @discardableResult
     public func ingest(_ event: NormalizedEventInput) async throws -> [Trace] {
-        // v1.17.4 (perf): collect this event's entities + edges and persist
-        // them in ONE batched transaction (store.upsertBatch) instead of ~7
-        // individual autocommit upserts. Entities are appended before their
-        // edges, and the batch inserts all entities before all edges, so the
-        // trace_edges→trace_entities FKs hold for in-batch endpoints.
+        // Collect this event's entities + edges as one logical observation.
+        // The bounded writer may coalesce it with adjacent non-anchor events;
+        // every physical batch still inserts all entities before all edges, so
+        // the trace_edges→trace_entities FKs hold for in-batch endpoints.
         var entities: [TraceEntity] = []
         var edges: [TraceEdge] = []
 
@@ -388,55 +610,76 @@ public actor RollingCausalGraph {
         var fileNode: FileNode?
         var persistenceNode: PersistenceNode?
         if let fileObs = event.file {
-            let inferredKind = inferFileKind(path: fileObs.path)
-            let node = FileNode(
+            let inferredKind = Self.inferFileKind(path: fileObs.path)
+            if Self.fileObservationIsRelevant(
                 path: fileObs.path,
-                pathHash: fileObs.pathHash,
-                fileKind: inferredKind,
-                sha256: fileObs.sha256,
-                untrustedContent: fileObs.untrustedContent,
-                firstSeen: event.timestamp,
-                lastSeen: event.timestamp
-            )
-            fileNode = node
-            let fileEntity = try node.toEntity(source: "rolling_graph")
-            entities.append(fileEntity)
-
-            let relation: EdgeRelation = mapFileAction(event.action)
-            let edge = EdgeBuilder.build(
-                from: processNode,
-                to: node,
-                relation: relation,
-                confidence: 0.9,
-                observedAt: event.timestamp,
-                eventIds: [event.eventId]
-            )
-            edges.append(edge)
-
-            // Persistence detection: certain file kinds + create/write
-            // trigger a parallel PersistenceNode + created_persistence edge.
-            if let persistenceType = persistenceType(for: inferredKind),
-               event.action == .fileCreate || event.action == .fileWrite {
-                let persistence = PersistenceNode(
-                    persistenceType: persistenceType,
+                kind: inferredKind,
+                untrustedContent: fileObs.untrustedContent
+            ) {
+                let node = FileNode(
                     path: fileObs.path,
-                    label: nil,
-                    createdByProcessKey: event.process.processKey,
+                    pathHash: fileObs.pathHash,
+                    fileKind: inferredKind,
+                    sha256: fileObs.sha256,
+                    untrustedContent: fileObs.untrustedContent,
                     firstSeen: event.timestamp,
                     lastSeen: event.timestamp
                 )
-                persistenceNode = persistence
-                let persistEntity = try persistence.toEntity(source: "rolling_graph")
-                entities.append(persistEntity)
-                let persistEdge = EdgeBuilder.build(
+                fileNode = node
+                let fileEntity = try node.toEntity(source: "rolling_graph")
+                entities.append(fileEntity)
+
+                let relation: EdgeRelation = mapFileAction(event.action)
+                let edge = EdgeBuilder.build(
                     from: processNode,
-                    to: persistence,
-                    relation: .createdPersistence,
-                    confidence: 0.95,
+                    to: node,
+                    relation: relation,
+                    confidence: 0.9,
                     observedAt: event.timestamp,
                     eventIds: [event.eventId]
                 )
-                edges.append(persistEdge)
+                edges.append(edge)
+
+                // Persistence detection: certain file kinds + create/write
+                // trigger a parallel PersistenceNode + created_persistence edge.
+                if let persistenceType = persistenceType(for: inferredKind),
+                   event.action == .fileCreate || event.action == .fileWrite {
+                    let persistence = PersistenceNode(
+                        persistenceType: persistenceType,
+                        path: fileObs.path,
+                        label: nil,
+                        createdByProcessKey: event.process.processKey,
+                        firstSeen: event.timestamp,
+                        lastSeen: event.timestamp
+                    )
+                    persistenceNode = persistence
+                    let persistEntity = try persistence.toEntity(source: "rolling_graph")
+                    entities.append(persistEntity)
+                    let persistEdge = EdgeBuilder.build(
+                        from: processNode,
+                        to: persistence,
+                        relation: .createdPersistence,
+                        confidence: 0.95,
+                        observedAt: event.timestamp,
+                        eventIds: [event.eventId]
+                    )
+                    edges.append(persistEdge)
+                }
+            } else {
+                // Current shipped graph detection needs file nodes only for
+                // credential access, untrusted-content taint, and persistence
+                // paths. Ordinary temp/build/source opens are not causal-rule
+                // inputs; retaining each unique path produced the rc.5
+                // 61k-entity/80k-edge churn. Process and AI-agent provenance
+                // above is still retained and exactly observation-weighted.
+                relevanceSuppressedFileEventsTotal = Self.saturatingAdd(
+                    relevanceSuppressedFileEventsTotal,
+                    1
+                )
+                relevanceSuppressedRowsTotal = Self.saturatingAdd(
+                    relevanceSuppressedRowsTotal,
+                    2
+                )
             }
         }
 
@@ -466,12 +709,11 @@ public actor RollingCausalGraph {
             edges.append(edge)
         }
 
-        // v1.17.4 (perf): persist the whole event's graph in ONE batched
-        // transaction (entities before edges). Must run BEFORE anchor
-        // detection / materialization below, which reads the persisted graph.
-        try await store.upsertBatch(entities: entities, edges: edges)
-
-        // 6. Anchor detection + materialization
+        // 6. Classify before persistence so a novel anchor can force all
+        // pending observations to stable storage before the materializer reads
+        // the graph. Previously classification happened after a per-event
+        // commit; retaining this ordering contract is what makes bounded
+        // cross-event coalescing detection-safe.
         let anchorContext = AnchorDetector.EventContext(
             processNode: processNode,
             fileNode: fileNode,
@@ -482,11 +724,195 @@ public actor RollingCausalGraph {
             policy: policy
         )
         let anchors = AnchorDetector.classify(anchorContext)
+
+        inputEventsTotal = Self.saturatingAdd(inputEventsTotal, 1)
+        entityObservationsTotal = Self.saturatingAdd(
+            entityObservationsTotal,
+            UInt64(entities.count)
+        )
+        edgeObservationsTotal = Self.saturatingAdd(
+            edgeObservationsTotal,
+            UInt64(edges.count)
+        )
+        let coalesced = pendingWriteBatch.append(entities: entities, edges: edges)
+        coalescedNoopRowsTotal = Self.saturatingAdd(
+            coalescedNoopRowsTotal,
+            UInt64(coalesced)
+        )
+
+        // A previously materialized/deduped anchor needs no special write: its
+        // substrate is still flushed by the ordinary time/count bounds. A
+        // novel anchor must be visible synchronously to TraceMaterializer.
+        let hasNovelAnchor = anchors.contains {
+            !anchorIsDuplicate($0, now: event.timestamp)
+        }
+        if hasNovelAnchor || shouldFlushPendingBatch {
+            try await flushPending()
+        } else {
+            schedulePendingFlushIfNeeded()
+        }
+
+        // 7. Anchor materialization. Novel anchors have just forced a commit;
+        // duplicate anchors remain suppressed by the existing cache.
         return await materializeAnchors(
             anchors,
             eventId: event.eventId,
             timestamp: event.timestamp
         )
+    }
+
+    private var shouldFlushPendingBatch: Bool {
+        ingestionWritePolicy.maximumDelaySeconds == 0
+            || pendingWriteBatch.eventCount >= ingestionWritePolicy.maximumPendingEvents
+            || pendingWriteBatch.rowCount >= ingestionWritePolicy.maximumPendingRows
+    }
+
+    private func schedulePendingFlushIfNeeded() {
+        guard scheduledFlush == nil, pendingWriteBatch.eventCount > 0 else { return }
+        let seconds = ingestionWritePolicy.maximumDelaySeconds
+        guard seconds > 0 else { return }
+        let nanosecondsDouble = min(
+            seconds * 1_000_000_000,
+            Double(UInt64.max)
+        )
+        let nanoseconds = UInt64(nanosecondsDouble.rounded(.up))
+        scheduledFlushGeneration &+= 1
+        let generation = scheduledFlushGeneration
+        scheduledFlush = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            await self?.flushScheduledBatch(generation: generation)
+        }
+    }
+
+    private func flushScheduledBatch(generation: UInt64) async {
+        guard generation == scheduledFlushGeneration else { return }
+        scheduledFlush = nil
+        do {
+            try await flushPending()
+        } catch is CausalGraphStorageAdmissionError {
+            // Expected fail-closed shedding. The SQLite store logs latch
+            // transitions; the exact failed event/row totals remain visible in
+            // writeTelemetry without producing one warning per timer tick.
+        } catch {
+            logger.warning("rolling graph coalesced flush failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Persist every currently pending observation in one transaction.
+    /// Public so lifecycle owners and focused probes can establish a stable
+    /// boundary; ordinary daemon callers rely on the automatic bounds above.
+    public func flushPending() async throws {
+        scheduledFlush?.cancel()
+        scheduledFlush = nil
+        scheduledFlushGeneration &+= 1
+
+        // Join an earlier scheduled/anchor flush before deciding there is no
+        // work. On success, loop until the owning continuation has published
+        // its counters and cleared the handle; then flush any observations that
+        // arrived during that physical write.
+        while let existing = inFlightStoreWrite {
+            do {
+                try await existing.value
+            } catch {
+                while inFlightStoreWrite != nil { await Task.yield() }
+                throw error
+            }
+            if inFlightStoreWrite != nil { await Task.yield() }
+        }
+
+        guard pendingWriteBatch.eventCount > 0 else { return }
+        let batch = pendingWriteBatch
+        pendingWriteBatch = PendingWriteBatch()
+        let entities = batch.sortedEntities
+        let edges = batch.sortedEdges
+        let rowCount = entities.count + edges.count
+
+        writeAttemptsTotal = Self.saturatingAdd(writeAttemptsTotal, 1)
+        writeRowsAttemptedTotal = Self.saturatingAdd(
+            writeRowsAttemptedTotal,
+            UInt64(rowCount)
+        )
+        writeBatchesInFlight += 1
+        eventsInFlight += batch.eventCount
+        writeRowsInFlight += rowCount
+
+        let store = self.store
+        let storeWrite = Task {
+            try await store.upsertBatch(entities: entities, edges: edges)
+        }
+        inFlightStoreWrite = storeWrite
+
+        do {
+            try await storeWrite.value
+            inFlightStoreWrite = nil
+            writeBatchesInFlight -= 1
+            eventsInFlight -= batch.eventCount
+            writeRowsInFlight -= rowCount
+            writeBatchesCommittedTotal = Self.saturatingAdd(
+                writeBatchesCommittedTotal,
+                1
+            )
+            eventsCommittedTotal = Self.saturatingAdd(
+                eventsCommittedTotal,
+                UInt64(batch.eventCount)
+            )
+            writeRowsCommittedTotal = Self.saturatingAdd(
+                writeRowsCommittedTotal,
+                UInt64(rowCount)
+            )
+        } catch {
+            inFlightStoreWrite = nil
+            writeBatchesInFlight -= 1
+            eventsInFlight -= batch.eventCount
+            writeRowsInFlight -= rowCount
+            writeBatchesFailedTotal = Self.saturatingAdd(
+                writeBatchesFailedTotal,
+                1
+            )
+            eventsFailedTotal = Self.saturatingAdd(
+                eventsFailedTotal,
+                UInt64(batch.eventCount)
+            )
+            writeRowsFailedTotal = Self.saturatingAdd(
+                writeRowsFailedTotal,
+                UInt64(rowCount)
+            )
+            throw error
+        }
+    }
+
+    public func writeTelemetry() -> CausalGraphIngestionWriteTelemetry {
+        CausalGraphIngestionWriteTelemetry(
+            inputEventsTotal: inputEventsTotal,
+            eventsCommittedTotal: eventsCommittedTotal,
+            eventsFailedTotal: eventsFailedTotal,
+            eventsInFlight: eventsInFlight,
+            eventsPending: pendingWriteBatch.eventCount,
+            entityObservationsTotal: entityObservationsTotal,
+            edgeObservationsTotal: edgeObservationsTotal,
+            relevanceSuppressedFileEventsTotal: relevanceSuppressedFileEventsTotal,
+            relevanceSuppressedRowsTotal: relevanceSuppressedRowsTotal,
+            writeAttemptsTotal: writeAttemptsTotal,
+            writeBatchesCommittedTotal: writeBatchesCommittedTotal,
+            writeBatchesFailedTotal: writeBatchesFailedTotal,
+            writeBatchesInFlight: writeBatchesInFlight,
+            writeRowsAttemptedTotal: writeRowsAttemptedTotal,
+            writeRowsCommittedTotal: writeRowsCommittedTotal,
+            writeRowsFailedTotal: writeRowsFailedTotal,
+            writeRowsInFlight: writeRowsInFlight,
+            coalescedNoopRowsTotal: coalescedNoopRowsTotal,
+            pendingEntityRows: pendingWriteBatch.entities.count,
+            pendingEdgeRows: pendingWriteBatch.edges.count
+        )
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? UInt64.max : sum
     }
 
     /// Materialize classified anchors and commit their dedup key only after a
@@ -542,6 +968,10 @@ public actor RollingCausalGraph {
         confidence: Double,
         observedAt: Date
     ) async throws -> Trace {
+        // External rule/sequence/campaign anchors can target an entity that is
+        // still inside the bounded coalescing window. Preserve the historical
+        // contract that materialization reads a fully persisted substrate.
+        try await flushPending()
         let trace = try await materializer.materialize(
             anchorEntityId: anchorEntityId,
             anchorEventId: anchorEventId,
@@ -607,39 +1037,40 @@ public actor RollingCausalGraph {
         }
     }
 
-    private func inferFileKind(path: String) -> FileKind {
-        // Lightweight pattern-based classification. The CredentialFence
-        // (existing v1.9) is the authoritative classifier and would be
-        // wired in when ESCollector pumps events through; this lighter
-        // version covers the §27.2 fixtures.
-        if path.hasSuffix(".aws/credentials")
-            || path.hasSuffix(".aws/config")
-            || path.contains("/.ssh/id_")
-            || path.hasSuffix("/.npmrc")
-            || path.hasSuffix("/.docker/config.json") {
-            return .credentialFile
-        }
-        if path.contains("/Library/LaunchAgents/")    { return .launchAgent }
-        if path.contains("/Library/LaunchDaemons/")   { return .launchDaemon }
-        if path.contains("/Library/LoginItems/")      { return .loginItem }
-        if path.hasSuffix("/.zshrc") || path.hasSuffix("/.bashrc")
-            || path.hasSuffix("/.bash_profile") || path.hasSuffix("/.zprofile") {
-            return .shellProfile
-        }
-        if path.hasSuffix(".plist") { return .plist }
-        if path.hasSuffix(".sh") || path.hasSuffix(".py") || path.hasSuffix(".rb") { return .script }
-        if path.contains("/Downloads/") { return .browserDownload }
-        if path.contains("/node_modules/") { return .packageFile }
-        return .unknown
+    /// Classify graph file substrate with CredentialFence's canonical semantic
+    /// credential matcher. ES OPEN admission is intentionally broader: it also
+    /// carries Safari history, Notes, Messages, TCC, deception, and other
+    /// sensitive-but-not-credential evidence. Treating that whole admission
+    /// set as `credential_file` would create false graph edges and alerts. The
+    /// broader ES set is retained by `fileObservationIsRelevant` below without
+    /// lying about its FileKind.
+    nonisolated static func inferFileKind(path: String) -> FileKind {
+        TraceGraphFileObservationPolicy.classify(path: path).fileKind
+    }
+
+    /// Conservative pre-SQL relevance contract for file substrate rows.
+    ///
+    /// Every shipped graph rule containing a file node is guarded by either
+    /// `file_kind == credential_file` or `untrusted_content == true`; focused
+    /// tests scan the bundled rule corpus so a future rule cannot silently
+    /// widen that assumption. The narrow ES OPEN-sensitive set stays retained
+    /// too, but keeps its truthful semantic kind (for example Safari history is
+    /// `.unknown`, never fabricated as a credential). Persistence anchors
+    /// additionally require the four path kinds below. Process, AI-agent, and
+    /// network substrate is not subject to this gate.
+    nonisolated static func fileObservationIsRelevant(
+        path: String? = nil,
+        kind: FileKind,
+        untrustedContent: Bool
+    ) -> Bool {
+        TraceGraphFileObservationPolicy.isRelevant(
+            path: path,
+            kind: kind,
+            untrustedContent: untrustedContent
+        )
     }
 
     private func persistenceType(for kind: FileKind) -> PersistenceType? {
-        switch kind {
-        case .launchAgent:  return .launchAgent
-        case .launchDaemon: return .launchDaemon
-        case .loginItem:    return .loginItem
-        case .shellProfile: return .shellProfile
-        default:            return nil
-        }
+        TraceGraphFileObservationPolicy.persistenceType(for: kind)
     }
 }

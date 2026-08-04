@@ -5,11 +5,10 @@
 // (actions.json) that steers what the ROOT engine does when a rule fires.
 //
 // SECURITY-CRITICAL. `set_response_action` is a DEFENSE-AFFECTING mutation —
-// it can arm kill / quarantine / blockNetwork against the process or file that
-// trips a rule — so it is gated at the top `.response` tier in
-// AgentControl.swift's agentToolCapability map. (The map FAILS OPEN, so a
-// missing entry would silently bypass the gate; the fail-open guard test pins
-// the gated set.) `list_response_actions` is read-only and ungated.
+// it can propose kill / quarantine / script / blockNetwork against the process
+// or file that trips a rule — so it is gated at the top `.response` tier in
+// AgentControl.swift's exhaustive static authority registry. A missing entry is
+// denied before dispatch. `list_response_actions` is explicitly ungated.
 //
 // Like the dashboard + CLI, we WRITE the user-home actions.json (the MCP runs
 // as uid 501 and cannot write the root-owned system dir) and queue a reload via
@@ -43,8 +42,13 @@ private let mcpResponseValidActions: Set<String> = [
     "log", "notify", "kill", "quarantine", "script", "blockNetwork", "escalateNotification",
 ]
 private let mcpResponseValidSeverities: Set<String> = ["critical", "high", "medium", "low", "informational"]
-/// Destructive actions default requireConfirmation to true (the safer default).
-private let mcpResponseConfirmByDefault: Set<String> = ["kill", "quarantine", "blockNetwork"]
+/// The exhaustive host-mutating set mirrored from ResponseEngine.mutatesHost.
+/// MCP can create these only as confirmation-required, per-rule records. This
+/// process never has authority to turn model/agent input into an automatic host
+/// mutation or a global destructive default.
+private let mcpResponseHostMutatingActions: Set<String> = [
+    "kill", "quarantine", "script", "blockNetwork",
+]
 
 /// The root-managed dirs the ROOT engine will execute response scripts from
 /// (mirrors ResponseAction.scriptAllowlistedDirs). A script anywhere else is
@@ -170,7 +174,15 @@ private func mcpFormatActionLine(_ e: MCPActionEntry) -> String {
     if let sp = e.scriptPath { parts.append("script=\(sp)") }
     if let d = e.blockDurationSeconds { parts.append("block-duration=\(d)s") }
     let confirm = e.requireConfirmation ?? false
-    parts.append(confirm ? "confirm=required" : "confirm=no (auto-executes)")
+    if confirm {
+        parts.append("confirm=required")
+    } else if mcpResponseHostMutatingActions.contains(e.action) {
+        // This can only be an older/dashboard/CLI-authored record; the MCP
+        // setter below refuses to create this shape. List it honestly.
+        parts.append("confirm=no (host mutation may auto-execute)")
+    } else {
+        parts.append("confirm=not required (non-destructive)")
+    }
     return parts.joined(separator: "  ")
 }
 
@@ -196,16 +208,40 @@ func handleSetResponseAction(_ args: [String: Any]) -> Any {
         return toolError("'script_path' must be an absolute path under a root-managed scripts dir (\(mcpScriptAllowlistedDirs.joined(separator: " or "))). The ROOT engine only executes scripts that live there and are owned by root with no group/world-write, so a path elsewhere would never run.")
     }
     let blockDuration = args["block_duration_seconds"] as? Int
-    let ruleId = (args["rule_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    if action == "blockNetwork", let blockDuration,
+       !(1...86_400).contains(blockDuration) {
+        return toolError("'block_duration_seconds' must be between 1 and 86400 for MCP-created network blocks")
+    }
 
-    // requireConfirmation: explicit 'require_confirmation' wins; else destructive
-    // actions default to true. Encoded as nil (omitted) when false, matching the
-    // dashboard's on-disk shape (the engine treats absent as false).
+    let ruleId = (args["rule_id"] as? String)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .flatMap { $0.isEmpty ? nil : $0 }
+    if let ruleId {
+        guard ruleId.utf8.count <= 512,
+              !ruleId.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            return toolError("'rule_id' must be at most 512 UTF-8 bytes and contain no control characters")
+        }
+    }
+
+    let hostMutating = mcpResponseHostMutatingActions.contains(action)
+    if hostMutating, ruleId == nil {
+        return toolError("MCP cannot create a global default for host-mutating action '\(action)'; provide the exact rule_id so the proposal is scoped to one rule and remains confirmation-pending")
+    }
+    if hostMutating, (args["require_confirmation"] as? Bool) == false {
+        return toolError("MCP cannot disable operator confirmation for host-mutating action '\(action)'; require_confirmation:false is refused")
+    }
+
+    // Host-mutating MCP proposals are unconditionally confirmation-pending.
+    // Safe actions preserve the compatibility field: explicit true is stored;
+    // false/absent is omitted (the engine's non-destructive default).
     let requireConfirmation: Bool?
-    if let explicit = args["require_confirmation"] as? Bool {
+    if hostMutating {
+        requireConfirmation = true
+    } else if let explicit = args["require_confirmation"] as? Bool {
         requireConfirmation = explicit ? true : nil
     } else {
-        requireConfirmation = mcpResponseConfirmByDefault.contains(action) ? true : nil
+        requireConfirmation = nil
     }
 
     let entry = MCPActionEntry(
@@ -248,8 +284,8 @@ func handleSetResponseAction(_ args: [String: Any]) -> Any {
     if let err = dropInboxRequest(verb: "reload-rules", payload: ["requestedAt": isoFormatter.string(from: Date()), "source": "mcp-set-response-action"]) {
         return ["content": [["type": "text", "text": "Saved \(action) on \(ruleId ?? "default actions"), but could not queue a reload: \(err). The engine will pick it up on its next start / SIGHUP.\(armingNote)"]]]
     }
-    let confirmNote = (requireConfirmation ?? false)
-        ? " Operator confirmation is REQUIRED — it will not auto-execute."
-        : (mcpResponseConfirmByDefault.contains(action) ? " Confirmation was explicitly disabled — this auto-executes." : "")
+    let confirmNote = hostMutating
+        ? " Operator confirmation is REQUIRED — MCP has recorded a pending per-rule proposal and cannot auto-execute it."
+        : " This is a non-destructive action."
     return ["content": [["type": "text", "text": "Set \(action) (min=\(minSeverity)) on \(ruleId.map { "rule \($0)" } ?? "default actions").\(confirmNote) Queued a rule reload; the engine applies it within ~5 s.\(armingNote)"]]]
 }

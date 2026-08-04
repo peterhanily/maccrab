@@ -336,6 +336,39 @@ if /usr/bin/grep -qE 'codesign[^#]*--verify[^#]*\|\|[[:space:]]*true|CODESIGN_BI
     echo "  ✗ codesign verification failure is swallowed" >&2
     exit 1
 fi
+if /usr/bin/grep -qE 'MacCrabTools\.entitlements|TOOLS_ENT=' \
+        "$PROJECT_DIR/scripts/build-release.sh" "$PROJECT_DIR/scripts/release.sh"; then
+    echo "  ✗ provisioning-profile-bound entitlement input returned for bare tools" >&2
+    exit 1
+fi
+if ! /usr/bin/grep -Fq 'strip -S -x "$STAGING_DIR/bin/$binary"' \
+        "$PROJECT_DIR/scripts/build-release.sh"; then
+    echo "  ✗ release binaries do not remove local symbols before signing" >&2
+    exit 1
+fi
+if /usr/bin/grep -E 'strip -S -x .*\|\|[[:space:]]*true' \
+        "$PROJECT_DIR/scripts/build-release.sh" >/dev/null; then
+    echo "  ✗ release symbol-strip failure is swallowed" >&2
+    exit 1
+fi
+for footprint_marker in \
+        'APP_FOOTPRINT_BUDGET_KIB=163840' \
+        'APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)' \
+        'APP_FOOTPRINT_KIB" -gt "$APP_FOOTPRINT_BUDGET_KIB'; do
+    /usr/bin/grep -Fq "$footprint_marker" "$PROJECT_DIR/scripts/build-release.sh" \
+        || { echo "  ✗ installed-app footprint release gate is incomplete" >&2; exit 1; }
+done
+[ "$(/usr/bin/grep -cF 'verify_bare_tool_runtime "$APP" "post-sign"' \
+        "$PROJECT_DIR/scripts/build-release.sh")" = 1 ] \
+    || { echo "  ✗ signed-app bare-tool execution probe is missing or duplicated" >&2; exit 1; }
+[ "$(/usr/bin/grep -cF 'verify_bare_tool_runtime "$DMG_MNT/MacCrab.app" "mounted-DMG"' \
+        "$PROJECT_DIR/scripts/build-release.sh")" = 1 ] \
+    || { echo "  ✗ mounted-DMG bare-tool execution probe is missing or duplicated" >&2; exit 1; }
+if /usr/bin/grep -E 'verify_bare_tool_runtime .*\|\|[[:space:]]*true' \
+        "$PROJECT_DIR/scripts/build-release.sh" >/dev/null; then
+    echo "  ✗ bare-tool execution probe failure is swallowed" >&2
+    exit 1
+fi
 
 for binding_marker in \
         'SOURCE_COMMIT=' \
@@ -368,6 +401,12 @@ fi
 /usr/bin/grep -q 'repository-local SwiftPM configuration must not be a release input' \
     "$PROJECT_DIR/scripts/release.sh"
 /usr/bin/grep -q 'Tools/AssessmentHarness/.build' "$PROJECT_DIR/scripts/ci-local.sh"
+/usr/bin/grep -q '^SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1$' \
+    "$PROJECT_DIR/scripts/ci-local.sh" \
+    || { echo "  ✗ local CI no longer bounds Swift Testing concurrency" >&2; exit 1; }
+/usr/bin/grep -q 'check "Swift test suite" swift test --no-parallel' \
+    "$PROJECT_DIR/scripts/ci-local.sh" \
+    || { echo "  ✗ local CI no longer explicitly serializes Swift Testing" >&2; exit 1; }
 
 for evidence_marker in \
         provisioning_profile_sha256 \

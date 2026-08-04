@@ -282,7 +282,8 @@ struct BehaviorScoringIndicatorTests {
             "event_tap_keylogger", "executed_from_tmp", "fresh_package_install",
             "high_entropy_commandline", "known_malicious_domain", "known_malicious_hash",
             "known_malicious_ip", "library_injection", "mcp_server_suspicious",
-            "not_notarized", "statistical_frequency_anomaly", "unsigned_binary",
+            "not_notarized", "statistical_frequency_anomaly",
+            "statistical_process_shape_anomaly", "unsigned_binary",
             "unsigned_dev_tooling", "writes_launch_agent", "writes_launch_daemon",
             // Emitted via the raw Indicator(name:) form:
             "suspicious_certificate", "typosquat_domain",

@@ -90,7 +90,7 @@ public actor DNSCollector {
     public nonisolated let events: AsyncStream<DnsQuery>
     private var continuation: AsyncStream<DnsQuery>.Continuation?
     private var captureTask: Task<Void, Never>?
-    private var isRunning = false
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
 
     // MARK: - Initialization
 
@@ -106,8 +106,11 @@ public actor DNSCollector {
 
     /// Start capturing DNS packets. Requires root for BPF access.
     public func start() {
-        guard !isRunning else { return }
-        isRunning = true
+        guard lifecyclePhase == .initialized else {
+            logger.warning("DNS collector start rejected after its one-shot lifecycle advanced")
+            return
+        }
+        lifecyclePhase = .running
 
         let continuation = self.continuation!
         let logger = self.logger
@@ -121,10 +124,36 @@ public actor DNSCollector {
 
     /// Stop capturing.
     public func stop() {
-        isRunning = false
+        _ = beginStop()
+    }
+
+    /// Join the BPF/passive capture task. The BPF fd has a one-second read
+    /// timeout, so a healthy worker observes cancellation within this bound.
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.25) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(
+            task.map { [$0] } ?? [],
+            deadline: deadline
+        )
+        if joined {
+            captureTask = nil
+            lifecyclePhase = .stopped
+            logger.info("DNS collector stopped cleanly")
+        } else {
+            logger.error("DNS collector stop deadline expired with capture work active")
+        }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = captureTask
         captureTask?.cancel()
-        captureTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     /// Look up the domain name for an IP address from recent DNS resolutions.

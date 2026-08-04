@@ -623,7 +623,11 @@ struct RootWholeFileReadBoundaryTests {
         }
 
         let eventLoop = try source("Sources/MacCrabAgentKit/EventLoop.swift")
-        #expect(eventLoop.contains("state.fileInjectionScanner.scanFile(path: filePath)"))
+        #expect(eventLoop.contains("FileInjectionScanner.isEligible("))
+        #expect(eventLoop.contains("let scanner = state.fileInjectionScanner"))
+        #expect(eventLoop.contains("label: \"file-injection-scan\""))
+        #expect(eventLoop.contains("await scanner.scanFile("))
+        #expect(eventLoop.contains("eventAction: enrichedEvent.eventAction"))
         let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
         #expect(timers.contains("state.crashReportMiner.scan()"))
 

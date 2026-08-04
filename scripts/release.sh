@@ -107,8 +107,7 @@ require_clean_release_source() {
     fi
     for input in \
         Xcode/Resources/MacCrabApp.entitlements \
-        Xcode/Resources/MacCrabAgent.entitlements \
-        Xcode/Resources/MacCrabTools.entitlements; do
+        Xcode/Resources/MacCrabAgent.entitlements; do
         if ! $GIT_BIN ls-files --error-unmatch "$input" >/dev/null 2>&1; then
             echo "ERROR: shipped signing capability is not tracked: $input" >&2
             return 1

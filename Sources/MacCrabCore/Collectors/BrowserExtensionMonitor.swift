@@ -94,6 +94,7 @@ public actor BrowserExtensionMonitor {
     public nonisolated let events: AsyncStream<ExtensionEvent>
     private var continuation: AsyncStream<ExtensionEvent>.Continuation?
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     /// Never key an extension by id alone: ids can legitimately collide across
     /// users, browsers and profiles, and a version update must be observable.
     private var knownExtensionFamilies: Set<String> = []
@@ -164,7 +165,8 @@ public actor BrowserExtensionMonitor {
     // MARK: - Lifecycle
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         logger.info("Browser extension monitor starting (poll every \(self.pollInterval)s)")
 
         pollTask = Task { [weak self] in
@@ -184,9 +186,25 @@ public actor BrowserExtensionMonitor {
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { pollTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
         pollTask?.cancel()
-        pollTask = nil
         continuation?.finish()
+        continuation = nil
+        return task
     }
 
     // MARK: - Snapshot (dashboard read path)

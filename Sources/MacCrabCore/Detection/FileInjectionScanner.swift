@@ -1,25 +1,27 @@
 // FileInjectionScanner.swift
 // MacCrabCore
 //
-// Scans files for hidden prompt injection using native structural analysis.
-// When an AI tool reads or writes a file, this scanner catches prompt injection
-// hidden in documents BEFORE the LLM processes them — invisible unicode,
-// metadata injection, hidden text, bidi overrides, and zero-width binary encoding.
+// Scans UTF-8 text files for hidden prompt-injection carriers using native
+// structural analysis. EventLoop invokes it only after a completed write or an
+// admitted read; CREATE/WRITE callbacks can observe incomplete content and must
+// never poison the unchanged-file cache.
 
 import Foundation
 import os.log
 
-/// Scans files for hidden prompt injection using native structural analysis.
-/// Detects invisible unicode, metadata injection, hidden text, bidi overrides,
-/// and zero-width binary encoding in files that AI tools access.
+/// Scans UTF-8 text files for invisible Unicode, bidi overrides, and Unicode
+/// tag characters. This is not a PDF/Office parser and does not claim to find
+/// image, archive, metadata, homoglyph, base64, or split-token obfuscation.
 public actor FileInjectionScanner {
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "file-injection")
 
-    /// File types worth scanning (documents AI tools commonly read)
-    private static let scannableExtensions: Set<String> = [
+    /// UTF-8 text types worth scanning. Binary document formats deliberately do
+    /// not appear here: treating a failed UTF-8 decode of PDF/DOCX as a clean
+    /// scan would be a false security claim.
+    public nonisolated static let supportedExtensions: Set<String> = [
         "md", "txt", "py", "js", "ts", "swift", "go", "rs", "java", "c", "cpp", "h",
         "json", "yaml", "yml", "toml", "xml", "html", "css", "csv",
-        "pdf", "docx", "doc", "rtf",
+        "rtf",
         "sh", "bash", "zsh",
         "env", "config", "conf", "ini",
         "sql", "graphql",
@@ -29,9 +31,25 @@ public actor FileInjectionScanner {
     /// Maximum file size to scan (5MB)
     static let maxFileSize: Int = 5 * 1024 * 1024
 
-    /// Cache of recently scanned files (path -> timestamp) to avoid re-scanning
-    private var scanCache: [String: Date] = [:]
-    private let cacheDuration: TimeInterval = 300  // 5 minutes
+    /// Identity from the exact descriptor that supplied the scanned bytes.
+    /// Device+inode+size+ctime means a same-path rewrite is scanned again even
+    /// when it happens inside the former five-minute pathname TTL or restores
+    /// the old mtime. A cache entry can suppress only the same stable snapshot.
+    private struct SnapshotIdentity: Sendable, Equatable {
+        let deviceID: UInt64
+        let inodeNumber: UInt64
+        let sizeBytes: Int64
+        let statusChangeSeconds: Int64
+        let statusChangeNanoseconds: Int64
+    }
+
+    private struct CacheEntry: Sendable {
+        let identity: SnapshotIdentity
+        let accessSequence: UInt64
+    }
+
+    private var scanCache: [String: CacheEntry] = [:]
+    private var cacheAccessSequence: UInt64 = 0
     private let maxCacheSize = 500
 
     public struct ScanResult: Sendable {
@@ -44,29 +62,66 @@ public actor FileInjectionScanner {
 
     public init() {}
 
-    /// Scan a file for hidden prompt injection.
-    /// Returns nil if the file shouldn't be scanned (wrong type, too large, cached).
-    public func scanFile(path: String) async -> ScanResult? {
-        // Check extension
-        let ext = (path as NSString).pathExtension.lowercased()
-        guard Self.scannableExtensions.contains(ext) else { return nil }
+    /// Event-level contract shared with callback admission. `open` is the read
+    /// event that reaches EventLoop; `close_modified` is the first callback that
+    /// proves a write completed. Earlier CREATE/WRITE callbacks are ineligible.
+    public nonisolated static func isEligible(path: String, eventAction: String) -> Bool {
+        let action = eventAction.lowercased()
+        guard action == "open" || action == "close_modified" else { return false }
+        return isSupportedTextPath(path)
+    }
 
-        // Check cache
-        if let lastScan = scanCache[path],
-           Date().timeIntervalSince(lastScan) < cacheDuration {
-            return nil  // Recently scanned
+    public nonisolated static func isSupportedTextPath(_ path: String) -> Bool {
+        let name = (path as NSString).lastPathComponent.lowercased()
+        let normalExtension = (name as NSString).pathExtension.lowercased()
+        if supportedExtensions.contains(normalExtension) { return true }
+
+        // NSString intentionally reports no extension for a leading-dot file.
+        // Treat `.env` / `.config` / `.ini` as their declared text type.
+        if name.first == ".", name.dropFirst().contains(".") == false {
+            return supportedExtensions.contains(String(name.dropFirst()))
         }
+        return false
+    }
 
+    /// Event-aware entry point used by the daemon. An ineligible callback does
+    /// no filesystem work and, critically, cannot create a clean cache entry.
+    public func scanFile(path: String, eventAction: String) async -> ScanResult? {
+        guard Self.isEligible(path: path, eventAction: eventAction) else { return nil }
+        return scanEligibleFile(path: path)
+    }
+
+    /// Scan a file for hidden prompt injection.
+    /// Direct/manual entry point. Returns nil if the file should not be scanned,
+    /// is unchanged since its last complete scan, or carries no supported signal.
+    public func scanFile(path: String) async -> ScanResult? {
+        guard Self.isSupportedTextPath(path) else { return nil }
+        return scanEligibleFile(path: path)
+    }
+
+    private func scanEligibleFile(path: String) -> ScanResult? {
         // Read through the same descriptor that was proven regular and within
         // the cap. A path-based attributes check followed by
         // String(contentsOfFile:) let an attacker rename a validated small file
         // and replace it with a FIFO/device/oversized carrier before the open.
-        guard let data = BoundedRegularFileReader.read(
-                  at: path,
-                  maximumBytes: Self.maxFileSize
-              ),
-              !data.isEmpty,
-              let content = String(data: data, encoding: .utf8) else { return nil }
+        guard case .success(let snapshot) = BoundedRegularFileReader.readOutcome(
+                  at: path, maximumBytes: Self.maxFileSize
+              ) else { return nil }
+
+        let identity = SnapshotIdentity(
+            deviceID: snapshot.deviceID,
+            inodeNumber: snapshot.inodeNumber,
+            sizeBytes: snapshot.sizeBytes,
+            statusChangeSeconds: snapshot.statusChangeSeconds,
+            statusChangeNanoseconds: snapshot.statusChangeNanoseconds
+        )
+        if scanCache[path]?.identity == identity {
+            touchCache(path: path, identity: identity)
+            return nil
+        }
+
+        guard !snapshot.data.isEmpty,
+              let content = String(data: snapshot.data, encoding: .utf8) else { return nil }
 
         // Native structural checks. These used to sit behind a
         // `guard isAvailable else { return nil }` that probed for an external
@@ -95,12 +150,9 @@ public actor FileInjectionScanner {
             quickThreats.append("tag-chars: Unicode tag characters detected (ASCII smuggling)")
         }
 
-        // Update cache
-        scanCache[path] = Date()
-        if scanCache.count > maxCacheSize {
-            let oldest = scanCache.sorted { $0.value < $1.value }.prefix(100).map(\.key)
-            for key in oldest { scanCache.removeValue(forKey: key) }
-        }
+        // Cache only after a complete, stable, UTF-8 snapshot was evaluated.
+        // Carrier rejection and partial/failed reads remain eligible to retry.
+        touchCache(path: path, identity: identity)
 
         guard !quickThreats.isEmpty else { return nil }
 
@@ -119,6 +171,25 @@ public actor FileInjectionScanner {
             threats: quickThreats,
             severity: severity
         )
+    }
+
+    private func touchCache(path: String, identity: SnapshotIdentity) {
+        if cacheAccessSequence < UInt64.max {
+            cacheAccessSequence += 1
+        } else {
+            // A lifetime boundary, not an ordinary hot-path case. Rebase the
+            // tiny bounded cache instead of allowing LRU ordering to wrap.
+            scanCache.removeAll(keepingCapacity: true)
+            cacheAccessSequence = 1
+        }
+        scanCache[path] = CacheEntry(
+            identity: identity,
+            accessSequence: cacheAccessSequence
+        )
+        if scanCache.count > maxCacheSize {
+            let oldest = scanCache.min { $0.value.accessSequence < $1.value.accessSequence }?.key
+            if let oldest { scanCache.removeValue(forKey: oldest) }
+        }
     }
 
 }

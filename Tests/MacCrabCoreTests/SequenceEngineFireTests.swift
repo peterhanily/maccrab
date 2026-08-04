@@ -983,7 +983,12 @@ struct SequenceEngineFireTests {
             correlation: .processLineage
         ))
 
-        for pid in Int32(1)...Int32(poolLimit) {
+        // Do not seed PID 1: the synthetic event fixture truthfully carries
+        // launchd (PID 1) as an ancestor, so using PID 1 as a bound step would
+        // make the later candidate lineage-related rather than a miss.
+        let firstSeedPID: Int32 = 10_000
+        for offset in 0..<poolLimit {
+            let pid = firstSeedPID + Int32(offset)
             _ = await engine.evaluate(procEvent("/usr/bin/curl", pid: pid))
         }
         #expect(await engine.activePartialMatchCount == poolLimit)

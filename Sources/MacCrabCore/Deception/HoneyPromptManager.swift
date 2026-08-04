@@ -97,6 +97,9 @@ public actor HoneyPromptManager {
     private var deployed: [String: HoneyPrompt] = [:]
     /// canary package names → entry, fast lookup for isCanaryPackage().
     private var canaryNames: [String: HoneyPrompt] = [:]
+    /// False after any rejected load. A callback snapshot may be restrictive
+    /// only when both path and canary indexes came from one complete manifest.
+    private var manifestStateKnown = false
 
     // MARK: - Init
 
@@ -108,7 +111,16 @@ public actor HoneyPromptManager {
         let path = manifestPath
             ?? "\(homeDir)/Library/Application Support/MacCrab/honeyprompts.json"
         self.manifestURL = URL(fileURLWithPath: path)
-        Task { await self.loadManifest() }
+        // Match HoneyfileManager's publication ordering: manifest state is
+        // complete before the actor can answer enrichment/snapshot lookups.
+        switch Self.readManifest(at: path) {
+        case .complete(let entries, let canaries):
+            self.deployed = entries
+            self.canaryNames = canaries
+            self.manifestStateKnown = true
+        case .rejected(let reason):
+            logger.error("Honey-prompt manifest load failed: \(reason, privacy: .public)")
+        }
     }
 
     // MARK: - Public API
@@ -117,6 +129,7 @@ public actor HoneyPromptManager {
     /// entries that were freshly written.
     @discardableResult
     public func deploy() throws -> [HoneyPrompt] {
+        manifestStateKnown = false
         var written: [HoneyPrompt] = []
         for entry in Self.defaultHoneyPromptSet(homeDir: homeDir) {
             let dir = (entry.path as NSString).deletingLastPathComponent
@@ -160,11 +173,13 @@ public actor HoneyPromptManager {
             logger.info("Deployed honey-prompt at \(entry.path, privacy: .public)")
         }
         saveManifest()
+        manifestStateKnown = true
         return written
     }
 
     @discardableResult
     public func remove() -> [HoneyPrompt] {
+        manifestStateKnown = false
         var removed: [HoneyPrompt] = []
         for entry in deployed.values {
             try? FileManager.default.removeItem(atPath: entry.path)
@@ -173,6 +188,7 @@ public actor HoneyPromptManager {
         deployed.removeAll()
         canaryNames.removeAll()
         saveManifest()
+        manifestStateKnown = true
         return removed
     }
 
@@ -242,28 +258,74 @@ public actor HoneyPromptManager {
 
     public func deployedCount() -> Int { deployed.count }
 
+    public func callbackPathSnapshot(
+        validUntilUptimeNanoseconds: UInt64
+    ) -> HoneyfilePathSnapshot {
+        guard manifestStateKnown else { return .unknown }
+        return .current(
+            paths: Set(deployed.keys),
+            validUntilUptimeNanoseconds: validUntilUptimeNanoseconds
+        )
+    }
+
+    @discardableResult
+    public func reloadManifest() -> Bool {
+        switch Self.readManifest(at: manifestURL.path) {
+        case .complete(let entries, let canaries):
+            deployed = entries
+            canaryNames = canaries
+            manifestStateKnown = true
+            return true
+        case .rejected(let reason):
+            manifestStateKnown = false
+            logger.error("Honey-prompt manifest reload failed: \(reason, privacy: .public)")
+            return false
+        }
+    }
+
     // MARK: - Manifest persistence
 
-    private func loadManifest() {
+    private enum ManifestLoad {
+        case complete([String: HoneyPrompt], [String: HoneyPrompt])
+        case rejected(String)
+    }
+
+    private nonisolated static func readManifest(at path: String) -> ManifestLoad {
         let data: Data
         switch BoundedRegularFileReader.readOutcome(
-            at: manifestURL.path,
+            at: path,
             maximumBytes: Self.maxManifestBytes
         ) {
         case .success(let snapshot):
             data = snapshot.data
         case .rejected(.notFound):
-            return // First deployment has no manifest yet.
+            return .complete([:], [:])
         case .rejected(let reason):
-            logger.error("Honey-prompt manifest carrier rejected: \(String(describing: reason), privacy: .public)")
-            return
+            return .rejected("carrier rejected: \(String(describing: reason))")
         }
         do {
             let entries = try JSONDecoder().decode([HoneyPrompt].self, from: data)
-            deployed = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
-            canaryNames = Dictionary(uniqueKeysWithValues: entries.map { ($0.canaryPackageName, $0) })
+            var byPath: [String: HoneyPrompt] = [:]
+            var byCanary: [String: HoneyPrompt] = [:]
+            byPath.reserveCapacity(entries.count)
+            byCanary.reserveCapacity(entries.count)
+            for entry in entries {
+                guard !entry.path.isEmpty else {
+                    return .rejected("manifest contains an empty path")
+                }
+                guard !entry.canaryPackageName.isEmpty else {
+                    return .rejected("manifest contains an empty canary package name")
+                }
+                guard byPath.updateValue(entry, forKey: entry.path) == nil else {
+                    return .rejected("manifest contains a duplicate path")
+                }
+                guard byCanary.updateValue(entry, forKey: entry.canaryPackageName) == nil else {
+                    return .rejected("manifest contains a duplicate canary package")
+                }
+            }
+            return .complete(byPath, byCanary)
         } catch {
-            logger.error("Honey-prompt manifest decode failed: \(error.localizedDescription)")
+            return .rejected("decode failed: \(error.localizedDescription)")
         }
     }
 

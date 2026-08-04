@@ -45,7 +45,7 @@ struct FileContentEnricherRevivalTests {
         #expect(!FileContentEnricher.shouldScan(targetPath: "/Users/x/.claude/todos/foo.json"))
     }
 
-    @Test("close-class file event is content-enriched; a non-close action is not (gate fix)")
+    @Test("close-class file content is conserved for deferred re-evaluation; open is ineligible")
     func closeGateEnriches() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("fce-\(UUID().uuidString)")
         let wfDir = base.appendingPathComponent(".github/workflows", isDirectory: true)
@@ -54,20 +54,62 @@ struct FileContentEnricherRevivalTests {
         try "runs-on: self-hosted\nuses: shai-hulud\n".write(to: wf, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: base) }
 
-        let enricher = EventEnricher(fileContentEnricher: FileContentEnricher())
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1,
+            maximumQueuedWorkItems: 4,
+            maximumOutstandingResults: 8,
+            // Test stable identity + replay, not the production deadline.
+            operationTimeoutSeconds: 30
+        ))
+        let enricher = EventEnricher(
+            fileContentEnricher: FileContentEnricher(),
+            heavyEnrichmentPlane: plane
+        )
         func fileEvent(action: String) -> Event {
             let proc = MacCrabCore.ProcessInfo(
                 pid: 4242, ppid: 1, rpid: 4242, name: "curl", executable: "/usr/bin/curl",
                 commandLine: "curl", args: [], workingDirectory: "/",
-                userId: 501, userName: "t", groupId: 20, startTime: Date(), codeSignature: nil)
+                userId: 501, userName: "t", groupId: 20, startTime: Date(),
+                codeSignature: CodeSignatureInfo(signerType: .apple),
+                isPlatformBinary: true)
             return Event(eventCategory: .file, eventType: .creation, eventAction: action,
-                         process: proc, file: FileInfo(path: wf.path, action: .create))
+                         process: proc, file: FileInfo(
+                            path: wf.path,
+                            size: UInt64((try? Data(contentsOf: wf).count) ?? 0),
+                            action: .create
+                         ))
         }
 
-        let enrichedClose = await enricher.enrich(fileEvent(action: "close_modified"))
-        #expect(enrichedClose.enrichments["FileContent"] != nil)
+        let closeEvent = fileEvent(action: "close_modified")
+        let enrichedClose = await enricher.enrich(closeEvent)
+        #expect(enrichedClose.enrichments["FileContent"] == nil)
+        #expect(enrichedClose.enrichments[DeferredEventEnrichment.coverageKey]?.contains(
+            "file_content:pending"
+        ) == true)
+
+        var filePatch: DeferredEventEnrichment?
+        let addition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(30_000_000_000)
+        let deadline = addition.overflow ? UInt64.max : addition.partialValue
+        while filePatch == nil,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            filePatch = await enricher.drainDeferredEnrichments(limit: 8).first {
+                $0.component == .fileContent
+            }
+            if filePatch == nil {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        let completed = try #require(filePatch)
+        #expect(completed.outcome == .completed)
+        let reEvaluated = try #require(completed.applying(to: enrichedClose))
+        #expect(reEvaluated.enrichments["FileContent"] != nil)
 
         let enrichedOpen = await enricher.enrich(fileEvent(action: "open"))
         #expect(enrichedOpen.enrichments["FileContent"] == nil)
+        #expect(enrichedOpen.enrichments[DeferredEventEnrichment.coverageKey]?.contains(
+            "file_content"
+        ) != true)
+        _ = await enricher.shutdownHeavyEnrichment()
     }
 }

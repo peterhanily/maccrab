@@ -18,7 +18,9 @@ struct LLMConfigMigrationSweepTests {
         let expectedReaders: [(path: String, interaction: String)] = [
             ("Sources/MacCrabAgentKit/DaemonSetup.swift", ".disallowed"),
             ("Sources/MacCrabAgentKit/DaemonTimers.swift", ".disallowed"),
-            ("Sources/MacCrabApp/AppState.swift", ".allowed"),
+            // AppState is deliberately not a config-file reader: applied LLM
+            // state comes only from a newer root-engine heartbeat. SettingsView
+            // owns the interactive user-config migration boundary.
             ("Sources/MacCrabApp/Views/SettingsView.swift", ".allowed"),
             ("Sources/maccrabctl/Helpers.swift", ".allowed"),
             ("Sources/maccrab-mcp/main.swift", ".disallowed"),
@@ -180,46 +182,73 @@ struct LLMConfigMigrationSweepTests {
         #expect(persistence.contains("try store.setNonInteractive(key, value: value)"))
     }
 
-    @Test("shipped CLI and MCP tools receive only the shared Keychain entitlement")
+    @Test("shipped bare CLI and MCP tools stay entitlement-free and runtime-probed")
     func toolSigningGuard() throws {
-        // Use --no-index so this keeps checking the ignore rules after the plist
-        // is committed. Otherwise a tracked file is silently exempt from
-        // check-ignore and a clean clone could omit this release input again.
-        let ignoreProbe = Process()
-        ignoreProbe.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        ignoreProbe.arguments = [
-            "check-ignore", "--no-index", "--quiet",
-            "Xcode/Resources/MacCrabTools.entitlements",
-        ]
-        ignoreProbe.currentDirectoryURL = repositoryRoot
-        try ignoreProbe.run()
-        ignoreProbe.waitUntilExit()
-        #expect(
-            ignoreProbe.terminationReason == .exit && ignoreProbe.terminationStatus == 1,
-            "MacCrabTools.entitlements is ignored or git check-ignore failed; a clean release clone would not contain it"
-        )
-
-        let entitlementPath = repositoryRoot
+        // Bare executables do not inherit MacCrab.app's provisioning profile.
+        // A restricted entitlement therefore makes taskgated/AMFI kill them
+        // before main even though codesign verification and notarization pass.
+        let obsoleteEntitlements = repositoryRoot
             .appendingPathComponent("Xcode/Resources/MacCrabTools.entitlements")
-        let entitlementData = try Data(contentsOf: entitlementPath)
-        let entitlements = try #require(
-            PropertyListSerialization.propertyList(from: entitlementData, format: nil)
-                as? [String: Any]
+        #expect(
+            !FileManager.default.fileExists(atPath: obsoleteEntitlements.path),
+            "bare tools must not regain a provisioning-profile-bound entitlement input"
         )
-        let groups = entitlements["keychain-access-groups"] as? [String]
-        #expect(groups == ["79S425CW99.com.maccrab.shared"])
-        #expect(entitlements["com.apple.developer.system-extension.install"] == nil)
-        #expect(entitlements["com.apple.developer.endpoint-security.client"] == nil)
 
         let buildScript = try String(
             contentsOf: repositoryRoot.appendingPathComponent("scripts/build-release.sh"),
             encoding: .utf8
         )
-        #expect(buildScript.contains("TOOLS_ENT="))
-        #expect(buildScript.contains("--entitlements \"$TOOLS_ENT\""))
-        #expect(buildScript.contains("/usr/bin/grep -Fq 'keychain-access-groups'"))
-        #expect(buildScript.contains("/usr/bin/grep -Fq '79S425CW99.com.maccrab.shared'"))
-        #expect(!buildScript.contains("grep -q '<string>79S425CW99.com.maccrab.shared</string>'"))
-        #expect(buildScript.contains("CLI/MCP Keychain entitlement guard failed"))
+        #expect(!buildScript.contains("MacCrabTools.entitlements"))
+        #expect(!buildScript.contains("TOOLS_ENT="))
+
+        guard let guardStart = buildScript.range(of: "# BEGIN BARE_TOOL_RELEASE_GUARDS"),
+              let guardEnd = buildScript.range(of: "# END BARE_TOOL_RELEASE_GUARDS") else {
+            Issue.record("central bare-tool release guard block is missing")
+            return
+        }
+        let releaseGuards = String(buildScript[guardStart.lowerBound..<guardEnd.upperBound])
+        guard let verifierStart = releaseGuards.range(
+            of: "verify_bare_tool_signature_contract()"
+        ) else {
+            Issue.record("central bare-tool signature verifier is missing")
+            return
+        }
+        let signer = String(releaseGuards[..<verifierStart.lowerBound])
+        #expect(signer.contains("--identifier \"com.maccrab.$name\""))
+        #expect(signer.contains("--options runtime"))
+        #expect(!signer.contains("--entitlements"))
+        #expect(releaseGuards.contains("for arch in $archs"))
+        #expect(releaseGuards.contains("'\\[Key\\]|<key>'"))
+        #expect(releaseGuards.contains("verify_bare_tool_runtime()"))
+
+        let signingCalls = buildScript.components(
+            separatedBy: "sign_bare_tool \"$binary\" \"$DEVELOPER_ID\""
+        ).count - 1
+        #expect(signingCalls == 2, "loose and in-app copies must share exactly one signing path each")
+        #expect(buildScript.contains("verify_bare_tool_runtime \"$APP\" \"post-sign\""))
+        #expect(buildScript.contains(
+            "verify_bare_tool_runtime \"$DMG_MNT/MacCrab.app\" \"mounted-DMG\""
+        ))
+    }
+
+    @Test("MCP version probe exits before server startup side effects")
+    func mcpVersionProbeIsEarly() throws {
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Sources/maccrab-mcp/main.swift"),
+            encoding: .utf8
+        )
+        guard let version = source.range(
+            of: "if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == \"--version\""
+        ),
+        let buffering = source.range(of: "setbuf(stdout, nil)"),
+        let logger = source.range(of: "private let logger = Logger"),
+        let parentLog = source.range(of: "logInvokingParentProcess()", options: .backwards) else {
+            Issue.record("MCP version/startup markers are missing")
+            return
+        }
+        #expect(source.contains("print(\"maccrab-mcp \\(MacCrabVersion.current)\")"))
+        #expect(version.lowerBound < buffering.lowerBound)
+        #expect(version.lowerBound < logger.lowerBound)
+        #expect(version.lowerBound < parentLog.lowerBound)
     }
 }

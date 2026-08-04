@@ -25,6 +25,7 @@ public actor RootkitDetector {
     public nonisolated let events: AsyncStream<HiddenProcess>
     private let continuation: AsyncStream<HiddenProcess>.Continuation
     private var pollTask: Task<Void, Never>?
+    private var lifecyclePhase: CollectorLifecyclePhase = .initialized
     private let pollInterval: TimeInterval
 
     public init(pollInterval: TimeInterval = 120) {
@@ -40,7 +41,8 @@ public actor RootkitDetector {
     }
 
     public func start() {
-        guard pollTask == nil else { return }
+        guard lifecyclePhase == .initialized else { return }
+        lifecyclePhase = .running
         let base = pollInterval
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -55,9 +57,24 @@ public actor RootkitDetector {
     }
 
     public func stop() {
+        _ = beginStop()
+    }
+
+    @discardableResult
+    public func stopAndJoin(deadline: TimeInterval = 1.0) async -> Bool {
+        let task = beginStop()
+        let joined = await CollectorBoundedTaskJoin.waitForAll(task.map { [$0] } ?? [], deadline: deadline)
+        if joined { pollTask = nil; lifecyclePhase = .stopped }
+        return joined
+    }
+
+    private func beginStop() -> Task<Void, Never>? {
+        if lifecyclePhase == .stopped { return nil }
+        lifecyclePhase = .stopping
+        let task = pollTask
         pollTask?.cancel()
-        pollTask = nil
         continuation.finish()
+        return task
     }
 
     private func scan() async {
@@ -84,6 +101,7 @@ public actor RootkitDetector {
         // PIDs where the discrepancy persists. A true userland rootkit
         // hides the process for its entire lifetime; a race does not.
         try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        guard lifecyclePhase == .running, !Task.isCancelled else { return }
         let verifyProc = getPidsViaProcList()
         let verifySysctl = getPidsViaSysctl()
 
