@@ -162,4 +162,60 @@ struct ESCallbackAdmissionTests {
             path: "/private/var/log/payload"
         ))
     }
+
+    // v1.21.7. SETMODE hit `default: return false`, so every chmod on the host
+    // was admitted. On an installed rc.7 host that was 35% of all stored events
+    // — the largest single category — almost entirely `python3.12` setting
+    // 0600/0644 on files it had just created under /private/var/folders/…/T/.
+    // A mode change that grants neither execution nor escalation cannot enable
+    // anything a rule acts on.
+    @Test("chmod granting execute or setuid/setgid is kept; a permissions-only chmod is dropped")
+    func setmodeAdmissionKeepsOnlyCapabilityGrants() {
+        // The half that MUST survive — download → chmod +x → execute.
+        for mode: UInt32 in [0o755, 0o700, 0o111, 0o4755, 0o2755, 0o4644] {
+            #expect(!ESCollector.shouldDropBeforeWorker(
+                eventType: ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue,
+                path: "/private/var/folders/hf/T/payload",
+                mode: mode
+            ), "chmod \(String(mode, radix: 8)) confers execution or escalation and must be kept")
+        }
+
+        // The 35%: tidy-up chmod that confers nothing.
+        for mode: UInt32 in [0o600, 0o644, 0o664, 0o666, 0o400, 0o1666] {
+            #expect(ESCollector.shouldDropBeforeWorker(
+                eventType: ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue,
+                path: "/private/var/folders/hf/T/artifactforge-snapshot/x.xml",
+                mode: mode
+            ), "chmod \(String(mode, radix: 8)) confers no capability and must be dropped")
+        }
+    }
+
+    // The filter is mode-based ON PURPOSE. A temp-path allowlist would have been
+    // the obvious way to kill the same volume, and it would have dropped
+    // `chmod +x` on a payload staged in exactly that directory — the event most
+    // worth keeping. Malware writing to a temp directory is the normal case.
+    @Test("execute grants survive in every location, including the noisy temp paths")
+    func setmodeFilterIsModeBasedNotPathBased() {
+        for path in [
+            "/private/var/folders/hf/gyw5ykz53xl2rr8yhfbg7q4h0000gn/T/dropper/payload",
+            "/tmp/payload",
+            "/Users/someone/Downloads/installer",
+            "/private/var/log/payload"
+        ] {
+            #expect(!ESCollector.shouldDropBeforeWorker(
+                eventType: ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue,
+                path: path,
+                mode: 0o755
+            ), "chmod +x must survive at \(path)")
+        }
+    }
+
+    @Test("the sticky bit alone is not a capability grant")
+    func stickyBitIsNotEscalation() {
+        // S_ISVTX restricts deletion within a directory; it grants the caller
+        // nothing, so it must not by itself hold an event in the store.
+        #expect(ESCollector.modeGrantsExecutionOrEscalation(0o1666) == false)
+        #expect(ESCollector.modeGrantsExecutionOrEscalation(0o1777) == true)   // has +x
+        #expect(ESCollector.modeGrantsExecutionOrEscalation(0) == false)
+    }
 }

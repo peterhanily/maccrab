@@ -859,6 +859,23 @@ public final class ESCollector: @unchecked Sendable {
     /// processFromESProcess. Conservative: only log sinks are eligible, and a
     /// log-sink path is still KEPT if it is a credential/wallet, agent-content,
     /// or code drop. Default is KEEP.
+    /// True when a chmod's resulting mode can confer the ability to RUN or to
+    /// ESCALATE — the only two properties a SETMODE event can establish that
+    /// any detection acts on.
+    ///
+    /// - execute for any of user/group/other: the `chmod +x` half of the
+    ///   download → chmod → execute chain.
+    /// - setuid / setgid: privilege gain regardless of execute bits, so they are
+    ///   tested independently rather than folded into the execute mask.
+    ///
+    /// The sticky bit is deliberately excluded: it restricts deletion within a
+    /// directory and confers no capability on the caller.
+    static func modeGrantsExecutionOrEscalation(_ mode: UInt32) -> Bool {
+        let executeAny = UInt32(S_IXUSR | S_IXGRP | S_IXOTH)
+        let escalation = UInt32(S_ISUID | S_ISGID)
+        return (mode & (executeAny | escalation)) != 0
+    }
+
     static func shouldDropNoisyWrite(path: String) -> Bool {
         guard isLogSinkWritePath(path) else { return false }   // not a log sink ⇒ KEEP
         if isCredentialReadPath(path) { return false }         // wallet leveldb *.log, etc.
@@ -889,10 +906,34 @@ public final class ESCollector: @unchecked Sendable {
         closeModified: Bool = true,
         isPlatformBinary: Bool = false,
         protection: Int32 = 0,
+        mode: UInt32 = 0,
         processID: Int32? = nil,
         dynamicAIRegistry: FileEventInterestPolicyRegistry = dynamicAIFileInterestRegistry
     ) -> Bool {
         switch eventType {
+        case ES_EVENT_TYPE_NOTIFY_SETMODE.rawValue:
+            // v1.21.7: SETMODE fell through `default: return false`, so EVERY
+            // chmod on the host was admitted. Measured on an installed rc.7
+            // host: 35% of all stored events — the single largest category,
+            // ahead of open (21%) — and overwhelmingly `python3.12` setting
+            // 0600/0644 on files it had just created under
+            // /private/var/folders/…/T/. That is a build tool tidying its own
+            // temp files, retained at ~1,400 events/sec.
+            //
+            // Keep the chmod that carries security meaning and drop the rest.
+            // The detections that rely on SETMODE are the ones where a mode
+            // change confers the ability to run or to escalate: `chmod +x` on a
+            // dropped payload (download → chmod +x → execute, the standard
+            // macOS infostealer chain) and setuid/setgid. A mode change that
+            // grants neither cannot enable execution or privilege gain, so no
+            // rule in the corpus can act on it.
+            //
+            // Deliberately mode-based, not path-based: an allowlist of temp
+            // directories would drop `chmod +x /tmp/payload`, which is the exact
+            // event most worth keeping. Malware writing to a temp directory is
+            // the normal case, not the exception.
+            return !modeGrantsExecutionOrEscalation(mode)
+
         case ES_EVENT_TYPE_NOTIFY_OPEN.rawValue:
             guard let path else { return true }
             // Keep the platform-keychain safe drop independent and FIRST: a
@@ -1046,6 +1087,13 @@ public final class ESCollector: @unchecked Sendable {
             return shouldDropBeforeWorker(
                 eventType: eventType,
                 protection: msg.event.mprotect.protection
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_SETMODE:
+            return shouldDropBeforeWorker(
+                eventType: eventType,
+                path: esFileToPath(msg.event.setmode.target),
+                mode: UInt32(msg.event.setmode.mode)
             )
 
         default:

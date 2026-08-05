@@ -13,6 +13,7 @@
 import Testing
 import Foundation
 @testable import MacCrabCore
+@testable import MacCrabAgentKit
 
 @Suite("TraceGraph: substrate retention (v1.18)")
 struct CausalGraphSubstrateRetentionTests {
@@ -205,5 +206,61 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(await store.liveDataSizeBytes() <= liveAfter)
 
         await store.close()
+    }
+
+    // v1.21.7 regression. `recoverStorageBudget` deletes only inside the cutoffs
+    // its CALLER supplies, and the daemon supplied the configured retention —
+    // 90 days by default — plus a 1-hour orphan window. A store whose fill rate
+    // is set by event volume reaches its cap in hours, so nothing was ever old
+    // enough to qualify: on an installed rc.7 host the 300s timer reclaimed
+    // exactly zero rows for two hours while the substrate sat pinned at its
+    // admission threshold and shed 2,753,096 events, with 62 MB of its cap
+    // unused. The bug is not that the sweep is wrong — it is that a time-only
+    // window cannot bound a volume-driven store. Prove both halves.
+    @Test("A volume-filled substrate is unreachable by the configured window, reachable by a tightened one")
+    func timeOnlyRetentionCannotBoundAVolumeFilledSubstrate() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        // Everything is RECENT — the shape of a store that filled in hours.
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let minutesAgo = now.addingTimeInterval(-20 * 60)
+        for i in 0..<40 {
+            try await store.upsertEntity(ent("v\(i)", lastSeen: minutesAgo))
+        }
+        for i in 0..<39 {
+            try await store.upsertEdge(edg("ve\(i)", from: "v\(i)", to: "v\(i + 1)", lastSeen: minutesAgo))
+        }
+
+        // What the daemon actually passed: retention 90 days, orphans 1 hour.
+        let configured = try await store.recoverStorageBudget(
+            retentionCutoff: now.addingTimeInterval(-90 * 86_400),
+            orphanCutoff: now.addingTimeInterval(-3_600)
+        )
+        #expect(configured.edgesDeleted == 0 && configured.entitiesDeleted == 0,
+                "the configured window must reclaim nothing here — this is the shipped bug")
+
+        // The tightened rung the timer now falls back to. Anything older than
+        // 10 minutes is eligible, so the 20-minute-old substrate is reachable.
+        let tightened = try await store.recoverStorageBudget(
+            retentionCutoff: now.addingTimeInterval(-600),
+            orphanCutoff: now.addingTimeInterval(-600)
+        )
+        #expect(tightened.edgesDeleted > 0 || tightened.entitiesDeleted > 0,
+                "a tightened window must reclaim what the configured one could not")
+
+        await store.close()
+    }
+
+    @Test("Tightening rungs descend to a floor that protects the materialization window")
+    func recoveryCutoffRungsAreOrderedAndFloored() {
+        let rungs = DaemonTimers.tracegraphRecoveryCutoffHours
+        #expect(!rungs.isEmpty)
+        #expect(rungs == rungs.sorted(by: >), "rungs must go coarse -> fine")
+        // One hour is >> the 5-minute trace materialization window, so a
+        // tightened sweep can never delete the context of a trace still being
+        // assembled. A rung below this would trade reported degradation for
+        // silent destruction of the most recent graph.
+        #expect((rungs.last ?? 0) >= 1, "the floor must stay clear of the 5-minute trace window")
     }
 }

@@ -693,6 +693,18 @@ enum SizeCapConvergence {
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
 enum DaemonTimers {
+    /// Progressively tighter retention windows for TraceGraph recovery, used
+    /// ONLY when the configured sweep reclaimed nothing and admission is still
+    /// shed. Ordered coarse→fine and floored at one hour, which is well clear of
+    /// the 5-minute trace materialization window, so a tightened sweep can never
+    /// delete the causal context of a trace still being assembled.
+    ///
+    /// There is deliberately no rung below the floor: inventing 30- and
+    /// 15-minute steps would trade a bounded, reported degradation for silent
+    /// destruction of the recent graph, which is the evidence most likely to
+    /// matter. If the floor is not enough, the condition is reported instead.
+    static let tracegraphRecoveryCutoffHours: [Int] = [72, 24, 6, 1]
+
     /// Stateful, non-recursive POSIX directory stream for the privileged inbox.
     ///
     /// Keeping the stream open across ticks is intentional. A fresh `readdir`
@@ -1393,21 +1405,59 @@ enum DaemonTimers {
                     let days = max(1, min(state.storage.tracegraphRetentionDays, 3650))
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                     let orphanCutoff = Date().addingTimeInterval(-3600)  // 1h ≫ the 5-min trace window
+                    func reclaimedAnything(_ r: CausalGraphStorageRecoveryResult) -> Bool {
+                        r.tracesDeleted > 0 || r.traceChildRowsDeleted > 0
+                            || r.edgesDeleted > 0 || r.entitiesDeleted > 0
+                            || r.vacuumPagesReclaimed > 0
+                    }
                     do {
-                        let result = try await causalStore.recoverStorageBudget(
+                        var result = try await causalStore.recoverStorageBudget(
                             retentionCutoff: cutoff,
                             orphanCutoff: orphanCutoff
                         )
                         if result.pinnedReader {
                             logger.warning("TraceGraph bounded recovery paused by a reader-pinned WAL; no further delete/vacuum work issued this tick")
-                        } else if result.tracesDeleted > 0
-                                    || result.traceChildRowsDeleted > 0
-                                    || result.edgesDeleted > 0
-                                    || result.entitiesDeleted > 0
-                                    || result.vacuumPagesReclaimed > 0 {
+                        } else if reclaimedAnything(result) {
                             logger.info("TraceGraph bounded recovery: \(result.tracesDeleted) traces + \(result.traceChildRowsDeleted) trace-child rows + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes")
                         }
-                        let admission = await causalStore.storageAdmissionStatus()
+                        var admission = await causalStore.storageAdmissionStatus()
+
+                        // v1.21.7: the cutoffs above are the CONFIGURED retention
+                        // (90 days by default) and a 1-hour orphan window. On a
+                        // store that fills in hours rather than months, nothing is
+                        // ever old enough to qualify — so this timer ran every 300s,
+                        // reclaimed exactly zero rows, and the substrate sat pinned
+                        // at its admission threshold shedding every write. Measured
+                        // on an installed rc.7 host: 2,753,096 events shed, footprint
+                        // wedged 86,928 bytes above the threshold with 62 MB of the
+                        // configured cap never used, and not one "bounded recovery:
+                        // N deleted" line in two hours.
+                        //
+                        // Time-based retention alone cannot bound a store whose fill
+                        // rate is set by event volume. When admission is still shed
+                        // after the configured sweep, tighten the window stepwise —
+                        // mirroring `EventRetentionFloor.adaptiveCutoffs` on the
+                        // events path — and stop at a floor rather than deleting the
+                        // recent graph to manufacture convergence.
+                        if admission.blocked, !result.pinnedReader, !reclaimedAnything(result) {
+                            for floorHours in Self.tracegraphRecoveryCutoffHours {
+                                let tightened = Date().addingTimeInterval(-Double(floorHours) * 3600)
+                                guard tightened < cutoff else { continue }
+                                result = try await causalStore.recoverStorageBudget(
+                                    retentionCutoff: tightened,
+                                    orphanCutoff: tightened
+                                )
+                                admission = await causalStore.storageAdmissionStatus()
+                                if reclaimedAnything(result) {
+                                    logger.notice("TraceGraph recovery tightened to \(floorHours)h: \(result.tracesDeleted) traces + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes; admission blocked=\(admission.blocked)")
+                                }
+                                if !admission.blocked || result.pinnedReader { break }
+                            }
+                            if admission.blocked {
+                                logger.fault("TraceGraph remains storage-shed after tightening retention to the \(Self.tracegraphRecoveryCutoffHours.last ?? 0)-hour floor. The configured tracegraph budget is infeasible at this event rate; recent causal evidence was NOT deleted to manufacture convergence. Graph rules and trace queries are degraded until the cap is raised or ingest falls.")
+                            }
+                        }
+
                         if admission.blocked, result.autoVacuumMode != 2 {
                             logger.warning("TraceGraph remains storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. Stop the engine before performing an offline full-VACUUM conversion; online full VACUUM recovery is intentionally disabled.")
                         }
