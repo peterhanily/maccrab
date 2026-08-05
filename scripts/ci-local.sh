@@ -618,6 +618,10 @@ fi
 # check into an arbitrary-file clobber or stale-rules false green. `mktemp`
 # creates private, per-run leaves below the invoking user's normal temp root.
 CI_LOCAL_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/maccrab-ci-output.XXXXXX")
+# Per-run directory for the complete output of any gate that fails. Kept outside
+# .build so a --clean wipe cannot destroy the evidence for the failure that
+# stopped the release.
+CI_FAILURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-failures.XXXXXX")
 CI_COMPILED_RULES=$(mktemp -d "${TMPDIR:-/tmp}/maccrab-ci-rules.XXXXXX")
 
 RED='\033[0;31m'
@@ -639,7 +643,30 @@ check() {
         PASS=$((PASS + 1))
     else
         echo -e "${RED}FAIL${NC}"
-        tail -5 "$CI_LOCAL_OUTPUT" | sed 's/^/    /'
+        # Preserve the WHOLE failing gate, not just its tail. $CI_LOCAL_OUTPUT is
+        # one reused buffer, so the next check() overwrote the evidence: an rc.8
+        # release build failed here on a single test out of 4,116, and by the
+        # time anyone looked, the only surviving record was five lines of
+        # unrelated passing output from the end of the run. A gate that can fail
+        # a release must leave something diagnosable behind — especially for a
+        # flake, which by definition will not reproduce on demand.
+        local slug
+        slug=$(printf '%s' "$name" | LC_ALL=C tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z')
+        slug=${slug#-}
+        slug=${slug%-}
+        local preserved="$CI_FAILURE_DIR/${slug:-gate}.log"
+        if cp "$CI_LOCAL_OUTPUT" "$preserved" 2>/dev/null; then
+            echo "    full output: $preserved"
+        fi
+        # Swift Testing prints one ✘ line per failing test; surface those
+        # directly rather than whatever happened to run last.
+        local failures
+        failures=$(/usr/bin/grep -E '✘|recorded an issue|error:' "$CI_LOCAL_OUTPUT" 2>/dev/null | /usr/bin/head -12 || true)
+        if [ -n "$failures" ]; then
+            printf '%s\n' "$failures" | sed 's/^/    /'
+        else
+            tail -5 "$CI_LOCAL_OUTPUT" | sed 's/^/    /'
+        fi
         FAIL=$((FAIL + 1))
     fi
 }
