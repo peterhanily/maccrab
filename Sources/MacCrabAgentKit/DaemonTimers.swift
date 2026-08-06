@@ -705,6 +705,12 @@ enum DaemonTimers {
     /// matter. If the floor is not enough, the condition is reported instead.
     static let tracegraphRecoveryCutoffHours: [Int] = [72, 24, 6, 1]
 
+    /// How recently sequence eviction must have occurred for continuity to count
+    /// as currently degraded. Long enough that a genuinely sustained flush stays
+    /// flagged across heartbeat ticks; short enough that a single spike clears
+    /// on its own instead of latching for the life of the process.
+    static let sequenceEvictionHealthWindow: TimeInterval = 300
+
     /// Stateful, non-recursive POSIX directory stream for the privileged inbox.
     ///
     /// Keeping the stream open across ticks is intentional. A fresh `readdir`
@@ -2499,12 +2505,28 @@ enum DaemonTimers {
             } else if sequenceWeight.cachedWeight > sequenceWeight.maximumWeight {
                 sequenceStateContinuityMaintained = false
                 sequenceStateContinuityDetail = "checkpoint_weight_limit_exceeded"
-            } else if sequencePartialsEvicted > 0 {
+            } else if await state.sequenceEngine.evictionIsOngoing(
+                within: Self.sequenceEvictionHealthWindow
+            ) {
+                // v1.21.7: this used to read `sequencePartialsEvicted > 0` /
+                // `sequencePendingStepsEvicted > 0` — CUMULATIVE-since-boot
+                // counters. A lifetime total never decreases, so the flag
+                // latched on at the first eviction and could never clear for the
+                // life of the process. Measured on an installed rc.8 host: one
+                // load spike left `sequence_state_continuity_maintained = false`
+                // permanently, which is the single input driving the menu bar's
+                // "protection degraded" label — so the product reported degraded
+                // protection indefinitely while every other health signal was
+                // clean. An indicator that cannot clear teaches the operator to
+                // ignore it, which costs more than the eviction did.
+                //
+                // A health flag must answer "is state being lost NOW". The
+                // cumulative totals remain in the heartbeat below as
+                // diagnostics, where a monotonic counter is the right shape.
                 sequenceStateContinuityMaintained = false
-                sequenceStateContinuityDetail = "partial_match_eviction"
-            } else if sequencePendingStepsEvicted > 0 {
-                sequenceStateContinuityMaintained = false
-                sequenceStateContinuityDetail = "pending_step_eviction"
+                sequenceStateContinuityDetail = sequencePendingStepsEvicted > 0
+                    ? "pending_step_eviction"
+                    : "partial_match_eviction"
             } else {
                 sequenceStateContinuityMaintained = true
                 sequenceStateContinuityDetail = "nominal"

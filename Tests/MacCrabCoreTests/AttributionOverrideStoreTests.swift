@@ -291,7 +291,34 @@ struct AttributionOverrideStoreSplitTests {
         #expect(stats.totalEventsWithMachineAttribution == 1000)
         #expect(stats.formattedAccuracyLine.contains("rated=4"))
         #expect(stats.formattedAccuracyLine.contains("total=1000"))
-        #expect(stats.formattedAccuracyLine.contains("0.75"))
+        // The RATIO is still computed — callers that want it can read
+        // `accuracyAmongRated` — but it is no longer PRINTED at n=4.
+        #expect(stats.accuracyAmongRated == 0.75)
+        // v1.21.7: the shipped surface printed
+        // `attribution_accuracy_among_rated: 0.00 (rated=1, total=75307)`, which
+        // reads as "attribution is 0% accurate across 75,307 events". The one
+        // rated row was a leftover audit probe, n=1 cannot express an accuracy,
+        // and numerator and denominator are different populations with no join
+        // (the same host later printed total=3828 with rated still 1). Below the
+        // floor, show the counts and withhold the figure.
+        #expect(!stats.formattedAccuracyLine.contains("0.75"),
+                "a percentage must not be printed below the sample-size floor")
+        #expect(stats.formattedAccuracyLine.contains("need ≥20 rated"))
+    }
+
+    @Test("accuracy is printed once enough human verdicts exist")
+    func accuracyPrintsAtOrAboveTheFloor() {
+        let atFloor = AttributionOverrideStats(
+            ratedCount: AttributionOverrideStats.minimumRatedForAccuracy,
+            confirmedCount: AttributionOverrideStats.minimumRatedForAccuracy,
+            wrongToolCount: 0,
+            noAgentCount: 0,
+            unknownVerdictCount: 0,
+            totalEventsWithMachineAttribution: 1000
+        )
+        #expect(atFloor.formattedAccuracyLine.contains("1.00"),
+                "at the floor the figure becomes meaningful and must be shown")
+        #expect(!atFloor.formattedAccuracyLine.contains("need ≥"))
     }
 
     @Test("Fetch returns nil for unknown event_id")

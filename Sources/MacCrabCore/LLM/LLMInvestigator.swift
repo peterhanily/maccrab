@@ -37,7 +37,7 @@ extension LLMPrompts {
             {"kind": "event"|"alert"|"enrichment"|"threat_intel", "id": "<id>", "note": "<one-line>"}
           ],
           "mitreReasoning": [
-            {"tacticId": "TA0005"|null, "techniqueId": "T1562.001"|null, "reasoning": "<why>"}
+            {"tacticId": "<from mitre_tactics>"|null, "techniqueId": "<from mitre_techniques>"|null, "reasoning": "<why>"}
           ],
           "suggestedActions": [
             {
@@ -63,7 +63,12 @@ extension LLMPrompts {
         2. Emit evidenceChain entries in the order you consulted them. Each
            entry MUST reference an explicit alert.id, alert.event_id, or
            event.id you were shown. Never invent enrichment or threat-intel
-           evidence. MITRE identifiers must be copied from the supplied alert.
+           evidence. MITRE identifiers must be COPIED VERBATIM from the
+           alert's `mitre_tactics` / `mitre_techniques` arrays — those are the
+           only admissible values, and they are supplied in Sigma tag form
+           (e.g. "attack.defense_evasion", "attack.t1083"). Do not translate
+           them into canonical ATT&CK ids. If an array is empty, emit
+           "mitreReasoning": [] rather than inventing an entry.
         3. Every destructive suggestedAction (kill, quarantine, block,
            revoke) MUST have requiresConfirmation=true and a concrete
            previewCommand. The UI will NEVER auto-execute — it shows the
@@ -198,6 +203,72 @@ extension LLMPrompts {
                 && $0.utf8.count <= 64
         }.prefix(32))
     }
+
+    /// Canonical comparison form for a MITRE identifier.
+    ///
+    /// MacCrab rules tag ATT&CK in **Sigma** style exclusively — `attack.t1083`,
+    /// `attack.defense_evasion`. Not one rule file in the corpus emits a
+    /// canonical `TA####` / `T####` id (`grep -rhoE '\bTA[0-9]{4}\b' Rules/`
+    /// hits only prose in Rules/README.md). `Alert.mitreTacticsList` is a plain
+    /// CSV split, so the grounding allowlist is ALWAYS Sigma tags.
+    ///
+    /// The system prompt, meanwhile, shows the model `"tacticId": "TA0005"`.
+    /// The model complies, emits a canonical id, and byte-exact membership then
+    /// rejects it — so EVERY well-formed investigation was refused. Live on the
+    /// installed engine: `alert_investigation` 18 started, 0 accepted, 18 final
+    /// rejection, while campaign_investigation / active_defense /
+    /// security_posture were 100% accepted. The feature was wholly dead.
+    ///
+    /// Introduced by the grounding check added in cb6df0c, which did not update
+    /// the prompt's `TA0005` example. It shipped green because
+    /// `LLMInvestigatorTests` seeds `allowedTacticIds: ["TA0005"]` — canonical
+    /// ids that production cannot produce — so the fixture tested input the
+    /// system can never generate.
+    ///
+    /// Comparing on a normalized form accepts either representation from the
+    /// model without widening what is actually grounded: the set of admissible
+    /// identifiers is still exactly what the alert carried.
+    static func normalizedMITREID(_ value: String) -> String {
+        var s = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s.hasPrefix("attack.") { s.removeFirst("attack.".count) }
+        // Sigma spells sub-techniques with a dot already (`t1562.001`), so only
+        // the prefix differs between the two vocabularies.
+        return s
+    }
+
+    /// True when `candidate` denotes the same ATT&CK identifier as any member of
+    /// `allowed`, in either the Sigma-tag or canonical vocabulary.
+    static func mitreIDIsGrounded(_ candidate: String, in allowed: Set<String>) -> Bool {
+        let target = normalizedMITREID(candidate)
+        if allowed.contains(where: { normalizedMITREID($0) == target }) { return true }
+        // A Sigma TACTIC tag is a name (`defense_evasion`), not a TA#### id, so
+        // a model answering with the canonical id cannot match by string at all.
+        // Map through the fixed ATT&CK tactic vocabulary in that one direction.
+        if let name = Self.tacticNameForCanonicalID[target] {
+            return allowed.contains { normalizedMITREID($0) == name }
+        }
+        return false
+    }
+
+    /// The fourteen ATT&CK Enterprise tactics. Fixed vocabulary, not data —
+    /// pinned here so a model answering `TA0005` is recognised as the same thing
+    /// a rule tagged `attack.defense_evasion`.
+    static let tacticNameForCanonicalID: [String: String] = [
+        "ta0043": "reconnaissance",
+        "ta0042": "resource_development",
+        "ta0001": "initial_access",
+        "ta0002": "execution",
+        "ta0003": "persistence",
+        "ta0004": "privilege_escalation",
+        "ta0005": "defense_evasion",
+        "ta0006": "credential_access",
+        "ta0007": "discovery",
+        "ta0008": "lateral_movement",
+        "ta0009": "collection",
+        "ta0011": "command_and_control",
+        "ta0010": "exfiltration",
+        "ta0040": "impact",
+    ]
 
     /// Retry prompt emitted when the model's first response failed to parse.
     public static func alertInvestigationRetryFeedback(reason _: String) -> String {
@@ -518,13 +589,13 @@ public enum LLMInvestigator {
             }
             if let tacticId = mapping.tacticId {
                 guard nonemptyBounded(tacticId, bytes: Limits.mitreIdBytes),
-                      allowedTacticIds.contains(tacticId) else {
+                      LLMPrompts.mitreIDIsGrounded(tacticId, in: allowedTacticIds) else {
                     return .malformed(reason: "MITRE tactic was not supplied with the alert")
                 }
             }
             if let techniqueId = mapping.techniqueId {
                 guard nonemptyBounded(techniqueId, bytes: Limits.mitreIdBytes),
-                      allowedTechniqueIds.contains(techniqueId) else {
+                      LLMPrompts.mitreIDIsGrounded(techniqueId, in: allowedTechniqueIds) else {
                     return .malformed(reason: "MITRE technique was not supplied with the alert")
                 }
             }

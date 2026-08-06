@@ -111,9 +111,36 @@ public struct AttributionOverrideStats: Sendable, Codable, Equatable {
     /// accuracy must use this string; raw 0.94/n=1247 is forbidden because
     /// it reads as "94% of all 1247 attributions are correct" rather than
     /// "94% of the 1247 attributions a user has rated."
+    /// Below this many human verdicts, no percentage is shown at all.
+    ///
+    /// The shipped surface printed `attribution_accuracy_among_rated: 0.00
+    /// (rated=1, total=75307)` — which reads as "attribution is 0% accurate
+    /// across 75,307 events" and is wrong three times over:
+    ///
+    ///  * The single rated row was a leftover audit probe
+    ///    (`TEST-EVENT-ID-0001`, verdict `wrong_tool`, note "audit probe",
+    ///    2026-08-01), not a user judgement about a real attribution.
+    ///  * n=1 cannot express an accuracy. 0.00 and 1.00 are the only reachable
+    ///    values, and either is noise.
+    ///  * Numerator and denominator are different populations: rated rows live
+    ///    in the user-domain `attribution_overrides.db` and are never pruned;
+    ///    the total is a live, retention-bounded count from the root-owned
+    ///    `events.db`. There is no join and no foreign key between them, so the
+    ///    ratio is not a rate of anything. The same host printed total=75307 and
+    ///    later total=3828 with rated unchanged at 1.
+    ///
+    /// Rating is also close to unreachable: the dashboard renders the stats bar
+    /// with no verdict control, so the only production write path is
+    /// `maccrabctl trace reattribute <event-id> <verdict>` — an undocumented
+    /// verb needing a raw event UUID. A metric almost nobody can feed should not
+    /// present itself as a measurement.
+    public static let minimumRatedForAccuracy = 20
+
     public var formattedAccuracyLine: String {
-        guard let acc = accuracyAmongRated else {
-            return "attribution_accuracy_among_rated: — (rated=0, total=\(totalEventsWithMachineAttribution))"
+        guard let acc = accuracyAmongRated, ratedCount >= Self.minimumRatedForAccuracy else {
+            return "attribution_accuracy_among_rated: — "
+                + "(rated=\(ratedCount), total=\(totalEventsWithMachineAttribution); "
+                + "need ≥\(Self.minimumRatedForAccuracy) rated)"
         }
         return String(
             format: "attribution_accuracy_among_rated: %.2f (rated=%d, total=%d)",

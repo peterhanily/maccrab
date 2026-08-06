@@ -1077,4 +1077,102 @@ struct SequenceEngineFireTests {
         #expect(SequenceEngine.saturatingTelemetryAdd(Int.max, 1) == Int.max)
         #expect(SequenceEngine.saturatingTelemetryAdd(7, 0) == 7)
     }
+
+    // v1.21.7 regression. `sequence_state_continuity_maintained` was derived from
+    // the CUMULATIVE eviction counters (`> 0`), and a lifetime total never
+    // decreases — so the first eviction latched the flag off for the life of the
+    // process. That flag is the single input driving the menu bar's "protection
+    // degraded" label, so one load spike made an installed rc.8 host report
+    // degraded protection indefinitely while every other health signal was clean.
+    // A health flag has to answer "is state being lost NOW".
+    @Test("eviction health is recency-based, so a past spike clears but a live flush does not")
+    func evictionHealthDoesNotLatchOnLifetimeCounters() async {
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        let now = Date()
+
+        // Never evicted: healthy.
+        #expect(await engine.evictionIsOngoing(within: 300, now: now) == false)
+
+        // A spike well outside the window must NOT keep reporting degraded,
+        // however large the lifetime total is.
+        await engine.setEvictionTimestampsForTesting(
+            pending: now.addingTimeInterval(-3_600),
+            partial: nil
+        )
+        #expect(await engine.evictionIsOngoing(within: 300, now: now) == false,
+                "an hour-old eviction must not still read as degraded")
+
+        // A flush inside the window IS current degradation and must be reported.
+        await engine.setEvictionTimestampsForTesting(
+            pending: now.addingTimeInterval(-30),
+            partial: nil
+        )
+        #expect(await engine.evictionIsOngoing(within: 300, now: now) == true)
+
+        // Partial-match eviction counts the same way.
+        await engine.setEvictionTimestampsForTesting(
+            pending: nil,
+            partial: now.addingTimeInterval(-10)
+        )
+        #expect(await engine.evictionIsOngoing(within: 300, now: now) == true)
+    }
+
+    // v1.21.7. `pendingLaterSteps` bridges ONE race: the pipeline splits events
+    // into a fast priority stream and a slower file stream, so a later step on
+    // the fast lane can arrive before its step[0] on the slow one. Parking was
+    // unconditional, so it also ran for every rule whose step[0] rides the FAST
+    // lane — where step[0] can never be delivered late, and nothing parked for
+    // it can ever be replayed into a sequence.
+    //
+    // Measured on the installed rc.8 engine: all 11 sequence rules active under
+    // the default profile have a `process_creation` step[0] (fast lane), and the
+    // flood filling the buffer was file `open` (also fast lane). The inversion
+    // was impossible for every enabled rule, while the per-rule cap of 256
+    // evicted at up to 820/s — 166,691 cumulative — pinning
+    // `sequence_state_continuity_maintained` false, which is the sole input to
+    // the menu bar's "protection degraded" label. Pure waste plus a permanent
+    // false warning.
+    // Kept as a CLASSIFIER test only. `ruleCanSufferLaneInversion` correctly
+    // identifies which rules can suffer the cross-lane race (34 of the 41
+    // shipped rules cannot; all 11 enabled by default cannot), but it is NOT
+    // wired into parking: `outOfOrderBackfillCompletes` proves backfill is
+    // expected for a rule whose steps are both process_creation, i.e. same-lane
+    // delivery order is not guaranteed by anything this code can currently
+    // prove. Gating parking on it would have silently dropped that capability.
+    @Test("lane-inversion classifier identifies which rules could be overtaken")
+    func pendingParkingOnlyWhenLaneInversionIsPossible() {
+        func rule(_ id: String, _ categories: [String]) -> SequenceRule {
+            SequenceRule(
+                id: id, title: id, description: "test",
+                level: .high, tags: [], window: 300,
+                correlationType: .processSame, ordered: true,
+                steps: categories.enumerated().map { index, category in
+                    SequenceStep(
+                        id: "s\(index)", logsourceCategory: category,
+                        predicates: [], condition: .allOf,
+                        afterStep: index == 0 ? nil : "s\(index - 1)",
+                        processRelation: nil
+                    )
+                },
+                trigger: .allSteps, enabled: true)
+        }
+
+        // The shape of every rule enabled by default: a fast step[0]. It is
+        // never delivered behind a later step, so parking can only be discarded.
+        #expect(!SequenceEngine.ruleCanSufferLaneInversion(
+            rule("process-first", ["process_creation", "file_event", "network_connection"])))
+        #expect(!SequenceEngine.ruleCanSufferLaneInversion(
+            rule("tcc-first", ["tcc_event", "process_creation"])))
+
+        // The genuine inversion the buffer exists for: slow step[0], fast later.
+        #expect(SequenceEngine.ruleCanSufferLaneInversion(
+            rule("file-first", ["file_event", "process_creation"])))
+
+        // All-file rules share one lane, so delivery order is already preserved.
+        #expect(!SequenceEngine.ruleCanSufferLaneInversion(
+            rule("all-file", ["file_event", "file_event"])))
+
+        // A single-step rule has no later step to park at all.
+        #expect(!SequenceEngine.ruleCanSufferLaneInversion(rule("single", ["file_event"])))
+    }
 }

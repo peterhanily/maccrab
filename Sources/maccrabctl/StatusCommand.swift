@@ -599,7 +599,23 @@ extension MacCrabCtl {
         }
 
         if !unavailable, storage.graphWriteDegraded {
-            var lines = ["TraceGraph:      Evidence writes degraded ⚠"]
+            // Distinguish a DURABLE evidence gap from a LIVE fault. The
+            // underlying counters are deliberately sticky for the process epoch
+            // (you cannot un-lose evidence, so the gap is a fact worth keeping),
+            // but rendering that as an unqualified "degraded" reads as a
+            // condition still in progress. On a healthy engine the only entry is
+            // the handful of writes shed while bounded recovery ran at boot —
+            // and a warning that never clears is one an operator learns to
+            // ignore, which is the opposite of what an evidence-gap notice is
+            // for. Say which of the two it is.
+            let liveFault = !storage.writeTelemetryComplete
+                || storage.hasOutstandingBacklog == true
+                || storage.writeConservationMaintained != true
+            var lines = [
+                liveFault
+                    ? "TraceGraph:      Evidence writes degraded ⚠"
+                    : "TraceGraph:      Evidence gap earlier this boot (writes healthy now) ⚠"
+            ]
             if storage.hasStickyWriteFailure == true {
                 lines.append(
                     "                 Failed since boot: events=\(storage.ingestEventsFailedTotal ?? -1), batches=\(storage.writeBatchesFailedTotal ?? -1), rows=\(storage.writeRowsFailedTotal ?? -1)."

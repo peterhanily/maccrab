@@ -2119,4 +2119,114 @@ struct SQLitePersistentStoreAdmissionTests {
             #expect(admission.lowerBound < statement.lowerBound)
         }
     }
+
+    // v1.21.7. Storage admission was lane-blind: at the footprint threshold it
+    // refused whatever arrived next, so a process exec and a routine chmod were
+    // treated identically. Measured on an installed rc.7 host: ~890 events/min
+    // refused with `footprint_limit` while 1,400/s of temp-file churn filled the
+    // store — process and network telemetry lost to make room for chmod. It is
+    // also an evasion primitive: flood cheap file events and the attacker's OWN
+    // process events stop being recorded.
+    //
+    // The reserve is what makes the file lane yield first. These pin its shape;
+    // the end-to-end ordering is exercised by the store-level tests above.
+    @Test("the priority reserve is always meaningful and always bounded")
+    func priorityLaneReserveIsSanelyBounded() {
+        // Floor holds for a small budget: 15 minutes of priority-lane events is
+        // a few MiB, so even the floor keeps that guarantee satisfiable.
+        #expect(EventStore.priorityLaneReserveBytes(maxFootprintBytes: 50 * 1_048_576)
+                == 16 * 1_048_576)
+        // Ceiling holds for a large one — the reserve must never become the
+        // dominant consumer of the budget it is protecting.
+        #expect(EventStore.priorityLaneReserveBytes(maxFootprintBytes: 4_096 * 1_048_576)
+                == 64 * 1_048_576)
+
+        // Across every plausible cap: non-zero, never a majority of the budget,
+        // and monotonic in the budget.
+        var previous: Int64 = 0
+        for mib in stride(from: 50, through: 2_048, by: 50) {
+            let cap = Int64(mib) * 1_048_576
+            let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: cap)
+            #expect(reserve > 0, "reserve must never vanish (cap \(mib) MiB)")
+            #expect(reserve < cap / 2, "reserve must never dominate the budget (cap \(mib) MiB)")
+            #expect(reserve >= previous, "reserve must not decrease as the budget grows")
+            previous = reserve
+        }
+    }
+
+    @Test("the shipped events budget reserves headroom the file lane cannot take")
+    func shippedBudgetReservesPriorityHeadroom() {
+        // The shipped default is events_max_size_mb 420 with a 100 MiB evidence
+        // subtraction, so the events family cap is 320 MiB.
+        let familyCap: Int64 = 320 * 1_048_576
+        let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: familyCap)
+        #expect(reserve == 33_554_432, "expected 32 MiB reserve at the shipped cap, got \(reserve)")
+        // A file-lane write must additionally leave the reserve free; a priority
+        // write is charged only its own cost and stays admissible below that
+        // point.
+        #expect(reserve > 0 && reserve < familyCap)
+    }
+
+    // The first implementation of the lane reserve got the mechanism wrong in
+    // two ways that the suite caught, and both are worth pinning so they cannot
+    // come back.
+    @Test("the lane reserve is small enough to never trip the per-transaction bound")
+    func laneReserveDoesNotExceedTheTransactionBound() {
+        // ATTEMPT 1 inflated `estimatedTransactionBytes` by the reserve. That
+        // parameter feeds a per-TRANSACTION sanity bound, not the footprint
+        // comparison, so every file-lane insert failed with
+        // `transactionEstimateExceedsReserve` instead of being admitted —
+        // 9 suite failures, and in production it would have dropped 100% of
+        // file events rather than shedding them under pressure.
+        //
+        // The reserve therefore must never be expressible as part of a
+        // transaction estimate. It is a FOOTPRINT quantity: comparable to the
+        // store cap, far larger than any single transaction's reserve.
+        for mib in [50, 320, 420, 2_048] {
+            let cap = Int64(mib) * 1_048_576
+            let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: cap)
+            #expect(reserve > SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
+                    "the reserve is a footprint quantity, not a per-row one (cap \(mib) MiB)")
+        }
+    }
+
+    @Test("a file-lane refusal must not latch the store closed against the priority lane")
+    func fileLaneRefusalIsNonLatching() throws {
+        // ATTEMPT 2 would have routed the lane test through `admitWrite`, whose
+        // failure latches into `latchedFailure` — shared state every later
+        // writer consults. A file-lane refusal would then have blocked the
+        // PRIORITY lane too, which is exactly the outcome the reserve exists to
+        // prevent: the cheap events would have shut the door on the valuable
+        // ones by a different route.
+        //
+        // Guard the property structurally: the lane check lives in EventStore
+        // and throws directly, so `admitWrite` is never called with a
+        // lane-adjusted value and cannot latch on the lane's behalf.
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()          // MacCrabCoreTests
+                .deletingLastPathComponent()          // Tests
+                .deletingLastPathComponent()          // repo root
+                .appendingPathComponent("Sources/MacCrabCore/Storage/EventStore.swift"),
+            encoding: .utf8
+        )
+        guard let gate = source.range(of: "if lane == .file, let footprint = admission.lastFootprintBytes") else {
+            Issue.record("the lane reserve pre-check is missing from EventStore.admitStorageWrite")
+            return
+        }
+        // Bound the window precisely: the lane check must sit BETWEEN the gate
+        // and the shared `admitWrite` call, and must resolve itself by throwing
+        // inside that region. A loose window would run past the closing brace
+        // and pick up the legitimate admitWrite below it.
+        let after = String(source[gate.lowerBound...])
+        guard let admitCall = after.range(of: "try admission.admitWrite") else {
+            Issue.record("expected admitStorageWrite to still call admitWrite for the shared gate")
+            return
+        }
+        let checkBody = String(after[..<admitCall.lowerBound])
+        #expect(checkBody.contains("throw SQLitePersistentStoreAdmissionError.footprintLimit"),
+                "the lane check must throw on its own, before the shared gate runs")
+        #expect(!checkBody.contains("admitWrite"),
+                "the lane check must not route through admitWrite, whose failure latches shared state")
+    }
 }

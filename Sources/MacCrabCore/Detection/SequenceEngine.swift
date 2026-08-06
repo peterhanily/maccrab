@@ -845,6 +845,41 @@ public actor SequenceEngine {
             evictedPendingStepCount,
             count
         )
+        lastPendingStepEvictionAt = Date()
+    }
+
+    /// When pending-step eviction last actually happened.
+    ///
+    /// The cumulative counters answer "has this ever occurred", which is the
+    /// right question for a diagnostic and the WRONG one for a health flag: a
+    /// lifetime total never decreases, so a health signal derived from
+    /// `> 0` latches on at the first eviction and can never clear for the life
+    /// of the process. That is exactly what shipped — one transient eviction
+    /// during a load spike left the menu bar reading "protection degraded"
+    /// indefinitely, which trains an operator to ignore the one indicator that
+    /// is supposed to mean something.
+    ///
+    /// Recency lets the caller ask the question a health flag should ask: is
+    /// sequence state being lost *now*?
+    private(set) var lastPendingStepEvictionAt: Date?
+
+    /// As above, for partial-match eviction.
+    private(set) var lastPartialEvictionAt: Date?
+
+    /// True when eviction occurred within `window`. Nil timestamps mean it has
+    /// never happened, which is healthy.
+    public func evictionIsOngoing(within window: TimeInterval, now: Date = Date()) -> Bool {
+        for stamp in [lastPendingStepEvictionAt, lastPartialEvictionAt] {
+            if let stamp, now.timeIntervalSince(stamp) <= window { return true }
+        }
+        return false
+    }
+
+    /// Test seam: drive the recency stamps directly so a regression can pin the
+    /// latch behaviour without having to manufacture a real cap overflow.
+    func setEvictionTimestampsForTesting(pending: Date?, partial: Date?) {
+        lastPendingStepEvictionAt = pending
+        lastPartialEvictionAt = partial
     }
 
     private func enforceGlobalPendingCap() {
@@ -1805,6 +1840,7 @@ public actor SequenceEngine {
                 evictedPartialCount,
                 partialsRemoved
             )
+            lastPartialEvictionAt = Date()
         }
         if pendingRemoved > 0 || partialsRemoved > 0 {
             markCheckpointStateMutation()
@@ -2438,6 +2474,14 @@ public actor SequenceEngine {
             // out-of-order gap to bridge). Appending AFTER replay also prevents one
             // event that matches both step[0] and a later step from satisfying two
             // steps of the same freshly-seeded partial.
+            // NOT gated on `ruleCanSufferLaneInversion`. See that function: the
+            // lane model says a fast step[0] can never be overtaken, but
+            // `outOfOrderBackfillCompletes` asserts backfill for a rule whose
+            // steps are BOTH process_creation, and ES runs split clients with
+            // eslogger/kdebug fallbacks — so same-lane delivery order is not
+            // something this code can currently prove. Parking stays
+            // unconditional until that is settled; the cost is bounded churn,
+            // and the alternative risks silently losing sequence detections.
             if rule.ordered {
                 let initialStepId = rule.steps.first?.id
                 for step in matchingSteps where step.id != initialStepId {
@@ -2893,6 +2937,55 @@ public actor SequenceEngine {
     /// A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule (oldest
     /// evicted) and deduped by (eventId, stepId) so the same event cannot occupy
     /// the history twice across re-evaluations.
+    /// Whether this rule's step[0] can actually arrive AFTER a later step.
+    ///
+    /// `pendingLaterSteps` exists for exactly one race: the pipeline splits
+    /// events into a priority stream and a slower file stream, so a later step
+    /// on the fast lane can reach `evaluate` before its step[0] on the slow one.
+    /// Parking was unconditional, which made the buffer pure waste for every
+    /// rule whose step[0] rides the SAME lane — its step[0] can never be
+    /// delivered late, so nothing parked for it can ever be replayed into a
+    /// sequence.
+    ///
+    /// Measured on the installed rc.8 engine: all 11 sequence rules active under
+    /// the default stable profile have step[0] `process_creation`, which rides
+    /// the priority lane — and the flood filling the buffer was file `open`,
+    /// which rides the priority lane too. So the inversion was impossible for
+    /// every enabled rule, while the per-rule cap of 256 evicted at up to 820
+    /// entries/second (166,691 cumulative) and pinned
+    /// `sequence_state_continuity_maintained` false, which is the sole input to
+    /// the menu bar's "protection degraded" label. Pure cost: wasted work, a
+    /// permanent false warning, and no detection anywhere could benefit.
+    ///
+    /// Gating on the lane relation keeps the buffer for the rules that genuinely
+    /// need it (a file-lane step[0] followed by a priority-lane step) and skips
+    /// it entirely for the rules that cannot.
+    static func ruleCanSufferLaneInversion(_ rule: SequenceRule) -> Bool {
+        guard let initial = rule.steps.first else { return false }
+        // Only a SLOW-lane step[0] can be overtaken. If step[0] rides the
+        // priority lane it is never behind a later step in delivery order.
+        guard stepRidesFileLane(initial) else { return false }
+        // ...and only by a later step on the FAST lane.
+        return rule.steps.dropFirst().contains { !stepRidesFileLane($0) }
+    }
+
+    /// Whether a step MIGHT be delivered on the slow file lane.
+    ///
+    /// Deliberately conservative: a step's file action lives inside its
+    /// predicates rather than on the step, and `EventPipelineLane` sends only
+    /// SOME file actions down the slow lane (`open` and `btm_add` ride the
+    /// priority lane). Rather than decode predicates to recover the action set —
+    /// fragile, and wrong in the dangerous direction if it under-approximates —
+    /// treat every `file_event` step as possibly-slow.
+    ///
+    /// The error is therefore always toward KEEPING the buffer, so this can only
+    /// ever skip parking for a rule whose step[0] is definitively fast
+    /// (process/network/TCC). That is sufficient: every sequence rule active
+    /// under the default profile has a `process_creation` step[0].
+    static func stepRidesFileLane(_ step: SequenceStep) -> Bool {
+        step.logsourceCategory == "file_event"
+    }
+
     private func bufferPendingStep(ruleId: String, step: SequenceStep, matched: MatchedStep, now: Date) {
         var buf = pendingLaterSteps[ruleId] ?? []
         if buf.contains(where: { $0.matched.eventId == matched.eventId && $0.step.id == step.id }) {
@@ -3256,6 +3349,7 @@ public actor SequenceEngine {
                 evictedPartialCount,
                 removed
             )
+            lastPartialEvictionAt = Date()
             logger.warning("Evicted \(removed) oldest partial matches (cap: \(self.maxPartialMatches), cumulative: \(self.evictedPartialCount))")
         }
         compactEvictionQueue()

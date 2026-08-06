@@ -1079,13 +1079,49 @@ public actor EventStore {
     }
 
     public func insert(event: Event) throws {
+        let lane = EventPipelineLane.finalLane(for: event)
         _ = try insert(event: event, applyInsertFilter: true) { rowMutationBytes in
             try self.admitStorageWrite(
                 estimatedTransactionBytes: self.eventTransactionEstimate(
                     rowMutationBytes: rowMutationBytes
-                )
+                ),
+                lane: lane
             )
         }
+    }
+
+    /// Bytes of the events budget that only the PRIORITY lane may consume.
+    ///
+    /// Storage admission used to be lane-blind: at the footprint threshold it
+    /// refused whatever arrived next, so a process exec and a routine chmod were
+    /// treated identically. That is the wrong policy for a detection engine, and
+    /// it disagreed with the rest of the product — `EventPipelineLane` already
+    /// splits events into priority/file streams, and eviction already protects
+    /// process rows first (`processEventsFloorMinutes`, v1.21.4). Three
+    /// subsystems knew file events were the cheap ones; the gate that decides
+    /// what actually gets recorded did not.
+    ///
+    /// Measured consequence on an installed rc.7 host: ~890 events/minute
+    /// refused with `footprint_limit` while 1,400/s of temp-file churn filled
+    /// the store — process and network telemetry lost to make room for `chmod`.
+    ///
+    /// It is also an evasion primitive. Flooding cheap file events pushes the
+    /// footprint over the threshold, after which the attacker's OWN process and
+    /// network events stop being recorded. The product ships a self-defence
+    /// monitor for telemetry-drop evasion; admission was manufacturing exactly
+    /// that condition under ordinary load.
+    ///
+    /// The reserve makes the file lane yield first. Priority events remain
+    /// admissible down to the absolute cap because their volume is bounded and
+    /// small — on a host doing 1,400 file events/sec the priority lane is a
+    /// rounding error beside it.
+    static func priorityLaneReserveBytes(maxFootprintBytes: Int64) -> Int64 {
+        // 10% of the budget, floored at 16 MiB and capped at 64 MiB. The floor
+        // matters more than the fraction: 15 minutes of priority-lane events is
+        // a few MiB, so even the floor makes the retention guarantee satisfiable
+        // for the lane that carries the evidence. The ceiling keeps the reserve
+        // from ever becoming the dominant consumer of the budget it protects.
+        return max(16 * 1_048_576, min(64 * 1_048_576, maxFootprintBytes / 10))
     }
 
     /// Prepare the complete persisted representation before asking the caller
@@ -4249,9 +4285,42 @@ public actor EventStore {
     /// controller is a value so copy it out and always write it back, including
     /// on a thrown probe, preserving the sticky pressure latch.
     private func admitStorageWrite(
-        estimatedTransactionBytes: Int64
+        estimatedTransactionBytes: Int64,
+        lane: EventPipelineLane = .priority
     ) throws {
         guard var admission = storageAdmission else { return }
+        // A file-lane write must additionally leave the priority reserve free.
+        //
+        // This is a SEPARATE, NON-LATCHING pre-check rather than an adjustment
+        // to `admitWrite`, for two reasons that both matter:
+        //
+        //  * `estimatedTransactionBytes` feeds a per-TRANSACTION sanity bound
+        //    (`transactionEstimateExceedsReserve`), not the footprint
+        //    comparison. Inflating it does not tighten the footprint test — it
+        //    makes every file write fail validation outright.
+        //  * `admitWrite` latches its failure into `latchedFailure`, which is
+        //    shared state consulted by every subsequent writer. Routing a
+        //    file-lane refusal through it would latch the store closed against
+        //    the PRIORITY lane too, which is precisely the outcome the reserve
+        //    exists to prevent.
+        //
+        // So the lane test stands on its own, throws the same typed error the
+        // caller already handles, and leaves the shared latch untouched.
+        if lane == .file, let footprint = admission.lastFootprintBytes {
+            let cap = admission.policy.maxFootprintBytes
+            let reserve = Self.priorityLaneReserveBytes(maxFootprintBytes: cap)
+            let required = SQLitePersistentStoreAdmission.saturatingAdd(
+                SQLitePersistentStoreAdmission.saturatingAdd(footprint, estimatedTransactionBytes),
+                reserve
+            )
+            if required > cap {
+                throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                    footprintBytes: footprint,
+                    reserveBytes: reserve,
+                    maxFootprintBytes: cap
+                )
+            }
+        }
         let wasBlocked = admission.growthBlocked
         let writerSetupPending = !isReadOnly && insertStmt == nil
         do {

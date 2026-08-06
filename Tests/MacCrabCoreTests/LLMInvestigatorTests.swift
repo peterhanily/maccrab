@@ -57,8 +57,8 @@ private func parseInvestigation(
     fallbackModel: String = "trusted-provider",
     generatedAt: Date = trustedGenerationDate,
     allowedEventIds: Set<String> = ["evt-1"],
-    allowedTacticIds: Set<String> = ["TA0003"],
-    allowedTechniqueIds: Set<String> = ["T1543.001"]
+    allowedTacticIds: Set<String> = ["attack.persistence"],
+    allowedTechniqueIds: Set<String> = ["attack.t1543.001"]
 ) -> InvestigationParseResult {
     LLMInvestigator.parse(
         response: response,
@@ -167,8 +167,8 @@ struct LLMInvestigatorParserTests {
             modified,
             alertId: "injected-id",
             allowedEventIds: ["evt-1"],
-            allowedTacticIds: ["TA0003"],
-            allowedTechniqueIds: ["T1543.001"]
+            allowedTacticIds: ["attack.persistence"],
+            allowedTechniqueIds: ["attack.t1543.001"]
         )
         guard case let .ok(inv) = result else {
             Issue.record("Expected .ok")
@@ -562,5 +562,62 @@ struct LLMInvestigatorE2ETests {
         #expect(validation?.retryRequested == 1)
         #expect(validation?.finalRejection == 1)
         #expect(validation?.conservationMaintained == true)
+    }
+
+    // v1.21.7 regression. MacCrab rules tag ATT&CK in SIGMA form only
+    // (`attack.defense_evasion`, `attack.t1083`); no rule in the corpus emits a
+    // canonical `TA####` id. The grounding allowlist added in cb6df0c is built
+    // from those tags, but the system prompt showed the model `"tacticId":
+    // "TA0005"` — so the model complied, emitted a canonical id, and byte-exact
+    // membership rejected every well-formed answer. Live on the installed
+    // engine: alert_investigation 18 started, 0 accepted, 18 final rejection,
+    // while every other LLM feature was 100% accepted. The feature was dead.
+    //
+    // It shipped green because THIS file's fixture seeded canonical ids —
+    // `allowedTacticIds: ["TA0003"]` — input production cannot generate. The
+    // fixture now uses Sigma tags, which is what the engine actually supplies.
+    @Test("grounding accepts either MITRE vocabulary, because rules only ever emit Sigma tags")
+    func mitreGroundingAcceptsSigmaAndCanonicalForms() {
+        // What the engine really supplies.
+        let allowedTactics: Set<String> = ["attack.defense_evasion", "attack.persistence"]
+        let allowedTechniques: Set<String> = ["attack.t1083", "attack.t1543.001"]
+
+        // A model answering in the SIGMA vocabulary (what the prompt now asks for).
+        #expect(LLMPrompts.mitreIDIsGrounded("attack.defense_evasion", in: allowedTactics))
+        #expect(LLMPrompts.mitreIDIsGrounded("attack.t1083", in: allowedTechniques))
+
+        // A model answering in the CANONICAL vocabulary — the case that was
+        // rejecting 100% of investigations.
+        #expect(LLMPrompts.mitreIDIsGrounded("TA0005", in: allowedTactics),
+                "TA0005 is defense_evasion; a rule tagged attack.defense_evasion grounds it")
+        #expect(LLMPrompts.mitreIDIsGrounded("T1083", in: allowedTechniques))
+        #expect(LLMPrompts.mitreIDIsGrounded("T1543.001", in: allowedTechniques))
+
+        // Grounding is still grounding: an identifier the alert did NOT carry is
+        // refused in either vocabulary. Normalizing must not widen the set.
+        #expect(!LLMPrompts.mitreIDIsGrounded("TA0040", in: allowedTactics),
+                "impact was never supplied by this alert")
+        #expect(!LLMPrompts.mitreIDIsGrounded("attack.impact", in: allowedTactics))
+        #expect(!LLMPrompts.mitreIDIsGrounded("T1486", in: allowedTechniques))
+        #expect(!LLMPrompts.mitreIDIsGrounded("TA9999", in: allowedTactics),
+                "an unknown canonical id must not ground against anything")
+        #expect(!LLMPrompts.mitreIDIsGrounded("", in: allowedTactics))
+        #expect(!LLMPrompts.mitreIDIsGrounded("attack.defense_evasion", in: []),
+                "an empty allowlist grounds nothing at all")
+    }
+
+    @Test("the prompt no longer shows the model an identifier vocabulary it must not use")
+    func promptDoesNotAdvertiseCanonicalMITREIDs() {
+        // The schema example was the proximate cause: it showed "TA0005" as the
+        // shape to emit, while every admissible value is a Sigma tag. A future
+        // edit that reintroduces a canonical id as the example would silently
+        // restore a 100%-rejection feature, so pin it.
+        let prompt = LLMPrompts.alertInvestigationSystem
+        #expect(!prompt.contains("\"TA0005\""),
+                "the schema example must not advertise a canonical tactic id")
+        #expect(!prompt.contains("\"T1562.001\""),
+                "the schema example must not advertise a canonical technique id")
+        #expect(prompt.contains("mitre_tactics"),
+                "the prompt must point the model at the supplied arrays instead")
     }
 }
