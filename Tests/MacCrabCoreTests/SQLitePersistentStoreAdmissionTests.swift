@@ -1,4 +1,5 @@
 import Testing
+import os
 import Foundation
 import Darwin
 import CSQLCipher
@@ -462,6 +463,79 @@ struct SQLitePersistentStoreAdmissionTests {
             )
         }
         try admission.admitWrite(estimatedTransactionBytes: reserve)
+    }
+
+    // v1.21.7. `optimizeFTS` — the only thing that reclaims FTS5 tombstones —
+    // was admitted through `admitSchemaRebuild`, which projects
+    // `family + growth + scratch` and refuses unless that stays under the cap.
+    // `family` is the CURRENT footprint, and the call site only ever fires when
+    // the store is already over cap, so the guard could never pass. It threw
+    // every sweep and `optimizeFTS` returned false SILENTLY.
+    //
+    // Measured on an installed rc.9 host after 25 h uptime: events_fts_data at
+    // 188 MB — 44% of a 383 MB store, against 62 MB of actual events spanning
+    // 16 minutes — from tombstones left by ~4.5M insert/delete cycles. Zero "FTS
+    // optimize compacted" lines in 8 h while the sweep ran 218 times and
+    // reported the cap unreachable. The store was over cap BECAUSE of the index,
+    // and being over cap is what blocked the only thing that shrinks it.
+    @Test("compaction is admissible while over cap; growth is not")
+    func reclaimAdmissionDoesNotDeadlockOnTheFootprintCap() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cap: Int64 = 128 * 1_048_576
+        // The state that actually occurs: footprint ABOVE the cap, plenty of
+        // disk. This is the only state optimizeFTS is ever invoked in.
+        // The store opens HEALTHY and only later grows over cap — the real
+        // sequence. A probe that is over cap at init cannot even be constructed.
+        let grew = OSAllocatedUnfairLock(initialState: false)
+        let overCapPath = dir.appendingPathComponent("overcap.db").path
+        FileManager.default.createFile(atPath: overCapPath, contents: Data(count: 4_096))
+        var overCap = try SQLitePersistentStoreAdmission(
+            databasePath: overCapPath,
+            policy: policy(directory: dir, max: cap, reserve: 8 * 1_048_576),
+            footprintProbe: { _ in
+                grew.withLock { $0 } ? cap + 64 * 1_048_576 : 0
+            },
+            freeSpaceProbe: { _ in Int64.max }
+        )
+        grew.withLock { $0 = true }   // now over cap, as on the live host
+
+        // GROWTH admission must still refuse — the cap is real for new data.
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            _ = try overCap.admitSchemaRebuild(operationCount: 1)
+        }
+
+        // RECLAIM admission must NOT, or the store can never get back under cap.
+        #expect(throws: Never.self) {
+            _ = try overCap.admitFullVacuum()
+        }
+    }
+
+    @Test("reclaim still refuses when the volume itself is short")
+    func reclaimStillRespectsFreeSpace() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cap: Int64 = 128 * 1_048_576
+        // Ignoring the footprint cap must not mean ignoring the disk: compaction
+        // needs transient scratch, and exhausting the boot volume mid-rewrite is
+        // the failure this project has already had once.
+        let grewND = OSAllocatedUnfairLock(initialState: false)
+        let noDiskPath = dir.appendingPathComponent("nodisk.db").path
+        FileManager.default.createFile(atPath: noDiskPath, contents: Data(count: 4_096))
+        var noDisk = try SQLitePersistentStoreAdmission(
+            databasePath: noDiskPath,
+            policy: policy(directory: dir, max: cap, reserve: 8 * 1_048_576),
+            footprintProbe: { _ in
+                grewND.withLock { $0 } ? cap + 64 * 1_048_576 : 0
+            },
+            freeSpaceProbe: { _ in
+                grewND.withLock { $0 } ? 2_048 : Int64.max   // below 2x the 4 KiB main file
+            }
+        )
+        grewND.withLock { $0 = true }   // disk fills AFTER the store opened
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            _ = try noDisk.admitFullVacuum()
+        }
     }
 
     @Test("Page-counted maintenance reserves fixed paths and bounded overshoot")

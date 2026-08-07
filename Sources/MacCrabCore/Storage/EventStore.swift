@@ -4054,10 +4054,38 @@ public actor EventStore {
                 .debug("optimizeFTS skipped: last full optimize was \(Int(now.timeIntervalSince(last)))s ago (min interval \(Int(Self.minFullFTSOptimizeInterval))s); bounded mergeFTS still runs each sweep")
             return false
         }
-        // Full optimize rewrites all FTS segments and scales with the existing
-        // store. It therefore uses whole-store schema/rebuild headroom rather
-        // than pretending to fit the ordinary bounded row transaction reserve.
-        guard (try? admitStorageSchemaRebuild()) != nil else { return false }
+        // Admit on FREE-DISK headroom, not on the footprint cap.
+        //
+        // This used `admitStorageSchemaRebuild()`, which is admission for work
+        // that GROWS the database: it projects `family + growth + scratch` and
+        // refuses unless that stays under `maxFootprintBytes`. Since `family` is
+        // the CURRENT footprint, the check can never pass once the store is over
+        // cap — and over cap is the only state in which this function is ever
+        // called (`overCap` gates the call site). So the guard threw every time,
+        // `optimizeFTS` returned false, and it did so SILENTLY.
+        //
+        // That produced a deadlock, measured on an installed rc.9 host over 25
+        // hours of uptime: events_fts_data had grown to 188 MB — 44% of a 383 MB
+        // store, against 62 MB of actual events spanning 16 minutes — from
+        // tombstones left by ~4.5M insert/delete cycles. `optimize` is the only
+        // thing that reclaims them, the store was permanently over cap BECAUSE
+        // of them, and being over cap is what blocked `optimize`. The cure
+        // required headroom only the cure could create. Zero "FTS optimize
+        // compacted" lines were logged in 8 hours while the sweep ran 218 times,
+        // pruned thousands of events, and reported the cap unreachable.
+        //
+        // Optimize does not grow the store; it rewrites FTS segments and frees
+        // pages to the freelist. What it genuinely needs is transient scratch on
+        // the VOLUME, which is exactly what full-VACUUM admission checks — and
+        // that check deliberately ignores the footprint cap. It over-estimates
+        // for this operation (it budgets two copies of the whole main file, and
+        // optimize only rewrites the index), but refusing under uncertain disk
+        // headroom is the safe direction, and the free-space floor still holds.
+        guard (try? admitStorageFullVacuum()) != nil else {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                .warning("optimizeFTS skipped: insufficient free-disk headroom for FTS compaction; events_fts remains a floor under the size cap")
+            return false
+        }
         // Stamp BEFORE the exec so a slow or repeatedly-failing optimize cannot
         // be re-attempted on every subsequent sweep.
         lastFullFTSOptimizeAt = now
