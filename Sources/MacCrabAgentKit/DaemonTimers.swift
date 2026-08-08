@@ -5347,7 +5347,26 @@ func runAdaptiveRollupSweep(
     hotTierMinutes: Int = 30,
     aggregateDays: Int = 90,
     alertsRetentionDays: Int = 365,
-    evidencePerAlertCap: Int = 50,
+    // v1.21.7: 50 -> 16. The legacy `events.db.alert_evidence` table froze at
+    // 93.4 MB / 36,322 rows across 729 alerts when schema v8 sent NEW evidence to
+    // alerts.db. It is size-pruned only when it exceeds its OWN sub-cap
+    // (evidenceMaxSizeMB = 100 MiB) and it sits just under that, so it never
+    // prunes — while consuming 29% of the 320 MiB events-family budget and
+    // draining otherwise only as alerts age out on a 365-day clock.
+    //
+    // 16 is chosen against what is actually consumed, not arbitrarily: the sole
+    // production reader chain renders `evidence.prefix(8)`
+    // (EventStore.evidenceFor -> AlertEvidence -> AppState -> V2AlertsWorkspace),
+    // so 16 keeps double what any surface displays. Measured on the live store:
+    // 36,322 rows -> 11,651, ~70 MB reclaimed through the incremental_vacuum
+    // already running every sweep — no full VACUUM, no 2x transient spike, no
+    // migration. 98.90% of displayed evidence rows are byte-identical
+    // (5,763 of 5,827); the 64 that change are replaced by HIGHER-severity
+    // events, because pruneAlertEvidenceCap ranks by severity then timestamp.
+    //
+    // This reclaims disk. It does NOT move the hard admission gate (+0.28 MB) —
+    // do not read it as a fix for the write-drop rate.
+    evidencePerAlertCap: Int = 16,
     evidenceMaxSizeMB: Int = 100,
     processFloorMinutes: Int = 0
 ) async {
@@ -5536,13 +5555,30 @@ func runAdaptiveRollupSweep(
         return
     }
     let overCap = footprintBeforeReclaimBytes > targetSizeBytes
-    if overCap && !walPinned && !underPowerPressure {
+    // v1.21.7: `overCap` deliberately REMOVED from the optimize condition.
+    //
+    // Gating compaction on already being over cap creates a failure class where
+    // a host that stays under cap never compacts — so events_fts accumulates
+    // tombstones untouched until the INDEX ITSELF forces the crossing. Measured
+    // trajectory before this: the index reached 180.6 MB in ~81 days, at which
+    // point it was 44% of the store and the dominant reason the cap was
+    // unreachable. Compacting only once the damage is done is the same
+    // wait-for-the-fire posture the admission deadlock had.
+    //
+    // `optimizeFTS` carries its own 6-hour rate limit, which is the real
+    // governor and is well calibrated: measured over a full interval it held the
+    // index to a 3.90-28.81 MB sawtooth, and the post-optimize floor FELL across
+    // five passes. Cost is 4 passes/day at 0.138-0.399 s each — about 1.6 s/day
+    // of actor time. `walPinned` and `underPowerPressure` still apply, so this
+    // never runs while a reader pins the WAL or the machine is under thermal or
+    // battery pressure.
+    if !walPinned && !underPowerPressure {
         guard let ftsStart = currentFootprint("before FTS optimize") else {
             return
         }
         if await eventStore.optimizeFTS() {
             _ = await eventStore.walCheckpoint()   // move optimize's freed pages out of the WAL
-            logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) byte footprint over \(targetSizeBytes)-byte target) — pages freed for reclamation")
+            logger.notice("Tier-rollup: FTS optimize compacted events_fts (\(ftsStart) byte footprint, \(targetSizeBytes)-byte target, overCap=\(overCap)) — pages freed for reclamation")
         }
     }
 

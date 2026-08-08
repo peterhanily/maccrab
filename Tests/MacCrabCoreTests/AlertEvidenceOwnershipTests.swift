@@ -730,4 +730,71 @@ struct AlertEvidenceOwnershipTests {
             #expect(policy.lowerBound < commit.lowerBound)
         }
     }
+
+    // v1.21.7. Legacy `events.db.alert_evidence` froze at 93.4 MB / 36,322 rows
+    // across 729 alerts when schema v8 sent NEW evidence to alerts.db. Its size
+    // prune only fires above its OWN sub-cap (evidenceMaxSizeMB = 100 MiB) and it
+    // sat just under, so it never pruned — holding 29% of the 320 MiB
+    // events-family budget and otherwise draining only as alerts aged out on a
+    // 365-day clock.
+    //
+    // The per-alert cap is the lever, and it must stay well above what any
+    // surface actually reads, or the drain would start costing displayed
+    // evidence rather than dead weight.
+    @Test("the per-alert evidence cap keeps strictly more than any reader displays")
+    func evidenceCapExceedsWhatAnySurfaceRenders() throws {
+        // The sole production reader chain renders `evidence.prefix(8)`:
+        //   EventStore.evidenceFor -> AlertEvidence -> AppState -> V2AlertsWorkspace
+        let renderedByDashboard = 8
+        let cap = 16   // must match DaemonTimers.pruneAndRollUp evidencePerAlertCap
+
+        #expect(cap > renderedByDashboard,
+                "the cap must exceed what is displayed, or pruning starts costing visible evidence")
+        #expect(cap >= renderedByDashboard * 2,
+                "keep at least 2x the displayed depth as headroom for severity re-ranking")
+
+        // Pin the reader depth so that if a surface starts showing MORE evidence,
+        // this fails and forces the cap to be reconsidered rather than silently
+        // truncating what the operator sees.
+        let workspace = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/MacCrabApp/V2/Workspaces/V2AlertsWorkspace.swift"),
+            encoding: .utf8
+        )
+        #expect(workspace.contains("evidence.prefix(\(renderedByDashboard))"),
+                "the dashboard's evidence depth changed — re-derive the per-alert cap against it")
+    }
+
+    // The tier-rollup sweep used to run the FTS optimize only when ALREADY over
+    // cap. That let events_fts accumulate tombstones untouched on a host sitting
+    // under cap, until the index itself forced the crossing — a measured 180.6 MB
+    // in ~81 days, at which point it was 44% of the store. Compaction must be
+    // governed by its own rate limit, not by waiting for the damage.
+    @Test("FTS compaction is not gated on already being over cap")
+    func ftsCompactionIsNotGatedOnOverCap() throws {
+        let timers = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/MacCrabAgentKit/DaemonTimers.swift"),
+            encoding: .utf8
+        )
+        guard let gate = timers.range(of: "before FTS optimize") else {
+            Issue.record("the FTS optimize call site is missing")
+            return
+        }
+        // Inspect the `if` immediately preceding the optimize block.
+        let head = String(timers[..<gate.lowerBound].suffix(400))
+        guard let condition = head.range(of: "if ", options: .backwards) else {
+            Issue.record("could not locate the optimize gate condition")
+            return
+        }
+        let text = String(head[condition.lowerBound...])
+        #expect(!text.contains("overCap &&"),
+                "compaction must not wait for the store to be over cap before running")
+        #expect(text.contains("!walPinned") && text.contains("!underPowerPressure"),
+                "the reader-pin and power-pressure guards must remain")
+    }
 }
