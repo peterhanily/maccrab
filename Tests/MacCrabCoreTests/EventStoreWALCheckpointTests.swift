@@ -116,7 +116,7 @@ struct EventStoreWALCheckpointTests {
         while index < total {
             let upper = min(index + batchSize, total)
             let batch = (index..<upper).map { Self.makeEvent(index: $0, commandLine: bigCmd) }
-            try await store.insert(events: batch)
+            try await store.insert(events: batch, lane: .priority)
             index = upper
             // Measure AFTER each batch commit — the post-commit auto-checkpoint
             // has already run, so this is the true high-water mark.
@@ -150,7 +150,7 @@ struct EventStoreWALCheckpointTests {
         // and comfortably under the 64 MB per-transaction ceiling.
         let bigCmd = String(repeating: "y", count: 16_384)
         let batch = (0..<600).map { Self.makeEvent(index: $0, commandLine: bigCmd) }
-        try await store.insert(events: batch)
+        try await store.insert(events: batch, lane: .priority)
 
         let before = Self.walSize(path)
         #expect(before > 0, "expected a non-empty WAL before truncate")

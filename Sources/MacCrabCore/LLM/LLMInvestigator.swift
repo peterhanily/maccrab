@@ -13,10 +13,123 @@ import os.log
 
 // MARK: - Parse result
 
+/// Coarse, fixed-cardinality rejection families. These are safe to persist,
+/// render, and send back to a provider because none is derived from response
+/// content.
+public enum LLMAlertInvestigationRejectionCategory: String, CaseIterable, Codable,
+                                                    Hashable, Sendable {
+    case transport
+    case envelope
+    case schema
+    case grounding
+    case contentSafety = "content_safety"
+    case actionPolicy = "action_policy"
+    case cardinality
+}
+
+/// Exact bounded reasons why an alert-investigation attempt was rejected.
+/// Never add a response string, coding path, identifier, or provider-authored
+/// value here: this enum is deliberately the only diagnostic material retained
+/// in telemetry and fed to the retry prompt.
+public enum LLMAlertInvestigationRejectionReason: String, CaseIterable, Codable,
+                                                  Hashable, Sendable {
+    case backendResponseUnavailable = "backend_response_unavailable"
+    case responseSizeLimit = "response_size_limit"
+    case responseEnvelope = "response_envelope"
+    case schemaDecode = "schema_decode"
+    case trustedAlertIdentifier = "trusted_alert_identifier"
+    case responseAlertIdentifier = "response_alert_identifier"
+    case confidenceRange = "confidence_range"
+    case summarySafety = "summary_safety"
+    case evidenceCardinality = "evidence_cardinality"
+    case evidenceShape = "evidence_shape"
+    case evidenceGrounding = "evidence_grounding"
+    case mitreCardinality = "mitre_cardinality"
+    case mitreReasoningSafety = "mitre_reasoning_safety"
+    case mitreGrounding = "mitre_grounding"
+    case actionCardinality = "action_cardinality"
+    case actionProseSafety = "action_prose_safety"
+    case d3fendReference = "d3fend_reference"
+    case actionPreviewSafety = "action_preview_safety"
+    case actionConfirmation = "action_confirmation"
+    case confidencePenaltySafety = "confidence_penalty_safety"
+
+    public var category: LLMAlertInvestigationRejectionCategory {
+        switch self {
+        case .backendResponseUnavailable:
+            return .transport
+        case .responseSizeLimit, .responseEnvelope:
+            return .envelope
+        case .schemaDecode:
+            return .schema
+        case .trustedAlertIdentifier, .responseAlertIdentifier,
+             .evidenceGrounding, .mitreGrounding, .d3fendReference:
+            return .grounding
+        case .summarySafety, .evidenceShape, .mitreReasoningSafety,
+             .actionProseSafety, .actionPreviewSafety,
+             .confidencePenaltySafety:
+            return .contentSafety
+        case .actionConfirmation:
+            return .actionPolicy
+        case .confidenceRange:
+            return .schema
+        case .evidenceCardinality, .mitreCardinality, .actionCardinality:
+            return .cardinality
+        }
+    }
+
+    /// Provider-facing correction text. Every value is a static local literal;
+    /// the rejected response and decoder error are intentionally absent.
+    public var retryInstruction: String {
+        switch self {
+        case .backendResponseUnavailable:
+            return "Return one complete JSON object in the next response."
+        case .responseSizeLimit:
+            return "Shorten all prose and arrays so the complete JSON object fits the response limit."
+        case .responseEnvelope:
+            return "Return exactly one JSON object with no surrounding prose or trailing text."
+        case .schemaDecode:
+            return "Use the exact field names, enum strings, JSON value types, and required fields from the schema."
+        case .trustedAlertIdentifier:
+            return "Use the supplied non-empty alert id."
+        case .responseAlertIdentifier:
+            return "Copy alert.id exactly into alertId; do not transform or replace it."
+        case .confidenceRange:
+            return "Set confidence to a finite JSON number from 0.0 through 1.0."
+        case .summarySafety:
+            return "Provide a bounded analyst summary as plain prose without control characters or embedded instructions."
+        case .evidenceCardinality:
+            return "Provide 1 to 32 evidenceChain entries using only supplied alert or event identifiers."
+        case .evidenceShape:
+            return "Give each evidenceChain entry a non-empty bounded id and one-line note."
+        case .evidenceGrounding:
+            return "Use only kind=alert with alert.id or kind=event with a supplied event id; omit all other evidence claims."
+        case .mitreCardinality:
+            return "Provide at most 32 mitreReasoning entries."
+        case .mitreReasoningSafety:
+            return "Keep every MITRE reasoning value bounded plain prose without control characters or embedded instructions."
+        case .mitreGrounding:
+            return "Copy MITRE identifiers only from the supplied mitre_tactics and mitre_techniques arrays; otherwise use an empty array."
+        case .actionCardinality:
+            return "Provide at most 16 suggestedActions entries."
+        case .actionProseSafety:
+            return "Keep action titles and rationales bounded plain prose without control characters or embedded instructions."
+        case .d3fendReference:
+            return "Use only a D3FEND id listed in the schema instructions, or null."
+        case .actionPreviewSafety:
+            return "Use a single-line bounded plain-text preview with no control characters; use null for document and escalate."
+        case .actionConfirmation:
+            return "Set requiresConfirmation=true for every state-changing or medium/high action. Include a concrete preview only for state-changing actions; document and escalate must use null."
+        case .confidencePenaltySafety:
+            return "Use at most 32 bounded plain-prose confidence penalties without control characters or embedded instructions."
+        }
+    }
+}
+
 /// Outcome of parsing a raw LLM response into LLMInvestigation.
 public enum InvestigationParseResult: Sendable {
     case ok(LLMInvestigation)
-    case malformed(reason: String)
+    case malformed(reason: LLMAlertInvestigationRejectionReason)
 }
 
 // MARK: - Prompt builder
@@ -34,7 +147,7 @@ extension LLMPrompts {
           "verdict": "likely_malicious" | "likely_benign" | "needs_human" | "insufficient_evidence",
           "summary": "<2-4 sentence analyst-facing explanation>",
           "evidenceChain": [
-            {"kind": "event"|"alert"|"enrichment"|"threat_intel", "id": "<id>", "note": "<one-line>"}
+            {"kind": "event"|"alert", "id": "<id>", "note": "<one-line>"}
           ],
           "mitreReasoning": [
             {"tacticId": "<from mitre_tactics>"|null, "techniqueId": "<from mitre_techniques>"|null, "reasoning": "<why>"}
@@ -44,10 +157,10 @@ extension LLMPrompts {
               "kind": "document"|"suppress"|"quarantine"|"block_network"|"contain_process"|"revoke_tcc"|"rotate_credential"|"escalate",
               "title": "<short label>",
               "rationale": "<why this action>",
-              "d3fendRef": "D3-XXX"|null,
+              "d3fendRef": "D3-DNSBA"|"D3-OTF"|"D3-PFV"|"D3-UAP"|"D3-PL"|"D3-FCR"|"D3-SBV"|"D3-EHPV"|"D3-DF"|null,
               "blastRadius": "low"|"medium"|"high",
               "requiresConfirmation": true,
-              "previewCommand": "<exact command or null>"
+              "previewCommand": "<exact command>"|null
             }
           ],
           "confidencePenalties": ["<short note of uncertainty>"]
@@ -69,14 +182,16 @@ extension LLMPrompts {
            (e.g. "attack.defense_evasion", "attack.t1083"). Do not translate
            them into canonical ATT&CK ids. If an array is empty, emit
            "mitreReasoning": [] rather than inventing an entry.
-        3. Every destructive suggestedAction (kill, quarantine, block,
-           revoke) MUST have requiresConfirmation=true and a concrete
-           previewCommand. The UI will NEVER auto-execute — it shows the
-           preview and waits for a human click.
+        3. For EVERY state-changing suggestedAction (`suppress`, `quarantine`,
+           `block_network`, `contain_process`, `revoke_tcc`, or
+           `rotate_credential`), set requiresConfirmation=true and provide one
+           concrete SINGLE-LINE previewCommand. For `document` and `escalate`,
+           previewCommand MUST be null. Every medium/high blast-radius action
+           also requires confirmation. The UI never auto-executes a preview.
         4. If you are uncertain, set verdict=needs_human and list your
            uncertainty in confidencePenalties. Do NOT fabricate confidence.
-        5. Set d3fendRef from the official MITRE D3FEND matrix when the
-           suggested action maps cleanly. Otherwise null.
+        5. d3fendRef is limited to the exact finite id list in the schema above.
+           Use null when none maps cleanly. Never invent another D3FEND id.
 
         Return ONLY the JSON object. No preamble, no explanation.
         """
@@ -212,16 +327,17 @@ extension LLMPrompts {
     /// hits only prose in Rules/README.md). `Alert.mitreTacticsList` is a plain
     /// CSV split, so the grounding allowlist is ALWAYS Sigma tags.
     ///
-    /// The system prompt, meanwhile, shows the model `"tacticId": "TA0005"`.
-    /// The model complies, emits a canonical id, and byte-exact membership then
-    /// rejects it — so EVERY well-formed investigation was refused. Live on the
-    /// installed engine: `alert_investigation` 18 started, 0 accepted, 18 final
-    /// rejection, while campaign_investigation / active_defense /
-    /// security_posture were 100% accepted. The feature was wholly dead.
+    /// The historical system prompt showed the model `"tacticId": "TA0005"`.
+    /// The model complied, emitted a canonical id, and byte-exact membership
+    /// then rejected it. An earlier installed-engine sample showed 18 started,
+    /// 0 accepted, and 18 final rejections for alert investigation. The latest
+    /// preserved sample improved to 1 accepted of 6 operations, but still had
+    /// 5 retries and 5 final rejections; fixed-cardinality rejection telemetry
+    /// now distinguishes the remaining contract failures.
     ///
     /// Introduced by the grounding check added in cb6df0c, which did not update
     /// the prompt's `TA0005` example. It shipped green because
-    /// `LLMInvestigatorTests` seeds `allowedTacticIds: ["TA0005"]` — canonical
+    /// `LLMInvestigatorTests` seeded `allowedTacticIds: ["TA0005"]` — canonical
     /// ids that production cannot produce — so the fixture tested input the
     /// system can never generate.
     ///
@@ -271,9 +387,14 @@ extension LLMPrompts {
     ]
 
     /// Retry prompt emitted when the model's first response failed to parse.
-    public static func alertInvestigationRetryFeedback(reason _: String) -> String {
+    public static func alertInvestigationRetryFeedback(
+        reason: LLMAlertInvestigationRejectionReason
+    ) -> String {
         """
-        Your previous response failed local schema or grounding validation.
+        Your previous response failed local acceptance validation.
+        Failure category: \(reason.category.rawValue)
+        Failure reason: \(reason.rawValue)
+        Required correction: \(reason.retryInstruction)
         Return ONLY the JSON object matching the schema. No prose.
         """
     }
@@ -302,7 +423,7 @@ extension LLMService {
     ) async -> LLMInvestigation? {
         if let event,
            !alert.eventId.isEmpty,
-           event.id.uuidString != alert.eventId {
+           !LLMInvestigator.identifiersMatch(event.id.uuidString, alert.eventId) {
             Self.investigatorLogger.error(
                 "Refusing investigation with event context from a different alert"
             )
@@ -326,9 +447,10 @@ extension LLMService {
             useCache: false,
             feature: .alertInvestigation
         ) else {
-            _ = finishDownstreamValidation(
+            _ = recordAlertInvestigationRejection(
                 token: semanticToken,
-                outcome: .finalRejection
+                reason: .backendResponseUnavailable,
+                disposition: .final
             )
             return nil
         }
@@ -338,21 +460,25 @@ extension LLMService {
             allowedEventIds: allowedEventIds,
             allowedTacticIds: allowedTacticIds,
             allowedTechniqueIds: allowedTechniqueIds,
-            fallbackModel: first.provider
+            fallbackModel: first.model
         )
         if case let .ok(inv) = firstParse {
             _ = finishDownstreamValidation(token: semanticToken, outcome: .accepted)
             return inv
         }
-        _ = recordDownstreamValidationRetry(token: semanticToken)
 
         // Single retry with explicit feedback.
-        let firstFailureReason: String
+        let firstFailureReason: LLMAlertInvestigationRejectionReason
         if case let .malformed(reason) = firstParse {
             firstFailureReason = reason
         } else {
-            firstFailureReason = "validation failed"
+            firstFailureReason = .schemaDecode
         }
+        _ = recordAlertInvestigationRejection(
+            token: semanticToken,
+            reason: firstFailureReason,
+            disposition: .retry
+        )
         let retryPrompt = user + "\n\n" +
             LLMPrompts.alertInvestigationRetryFeedback(reason: firstFailureReason)
         guard let second = await self.query(
@@ -363,29 +489,40 @@ extension LLMService {
             useCache: false,
             feature: .alertInvestigation
         ) else {
-            _ = finishDownstreamValidation(
+            _ = recordAlertInvestigationRejection(
                 token: semanticToken,
-                outcome: .finalRejection
+                reason: .backendResponseUnavailable,
+                disposition: .final
             )
             return nil
         }
 
-        if case let .ok(inv) = LLMInvestigator.parse(
+        let secondParse = LLMInvestigator.parse(
             response: second.response, alertId: alert.id,
             allowedEventIds: allowedEventIds,
             allowedTacticIds: allowedTacticIds,
             allowedTechniqueIds: allowedTechniqueIds,
-            fallbackModel: second.provider
-        ) {
+            fallbackModel: second.model
+        )
+        if case let .ok(inv) = secondParse {
             _ = finishDownstreamValidation(token: semanticToken, outcome: .accepted)
             return inv
         }
 
-        _ = finishDownstreamValidation(
+        let finalReason: LLMAlertInvestigationRejectionReason
+        if case let .malformed(reason) = secondParse {
+            finalReason = reason
+        } else {
+            finalReason = .schemaDecode
+        }
+        _ = recordAlertInvestigationRejection(
             token: semanticToken,
-            outcome: .finalRejection
+            reason: finalReason,
+            disposition: .final
         )
-        Self.investigatorLogger.warning("Investigation failed to parse after retry")
+        Self.investigatorLogger.warning(
+            "Investigation rejected after retry (category: \(finalReason.category.rawValue, privacy: .public), reason: \(finalReason.rawValue, privacy: .public))"
+        )
         return nil
     }
 
@@ -479,6 +616,33 @@ public enum LLMInvestigator {
         let mitreReasoning: [MITREMap]
         let suggestedActions: [SuggestedAction]
         let confidencePenalties: [String]
+
+        private enum CodingKeys: String, CodingKey {
+            case alertId, confidence, verdict, summary, evidenceChain
+            case mitreReasoning, suggestedActions, confidencePenalties
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            alertId = try container.decodeIfPresent(String.self, forKey: .alertId)
+            confidence = try container.decode(Double.self, forKey: .confidence)
+            verdict = try container.decode(Verdict.self, forKey: .verdict)
+            summary = try container.decode(String.self, forKey: .summary)
+            evidenceChain = try container.decode([Evidence].self, forKey: .evidenceChain)
+            // These arrays are semantically allowed to be empty. Several real
+            // providers omit an empty optional section or emit null despite a
+            // rigid schema; normalizing that shape does not invent evidence or
+            // weaken any field-level validation below.
+            mitreReasoning = try container.decodeIfPresent(
+                [MITREMap].self, forKey: .mitreReasoning
+            ) ?? []
+            suggestedActions = try container.decodeIfPresent(
+                [SuggestedAction].self, forKey: .suggestedActions
+            ) ?? []
+            confidencePenalties = try container.decodeIfPresent(
+                [String].self, forKey: .confidencePenalties
+            ) ?? []
+        }
     }
 
     /// Parse a raw LLM response into LLMInvestigation. Strips common
@@ -493,11 +657,11 @@ public enum LLMInvestigator {
         generatedAt: Date = Date()
     ) -> InvestigationParseResult {
         guard response.utf8.count <= Limits.responseBytes else {
-            return .malformed(reason: "response exceeds the structured-output limit")
+            return .malformed(reason: .responseSizeLimit)
         }
-        let trimmed = stripCodeFences(response.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard let data = trimmed.data(using: .utf8) else {
-            return .malformed(reason: "not valid UTF-8")
+        guard let object = extractStructuredJSONObject(from: response),
+              let data = object.data(using: .utf8) else {
+            return .malformed(reason: .responseEnvelope)
         }
         do {
             let wire = try JSONDecoder().decode(InvestigationWire.self, from: data)
@@ -511,26 +675,74 @@ public enum LLMInvestigator {
                 generatedAt: generatedAt
             )
         } catch {
-            return .malformed(reason: error.localizedDescription)
+            // Decoder diagnostics can contain provider-authored field names or
+            // coding-path material. Collapse them to one fixed safe bucket.
+            return .malformed(reason: .schemaDecode)
         }
     }
 
-    /// Strip ```json ... ``` or ``` ... ``` fences the model sometimes
-    /// wraps around the output.
-    static func stripCodeFences(_ s: String) -> String {
-        var t = s
-        let fencePrefixes = ["```json", "```JSON", "```"]
-        for prefix in fencePrefixes {
-            if t.hasPrefix(prefix) {
-                t = String(t.dropFirst(prefix.count))
-                if t.hasPrefix("\n") { t = String(t.dropFirst()) }
-                break
+    /// Accept either the requested bare object, a whole-response Markdown
+    /// fence, or one small fixed provider preamble followed by exactly one JSON
+    /// object. Arbitrary prefix/suffix prose remains a rejection. The wrapper
+    /// is discarded and no provider-authored text enters telemetry or storage.
+    static func extractStructuredJSONObject(from response: String) -> String? {
+        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = trimmed.firstIndex(of: "{") else { return nil }
+        let prefix = String(trimmed[..<start])
+        guard isAllowedProviderJSONPreamble(prefix) else { return nil }
+
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var end: String.Index?
+        var index = start
+        while index < trimmed.endIndex {
+            let character = trimmed[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                guard depth >= 0 else { return nil }
+                if depth == 0 {
+                    end = trimmed.index(after: index)
+                    break
+                }
             }
+            index = trimmed.index(after: index)
         }
-        if t.hasSuffix("```") {
-            t = String(t.dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return t
+        guard let end, depth == 0, !inString else { return nil }
+        let suffix = String(trimmed[end...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard suffix.isEmpty || suffix == "```" else { return nil }
+        return String(trimmed[start..<end])
+    }
+
+    private static func isAllowedProviderJSONPreamble(_ value: String) -> Bool {
+        let normalized = value
+            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized.isEmpty || [
+            "json",
+            "here is the json",
+            "here's the json",
+            "here is the requested json",
+            "here is the json object",
+            "here is the requested json object",
+        ].contains(normalized)
     }
 
     private static func validate(
@@ -543,82 +755,84 @@ public enum LLMInvestigator {
         generatedAt: Date
     ) -> InvestigationParseResult {
         guard nonemptyBounded(alertId, bytes: Limits.alertIdBytes) else {
-            return .malformed(reason: "trusted alert id is empty or oversized")
+            return .malformed(reason: .trustedAlertIdentifier)
         }
         if let claimedAlertId = wire.alertId,
            !claimedAlertId.isEmpty,
-           claimedAlertId != alertId {
-            return .malformed(reason: "response alert id does not match the requested alert")
+           !identifiersMatch(claimedAlertId, alertId) {
+            return .malformed(reason: .responseAlertIdentifier)
         }
         guard wire.confidence.isFinite, (0.0...1.0).contains(wire.confidence) else {
-            return .malformed(reason: "confidence must be finite and between 0 and 1")
+            return .malformed(reason: .confidenceRange)
         }
         guard safeModelProse(wire.summary, bytes: Limits.summaryBytes) else {
-            return .malformed(reason: "summary is empty, unsafe, or oversized")
+            return .malformed(reason: .summarySafety)
         }
 
         guard !wire.evidenceChain.isEmpty,
               wire.evidenceChain.count <= Limits.evidenceCount else {
-            return .malformed(reason: "evidence chain must contain 1-\(Limits.evidenceCount) entries")
+            return .malformed(reason: .evidenceCardinality)
         }
         for evidence in wire.evidenceChain {
             guard nonemptyBounded(evidence.id, bytes: Limits.evidenceIdBytes),
                   nonemptyBounded(evidence.note, bytes: Limits.evidenceNoteBytes) else {
-                return .malformed(reason: "evidence id or note is empty or oversized")
+                return .malformed(reason: .evidenceShape)
             }
             switch evidence.kind {
             case .alert:
-                guard evidence.id == alertId else {
-                    return .malformed(reason: "evidence references an alert that was not supplied")
+                guard identifiersMatch(evidence.id, alertId) else {
+                    return .malformed(reason: .evidenceGrounding)
                 }
             case .event:
-                guard allowedEventIds.contains(evidence.id) else {
-                    return .malformed(reason: "evidence references an event that was not supplied")
+                guard allowedEventIds.contains(where: {
+                    identifiersMatch(evidence.id, $0)
+                }) else {
+                    return .malformed(reason: .evidenceGrounding)
                 }
             case .enrichment, .threatIntel:
-                return .malformed(reason: "response cites evidence that was not supplied")
+                return .malformed(reason: .evidenceGrounding)
             }
         }
 
         guard wire.mitreReasoning.count <= Limits.mitreCount else {
-            return .malformed(reason: "too many MITRE mappings")
+            return .malformed(reason: .mitreCardinality)
         }
         for mapping in wire.mitreReasoning {
             guard safeModelProse(mapping.reasoning, bytes: Limits.reasoningBytes) else {
-                return .malformed(reason: "MITRE reasoning is empty, unsafe, or oversized")
+                return .malformed(reason: .mitreReasoningSafety)
             }
             if let tacticId = mapping.tacticId {
                 guard nonemptyBounded(tacticId, bytes: Limits.mitreIdBytes),
                       LLMPrompts.mitreIDIsGrounded(tacticId, in: allowedTacticIds) else {
-                    return .malformed(reason: "MITRE tactic was not supplied with the alert")
+                    return .malformed(reason: .mitreGrounding)
                 }
             }
             if let techniqueId = mapping.techniqueId {
                 guard nonemptyBounded(techniqueId, bytes: Limits.mitreIdBytes),
                       LLMPrompts.mitreIDIsGrounded(techniqueId, in: allowedTechniqueIds) else {
-                    return .malformed(reason: "MITRE technique was not supplied with the alert")
+                    return .malformed(reason: .mitreGrounding)
                 }
             }
             guard mapping.tacticId != nil || mapping.techniqueId != nil else {
-                return .malformed(reason: "MITRE mapping has no supplied identifier")
+                return .malformed(reason: .mitreGrounding)
             }
         }
 
         guard wire.suggestedActions.count <= Limits.actionCount else {
-            return .malformed(reason: "too many suggested actions")
+            return .malformed(reason: .actionCardinality)
         }
         for action in wire.suggestedActions {
             guard safeModelProse(action.title, bytes: Limits.actionTitleBytes),
                   safeModelProse(action.rationale, bytes: Limits.actionRationaleBytes) else {
-                return .malformed(reason: "suggested action text is empty, unsafe, or oversized")
+                return .malformed(reason: .actionProseSafety)
             }
             if let d3fendRef = action.d3fendRef,
                !safeD3FENDReference(d3fendRef) {
-                return .malformed(reason: "D3FEND reference is malformed")
+                return .malformed(reason: .d3fendReference)
             }
             if let preview = action.previewCommand {
                 guard safePreview(preview, bytes: Limits.previewBytes) else {
-                    return .malformed(reason: "action preview is empty, unsafe, oversized, or multiline")
+                    return .malformed(reason: .actionPreviewSafety)
                 }
             }
             let mutatesState: Bool
@@ -632,17 +846,15 @@ public enum LLMInvestigator {
             if mutatesState {
                 guard action.requiresConfirmation,
                       action.previewCommand != nil else {
-                    return .malformed(
-                        reason: "state-changing action lacks confirmation or a concrete preview"
-                    )
+                    return .malformed(reason: .actionConfirmation)
                 }
             } else if action.previewCommand != nil {
                 // A model must not smuggle an executable payload under the
                 // ostensibly non-mutating `document` / `escalate` labels.
-                return .malformed(reason: "non-state action carries an executable preview")
+                return .malformed(reason: .actionConfirmation)
             }
             if action.blastRadius != .low, !action.requiresConfirmation {
-                return .malformed(reason: "medium/high blast-radius action lacks confirmation")
+                return .malformed(reason: .actionConfirmation)
             }
         }
 
@@ -650,7 +862,7 @@ public enum LLMInvestigator {
               wire.confidencePenalties.allSatisfy({
                   safeModelProse($0, bytes: Limits.penaltyBytes)
               }) else {
-            return .malformed(reason: "confidence penalties are empty, unsafe, oversized, or too numerous")
+            return .malformed(reason: .confidencePenaltySafety)
         }
 
         let trustedModel = fallbackModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -662,16 +874,22 @@ public enum LLMInvestigator {
         // descriptions are reconstructed deterministically here.
         let groundedEvidence = wire.evidenceChain.map { evidence in
             let note: String
+            let id: String
             switch evidence.kind {
             case .alert:
                 note = "Alert supplied to this investigation"
+                id = alertId
             case .event:
                 note = "Event supplied to this investigation"
+                id = allowedEventIds.sorted().first(where: {
+                    identifiersMatch(evidence.id, $0)
+                }) ?? evidence.id
             case .enrichment, .threatIntel:
                 // Rejected above; this branch keeps the mapping exhaustive.
                 note = "Evidence supplied to this investigation"
+                id = evidence.id
             }
-            return Evidence(kind: evidence.kind, id: evidence.id, note: note)
+            return Evidence(kind: evidence.kind, id: id, note: note)
         }
         return .ok(LLMInvestigation(
             alertId: alertId,
@@ -690,6 +908,18 @@ public enum LLMInvestigator {
     private static func nonemptyBounded(_ value: String, bytes: Int) -> Bool {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && value.utf8.count <= bytes
+    }
+
+    /// Providers commonly normalize UUID hex casing. Treat the two textual
+    /// forms as the same already-supplied identifier without relaxing arbitrary
+    /// alert/event identifiers or permitting a different UUID.
+    static func identifiersMatch(_ candidate: String, _ supplied: String) -> Bool {
+        if candidate == supplied { return true }
+        guard let candidateUUID = UUID(uuidString: candidate),
+              let suppliedUUID = UUID(uuidString: supplied) else {
+            return false
+        }
+        return candidateUUID == suppliedUUID
     }
 
     /// Model prose is persisted and later exposed through MCP, so it is a
@@ -712,7 +942,9 @@ public enum LLMInvestigator {
     private static func safeD3FENDReference(_ value: String) -> Bool {
         guard nonemptyBounded(value, bytes: Limits.d3fendRefBytes),
               value.hasPrefix("D3-"), value.utf8.count > 3,
-              D3FENDMapping.canonicalSlug[value] != nil else { return false }
+              D3FENDMapping.all.contains(where: { $0.id == value }) else {
+            return false
+        }
         return value.utf8.dropFirst(3).allSatisfy { byte in
             (65...90).contains(byte) || (48...57).contains(byte) || byte == 45
         }
@@ -721,7 +953,10 @@ public enum LLMInvestigator {
     private static func containsUnsafeScalar(_ value: String) -> Bool {
         value.unicodeScalars.contains { scalar in
             switch scalar.value {
-            case 0x00...0x1F, 0x7F...0x9F,
+            // LF is ordinary multi-sentence prose and is allowed by the
+            // central persisted-advisory boundary. Preview commands reject LF
+            // separately below; all other C0/C1 controls remain forbidden.
+            case 0x00...0x09, 0x0B...0x1F, 0x7F...0x9F,
                  0x200B...0x200F, 0x202A...0x202E,
                  0x2060...0x206F, 0xFEFF,
                  0xE0000...0xE007F:

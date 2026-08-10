@@ -56,6 +56,68 @@ public enum LLMSemanticValidationOutcome: String, CaseIterable, Codable, Hashabl
     case finalRejection = "final_rejection"
 }
 
+/// Whether one rejected alert-investigation response is being retried or ends
+/// the owning semantic operation. Keeping this closed prevents callers from
+/// inventing telemetry labels or retry states.
+public enum LLMAlertInvestigationRejectionDisposition: Sendable {
+    case retry
+    case final
+}
+
+/// One fixed reason bucket in the alert-investigation rejection ledger.
+/// `observedAttempts` counts every rejected response (including the response
+/// that triggered a retry); `terminalRejections` counts only the reason that
+/// ultimately ended an investigation without an accepted result.
+public struct LLMAlertInvestigationRejectionReasonCount: Codable, Sendable, Equatable {
+    public let reason: LLMAlertInvestigationRejectionReason
+    public let observedAttempts: UInt64
+    public let terminalRejections: UInt64
+}
+
+/// Content-free, fixed-cardinality diagnostic counters for structured alert
+/// investigation. The producer always emits every reason exactly once in enum
+/// declaration order, including zero-valued reasons.
+public struct LLMAlertInvestigationRejectionSnapshot: Codable, Sendable, Equatable {
+    public let observedAttemptsTotal: UInt64
+    public let terminalRejectionsTotal: UInt64
+    public let byReason: [LLMAlertInvestigationRejectionReasonCount]
+
+    public func counts(
+        for reason: LLMAlertInvestigationRejectionReason
+    ) -> LLMAlertInvestigationRejectionReasonCount? {
+        byReason.first { $0.reason == reason }
+    }
+
+    public var fixedCardinalityMaintained: Bool {
+        byReason.map(\.reason) == LLMAlertInvestigationRejectionReason.allCases
+            && Set(byReason.map(\.reason)).count
+                == LLMAlertInvestigationRejectionReason.allCases.count
+    }
+
+    public var conservationMaintained: Bool {
+        guard fixedCardinalityMaintained else { return false }
+        var observed: UInt64 = 0
+        var terminal: UInt64 = 0
+        for entry in byReason {
+            let (nextObserved, observedOverflow) = observed.addingReportingOverflow(
+                entry.observedAttempts
+            )
+            let (nextTerminal, terminalOverflow) = terminal.addingReportingOverflow(
+                entry.terminalRejections
+            )
+            guard !observedOverflow, !terminalOverflow,
+                  entry.terminalRejections <= entry.observedAttempts else {
+                return false
+            }
+            observed = nextObserved
+            terminal = nextTerminal
+        }
+        return observed == observedAttemptsTotal
+            && terminal == terminalRejectionsTotal
+            && terminalRejectionsTotal <= observedAttemptsTotal
+    }
+}
+
 public struct LLMDownstreamValidationCounts: Codable, Sendable, Equatable {
     public internal(set) var operationsStartedTotal: UInt64 = 0
     public internal(set) var currentOperations: Int = 0
@@ -200,6 +262,9 @@ public struct LLMRuntimeTelemetrySnapshot: Codable, Sendable, Equatable {
     /// Always contains every `LLMRuntimeFeature` exactly once in declaration
     /// order, including zero-valued and `.unspecified` entries.
     public let perFeature: [LLMFeatureRuntimeTelemetry]
+    /// nil only when decoding a schema-1 heartbeat from an older engine. New
+    /// producers always emit the exhaustive fixed reason set.
+    public let alertInvestigationRejections: LLMAlertInvestigationRejectionSnapshot?
 
     public func counters(for feature: LLMRuntimeFeature) -> LLMRuntimeCountersSnapshot? {
         perFeature.first { $0.feature == feature }?.counters
@@ -393,6 +458,11 @@ struct LLMRuntimeTelemetryLedger {
         })
     private var nextSemanticOperationID: UInt64 = 0
     private var activeSemanticOperations: [UInt64: LLMRuntimeFeature] = [:]
+    private var alertInvestigationRejectionCounts = Dictionary(
+        uniqueKeysWithValues: LLMAlertInvestigationRejectionReason.allCases.map {
+            ($0, (observed: UInt64(0), terminal: UInt64(0)))
+        }
+    )
 
     mutating func begin(
         feature: LLMRuntimeFeature,
@@ -441,7 +511,11 @@ struct LLMRuntimeTelemetryLedger {
     mutating func recordDownstreamRetry(
         token: LLMSemanticOperationToken
     ) -> Bool {
-        guard activeSemanticOperations[token.id] == token.feature else {
+        // Alert-investigation retries require a fixed reason. Route them
+        // through recordAlertInvestigationRejection so schema-2 snapshots
+        // cannot contain an unattributed rejection.
+        guard token.feature != .alertInvestigation,
+              activeSemanticOperations[token.id] == token.feature else {
             return false
         }
         totals.recordDownstreamRetry()
@@ -454,12 +528,44 @@ struct LLMRuntimeTelemetryLedger {
         token: LLMSemanticOperationToken,
         outcome: LLMSemanticValidationOutcome
     ) -> Bool {
-        guard activeSemanticOperations[token.id] == token.feature else {
+        // Accepted alert investigations have no rejection reason. Their final
+        // rejections must use recordAlertInvestigationRejection atomically.
+        guard !(token.feature == .alertInvestigation && outcome == .finalRejection),
+              activeSemanticOperations[token.id] == token.feature else {
             return false
         }
         activeSemanticOperations.removeValue(forKey: token.id)
         totals.finishDownstreamValidation(outcome)
         byFeature[token.feature]!.finishDownstreamValidation(outcome)
+        return true
+    }
+
+    /// Attribute a rejected structured response and atomically advance the
+    /// generic semantic ledger. This avoids a retry/final count with no reason,
+    /// or a reason count detached from a live alert-investigation operation.
+    @discardableResult
+    mutating func recordAlertInvestigationRejection(
+        token: LLMSemanticOperationToken,
+        reason: LLMAlertInvestigationRejectionReason,
+        disposition: LLMAlertInvestigationRejectionDisposition
+    ) -> Bool {
+        guard token.feature == .alertInvestigation,
+              activeSemanticOperations[token.id] == token.feature else {
+            return false
+        }
+        var reasonCounts = alertInvestigationRejectionCounts[reason]!
+        reasonCounts.observed += 1
+        switch disposition {
+        case .retry:
+            totals.recordDownstreamRetry()
+            byFeature[token.feature]!.recordDownstreamRetry()
+        case .final:
+            reasonCounts.terminal += 1
+            activeSemanticOperations.removeValue(forKey: token.id)
+            totals.finishDownstreamValidation(.finalRejection)
+            byFeature[token.feature]!.finishDownstreamValidation(.finalRejection)
+        }
+        alertInvestigationRejectionCounts[reason] = reasonCounts
         return true
     }
 
@@ -505,8 +611,17 @@ struct LLMRuntimeTelemetryLedger {
     }
 
     func snapshot(capturedAt: Date) -> LLMRuntimeTelemetrySnapshot {
-        LLMRuntimeTelemetrySnapshot(
-            schemaVersion: 1,
+        let rejectionEntries = LLMAlertInvestigationRejectionReason.allCases.map {
+            reason in
+            let counts = alertInvestigationRejectionCounts[reason]!
+            return LLMAlertInvestigationRejectionReasonCount(
+                reason: reason,
+                observedAttempts: counts.observed,
+                terminalRejections: counts.terminal
+            )
+        }
+        return LLMRuntimeTelemetrySnapshot(
+            schemaVersion: 2,
             capturedAtUnix: capturedAt.timeIntervalSince1970,
             totals: totals.snapshot(),
             perFeature: LLMRuntimeFeature.allCases.map {
@@ -514,7 +629,16 @@ struct LLMRuntimeTelemetryLedger {
                     feature: $0,
                     counters: byFeature[$0]!.snapshot()
                 )
-            }
+            },
+            alertInvestigationRejections: LLMAlertInvestigationRejectionSnapshot(
+                observedAttemptsTotal: rejectionEntries.reduce(0) {
+                    $0 + $1.observedAttempts
+                },
+                terminalRejectionsTotal: rejectionEntries.reduce(0) {
+                    $0 + $1.terminalRejections
+                },
+                byReason: rejectionEntries
+            )
         )
     }
 }

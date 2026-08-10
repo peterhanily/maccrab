@@ -361,7 +361,14 @@ public actor SequenceEngine {
     private var pendingLaterSteps: [String: [PendingStep]] = [:]
 
     /// Per-rule cap on buffered out-of-order later steps. Oldest evicted first.
-    static let maxPendingPerRule = 256
+    ///
+    /// rc.10 proved that the old 256-entry sub-cap discarded exact history long
+    /// before the already-enforced global/serialized-state budgets were full:
+    /// 510,591 per-rule evictions were observed while the aggregate journal held
+    /// only 330 entries. Let one genuinely hot rule use the complete existing
+    /// global allowance. This expands no resource envelope—the independent
+    /// global count and 7.5 MiB semantic-weight ceilings remain authoritative.
+    static let maxPendingPerRule = SequenceCheckpointLimits.maximumTotalPendingSteps
 
     /// Global cap shared by runtime, capture, and restore. A per-rule bound is
     /// not a global memory bound when the rule corpus itself is large.
@@ -379,6 +386,22 @@ public actor SequenceEngine {
 
     /// Cumulative history items shed by either per-rule or global bounds.
     private var evictedPendingStepCount: Int = 0
+
+    /// Exact admission ledger for the bounded pending-step journal. These are
+    /// updated from identity differences in `setPendingBucket`, so a full
+    /// bucket that admits one item while evicting another cannot hide behind an
+    /// unchanged depth gauge.
+    private var pendingStepsOfferedTotal: UInt64 = 0
+    private var pendingStepsCompletedTotal: UInt64 = 0
+    private var pendingStepsExplicitlyShedTotal: UInt64 = 0
+    private var pendingStepsOfferedByRule: [String: UInt64] = [:]
+    private var pendingStepsCompletedByRule: [String: UInt64] = [:]
+    private var pendingStepsExplicitlyShedByRule: [String: UInt64] = [:]
+
+    private enum PendingStepRemovalDisposition {
+        case completed
+        case explicitlyShed
+    }
 
     /// Recovery is a startup-only operation. Empty runtime collections are not
     /// proof that no event was evaluated: a miss or single-step completion can
@@ -897,7 +920,11 @@ public actor SequenceEngine {
                           && $0.matched.eventId == identity.eventID
                   }) else { continue }
             bucket.remove(at: index)
-            setPendingBucket(bucket, for: identity.ruleID)
+            setPendingBucket(
+                bucket,
+                for: identity.ruleID,
+                removedDisposition: .explicitlyShed
+            )
             excess -= 1
             removed += 1
         }
@@ -1512,6 +1539,38 @@ public actor SequenceEngine {
         evictedPendingStepCount
     }
 
+    /// Producer-owned conservation boundary for out-of-order sequence history.
+    /// Mutations are synchronous on this actor, so there is no unclassified
+    /// in-flight state between admission and a terminal/queued disposition.
+    public func pendingStepConservation() -> SequenceConservationTelemetry {
+        SequenceConservationTelemetry(
+            offered: pendingStepsOfferedTotal,
+            completed: pendingStepsCompletedTotal,
+            queued: UInt64(totalPendingStepCount),
+            inFlight: 0,
+            explicitlyShed: pendingStepsExplicitlyShedTotal
+        )
+    }
+
+    /// Trusted rule IDs are the only labels. Retain cumulative entries after a
+    /// reload/removal so the rule responsible for an earlier shed episode does
+    /// not disappear from the next diagnostic heartbeat.
+    public func pendingStepConservationByRule() -> [String: SequenceConservationTelemetry] {
+        let keys = Set(pendingStepsOfferedByRule.keys)
+            .union(pendingStepsCompletedByRule.keys)
+            .union(pendingStepsExplicitlyShedByRule.keys)
+            .union(pendingLaterSteps.keys)
+        return Dictionary(uniqueKeysWithValues: keys.map { ruleId in
+            (ruleId, SequenceConservationTelemetry(
+                offered: pendingStepsOfferedByRule[ruleId] ?? 0,
+                completed: pendingStepsCompletedByRule[ruleId] ?? 0,
+                queued: UInt64(pendingLaterSteps[ruleId]?.count ?? 0),
+                inFlight: 0,
+                explicitlyShed: pendingStepsExplicitlyShedByRule[ruleId] ?? 0
+            ))
+        })
+    }
+
     /// Number of ENABLED sequence rules — the count that actually evaluates,
     /// distinct from `ruleCount` (loaded). Mirrors `RuleEngine.enabledRuleCount`
     /// so a caller/heartbeat can surface effective temporal-tier coverage
@@ -1723,10 +1782,46 @@ public actor SequenceEngine {
         partialMatches[ruleId] = partials.isEmpty ? nil : partials
     }
 
-    private func setPendingBucket(_ pending: [PendingStep], for ruleId: String) {
+    private func setPendingBucket(
+        _ pending: [PendingStep],
+        for ruleId: String,
+        removedDisposition: PendingStepRemovalDisposition = .completed
+    ) {
+        let oldPending = pendingLaterSteps[ruleId] ?? []
+        let oldIdentities = Set(oldPending.map {
+            pendingIdentity(ruleId: ruleId, pending: $0)
+        })
+        let newIdentities = Set(pending.map {
+            pendingIdentity(ruleId: ruleId, pending: $0)
+        })
+        let offeredCount = UInt64(newIdentities.subtracting(oldIdentities).count)
+        Self.addSaturating(offeredCount, to: &pendingStepsOfferedTotal)
+        Self.addSaturating(
+            offeredCount,
+            for: ruleId,
+            in: &pendingStepsOfferedByRule
+        )
+        let removedCount = UInt64(oldIdentities.subtracting(newIdentities).count)
+        switch removedDisposition {
+        case .completed:
+            Self.addSaturating(removedCount, to: &pendingStepsCompletedTotal)
+            Self.addSaturating(
+                removedCount,
+                for: ruleId,
+                in: &pendingStepsCompletedByRule
+            )
+        case .explicitlyShed:
+            Self.addSaturating(removedCount, to: &pendingStepsExplicitlyShedTotal)
+            Self.addSaturating(
+                removedCount,
+                for: ruleId,
+                in: &pendingStepsExplicitlyShedByRule
+            )
+        }
+
         let oldWeight = pendingBucketWeight(
             ruleId: ruleId,
-            pending: pendingLaterSteps[ruleId] ?? []
+            pending: oldPending
         )
         if checkpointStateWeight < oldWeight {
             checkpointStateWeight = recomputedCheckpointAccountingWeight()
@@ -1794,7 +1889,11 @@ public actor SequenceEngine {
                             !selected.contains(pendingIdentity(ruleId: ruleId, pending: $0))
                         }
                         if surviving.count != pending.count {
-                            setPendingBucket(surviving, for: ruleId)
+                            setPendingBucket(
+                                surviving,
+                                for: ruleId,
+                                removedDisposition: .explicitlyShed
+                            )
                         }
                     }
                     removedThisPass = selected.count
@@ -2474,14 +2573,15 @@ public actor SequenceEngine {
             // out-of-order gap to bridge). Appending AFTER replay also prevents one
             // event that matches both step[0] and a later step from satisfying two
             // steps of the same freshly-seeded partial.
-            // NOT gated on `ruleCanSufferLaneInversion`. See that function: the
-            // lane model says a fast step[0] can never be overtaken, but
-            // `outOfOrderBackfillCompletes` asserts backfill for a rule whose
-            // steps are BOTH process_creation, and ES runs split clients with
-            // eslogger/kdebug fallbacks — so same-lane delivery order is not
-            // something this code can currently prove. Parking stays
-            // unconditional until that is settled; the cost is bounded churn,
-            // and the alternative risks silently losing sequence detections.
+            // NOT gated on `ruleCanSufferLaneInversion`. Each collector has an
+            // independent producer Task and the two final lanes have independent
+            // consumers, so neither same-lane nor priority-before-file event-time
+            // order is guaranteed. In particular, seven stable process-first
+            // rules have later file steps, and their process event may arrive
+            // through ES/eslogger/kdebug after a later file event. The bounded
+            // history is honest continuity protection for those inversions; its
+            // eviction telemetry must stay visible rather than trading overload
+            // for silent sequence false negatives.
             if rule.ordered {
                 let initialStepId = rule.steps.first?.id
                 for step in matchingSteps where step.id != initialStepId {
@@ -2937,33 +3037,21 @@ public actor SequenceEngine {
     /// A2 cross-consumer race — see `pendingLaterSteps`). Bounded per rule (oldest
     /// evicted) and deduped by (eventId, stepId) so the same event cannot occupy
     /// the history twice across re-evaluations.
-    /// Whether this rule's step[0] can actually arrive AFTER a later step.
+    /// Whether the declared step categories expose the intentional slow-file /
+    /// fast-priority inversion shape.
     ///
-    /// `pendingLaterSteps` exists for exactly one race: the pipeline splits
-    /// events into a priority stream and a slower file stream, so a later step
-    /// on the fast lane can reach `evaluate` before its step[0] on the slow one.
-    /// Parking was unconditional, which made the buffer pure waste for every
-    /// rule whose step[0] rides the SAME lane — its step[0] can never be
-    /// delivered late, so nothing parked for it can ever be replayed into a
-    /// sequence.
+    /// The pipeline split makes this one obvious inversion: a later step on the
+    /// fast lane can reach `evaluate` before its step[0] on the slow one. This
+    /// classifier is useful for inventory/diagnostics, but it is deliberately
+    /// not a scheduling proof: independent collector producer Tasks can reorder
+    /// event time within one lane, and the two lane consumers can run in either
+    /// order.
     ///
-    /// Measured on the installed rc.8 engine: all 11 sequence rules active under
-    /// the default stable profile have step[0] `process_creation`, which rides
-    /// the priority lane — and the flood filling the buffer was file `open`,
-    /// which rides the priority lane too. So the inversion was impossible for
-    /// every enabled rule, while the per-rule cap of 256 evicted at up to 820
-    /// entries/second (166,691 cumulative) and pinned
-    /// `sequence_state_continuity_maintained` false, which is the sole input to
-    /// the menu bar's "protection degraded" label. Pure cost: wasted work, a
-    /// permanent false warning, and no detection anywhere could benefit.
-    ///
-    /// Gating on the lane relation keeps the buffer for the rules that genuinely
-    /// need it (a file-lane step[0] followed by a priority-lane step) and skips
-    /// it entirely for the rules that cannot.
+    /// Do not gate pending-step parking on this value without first carrying a
+    /// source/order proof through `EventPipelineEnvelope` into this actor.
     static func ruleCanSufferLaneInversion(_ rule: SequenceRule) -> Bool {
         guard let initial = rule.steps.first else { return false }
-        // Only a SLOW-lane step[0] can be overtaken. If step[0] rides the
-        // priority lane it is never behind a later step in delivery order.
+        // A slow-lane step[0] is the declared split's obvious overtaken case.
         guard stepRidesFileLane(initial) else { return false }
         // ...and only by a later step on the FAST lane.
         return rule.steps.dropFirst().contains { !stepRidesFileLane($0) }
@@ -2978,10 +3066,8 @@ public actor SequenceEngine {
     /// fragile, and wrong in the dangerous direction if it under-approximates —
     /// treat every `file_event` step as possibly-slow.
     ///
-    /// The error is therefore always toward KEEPING the buffer, so this can only
-    /// ever skip parking for a rule whose step[0] is definitively fast
-    /// (process/network/TCC). That is sufficient: every sequence rule active
-    /// under the default profile has a `process_creation` step[0].
+    /// This deliberately describes category potential only. It says nothing
+    /// about cross-producer arrival order and must not control correctness.
     static func stepRidesFileLane(_ step: SequenceStep) -> Bool {
         step.logsourceCategory == "file_event"
     }
@@ -3008,7 +3094,11 @@ public actor SequenceEngine {
             buf.removeFirst(removed)
             recordPendingEvictions(removed)
         }
-        setPendingBucket(buf, for: ruleId)
+        setPendingBucket(
+            buf,
+            for: ruleId,
+            removedDisposition: .explicitlyShed
+        )
         enforceGlobalPendingCap()
         markCheckpointStateMutation()
     }
@@ -3362,6 +3452,19 @@ public actor SequenceEngine {
         guard delta > 0 else { return current }
         guard current >= 0, current <= Int.max - delta else { return Int.max }
         return current + delta
+    }
+
+    private static func addSaturating(_ delta: UInt64, to value: inout UInt64) {
+        value = value > UInt64.max - delta ? UInt64.max : value + delta
+    }
+
+    private static func addSaturating(
+        _ delta: UInt64,
+        for key: String,
+        in values: inout [String: UInt64]
+    ) {
+        let current = values[key] ?? 0
+        values[key] = current > UInt64.max - delta ? UInt64.max : current + delta
     }
 
     // MARK: - Helpers

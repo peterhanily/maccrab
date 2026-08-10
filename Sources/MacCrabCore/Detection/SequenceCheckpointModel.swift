@@ -188,6 +188,48 @@ public enum SequenceCheckpointCarrierInvalidationReason: String, Codable, Sendab
     case ioFailure = "io_failure"
 }
 
+/// Fixed-cardinality accounting for one bounded sequence work boundary.
+///
+/// `offered = completed + queued + in_flight + explicitly_shed` must hold at
+/// every observation. The counters are producer-owned: consumers must never
+/// derive a balancing residual and call it conservation.
+public struct SequenceConservationTelemetry: Codable, Sendable, Equatable {
+    public let offered: UInt64
+    public let completed: UInt64
+    public let queued: UInt64
+    public let inFlight: UInt64
+    public let explicitlyShed: UInt64
+
+    public init(
+        offered: UInt64,
+        completed: UInt64,
+        queued: UInt64,
+        inFlight: UInt64,
+        explicitlyShed: UInt64
+    ) {
+        self.offered = offered
+        self.completed = completed
+        self.queued = queued
+        self.inFlight = inFlight
+        self.explicitlyShed = explicitlyShed
+    }
+
+    public var conservationMaintained: Bool {
+        let (completedAndQueued, overflow1) = completed.addingReportingOverflow(queued)
+        let (withInFlight, overflow2) = completedAndQueued.addingReportingOverflow(inFlight)
+        let (accounted, overflow3) = withInFlight.addingReportingOverflow(explicitlyShed)
+        return !overflow1 && !overflow2 && !overflow3 && offered == accounted
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case offered
+        case completed
+        case queued
+        case inFlight = "in_flight"
+        case explicitlyShed = "explicitly_shed"
+    }
+}
+
 /// A point-in-time telemetry view suitable for heartbeat publication. Digest
 /// fields are optional when engine mutations occurred after the last bounded
 /// snapshot; that means "not observed yet", never "clean".
@@ -216,6 +258,7 @@ public struct SequenceCheckpointTelemetry: Codable, Sendable, Equatable {
     public let bytesWrittenTotal: UInt64
     public let unchangedSkipsTotal: UInt64
     public let budgetDeferralsTotal: UInt64
+    public let conservation: SequenceConservationTelemetry
     public let orphanFilesCurrent: Int
     public let orphanBytesCurrent: Int
     public let orphanFilesRemovedTotal: UInt64

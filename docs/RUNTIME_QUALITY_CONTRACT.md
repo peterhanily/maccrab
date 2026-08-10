@@ -112,18 +112,106 @@ reference Mac using the recorded normal-plus-burst workload:
 |---|---|
 | Process | One engine PID for the epoch; no crash, watchdog exit, or relaunch. |
 | Conservation | Offered equals completed + queued + in-flight + explicitly shed at every lane and persistence boundary. |
+| Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed. Its measured peak must reach at least 1,274 combined offered events/s, the previously observed failure-state rate; a conserving idle collector does not pass. |
 | Priority fidelity | Zero priority-lane, kernel, callback-copy, or upstream collector loss. |
 | File fidelity | Zero unclassified queue loss. Semantic rejects/coalesces must be attributable to a tested reason that is conservative against the complete enabled rule corpus. |
-| Correlation continuity | At least 900 seconds of sequence recovery coverage, zero checkpoint/journal shed, and a restart + rule-reload probe that proves eligible partials survive while expired or rule-hash-mismatched state does not. |
+| Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. Source-bound focused tests exercise restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
 | Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. |
-| TraceGraph | At least 99% writable duty, no mutation shed in the reference workload, no recovery oscillation, and bounded coalescing telemetry. |
+| TraceGraph | At least 99% writable duty, no mutation or ingest shed, no recovery oscillation, and exact batch/row/observation/coalescing conservation at every sample. No unmeasured coalescing-bound assertion is accepted. |
+| TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
 | Disk writes | Engine average at most 1 MiB/s over the epoch and no 60-second interval above 4 MiB/s; no macOS disk-writes diagnostic. |
 | CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI p95 at most 10% of one core. |
 | Memory | Engine RSS at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
 | Disk safety | Every SQLite family stays beneath its exact DB+WAL+SHM cap and preserves the configured free-space floor. |
 | Rules | Sealed rules synchronize before readers, corpus parity holds, and ordinary launch produces no administrator-password flow. |
+| AI quality | Alert investigation is configured and healthy. Every sample carries conserving schema-2 fixed-cardinality telemetry; the fixed harmless HIGH-alert trigger must yield at least one newly started and accepted investigation, with no operation in flight at either epoch boundary, zero unattributed requests, and zero final rejection. Disabled or zero-operation runs fail this release qualification. |
 | Shipped tools | `maccrabctl version` and `maccrab-mcp --version` execute after signing and directly from the mounted DMG under normal SIP/AMFI policy. |
 | Evidence | Candidate report binds source commit/tree, DMG SHA-256, signing/notarization, payload inventory, and the complete host measurements above. |
+
+### Machine-readable evidence
+
+`scripts/candidate-qualification.py` is the executable form of this table.
+`release.sh` records the inspected candidate at
+`.qualification-evidence/MacCrab-v<VERSION>.candidate.json` and creates the
+intentionally failing template
+`.qualification-evidence/MacCrab-v<VERSION>.runtime.json`. Do not edit that
+template into a PASS. After installing the exact DMG, run the recorder printed
+by `release.sh`:
+
+```bash
+sudo /usr/bin/python3 -I scripts/candidate-qualification.py record-runtime \
+  --candidate-manifest .qualification-evidence/MacCrab-v<VERSION>.candidate.json \
+  --dmg .build/MacCrab-v<VERSION>.dmg --source-root . \
+  --output .qualification-evidence/MacCrab-v<VERSION>.runtime.json
+```
+
+The command verifies the installed process identity, runs focused source-bound
+continuity/rule probes, executes both shipped tools from a read-only `/Volumes`
+mount, records 31 samples, runs the fixed bounded burst at minute 5, and sends
+the live rule-reload probe at minute 7.5. The burst submits one bounded OTLP
+span and executes a harmless `/dev/tcp` command-line token (it opens no network
+connection) from a per-run unique copy of `/bin/echo`, avoiding the one-hour
+rule/executable deduplication window while triggering the stable high-severity
+reverse-shell rule and its real installed alert-investigation path. Both transitive workload executors and
+their SHA-256 values are part of the workload binding. It leaves a restart-safe
+`.runtime.json.capture.json` while sampling. A passing report embeds each raw
+rich heartbeat, heartbeat-file digest/ownership, Darwin process counters, and
+complete SQLite-family observation; it then canonically hashes and normalizes
+those observations. The verifier repeats that normalization, reconciles sample
+timestamps to epoch start plus offset, recomputes CPU/write aggregates and p95,
+and enforces every numerical limit above. Every sample carries cumulative engine
+CPU and disk-write totals, engine RSS, GUI background CPU, the complete
+conservation-boundary snapshot, all five zero-loss counters, and LLM quality
+state. Aggregate PASS fields must reconcile to those raw observations.
+
+Before recording, enable Agent Traces/the loopback receiver and configure a
+working alert-investigation LLM. The recorder fails before starting the
+900-second timer when the running engine does not publish a real producer
+conservation ledger or a full writable TraceStore. In particular, it never
+derives shed from a balancing residual and never invents offered/completed
+counters from queue depth. `sequence_checkpoint.conservation`,
+`sequence_journal_conservation`, and
+`traces_storage_admission.ingest_conservation` must come from their enabled
+producers. A disabled or startup-blocked TraceStore does not publish a synthetic
+zero ledger and cannot qualify. This is a release-readiness requirement, not an
+operator field to fill by hand.
+
+The v1 schema has an explicit completeness inventory. Conservation must contain
+exactly these shipping boundaries: `priority-ingress`, `file-ingress`,
+`priority-event-persistence`, `file-event-persistence`,
+`sequence-checkpoint`, `sequence-journal`, `trace-graph-mutation`, and
+`trace-store-ingest`. Disk safety must measure at least `events.db`,
+`alerts.db`, `campaigns.db`, `tracegraph.db`, `traces.db`, and
+`attribution_overrides.db`; any additional discovered SQLite family must also be
+listed and measured with its exact configured cap (pass
+`--sqlite-cap NAME=BYTES` only for a newly shipped family whose cap is not yet
+published by the heartbeat). Adding a lane, persistence boundary, or database requires
+a gate/schema update so omission cannot manufacture a pass.
+
+After the first `release.sh` phase has preserved a candidate,
+`VERSION=<VERSION> make test-corpus` invokes the containment recorder. The
+recorder itself verifies the full candidate, requires the clean exact source
+checkout both before and after its tests, builds the corpus binaries in a fresh
+private SwiftPM scratch path under a fixed sanitized environment, and mounts
+the bound DMG read-only. The mounted
+candidate's signed `maccrabctl` then signs and tests three deny-default bundles:
+the exact shipped example and the source-built C and Swift adversarial probes.
+This executes the candidate-statically-linked runner/broker and its exact signed
+sibling trampoline. The report binds each executed candidate binary's payload
+hash, Developer ID, Team ID, signing identifier and CDHash, plus the complete
+build/control/sign/run transcripts. While a throwaway file sentinel and fixed
+loopback listener are live, the same freshly built C and Swift probe bytes must
+first run unsandboxed and produce their complete positive `leak.*` deny-control
+sets; reachability is checked both before and after the candidate runs. PASS
+then requires the sandboxed third-party lane, exit zero, terminal `ok`, exactly
+one expected artifact, and zero `leak.*` artifacts for every candidate run. It
+derives its own timestamps;
+there is no standalone success-attestation or caller-supplied timestamp path.
+The publisher independently recomputes the complete Tier-B source digest.
+Both reports bind the candidate manifest, source commit/tree, exact DMG SHA-256
+and payload inventory. `release.sh` validates them once before clean CI and
+again at the irreversible publication boundary, then continuously rehashes all
+three evidence files and the DMG. It never rebuilds a qualified candidate.
 
 The first repaired host run may make a threshold look unrealistic. That is a
 design review signal: measure where the cost comes from, change the feature or

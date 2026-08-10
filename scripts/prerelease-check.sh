@@ -560,50 +560,16 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# Containment corpus attestation (E-01)
+# Installed-host evidence is intentionally not checked here.
 # ---------------------------------------------------------------------
-# The Tier-B containment corpus (`make test-corpus`) is the only on-device
-# proof that the sandboxed third-party plugin lane actually CONTAINS
-# (undeclared read / network / fork / metadata-stat / undeclared
-# mach-lookup are OS-denied; a declared read is brokered over fd 3). It
-# can't run in hosted CI — it spawns the real sandbox_init under a physical
-# macOS host — so the operator must run it on the release machine. On
-# success `make test-corpus` writes a local `.maccrab-corpus-attest`
-# recording version + commit + UTC date. Require that marker here, and
-# require it to attest the exact version being cut, so a release can't ship
-# without that containment proof.
+# prerelease-check.sh can be skipped for emergency metadata work, and it also
+# runs before the first-phase candidate exists. Containment and runtime evidence
+# therefore live in release.sh's later, non-bypassable exact-candidate boundary.
+# candidate-qualification.py binds the JSON reports to the source commit/tree,
+# the complete containment-source digest, and the exact DMG SHA-256.
 
-section "Containment corpus attestation"
-
-ATTEST_FILE=".maccrab-corpus-attest"
-if [[ ! -f "$ATTEST_FILE" ]]; then
-    err "$ATTEST_FILE missing — run \`make test-corpus\` on this Mac (macOS 26) for the release build first"
-else
-    ATTEST_VER=$(grep -oE 'version=[^[:space:]]+' "$ATTEST_FILE" 2>/dev/null | head -1 | sed -E 's/^version=//')
-    # The marker used to bind ONLY to the version string, so it stayed "valid"
-    # across any number of commits to the containment code: v1.21.5 GA shipped
-    # attesting commit 88fdaf5 while the released tree was 16 commits later,
-    # including changes that had never been run against the corpus. The commit=
-    # field existed but nothing read it. Bind to the containment sources instead —
-    # `make test-corpus` records a digest over TierB + the broker / sandbox-host
-    # trampoline / probe targets, and we recompute it here. This detects
-    # STALENESS, not forgery (the marker is still a local, gitignored file); CI
-    # is the eventual home once a macOS runner exists.
-    # KEEP THIS PATH LIST IN SYNC WITH THE ONE IN Makefile's test-corpus TARGET.
-    CUR_DIGEST=$(find Sources/MacCrabForensics/TierB Sources/CTierBBroker Sources/maccrab-tierb-sandbox-host Sources/maccrab-tierb-corpus-probe Sources/maccrab-tierb-corpus-probe-swift Sources/maccrab-tierb-example -type f 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}' || true)
-    ATTEST_DIGEST=$(grep -oE 'digest=[a-f0-9]{64}' "$ATTEST_FILE" 2>/dev/null | head -1 | sed -E 's/^digest=//')
-    if [[ -z "$ATTEST_VER" ]]; then
-        err "$ATTEST_FILE has no version= field — re-run \`make test-corpus\` on this Mac (macOS 26)"
-    elif [[ "$ATTEST_VER" != "$VERSION_SEMVER" ]]; then
-        err "$ATTEST_FILE attests \"$ATTEST_VER\" but this release is \"$VERSION_SEMVER\" — re-run \`make test-corpus\` on this Mac (macOS 26)"
-    elif [[ -z "$ATTEST_DIGEST" ]]; then
-        err "$ATTEST_FILE has no digest= field (written by a pre-digest \`make test-corpus\`) — re-run \`make test-corpus\` on this Mac (macOS 26)"
-    elif [[ "$ATTEST_DIGEST" != "$CUR_DIGEST" ]]; then
-        err "$ATTEST_FILE attests containment digest ${ATTEST_DIGEST:0:16}... but the Tier-B containment sources now hash to ${CUR_DIGEST:0:16}... — the sandbox / broker / trampoline code changed since the corpus run, so the only containment proof does not describe this build; re-run \`make test-corpus\` on this Mac (macOS 26)"
-    else
-        ok "$ATTEST_FILE → containment corpus attested for $VERSION_SEMVER (digest ${CUR_DIGEST:0:16}...)"
-    fi
-fi
+section "Installed-host qualification boundary"
+ok "runtime + containment reports are enforced non-bypassably by release.sh after the exact candidate exists"
 
 # ---------------------------------------------------------------------
 # Summary

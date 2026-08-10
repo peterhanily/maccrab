@@ -216,6 +216,10 @@ struct HeartbeatSnapshotTests {
         "bytes_written_total": 172032,
         "unchanged_skips_total": 3,
         "budget_deferrals_total": 0,
+        "conservation": {
+          "offered": 24, "completed": 23, "queued": 0,
+          "in_flight": 1, "explicitly_shed": 0
+        },
         "orphan_files_current": 0,
         "orphan_bytes_current": 0,
         "orphan_files_removed_total": 2,
@@ -225,6 +229,16 @@ struct HeartbeatSnapshotTests {
         "carrier_invalidations_total": 1,
         "last_carrier_invalidation_reason": "integrity_mismatch",
         "last_carrier_invalidation_at_unix": 1699999997.0
+      },
+      "sequence_journal_conservation": {
+        "offered": 12, "completed": 10, "queued": 2,
+        "in_flight": 0, "explicitly_shed": 0
+      },
+      "sequence_journal_conservation_by_rule": {
+        "stable-rule": {
+          "offered": 12, "completed": 10, "queued": 2,
+          "in_flight": 0, "explicitly_shed": 0
+        }
       },
       "sequence_partials_evicted_total": 0,
       "sequence_partials_in_flight": 17,
@@ -251,7 +265,11 @@ struct HeartbeatSnapshotTests {
         "admission_threshold_bytes": 96468992,
         "transaction_reserve_bytes": 8388608, "footprint_bytes": 95158272,
         "free_space_bytes": 805306368, "free_space_floor_bytes": 1073741824,
-        "pinned_reader": false, "recovering": true
+        "pinned_reader": false, "recovering": true,
+        "ingest_conservation": {
+          "offered": 29, "completed": 7, "queued": 3,
+          "in_flight": 4, "explicitly_shed": 15
+        }
       },
       "browser_inventory": {
         "coverage_known": true, "complete": false, "degraded": true,
@@ -456,6 +474,8 @@ struct HeartbeatSnapshotTests {
         #expect(h.sequenceCheckpoint?.crashRPOBoundCurrentlyMaintained == true)
         #expect(h.sequenceCheckpoint?.periodicWritesLastHour == 14)
         #expect(h.sequenceCheckpoint?.writesTotal == 21)
+        #expect(h.sequenceCheckpoint?.conservation?.conservationMaintained == true)
+        #expect(h.sequenceCheckpoint?.conservation?.inFlight == 1)
         #expect(h.sequenceCheckpoint?.orphanFilesRemovedTotal == 2)
         #expect(h.sequenceCheckpoint?.carrierInvalidationsTotal == 1)
         #expect(h.sequenceCheckpoint?.lastCarrierInvalidationReason == "integrity_mismatch")
@@ -463,6 +483,10 @@ struct HeartbeatSnapshotTests {
         #expect(h.sequencePartialsInFlight == 17)
         #expect(h.sequencePendingStepsCurrent == 2)
         #expect(h.sequencePendingStepsEvictedTotal == 0)
+        #expect(h.sequenceJournalConservation?.conservationMaintained == true)
+        #expect(h.sequenceJournalConservation?.queued == 2)
+        #expect(h.sequenceJournalConservationByRule?["stable-rule"]?
+            .conservationMaintained == true)
         #expect(h.sequenceCheckpointStateWeightBytes == 4_096)
         #expect(h.sequenceCheckpointStateWeightRecomputedBytes == 4_096)
         #expect(h.sequenceCheckpointStateWeightLimitBytes == 8_388_608)
@@ -483,6 +507,13 @@ struct HeartbeatSnapshotTests {
         #expect(h.traceStoreStorageAdmission?.shedMutationsTotal == 19)
         #expect(h.traceStoreStorageAdmission?.maxFootprintBytes == 104_857_600)
         #expect(h.traceStoreStorageAdmission?.recovering == true)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?.offered == 29)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?.completed == 7)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?.queued == 3)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?.inFlight == 4)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?.explicitlyShed == 15)
+        #expect(h.traceStoreStorageAdmission?.ingestConservation?
+            .conservationMaintained == true)
         #expect(h.browserInventory?.coverageKnown == true)
         #expect(h.browserInventory?.complete == false)
         #expect(h.browserInventory?.degraded == true)
@@ -1004,13 +1035,25 @@ struct HeartbeatSnapshotTests {
                 "model": "content-free",
                 "healthy": true,
                 "runtime_telemetry": [
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "capturedAtUnix": 1_700_000_000.0,
                     "totals": counters(
                         requested: 3, success: 2, cache: 1, admitted: 2,
                         accepted: 1, retries: 1, finalRejections: 1
                     ),
                     "perFeature": perFeature,
+                    "alertInvestigationRejections": [
+                        "observedAttemptsTotal": 2,
+                        "terminalRejectionsTotal": 1,
+                        "byReason": LLMAlertInvestigationRejectionReason.allCases.map {
+                            reason in
+                            [
+                                "reason": reason.rawValue,
+                                "observedAttempts": reason == .mitreGrounding ? 2 : 0,
+                                "terminalRejections": reason == .mitreGrounding ? 1 : 0,
+                            ]
+                        },
+                    ],
                 ],
             ],
         ]
@@ -1021,6 +1064,8 @@ struct HeartbeatSnapshotTests {
         #expect(h.llm?.unspecifiedRequestsTotal == 1)
         #expect(h.llm?.runtimeTelemetry?.totals.downstreamValidation.retryRequested == 1)
         #expect(h.llm?.runtimeTelemetry?.totals.downstreamValidation.finalRejection == 1)
+        #expect(h.llm?.runtimeTelemetry?.alertInvestigationRejections?
+            .counts(for: .mitreGrounding)?.observedAttempts == 2)
         #expect(h.llm?.runtimeTelemetryDegraded == true)
     }
 

@@ -1457,7 +1457,10 @@ struct SQLitePersistentStoreAdmissionTests {
         // a one-shot/lifetime accident visible under sanitizers as well.
         for cycle in 0..<8 {
             if try await store.count() == 0 {
-                let seed = try await store.insert(events: (0..<8).map { _ in event() })
+                let seed = try await store.insert(
+                    events: (0..<8).map { _ in event() },
+                    lane: .priority
+                )
                 #expect(seed.persistedCount == 8)
             }
 
@@ -1476,7 +1479,10 @@ struct SQLitePersistentStoreAdmissionTests {
             #expect(compacted + reserve <= tight.maxFootprintBytes)
 
             let batch = (0..<16).map { _ in event() }
-            let recovered = try await store.insert(events: batch)
+            let recovered = try await store.insert(
+                events: batch,
+                lane: .priority
+            )
             #expect(recovered.persistedCount == batch.count)
             #expect(recovered.filteredCount == 0)
             #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
@@ -1831,7 +1837,7 @@ struct SQLitePersistentStoreAdmissionTests {
         }
 
         let before = await store.batchInsertTransactionCount()
-        let result = try await store.insert(events: events)
+        let result = try await store.insert(events: events, lane: .priority)
         let after = await store.batchInsertTransactionCount()
         #expect(result.persistedCount == 1_000)
         #expect(result.filteredCount == 0)
@@ -1866,7 +1872,7 @@ struct SQLitePersistentStoreAdmissionTests {
         )
 
         do {
-            _ = try await store.insert(events: [oversized])
+            _ = try await store.insert(events: [oversized], lane: .priority)
             Issue.record("oversized event unexpectedly passed transaction admission")
         } catch let failure as EventBatchInsertFailure {
             #expect(failure.progress.persistedCount == 0)
@@ -1920,7 +1926,7 @@ struct SQLitePersistentStoreAdmissionTests {
             path: path,
             storagePolicy: configured
         )
-        _ = try await bootstrap?.insert(events: [event()])
+        _ = try await bootstrap?.insert(events: [event()], lane: .priority)
         bootstrap = nil
 
         var raw: OpaquePointer?
@@ -2082,6 +2088,12 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(writer.contains("partial.uncommittedEvents"))
         #expect(writer.contains("partial.underlyingError"))
         #expect(writer.contains("partial.replacementReadyForRetry"))
+        #expect(writer.contains("partitionPartialFailure("),
+                "partial retries must map EventStore identities back to writer generations")
+        #expect(!writer.contains("batch.suffix("),
+                "arbitrarily-positioned filtered rows make count-based suffix mapping unsafe")
+        #expect(!writer.contains("batch.dropLast("),
+                "terminal generations must come from exact partial dispositions")
 
         let eventStore = try #require(
             files["MacCrabCore/Storage/EventStore.swift"]
@@ -2164,13 +2176,30 @@ struct SQLitePersistentStoreAdmissionTests {
             ))
             let method = String(source[start.lowerBound..<end.lowerBound])
 
-            #expect(
-                occurrences(
-                    of: "estimatedTransactionBytes: estimatedTransactionBytes",
-                    in: method
-                ) == 2,
-                "\(path) must charge the same full estimate on primary and secondary admission"
+            let fullEstimateForwards = occurrences(
+                of: "estimatedTransactionBytes: estimatedTransactionBytes",
+                in: method
             )
+            if path.hasSuffix("EventStore.swift") {
+                // EventStore additionally carries the lane through a fresh-probe
+                // helper and through both post-reopen revalidations. Pin the
+                // complete forwarding chain rather than the old two-call shape.
+                #expect(fullEstimateForwards == 6,
+                        "EventStore must preserve the full estimate through every fresh lane check")
+                #expect(occurrences(
+                    of: "try admitFreshStorageWrite(",
+                    in: method
+                ) == 2, "primary and revalidation admission must share the fresh gate")
+                #expect(occurrences(
+                    of: "try revalidateStorageWriteAfterReopen(",
+                    in: method
+                ) == 2, "both bounded recovery reopens must receive the full estimate")
+            } else {
+                #expect(
+                    fullEstimateForwards == 2,
+                    "\(path) must charge the same full estimate on primary and secondary admission"
+                )
+            }
             #expect(
                 occurrences(of: "try reopenAfterStorageRecovery()", in: method) == 2,
                 "\(path) must reopen once after each successful recovery admission"
@@ -2273,9 +2302,10 @@ struct SQLitePersistentStoreAdmissionTests {
         // prevent: the cheap events would have shut the door on the valuable
         // ones by a different route.
         //
-        // Guard the property structurally: the lane check lives in EventStore
-        // and throws directly, so `admitWrite` is never called with a
-        // lane-adjusted value and cannot latch on the lane's behalf.
+        // Guard the property structurally: the shared gate probes first so the
+        // lane check consumes its fresh footprint, but the lane check still
+        // throws directly rather than feeding an adjusted value back through
+        // `admitWrite` and poisoning the shared latch.
         let source = try String(
             contentsOf: URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()          // MacCrabCoreTests
@@ -2284,23 +2314,40 @@ struct SQLitePersistentStoreAdmissionTests {
                 .appendingPathComponent("Sources/MacCrabCore/Storage/EventStore.swift"),
             encoding: .utf8
         )
-        guard let gate = source.range(of: "if lane == .file, let footprint = admission.lastFootprintBytes") else {
-            Issue.record("the lane reserve pre-check is missing from EventStore.admitStorageWrite")
-            return
-        }
-        // Bound the window precisely: the lane check must sit BETWEEN the gate
-        // and the shared `admitWrite` call, and must resolve itself by throwing
-        // inside that region. A loose window would run past the closing brace
-        // and pick up the legitimate admitWrite below it.
-        let after = String(source[gate.lowerBound...])
-        guard let admitCall = after.range(of: "try admission.admitWrite") else {
-            Issue.record("expected admitStorageWrite to still call admitWrite for the shared gate")
-            return
-        }
-        let checkBody = String(after[..<admitCall.lowerBound])
-        #expect(checkBody.contains("throw SQLitePersistentStoreAdmissionError.footprintLimit"),
-                "the lane check must throw on its own, before the shared gate runs")
-        #expect(!checkBody.contains("admitWrite"),
+        let freshStart = try #require(source.range(
+            of: "private func admitFreshStorageWrite("
+        ))
+        let freshEnd = try #require(source.range(
+            of: "private func revalidateStorageWriteAfterReopen(",
+            range: freshStart.upperBound..<source.endIndex
+        ))
+        let freshBody = String(
+            source[freshStart.lowerBound..<freshEnd.lowerBound]
+        )
+        let sharedGate = try #require(freshBody.range(
+            of: "try admission.admitWrite("
+        ))
+        let laneGate = try #require(freshBody.range(
+            of: "try enforceFileLaneReserve("
+        ))
+        #expect(sharedGate.lowerBound < laneGate.lowerBound,
+                "the lane check must consume admitWrite's fresh footprint")
+
+        let laneStart = try #require(source.range(
+            of: "private func enforceFileLaneReserve("
+        ))
+        let laneEnd = try #require(source.range(
+            of: "private func admitStorageMaintenanceWrite(",
+            range: laneStart.upperBound..<source.endIndex
+        ))
+        let laneBody = String(source[laneStart.lowerBound..<laneEnd.lowerBound])
+        #expect(laneBody.contains("throw SQLitePersistentStoreAdmissionError.footprintLimit"),
+                "the lane check must throw directly after the shared fresh probe")
+        #expect(!laneBody.contains("admitWrite("),
                 "the lane check must not route through admitWrite, whose failure latches shared state")
+        #expect(occurrences(
+            of: "try revalidateStorageWriteAfterReopen(",
+            in: source
+        ) == 2, "every bounded recovery reopen must receive a fresh lane check")
     }
 }

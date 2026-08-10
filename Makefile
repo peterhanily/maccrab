@@ -110,31 +110,36 @@ test-integration:
 # Containment corpus — the on-device proof that the sandboxed third-party Tier-B
 # lane actually CONTAINS (undeclared read / network / fork / metadata-stat /
 # undeclared mach-lookup are OS-denied; a declared read is brokered over fd 3).
-# Gated behind MACCRAB_CORPUS so plain `make test` / hosted CI stays
-# host-agnostic; this runs the real spawn under sandbox_init on a physical macOS
-# host. MANDATORY pre-release gate for ANY change under Sources/MacCrabForensics/
+# Gated behind MACCRAB_CORPUS so plain `make test` stays host-agnostic; this
+# runs the real spawn under sandbox_init on a physical macOS host. MANDATORY
+# pre-release gate for ANY change under Sources/MacCrabForensics/
 # TierB or the trampoline/broker C targets — record the run in the release
 # checklist. (audit #2: the only containment proof must not run nowhere.)
-# The marker records a DIGEST over the containment sources, not just a version
-# string, so it goes stale the moment that code changes. The path list below is
-# MIRRORED in scripts/prerelease-check.sh — change both together.
+# candidate-qualification.py mounts the exact DMG read-only and drives the
+# candidate's shipped maccrabctl + runner/broker + signed trampoline against the
+# shipped example and fresh-private-build C/Swift deny probes, including a
+# reachable-loopback/throwaway-file unsandboxed positive control. It records the
+# exact candidate binary identities, transcripts, source commit/tree, host, interval,
+# and a canonical containment-source digest. release.sh independently recomputes
+# those bindings at its non-bypassable publication gate.
 test-corpus:
 	@set -o pipefail; \
-	swift build && \
-	MACCRAB_CORPUS=1 MACCRAB_BIN_DIR="$$(swift build --show-bin-path)" \
-		swift test --filter ContainmentCorpus 2>&1 | grep -E "✔|✘|Test run"; \
-	rc=$$?; \
-	if [ "$$rc" -eq 0 ]; then \
-		ver="$${VERSION:-$$(grep -E '^[[:space:]]*public static let fallback:' Sources/MacCrabCore/MacCrabVersion.swift | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"; \
-		dig="$$(find Sources/MacCrabForensics/TierB Sources/CTierBBroker Sources/maccrab-tierb-sandbox-host Sources/maccrab-tierb-corpus-probe Sources/maccrab-tierb-corpus-probe-swift Sources/maccrab-tierb-example -type f 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $$1}')"; \
-		printf 'CORPUS_ATTESTED version=%s commit=%s digest=%s date=%s\n' \
-			"$$ver" "$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$$dig" \
-			"$$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .maccrab-corpus-attest; \
-		echo "✓ containment corpus attested for $$ver → .maccrab-corpus-attest"; \
-	else \
-		echo "✗ containment corpus failed (rc=$$rc) — .maccrab-corpus-attest NOT written"; \
+	ver="$${VERSION:-$$(grep -E '^[[:space:]]*public static let fallback:' Sources/MacCrabCore/MacCrabVersion.swift | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"; \
+	candidate=".qualification-evidence/MacCrab-v$$ver.candidate.json"; \
+	dmg=".build/MacCrab-v$$ver.dmg"; \
+	if [ ! -f "$$candidate" ] || [ -L "$$candidate" ] || [ ! -s "$$candidate" ] \
+			|| [ ! -f "$$dmg" ] || [ -L "$$dmg" ] || [ ! -s "$$dmg" ]; then \
+		echo "✗ build the preserved release.sh candidate before recording containment"; \
+		echo "  expected $$candidate and $$dmg"; \
+		exit 2; \
 	fi; \
-	exit $$rc
+	out=".qualification-evidence/MacCrab-v$$ver.containment.json"; \
+	python3 -I scripts/candidate-qualification.py record-containment \
+		--version "$$ver" \
+		--source-root . \
+		--candidate-manifest "$$candidate" \
+		--dmg "$$dmg" \
+		--output "$$out"
 
 # Also see scripts/check-promotion.sh <rule-id|--all> — advisory checker for
 # the experimental→stable promotion bar (CONTRIBUTING.md "Rule Promotion Criteria").

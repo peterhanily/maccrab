@@ -75,6 +75,21 @@ struct SequenceCheckpointTests {
         )
     }
 
+    private func fileEvent(
+        _ executable: String,
+        pid: Int32,
+        timestamp: Date
+    ) -> Event {
+        Event(
+            timestamp: timestamp,
+            eventCategory: .file,
+            eventType: .creation,
+            eventAction: "write",
+            process: process(executable, pid: pid),
+            file: FileInfo(path: "/tmp/checkpoint-seed", action: .write)
+        )
+    }
+
     private func rule(
         id: String = "checkpoint-sequence",
         window: TimeInterval = 600,
@@ -116,6 +131,34 @@ struct SequenceCheckpointTests {
             ],
             trigger: .allSteps,
             enabled: enabled
+        )
+    }
+
+    private func laneInversionRule() -> SequenceRule {
+        let base = rule()
+        return SequenceRule(
+            id: base.id,
+            title: base.title,
+            description: base.description,
+            level: base.level,
+            tags: base.tags,
+            window: base.window,
+            correlationType: base.correlationType,
+            ordered: base.ordered,
+            steps: [
+                SequenceStep(
+                    id: "download",
+                    logsourceCategory: "file_event",
+                    predicates: [Predicate(
+                        field: "Image", modifier: .endswith,
+                        values: ["/curl"], negate: false
+                    )]
+                ),
+                base.steps[1],
+            ],
+            trigger: base.trigger,
+            enabled: base.enabled,
+            suppressible: base.suppressible
         )
     }
 
@@ -270,7 +313,8 @@ struct SequenceCheckpointTests {
         let base = Date()
 
         let first = SequenceEngine(lineage: ProcessLineage())
-        try await first.addRule(rule())
+        let inversionRule = laneInversionRule()
+        try await first.addRule(inversionRule)
         // Delivery is reversed but event time is chronological.
         _ = await first.evaluate(
             event("/tmp/payload", pid: 202, timestamp: base.addingTimeInterval(2))
@@ -279,7 +323,7 @@ struct SequenceCheckpointTests {
         _ = await writer.forceFlush(engine: first, now: base.addingTimeInterval(0.1))
 
         let restarted = SequenceEngine(lineage: ProcessLineage())
-        try await restarted.addRule(rule())
+        try await restarted.addRule(inversionRule)
         let reader = SequenceCheckpointCoordinator(checkpointURL: fixture.file)
         let restore = await reader.restore(
             into: restarted,
@@ -292,9 +336,9 @@ struct SequenceCheckpointTests {
             expiredPendingSteps: 0
         ))
 
-        let matches = await restarted.evaluate(
-            event("/usr/bin/curl", pid: 202, timestamp: base)
-        )
+        let matches = await restarted.evaluate(fileEvent(
+            "/usr/bin/curl", pid: 202, timestamp: base
+        ))
         #expect(matches.contains { $0.ruleId == "checkpoint-sequence" })
     }
 
@@ -482,6 +526,14 @@ struct SequenceCheckpointTests {
         let telemetry = await coordinator.telemetry(now: base.addingTimeInterval(10))
         #expect(telemetry.unchangedSkipsTotal == 1)
         #expect(!telemetry.dirty)
+        #expect(telemetry.conservation == SequenceConservationTelemetry(
+            offered: 2,
+            completed: 2,
+            queued: 0,
+            inFlight: 0,
+            explicitlyShed: 0
+        ))
+        #expect(telemetry.conservation.conservationMaintained)
     }
 
     @Test("graceful flush bypasses cadence and captures the newest generation")
@@ -557,6 +609,14 @@ struct SequenceCheckpointTests {
         #expect(telemetry.lastFailure != nil)
         #expect(telemetry.lastFailureAt != nil)
         #expect(telemetry.writesTotal == 0)
+        #expect(telemetry.conservation == SequenceConservationTelemetry(
+            offered: 1,
+            completed: 0,
+            queued: 0,
+            inFlight: 0,
+            explicitlyShed: 1
+        ))
+        #expect(telemetry.conservation.conservationMaintained)
     }
 
     @Test("invalid identities and step membership reject before atomic restore")
@@ -1094,6 +1154,14 @@ struct SequenceCheckpointTests {
         let telemetry = await coordinator.telemetry(now: base.addingTimeInterval(-20_000))
         #expect(telemetry.periodicWritesLastHour == 1)
         #expect(telemetry.budgetDeferralsTotal == 1)
+        #expect(telemetry.conservation == SequenceConservationTelemetry(
+            offered: 4,
+            completed: 3,
+            queued: 0,
+            inFlight: 0,
+            explicitlyShed: 1
+        ))
+        #expect(telemetry.conservation.conservationMaintained)
     }
 
     @Test("semantic weight estimate dominates adversarial canonical JSON size")

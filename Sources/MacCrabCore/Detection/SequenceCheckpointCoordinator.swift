@@ -57,6 +57,14 @@ public actor SequenceCheckpointCoordinator {
     private var bytesWrittenTotal: UInt64 = 0
     private var unchangedSkipsTotal: UInt64 = 0
     private var budgetDeferralsTotal: UInt64 = 0
+    /// Every requested write pass receives exactly one current or terminal
+    /// disposition. Cadence no-ops complete normally; overlap, budget refusal,
+    /// and I/O/capture failure are explicit shed rather than disappearing from
+    /// the release-quality boundary.
+    private var writeRequestsOfferedTotal: UInt64 = 0
+    private var writeRequestsCompletedTotal: UInt64 = 0
+    private var writeRequestsExplicitlyShedTotal: UInt64 = 0
+    private var writeRequestsInFlight: UInt64 = 0
     private var orphanFilesCurrent = 0
     private var orphanBytesCurrent = 0
     private var orphanFilesRemovedTotal: UInt64 = 0
@@ -316,6 +324,13 @@ public actor SequenceCheckpointCoordinator {
             bytesWrittenTotal: bytesWrittenTotal,
             unchangedSkipsTotal: unchangedSkipsTotal,
             budgetDeferralsTotal: budgetDeferralsTotal,
+            conservation: SequenceConservationTelemetry(
+                offered: writeRequestsOfferedTotal,
+                completed: writeRequestsCompletedTotal,
+                queued: 0,
+                inFlight: writeRequestsInFlight,
+                explicitlyShed: writeRequestsExplicitlyShedTotal
+            ),
             orphanFilesCurrent: orphanFilesCurrent,
             orphanBytesCurrent: orphanBytesCurrent,
             orphanFilesRemovedTotal: orphanFilesRemovedTotal,
@@ -350,15 +365,21 @@ public actor SequenceCheckpointCoordinator {
         now: Date,
         forced: Bool
     ) async -> SequenceCheckpointWriteResult {
-        guard !operationInProgress else { return .alreadyInProgress }
+        incrementSaturating(&writeRequestsOfferedTotal)
+        guard !operationInProgress else {
+            incrementSaturating(&writeRequestsExplicitlyShedTotal)
+            return .alreadyInProgress
+        }
         let monotonicTick = sampleMonotonicTick()
         if !forced,
            let lastPeriodicAttemptTick,
            monotonicTick - lastPeriodicAttemptTick < policy.cadence {
+            incrementSaturating(&writeRequestsCompletedTotal)
             return .notDue
         }
 
         operationInProgress = true
+        writeRequestsInFlight = 1
         defer { operationInProgress = false }
         lastAttemptAt = now
         if !forced { lastPeriodicAttemptTick = monotonicTick }
@@ -407,6 +428,7 @@ public actor SequenceCheckpointCoordinator {
                     lastSuccessTick = monotonicTick
                     incrementSaturating(&unchangedSkipsTotal)
                     lastFailure = nil
+                    finishWriteRequest(explicitlyShed: false)
                     return .unchanged
                 }
                 if case .invalid(let reason) = carrierValidation {
@@ -436,6 +458,7 @@ public actor SequenceCheckpointCoordinator {
                         SequenceCheckpointError.periodicBudgetExceeded.localizedDescription,
                         at: now
                     )
+                    finishWriteRequest(explicitlyShed: true)
                     return .budgetDeferred
                 }
             }
@@ -479,6 +502,7 @@ public actor SequenceCheckpointCoordinator {
                 dirty = true
             }
             logger.debug("Sequence checkpoint wrote \(file.count) bytes (generation \(capture.sourceGeneration), dirty after write: \(self.dirty))")
+            finishWriteRequest(explicitlyShed: false)
             return .written(bytes: file.count)
         } catch {
             let detail = error.localizedDescription
@@ -487,7 +511,20 @@ public actor SequenceCheckpointCoordinator {
             dirty = true
             recordFailure(detail, at: now)
             logger.error("Sequence checkpoint write failed: \(detail)")
+            finishWriteRequest(explicitlyShed: true)
             return .failed(detail)
+        }
+    }
+
+    private func finishWriteRequest(explicitlyShed: Bool) {
+        // The operation guard permits exactly one admitted write. Keep the
+        // gauge fail-visible if a future path calls this without admission.
+        guard writeRequestsInFlight == 1 else { return }
+        writeRequestsInFlight = 0
+        if explicitlyShed {
+            incrementSaturating(&writeRequestsExplicitlyShedTotal)
+        } else {
+            incrementSaturating(&writeRequestsCompletedTotal)
         }
     }
 

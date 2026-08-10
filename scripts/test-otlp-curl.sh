@@ -19,18 +19,21 @@
 #   scripts/test-otlp-curl.sh
 #   scripts/test-otlp-curl.sh --port 4318    # custom port
 #   scripts/test-otlp-curl.sh --secret-test  # encode an api_key in attrs to verify sanitiser
+#   scripts/test-otlp-curl.sh --receiver-only # rely on heartbeat ledger for commit proof
 
 set -euo pipefail
 
 PORT=4318
 SECRET_TEST=0
+RECEIVER_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port) PORT="$2"; shift 2 ;;
         --secret-test) SECRET_TEST=1; shift ;;
+        --receiver-only) RECEIVER_ONLY=1; shift ;;
         -h|--help)
-            echo "Usage: $0 [--port 4318] [--secret-test]"
+            echo "Usage: $0 [--port 4318] [--secret-test] [--receiver-only]"
             exit 0
             ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -196,6 +199,15 @@ if [[ "$RESP_CODE" != "200" ]]; then
     exit 1
 fi
 echo "✓ Receiver returned HTTP 200"
+
+# The release runtime recorder runs this probe as the original desktop user,
+# which intentionally cannot read root-owned traces.db.  In that mode the
+# receiver response proves delivery, while the recorder independently requires
+# the root-owned heartbeat's TraceStore offered/completed counters to advance.
+if [[ "$RECEIVER_ONLY" == "1" ]]; then
+    echo "✓ Bounded OTLP span accepted; root-owned recorder will verify persistence"
+    exit 0
+fi
 
 # Give the actor a moment to flush.
 sleep 1

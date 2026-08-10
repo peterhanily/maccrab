@@ -96,7 +96,7 @@ struct LLMRuntimeTelemetryTests {
 
         let snapshot = await service.runtimeTelemetrySnapshot()
         let totals = snapshot.totals
-        #expect(snapshot.schemaVersion == 1)
+        #expect(snapshot.schemaVersion == 2)
         #expect(snapshot.perFeature.map(\.feature) == LLMRuntimeFeature.allCases)
         #expect(Set(snapshot.perFeature.map(\.feature)).count == LLMRuntimeFeature.allCases.count)
         #expect(totals.requestedTotal == 2)
@@ -203,6 +203,11 @@ struct LLMRuntimeTelemetryTests {
 
         #expect(await service.recordDownstreamValidationRetry(
             token: investigationToken
+        ) == false, "Alert-investigation retries cannot omit their reason")
+        #expect(await service.recordAlertInvestigationRejection(
+            token: investigationToken,
+            reason: .summarySafety,
+            disposition: .retry
         ))
         let wrongFeatureToken = LLMSemanticOperationToken(
             id: investigationToken.id,
@@ -246,6 +251,82 @@ struct LLMRuntimeTelemetryTests {
         #expect(investigation?.downstreamValidation.finalRejection == 0)
         #expect(snapshot.counters(for: .campaignInvestigation)?
             .downstreamValidation.finalRejection == 1)
+    }
+
+    @Test("Alert-investigation rejection reasons are exhaustive, conserving, and content-free")
+    func alertInvestigationRejectionReasons() async throws {
+        let service = LLMService(
+            backend: RecordingBackend(responses: []),
+            config: cloudConfig(),
+            minInterval: 0
+        )
+        let token = await service.beginDownstreamValidation(
+            feature: .alertInvestigation
+        )
+        #expect(await service.recordAlertInvestigationRejection(
+            token: token,
+            reason: .summarySafety,
+            disposition: .retry
+        ))
+        #expect(await service.finishDownstreamValidation(
+            token: token,
+            outcome: .finalRejection
+        ) == false, "Alert-investigation final rejection cannot omit its reason")
+        #expect(await service.recordAlertInvestigationRejection(
+            token: token,
+            reason: .evidenceGrounding,
+            disposition: .final
+        ))
+        #expect(await service.recordAlertInvestigationRejection(
+            token: token,
+            reason: .schemaDecode,
+            disposition: .final
+        ) == false, "A finished operation cannot accrue a floating reason")
+
+        let snapshot = await service.runtimeTelemetrySnapshot()
+        let reasons = try #require(snapshot.alertInvestigationRejections)
+        #expect(reasons.byReason.map(\.reason)
+            == LLMAlertInvestigationRejectionReason.allCases)
+        #expect(reasons.byReason.count
+            == LLMAlertInvestigationRejectionReason.allCases.count)
+        #expect(reasons.observedAttemptsTotal == 2)
+        #expect(reasons.terminalRejectionsTotal == 1)
+        #expect(reasons.counts(for: .summarySafety)?.observedAttempts == 1)
+        #expect(reasons.counts(for: .summarySafety)?.terminalRejections == 0)
+        #expect(reasons.counts(for: .evidenceGrounding)?.observedAttempts == 1)
+        #expect(reasons.counts(for: .evidenceGrounding)?.terminalRejections == 1)
+        #expect(reasons.conservationMaintained)
+
+        let missingBucket = LLMAlertInvestigationRejectionSnapshot(
+            observedAttemptsTotal: reasons.observedAttemptsTotal,
+            terminalRejectionsTotal: reasons.terminalRejectionsTotal,
+            byReason: Array(reasons.byReason.dropLast())
+        )
+        #expect(!missingBucket.fixedCardinalityMaintained)
+        #expect(!missingBucket.conservationMaintained)
+        let mismatchedTotal = LLMAlertInvestigationRejectionSnapshot(
+            observedAttemptsTotal: reasons.observedAttemptsTotal + 1,
+            terminalRejectionsTotal: reasons.terminalRejectionsTotal,
+            byReason: reasons.byReason
+        )
+        #expect(mismatchedTotal.fixedCardinalityMaintained)
+        #expect(!mismatchedTotal.conservationMaintained)
+
+        let semantic = try #require(
+            snapshot.counters(for: .alertInvestigation)?.downstreamValidation
+        )
+        #expect(semantic.retryRequested == 1)
+        #expect(semantic.finalRejection == 1)
+        #expect(semantic.conservationMaintained)
+
+        let encoded = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(
+            LLMRuntimeTelemetrySnapshot.self, from: encoded
+        )
+        #expect(decoded == snapshot)
+        let encodedText = String(decoding: encoded, as: UTF8.self)
+        #expect(!encodedText.contains("summary text"))
+        #expect(!encodedText.contains("provider response"))
     }
 
     @Test("Feature attribution is compile-required and current production calls do not drift")

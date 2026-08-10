@@ -146,14 +146,27 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
 
 /// Result wrapper for an LLM-enhanced operation.
 public struct LLMEnhancement: Sendable {
+    /// Backend/provider family that produced the response (for example
+    /// `Ollama` or `Claude`). This is not a model-version identifier.
     public let provider: String
+    /// Trusted configured model label selected by `LLMService`. This never
+    /// comes from provider-authored response text.
+    public let model: String
     public let prompt: String
     public let response: String
     public let latency: TimeInterval
     public let cached: Bool
 
-    public init(provider: String, prompt: String, response: String, latency: TimeInterval, cached: Bool) {
+    public init(
+        provider: String,
+        model: String,
+        prompt: String,
+        response: String,
+        latency: TimeInterval,
+        cached: Bool
+    ) {
         self.provider = provider
+        self.model = model
         self.prompt = prompt
         self.response = response
         self.latency = latency

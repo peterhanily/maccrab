@@ -2511,12 +2511,23 @@ func llmRuntimeOperatorStatusLines(_ llm: HeartbeatSnapshot.LLMHealth) -> [Strin
     let featureTotals = runtime.perFeature.map {
         "\($0.feature.rawValue)=\($0.counters.requestedTotal)"
     }.joined(separator: ", ")
-    return [
+    var lines = [
         "AI Runtime: requested=\(totals.requestedTotal), in_flight=\(totals.currentInFlight), backend_calls=\(totals.backendCallsStartedTotal), accounting=\(conservation)",
         "  Outcomes: success=\(outcomes.success), cache_hit=\(outcomes.cacheHit), backend_failure=\(outcomes.backendFailure), circuit_rejection=\(outcomes.circuitRejection), privacy_rejection=\(outcomes.privacyRejection), admission_shed=\(outcomes.admissionShed), cancellation=\(outcomes.cancellation), response_oversize=\(outcomes.responseOversize)",
         "  Attribution: unspecified=\(llm.unspecifiedRequestsTotal ?? 0); \(featureTotals)",
         "  Semantic validation: operations=\(semantic.operationsStartedTotal), current=\(semantic.currentOperations), accepted=\(semantic.accepted), retries=\(semantic.retryRequested), final_rejection=\(semantic.finalRejection)",
     ]
+    if let rejection = runtime.alertInvestigationRejections {
+        let nonzero = rejection.byReason.filter {
+            $0.observedAttempts > 0 || $0.terminalRejections > 0
+        }.map {
+            "\($0.reason.rawValue)=\($0.observedAttempts)/\($0.terminalRejections)"
+        }.joined(separator: ", ")
+        lines.append(
+            "  Alert investigation rejections: observed=\(rejection.observedAttemptsTotal), terminal=\(rejection.terminalRejectionsTotal); reasons(observed/terminal): \(nonzero.isEmpty ? "none" : nonzero)"
+        )
+    }
+    return lines
 }
 
 func alertEvidenceBudgetStatusLines(

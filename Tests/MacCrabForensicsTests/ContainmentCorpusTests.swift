@@ -1,6 +1,6 @@
-// ContainmentCorpusTests — the adversarial containment corpus as a CLIENT
-// integration test against the EXACT shipped SandboxedTierBRunner + broker +
-// trampoline (never a prototype). It proves, on a real macOS host, that:
+// ContainmentCorpusTests — the source-level adversarial containment regression
+// for SandboxedTierBRunner + broker + a development trampoline. It proves, on
+// a real macOS host, that the current source implementation enforces:
 //   - a benign plugin runs and emits under the deny-default sandbox (ALLOW);
 //   - a DECLARED read is served through the broker over fd 3 (ALLOW);
 //   - an undeclared file open, undeclared network egress, fork, a stat() of a
@@ -9,13 +9,14 @@
 //     artifacts (audit #4 added the metadata + mach-escape probes).
 //
 // GATED: the live-spawn tests run only when MACCRAB_CORPUS is set in the env AND
-// the signed trampoline + fixtures are present — so normal `swift test`/CI stays
-// green and the OPERATOR runs the real containment proof on macOS 26 with:
+// the development trampoline + fixtures are present — so normal `swift test`
+// stays green and a developer can exercise the source implementation with:
 //     MACCRAB_CORPUS=1 swift test --filter ContainmentCorpus
-// This is the launch gate the plan binds: assurance that "the OS denied the
-// read" is provable only by running it. The SBPL runtime base for a full Swift
-// plugin is still being tuned on device (TierB tuning); these C fixtures are the
-// minimal proof that the runner+broker+trampoline chain contains.
+// The release gate does not treat this debug test bundle as candidate evidence:
+// `make test-corpus` mounts the exact signed DMG and drives its release
+// `maccrabctl plugin test` path, which statically contains the shipped runner and
+// broker and resolves the signed sibling trampoline. These tests remain the
+// fast source regression for the same C and Swift adversarial inputs.
 
 import Testing
 import Foundation

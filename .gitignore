@@ -129,6 +129,9 @@ diagnosis.json
 soak/
 soak-marker.json
 samples.jsonl
+# Candidate-bound runtime qualification bundles are intentionally local-only.
+# They can contain host telemetry and macOS diagnostic reports.
+.qualification-evidence/
 
 # -----------------------------------------------------------------------------
 # Generic secret file patterns

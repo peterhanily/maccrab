@@ -3,6 +3,7 @@ import Foundation
 import Darwin
 import CSQLCipher
 @testable import MacCrabCore
+@testable import MacCrabAgentKit
 
 @Suite("TraceStore: authoritative disk admission + untrusted provenance")
 struct TraceStoreStorageAdmissionTests {
@@ -11,19 +12,42 @@ struct TraceStoreStorageAdmissionTests {
     private final class ProbeBox: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Int64?
+        private var scriptedValues: [Int64?] = []
+        private var scriptedReadCount = 0
 
         init(_ value: Int64?) { self.value = value }
 
         func get() -> Int64? {
             lock.lock()
             defer { lock.unlock() }
+            if !scriptedValues.isEmpty {
+                scriptedReadCount += 1
+                return scriptedValues.removeFirst()
+            }
+            if scriptedReadCount > 0 { scriptedReadCount += 1 }
             return value
         }
 
         func set(_ newValue: Int64?) {
             lock.lock()
             value = newValue
+            scriptedValues = []
+            scriptedReadCount = 0
             lock.unlock()
+        }
+
+        func script(_ values: [Int64?], then fallback: Int64?) {
+            lock.lock()
+            scriptedValues = values
+            value = fallback
+            scriptedReadCount = 0
+            lock.unlock()
+        }
+
+        func readsSinceScript() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return scriptedReadCount
         }
     }
 
@@ -36,6 +60,20 @@ struct TraceStoreStorageAdmissionTests {
     private static func cleanup(_ path: String) {
         for suffix in ["", "-wal", "-shm", "-journal"] {
             try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+    }
+
+    private static func executeSQLite(_ sql: String, at path: String) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK, let db else {
+            throw TraceStoreError.databaseOpenFailed("test fixture open failed")
+        }
+        defer { sqlite3_close(db) }
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else {
+            throw TraceStoreError.databaseOpenFailed(
+                String(cString: sqlite3_errmsg(db))
+            )
         }
     }
 
@@ -129,28 +167,448 @@ struct TraceStoreStorageAdmissionTests {
         #expect(try await blocked.count() == 0)
         #expect(await blocked.storageAdmissionStatus().reason == .probeFailure)
 
+        let maskedPath = Self.tempPath("masked-free-probe")
+        defer { Self.cleanup(maskedPath) }
+        do {
+            let maskedBootstrap = try TraceStore(path: maskedPath)
+            _ = maskedBootstrap
+        }
+        do {
+            _ = try TraceStore(
+                path: maskedPath,
+                maxFootprintBytes: 16 * Self.mib,
+                freeSpaceFloorBytes: Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib },
+                freeSpaceProbe: { _ in nil }
+            )
+            Issue.record("footprint pressure must not mask a failed free-space probe")
+        } catch let error as TraceStoreStorageAdmissionError {
+            guard case .probeFailed = error else {
+                Issue.record("expected probeFailed, got \(error)")
+                return
+            }
+        }
+
         let lowPath = Self.tempPath("low-floor")
         defer { Self.cleanup(lowPath) }
         _ = try TraceStore(path: lowPath)
-        #expect(throws: TraceStoreStorageAdmissionError.self) {
-            _ = try TraceStore(
-                path: lowPath,
-                freeSpaceFloorBytes: 1_024 * Self.mib,
-                freeSpaceProbe: { _ in 1_024 * Self.mib - 1 }
-            )
-        }
-        let freeSpace = ProbeBox(2_048 * Self.mib)
+        let freeSpace = ProbeBox(1_024 * Self.mib - 1)
         let low = try TraceStore(
             path: lowPath,
             freeSpaceFloorBytes: 1_024 * Self.mib,
             freeSpaceProbe: { _ in freeSpace.get() }
         )
-        freeSpace.set(1_024 * Self.mib - 1)
+        #expect(await low.storageAdmissionStatus().reason == .lowFreeSpace)
         await #expect(throws: TraceStoreStorageAdmissionError.self) {
             try await low.insertSpan(Self.span(id: "2222222222222222"))
         }
         #expect(try await low.count() == 0)
         #expect(await low.storageAdmissionStatus().reason == .lowFreeSpace)
+        freeSpace.set(2_048 * Self.mib)
+        try await low.insertSpan(Self.span(id: "3333333333333333"))
+        #expect(try await low.count() == 1,
+                "an existing pressure-opened store must resume without SIGHUP")
+    }
+
+    @Test(
+        "An inherited at/over-cap store recovers and restores the full writer",
+        arguments: [16, 20]
+    )
+    func startupPressureCanRecover(footprintMiB: Int) async throws {
+        let path = Self.tempPath("startup-recovery-\(footprintMiB)")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span(id: "aaaaaaaaaaaaaaaa"))
+        try await bootstrap?.insertSpan(Self.span(
+            trace: "5bf92f3577b34da6a3ce929d0e0e4736",
+            id: "bbbbbbbbbbbbbbbb",
+            start: 1_700_000_000_000_001_000
+        ))
+        bootstrap = nil
+
+        let footprint = ProbeBox(Int64(footprintMiB) * Self.mib)
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: 16 * Self.mib,
+            transactionReserveBytes: 4 * Self.mib,
+            footprintProbe: { _ in footprint.get() }
+        )
+        let blocked = await store.storageAdmissionStatus()
+        #expect(blocked.blocked)
+        #expect(blocked.reason == .footprintLimit)
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+        await #expect(throws: TraceStoreStorageAdmissionError.self) {
+            try await store.insertSpan(Self.span(id: "cccccccccccccccc"))
+        }
+
+        let recovery = try await store.recoverStorageBudget(
+            retentionCutoff: Date(),
+            maxDeleteRows: 1,
+            maxVacuumPages: 0
+        )
+        #expect(recovery.spansDeleted == 1,
+                "startup pressure must not strand the bounded recovery actor")
+        #expect(try await store.count() == 1)
+        #expect((await store.storageAdmissionStatus()).blocked,
+                "synthetic at/over-cap pressure remains latched after one bounded delete")
+
+        footprint.set(Self.mib)
+        #expect((await store.storageAdmissionStatus()).blocked,
+                "healthy probes alone must not expose the under-configured recovery handle")
+        try await store.insertSpan(Self.span(id: "dddddddddddddddd"))
+        #expect(try await store.count() == 2)
+        let configured = try await store.writerConfigurationDiagnostics()
+        #expect(!configured.recoveryOnly)
+        #expect(configured.maxPageCount == 3_072,
+                "12 MiB main-file threshold / 4 KiB SQLite pages")
+        #expect(configured.journalSizeLimit == 12 * Self.mib)
+        #expect(configured.journalMode.lowercased() == "wal")
+        #expect(!(await store.storageAdmissionStatus().blocked))
+    }
+
+    @Test("Recovery-only open rejects a current-version schema with a wrong-shaped index")
+    func recoveryRequiresCompleteCurrentSchema() async throws {
+        let path = Self.tempPath("recovery-schema")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        try Self.executeSQLite(
+            "DROP INDEX idx_spans_start; CREATE INDEX idx_spans_start ON spans(trace_id)",
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+    }
+
+    @Test("Recovery-only open rejects a UNIQUE index that changes replacement identity")
+    func recoveryRejectsNonPrimaryUniqueIdentity() async throws {
+        let path = Self.tempPath("recovery-unique-index")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        try Self.executeSQLite(
+            "DROP INDEX idx_spans_trace; CREATE UNIQUE INDEX idx_spans_trace ON spans(trace_id)",
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1)
+    }
+
+    @Test("Recovery-only open rejects a current-version spans table without its identity key")
+    func recoveryRequiresCompositeSpanIdentityBeforeDelete() async throws {
+        let path = Self.tempPath("recovery-no-primary-key")
+        defer { Self.cleanup(path) }
+        try Self.executeSQLite(
+            """
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE spans (
+                trace_id TEXT NOT NULL,
+                span_id TEXT NOT NULL,
+                parent_span_id TEXT,
+                start_ns INTEGER NOT NULL,
+                end_ns INTEGER NOT NULL,
+                service_name TEXT,
+                span_name TEXT NOT NULL,
+                agent_tool TEXT,
+                provider_name TEXT,
+                legacy_gen_ai_system TEXT,
+                attributes_json TEXT,
+                search_text TEXT,
+                trust_label TEXT NOT NULL DEFAULT 'unauthenticated_self_reported'
+            );
+            CREATE INDEX idx_spans_trace ON spans(trace_id);
+            CREATE INDEX idx_spans_start ON spans(start_ns);
+            CREATE INDEX idx_spans_search ON spans(search_text);
+            INSERT INTO spans (
+                trace_id, span_id, start_ns, end_ns, span_name, trust_label
+            ) VALUES (
+                '4bf92f3577b34da6a3ce929d0e0e4736',
+                '00f067aa0ba902b7', 1, 2, 'preserve',
+                'unauthenticated_self_reported'
+            );
+            PRAGMA user_version = 3;
+            """,
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1,
+                "schema refusal must precede every pressure-recovery DELETE")
+    }
+
+    @Test("Recovery-only open preserves a future-version store untouched")
+    func recoveryRejectsFutureSchemaBeforeDelete() async throws {
+        let path = Self.tempPath("recovery-future-schema")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        try Self.executeSQLite("PRAGMA user_version = 99", at: path)
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1,
+                "an older recovery writer must not mutate a future schema")
+    }
+
+    @Test("Recovery-only open rejects malformed retention and writer columns")
+    func recoveryRequiresExactCriticalColumnShape() async throws {
+        let path = Self.tempPath("recovery-critical-column-shape")
+        defer { Self.cleanup(path) }
+        try Self.executeSQLite(
+            """
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE spans (
+                trace_id TEXT NOT NULL,
+                span_id TEXT NOT NULL,
+                parent_span_id TEXT,
+                start_ns TEXT NOT NULL,
+                end_ns INTEGER NOT NULL,
+                service_name TEXT,
+                span_name TEXT NOT NULL,
+                agent_tool TEXT,
+                provider_name TEXT,
+                legacy_gen_ai_system TEXT,
+                attributes_json TEXT,
+                search_text TEXT,
+                trust_label TEXT,
+                PRIMARY KEY (trace_id, span_id)
+            );
+            CREATE INDEX idx_spans_trace ON spans(trace_id);
+            CREATE INDEX idx_spans_start ON spans(start_ns);
+            CREATE INDEX idx_spans_search ON spans(search_text);
+            INSERT INTO spans (
+                trace_id, span_id, start_ns, end_ns, span_name, trust_label
+            ) VALUES (
+                '4bf92f3577b34da6a3ce929d0e0e4736',
+                '00f067aa0ba902b7', '1', 2, 'preserve',
+                'unauthenticated_self_reported'
+            );
+            PRAGMA user_version = 3;
+            """,
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1,
+                "malformed retention columns must be refused before DELETE")
+    }
+
+    @Test("Recovery-only open rejects unsupported span CHECK constraints")
+    func recoveryRejectsUnsupportedTableConstraint() async throws {
+        let path = Self.tempPath("recovery-check-constraint")
+        defer { Self.cleanup(path) }
+        try Self.executeSQLite(
+            """
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE spans (
+                trace_id TEXT NOT NULL,
+                span_id TEXT NOT NULL,
+                parent_span_id TEXT,
+                start_ns INTEGER NOT NULL,
+                end_ns INTEGER NOT NULL,
+                service_name TEXT,
+                span_name TEXT NOT NULL,
+                agent_tool TEXT,
+                provider_name TEXT,
+                legacy_gen_ai_system TEXT,
+                attributes_json TEXT,
+                search_text TEXT,
+                trust_label TEXT NOT NULL DEFAULT 'unauthenticated_self_reported',
+                PRIMARY KEY (trace_id, span_id),
+                CHECK (start_ns <= end_ns)
+            );
+            CREATE INDEX idx_spans_trace ON spans(trace_id);
+            CREATE INDEX idx_spans_start ON spans(start_ns);
+            CREATE INDEX idx_spans_search ON spans(search_text);
+            INSERT INTO spans (
+                trace_id, span_id, start_ns, end_ns, span_name, trust_label
+            ) VALUES (
+                '4bf92f3577b34da6a3ce929d0e0e4736',
+                '00f067aa0ba902b7', 1, 2, 'preserve',
+                'unauthenticated_self_reported'
+            );
+            PRAGMA user_version = 3;
+            """,
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1,
+                "unknown table constraints must be refused before DELETE")
+    }
+
+    @Test("Recovery-only open rejects inbound foreign-key delete side effects")
+    func recoveryRejectsInboundSpanForeignKey() async throws {
+        let path = Self.tempPath("recovery-inbound-foreign-key")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        try Self.executeSQLite(
+            """
+            CREATE TABLE span_dependents (
+                trace_id TEXT NOT NULL,
+                span_id TEXT NOT NULL,
+                FOREIGN KEY (trace_id, span_id)
+                    REFERENCES spans(trace_id, span_id)
+                    ON DELETE CASCADE
+            );
+            INSERT INTO span_dependents(trace_id, span_id) VALUES (
+                '4bf92f3577b34da6a3ce929d0e0e4736',
+                '00f067aa0ba902b7'
+            );
+            """,
+            at: path
+        )
+
+        #expect(throws: TraceStoreError.self) {
+            _ = try TraceStore(
+                path: path,
+                maxFootprintBytes: 16 * Self.mib,
+                transactionReserveBytes: 4 * Self.mib,
+                footprintProbe: { _ in 13 * Self.mib }
+            )
+        }
+        let reader = try TraceStore(path: path, forceReadOnly: true)
+        #expect(try await reader.count() == 1,
+                "foreign-key refusal must precede every pressure DELETE")
+    }
+
+    @Test("Search backfill reacquires the full writer after recovery-only open")
+    func backfillReacquiresWriterAfterRecovery() async throws {
+        let path = Self.tempPath("recovery-backfill")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        try Self.executeSQLite("UPDATE spans SET search_text = NULL", at: path)
+
+        let footprint = ProbeBox(13 * Self.mib)
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: 16 * Self.mib,
+            transactionReserveBytes: 4 * Self.mib,
+            footprintProbe: { _ in footprint.get() }
+        )
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+
+        footprint.set(Self.mib)
+        #expect((await store.storageAdmissionStatus()).blocked)
+        #expect(try await store.backfillSearchProjection() == 1)
+        #expect(!(try await store.writerConfigurationDiagnostics().recoveryOnly))
+        #expect(try await store.searchSpans(matching: "claude-code").count == 1)
+    }
+
+    @Test("Failed full-writer finalization leaves bounded recovery available")
+    func recoveryFinalizationFailureStaysFailClosed() async throws {
+        let path = Self.tempPath("recovery-finalize-failure")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+
+        let footprint = ProbeBox(13 * Self.mib)
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: 16 * Self.mib,
+            transactionReserveBytes: 4 * Self.mib,
+            footprintProbe: { _ in footprint.get() },
+            pragmaFailureProbe: { operation in
+                operation == .journalSizeLimitStep
+                    ? TraceStoreInjectedSQLiteFailure(resultCode: SQLITE_FULL)
+                    : nil
+            }
+        )
+        footprint.set(Self.mib)
+        do {
+            try await store.insertSpan(Self.span(id: "bbbbbbbbbbbbbbbb"))
+            Issue.record("expected full-writer finalization to fail closed")
+        } catch let error as TraceStoreStorageAdmissionError {
+            guard case .sqliteFull = error else {
+                Issue.record("expected sqliteFull, got \(error)")
+                return
+            }
+        }
+        #expect(try await store.count() == 1)
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+        let status = await store.storageAdmissionStatus()
+        #expect(status.blocked)
+        #expect(status.reason == .sqliteFull)
+    }
+
+    @Test("Production directory open clamps inherited recovery-family permissions")
+    func recoveryOpenClampsPermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("traces-recovery-perms-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var bootstrap: TraceStore? = try TraceStore(directory: directory.path)
+        try await bootstrap?.insertSpan(Self.span())
+        bootstrap = nil
+        let path = directory.appendingPathComponent("traces.db").path
+        #expect(chmod(path, 0o660) == 0)
+
+        let store = try TraceStore(
+            directory: directory.path,
+            maxFootprintBytes: 16 * Self.mib,
+            transactionReserveBytes: 4 * Self.mib,
+            footprintProbe: { _ in 13 * Self.mib }
+        )
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        let permissions = attributes[.posixPermissions] as? NSNumber
+        #expect(permissions?.intValue == 0o640)
     }
 
     @Test("Direct single and batch writers cannot bypass footprint admission")
@@ -199,6 +657,76 @@ struct TraceStoreStorageAdmissionTests {
         #expect(try await store.count() == 0)
     }
 
+    @Test("Decoded admission charges the expanded encrypted attributes envelope")
+    func encryptedEnvelopeCannotExceedRecoverableReserve() async throws {
+        let path = Self.tempPath("encrypted-envelope-bound")
+        defer { Self.cleanup(path) }
+        let encryption = DatabaseEncryption(
+            enabled: true,
+            keyLoader: { Data(repeating: 0x33, count: 32) },
+            keySaver: { _ in 0 },
+            keyGenerator: { Data(repeating: 0x44, count: 32) }
+        )
+        let store = try TraceStore(
+            path: path,
+            encryption: encryption,
+            maxFootprintBytes:
+                TraceStoreStoragePolicy.capBytes(maxSizeMiB: 50)
+        )
+        let record = Self.span(payloadBytes: 5_000_000)
+        let status = await store.storageAdmissionStatus()
+        let reserve = try #require(status.transactionReserveBytes)
+        #expect(reserve == 25 * Self.mib / 2)
+        #expect(await store.estimatedInsertUpperBoundBytes([record]) > reserve,
+                "AES-GCM nonce/tag/base64 expansion must be charged before BEGIN")
+        await #expect(throws: TraceStoreStorageAdmissionError.self) {
+            try await store.insertSpan(record)
+        }
+        #expect(try await store.count() == 0)
+    }
+
+    @Test("Span ingest ledger conserves committed rows and whole-batch throws exactly")
+    func ingestConservationCountsWholeBatchFailure() async throws {
+        let path = Self.tempPath("ingest-conservation")
+        defer { Self.cleanup(path) }
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: 64 * Self.mib,
+            transactionReserveBytes: 2 * Self.mib
+        )
+        let committed = try await store.insertSpans([
+            Self.span(id: "1111111111111111"),
+            Self.span(
+                trace: "5bf92f3577b34da6a3ce929d0e0e4736",
+                id: "2222222222222222"
+            ),
+        ])
+        #expect(committed.succeeded == 2)
+        #expect(committed.failed == 0)
+
+        let refused = (0..<3).map { index in
+            Self.span(
+                trace: String(format: "%032llx", UInt64(index + 100)),
+                id: String(format: "%016llx", UInt64(index + 100)),
+                payloadBytes: 400_000
+            )
+        }
+        await #expect(throws: TraceStoreStorageAdmissionError.self) {
+            _ = try await store.insertSpans(refused)
+        }
+
+        let status = await store.storageAdmissionStatus()
+        let ingest = status.ingestConservation
+        #expect(ingest.offered == 5)
+        #expect(ingest.completed == 2)
+        #expect(ingest.queued == 0)
+        #expect(ingest.inFlight == 0)
+        #expect(ingest.explicitlyShed == 3,
+                "a thrown transaction sheds every row, not one mutation call")
+        #expect(ingest.conservationMaintained)
+        #expect(try await store.count() == 2)
+    }
+
     @Test("Failed BEGIN and COMMIT preserve typed FULL/ENOSPC and never report rows")
     func checkedTransactionControl() async throws {
         let beginPath = Self.tempPath("begin-full")
@@ -216,6 +744,12 @@ struct TraceStoreStorageAdmissionTests {
             try await beginStore.insertSpan(Self.span())
         }
         #expect(try await beginStore.count() == 0)
+        let beginIngest = await beginStore.storageAdmissionStatus()
+            .ingestConservation
+        #expect(beginIngest.offered == 1)
+        #expect(beginIngest.completed == 0)
+        #expect(beginIngest.explicitlyShed == 1)
+        #expect(beginIngest.conservationMaintained)
 
         let commitPath = Self.tempPath("commit-full")
         defer { Self.cleanup(commitPath) }
@@ -236,6 +770,12 @@ struct TraceStoreStorageAdmissionTests {
         }
         #expect(try await commitStore.count() == 1,
                 "failed COMMIT must roll back and expose no successful-row count")
+        let commitIngest = await commitStore.storageAdmissionStatus()
+            .ingestConservation
+        #expect(commitIngest.offered == 1)
+        #expect(commitIngest.completed == 0)
+        #expect(commitIngest.explicitlyShed == 1)
+        #expect(commitIngest.conservationMaintained)
 
         let ioPath = Self.tempPath("commit-enospc")
         defer { Self.cleanup(ioPath) }
@@ -263,6 +803,12 @@ struct TraceStoreStorageAdmissionTests {
             #expect(systemErrno == ENOSPC)
         }
         #expect(try await ioStore.count() == 0)
+        let ioIngest = await ioStore.storageAdmissionStatus()
+            .ingestConservation
+        #expect(ioIngest.offered == 1)
+        #expect(ioIngest.completed == 0)
+        #expect(ioIngest.explicitlyShed == 1)
+        #expect(ioIngest.conservationMaintained)
     }
 
     @Test("SQLite FULL remains latched until an explicit recovery boundary")
@@ -542,6 +1088,364 @@ struct TraceStoreStorageAdmissionTests {
         #expect(try await store.count() == 1)
     }
 
+    @Test("Repeated production-sized recovery batches converge a real SQLite family")
+    func multiBatchRecoveryConvergesRealFamily() async throws {
+        let path = Self.tempPath("multi-batch-convergence")
+        defer { Self.cleanup(path) }
+        let cutoff = Date(timeIntervalSince1970: 1_750_000_000)
+        let expiredStart: UInt64 = 1_600_000_000_000_000_000
+        let retainedStart: UInt64 = 1_800_000_000_000_000_000
+
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        #expect(await bootstrap?.autoVacuumMode() == 2)
+        for batchStart in stride(from: 0, to: 900, by: 75) {
+            let batchEnd = min(batchStart + 75, 900)
+            var records: [SpanRecord] = []
+            records.reserveCapacity(batchEnd - batchStart)
+            for index in batchStart..<batchEnd {
+                let ordinal = UInt64(index + 1)
+                let traceID = String(format: "%032llx", ordinal)
+                let spanID = String(format: "%016llx", ordinal)
+                records.append(Self.span(
+                    trace: traceID,
+                    id: spanID,
+                    payloadBytes: 4_096,
+                    start: expiredStart + UInt64(index)
+                ))
+            }
+            _ = try await bootstrap?.insertSpans(records)
+        }
+        let retainedTraceIDs = (0..<4).map { index in
+            String(format: "%032llx", UInt64(10_000 + index))
+        }
+        _ = try await bootstrap?.insertSpans(
+            retainedTraceIDs.enumerated().map { index, traceID in
+                Self.span(
+                    trace: traceID,
+                    id: String(format: "%016llx", UInt64(10_000 + index)),
+                    payloadBytes: 1_024,
+                    start: retainedStart + UInt64(index)
+                )
+            }
+        )
+        #expect(await bootstrap?.walCheckpointTruncate() == true)
+        bootstrap = nil
+
+        let initialFootprint = try #require(
+            TraceStore.exactSQLiteFootprintBytes(databasePath: path)
+        )
+        let threshold = max(512 * 1_024, initialFootprint * 55 / 100)
+        #expect(threshold < initialFootprint)
+        let reserve = 16 * Self.mib
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: threshold + reserve,
+            transactionReserveBytes: reserve
+        )
+        #expect((await store.storageAdmissionStatus()).blocked)
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+
+        var passes = 0
+        var deleted = 0
+        while (await store.storageAdmissionStatus()).blocked, passes < 12 {
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: cutoff
+            )
+            #expect(!result.pinnedReader)
+            deleted += result.spansDeleted
+            passes += 1
+        }
+
+        let recovered = await store.storageAdmissionStatus()
+        #expect(passes > 1,
+                "a one-shot 256-row pass must not be mistaken for convergence")
+        #expect(deleted > 256)
+        #expect(!recovered.blocked)
+        #expect(try #require(recovered.footprintBytes) < threshold)
+        #expect(!(try await store.writerConfigurationDiagnostics().recoveryOnly))
+        for traceID in retainedTraceIDs {
+            #expect(try await store.spansForTrace(traceID).count == 1,
+                    "pressure recovery must retain evidence newer than the cutoff")
+        }
+    }
+
+    @Test("One encrypted span larger than the nominal delete batch cannot wedge recovery")
+    func oversizedOldestSpanUsesBoundedSingleRowRecovery() async throws {
+        let path = Self.tempPath("oversized-oldest-recovery")
+        defer { Self.cleanup(path) }
+        let footprint = ProbeBox(64 * 1_024)
+        let free = ProbeBox(Int64.max)
+        let encryption = DatabaseEncryption(
+            enabled: true,
+            keyLoader: { Data(repeating: 0x5A, count: 32) },
+            keySaver: { _ in 0 },
+            keyGenerator: { Data(repeating: 0xA5, count: 32) }
+        )
+        let productionCap = TraceStoreStoragePolicy.capBytes(maxSizeMiB: 50)
+        let productionFloor = TraceStoreStoragePolicy.freeSpaceFloorBytes
+        let store = try TraceStore(
+            path: path,
+            encryption: encryption,
+            maxFootprintBytes: productionCap,
+            freeSpaceFloorBytes: productionFloor,
+            footprintProbe: { _ in footprint.get() },
+            freeSpaceProbe: { _ in free.get() }
+        )
+        let large = Self.span(payloadBytes: 4_300_000, start: 1)
+        let estimate = await store.estimatedInsertUpperBoundBytes([large])
+        let initial = await store.storageAdmissionStatus()
+        let reserve = 25 * Self.mib / 2
+        #expect(initial.transactionReserveBytes == reserve)
+        #expect(estimate < reserve,
+                "the >4 MiB production-legal span must reach persistence")
+        try await store.insertSpan(large)
+        #expect(try await store.count() == 1)
+        let exactFamily = TraceStore.exactSQLiteFootprintBytes(
+            databasePath: path
+        )
+        guard let exactFamily else {
+            Issue.record("exact family probe failed before checkpoint")
+            return
+        }
+        footprint.set(exactFamily)
+        #expect(await store.walCheckpointTruncate())
+
+        // Default 50 MiB policy admits below 37.5 MiB. The encrypted row's
+        // recovery charge is above the ordinary 8 MiB delete batch but below
+        // the explicit one-row ceiling.
+        footprint.set(38 * Self.mib)
+        #expect((await store.storageAdmissionStatus()).blocked)
+
+        // The checkpoint headroom is small after the explicit truncate, but
+        // the fresh operation-sized floor proof still refuses this DELETE.
+        let operationStarvedFree = productionFloor + 2 * Self.mib
+        // Recovery's PASSIVE and TRUNCATE checkpoints each see ample space.
+        // Space drops before the DELETE boundary; only a fresh per-operation
+        // floor probe can observe and refuse that transition.
+        free.script([Int64.max, Int64.max], then: operationStarvedFree)
+        await #expect(throws: TraceStoreStorageAdmissionError.self) {
+            _ = try await store.recoverStorageBudget(
+                retentionCutoff: Date(),
+                maxDeleteRows: 256,
+                maxVacuumPages: 0
+            )
+        }
+        #expect(try await store.count() == 1,
+                "an oversized recovery may not spend through the fresh floor")
+        #expect(free.readsSinceScript() >= 4,
+                "the DELETE must re-probe after both checkpoint gates")
+
+        free.set(Int64.max)
+        let recovery = try await store.recoverStorageBudget(
+            retentionCutoff: Date(),
+            maxDeleteRows: 256,
+            maxVacuumPages: 0
+        )
+        #expect(recovery.spansDeleted == 1)
+        #expect(!recovery.retentionBacklogRemaining)
+        #expect(try await store.count() == 0)
+
+        footprint.set(64 * 1_024)
+        #expect(!(await store.storageAdmissionStatus()).blocked,
+                "one bounded pass must let the writer converge after pressure clears")
+    }
+
+    @Test("Single-row recovery refuses payloads no production admission could create")
+    func oversizedRecoveryIsCappedAtFormerProductionAdmission() async throws {
+        let path = Self.tempPath("oversized-recovery-ceiling")
+        defer { Self.cleanup(path) }
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span(start: 1))
+        #expect(await bootstrap?.walCheckpointTruncate() == true)
+        bootstrap = nil
+
+        // Under the 50 MiB production policy the 12.5 MiB reserve could admit
+        // at most ~8.03 MB of ENC2/base64 attributes under the former plaintext
+        // estimate. This 8.2 MiB stored payload is therefore not a legacy-legal
+        // row and must not broaden the emergency DELETE operation indefinitely.
+        try Self.executeSQLite(
+            "UPDATE spans SET attributes_json = zeroblob(8200000); PRAGMA wal_checkpoint(TRUNCATE)",
+            at: path
+        )
+        let productionCap = TraceStoreStoragePolicy.capBytes(maxSizeMiB: 50)
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: productionCap,
+            freeSpaceFloorBytes: TraceStoreStoragePolicy.freeSpaceFloorBytes,
+            footprintProbe: { _ in 38 * Self.mib },
+            freeSpaceProbe: { _ in Int64.max }
+        )
+
+        await #expect(throws: TraceStoreStorageAdmissionError.self) {
+            _ = try await store.recoverStorageBudget(
+                retentionCutoff: Date(),
+                maxDeleteRows: 256,
+                maxVacuumPages: 0
+            )
+        }
+        #expect(try await store.count() == 1,
+                "an impossible oversized row must fail visibly and remain intact")
+    }
+
+    @Test("Pressured populated mode-0 store converts once and recovers physically")
+    func legacyModeZeroRecoveryConvertsAndPreservesRecentEvidence() async throws {
+        let path = Self.tempPath("legacy-mode-zero")
+        defer { Self.cleanup(path) }
+        try Self.executeSQLite(
+            "PRAGMA auto_vacuum = NONE; CREATE TABLE legacy_seed(value TEXT); INSERT INTO legacy_seed VALUES ('preserve');",
+            at: path
+        )
+
+        let cutoff = Date(timeIntervalSince1970: 1_750_000_000)
+        let expiredStart: UInt64 = 1_600_000_000_000_000_000
+        let retainedStart: UInt64 = 1_800_000_000_000_000_000
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        #expect(await bootstrap?.autoVacuumMode() == 0,
+                "a populated NONE header cannot change without full VACUUM")
+        for batchStart in stride(from: 0, to: 700, by: 50) {
+            let batchEnd = min(batchStart + 50, 700)
+            var records: [SpanRecord] = []
+            records.reserveCapacity(batchEnd - batchStart)
+            for index in batchStart..<batchEnd {
+                let ordinal = UInt64(index + 1)
+                let traceID = String(format: "%032llx", ordinal)
+                let spanID = String(format: "%016llx", ordinal)
+                records.append(Self.span(
+                    trace: traceID,
+                    id: spanID,
+                    payloadBytes: 8_192,
+                    start: expiredStart + UInt64(index)
+                ))
+            }
+            _ = try await bootstrap?.insertSpans(records)
+        }
+        let retainedTraceIDs = (0..<3).map { index in
+            String(format: "%032llx", UInt64(20_000 + index))
+        }
+        _ = try await bootstrap?.insertSpans(
+            retainedTraceIDs.enumerated().map { index, traceID in
+                Self.span(
+                    trace: traceID,
+                    id: String(format: "%016llx", UInt64(20_000 + index)),
+                    payloadBytes: 1_024,
+                    start: retainedStart + UInt64(index)
+                )
+            }
+        )
+        #expect(await bootstrap?.walCheckpointTruncate() == true)
+        bootstrap = nil
+
+        let initialFootprint = try #require(
+            TraceStore.exactSQLiteFootprintBytes(databasePath: path)
+        )
+        let threshold = max(512 * 1_024, initialFootprint * 55 / 100)
+        let reserve = 16 * Self.mib
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: threshold + reserve,
+            freeSpaceFloorBytes: 64 * 1_024,
+            transactionReserveBytes: reserve
+        )
+        let initialStatus = await store.storageAdmissionStatus()
+        #expect(initialStatus.blocked)
+        #expect(try #require(initialStatus.footprintBytes) >= threshold)
+        #expect(try await store.writerConfigurationDiagnostics().recoveryOnly)
+
+        var passes = 0
+        var deleted = 0
+        var observedModeTwo = false
+        while (await store.storageAdmissionStatus()).blocked, passes < 12 {
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: cutoff
+            )
+            #expect(!result.pinnedReader)
+            observedModeTwo = observedModeTwo || result.autoVacuumMode == 2
+            deleted += result.spansDeleted
+            passes += 1
+        }
+
+        let recovered = await store.storageAdmissionStatus()
+        #expect(observedModeTwo)
+        #expect(await store.autoVacuumMode() == 2)
+        #expect(deleted > 0)
+        #expect(!recovered.blocked)
+        #expect(try #require(recovered.footprintBytes) < threshold)
+        #expect(!(try await store.writerConfigurationDiagnostics().recoveryOnly),
+                "physical recovery must restore the fully configured writer")
+        for traceID in retainedTraceIDs {
+            #expect(try await store.spansForTrace(traceID).count == 1,
+                    "full conversion and bounded pruning must retain recent evidence")
+        }
+    }
+
+    @Test("Mode-0 conversion preserves the configured floor before deleting evidence")
+    func legacyConversionHeadroomFailsBeforeDelete() async throws {
+        let path = Self.tempPath("legacy-mode-zero-headroom")
+        defer { Self.cleanup(path) }
+        try Self.executeSQLite(
+            "PRAGMA auto_vacuum = NONE; CREATE TABLE legacy_seed(value TEXT); INSERT INTO legacy_seed VALUES ('seed');",
+            at: path
+        )
+        var bootstrap: TraceStore? = try TraceStore(path: path)
+        try await bootstrap?.insertSpan(Self.span(id: "aaaaaaaaaaaaaaaa", start: 1))
+        #expect(await bootstrap?.autoVacuumMode() == 0)
+        #expect(await bootstrap?.walCheckpointTruncate() == true)
+        bootstrap = nil
+
+        let initialFootprint = try #require(
+            TraceStore.exactSQLiteFootprintBytes(databasePath: path)
+        )
+        let mainBytes = try SQLitePersistentStoreAdmission.measureMainFile(path)
+        let reserve: Int64 = 4_096
+        let floor: Int64 = 64 * 1_024
+        let free = ProbeBox(Int64.max)
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes: initialFootprint + reserve,
+            freeSpaceFloorBytes: floor,
+            transactionReserveBytes: reserve,
+            freeSpaceProbe: { _ in free.get() }
+        )
+        #expect((await store.storageAdmissionStatus()).blocked)
+
+        let family = try #require(
+            TraceStore.exactSQLiteFootprintBytes(databasePath: path)
+        )
+        let checkpointRequired = floor + max(0, family - mainBytes)
+        let fullVacuumRequired = SQLitePersistentStoreAdmission
+            .fullVacuumRequiredFreeBytes(
+                mainFileBytes: mainBytes,
+                freeSpaceFloorBytes: floor
+            )
+        let oneByteShort = fullVacuumRequired - 1
+        #expect(oneByteShort >= checkpointRequired,
+                "fixture must admit the reader check but refuse full VACUUM")
+        free.set(oneByteShort)
+
+        do {
+            _ = try await store.recoverStorageBudget(
+                retentionCutoff: Date(),
+                maxDeleteRows: 1,
+                maxVacuumPages: 0
+            )
+            Issue.record("expected configured full-VACUUM headroom refusal")
+        } catch let error as TraceStoreStorageAdmissionError {
+            guard case .lowFreeSpace(
+                let freeBytes, let floorBytes, let requiredFreeBytes
+            ) = error else {
+                Issue.record("expected lowFreeSpace, got \(error)")
+                return
+            }
+            #expect(freeBytes == oneByteShort)
+            #expect(floorBytes == floor)
+            #expect(requiredFreeBytes == fullVacuumRequired)
+        }
+        #expect(try await store.count() == 1,
+                "no DELETE may precede a refused mode-0 conversion")
+        #expect(await store.autoVacuumMode() == 0)
+        #expect((await store.storageAdmissionStatus()).blocked)
+    }
+
     @Test("Force-read-only v2 schema defaults trust and cannot mutate")
     func legacyReadOnlyTrustMigration() async throws {
         let path = Self.tempPath("legacy-v2")
@@ -626,6 +1530,87 @@ struct TraceStoreStorageAdmissionTests {
         #expect(decoded.trust == .unauthenticatedSelfReported)
     }
 
+    @Test("Trace recovery retries pressure every tick but retains daily healthy cadence")
+    func productionRecoveryCadenceGate() {
+        #expect(TraceStoreRecoveryCadenceGate.initialDelaySeconds == 180)
+        #expect(TraceStoreRecoveryCadenceGate.pressureIntervalSeconds == 300)
+        #expect(TraceStoreRecoveryCadenceGate.healthyIntervalSeconds == 86_400)
+
+        let gate = TraceStoreRecoveryCadenceGate()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        #expect(gate.shouldRun(blocked: false, now: start),
+                "the first post-boot retention pass must run")
+        #expect(!gate.shouldRun(blocked: false, now: start.addingTimeInterval(300)),
+                "healthy five-minute ticks must not replace daily retention")
+        gate.recordRecoveryOutcome(retentionBacklogRemaining: true)
+        #expect(gate.shouldRun(blocked: false, now: start.addingTimeInterval(600)),
+                "an explicitly reported healthy backlog must use the five-minute drain cadence")
+        gate.recordRecoveryOutcome(retentionBacklogRemaining: false)
+        #expect(!gate.shouldRun(blocked: false, now: start.addingTimeInterval(900)),
+                "an empty retention backlog returns to the daily deadline")
+        #expect(gate.shouldRun(blocked: true, now: start.addingTimeInterval(600)))
+        #expect(gate.shouldRun(blocked: true, now: start.addingTimeInterval(900)),
+                "a blocked store needs consecutive bounded recovery batches")
+        #expect(!gate.shouldRun(blocked: false, now: start.addingTimeInterval(1_200)),
+                "recovery completion resets the daily healthy deadline")
+        #expect(gate.shouldRun(
+            blocked: false,
+            now: start.addingTimeInterval(900 + 86_400)
+        ))
+    }
+
+    @Test("Healthy retention drains more than one bounded batch before returning daily")
+    func healthyRetentionBacklogDrainsAtPressureCadence() async throws {
+        let path = Self.tempPath("healthy-retention-drain")
+        defer { Self.cleanup(path) }
+        let store = try TraceStore(
+            path: path,
+            maxFootprintBytes:
+                TraceStoreStoragePolicy.capBytes(maxSizeMiB: 100)
+        )
+        var records: [SpanRecord] = []
+        records.reserveCapacity(600)
+        for index in 0..<600 {
+            let ordinal = UInt64(index + 1)
+            records.append(Self.span(
+                trace: String(format: "%032llx", ordinal),
+                id: String(format: "%016llx", ordinal),
+                start: ordinal
+            ))
+        }
+        _ = try await store.insertSpans(records)
+        #expect(!(await store.storageAdmissionStatus()).blocked)
+
+        let gate = TraceStoreRecoveryCadenceGate()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var now = start
+        var passCounts: [Int] = []
+        while gate.shouldRun(blocked: false, now: now) {
+            let result = try await store.recoverStorageBudget(
+                retentionCutoff: Date(),
+                maxDeleteRows: 256,
+                maxVacuumPages: 0
+            )
+            passCounts.append(result.spansDeleted)
+            gate.recordRecoveryOutcome(
+                retentionBacklogRemaining:
+                    result.retentionBacklogRemaining
+            )
+            now = now.addingTimeInterval(
+                TraceStoreRecoveryCadenceGate.pressureIntervalSeconds
+            )
+            if passCounts.count > 4 {
+                Issue.record("healthy retention did not converge in bounded passes")
+                break
+            }
+        }
+
+        #expect(passCounts == [256, 256, 88])
+        #expect(try await store.count() == 0)
+        #expect(!gate.shouldRun(blocked: false, now: now),
+                "an empty backlog must remain on daily cadence")
+    }
+
     @Test("Production TraceStore wiring cannot drift around admission or trust")
     func productionWiringGuard() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -703,10 +1688,22 @@ struct TraceStoreStorageAdmissionTests {
         ))
         let traceTimer = String(timers[timerStart.lowerBound..<timerEnd.lowerBound])
         #expect(traceTimer.contains("recoverStorageBudget("))
+        #expect(traceTimer.contains(
+            "TraceStoreRecoveryCadenceGate.pressureIntervalSeconds"
+        ), "the live timer must wake at the bounded pressure cadence")
+        #expect(traceTimer.contains("shouldRun("))
+        #expect(traceTimer.contains("blocked: admissionBefore.blocked"),
+                "storage pressure must bypass the daily retention gate")
+        #expect(traceTimer.contains("recordRecoveryOutcome("))
+        #expect(traceTimer.contains("result.retentionBacklogRemaining"),
+                "a healthy bounded pass must keep draining an expired backlog")
+        #expect(traceTimer.contains(
+            "timerLifecycle.submit(label: \"traces-recovery\")"
+        ), "label coalescing prevents overlapping recovery passes")
         #expect(!traceTimer.contains(".prune("))
         #expect(!traceTimer.contains(".pruneOldest("))
         #expect(!traceTimer.contains(".vacuum("),
-                "the online timer must never issue a full-file VACUUM")
+                "the timer must delegate to actor-owned recovery, never call the unrestricted VACUUM entry point")
         let timerHandler = try #require(traceTimer.range(of: "t.setEventHandler"))
         let liveStoreLookup = try #require(traceTimer.range(
             of: "guard let traceStore = state.traceStore",
@@ -715,6 +1712,11 @@ struct TraceStoreStorageAdmissionTests {
         #expect(timerHandler.lowerBound < liveStoreLookup.lowerBound,
                 "SIGHUP lifecycle requires the timer to resolve the current TraceStore actor on each tick")
         #expect(timers.contains("\"traces_storage_admission\": traceStoreStorageDict"))
+        #expect(timers.contains("d[\"ingest_conservation\"]"))
+        for key in ["offered", "completed", "queued", "in_flight", "explicitly_shed"] {
+            #expect(timers.contains("\"\(key)\""),
+                    "TraceStore heartbeat is missing ingest ledger key \(key)")
+        }
 
         let readOnlyClients = [
             "Sources/MacCrabApp/AppState.swift",

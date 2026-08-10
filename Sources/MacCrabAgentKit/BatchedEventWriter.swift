@@ -12,7 +12,7 @@
 //
 // This actor decouples the DB write from detection. The consumer calls the
 // O(1) `enqueue`; a background drain flushes accumulated events through the
-// existing batch transaction `EventStore.insert(events:)` — hundreds of
+// existing batch transaction `EventStore.insert(events:lane:)` — hundreds of
 // transactions per burst instead of hundreds of thousands, and off the
 // consumer's critical path entirely.
 //
@@ -36,7 +36,10 @@ import os.log
 /// `EventStoreError.busy` on demand to exercise the #13 transient-retry path.
 /// `EventStore` (an actor) satisfies the async requirement via its isolation.
 protocol EventBatchInserting: Sendable {
-    func insert(events: [Event]) async throws -> EventBatchInsertResult
+    func insert(
+        events: [Event],
+        lane: EventPipelineLane
+    ) async throws -> EventBatchInsertResult
 }
 
 extension EventStore: EventBatchInserting {}
@@ -116,7 +119,7 @@ actor BatchedEventWriter {
         repeating: [], count: EventPipelineLane.allCases.count
     )
     /// Exactly one drain runs at a time, so this is either zero or the complete
-    /// detached batch suspended in `store.insert(events:)`.
+    /// detached batch suspended in `store.insert(events:lane:)`.
     private var inFlightDepth = 0
     private var inFlightDepthByLane = [Int](
         repeating: 0, count: EventPipelineLane.allCases.count
@@ -271,10 +274,95 @@ actor BatchedEventWriter {
         _ events: [BufferedEvent],
         lane: EventPipelineLane
     ) -> Bool {
-        guard bufferDepth + events.count <= hardCap else { return false }
+        guard events.count <= hardCap else { return false }
+        let available = max(0, hardCap - bufferDepth)
+        if events.count > available {
+            // The detached batch is older than everything admitted while its
+            // SQLite write was suspended. Prefer it over newer work without
+            // weakening the one-way lane policy: evict newest file rows first;
+            // a priority retry may then evict newer priority rows, while a file
+            // retry may never displace priority.
+            let fileIndex = EventPipelineLane.file.rawValue
+            let evictionCount = events.count - available
+            let fileEvictionCount = min(
+                evictionCount,
+                buffers[fileIndex].count
+            )
+            let priorityEvictionCount = evictionCount - fileEvictionCount
+            guard lane == .priority || priorityEvictionCount == 0 else {
+                return false
+            }
+            let priorityIndex = EventPipelineLane.priority.rawValue
+            guard buffers[priorityIndex].count >= priorityEvictionCount else {
+                return false
+            }
+
+            if fileEvictionCount > 0 {
+                let evictedFile = Array(
+                    buffers[fileIndex].suffix(fileEvictionCount)
+                )
+                buffers[fileIndex].removeLast(fileEvictionCount)
+                recordDrop(fileEvictionCount, lane: .file)
+                markTerminal(evictedFile)
+            }
+            if priorityEvictionCount > 0 {
+                let evictedPriority = Array(
+                    buffers[priorityIndex].suffix(priorityEvictionCount)
+                )
+                buffers[priorityIndex].removeLast(priorityEvictionCount)
+                recordDrop(priorityEvictionCount, lane: .priority)
+                markTerminal(evictedPriority)
+            }
+        }
         buffers[lane.rawValue].insert(contentsOf: events, at: 0)
         recordRetry(events.count, lane: lane)
         return true
+    }
+
+    /// Reattach EventStore's exact filter-passing remainder to the writer's
+    /// generation-bearing envelopes. Filtered rows can occur anywhere in the
+    /// original batch, so a count-based array suffix is not an identity map.
+    /// Match the complete immutable event value rather than UUID alone: callers
+    /// may legally supply the same UUID on distinct values, and EventStore treats
+    /// that identifier as a first-writer-wins persistence key. Scan from the end
+    /// so truly identical duplicates retain candidate-suffix semantics, while
+    /// counts preserve the complete multiset.
+    private func partitionPartialFailure(
+        _ batch: [BufferedEvent],
+        uncommittedEvents: [Event]
+    ) -> (terminal: [BufferedEvent], uncommitted: [BufferedEvent])? {
+        guard uncommittedEvents.count <= batch.count else { return nil }
+        var remainingByEvent: [Event: Int] = [:]
+        for event in uncommittedEvents {
+            remainingByEvent[event, default: 0] += 1
+        }
+
+        var terminalReversed: [BufferedEvent] = []
+        var uncommittedReversed: [BufferedEvent] = []
+        terminalReversed.reserveCapacity(batch.count - uncommittedEvents.count)
+        uncommittedReversed.reserveCapacity(uncommittedEvents.count)
+        for item in batch.reversed() {
+            if let remaining = remainingByEvent[item.event], remaining > 0 {
+                uncommittedReversed.append(item)
+                if remaining == 1 {
+                    remainingByEvent.removeValue(forKey: item.event)
+                } else {
+                    remainingByEvent[item.event] = remaining - 1
+                }
+            } else {
+                terminalReversed.append(item)
+            }
+        }
+        guard remainingByEvent.isEmpty else { return nil }
+
+        let uncommitted = Array(uncommittedReversed.reversed())
+        guard uncommitted.map(\.event) == uncommittedEvents else {
+            return nil
+        }
+        return (
+            terminal: Array(terminalReversed.reversed()),
+            uncommitted: uncommitted
+        )
     }
 
     /// - Note: In production `flushThreshold` / `hardCap` are FIXED at their
@@ -420,38 +508,56 @@ actor BatchedEventWriter {
             setInFlight(batch.count, lane: lane)
             do {
                 let result = try await store.insert(
-                    events: batch.map(\.event)
+                    events: batch.map(\.event),
+                    lane: lane
                 )
                 recordPersisted(result.persistedCount, lane: lane)
                 recordFiltered(result.filteredCount, lane: lane)
                 markTerminal(batch)
                 clearInFlight(lane: lane)
             } catch let partial as EventBatchInsertFailure {
-                recordPersisted(partial.progress.persistedCount, lane: lane)
-                recordFiltered(partial.progress.filteredCount, lane: lane)
-                let suffixCount = min(
-                    batch.count,
-                    partial.uncommittedEvents.count
-                )
-                let committedPrefix = batch.dropLast(suffixCount)
-                let suffix = Array(batch.suffix(suffixCount))
-                markTerminal(committedPrefix)
-                if partial.replacementReadyForRetry {
-                    // Corruption recovery quarantined the DB containing any
-                    // earlier committed chunks. EventStore resets progress and
-                    // returns the full filter-passing batch; the fresh DB is
-                    // ready, so retry it instead of falsely counting the old
-                    // prefix as durable or permanently shedding recoverable rows.
-                    if prependForRetry(suffix, lane: lane) {
+                let transient = (partial.underlyingError as? EventStoreError)
+                    .map(isTransient) ?? false
+                let retryable = partial.replacementReadyForRetry || transient
+                guard let disposition = partitionPartialFailure(
+                    batch,
+                    uncommittedEvents: partial.uncommittedEvents
+                ), disposition.terminal.count
+                    == partial.progress.persistedCount
+                        + partial.progress.filteredCount else {
+                    // Never guess at identity from malformed aggregate counts.
+                    // Retrying the complete batch is safe on a transient or a
+                    // fresh replacement because immutable event IDs make the
+                    // already-durable portion duplicate no-ops.
+                    if retryable, prependForRetry(batch, lane: lane) {
                         clearInFlight(lane: lane)
                         return
                     }
-                } else if let eventError = partial.underlyingError as? EventStoreError,
-                   isTransient(eventError) {
-                    // Only the rolled-back/unstarted suffix is retried. The
-                    // committed prefix is already durable and must never be
-                    // duplicated in retry/drop telemetry.
-                    if prependForRetry(suffix, lane: lane) {
+                    recordDrop(batch.count, lane: lane)
+                    markTerminal(batch)
+                    clearInFlight(lane: lane)
+                    await StorageErrorTracker.shared.recordEventError(
+                        partial.underlyingError
+                    )
+                    continue
+                }
+                recordPersisted(partial.progress.persistedCount, lane: lane)
+                recordFiltered(partial.progress.filteredCount, lane: lane)
+                markTerminal(disposition.terminal)
+                if partial.replacementReadyForRetry {
+                    // Corruption recovery quarantined the DB containing any
+                    // earlier committed chunks. EventStore resets progress and
+                    // returns every exact filter-passing candidate; filtered
+                    // envelopes are terminal while those candidates retry.
+                    if prependForRetry(disposition.uncommitted, lane: lane) {
+                        clearInFlight(lane: lane)
+                        return
+                    }
+                } else if transient {
+                    // Only the exact rolled-back/unstarted identities retry.
+                    // Arbitrarily-positioned filtered rows are already terminal
+                    // and must never be substituted by a positional suffix.
+                    if prependForRetry(disposition.uncommitted, lane: lane) {
                         clearInFlight(lane: lane)
                         return
                     }
@@ -460,8 +566,8 @@ actor BatchedEventWriter {
                 // StorageErrorTracker is an actor hop, and heartbeat snapshots
                 // must never observe rows in neither in-flight nor drop/retry/
                 // persisted accounting while that hop is suspended.
-                recordDrop(suffix.count, lane: lane)
-                markTerminal(suffix)
+                recordDrop(disposition.uncommitted.count, lane: lane)
+                markTerminal(disposition.uncommitted)
                 clearInFlight(lane: lane)
                 await StorageErrorTracker.shared.recordEventError(
                     partial.underlyingError

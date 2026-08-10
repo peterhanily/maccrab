@@ -1431,7 +1431,7 @@ public actor EventStore {
             // close→quarantine→reopen so ingestion recovers instead of failing
             // forever. We still throw this event's failure (the row is lost);
             // the *next* insert lands in the freshly-reopened DB. (When reached
-            // from the batch `insert(events:)`, the enclosing transaction's
+            // from the batch `insert(events:lane:)`, the enclosing transaction's
             // ROLLBACK runs on the reopened handle as a harmless no-op.)
             if failure.isExplicitCorruption {
                 attemptCorruptionSelfHeal(failure: failure, reason: msg)
@@ -1766,11 +1766,33 @@ public actor EventStore {
     /// longer one atomic unit. On failure, `EventBatchInsertFailure` carries
     /// the exact committed count and filter-passing suffix.
     ///
-    /// - Parameter events: The events to store.
+    /// - Parameters:
+    ///   - events: The events to store. Every event must classify to `lane`.
+    ///   - lane: The homogeneous pipeline lane that owns this batch. This is
+    ///     carried from the detection stream rather than defaulted at storage
+    ///     admission, so file-firehose transactions cannot consume the
+    ///     priority-only footprint reserve.
     /// - Throws: `EventBatchInsertFailure` on serialisation/database failure.
     @discardableResult
-    public func insert(events: [Event]) throws -> EventBatchInsertResult {
+    public func insert(
+        events: [Event],
+        lane: EventPipelineLane
+    ) throws -> EventBatchInsertResult {
         let startingGeneration = activeDatabaseGeneration
+        guard events.allSatisfy({ EventPipelineLane.finalLane(for: $0) == lane }) else {
+            throw EventBatchInsertFailure(
+                progress: EventBatchInsertResult(
+                    inputCount: events.count,
+                    persistedCount: 0,
+                    filteredCount: 0,
+                    committedTransactionCount: 0
+                ),
+                uncommittedEvents: events,
+                underlyingError: EventStoreError.stepFailed(
+                    "Event batch mixes pipeline lanes or is mislabeled as \(lane.key)"
+                )
+            )
+        }
         var candidates: [Event] = []
         candidates.reserveCapacity(events.count)
         var filteredCount = 0
@@ -1819,9 +1841,18 @@ public actor EventStore {
                         let firstEstimate = eventTransactionEstimate(
                             rowMutationBytes: rowBytes
                         )
+                        // The chunk can continue growing until `reserve` before
+                        // its next admission boundary. Charge that complete
+                        // upper bound now; admitting only `firstEstimate` lets
+                        // later file rows consume the priority-only headroom
+                        // without another probe. Preserve an oversized first
+                        // row's real estimate so the shared gate still returns
+                        // transactionEstimateExceedsReserve.
+                        let admissionEstimate = max(firstEstimate, reserve)
                         try execute(
                             "BEGIN TRANSACTION",
-                            estimatedTransactionBytes: firstEstimate
+                            estimatedTransactionBytes: admissionEstimate,
+                            lane: lane
                         )
                         transactionOpen = true
                     }
@@ -2343,7 +2374,8 @@ public actor EventStore {
         newerThan floorCutoff: Date? = nil,
         // v1.21.4 (audit): set true when the CALLER already holds an open write
         // transaction (rollUpAndPrune). Inside a transaction we must NOT suspend
-        // (Task.yield) — the actor would reenter and a concurrent insert(events:)
+        // (Task.yield) — the actor would reenter and a concurrent
+        // insert(events:lane:)
         // would issue a nested BEGIN, which SQLite rejects, silently losing that
         // insert's whole batch. We also skip incremental_vacuum (illegal inside a
         // transaction); the caller vacuums after COMMIT.
@@ -3004,7 +3036,8 @@ public actor EventStore {
             guard plan.rowCount > 0 else { break }
             let thisBatch = plan.rowCount
             try admitStorageWrite(
-                estimatedTransactionBytes: plan.estimatedTransactionBytes
+                estimatedTransactionBytes: plan.estimatedTransactionBytes,
+                lane: .priority
             )
             let stmt = try prepare(sql)
             bindText(stmt, index: 1, value: alertId)
@@ -4268,7 +4301,8 @@ public actor EventStore {
     private func execute(
         _ sql: String,
         maintenance: Bool = false,
-        estimatedTransactionBytes: Int64? = nil
+        estimatedTransactionBytes: Int64? = nil,
+        lane: EventPipelineLane? = nil
     ) throws {
         if sql.trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased().hasPrefix("BEGIN") {
@@ -4282,8 +4316,14 @@ public actor EventStore {
                     estimatedTransactionBytes: estimatedTransactionBytes
                 )
             } else {
+                guard let lane else {
+                    throw EventStoreError.stepFailed(
+                        "BEGIN requires an explicit event pipeline lane"
+                    )
+                }
                 try admitStorageWrite(
-                    estimatedTransactionBytes: estimatedTransactionBytes
+                    estimatedTransactionBytes: estimatedTransactionBytes,
+                    lane: lane
                 )
             }
         }
@@ -4314,12 +4354,103 @@ public actor EventStore {
     /// on a thrown probe, preserving the sticky pressure latch.
     private func admitStorageWrite(
         estimatedTransactionBytes: Int64,
-        lane: EventPipelineLane = .priority
+        lane: EventPipelineLane
     ) throws {
         guard var admission = storageAdmission else { return }
+        let wasBlocked = admission.growthBlocked
+        let writerSetupPending = !isReadOnly && insertStmt == nil
+        do {
+            try admitFreshStorageWrite(
+                &admission,
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                lane: lane
+            )
+        } catch {
+            storageAdmission = admission
+            throw error
+        }
+        let recovered = wasBlocked && !admission.growthBlocked
+        storageAdmission = admission
+        if recovered || (writerSetupPending && !admission.growthBlocked) {
+            try reopenAfterStorageRecovery()
+
+            // Opening or preparing a replacement connection can grow or
+            // reshape the SQLite family. Re-run BOTH the shared admission and
+            // the lane reserve against a new authoritative probe before BEGIN.
+            try revalidateStorageWriteAfterReopen(
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                lane: lane
+            )
+
+            // Space can disappear between the successful probe and the fresh
+            // open. A shed-only reopen has no insert statement. Retry admission
+            // once with the SAME full transaction estimate; a successful retry
+            // reopens again and the caller acquires only the new statement.
+            if !isReadOnly, insertStmt == nil {
+                try reopenAfterStorageRecovery()
+                try revalidateStorageWriteAfterReopen(
+                    estimatedTransactionBytes: estimatedTransactionBytes,
+                    lane: lane
+                )
+                if insertStmt == nil,
+                   let failure = storageAdmission?.latchedFailure {
+                    throw failure
+                }
+            }
+        }
+    }
+
+    /// Run the shared latching admission first so `lastFootprintBytes` is the
+    /// authoritative measurement taken at this exact write boundary, then
+    /// apply the file-only reserve without mutating the shared latch.
+    private func admitFreshStorageWrite(
+        _ admission: inout SQLitePersistentStoreAdmission,
+        estimatedTransactionBytes: Int64,
+        lane: EventPipelineLane
+    ) throws {
+        try admission.admitWrite(
+            estimatedTransactionBytes: estimatedTransactionBytes,
+            on: db
+        )
+        try enforceFileLaneReserve(
+            admission,
+            estimatedTransactionBytes: estimatedTransactionBytes,
+            lane: lane
+        )
+    }
+
+    private func revalidateStorageWriteAfterReopen(
+        estimatedTransactionBytes: Int64,
+        lane: EventPipelineLane
+    ) throws {
+        guard var admission = storageAdmission else { return }
+        do {
+            try admitFreshStorageWrite(
+                &admission,
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                lane: lane
+            )
+        } catch {
+            storageAdmission = admission
+            throw error
+        }
+        storageAdmission = admission
+    }
+
+    private func enforceFileLaneReserve(
+        _ admission: SQLitePersistentStoreAdmission,
+        estimatedTransactionBytes: Int64,
+        lane: EventPipelineLane
+    ) throws {
+        guard lane == .file else { return }
+        guard let footprint = admission.lastFootprintBytes else {
+            throw EventStoreError.stepFailed(
+                "File-lane admission completed without a footprint measurement"
+            )
+        }
         // A file-lane write must additionally leave the priority reserve free.
         //
-        // This is a SEPARATE, NON-LATCHING pre-check rather than an adjustment
+        // This is a SEPARATE, NON-LATCHING check rather than an adjustment
         // to `admitWrite`, for two reasons that both matter:
         //
         //  * `estimatedTransactionBytes` feeds a per-TRANSACTION sanity bound
@@ -4332,61 +4463,24 @@ public actor EventStore {
         //    the PRIORITY lane too, which is precisely the outcome the reserve
         //    exists to prevent.
         //
-        // So the lane test stands on its own, throws the same typed error the
-        // caller already handles, and leaves the shared latch untouched.
-        if lane == .file, let footprint = admission.lastFootprintBytes {
-            let cap = admission.policy.maxFootprintBytes
-            let reserve = Self.priorityLaneReserveBytes(maxFootprintBytes: cap)
-            let required = SQLitePersistentStoreAdmission.saturatingAdd(
-                SQLitePersistentStoreAdmission.saturatingAdd(footprint, estimatedTransactionBytes),
-                reserve
+        // So the lane test consumes the fresh measurement produced by the
+        // immediately preceding `admitWrite`, throws directly, and leaves the
+        // shared latch untouched.
+        let cap = admission.policy.maxFootprintBytes
+        let reserve = Self.priorityLaneReserveBytes(maxFootprintBytes: cap)
+        let required = SQLitePersistentStoreAdmission.saturatingAdd(
+            SQLitePersistentStoreAdmission.saturatingAdd(
+                footprint,
+                estimatedTransactionBytes
+            ),
+            reserve
+        )
+        if required > cap {
+            throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                footprintBytes: footprint,
+                reserveBytes: reserve,
+                maxFootprintBytes: cap
             )
-            if required > cap {
-                throw SQLitePersistentStoreAdmissionError.footprintLimit(
-                    footprintBytes: footprint,
-                    reserveBytes: reserve,
-                    maxFootprintBytes: cap
-                )
-            }
-        }
-        let wasBlocked = admission.growthBlocked
-        let writerSetupPending = !isReadOnly && insertStmt == nil
-        do {
-            try admission.admitWrite(
-                estimatedTransactionBytes: estimatedTransactionBytes,
-                on: db
-            )
-        } catch {
-            storageAdmission = admission
-            throw error
-        }
-        let recovered = wasBlocked && !admission.growthBlocked
-        storageAdmission = admission
-        if recovered || (writerSetupPending && !admission.growthBlocked) {
-            try reopenAfterStorageRecovery()
-            // Space can disappear between the successful probe and the fresh
-            // open. A shed-only reopen has no insert statement. Retry admission
-            // once with the SAME full transaction estimate; a successful retry
-            // reopens again and the caller acquires only the new statement.
-            if !isReadOnly, insertStmt == nil {
-                guard var secondary = storageAdmission else { return }
-                do {
-                    try secondary.admitWrite(
-                        estimatedTransactionBytes: estimatedTransactionBytes,
-                        on: db
-                    )
-                } catch {
-                    storageAdmission = secondary
-                    throw error
-                }
-                storageAdmission = secondary
-                if !secondary.growthBlocked {
-                    try reopenAfterStorageRecovery()
-                }
-                if insertStmt == nil, let failure = storageAdmission?.latchedFailure {
-                    throw failure
-                }
-            }
         }
     }
 
@@ -4833,7 +4927,8 @@ public actor EventStore {
                     rowMutationBytes: rowBytes,
                     pageSizeBytes: sqlitePageSizeBytes,
                     maximumTreePathPageTouches: 8
-                )
+                ),
+            lane: .priority
         )
         guard let db else {
             throw EventStoreError.databaseOpenFailed("db not open")

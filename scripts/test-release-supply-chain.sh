@@ -307,6 +307,17 @@ if ! /usr/bin/grep -q 'MANUAL RECOVERY REQUIRED: retained GitHub release ID' \
     echo "  ✗ failed/ambiguous drafts lack an immutable-ID manual recovery path" >&2
     exit 1
 fi
+if /usr/bin/grep -qE 'gh[[:space:]]+release[[:space:]]+create' \
+        "$PROJECT_DIR/scripts/build-release.sh"; then
+    echo "  ✗ build-only helper recommends bypassing the qualified release flow" >&2
+    exit 1
+fi
+/usr/bin/grep -q 'do not tag, push, or publish this artifact directly' \
+    "$PROJECT_DIR/scripts/build-release.sh" \
+    || { echo "  ✗ build-only helper lacks explicit no-publication guidance" >&2; exit 1; }
+/usr/bin/grep -q "scripts/release.sh's two-phase qualification flow" \
+    "$PROJECT_DIR/scripts/build-release.sh" \
+    || { echo "  ✗ build-only helper does not route operators to qualification" >&2; exit 1; }
 
 for fixed_assignment in \
         'GIT_BIN=/usr/bin/git' \

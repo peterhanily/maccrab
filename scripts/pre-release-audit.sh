@@ -91,14 +91,13 @@ section() { echo; echo "${BOLD}── $* ──${RESET}"; }
 # Audit scope (E-04)
 # ---------------------------------------------------------------------
 # "full" (default) runs every pass, including the release-time gates that
-# need the signed build / pinned toolchain — this is what release.sh and the
-# advisory CI `audit` job run. "deterministic" runs only the cheap, hermetic,
-# source-only passes (the architectural invariants + the PASS 13 env-block
-# secret-leak scan) so they can gate every PR as a REQUIRED CI job. In
-# deterministic scope the release-time passes K/L/M (toolchain pin, Xcode-27
-# source-compat guards, universal-binary arch) are skipped: a fresh hosted PR
-# runner has no staged build and defaults to a non-pinned Xcode, so those
-# would false-fail on unrelated PRs. Set via MACCRAB_AUDIT_SCOPE.
+# need the signed build / pinned toolchain — this is what release.sh runs.
+# "deterministic" runs only the cheap, hermetic, source-only passes (the
+# architectural invariants + the PASS 13 env-block secret-leak scan) for the
+# local pre-push hook. In deterministic scope the release-time passes K/L/M
+# (toolchain pin, Xcode-27 source-compat guards, universal-binary arch) are
+# skipped because there is no staged release build. Set via
+# MACCRAB_AUDIT_SCOPE.
 AUDIT_SCOPE="${MACCRAB_AUDIT_SCOPE:-full}"
 
 # ---------------------------------------------------------------------
@@ -3069,13 +3068,12 @@ fi
 # deliberately, with the design QA done — never as a side effect of
 # updating Xcode. RELEASE_PROCESS.md Step 3 documents the gate.
 
-# E-04: PASS K/L/M are the release-time gates. In deterministic scope (the
-# REQUIRED per-PR CI gate) they're skipped — they need the release build /
-# pinned toolchain a fresh hosted runner doesn't have. They still run in full
-# scope (the advisory CI `audit` job + release.sh Step 0b).
+# E-04: PASS K/L/M are release-time gates. The deterministic local-hook scope
+# skips them because they need the release build and pinned toolchain; they
+# still run in full scope through release.sh Step 0b.
 if [[ "$AUDIT_SCOPE" == "deterministic" ]]; then
     section "PASS K/L/M — release-time gates"
-    info "SKIPPED in deterministic scope (toolchain pin, Xcode-27 source-compat guards, universal-binary arch). Gated by release.sh + the advisory CI audit job."
+    info "SKIPPED in deterministic scope (toolchain pin, Xcode-27 source-compat guards, universal-binary arch). Gated by the local release.sh flow."
 else
 
 section "PASS K — release toolchain pin"

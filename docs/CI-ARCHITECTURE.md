@@ -1,6 +1,8 @@
 # CI Architecture
 
-**MacCrab runs its CI locally. There are no GitHub Actions workflows.**
+**MacCrab's build, test, signing, and release gates run locally.** There are no
+GitHub Actions workflows in this repository. This is an explicit trust-boundary
+decision, not a claim of independent CI or hosted attestation.
 
 The gate is `scripts/ci-local.sh`, invoked automatically by the version-controlled
 `.githooks/pre-push` hook. Activate it once per clone:
@@ -11,7 +13,7 @@ make ci         # run the gate by hand
 make ci-clean   # same, from a wiped .build (what a tag push runs automatically)
 ```
 
-## Why local, not GitHub Actions
+## Why the release gate is local
 
 Three independent reasons, any one of which is sufficient:
 
@@ -20,7 +22,7 @@ Three independent reasons, any one of which is sufficient:
    holding the Developer ID identity, the Sparkle EdDSA key and the rule-channel
    private key. GitHub documents this as a hazard; for a security product it is
    disqualifying.
-2. **Hosted runners cannot satisfy the toolchain pin.** Releases build on the
+2. **Hosted runners cannot satisfy the release toolchain pin.** Releases build on the
    pinned Xcode major, which the hosted macOS images do not ship. The retired
    `ci.yml` failed on exactly this from 2026-07-18 — an infrastructure mismatch,
    never a code defect, but it left the required check red across two GA releases.
@@ -36,31 +38,30 @@ package plugins, rule compilation, tests, and unsigned assembly run only after
 conventional signing/publisher variables are removed. Fixed credential-bearing
 phases do not invoke SwiftPM or dependency discovery.
 
-## What the gate covers
+## What the gates cover
 
-`scripts/ci-local.sh` — 19 checks, ~150s warm:
+`scripts/ci-local.sh` — 20 checks, ~150s warm:
 
 | Group | Checks |
 |---|---|
 | Build | `swift build`, `swift build --build-tests` |
 | Tests | full `swift test` suite |
 | Rules | YAML→JSON compile, rule-count consistency, rule lint (filter coverage), rule trust-anchor fixtures |
-| Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, release-dependency provenance, release supply-chain fixtures, SQLCipher provenance fixtures, secret/host-path diff scan, release-artifact lifecycle regression |
+| Required gates | broker fd fuzz (ASan/UBSan), deterministic architectural audit, release-dependency provenance, release supply-chain fixtures, exact-candidate qualification fixtures, SQLCipher provenance fixtures, secret/host-path diff scan, release-artifact lifecycle regression |
 | Assessment harness | builds, tests, and stays out of the shipped build |
 | Code quality | no force unwraps in `Sources`, no TODO/FIXME in `Sources` |
 
-This is a **superset** of what the retired hosted workflow gated: the secret scan,
-the harness-isolation check and the code-quality passes had no GitHub equivalent.
-
 ## The tradeoff, stated plainly
 
-Hosted CI ran on a **clean image**. Local CI runs on a machine that already has
-the toolchain, a warm `.build` and resolved dependencies, so it cannot see
-environment drift the way a fresh runner could. This project has been bitten by
-that class before — a poisoned `/tmp` cache, Xcode integer-literal arithmetic
-inside `#expect`, and `runner` colliding with a sanitizer reserved word.
+Local CI runs on a machine that already has the toolchain, a warm `.build` and
+resolved dependencies, so it cannot supply the independent clean-host signal a
+hosted job could. This project has been bitten by environment-drift failures
+before — a poisoned `/tmp` cache, Xcode integer-literal arithmetic inside
+`#expect`, and `runner` colliding with a sanitizer reserved word.
 
-The mitigation is `--clean`, which records the exact DMG name/SHA manifest,
+The compensating controls are the exact-candidate manifest and qualification
+reports, the versioned local pre-push hook, the complete local CI bundle, and
+`--clean`, which records the exact DMG name/SHA manifest,
 requires every member to be a non-empty regular file, renames each signed
 release DMG into a private sibling directory on the **same filesystem**, wipes
 `.build`, re-resolves, and restores only after explicit type/symlink,
@@ -79,10 +80,21 @@ cover resolve failure, zero-byte artifacts, partial staging failure, device
 mismatch, staged deletion, `.build` symlink redirection, real-Git `h`/`S`
 mutations, wrong source/tree metadata, and extra metadata paths.
 
-`release.sh` also runs `ci-local.sh --clean` before constructing the artifact,
-so a later clean tag check is not asked to retroactively prove the signed bytes
-came from fresh release outputs. Release-mode CI removes the nested Assessment
-Harness build cache. Artifact construction then occurs in a private workspace
+`release.sh` is now two-phase. When no trusted candidate exists, it runs
+`ci-local.sh --clean`, constructs one signed/notarised candidate in a private
+tracked-Git-object workspace, records its signing/notary identity and complete
+payload inventory, preserves the DMG, writes an incomplete runtime-report
+template, and exits before any tag, push, GitHub draft or distribution mutation.
+The root-owned `record-runtime` command replaces that template only after it has
+captured and self-verified raw heartbeat/process/SQLite observations from the
+exact installed candidate for the full 900-second run. After that run and the
+on-device containment corpus, the second invocation rehashes and fully
+re-inspects that same DMG, recomputes every blocking runtime threshold and
+containment-source digest, runs clean CI again, and reuses the bytes without
+rebuilding them.
+
+Release-mode CI removes the nested Assessment Harness build cache. First-phase
+artifact construction occurs in a private workspace
 exported directly from the captured commit's Git blob objects: it has no `.git`,
 repository-local `.swiftpm`, ignored inputs, live index, attributes, archive
 filters, or live-checkout bytes. For a GA, a private temporary index seeded from
@@ -113,9 +125,11 @@ dependency and PyYAML hashes, provisioning-profile hash/metadata, source and
 bundled corpus hashes, and Xcode/Swift versions. `release.json` records the hash
 of that signed evidence.
 
-An RC is build-only unless `--publish-rc` is explicit. The explicit path creates
-only a non-latest GitHub prerelease and leaves production appcast,
-`release.json`, and both casks unchanged.
+An RC is build-only unless `--publish-rc` is explicit. Even with that flag, a
+first invocation cannot publish: it stops at the exact-candidate evidence
+boundary. Once both reports pass, the explicit path creates only a non-latest
+GitHub prerelease and leaves production appcast, `release.json`, and both casks
+unchanged. `--skip-prerelease-check` and `--respin` cannot bypass qualification.
 
 ## Local same-UID threat boundary
 
@@ -149,19 +163,9 @@ Re-introducing provenance would require a build host that is *not* the signing
 host. That is a change in topology, not a workflow file.
 
 `pre-release-audit.sh` **PASS J** audits stored GitHub Actions secrets against
-the workflows that could consume them, and reports the two cases separately:
-
-- **No workflows in the repo** (today's state): any stored Actions secret is
-  unusable by construction, so PASS J warns and tells you to delete it. A
-  credential nothing can consume is exposure with no compensating benefit. It is
-  quiet only when zero Actions secrets are stored — which is the case now.
-- **Workflows present**: each stored secret must be referenced by at least one
-  of them; the unreferenced ones are reported as orphans.
-
-An earlier version of this paragraph claimed PASS J "has nothing to scan and
-stays clean" with no workflows. It did not: an empty reference set made the
-per-secret `grep -qx` fail for every secret, so it would have accused all of
-them at once. The code now matches this description.
+the workflows that could consume them. With no workflows present, the expected
+Actions-secret inventory is empty; any stored secret is an orphan and must be
+removed.
 
 ## Trust map
 
@@ -180,4 +184,5 @@ them at once. The code now matches this description.
 - `scripts/ci-local.sh` — the gate
 - `.githooks/pre-push` — how it is enforced (`make hooks` to activate)
 - `scripts/pre-release-audit.sh` — the deeper pre-release audit, incl. advisory passes
+- `scripts/candidate-qualification.py` — exact-DMG runtime + containment gate
 - `RELEASE_PROCESS.md` — the full local sign / notarise / publish flow

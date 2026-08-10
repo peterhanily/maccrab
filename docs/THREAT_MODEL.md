@@ -256,10 +256,12 @@ an FDA/TCC host.
   is signed with an offline key and carries a `frozen` install kill-switch; a
   runtime re-verify quarantines plugins a fresh signed revocation list revokes;
   the operator has a local execution kill-switch.
-- **Containment is proved, not asserted.** An adversarial corpus
-  (`make test-corpus`) runs the EXACT shipped runner + broker + trampoline on a
-  real macOS host and asserts the OS denies undeclared read / network / fork /
-  metadata-stat / mach-lookup for both a C and a Swift fixture.
+- **Containment is proved, not asserted.** The candidate-bound adversarial corpus
+  (`make test-corpus`) mounts the signed DMG read-only and drives its release
+  `maccrabctl plugin test` path, exercising the exact shipped runner + broker +
+  signed trampoline on a real macOS host. It asserts that the OS denies
+  undeclared read / network / fork / metadata-stat / mach-lookup for both a C
+  and a Swift fixture; the debug test bundle is not accepted as release proof.
 
 **Residual risk:**
 - The runnable third-party lane **ships fail-closed and is disabled by default**:

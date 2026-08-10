@@ -8,10 +8,13 @@
 # hosted CI sat red for months on an error that was never about the code.
 #
 # This hook is the gate. It is version-controlled (unlike .git/hooks/) and
-# activated by `make hooks`, so a fresh clone is protected too.
+# activated by `make hooks`, so each clone can install the same gate. A fresh
+# clone remains unprotected until that command is run.
 #
-# Bypass — for a genuine emergency only, and say why in the commit:
-#   git push --no-verify
+# Client hooks are technically bypassable, but any bypass is outside the release
+# policy. It must never carry a version tag or move a release branch; document a
+# genuine non-release emergency separately instead of advertising a copy/paste
+# bypass here.
 set -euo pipefail
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -43,6 +46,9 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release-env.sh
     scripts/_release_env.py
     scripts/export-release-source.py
+    scripts/candidate-qualification.py
+    scripts/runtime-qualification-workload.sh
+    scripts/test-otlp-curl.sh
     scripts/check-release-dependencies.sh
     scripts/prepare-release-pyyaml.sh
     scripts/check-release-pyyaml.sh

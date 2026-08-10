@@ -31,9 +31,9 @@
 # run individually OR as one non-interactive flow. The default (no
 # argument) runs every stage in order in a single process with a
 # per-PID staging dir — byte-for-byte identical to the pre-S5-T6 linear
-# script. Individual stage invocation is what the reproducible-build CI
-# workflow (.github/workflows/reproducible-build.yml) uses: it runs the
-# `unsigned-build` stage ONLY (signing stays on the trusted Mac).
+# script. Individual stage invocation remains useful for local diagnosis and
+# reproducibility checks; signing stays on the trusted Mac. This repository has
+# no hosted release workflow.
 #
 #   scripts/build-release.sh                   # all four stages (default)
 #   scripts/build-release.sh all               # explicit equivalent
@@ -550,8 +550,8 @@ load_sparkle_config() {
 #   Compile both architectures, lipo universal binaries, compile rules,
 #   stamp the bundle-version marker + the rule-manifest hashes. Produces
 #   $STAGING_DIR/bin + $STAGING_DIR/compiled_rules + rules_source. No
-#   .app, no signing, no Apple round-trip — this is the ONLY stage the
-#   self-hosted reproducible-build CI runs.
+#   .app, no signing, no Apple round-trip. This stage is also useful for
+#   local reproducibility checks; this repository has no hosted CI runner.
 # ═════════════════════════════════════════════════════════════════════
 stage_unsigned_build() {
     if [ "${MACCRAB_REQUIRE_TRACKED_RELEASE_INPUTS:-0}" = "1" ]; then
@@ -1759,8 +1759,8 @@ RELEASE_EOF
 
     rm -rf "$STAGING_DIR"
 
-    echo "To create a GitHub release:"
-    echo "  gh release create v$VERSION '$DMG_PATH' --title 'MacCrab v$VERSION' --notes-file RELEASE_NOTES/v$VERSION.md"
+    echo "Candidate bytes built only — do not tag, push, or publish this artifact directly."
+    echo "Use scripts/release.sh's two-phase qualification flow; publication remains blocked on exact-candidate runtime and containment evidence."
 }
 
 # ─── Stage handoff helper ────────────────────────────────────────────

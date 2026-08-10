@@ -689,6 +689,48 @@ enum SizeCapConvergence {
     }
 }
 
+/// Trace retention is daily while healthy, but a storage-shed TraceStore needs
+/// repeated bounded passes to consume more than one 256-row recovery batch.
+/// The Dispatch timer supplies the five-minute tick; this small locked gate
+/// suppresses healthy ticks until the daily deadline. `DaemonTimerLifecycle`'s
+/// label coalescing independently guarantees that slow passes never overlap.
+final class TraceStoreRecoveryCadenceGate: @unchecked Sendable {
+    static let initialDelaySeconds: TimeInterval = 180
+    static let pressureIntervalSeconds: TimeInterval = 300
+    static let healthyIntervalSeconds: TimeInterval = 86_400
+
+    private let lock = NSLock()
+    private var lastRunAt: Date?
+    /// A healthy retention pass is intentionally bounded. If it leaves expired
+    /// rows behind, keep the pressure cadence until the producer reports that
+    /// the backlog is empty; otherwise a machine producing more than 256 spans
+    /// per day can never enforce its configured retention horizon.
+    private var retentionDrainPending = false
+
+    func shouldRun(blocked: Bool, now: Date = Date()) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if blocked || retentionDrainPending {
+            lastRunAt = now
+            return true
+        }
+        if let lastRunAt {
+            let elapsed = now.timeIntervalSince(lastRunAt)
+            guard elapsed < 0 || elapsed >= Self.healthyIntervalSeconds else {
+                return false
+            }
+        }
+        lastRunAt = now
+        return true
+    }
+
+    func recordRecoveryOutcome(retentionBacklogRemaining: Bool) {
+        lock.lock()
+        retentionDrainPending = retentionBacklogRemaining
+        lock.unlock()
+    }
+}
+
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
@@ -1480,22 +1522,34 @@ enum DaemonTimers {
 
         let tracesPruneTimer: DispatchSourceTimer?
         let t = DispatchSource.makeTimerSource(queue: .global())
-        // First bounded recovery shortly after boot; then daily. The timer is
-        // retained even when the receiver is disabled at boot and resolves the
-        // current actor only when it fires. This keeps SIGHUP enable/disable and
-        // port changes from leaving a timer pinned to a stale TraceStore handle.
-        // All checkpoint/delete/vacuum decisions live inside TraceStore so a
-        // maintenance call cannot bypass the same cap/floor contract as an
-        // OTLP insert.
-        t.schedule(deadline: .now() + 180, repeating: 86400)
+        let tracesRecoveryCadence = TraceStoreRecoveryCadenceGate()
+        // First bounded recovery shortly after boot, then inspect every five
+        // minutes. A blocked store runs one bounded pass per tick until it
+        // converges; a healthy store is admitted by the cadence gate only once
+        // per day. The timer is retained even when the receiver is disabled at
+        // boot and resolves the current actor only when it fires, so SIGHUP
+        // enable/disable and port changes cannot pin a stale TraceStore handle.
+        // Label coalescing prevents overlap if one pass exceeds five minutes.
+        t.schedule(
+            deadline: .now() + TraceStoreRecoveryCadenceGate.initialDelaySeconds,
+            repeating: TraceStoreRecoveryCadenceGate.pressureIntervalSeconds
+        )
         t.setEventHandler {
             timerLifecycle.submit(label: "traces-recovery") {
                 guard let traceStore = state.traceStore else { return }
+                let admissionBefore = await traceStore.storageAdmissionStatus()
+                guard tracesRecoveryCadence.shouldRun(
+                    blocked: admissionBefore.blocked
+                ) else { return }
                 let days = max(1, min(state.storage.tracesRetentionDays, 3650))
                 let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                 do {
                     let result = try await traceStore.recoverStorageBudget(
                         retentionCutoff: cutoff
+                    )
+                    tracesRecoveryCadence.recordRecoveryOutcome(
+                        retentionBacklogRemaining:
+                            result.retentionBacklogRemaining
                     )
                     if result.pinnedReader {
                         logger.warning("OTLP traces bounded recovery aborted: a reader pins traces.db-wal; no DELETE or vacuum was issued")
@@ -1504,10 +1558,17 @@ enum DaemonTimers {
                         logger.notice("OTLP traces bounded recovery: \(result.spansDeleted) spans deleted, \(result.vacuumPagesReclaimed) pages reclaimed; footprint=\(result.footprintBytes ?? -1) bytes, free=\(result.freeSpaceBytes ?? -1) bytes")
                     }
                     let admission = await traceStore.storageAdmissionStatus()
-                    if admission.blocked, result.autoVacuumMode != 2 {
-                        logger.warning("OTLP traces remain storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. Stop the engine before any offline conversion; online full VACUUM is intentionally disabled.")
+                    if admission.blocked, result.autoVacuumMode != 2,
+                       !result.pinnedReader {
+                        logger.warning("OTLP traces remain storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. The actor-owned one-shot conversion was deferred; recovery will retry on the next bounded cadence.")
                     }
                 } catch {
+                    // A failed healthy pass has not proven the retention backlog
+                    // empty. Retry at the bounded cadence instead of postponing
+                    // the same failed maintenance boundary for a full day.
+                    tracesRecoveryCadence.recordRecoveryOutcome(
+                        retentionBacklogRemaining: true
+                    )
                     logger.warning("OTLP traces bounded recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -2491,6 +2552,19 @@ enum DaemonTimers {
             // signature of the flush, whether accidental or deliberate.
             let sequencePartialsEvicted = await state.sequenceEngine.partialsEvictedTotal
             let sequencePendingStepsEvicted = await state.sequenceEngine.pendingStepsEvictedTotal
+            let sequenceJournalConservation = await state.sequenceEngine.pendingStepConservation()
+            let sequenceJournalByRule = await state.sequenceEngine
+                .pendingStepConservationByRule()
+            let sequenceJournalByRuleDict: [String: [String: UInt64]] =
+                sequenceJournalByRule.mapValues { ledger in
+                    [
+                        "offered": ledger.offered,
+                        "completed": ledger.completed,
+                        "queued": ledger.queued,
+                        "in_flight": ledger.inFlight,
+                        "explicitly_shed": ledger.explicitlyShed,
+                    ]
+                }
             let sequenceWeight = await state.sequenceEngine.checkpointWeightDiagnostics()
             let sequencePartialsInFlight = sequenceWeight.partialCount
             let sequencePendingStepsCurrent = sequenceWeight.pendingCount
@@ -2549,6 +2623,13 @@ enum DaemonTimers {
                 "bytes_written_total": sequenceCheckpoint.bytesWrittenTotal,
                 "unchanged_skips_total": sequenceCheckpoint.unchangedSkipsTotal,
                 "budget_deferrals_total": sequenceCheckpoint.budgetDeferralsTotal,
+                "conservation": [
+                    "offered": sequenceCheckpoint.conservation.offered,
+                    "completed": sequenceCheckpoint.conservation.completed,
+                    "queued": sequenceCheckpoint.conservation.queued,
+                    "in_flight": sequenceCheckpoint.conservation.inFlight,
+                    "explicitly_shed": sequenceCheckpoint.conservation.explicitlyShed,
+                ],
                 "orphan_files_current": sequenceCheckpoint.orphanFilesCurrent,
                 "orphan_bytes_current": sequenceCheckpoint.orphanBytesCurrent,
                 "orphan_files_removed_total": sequenceCheckpoint.orphanFilesRemovedTotal,
@@ -2896,6 +2977,14 @@ enum DaemonTimers {
                     "shed_mutations_total": Int64(clamping: s.shedMutationsTotal),
                     "pinned_reader": s.pinnedReader,
                     "recovering": s.recovering,
+                ]
+                let ingest = s.ingestConservation
+                d["ingest_conservation"] = [
+                    "offered": Int64(clamping: ingest.offered),
+                    "completed": Int64(clamping: ingest.completed),
+                    "queued": Int64(clamping: ingest.queued),
+                    "in_flight": Int64(clamping: ingest.inFlight),
+                    "explicitly_shed": Int64(clamping: ingest.explicitlyShed),
                 ]
                 if let value = s.maxFootprintBytes { d["max_footprint_bytes"] = value }
                 if let value = s.admissionThresholdBytes { d["admission_threshold_bytes"] = value }
@@ -3246,6 +3335,14 @@ enum DaemonTimers {
                 "sequence_state_continuity_maintained": sequenceStateContinuityMaintained,
                 "sequence_state_continuity_detail": sequenceStateContinuityDetail,
                 "sequence_checkpoint": sequenceCheckpointDict,
+                "sequence_journal_conservation": [
+                    "offered": sequenceJournalConservation.offered,
+                    "completed": sequenceJournalConservation.completed,
+                    "queued": sequenceJournalConservation.queued,
+                    "in_flight": sequenceJournalConservation.inFlight,
+                    "explicitly_shed": sequenceJournalConservation.explicitlyShed,
+                ],
+                "sequence_journal_conservation_by_rule": sequenceJournalByRuleDict,
                 // v1.21.4 (F2/A2): split merged-stream drop attribution. Both are
                 // detection-input drops folded into `events_dropped`; surfaced
                 // distinctly so a file-noise flood (file) is not read as a lost

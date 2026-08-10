@@ -42,6 +42,10 @@ let scratch = (try? JSONSerialization.jsonObject(with: requestData) as? [String:
 // ---- ALLOW: a DECLARED read served through the broker over fd 3. ----
 if let scratch {
     let path = scratch + "/allowed.txt"
+    // Seed only the runner-provided writable scratch directory so this probe is
+    // self-contained under the exact shipped `maccrabctl plugin test` path.
+    // The read below still occurs solely through the broker-passed fd.
+    try? Data("BROKER-OK".utf8).write(to: URL(fileURLWithPath: path))
     let bytes = Array(path.utf8)
     let hdr: [UInt8] = [UInt8((bytes.count >> 8) & 0xFF), UInt8(bytes.count & 0xFF)]
     let sentHdr = hdr.withUnsafeBytes { write(3, $0.baseAddress, 2) }
@@ -65,21 +69,21 @@ do {
     if f >= 0 { emit("leak.file_escape", "opened an undeclared file directly"); close(f) }
 }
 
-// F9: undeclared network egress.
+// F9: undeclared network egress. The recorder proves this fixed loopback
+// endpoint is reachable by the same binary before the sandboxed comparison.
 do {
     let s = socket(AF_INET, SOCK_STREAM, 0)
     if s >= 0 {
-        _ = fcntl(s, F_SETFL, O_NONBLOCK)
         var sa = sockaddr_in()
         sa.sin_family = sa_family_t(AF_INET)
-        sa.sin_port = in_port_t(443).bigEndian
-        inet_pton(AF_INET, "1.1.1.1", &sa.sin_addr)
+        sa.sin_port = in_port_t(49373).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr)
         let rc = withUnsafePointer(to: &sa) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        if rc == 0 || errno == EINPROGRESS { emit("leak.network", "outbound connect not denied") }
+        if rc == 0 { emit("leak.network", "reachable loopback connect not denied") }
         close(s)
     }
 }

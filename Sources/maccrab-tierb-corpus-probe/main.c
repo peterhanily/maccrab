@@ -56,11 +56,19 @@ int main(void) {
     int have_scratch = (read_scratch(scratch, sizeof(scratch)) == 0);
 
     // ---- ALLOW probe: a DECLARED read served through the broker (fd 3). ----
-    // The harness pre-creates <scratch>/allowed.txt; scratch is in the broker
-    // policy, so this read SHOULD succeed via a passed fd (we never open() it).
+    // Seed <scratch>/allowed.txt through the sandbox's explicitly writable
+    // per-invocation directory. This makes the probe self-contained when the
+    // exact shipped `maccrabctl plugin test` path owns the random scratch path.
+    // The subsequent READ still goes only through the broker-passed fd.
     if (have_scratch) {
         char path[1100];
         snprintf(path, sizeof(path), "%s/allowed.txt", scratch);
+        int seed = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (seed >= 0) {
+            const char *content = "BROKER-OK";
+            (void)write(seed, content, strlen(content));
+            close(seed);
+        }
         size_t len = strlen(path);
         unsigned char hdr[2] = { (unsigned char)((len >> 8) & 0xFF), (unsigned char)(len & 0xFF) };
         if (write(3, hdr, 2) == 2 && write(3, path, len) == (ssize_t)len) {
@@ -82,16 +90,18 @@ int main(void) {
         if (f >= 0) { emit("leak.file_escape", "opened an undeclared file directly"); close(f); }
     }
 
-    // F9: undeclared network egress.
+    // F9: undeclared network egress. The qualification recorder keeps this
+    // fixed loopback endpoint reachable and first proves the same binary can
+    // connect to it unsandboxed, so a denied result cannot be caused by an
+    // offline host or an unroutable external target.
     {
         int s = socket(AF_INET, SOCK_STREAM, 0);
         if (s >= 0) {
-            fcntl(s, F_SETFL, O_NONBLOCK);
             struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET; sa.sin_port = htons(443);
-            inet_pton(AF_INET, "1.1.1.1", &sa.sin_addr);
+            sa.sin_family = AF_INET; sa.sin_port = htons(49373);
+            inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
             int rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
-            if (rc == 0 || errno == EINPROGRESS) emit("leak.network", "outbound connect not denied");
+            if (rc == 0) emit("leak.network", "reachable loopback connect not denied");
             close(s);
         }
     }

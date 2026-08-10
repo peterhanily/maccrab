@@ -52,11 +52,14 @@ Every brokered request is still validated against the signature-bound manifest
 allowlist, the per-component `O_NOFOLLOW` safe-open, and the TCC guard — the
 client never reaches beyond the plugin's declared, consented read-set.
 
-**Containment is PROVEN on-device** by `ContainmentCorpusTests` (`make
-test-corpus`) against the EXACT shipped runner + broker + trampoline, for both a C
-fixture and a Swift fixture (Swift runtime + Foundation): a declared read is
-brokered; undeclared file / network / fork+exec / metadata-stat / mach-lookup are
-all OS-denied (zero `leak.*` artifacts).
+**Containment is PROVEN on-device** by the candidate-bound `make test-corpus`
+gate. It mounts the exact signed DMG read-only and uses that candidate's release
+`maccrabctl plugin test` path, so the shipped runner + broker + signed trampoline
+execute both a C fixture and a Swift fixture (Swift runtime + Foundation): a
+declared read is brokered; undeclared file / network / fork+exec / metadata-stat
+/ mach-lookup are all OS-denied (zero `leak.*` artifacts). The gated
+`ContainmentCorpusTests` suite is the corresponding source-level regression; it
+is not accepted as a substitute for exact-candidate evidence.
 
 ### Remaining gates (operator / keyholder / external — NOT code)
 

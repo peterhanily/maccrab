@@ -115,6 +115,12 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// Missing means the running engine predates checkpoint integration; a
     /// present dirty/degraded block must never be rendered as restart-safe.
     public let sequenceCheckpoint: SequenceCheckpoint?
+    /// Exact producer-owned accounting for the bounded pending-step journal.
+    /// Missing on older engines means unknown, never an inferred zero.
+    public let sequenceJournalConservation: SequenceConservationTelemetry?
+    /// Per-rule attribution for the same exact ledger. Keys are trusted rule
+    /// IDs, not event-derived labels. Missing means the producer predates it.
+    public let sequenceJournalConservationByRule: [String: SequenceConservationTelemetry]?
     /// Live temporal-correlation state. Eviction or accounting drift is a
     /// detection-continuity loss even if the checkpoint carrier itself is
     /// current and writable.
@@ -236,6 +242,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case eventsRetentionBudget = "events_retention_budget"
         case alertEvidenceBudget = "alert_evidence_budget"
         case sequenceCheckpoint = "sequence_checkpoint"
+        case sequenceJournalConservation = "sequence_journal_conservation"
+        case sequenceJournalConservationByRule = "sequence_journal_conservation_by_rule"
         case sequencePartialsEvictedTotal = "sequence_partials_evicted_total"
         case sequencePartialsInFlight = "sequence_partials_in_flight"
         case sequencePendingStepsCurrent = "sequence_pending_steps_current"
@@ -621,9 +629,34 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             let observedFeatures = telemetry.perFeature.map(\.feature)
             guard observedFeatures.count == expectedFeatures.count,
                   Set(observedFeatures) == expectedFeatures,
-                  Self.featureTotalsMatch(telemetry) else { return false }
+                  Self.featureTotalsMatch(telemetry),
+                  Self.alertInvestigationReasonsConserve(telemetry) else {
+                return false
+            }
             let counters = [telemetry.totals] + telemetry.perFeature.map(\.counters)
             return counters.allSatisfy(Self.countersConserve)
+        }
+
+        /// Schema-1 heartbeats predate reason attribution and remain honestly
+        /// decodable. A schema-2 producer must emit the exhaustive reason set,
+        /// and every retry/final alert-investigation rejection must have exactly
+        /// one fixed content-free reason.
+        private static func alertInvestigationReasonsConserve(
+            _ telemetry: LLMRuntimeTelemetrySnapshot
+        ) -> Bool {
+            guard let reasons = telemetry.alertInvestigationRejections else {
+                return telemetry.schemaVersion == 1
+            }
+            guard reasons.conservationMaintained,
+                  let investigation = telemetry.counters(for: .alertInvestigation)?
+                    .downstreamValidation else {
+                return false
+            }
+            let (expectedObserved, overflow) = investigation.retryRequested
+                .addingReportingOverflow(reasons.terminalRejectionsTotal)
+            return !overflow
+                && reasons.observedAttemptsTotal == expectedObserved
+                && reasons.terminalRejectionsTotal == investigation.finalRejection
         }
 
         /// Requests that reached the public API without a fixed feature label.
@@ -1232,6 +1265,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let bytesWrittenTotal: UInt64?
         public let unchangedSkipsTotal: UInt64?
         public let budgetDeferralsTotal: UInt64?
+        public let conservation: SequenceConservationTelemetry?
         public let orphanFilesCurrent: Int?
         public let orphanBytesCurrent: Int?
         public let orphanFilesRemovedTotal: UInt64?
@@ -1267,6 +1301,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case bytesWrittenTotal = "bytes_written_total"
             case unchangedSkipsTotal = "unchanged_skips_total"
             case budgetDeferralsTotal = "budget_deferrals_total"
+            case conservation
             case orphanFilesCurrent = "orphan_files_current"
             case orphanBytesCurrent = "orphan_bytes_current"
             case orphanFilesRemovedTotal = "orphan_files_removed_total"
@@ -1276,6 +1311,39 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case carrierInvalidationsTotal = "carrier_invalidations_total"
             case lastCarrierInvalidationReason = "last_carrier_invalidation_reason"
             case lastCarrierInvalidationAtUnix = "last_carrier_invalidation_at_unix"
+        }
+    }
+
+    /// Exact TraceStore span-ingest conservation. Missing means the heartbeat
+    /// predates this ledger; a present but incomplete ledger remains unknown,
+    /// never silently green.
+    public struct TraceStoreIngestConservation: Codable, Sendable, Equatable {
+        public let offered: Int64?
+        public let completed: Int64?
+        public let queued: Int64?
+        public let inFlight: Int64?
+        public let explicitlyShed: Int64?
+
+        private enum CodingKeys: String, CodingKey {
+            case offered
+            case completed
+            case queued
+            case inFlight = "in_flight"
+            case explicitlyShed = "explicitly_shed"
+        }
+
+        public var conservationMaintained: Bool? {
+            guard let offered, let completed, let queued, let inFlight,
+                  let explicitlyShed else { return nil }
+            guard offered >= 0, completed >= 0, queued >= 0, inFlight >= 0,
+                  explicitlyShed >= 0 else { return false }
+            var accounted: Int64 = 0
+            for value in [completed, queued, inFlight, explicitlyShed] {
+                let (next, overflow) = accounted.addingReportingOverflow(value)
+                guard !overflow else { return false }
+                accounted = next
+            }
+            return offered == accounted
         }
     }
 
@@ -1313,6 +1381,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let recoveryNoPhysicalProgressTotal: Int64?
         public let lastRecoveryFootprintBeforeBytes: Int64?
         public let lastRecoveryFootprintAfterBytes: Int64?
+        public let ingestConservation: TraceStoreIngestConservation?
 
         // Exact rolling-graph persistence accounting. These counters are
         // cumulative for one process epoch; failed totals therefore remain
@@ -1366,6 +1435,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case recoveryNoPhysicalProgressTotal = "recovery_no_physical_progress_total"
             case lastRecoveryFootprintBeforeBytes = "last_recovery_footprint_before_bytes"
             case lastRecoveryFootprintAfterBytes = "last_recovery_footprint_after_bytes"
+            case ingestConservation = "ingest_conservation"
             case ingestEventsTotal = "ingest_events_total"
             case ingestEventsCommittedTotal = "ingest_events_committed_total"
             case ingestEventsFailedTotal = "ingest_events_failed_total"

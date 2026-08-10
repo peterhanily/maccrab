@@ -493,7 +493,7 @@ struct EventStoreTests {
         let events = (0..<20).map { i in
             makeEvent(processName: "batch\(i)", pid: Int32(i + 100))
         }
-        try await store.insert(events: events)
+        try await store.insert(events: events, lane: .priority)
         let count = try await store.count()
         #expect(count == 20)
     }

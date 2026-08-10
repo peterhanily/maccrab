@@ -238,13 +238,25 @@ struct MacCrabCtlUnitTests {
             ]
         }
         let features: [[String: Any]] = LLMRuntimeFeature.allCases.map { feature in
-            [
-                "feature": feature.rawValue,
-                "counters": feature == .unspecified
-                    ? counters(requested: 1, cache: 1, retries: 1, finalRejections: 1)
-                    : counters(),
-            ]
+            let value: [String: Any]
+            switch feature {
+            case .unspecified:
+                value = counters(requested: 1, cache: 1)
+            case .alertInvestigation:
+                value = counters(retries: 1, finalRejections: 1)
+            default:
+                value = counters()
+            }
+            return ["feature": feature.rawValue, "counters": value]
         }
+        let rejectionReasons: [[String: Any]] =
+            LLMAlertInvestigationRejectionReason.allCases.map { reason in
+                [
+                    "reason": reason.rawValue,
+                    "observedAttempts": reason == .evidenceGrounding ? 2 : 0,
+                    "terminalRejections": reason == .evidenceGrounding ? 1 : 0,
+                ]
+            }
         let heartbeat: [String: Any] = [
             "schema_version": 5,
             "written_at_unix": 1_700_000_000.0,
@@ -254,12 +266,17 @@ struct MacCrabCtlUnitTests {
                 "model": "content-free",
                 "healthy": true,
                 "runtime_telemetry": [
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "capturedAtUnix": 1_700_000_000.0,
                     "totals": counters(
                         requested: 1, cache: 1, retries: 1, finalRejections: 1
                     ),
                     "perFeature": features,
+                    "alertInvestigationRejections": [
+                        "observedAttemptsTotal": 2,
+                        "terminalRejectionsTotal": 1,
+                        "byReason": rejectionReasons,
+                    ],
                 ],
             ],
         ]
@@ -277,6 +294,7 @@ struct MacCrabCtlUnitTests {
         #expect(cliText.contains("unspecified=1 ⚠"))
         #expect(cliText.contains("retries=1"))
         #expect(cliText.contains("final_rejection=1 ⚠"))
+        #expect(cliText.contains("evidence_grounding=2/1"))
         #expect(!cliText.contains("prompt"))
 
         let typed = try #require(HeartbeatSnapshot.readFreshest(supportDirs: [dir.path]))
@@ -286,6 +304,7 @@ struct MacCrabCtlUnitTests {
         #expect(mcp.contains("accounting=conserving"))
         #expect(mcp.contains("unspecified=1"))
         #expect(mcp.contains("final_rejection=1"))
+        #expect(mcp.contains("evidence_grounding=2/1"))
         #expect(!mcp.contains("prompt"))
     }
 

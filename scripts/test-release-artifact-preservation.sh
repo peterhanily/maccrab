@@ -29,6 +29,9 @@ RELEASE_CRITICAL_EXECUTORS=(
     scripts/release-env.sh
     scripts/_release_env.py
     scripts/export-release-source.py
+    scripts/candidate-qualification.py
+    scripts/runtime-qualification-workload.sh
+    scripts/test-otlp-curl.sh
     scripts/check-release-dependencies.sh
     scripts/prepare-release-pyyaml.sh
     scripts/check-release-pyyaml.sh
@@ -172,6 +175,7 @@ make_ci_fixture() {
         test-release-artifact-preservation.sh; do
         write_executable "$fixture/scripts/$stub" '#!/bin/bash' 'exit 0'
     done
+    printf 'raise SystemExit(0)\n' > "$fixture/scripts/test-candidate-qualification.py"
     write_executable "$fixture/scripts/pre-release-audit.sh" \
         '#!/bin/bash' \
         'if [ "${MACCRAB_TEST_LATE_DELETE:-0}" = "1" ]; then rm -f .build/MacCrab-v*.dmg; fi' \
@@ -958,7 +962,7 @@ make_release_fixture() {
     # disposable repository. The git shim delegates object/index/worktree
     # operations to /usr/bin/git and intercepts only publication, so release.sh
     # is tested against real commits, annotated tags, blob IDs, and cleanliness.
-    printf '.build/\n.swiftpm/\n*.log\n.fixture-*\nfail-*\nhome/\ntmp/\n' > "$fixture/.gitignore"
+    printf '.build/\n.qualification-evidence/\n.swiftpm/\n*.log\n.fixture-*\nfail-*\nhome/\ntmp/\n' > "$fixture/.gitignore"
     printf 'private-input/\n' > "$fixture/Sources/MacCrabCore/Resources/.gitignore"
     printf 'fixture README [![Tests](https://img.shields.io/badge/tests-1%%20passing-brightgreen)]()\n' \
         > "$fixture/README.md"
@@ -1206,6 +1210,7 @@ make_release_fixture() {
         '        mkdir -p .build Casks homebrew' \
         '        dmg=".build/MacCrab-v$VERSION.dmg"' \
         '        if [ "${MACCRAB_TEST_BUILD_ZERO_DMG:-0}" = "1" ]; then : > "$dmg"; else printf "signed-notarized-stapled-release\n" > "$dmg"; fi' \
+        '        printf "notary_submission_id=12345678-1234-4123-8123-123456789abc\n" > "$dmg.notary-submission-id"' \
         '        sha=$(shasum -a 256 "$dmg" | awk '\''{print $1}'\'')' \
         '        case "$VERSION" in' \
         '            *-rc.*) ;;' \
@@ -1216,6 +1221,26 @@ make_release_fixture() {
         '        esac ;;' \
         'esac'
 
+    # Python stub for the copied release flow. It models the gate boundary and
+    # lets individual fixtures force a qualification failure; the real verifier
+    # has its own deterministic threshold/mutation suite.
+    printf '%s\n' \
+        'import hashlib, json, os, pathlib, sys' \
+        'args = sys.argv[1:]' \
+        'command = args[0] if args else ""' \
+        'def value(flag): return args[args.index(flag) + 1]' \
+        'if command == "verify-release":' \
+        '    if os.environ.get("MACCRAB_TEST_QUALIFICATION_FAIL") == "1": print("fixture qualification mismatch", file=sys.stderr); raise SystemExit(74)' \
+        '    for flag in ("--dmg", "--candidate-manifest", "--runtime-report", "--containment-report"):' \
+        '        path = pathlib.Path(value(flag)); assert path.is_file() and path.stat().st_size > 0' \
+        'elif command in ("record-candidate", "runtime-template"):' \
+        '    path = pathlib.Path(value("--output")); path.parent.mkdir(parents=True, exist_ok=True); path.write_text("{}\\n")' \
+        'elif command == "emit-release-json":' \
+        '    version = value("--version"); dmg = pathlib.Path.cwd() / ".build" / ("MacCrab-v" + version + ".dmg")' \
+        '    sha = hashlib.sha256(dmg.read_bytes()).hexdigest(); pathlib.Path(value("--output")).write_text(json.dumps({"version": version, "sha256": sha}) + "\\n")' \
+        'raise SystemExit(0)' \
+        > "$fixture/scripts/candidate-qualification.py"
+    /bin/chmod 0755 "$fixture/scripts/candidate-qualification.py"
     install_missing_critical_executor_fixtures "$fixture"
     write_executable "$fixture/.githooks/pre-commit" \
         '#!/bin/bash' \
@@ -1245,6 +1270,12 @@ make_release_fixture() {
         -e "s#CURL_BIN=/usr/bin/curl#CURL_BIN=${fixture}/fake-bin/curl#" \
         -e "s#PATH=/usr/bin:/bin:/usr/sbin:/sbin#PATH=${fixture}/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin#" \
         "$fixture/scripts/release.sh"
+    # Production exits here unconditionally. Only this disposable, committed
+    # fixture copy continues so the existing post-boundary attack simulations
+    # can exercise tag/push/upload behavior without a 15-minute host run.
+    /usr/bin/sed -i '' \
+        's@^    exit 3 # exact-candidate-phase-boundary: fixture tests patch only their disposable copy$@    CANDIDATE_READY=1; QUALIFIED_CANDIDATE_SHA=$(shasum -a 256 "$DMG_PATH" | awk '\''{print $1}'\''); QUALIFIED_MANIFEST_SHA=$(shasum -a 256 "$CANDIDATE_MANIFEST" | awk '\''{print $1}'\''); QUALIFIED_RUNTIME_SHA=$(shasum -a 256 "$RUNTIME_REPORT" | awk '\''{print $1}'\''); QUALIFIED_CONTAINMENT_SHA=$(shasum -a 256 "$CONTAINMENT_REPORT" | awk '\''{print $1}'\'')@' \
+        "$fixture/scripts/release.sh"
     /usr/bin/sed -i '' "s#__FIXTURE_ROOT__#${fixture}#g" \
         "$fixture/scripts/generate-appcast-entry.sh" \
         "$fixture/scripts/publish-appcast-entry.sh" \
@@ -1271,6 +1302,9 @@ make_release_fixture() {
     printf 'hostile mirror configuration\n' > "$fixture/.swiftpm/configuration/registries.json"
     printf 'ignored resource poison\n' \
         > "$fixture/Sources/MacCrabCore/Resources/private-input/poison.yml"
+    /bin/mkdir -p "$fixture/.qualification-evidence"
+    printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11.containment.json"
+    printf '{}\n' > "$fixture/.qualification-evidence/MacCrab-v9.9.11-rc.1.containment.json"
 }
 
 run_release_attack() {
@@ -1302,6 +1336,78 @@ run_release_attack() {
     ! grep -q 'release create' "$fixture/gh.log" \
         || fail "release.sh invoked release creation with a $attack artifact"
 }
+
+# The release publisher is now a two-phase exact-candidate state machine. These
+# focused fixtures prove that evidence failures happen before every mutation and
+# that a qualified second phase reuses the preserved bytes without rebuilding.
+qualification_missing="$TEST_ROOT/release-qualification-missing"
+make_release_fixture "$qualification_missing"
+/bin/mkdir -p "$qualification_missing/.build"
+printf 'preserved candidate\n' > "$qualification_missing/.build/MacCrab-v9.9.11.dmg"
+printf '{}\n' > "$qualification_missing/.qualification-evidence/MacCrab-v9.9.11.candidate.json"
+set +e
+(
+    cd "$qualification_missing"
+    PATH="$qualification_missing/fake-bin:/usr/bin:/bin" \
+        HOME="$qualification_missing/home" \
+        RELEASE_BRANCH=main \
+        MACCRAB_TEST_GH_LOG="$qualification_missing/gh.log" \
+        ./scripts/release.sh 9.9.11 --skip-prerelease-check
+) > "$qualification_missing/output.log" 2>&1
+qualification_missing_status=$?
+set -e
+[ "$qualification_missing_status" -ne 0 ] || fail "release accepted missing installed-host evidence"
+/usr/bin/grep -q 'PUBLICATION STOPPED' "$qualification_missing/output.log" \
+    || fail "missing runtime evidence did not explain the phase boundary"
+[ ! -s "$qualification_missing/build.log" ] || fail "missing evidence caused a qualified candidate rebuild"
+[ ! -s "$qualification_missing/gh.log" ] || fail "missing evidence reached GitHub"
+
+qualification_mismatch="$TEST_ROOT/release-qualification-mismatch"
+make_release_fixture "$qualification_mismatch"
+/bin/mkdir -p "$qualification_mismatch/.build"
+printf 'preserved candidate\n' > "$qualification_mismatch/.build/MacCrab-v9.9.11.dmg"
+printf '{}\n' > "$qualification_mismatch/.qualification-evidence/MacCrab-v9.9.11.candidate.json"
+printf '{}\n' > "$qualification_mismatch/.qualification-evidence/MacCrab-v9.9.11.runtime.json"
+set +e
+(
+    cd "$qualification_mismatch"
+    PATH="$qualification_mismatch/fake-bin:/usr/bin:/bin" \
+        HOME="$qualification_mismatch/home" \
+        RELEASE_BRANCH=main \
+        MACCRAB_TEST_QUALIFICATION_FAIL=1 \
+        MACCRAB_TEST_GH_LOG="$qualification_mismatch/gh.log" \
+        ./scripts/release.sh 9.9.11 --skip-prerelease-check
+) > "$qualification_mismatch/output.log" 2>&1
+qualification_mismatch_status=$?
+set -e
+[ "$qualification_mismatch_status" -ne 0 ] || fail "release accepted mismatched candidate evidence"
+/usr/bin/grep -q 'candidate qualification failed' "$qualification_mismatch/output.log" \
+    || fail "mismatched candidate evidence was not diagnosed"
+[ ! -s "$qualification_mismatch/build.log" ] || fail "mismatched evidence caused a candidate rebuild"
+[ ! -s "$qualification_mismatch/gh.log" ] || fail "mismatched evidence reached GitHub"
+
+qualified_reuse="$TEST_ROOT/release-qualified-reuse"
+make_release_fixture "$qualified_reuse"
+/bin/mkdir -p "$qualified_reuse/.build"
+printf 'preserved candidate\n' > "$qualified_reuse/.build/MacCrab-v9.9.11-rc.1.dmg"
+printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.candidate.json"
+printf '{}\n' > "$qualified_reuse/.qualification-evidence/MacCrab-v9.9.11-rc.1.runtime.json"
+(
+    cd "$qualified_reuse"
+    PATH="$qualified_reuse/fake-bin:/usr/bin:/bin" \
+        HOME="$qualified_reuse/home" \
+        TMPDIR="$qualified_reuse/tmp" \
+        RELEASE_BRANCH=main \
+        MACCRAB_TEST_GH_LOG="$qualified_reuse/gh.log" \
+        MACCRAB_TEST_PUBLISH_LOG="$qualified_reuse/publish.log" \
+        ./scripts/release.sh 9.9.11-rc.1 --skip-prerelease-check --publish-rc
+) > "$qualified_reuse/output.log" 2>&1 \
+    || fail "qualified second phase did not publish the preserved RC fixture"
+[ ! -s "$qualified_reuse/build.log" ] || fail "qualified second phase rebuilt the installed-host-tested candidate"
+/usr/bin/grep -q 'Reusing exact installed-host-qualified candidate' "$qualified_reuse/output.log" \
+    || fail "qualified second phase did not report preserved-candidate reuse"
+/usr/bin/grep -q 'release create' "$qualified_reuse/gh.log" \
+    || fail "qualified second phase did not reach the isolated RC publisher"
 
 # Artifact construction starts only from a fully committed source snapshot, and
 # every entitlement used by codesign must be represented by that commit.
@@ -2089,19 +2195,22 @@ set +e
         HOME="$gh_missing/home" \
         DEVELOPER_ID="fixture identity" \
         SKIP_APPCAST=1 \
+        MACCRAB_TEST_GH_LOG="$gh_missing/gh.log" \
         ./scripts/release.sh 9.9.11 --skip-prerelease-check
 ) > "$gh_missing/output.log" 2>&1
 gh_missing_status=$?
 set -e
 [ "$gh_missing_status" -ne 0 ] || fail "release.sh exited 0 without gh"
-grep -q 'GitHub CLI (gh) is required' "$gh_missing/output.log" \
-    || fail "release.sh did not diagnose missing gh"
-[ ! -d "$gh_missing/.build" ] \
-    || fail "release.sh started the build before checking for gh"
+if ! grep -q 'GitHub CLI (gh) is required' "$gh_missing/output.log"; then
+    /usr/bin/tail -40 "$gh_missing/output.log" >&2
+    fail "release.sh did not diagnose missing gh"
+fi
+[ -s "$gh_missing/.build/MacCrab-v9.9.11.dmg" ] \
+    || fail "release.sh did not preserve the local candidate before publisher preflight"
 
 # A present CLI with an expired token is no more useful than a missing CLI.
-# The preflight must fail before the mocked build/tag path and must never reach
-# `gh release create`.
+# Publisher preflight runs only after the local candidate qualifies; it must
+# still fail before tag/release mutation and never reach `gh release create`.
 gh_unauthenticated="$TEST_ROOT/release-gh-unauthenticated"
 make_release_fixture "$gh_unauthenticated"
 set +e
@@ -2120,8 +2229,8 @@ set -e
 [ "$gh_unauthenticated_status" -ne 0 ] || fail "release.sh exited 0 with invalid gh authentication"
 grep -q 'GitHub CLI authentication is invalid or expired' "$gh_unauthenticated/output.log" \
     || fail "release.sh did not diagnose invalid gh authentication"
-[ ! -d "$gh_unauthenticated/.build" ] \
-    || fail "release.sh started the build before validating gh authentication"
+[ -s "$gh_unauthenticated/.build/MacCrab-v9.9.11.dmg" ] \
+    || fail "release.sh did not preserve the candidate before validating gh authentication"
 ! grep -q 'release create' "$gh_unauthenticated/gh.log" \
     || fail "release.sh attempted release creation with invalid gh authentication"
 
@@ -2145,14 +2254,15 @@ set -e
 [ "$gh_readonly_status" -ne 0 ] || fail "release.sh exited 0 with read-only repository credentials"
 grep -q 'cannot publish to this repository' "$gh_readonly/output.log" \
     || fail "release.sh did not diagnose read-only repository credentials"
-[ ! -d "$gh_readonly/.build" ] \
-    || fail "release.sh started the build before validating repository write access"
+[ -s "$gh_readonly/.build/MacCrab-v9.9.11.dmg" ] \
+    || fail "release.sh did not preserve the candidate before validating repository write access"
 ! grep -q 'release create' "$gh_readonly/gh.log" \
     || fail "release.sh attempted release creation with read-only repository credentials"
 
 # release.sh is a public publisher, not a build-only command. Sparkle may be
 # deliberately skipped, but the site metadata/cask publisher token remains a
-# hard precondition before build/tag work.
+# hard precondition before tag/publish work; local candidate construction does
+# not need publisher credentials.
 site_token_missing="$TEST_ROOT/release-site-token-missing"
 make_release_fixture "$site_token_missing"
 set +e
@@ -2171,8 +2281,8 @@ set -e
 [ "$site_token_missing_status" -ne 0 ] || fail "release.sh exited 0 without SITE_REPO_TOKEN"
 grep -q 'SITE_REPO_TOKEN env var not set' "$site_token_missing/output.log" \
     || fail "release.sh did not diagnose missing distribution token"
-[ ! -d "$site_token_missing/.build" ] \
-    || fail "release.sh started the build before validating SITE_REPO_TOKEN"
+[ -s "$site_token_missing/.build/MacCrab-v9.9.11.dmg" ] \
+    || fail "release.sh did not preserve the candidate before validating SITE_REPO_TOKEN"
 ! grep -q 'release create' "$site_token_missing/gh.log" \
     || fail "release.sh published GitHub release without the distribution token"
 

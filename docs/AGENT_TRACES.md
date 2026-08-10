@@ -170,8 +170,12 @@ verification**. Full detail: [`maccrabtrace.v1.spec.md` §6.4](maccrabtrace.v1.s
   the cap or when the containing volume has less than the 1 GiB free-space
   floor. Pressure returns HTTP 507 and is published in
   `traces_storage_admission` for CLI, MCP, and dashboard visibility. Recovery is
-  bounded, refuses to delete under a pinned WAL reader, and uses incremental
-  vacuum only—never a full online `VACUUM`.
+  bounded, refuses to delete under a pinned WAL reader, and normally uses
+  incremental vacuum. The one exception is an actor-owned, headroom-gated
+  conversion of an inherited legacy `auto_vacuum=NONE` file before any
+  evidence is deleted; once converted, subsequent recovery is incremental.
+  Pressured stores and retention backlogs are retried in bounded five-minute
+  passes until they converge, then return to the daily healthy cadence.
 
 ## Enabling
 

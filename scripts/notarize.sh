@@ -75,6 +75,10 @@ fi
 
 # Resolve to absolute path
 DMG_PATH="$(cd "$(dirname "$DMG_PATH")" && pwd)/$(basename "$DMG_PATH")"
+NOTARY_ID_PATH="$DMG_PATH.notary-submission-id"
+# Never let a prior submission identity describe newly created/re-signed bytes.
+# The accepted path below writes a fresh sidecar atomically.
+/bin/rm -f "$NOTARY_ID_PATH"
 
 echo ""
 echo -e "${BOLD}MacCrab Code Signing & Notarization${NC}"
@@ -158,14 +162,25 @@ if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
         # submission did NOT get accepted — otherwise a successful notarization
         # is aborted and the ticket is never stapled (offline installs break).
         if echo "$NOTARIZE_OUTPUT" | grep -q "status: Accepted"; then
+            SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -oE 'id: [a-fA-F0-9-]{36}' | head -1 | awk '{print $2}')
+            if ! [[ "$SUBMISSION_ID" =~ ^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[1-5][a-fA-F0-9]{3}-[89aAbB][a-fA-F0-9]{3}-[a-fA-F0-9]{12}$ ]]; then
+                fail "Notarization was accepted but its submission UUID was not recorded"
+            fi
             ok "Notarization accepted"
 
             # Staple the ticket
             info "Stapling notarization ticket..."
             if xcrun stapler staple "$DMG_PATH" 2>&1; then
                 ok "Notarization ticket stapled"
+                NOTARY_ID_TMP="$NOTARY_ID_PATH.tmp.$$"
+                /usr/bin/printf 'notary_submission_id=%s\n' \
+                    "$(printf '%s' "$SUBMISSION_ID" | /usr/bin/tr '[:upper:]' '[:lower:]')" \
+                    > "$NOTARY_ID_TMP"
+                /bin/chmod 0600 "$NOTARY_ID_TMP"
+                /bin/mv -f "$NOTARY_ID_TMP" "$NOTARY_ID_PATH"
+                ok "Notarization identity recorded: $NOTARY_ID_PATH"
             else
-                warn "Stapling failed — users can still download (ticket is in Apple's servers)"
+                fail "Stapling failed — exact-candidate qualification requires an offline-verifiable ticket"
             fi
         elif echo "$NOTARIZE_OUTPUT" | grep -qi "unable to authenticate\|401"; then
             fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE (or APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD)"

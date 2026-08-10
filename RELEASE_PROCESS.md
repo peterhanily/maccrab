@@ -3,9 +3,8 @@
 This document describes the end-to-end signing, notarization, and
 distribution pipeline for MacCrab releases. It is the operator-side
 companion to `docs/TRUST.md` (which covers end-user verification),
-`docs/CI-ARCHITECTURE.md` (which covers the local CI gate and why there
-are no GitHub Actions workflows), and `SECURITY.md` (which covers the
-vulnerability-disclosure path).
+`docs/CI-ARCHITECTURE.md` (which covers the local-only CI trust boundary), and
+`SECURITY.md` (which covers the vulnerability-disclosure path).
 
 Required reading for anyone who plans to cut a release tag.
 
@@ -59,15 +58,23 @@ each fixed signing or publishing child receives only the values it needs.
 
 ## End-to-end release pipeline
 
-`scripts/release.sh <version>` orchestrates all of the below. Run
-on the build Mac (Apple Silicon, macOS 14+).
+`scripts/release.sh <version>` orchestrates all of the below as a two-phase
+operation on the build/reference Mac (Apple Silicon, macOS 14+). The first
+invocation builds and preserves one exact candidate, then exits before any
+GitHub or distribution publication. Building the candidate necessarily submits
+its signed bytes to Apple's notarization service; it does not move a Git ref or
+publish a downloadable artifact. After that DMG passes the installed-host and
+containment gates, the second invocation reuses those exact bytes and may
+publish.
 
 ### Step 0 — preconditions
 
-- `gh` installed, authenticated, and authorized to write this repository.
-  Hard-fails before the build so a missing or expired publisher cannot strand
-  a remote tag without its release asset.
-- For a GA, `SITE_REPO_TOKEN` set. Hard-fails before any work if missing. The optional
+- `gh` installed, authenticated, and authorized to write this repository before
+  the qualified second phase. Publisher credentials are deliberately not read
+  and no GitHub/distribution mutation is attempted by the first-phase artifact
+  build. It still performs the required Apple notarization submission, and the
+  existing read-only tag/ancestry check queries `origin`.
+- For a GA, `SITE_REPO_TOKEN` set before the qualified second phase. The optional
   `SKIP_APPCAST=1` skips only Sparkle; site `release.json` verification and the
   Homebrew tap remain mandatory because `release.sh` creates a public release.
   For an internal/local artifact, use `scripts/build-release.sh` and do not run
@@ -99,8 +106,15 @@ on the build Mac (Apple Silicon, macOS 14+).
   `peterhanily/maccrab` SSH or HTTPS URL; `GH_REPO`/`GH_HOST` are cleared and
   every GitHub operation is explicitly bound to `peterhanily/maccrab` on
   `github.com`.
+- `scripts/candidate-qualification.py` passes at the non-bypassable publication
+  boundary. It verifies the source commit/tree, signed embedded input
+  attestation, exact DMG SHA-256/size, Developer ID and Team ID, accepted notary
+  submission UUID, staple/Gatekeeper result, complete mounted payload inventory,
+  uninterrupted 900-second runtime report, and on-device containment report.
+  `--skip-prerelease-check`, `--respin`, and `--publish-rc` do not bypass it.
 
-Release candidates are isolated by default. Build an unpublished RC with:
+Release candidates are isolated by default. A standalone development-only RC
+can still be built with:
 
 ```bash
 VERSION=1.2.3-rc.1 ALLOW_UNNOTARIZED=1 MACCRAB_BUILD_CHANNEL=dev \
@@ -112,13 +126,60 @@ That explicit path creates only a verified GitHub prerelease (`latest=false`);
 it does not modify or publish the production appcast, `release.json`, or either
 Homebrew cask.
 
+For a publishable RC, run `release.sh 1.2.3-rc.1 --publish-rc`. The first
+invocation creates the tracked-object candidate and stops. Install that exact
+DMG, enable Agent Traces/the loopback OTLP receiver, configure a working
+alert-investigation LLM, keep ordinary browser/terminal/dashboard work active,
+and run the printed recorder command (do not hand-edit the incomplete template):
+
+```bash
+sudo /usr/bin/python3 -I scripts/candidate-qualification.py record-runtime \
+  --candidate-manifest .qualification-evidence/MacCrab-v1.2.3-rc.1.candidate.json \
+  --dmg .build/MacCrab-v1.2.3-rc.1.dmg --source-root . \
+  --output .qualification-evidence/MacCrab-v1.2.3-rc.1.runtime.json
+```
+
+Then run `VERSION=1.2.3-rc.1 make test-corpus` and repeat the release command.
+The second invocation validates and publishes the preserved DMG without
+rebuilding it. The recorder fails quickly, before the 900-second epoch, if the
+installed engine omits any required producer conservation ledger, if TraceStore
+is not an enabled full writer, or if the LLM is disabled. During the minute-5
+window it runs the source-bound fixed workload, sends one bounded OTLP span,
+and generates one harmless high-severity command-line alert (no network
+connection). Both lanes must reach the predeclared 1,274 offered-events/s rate,
+fully drain through persistence with zero shed, the span must advance and drain
+the TraceStore ledger, and at least one alert investigation must finish and be
+accepted. The trigger runs from a per-run unique copy of `/bin/echo`, so the
+one-hour rule/executable alert-deduplication window cannot suppress a retry. At
+minute 7.5 it sends SIGHUP and later requires the installed engine's
+log transcript to show a successful non-empty rule reload with no rejection or
+error; this is not represented as a live restart test. The recorder rechecks
+the exact source commit/tree and clean checkout after the 900-second capture.
+
+`make test-corpus` is also a recorder, not a success-label writer: it verifies
+the full candidate and clean exact checkout before and after execution, runs
+the two source-bound adversarial probe builds in a fresh private SwiftPM scratch
+path under a fixed sanitized environment,
+mounts the exact DMG read-only, and executes the shipped `maccrabctl`, its
+statically linked runner/broker, and its signed sibling trampoline against the
+shipped example plus the C and Swift probes. It records the candidate binary
+hashes/signing identities and complete build/control/sign/run transcripts. A
+fixed loopback listener and throwaway file sentinel remain live while the same
+freshly built C/Swift binaries first demonstrate every expected `leak.*`
+operation unsandboxed. PASS then requires those exact bytes to run through the
+candidate sandboxed lane with one expected broker artifact and zero `leak.*`
+artifacts. Its CLI accepts no
+caller-supplied start/end timestamps. Synthetic Python fixtures use a distinct
+capture mode and are rejected by `verify-release`.
+
 ### Step 1 — tests
 
-`release.sh` first runs `scripts/ci-local.sh --clean`, including a fresh dependency
-resolution, builds, the full test suite, and all 19 local gates. This happens
-before artifact construction; the later tag hook repeats clean CI against the
-exact source commit/tree and exact final metadata tree. Release-mode clean CI
-also removes `Tools/AssessmentHarness/.build`. Failure blocks ship.
+Each `release.sh` phase runs `scripts/ci-local.sh --clean`, including a fresh
+dependency resolution, builds, the full test suite, and all 20 local gates. The
+first run does this before artifact construction. The qualified second run does
+it before publication, and the later tag hook repeats clean CI against the exact
+source commit/tree and exact final metadata tree. Release-mode clean CI also
+removes `Tools/AssessmentHarness/.build`. Failure blocks ship.
 
 ### Step 1b — false-positive baseline (detection quality gate)
 
@@ -240,8 +301,8 @@ alter that metadata commit. RCs retain the exact source commit/tree.
 
 ### Step 5 — GitHub publish
 
-Create an annotated (signed when configured) `v<version>` tag, push the release
-branch and then that one tag. `release.sh` refuses to start unless Git is
+Create an annotated (signed when configured) `v<version>` tag, push that one tag
+and then the release branch. `release.sh` refuses to start unless Git is
 configured to execute the repository's versioned pre-push hook, and rechecks
 that invariant immediately before the tag push. A created/moved version tag is
 rejected unless `release.sh` supplies one complete manifest: DMG path + SHA-256,
@@ -249,8 +310,11 @@ source commit/tree, final metadata tree, final commit object, annotated tag
 object, and committed hook blob. The hook requires either the exact source tree
 (RC) or an exact one-parent GA metadata commit whose only changed paths are
 `release.json` and the two casks. The peeled tag commit, `HEAD`, committed hook,
-executing hook, and every critical executor blob must all match. Direct
-lightweight/manual tag publication and multi-tag pushes fail closed.
+executing hook, and every critical executor blob must all match. Through the
+configured hook and `release.sh` path, lightweight tags and multi-tag pushes
+fail closed. This is a local policy boundary, not server-side enforcement:
+manual/API publication or `--no-verify` can bypass a client hook and is outside
+the release policy.
 
 The tag hook runs clean local CI from that exact commit. It stages the notarized DMG by a
 same-filesystem rename into a private sibling of `.build`. Restoration requires
@@ -338,18 +402,18 @@ run. Any failure ends with `RELEASE INCOMPLETE` and a non-zero exit; the full
 The already digest-verified public GitHub release is intentionally not rolled
 back after a downstream outage; its immutable ID and URL are printed for repair.
 
-## Continuous integration (local)
+## Continuous integration
 
-MacCrab's CI runs **locally**. There are no GitHub Actions workflows — see
-`docs/CI-ARCHITECTURE.md` for why (public repo + self-hosted runner risk,
-hosted images lacking the pinned Xcode, and a provenance workflow that never
-completed a run).
+MacCrab's build/test/release CI runs **locally**. No GitHub Actions workflow is
+installed, so the project does not claim an independent hosted test or
+attestation signal. See `docs/CI-ARCHITECTURE.md` for this trust boundary and
+its compensating controls.
 
-- **`scripts/ci-local.sh`** — the gate. 19 checks: build, full test suite,
+- **`scripts/ci-local.sh`** — the gate. 20 checks: build, full test suite,
   rule compile + lint, broker fd fuzz (ASan/UBSan), deterministic
   architectural audit, secret/host-path diff scan, assessment-harness
-  build/test/isolation, release-artifact lifecycle regression, and the
-  code-quality passes.
+  build/test/isolation, exact-candidate qualification fixtures,
+  release-artifact lifecycle regression, and the code-quality passes.
 - **`.githooks/pre-push`** — runs it automatically. A **tag** push runs it
   with `--clean`, the exact source commit/tree, final metadata tree/commit, and
   expected DMG SHA (same-filesystem staging,

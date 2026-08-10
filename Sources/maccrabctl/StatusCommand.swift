@@ -701,12 +701,23 @@ extension MacCrabCtl {
             "\($0.feature.rawValue)=\($0.counters.requestedTotal)"
         }.joined(separator: ", ")
 
-        return [
+        var lines = [
             "AI Runtime:      requested=\(totals.requestedTotal), in_flight=\(totals.currentInFlight), backend_calls=\(totals.backendCallsStartedTotal) \(conserving ? "✓" : "⚠ accounting drift")",
             "                 outcomes: success=\(outcomes.success), cache_hit=\(outcomes.cacheHit), backend_failure=\(outcomes.backendFailure), circuit_rejection=\(outcomes.circuitRejection), privacy_rejection=\(outcomes.privacyRejection), admission_shed=\(outcomes.admissionShed), cancellation=\(outcomes.cancellation), response_oversize=\(outcomes.responseOversize)",
             "AI Attribution:  unspecified=\(unspecified) \(attributionMark); features: \(featureTotals)",
             "AI Validation:   operations=\(semantic.operationsStartedTotal), current=\(semantic.currentOperations), accepted=\(semantic.accepted), retries=\(semantic.retryRequested), final_rejection=\(semantic.finalRejection) \(semanticMark)",
         ]
+        if let rejection = runtime.alertInvestigationRejections {
+            let nonzero = rejection.byReason.filter {
+                $0.observedAttempts > 0 || $0.terminalRejections > 0
+            }.map {
+                "\($0.reason.rawValue)=\($0.observedAttempts)/\($0.terminalRejections)"
+            }.joined(separator: ", ")
+            lines.append(
+                "AI Investigation: rejected_attempts=\(rejection.observedAttemptsTotal), terminal=\(rejection.terminalRejectionsTotal); reasons(observed/terminal): \(nonzero.isEmpty ? "none" : nonzero)"
+            )
+        }
+        return lines
     }
 
     /// Restart continuity for in-flight multi-event detections. A missing block

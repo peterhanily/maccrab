@@ -401,6 +401,37 @@ struct SequenceEngineFireTests {
         )
     }
 
+    /// A minimal genuine lane-inversion rule: the file-lane seed may be delayed
+    /// behind the later priority-lane process event.
+    private func fileThenProcessRule(
+        id: String,
+        window: TimeInterval = 600
+    ) -> SequenceRule {
+        SequenceRule(
+            id: id, title: "File then process (test)", description: "test",
+            level: .high, tags: ["attack.execution"], window: window,
+            correlationType: .processSame, ordered: true,
+            steps: [
+                SequenceStep(
+                    id: "seed", logsourceCategory: "file_event",
+                    predicates: [Predicate(
+                        field: "Image", modifier: .endswith,
+                        values: ["/curl"], negate: false
+                    )]
+                ),
+                SequenceStep(
+                    id: "execute", logsourceCategory: "process_creation",
+                    predicates: [Predicate(
+                        field: "Image", modifier: .startswith,
+                        values: ["/tmp/"], negate: false
+                    )],
+                    afterStep: "seed"
+                ),
+            ],
+            trigger: .allSteps, enabled: true
+        )
+    }
+
     /// A file-lane seed followed by two priority-lane process steps. The middle
     /// step is deliberately process-agnostic; the final relation is selected by
     /// each test so delivery-order parity can challenge both fan-out and exact
@@ -503,12 +534,12 @@ struct SequenceEngineFireTests {
         // buffered step's real event time is BEFORE the initial step, it is not
         // a valid step[1] and the chain must stay open (no false completion).
         let engine = SequenceEngine(lineage: ProcessLineage())
-        try await engine.addRule(dlExecRule(id: "seq-ooo-neg", window: 600))
+        try await engine.addRule(fileThenProcessRule(id: "seq-ooo-neg"))
         let t0 = Date()
         // execute's real time is BEFORE download's — invalid ordering.
         let early = await engine.evaluate(procEventAt("/tmp/payload", pid: 100, ts: t0))
         _ = early
-        let final = await engine.evaluate(procEventAt("/usr/bin/curl", pid: 100, ts: t0.addingTimeInterval(1)))
+        let final = await engine.evaluate(fileEventAt("/usr/bin/curl", pid: 100, ts: t0.addingTimeInterval(1)))
         #expect(!final.contains { $0.ruleId == "seq-ooo-neg" },
                 "a buffered step older than the initial step must not complete the ordered chain")
     }
@@ -516,12 +547,20 @@ struct SequenceEngineFireTests {
     @Test("#95: a buffered later step older than the window is pruned and cannot complete")
     func outOfOrderBackfillWindowExpiry() async throws {
         let engine = SequenceEngine(lineage: ProcessLineage())
-        try await engine.addRule(dlExecRule(id: "seq-ooo-exp", window: 0.1))
+        try await engine.addRule(fileThenProcessRule(
+            id: "seq-ooo-exp", window: 0.1
+        ))
         // Deliver the later step, then let the buffer window lapse before the
         // initial step arrives.
-        _ = await engine.evaluate(procEvent("/tmp/payload", pid: 100))
+        let seedTimestamp = Date()
+        _ = await engine.evaluate(procEventAt(
+            "/tmp/payload", pid: 100,
+            ts: seedTimestamp.addingTimeInterval(0.01)
+        ))
         try await Task.sleep(nanoseconds: 300_000_000)   // 0.3 s > 0.1 s window
-        let final = await engine.evaluate(procEvent("/usr/bin/curl", pid: 100))
+        let final = await engine.evaluate(fileEventAt(
+            "/usr/bin/curl", pid: 100, ts: seedTimestamp
+        ))
         #expect(!final.contains { $0.ruleId == "seq-ooo-exp" },
                 "an expired buffered step must have been pruned and cannot backfill")
     }
@@ -1078,6 +1117,79 @@ struct SequenceEngineFireTests {
         #expect(SequenceEngine.saturatingTelemetryAdd(7, 0) == 7)
     }
 
+    @Test("pending-step journal conserves admission across replacement and retirement")
+    func pendingStepJournalConservation() async throws {
+        let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
+        let rule = fileThenProcessRule(id: "seq-pending-conservation", window: 600)
+        try await engine.addRule(rule)
+
+        // The later rc.10 epoch added ~68 aggregate pending evictions/s. Stress
+        // one rule with a 60-second slice of that aggregate plus the fixed
+        // 400-event qualification burst. This is a measured lower bound, not a
+        // claim about the unknown hot rule: rc.10 lacked per-rule attribution,
+        // so the installed-host gate remains authoritative.
+        let measuredWindowAndBurst = 4_480
+        for index in 0..<measuredWindowAndBurst {
+            _ = await engine.evaluate(procEvent(
+                "/tmp/payload-\(index)",
+                pid: Int32(index + 10_000)
+            ))
+        }
+
+        var ledger = await engine.pendingStepConservation()
+        #expect(ledger.offered == UInt64(measuredWindowAndBurst))
+        #expect(ledger.completed == 0)
+        #expect(ledger.queued == UInt64(measuredWindowAndBurst))
+        #expect(ledger.inFlight == 0)
+        #expect(ledger.explicitlyShed == 0)
+        #expect(ledger.conservationMaintained)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
+        let measuredWeight = await engine.checkpointWeightDiagnostics()
+        #expect(measuredWeight.cachedWeight == measuredWeight.recomputedWeight)
+        #expect(measuredWeight.cachedWeight <= measuredWeight.maximumWeight)
+        let reverseCompletion = await engine.evaluate(fileEventAt(
+            "/usr/bin/curl",
+            pid: Int32(measuredWindowAndBurst - 1 + 10_000),
+            ts: Date().addingTimeInterval(-60)
+        ))
+        #expect(reverseCompletion.contains { $0.ruleId == rule.id },
+                "the retained working set must still complete a reversed arrival")
+
+        // The journal remains genuinely bounded. Drive one entry beyond the
+        // per-rule ceiling and prove the displaced identity is explicit shed,
+        // not a depth-neutral accounting disappearance.
+        for index in measuredWindowAndBurst...SequenceEngine.maxPendingPerRule {
+            _ = await engine.evaluate(procEvent(
+                "/tmp/payload-\(index)",
+                pid: Int32(index + 10_000)
+            ))
+        }
+
+        ledger = await engine.pendingStepConservation()
+        #expect(ledger.offered == UInt64(SequenceEngine.maxPendingPerRule + 1))
+        #expect(ledger.completed == 0)
+        #expect(ledger.queued <= UInt64(SequenceEngine.maxPendingPerRule))
+        #expect(ledger.inFlight == 0)
+        #expect(ledger.explicitlyShed > 0)
+        #expect(ledger.conservationMaintained)
+        #expect(await engine.pendingStepsEvictedTotal == Int(ledger.explicitlyShed))
+        var byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[rule.id] == ledger)
+
+        await engine.setEnabled(rule.id, enabled: false)
+        let retiredCount = ledger.queued
+        ledger = await engine.pendingStepConservation()
+        #expect(ledger.offered == UInt64(SequenceEngine.maxPendingPerRule + 1))
+        #expect(ledger.completed == retiredCount)
+        #expect(ledger.queued == 0)
+        #expect(ledger.inFlight == 0)
+        #expect(ledger.explicitlyShed > 0)
+        #expect(ledger.conservationMaintained)
+        byRule = await engine.pendingStepConservationByRule()
+        #expect(byRule[rule.id] == ledger,
+                "disabled rule attribution must remain cumulative and visible")
+    }
+
     // v1.21.7 regression. `sequence_state_continuity_maintained` was derived from
     // the CUMULATIVE eviction counters (`> 0`), and a lifetime total never
     // decreases — so the first eviction latched the flag off for the life of the
@@ -1117,28 +1229,11 @@ struct SequenceEngineFireTests {
         #expect(await engine.evictionIsOngoing(within: 300, now: now) == true)
     }
 
-    // v1.21.7. `pendingLaterSteps` bridges ONE race: the pipeline splits events
-    // into a fast priority stream and a slower file stream, so a later step on
-    // the fast lane can arrive before its step[0] on the slow one. Parking was
-    // unconditional, so it also ran for every rule whose step[0] rides the FAST
-    // lane — where step[0] can never be delivered late, and nothing parked for
-    // it can ever be replayed into a sequence.
-    //
-    // Measured on the installed rc.8 engine: all 11 sequence rules active under
-    // the default profile have a `process_creation` step[0] (fast lane), and the
-    // flood filling the buffer was file `open` (also fast lane). The inversion
-    // was impossible for every enabled rule, while the per-rule cap of 256
-    // evicted at up to 820/s — 166,691 cumulative — pinning
-    // `sequence_state_continuity_maintained` false, which is the sole input to
-    // the menu bar's "protection degraded" label. Pure waste plus a permanent
-    // false warning.
-    // Kept as a CLASSIFIER test only. `ruleCanSufferLaneInversion` correctly
-    // identifies which rules can suffer the cross-lane race (34 of the 41
-    // shipped rules cannot; all 11 enabled by default cannot), but it is NOT
-    // wired into parking: `outOfOrderBackfillCompletes` proves backfill is
-    // expected for a rule whose steps are both process_creation, i.e. same-lane
-    // delivery order is not guaranteed by anything this code can currently
-    // prove. Gating parking on it would have silently dropped that capability.
+    // Kept as a CLASSIFIER test only. It describes the intentional
+    // priority/file split, but it must NOT gate parking: independent collector
+    // producers can reorder within one final lane, and the two lane consumers
+    // can run in either order. The same-lane completion regression above pins
+    // that detection contract.
     @Test("lane-inversion classifier identifies which rules could be overtaken")
     func pendingParkingOnlyWhenLaneInversionIsPossible() {
         func rule(_ id: String, _ categories: [String]) -> SequenceRule {
@@ -1157,8 +1252,8 @@ struct SequenceEngineFireTests {
                 trigger: .allSteps, enabled: true)
         }
 
-        // The shape of every rule enabled by default: a fast step[0]. It is
-        // never delivered behind a later step, so parking can only be discarded.
+        // A declared process-first shape does not expose slow-file→priority
+        // inversion, although independent producers may still reorder it.
         #expect(!SequenceEngine.ruleCanSufferLaneInversion(
             rule("process-first", ["process_creation", "file_event", "network_connection"])))
         #expect(!SequenceEngine.ruleCanSufferLaneInversion(
@@ -1168,11 +1263,12 @@ struct SequenceEngineFireTests {
         #expect(SequenceEngine.ruleCanSufferLaneInversion(
             rule("file-first", ["file_event", "process_creation"])))
 
-        // All-file rules share one lane, so delivery order is already preserved.
+        // All-file categories do not expose the declared cross-category shape.
         #expect(!SequenceEngine.ruleCanSufferLaneInversion(
             rule("all-file", ["file_event", "file_event"])))
 
         // A single-step rule has no later step to park at all.
         #expect(!SequenceEngine.ruleCanSufferLaneInversion(rule("single", ["file_event"])))
     }
+
 }

@@ -307,6 +307,21 @@ public actor LLMService {
         runtimeTelemetry.finishDownstreamValidation(token: token, outcome: outcome)
     }
 
+    /// Record one content-free, fixed-cardinality alert-investigation failure
+    /// and atomically advance the generic retry/final semantic ledger.
+    @discardableResult
+    public func recordAlertInvestigationRejection(
+        token: LLMSemanticOperationToken,
+        reason: LLMAlertInvestigationRejectionReason,
+        disposition: LLMAlertInvestigationRejectionDisposition
+    ) -> Bool {
+        runtimeTelemetry.recordAlertInvestigationRejection(
+            token: token,
+            reason: reason,
+            disposition: disposition
+        )
+    }
+
     /// Build an `LLMService` from an `LLMConfig`, picking the right
     /// backend per `config.provider`. Returns nil when the config is
     /// disabled, when the chosen provider needs an API key that is
@@ -530,6 +545,7 @@ public actor LLMService {
                 telemetryReturnedOutputBytes = UInt64(cached.utf8.count)
                 return LLMEnhancement(
                     provider: await backend.providerName,
+                    model: modelLabel,
                     prompt: finalUser, response: cached,
                     latency: 0, cached: true
                 )
@@ -624,6 +640,7 @@ public actor LLMService {
 
         return LLMEnhancement(
             provider: await backend.providerName,
+            model: modelLabel,
             prompt: finalUser, response: response,
             latency: latency, cached: false
         )
@@ -905,6 +922,7 @@ public actor LLMService {
 
         return LLMEnhancement(
             provider: providerName,
+            model: modelLabel,
             prompt: finalUser, response: response,
             latency: latency, cached: false
         )
