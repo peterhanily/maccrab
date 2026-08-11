@@ -171,11 +171,18 @@ struct HeartbeatSnapshotTests {
                "shutdown_timeouts_total": 0,
                "cleanly_stopped": false },
       "alert_evidence_budget": {
-        "events_family_effective_cap_bytes": 440401920,
-        "events_family_steady_state_cap_bytes": 335544320,
+        "events_family_effective_cap_bytes": 461373440,
+        "events_family_steady_state_cap_bytes": 356515840,
         "alerts_family_combined_cap_bytes": 209715200,
-        "events_and_alerts_total_cap_bytes": 650117120,
-        "events_and_alerts_steady_state_total_cap_bytes": 545259520,
+        "events_and_alerts_total_cap_bytes": 671088640,
+        "events_and_alerts_steady_state_total_cap_bytes": 566231040,
+        "alerts_family_footprint_bytes": 190000000,
+        "alerts_family_admission_cap_bytes": 209715200,
+        "alerts_family_transaction_reserve_bytes": 8388608,
+        "alerts_family_admission_boundary_bytes": 201326592,
+        "alerts_family_recovery_target_bytes": 192937984,
+        "alerts_family_blocked": false,
+        "alerts_family_reason": "",
         "legacy_transition_reserve_bytes": 104857600,
         "legacy_transition_max_bytes": 104857600,
         "legacy_transition_measurement_failed": false,
@@ -457,8 +464,12 @@ struct HeartbeatSnapshotTests {
         #expect(h.otlpReceiverLifecycle?.activeConnections == 1)
         #expect(h.otlpReceiverLifecycle?.conservationMaintained == true)
         #expect(h.otlpReceiverLifecycle?.featureDegraded == false)
-        #expect(h.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(620) * 1_048_576)
-        #expect(h.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes == Int64(520) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(640) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.eventsAndAlertsSteadyStateTotalCapBytes == Int64(540) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.alertsFamilyAdmissionCapBytes == Int64(200) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.alertsFamilyTransactionReserveBytes == Int64(8) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.alertsFamilyAdmissionBoundaryBytes == Int64(192) * 1_048_576)
+        #expect(h.alertEvidenceBudget?.alertsFamilyRecoveryTargetBytes == Int64(184) * 1_048_576)
         #expect(h.alertEvidenceBudget?.captureDegraded == false)
         #expect(h.prevention?.sinkhole?.enabled == true)
         #expect(h.prevention?.networkBlocker?.count == 0)
@@ -619,11 +630,15 @@ struct HeartbeatSnapshotTests {
         let h = try decode("""
         {
           "alert_evidence_budget": {
-            "events_family_effective_cap_bytes": 440401920,
-            "events_family_steady_state_cap_bytes": 335544320,
+            "events_family_effective_cap_bytes": 461373440,
+            "events_family_steady_state_cap_bytes": 356515840,
             "alerts_family_combined_cap_bytes": 209715200,
-            "events_and_alerts_total_cap_bytes": 650117120,
-            "events_and_alerts_steady_state_total_cap_bytes": 545259520,
+            "events_and_alerts_total_cap_bytes": 671088640,
+            "events_and_alerts_steady_state_total_cap_bytes": 566231040,
+            "alerts_family_admission_cap_bytes": 209715200,
+            "alerts_family_transaction_reserve_bytes": 8388608,
+            "alerts_family_admission_boundary_bytes": 201326592,
+            "alerts_family_recovery_target_bytes": 192937984,
             "legacy_transition_reserve_bytes": 104857600,
             "legacy_transition_max_bytes": 104857600,
             "legacy_transition_measurement_failed": true,
@@ -773,10 +788,13 @@ struct HeartbeatSnapshotTests {
         }
         """)
         let budget = try #require(h.alertEvidenceBudget)
-        #expect(budget.eventsFamilyEffectiveCapBytes == Int64(420) * 1_048_576)
-        #expect(budget.eventsFamilySteadyStateCapBytes == Int64(320) * 1_048_576)
-        #expect(budget.eventsAndAlertsTotalCapBytes == Int64(620) * 1_048_576)
-        #expect(budget.eventsAndAlertsSteadyStateTotalCapBytes == Int64(520) * 1_048_576)
+        #expect(budget.eventsFamilyEffectiveCapBytes == Int64(440) * 1_048_576)
+        #expect(budget.eventsFamilySteadyStateCapBytes == Int64(340) * 1_048_576)
+        #expect(budget.eventsAndAlertsTotalCapBytes == Int64(640) * 1_048_576)
+        #expect(budget.eventsAndAlertsSteadyStateTotalCapBytes == Int64(540) * 1_048_576)
+        #expect(budget.alertsFamilyTransactionReserveBytes == Int64(8) * 1_048_576)
+        #expect(budget.alertsFamilyAdmissionBoundaryBytes == Int64(192) * 1_048_576)
+        #expect(budget.alertsFamilyRecoveryTargetBytes == Int64(184) * 1_048_576)
         #expect(budget.legacyTransitionReserveBytes == Int64(100) * 1_048_576)
         #expect(budget.legacyTransitionMeasurementFailed == true)
         #expect(budget.captureConserved == true)

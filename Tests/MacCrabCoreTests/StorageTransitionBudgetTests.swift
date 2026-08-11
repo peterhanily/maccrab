@@ -9,25 +9,25 @@ struct StorageTransitionBudgetTests {
     @Test("steady-state total is unchanged and upgrade reserve is bounded")
     func configEnvelope() {
         let storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
-        #expect(storage.effectiveEventsFamilyMaxSizeMB == 320)
+        #expect(storage.effectiveEventsFamilyMaxSizeMB == 340)
         #expect(storage.effectiveAlertsFamilyMaxSizeMB == 200)
-        #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB == 520)
+        #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB == 540)
 
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: 0
-        ) == 320)
+        ) == 340)
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: 37
-        ) == 357)
+        ) == 377)
         #expect(storage.effectiveEventsFamilyMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: .max
-        ) == 420)
+        ) == 440)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             legacyEvidenceTransitionReserveMiB: .max
-        ) == 620)
+        ) == 640)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             appliedLegacyEvidenceTransitionReserveMiB: 137
-        ) == 657)
+        ) == 677)
         #expect(storage.configuredEventsAndAlertsTotalMaxSizeMB(
             appliedLegacyEvidenceTransitionReserveMiB: .max
         ) == .max)
@@ -91,7 +91,7 @@ struct StorageTransitionBudgetTests {
         let oneByteOver = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 288
+                familyFootprintBytes: 308
                     * SQLitePersistentStorePolicy.bytesPerMiB + 1,
                 freelistCount: 1
             ),
@@ -106,7 +106,7 @@ struct StorageTransitionBudgetTests {
         let exactSteadyBoundary = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 288
+                familyFootprintBytes: 308
                     * SQLitePersistentStorePolicy.bytesPerMiB
             ),
             ticket: ticket

@@ -497,7 +497,7 @@ final class DaemonState {
     let eventWriter: BatchedEventWriter
     /// Sticky post-sweep truth: a configured budget miss remains degraded until
     /// a later sweep proves convergence or a config change invalidates it.
-    let eventRetentionBudgetHealth = EventRetentionBudgetHealth()
+    let eventRetentionBudgetHealth: EventRetentionBudgetHealth
     let alertStore: AlertStore
     /// Single chokepoint for all alert insertion. Routes everything through
     /// AlertDeduplicator before reaching AlertStore, closing the v1.6.9
@@ -733,6 +733,11 @@ final class DaemonState {
     /// disabled flag and could not tell that causal evidence was being shed.
     let causalStoreStartupAdmission: TraceGraphStartupAdmissionStatus?
 
+    /// Awaited proof captured immediately after the store opens and before the
+    /// first collector-local producer is activated. DaemonSetup throws instead
+    /// of constructing state when this result is non-converged.
+    let causalStoreStartupRecovery: CausalGraphStartupRecoveryResult
+
     /// Graph rule evaluator for v1.10.0 §23 multi-entity rules. Loaded
     /// once at daemon startup from `Rules/graph/*.json`. EventLoop runs
     /// every materialized Trace through `evaluate(entities:edges:)`
@@ -912,6 +917,7 @@ final class DaemonState {
         effectiveRulesDir: String,
         eventStore: EventStore,
         legacyEvidenceTransitionBudget: LegacyEvidenceTransitionBudget,
+        eventRetentionBudgetHealth: EventRetentionBudgetHealth,
         alertStore: AlertStore,
         evidenceBudgetBytes: Int64,
         startupWorkLifecycle: DaemonTimerLifecycle,
@@ -1001,6 +1007,7 @@ final class DaemonState {
         causalGraphBridge: EventToRollingCausalGraphBridge? = nil,
         causalStore: SQLiteCausalGraphStore? = nil,
         causalStoreStartupAdmission: TraceGraphStartupAdmissionStatus? = nil,
+        causalStoreStartupRecovery: CausalGraphStartupRecoveryResult,
         graphEvaluator: GraphRuleEvaluator? = nil,
         bayesianIntent: BayesianIntentEngine,
         intentClassifier: IntentClassifier,
@@ -1025,6 +1032,7 @@ final class DaemonState {
         self.effectiveRulesDir = effectiveRulesDir
         self.eventStore = eventStore
         self.legacyEvidenceTransitionBudget = legacyEvidenceTransitionBudget
+        self.eventRetentionBudgetHealth = eventRetentionBudgetHealth
         // Constructed with default flushThreshold/hardCap/flush-interval — these
         // are intentionally NOT config-surfaced (no daemon_config.json key),
         // unlike the priority/file stream caps below (DaemonSetup wires those
@@ -1152,6 +1160,7 @@ final class DaemonState {
         self.causalGraphBridge = causalGraphBridge
         self.causalStore = causalStore
         self.causalStoreStartupAdmission = causalStoreStartupAdmission
+        self.causalStoreStartupRecovery = causalStoreStartupRecovery
         graphEvaluatorLock.withLock { $0 = graphEvaluator }
         self.bayesianIntent = bayesianIntent
         self.intentClassifier = intentClassifier

@@ -159,7 +159,7 @@ struct EventsSizeCapIntervalTests {
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.storage.eventsSizeCapIntervalMinutes == 10)
         // Sibling storage fields untouched
-        #expect(cfg.storage.eventsMaxSizeMB == 420)   // v1.21.4 default
+        #expect(cfg.storage.eventsMaxSizeMB == 440)   // v1.21.6-rc.12 default
         #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         // Unrelated top-level field untouched
@@ -196,7 +196,7 @@ struct EventsSizeCapIntervalTests {
             #expect(cfg.storage.processEventsFloorMinutes == value,
                     "\(key) should decode to \(value)")
             // Sibling storage fields untouched by the partial decode.
-            #expect(cfg.storage.eventsMaxSizeMB == 420)
+            #expect(cfg.storage.eventsMaxSizeMB == 440)
             #expect(cfg.storage.eventsHotTierMinutes == 30)
         }
     }
@@ -209,6 +209,7 @@ struct EventsSizeCapIntervalTests {
 
         #expect(boundary.nominalCapBytes == 314_572_800)
         #expect(boundary.hardAdmissionBoundaryBytes == 281_018_368)
+        #expect(boundary.fileLaneAdmissionBoundaryBytes == 249_561_088)
         #expect(boundary.proactiveSweepBoundaryBytes == 247_463_936)
         // 80% of 300 MiB is 240 MiB, which would land above the proactive
         // 236 MiB watermark. The shared target must not immediately re-arm.
@@ -242,6 +243,63 @@ struct EventsSizeCapIntervalTests {
         #expect(boundary.requiresMaintenance(footprintBytes: strandedFootprint))
     }
 
+    @Test("startup converges the writable interval above the retention target")
+    func startupConvergesTargetToProactiveInterval() {
+        let boundary = EventsSizeCapBoundary(maxSizeMiB: 340)
+        let stranded = boundary.targetBytes + 1
+
+        #expect(stranded <= boundary.proactiveSweepBoundaryBytes)
+        #expect(!boundary.requiresMaintenance(footprintBytes: stranded))
+        #expect(boundary.requiresStartupConvergence(
+            footprintBytes: stranded
+        ))
+        #expect(!boundary.requiresStartupConvergence(
+            footprintBytes: boundary.targetBytes
+        ))
+    }
+
+    @Test("shipped event budgets clear the measured 15-minute structural floor")
+    func defaultBudgetClearsMeasuredForensicFloor() {
+        // rc.11 installed-host post-sweep floor, expressed in the same exact
+        // bytes used by admission (302.7 decimal MB). The upgraded store still
+        // owned 32,329,728 physical bytes of frozen legacy alert evidence; a
+        // fresh schema-v8 store does not. The installed heartbeat separately
+        // charged 34,492,416 bytes after allocator/index accounting, which is
+        // what production rounds up for the temporary transition reserve.
+        let installedFloorBytes: Int64 = 302_700_000
+        let legacyOwnedBytes: Int64 = 32_329_728
+        let legacyChargedBytes: Int64 = 34_492_416
+        let freshFloorBytes = installedFloorBytes - legacyOwnedBytes
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let measuredTransitionReserveMiB = Int(
+            (legacyChargedBytes - 1) / mib + 1
+        )
+
+        func fileLaneBoundary(capMiB: Int) -> Int64 {
+            let cap = Int64(capMiB) * 1_048_576
+            return cap
+                - SQLitePersistentStorePolicy.eventTransactionReserveBytes
+                - EventStore.priorityLaneReserveBytes(
+                    maxFootprintBytes: cap
+                )
+        }
+
+        // Production uses the charged bytes, not physical DBSTAT ownership:
+        // 340 MiB steady + ceil(34,492,416 / 1 MiB) = 373 MiB live.
+        #expect(measuredTransitionReserveMiB == 33)
+        let upgradedCapMiB = 340 + measuredTransitionReserveMiB
+        #expect(upgradedCapMiB == 373)
+        let upgraded = EventsSizeCapBoundary(maxSizeMiB: upgradedCapMiB)
+        #expect(upgraded.targetBytes > installedFloorBytes)
+        #expect(fileLaneBoundary(capMiB: upgradedCapMiB)
+            > installedFloorBytes)
+
+        let fresh = EventsSizeCapBoundary(maxSizeMiB: 340)
+        #expect(fresh.targetBytes > freshFloorBytes)
+        #expect(fileLaneBoundary(capMiB: 340) > freshFloorBytes)
+        #expect(EventRetentionFloor.minutes == 15)
+    }
+
     @Test("undersized and extreme event caps retain a positive safe maintenance window")
     func boundaryRejectsZeroTargetConfigurations() {
         let minimumMiB = DaemonConfig.StorageConfig.minimumEventsSizeMiB
@@ -268,8 +326,8 @@ struct EventsSizeCapIntervalTests {
         #expect(clamped.eventsMaxSizeMB == minimumMiB + 50)
         #expect(clamped.effectiveEventsFamilyMaxSizeMB == minimumMiB)
 
-        let defaultBoundary = EventsSizeCapBoundary(maxSizeMiB: 420)
-        #expect(defaultBoundary.nominalCapBytes == 420 * 1_048_576)
+        let defaultBoundary = EventsSizeCapBoundary(maxSizeMiB: 340)
+        #expect(defaultBoundary.nominalCapBytes == 340 * 1_048_576)
         #expect(defaultBoundary.proactiveSweepBoundaryBytes > 0)
         #expect(defaultBoundary.targetBytes > 0)
 
@@ -389,6 +447,107 @@ struct EventsSizeCapIntervalTests {
         #expect(timers.contains("SequenceEngine does not currently rehydrate from events.db"))
         #expect(!timers.contains("events_retention_below_sequence_floor"))
         #expect(!timers.localizedCaseInsensitiveContains("sequence-rebuild floor"))
+    }
+
+    @Test("setup proves event and alert storage before every producer activation")
+    func startupRecoveryEstablishesWritableFirstEpoch() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let setup = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonSetup.swift"
+            ),
+            encoding: .utf8
+        )
+        let timers = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/DaemonTimers.swift"
+            ),
+            encoding: .utf8
+        )
+        let eventRecovery = try #require(setup.range(of:
+            "let eventStartupRecovery = await recoverEventStoreBeforeProducers("
+        ))
+        let eventGuard = try #require(setup.range(of:
+            "guard eventStartupRecovery.writableBeforeProducers else"
+        ))
+        let alertRecovery = try #require(setup.range(of:
+            "let alertStartupRecovery = await recoverAlertStoreBeforeProducers("
+        ))
+        let alertGuard = try #require(setup.range(of:
+            "guard alertStartupRecovery.writableBeforeProducers else"
+        ))
+        let finalMarker = try #require(setup.range(of:
+            "// FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY"
+        ))
+        let eventActivationProbe = try #require(setup.range(of:
+            "reprobeEventStoreAtActivationBoundary("
+        ))
+        let alertActivationProbe = try #require(setup.range(of:
+            "reprobeAlertStoreAtActivationBoundary("
+        ))
+        let graphActivationProof = try #require(setup.range(of:
+            "causalStoreStartupRecovery = activationProof"
+        ))
+        #expect(eventRecovery.lowerBound < alertRecovery.lowerBound)
+        #expect(eventRecovery.lowerBound < eventGuard.lowerBound)
+        #expect(alertRecovery.lowerBound < alertGuard.lowerBound)
+        #expect(finalMarker.lowerBound < eventActivationProbe.lowerBound)
+        #expect(eventActivationProbe.lowerBound < alertActivationProbe.lowerBound)
+        #expect(alertActivationProbe.lowerBound < graphActivationProof.lowerBound)
+
+        // These are the complete Setup-time producer census from the rc.11
+        // audit. Constructor-active sources are listed alongside explicit
+        // starts and the first AlertSink flush so future reordering cannot let
+        // a collector-local buffer/drop counter move during storage recovery.
+        for producer in [
+            "await mcpMonitor.start()",
+            "if await fleet.start()",
+            "await dnsCollector.start()",
+            "await eventTapMonitor.start()",
+            "await systemPolicyMonitor.start()",
+            "await fsEventsCollector.start()",
+            "ulCollector = try UnifiedLogCollector()",
+            "collector = try ESCollector(",
+            "await esloggerCollector!.start()",
+            "await kdebug.start()",
+            "for alert in bootstrapAlerts",
+            "try await receiver.start()",
+            "label: \"deception-deploy\"",
+            "label: \"threat-intel-hydration\"",
+        ] {
+            let activation = try #require(setup.range(of: producer))
+            #expect(
+                alertGuard.lowerBound < activation.lowerBound,
+                "event/alert storage proof must precede \(producer)"
+            )
+            #expect(graphActivationProof.lowerBound < activation.lowerBound,
+                    "fresh storage proofs must precede \(producer)")
+        }
+
+        let helperStart = try #require(timers.range(of:
+            "func recoverEventStoreBeforeProducers("
+        ))
+        let helperTail = try #require(timers.range(
+            of: "// MARK: - Size-cap enforcement",
+            range: helperStart.upperBound..<timers.endIndex
+        ))
+        let helper = timers[helperStart.lowerBound..<helperTail.lowerBound]
+        #expect(helper.contains("retentionBudgetHealth.recordSweep("))
+        #expect(helper.contains("reprobeStorageAdmissionForWrite(lane: .priority)"))
+        #expect(helper.contains("reprobeStorageAdmissionForWrite(lane: .file)"))
+        #expect(timers.contains("func reprobeEventStoreAtActivationBoundary("))
+        #expect(timers.contains("func reprobeAlertStoreAtActivationBoundary("))
+        let pinPreflight = try #require(helper.range(of:
+            "eventStore.walCheckpointTruncate()"
+        ))
+        let destructiveEnforcer = try #require(helper.range(of:
+            "enforceDatabaseSizeCap("
+        ))
+        #expect(pinPreflight.lowerBound < destructiveEnforcer.lowerBound,
+                "startup must detect a reader pin before pruning event rows")
     }
 
     // MARK: - 3. Integration: runAdaptiveRollupSweep drives prune end-to-end

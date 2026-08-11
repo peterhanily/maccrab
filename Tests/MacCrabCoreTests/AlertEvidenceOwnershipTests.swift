@@ -646,9 +646,9 @@ struct AlertEvidenceOwnershipTests {
             )
         }
         let defaults = DaemonConfig.StorageConfig().clampedToSafeFloors()
-        #expect(defaults.effectiveEventsFamilyMaxSizeMB == 320)
+        #expect(defaults.effectiveEventsFamilyMaxSizeMB == 340)
         #expect(defaults.effectiveAlertsFamilyMaxSizeMB == 200)
-        #expect(defaults.configuredEventsAndAlertsTotalMaxSizeMB == 520)
+        #expect(defaults.configuredEventsAndAlertsTotalMaxSizeMB == 540)
         assertConserved(defaults)
 
         var low = DaemonConfig.StorageConfig()
@@ -669,11 +669,11 @@ struct AlertEvidenceOwnershipTests {
 
     @Test("heartbeat decodes effective caps rather than relabeling the envelope")
     func heartbeatCaps() throws {
-        let data = Data(#"{"schema_version":5,"alert_evidence_budget":{"events_family_effective_cap_bytes":335544320,"events_legacy_envelope_bytes":440401920,"alerts_family_combined_cap_bytes":209715200,"events_and_alerts_total_cap_bytes":545259520,"over_budget":false}}"#.utf8)
+        let data = Data(#"{"schema_version":5,"alert_evidence_budget":{"events_family_effective_cap_bytes":356515840,"events_legacy_envelope_bytes":461373440,"alerts_family_combined_cap_bytes":209715200,"events_and_alerts_total_cap_bytes":566231040,"over_budget":false}}"#.utf8)
         let heartbeat = try JSONDecoder().decode(HeartbeatSnapshot.self, from: data)
-        #expect(heartbeat.alertEvidenceBudget?.eventsFamilyEffectiveCapBytes == Int64(320) * 1_048_576)
-        #expect(heartbeat.alertEvidenceBudget?.eventsLegacyEnvelopeBytes == Int64(420) * 1_048_576)
-        #expect(heartbeat.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(520) * 1_048_576)
+        #expect(heartbeat.alertEvidenceBudget?.eventsFamilyEffectiveCapBytes == Int64(340) * 1_048_576)
+        #expect(heartbeat.alertEvidenceBudget?.eventsLegacyEnvelopeBytes == Int64(440) * 1_048_576)
+        #expect(heartbeat.alertEvidenceBudget?.eventsAndAlertsTotalCapBytes == Int64(540) * 1_048_576)
     }
 
     @Test("production capture and boot/reload cap wiring cannot drift to legacy paths")

@@ -451,9 +451,9 @@ public actor EventStore {
         for databasePath: String
     ) -> SQLitePersistentStorePolicy {
         SQLitePersistentStorePolicy(
-            // DaemonConfig's legacy 420 MiB envelope reserves 100 MiB for
+            // DaemonConfig's legacy 440 MiB envelope reserves 100 MiB for
             // alert-owned evidence after the schema-v8 file split.
-            maxFootprintBytes: 320 * SQLitePersistentStorePolicy.bytesPerMiB,
+            maxFootprintBytes: 340 * SQLitePersistentStorePolicy.bytesPerMiB,
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
                 .eventTransactionReserveBytes,
@@ -1115,7 +1115,9 @@ public actor EventStore {
     /// admissible down to the absolute cap because their volume is bounded and
     /// small — on a host doing 1,400 file events/sec the priority lane is a
     /// rounding error beside it.
-    static func priorityLaneReserveBytes(maxFootprintBytes: Int64) -> Int64 {
+    public static func priorityLaneReserveBytes(
+        maxFootprintBytes: Int64
+    ) -> Int64 {
         // 10% of the budget, floored at 16 MiB and capped at 64 MiB. The floor
         // matters more than the fraction: 15 minutes of priority-lane events is
         // a few MiB, so even the floor makes the retention guarantee satisfiable
@@ -4723,6 +4725,51 @@ public actor EventStore {
         guard var admission = storageAdmission else { return nil }
         defer { storageAdmission = admission }
         return admission.snapshot()
+    }
+
+    /// Proves that an ordinary event write in `lane` can enter its complete
+    /// reserve-bounded transaction without issuing BEGIN or INSERT. A size-cap
+    /// sweep uses maintenance admission, which deliberately cannot clear a
+    /// sticky pressure latch; startup recovery therefore runs this normal gate
+    /// for the priority and file lanes before enabling ingestion.
+    @discardableResult
+    public func reprobeStorageAdmissionForWrite(
+        lane: EventPipelineLane
+    ) throws -> SQLitePersistentStoreAdmissionSnapshot {
+        guard !isReadOnly, db != nil else {
+            throw EventStoreError.stepFailed(
+                "event storage admission reprobe requires a writable database"
+            )
+        }
+        guard storageAdmission != nil else {
+            throw EventStoreError.stepFailed(
+                "event storage admission reprobe requires an active policy"
+            )
+        }
+
+        // Event batches charge the whole transaction reserve at BEGIN so no
+        // later row in that transaction can consume the file lane's protected
+        // priority headroom. Match that strongest production boundary here.
+        try admitStorageWrite(
+            estimatedTransactionBytes: storageTransactionReserveBytes,
+            lane: lane
+        )
+
+        guard insertStmt != nil else {
+            throw EventStoreError.stepFailed(
+                "event storage admission recovered without a writer statement"
+            )
+        }
+        guard let snapshot = storageAdmissionSnapshot(),
+              snapshot.footprintBytes != nil,
+              snapshot.freeSpaceBytes != nil,
+              snapshot.latchedFailure == nil,
+              !snapshot.pageLimitPending else {
+            throw EventStoreError.stepFailed(
+                "event storage admission remained blocked after normal reprobe"
+            )
+        }
+        return snapshot
     }
 
     public func updateStorageAdmission(

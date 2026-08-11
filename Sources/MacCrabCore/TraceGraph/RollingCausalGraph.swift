@@ -148,7 +148,8 @@ public struct CausalGraphIngestionWritePolicy: Sendable, Equatable {
 ///
 ///     inputEvents = committed + failed + inFlight + pending
 ///     writeAttempts = committedBatches + failedBatches + inFlightBatches
-///     rowObservations = writeRowsAttempted + coalescedNoopRows + pendingRows
+///     rowObservations = writeRowsAttempted + coalescedNoopRows
+///         + physicalWriteSuppressedRows + pendingRows
 ///     writeRowsAttempted = committedRows + failedRows + inFlightRows
 ///
 /// `coalescedNoopRows` counts redundant per-event UPSERTs removed before
@@ -165,6 +166,8 @@ public struct CausalGraphIngestionWriteTelemetry: Sendable, Equatable {
     public let edgeObservationsTotal: UInt64
     public let relevanceSuppressedFileEventsTotal: UInt64
     public let relevanceSuppressedRowsTotal: UInt64
+    public let physicalWriteSuppressedEventsTotal: UInt64
+    public let physicalWriteSuppressedRowsTotal: UInt64
     public let writeAttemptsTotal: UInt64
     public let writeBatchesCommittedTotal: UInt64
     public let writeBatchesFailedTotal: UInt64
@@ -287,6 +290,66 @@ public actor RollingCausalGraph {
 
         var sortedEdges: [TraceEdge] {
             edges.values.sorted { $0.id < $1.id }
+        }
+
+        private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+            let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+            return overflow ? Int.max : sum
+        }
+    }
+
+    /// Bounded in-memory provenance carried from a physically-suppressed file
+    /// callback into the next graph-relevant observation for that process. This
+    /// preserves first-seen/observation weight if the process later anchors a
+    /// trace, without turning ordinary file churn back into SQLite traffic.
+    private struct DeferredProcessContextCache {
+        let capacity: Int
+        private(set) var entities: [String: TraceEntity] = [:]
+        private var insertionOrder: [String] = []
+
+        init(capacity: Int) {
+            self.capacity = max(1, capacity)
+        }
+
+        mutating func record(_ entity: TraceEntity) {
+            if let existing = entities[entity.id] {
+                entities[entity.id] = Self.merge(existing, entity)
+                return
+            }
+            if entities.count >= capacity {
+                while let oldest = insertionOrder.first,
+                      entities.removeValue(forKey: oldest) == nil {
+                    insertionOrder.removeFirst()
+                }
+                if !insertionOrder.isEmpty { insertionOrder.removeFirst() }
+            }
+            if insertionOrder.count > capacity * 2 {
+                insertionOrder = insertionOrder.filter { entities[$0] != nil }
+            }
+            entities[entity.id] = entity
+            insertionOrder.append(entity.id)
+        }
+
+        mutating func take(id: String) -> TraceEntity? {
+            entities.removeValue(forKey: id)
+        }
+
+        static func merge(_ first: TraceEntity, _ latest: TraceEntity) -> TraceEntity {
+            TraceEntity(
+                id: first.id,
+                entityType: first.entityType,
+                stableKey: first.stableKey,
+                displayName: latest.displayName,
+                firstSeen: min(first.firstSeen, latest.firstSeen),
+                lastSeen: max(first.lastSeen, latest.lastSeen),
+                attributesJson: latest.attributesJson,
+                source: first.source,
+                confidence: latest.confidence,
+                observationCount: saturatingAdd(
+                    max(1, first.observationCount),
+                    max(1, latest.observationCount)
+                )
+            )
         }
 
         private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
@@ -464,6 +527,7 @@ public actor RollingCausalGraph {
     private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "rolling-graph")
 
     private var pendingWriteBatch = PendingWriteBatch()
+    private var deferredProcessContexts = DeferredProcessContextCache(capacity: 4_096)
     private var scheduledFlush: Task<Void, Never>?
     private var scheduledFlushGeneration: UInt64 = 0
     /// Joinable handle for the physical store write. Actor reentrancy permits a
@@ -482,6 +546,8 @@ public actor RollingCausalGraph {
     private var edgeObservationsTotal: UInt64 = 0
     private var relevanceSuppressedFileEventsTotal: UInt64 = 0
     private var relevanceSuppressedRowsTotal: UInt64 = 0
+    private var physicalWriteSuppressedEventsTotal: UInt64 = 0
+    private var physicalWriteSuppressedRowsTotal: UInt64 = 0
     private var writeAttemptsTotal: UInt64 = 0
     private var writeBatchesCommittedTotal: UInt64 = 0
     private var writeBatchesFailedTotal: UInt64 = 0
@@ -545,6 +611,48 @@ public actor RollingCausalGraph {
 
     @discardableResult
     public func ingest(_ event: NormalizedEventInput) async throws -> [Trace] {
+        let processNode = makeProcessNode(from: event.process, agent: event.agent)
+        var processEntity = try processNode.toEntity(source: "rolling_graph")
+
+        // High-rate ordinary file callbacks used to suppress their file node
+        // and edge but still upsert the same process entity once per event.
+        // Suppress that last physical row only when the event carries neither
+        // a graph-relevant file nor any independent anchor/lineage evidence.
+        if event.category == .file, let file = event.file {
+            let kind = Self.inferFileKind(path: file.path)
+            let processCanAnchor = AnchorDetector.processOnlyAnchor(
+                processNode: processNode,
+                policy: policy
+            ) != nil
+            if TraceGraphFileObservationPolicy.canSuppressPhysicalWrite(
+                path: file.path,
+                kind: kind,
+                untrustedContent: file.untrustedContent,
+                hasAgent: event.agent != nil,
+                hasNetwork: event.network != nil,
+                hasProcessLineage: event.parentProcess != nil
+                    || event.process.parentProcessKey != nil,
+                processCanAnchor: processCanAnchor
+            ) {
+                deferredProcessContexts.record(processEntity)
+                inputEventsTotal = Self.saturatingAdd(inputEventsTotal, 1)
+                eventsCommittedTotal = Self.saturatingAdd(eventsCommittedTotal, 1)
+                entityObservationsTotal = Self.saturatingAdd(
+                    entityObservationsTotal, 1)
+                relevanceSuppressedFileEventsTotal = Self.saturatingAdd(
+                    relevanceSuppressedFileEventsTotal, 1)
+                // The irrelevant file entity+edge never become logical graph
+                // rows; this retains the established relevance ledger.
+                relevanceSuppressedRowsTotal = Self.saturatingAdd(
+                    relevanceSuppressedRowsTotal, 2)
+                physicalWriteSuppressedEventsTotal = Self.saturatingAdd(
+                    physicalWriteSuppressedEventsTotal, 1)
+                physicalWriteSuppressedRowsTotal = Self.saturatingAdd(
+                    physicalWriteSuppressedRowsTotal, 1)
+                return []
+            }
+        }
+
         // Collect this event's entities + edges as one logical observation.
         // The bounded writer may coalesce it with adjacent non-anchor events;
         // every physical batch still inserts all entities before all edges, so
@@ -552,9 +660,11 @@ public actor RollingCausalGraph {
         var entities: [TraceEntity] = []
         var edges: [TraceEdge] = []
 
-        // 1. Process node — always present.
-        let processNode = makeProcessNode(from: event.process, agent: event.agent)
-        let processEntity = try processNode.toEntity(source: "rolling_graph")
+        // 1. Process node. Restore any bounded context suppressed from prior
+        // graph-irrelevant file callbacks before a relevant event can anchor.
+        if let deferred = deferredProcessContexts.take(id: processEntity.id) {
+            processEntity = DeferredProcessContextCache.merge(deferred, processEntity)
+        }
         entities.append(processEntity)
 
         // 2. Parent process spawn edge (when present).
@@ -896,6 +1006,8 @@ public actor RollingCausalGraph {
             edgeObservationsTotal: edgeObservationsTotal,
             relevanceSuppressedFileEventsTotal: relevanceSuppressedFileEventsTotal,
             relevanceSuppressedRowsTotal: relevanceSuppressedRowsTotal,
+            physicalWriteSuppressedEventsTotal: physicalWriteSuppressedEventsTotal,
+            physicalWriteSuppressedRowsTotal: physicalWriteSuppressedRowsTotal,
             writeAttemptsTotal: writeAttemptsTotal,
             writeBatchesCommittedTotal: writeBatchesCommittedTotal,
             writeBatchesFailedTotal: writeBatchesFailedTotal,

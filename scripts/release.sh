@@ -230,6 +230,9 @@ RUNTIME_REPORT="${RUNTIME_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.runtime.j
 CONTAINMENT_REPORT="${CONTAINMENT_REPORT:-$QUALIFICATION_DIR/MacCrab-v$VERSION.containment.json}"
 DMG_PATH=".build/MacCrab-v$VERSION.dmg"
 BUILD_NUMBER="${VERSION}.$($GIT_BIN rev-list --count "$SOURCE_COMMIT")"
+CI_TRANSCRIPT=""
+CI_STARTED_AT=""
+CI_COMPLETED_AT=""
 
 cd "$PROJECT_DIR"
 
@@ -542,7 +545,22 @@ echo "Step 0b/6: Architectural audit..."
 # from the later tag push cannot retroactively prove that the signed DMG came
 # from freshly resolved release outputs. Credentials remain unexported here.
 echo "Step 1/6: Running clean local CI before the release build..."
-./scripts/ci-local.sh --clean
+require_clean_release_source
+CI_TRANSCRIPT=$(/usr/bin/mktemp /private/tmp/maccrab-release-clean-ci.XXXXXX)
+/bin/chmod 600 "$CI_TRANSCRIPT"
+cleanup_preinstall_ci_transcript() {
+    local status=$?
+    trap - EXIT
+    [ -z "$CI_TRANSCRIPT" ] || /bin/rm -f "$CI_TRANSCRIPT"
+    exit "$status"
+}
+trap cleanup_preinstall_ci_transcript EXIT
+CI_STARTED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
+if ! ./scripts/ci-local.sh --clean 2>&1 | /usr/bin/tee "$CI_TRANSCRIPT"; then
+    echo "ERROR: clean local CI failed; no candidate will be recorded" >&2
+    exit 1
+fi
+CI_COMPLETED_AT=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
 require_clean_release_source
 if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
         || [ "$($GIT_BIN rev-parse "$SOURCE_COMMIT^{tree}")" != "$SOURCE_TREE" ]; then
@@ -565,6 +583,7 @@ cleanup_release_private_state() {
     [ -z "$METADATA_INDEX" ] || /bin/rm -f "$METADATA_INDEX"
     [ -z "$BUILD_WORKSPACE" ] || /bin/rm -rf "$BUILD_WORKSPACE"
     [ -z "$UPLOAD_SNAPSHOT_DIR" ] || /bin/rm -rf "$UPLOAD_SNAPSHOT_DIR"
+    [ -z "$CI_TRANSCRIPT" ] || /bin/rm -f "$CI_TRANSCRIPT"
     exit "$status"
 }
 trap cleanup_release_private_state EXIT
@@ -698,8 +717,12 @@ else
         --build-number "$BUILD_NUMBER" \
         --source-commit "$SOURCE_COMMIT" \
         --source-tree "$SOURCE_TREE" \
+        --source-root "$PROJECT_DIR" \
         --dmg "$PROJECT_DIR/$DMG_PATH" \
         --notarization-submission-id "$NOTARY_SUBMISSION_ID" \
+        --clean-ci-transcript "$CI_TRANSCRIPT" \
+        --clean-ci-started-at "$CI_STARTED_AT" \
+        --clean-ci-completed-at "$CI_COMPLETED_AT" \
         --output "$CANDIDATE_MANIFEST"
     if ! is_regular_evidence_file "$RUNTIME_REPORT"; then
         /usr/bin/python3 -I "$SCRIPT_DIR/candidate-qualification.py" runtime-template \

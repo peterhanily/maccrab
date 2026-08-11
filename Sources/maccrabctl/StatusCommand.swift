@@ -398,7 +398,7 @@ extension MacCrabCtl {
     }
 
     /// Effective post-split caps from the running engine. Never re-label the
-    /// legacy 420 MiB event+evidence envelope as an event-only database cap.
+    /// legacy event+evidence envelope as an event-only database cap.
     static func alertEvidenceStorageStatusLines(
         supportDir: String
     ) -> [String] {

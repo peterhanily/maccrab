@@ -128,10 +128,14 @@ public enum AnchorDetector {
             anchors.append(.persistenceCreated(processEntityId: processEntityId, persistenceEntityId: persistenceEntityId))
         }
 
-        // 3. Unsigned binary from download path
-        if !context.processNode.isAppleSigned,
-           context.policy.trustedConduitPolicy.isPathInDenylist(context.processNode.executablePath) {
-            anchors.append(.unsignedDownloadExecution(processEntityId: processEntityId))
+        // 3. Process-only anchors. Whole-event file suppression calls this same
+        // helper, so adding a future process-only anchor cannot silently bypass
+        // the graph writer's preservation gate.
+        if let processAnchor = processOnlyAnchor(
+            processNode: context.processNode,
+            policy: context.policy
+        ) {
+            anchors.append(processAnchor)
         }
 
         // 4. AI agent spawning a shell
@@ -149,6 +153,17 @@ public enum AnchorDetector {
         }
 
         return anchors
+    }
+
+    public static func processOnlyAnchor(
+        processNode: ProcessNode,
+        policy: TracePolicy
+    ) -> AnchorTrigger? {
+        guard !processNode.isAppleSigned,
+              policy.trustedConduitPolicy.isPathInDenylist(
+                processNode.executablePath) else { return nil }
+        return .unsignedDownloadExecution(
+            processEntityId: ProcessNode.entityType + ":" + processNode.processKey)
     }
 
     /// Identity used only to aggregate repeated credential observations. A

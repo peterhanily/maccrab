@@ -233,7 +233,7 @@ struct DaemonConfig: Codable {
         /// family cap is `eventsMaxSizeMB - evidenceMaxSizeMB`; the alerts.db
         /// family cap is `alertsMaxSizeMB + evidenceMaxSizeMB`. Their exact sum
         /// remains `eventsMaxSizeMB + alertsMaxSizeMB`, so the ownership move
-        /// neither raises the steady-state disk budget nor labels 420 MiB as an
+        /// neither raises the steady-state disk budget nor labels 440 MiB as an
         /// event-only allowance.
         ///
         /// Upgrades are different: the preserved legacy
@@ -273,7 +273,7 @@ struct DaemonConfig: Codable {
         /// the sweep converges instead of churning. Working set still bounded by
         /// `eventsHotTierMinutes`.
         ///
-        /// v1.21.6 (PERF-03) — that convergence claim DOES NOT HOLD under
+        /// v1.21.6 (PERF-03) — that convergence claim DID NOT HOLD under
         /// ordinary developer activity, and the cap is not a fix for the write
         /// volume underneath it. Field-sampled every 9 s on the author's host:
         /// 325.9 → 423.6 → 519.7 → 567.6 MB, then 291.6 MB (276 MB reclaimed in
@@ -282,16 +282,20 @@ struct DaemonConfig: Codable {
         /// rewrite every few minutes. Sustained ~1.59 MB/s of DB writes
         /// (~137 GB/day) at ~7,214 on-disk bytes per event.
         ///
-        /// Raising the number again would only move the thrash point. The bytes
-        /// per event are the problem: raw_json re-serializes ~20 fields that
-        /// already have typed columns, and every ephemeral row also pays for the
-        /// FTS5 index. Fixing that means changing the raw_json write AND the
-        /// `queryEvents` read path that decodes it, so it is deliberately NOT done
-        /// in this batch; the PERF-02 ingest gate lands first and the cap should
-        /// then be re-derived from a measured steady state, not guessed again.
-        /// Until that happens this cap is breached, not honoured — see the
-        /// early-fire watchdog's back-off in DaemonTimers for the containment.
-        var eventsMaxSizeMB: Int = 420
+        /// A broad cap increase by itself would only move that thrash point. The
+        /// release therefore first removes avoidable write volume with the
+        /// PERF-02 demand gate and relevance-aware physical-row suppression.
+        /// EventStore's duplicated raw_json + typed-column + FTS cost remains a
+        /// separate write-amplification concern, and the rc.12 cap correction is
+        /// not evidence that the runtime <=1 MiB/s write-rate contract is met.
+        /// v1.21.6-rc.12: raised 420 → 440 after an installed-host measurement put
+        /// the irreducible 15-minute family footprint at 302.7 decimal MB. The
+        /// live upgrade cap was 353 MiB, whose 80% target was only 296.1 MB;
+        /// the file-lane reserve also stopped growth below that floor. The
+        /// 20 MiB correction leaves measured headroom above both boundaries
+        /// without weakening the 15-minute forensic floor. Explicit operator
+        /// values remain authoritative; this changes only the shipped default.
+        var eventsMaxSizeMB: Int = 440
 
         /// Cadence (in minutes) for the events.db size-cap enforcer.
         ///
@@ -799,6 +803,70 @@ struct DaemonConfig: Codable {
         return try? JSONDecoder().decode(DaemonConfig.self, from: mergedData)
     }
 
+    /// Recognize the exact seven-key storage block emitted by the Settings UI
+    /// before the rc.12 events-envelope rebaseline. This is intentionally an
+    /// exact fingerprint: a partial file, any tuned companion value, any extra
+    /// storage knob, or the current Settings generation marker is an operator
+    /// override and remains authoritative.
+    ///
+    /// The old generated events value inherits the already-decoded system
+    /// configuration instead of blindly becoming 440. With the shipped config
+    /// that inherited value is 440; if an administrator explicitly configured
+    /// a different envelope in daemon_config.json, the stale generated UI
+    /// default no longer shadows it.
+    @discardableResult
+    static func rebaselineGeneratedSettingsStorage(
+        _ storage: inout [String: Any],
+        inheritedEventsMaxSizeMB: Int
+    ) -> Bool {
+        let generationKey = "settingsDefaultsGeneration"
+        guard storage[generationKey] == nil else { return false }
+
+        let generatedValues: [String: Int] = [
+            "eventsHotTierMinutes": 30,
+            "eventsMaxSizeMB": 420,
+            "alertsRetentionDays": 365,
+            "alertsMaxSizeMB": 100,
+            "evidenceMaxSizeMB": 100,
+            "campaignsRetentionDays": 365,
+            "campaignsMaxSizeMB": 50,
+        ]
+        guard Set(storage.keys) == Set(generatedValues.keys) else {
+            return false
+        }
+        for (key, value) in generatedValues {
+            guard storage[key] as? Int == value else { return false }
+        }
+
+        storage["eventsMaxSizeMB"] = inheritedEventsMaxSizeMB
+        return true
+    }
+
+    /// Object-level gate retained separately so legacy top-level cap spellings
+    /// are examined before `migrateLegacyStorageKeys` consumes the camel-case
+    /// one. Their presence is explicit operator provenance and must prevent the
+    /// generated-default classifier even when the nested tuple is otherwise an
+    /// exact match.
+    @discardableResult
+    static func rebaselineGeneratedSettingsOverrides(
+        _ object: inout [String: Any],
+        inheritedEventsMaxSizeMB: Int
+    ) -> Bool {
+        guard object["maxDatabaseSizeMB"] == nil,
+              object["max_database_size_mb"] == nil,
+              var storage = object["storage"] as? [String: Any] else {
+            return false
+        }
+        guard rebaselineGeneratedSettingsStorage(
+            &storage,
+            inheritedEventsMaxSizeMB: inheritedEventsMaxSizeMB
+        ) else {
+            return false
+        }
+        object["storage"] = storage
+        return true
+    }
+
     /// Read `user_overrides.json` from the console user's home (if
     /// any) and merge the storage tuning keys into `config`. Any other
     /// keys in the file are ignored — we do not let a user-writable
@@ -852,6 +920,18 @@ struct DaemonConfig: Codable {
         guard var obj = try? JSONSerialization.jsonObject(
             with: pick.data
         ) as? [String: Any] else { return }
+
+        // Settings used to write all of its default values as if they were
+        // operator overrides. Upgrade that one known generated fingerprint at
+        // daemon read time so boot does not depend on the preferences view
+        // being opened first. This is a read-time classification only; the app
+        // persists the generation marker on its next merge-safe sync. Run this
+        // before legacy folding so an explicit top-level cap remains visible as
+        // provenance and is never mistaken for a generated default.
+        rebaselineGeneratedSettingsOverrides(
+            &obj,
+            inheritedEventsMaxSizeMB: config.storage.eventsMaxSizeMB
+        )
 
         // Mirror decode()'s migration pass so legacy keys in the user
         // overrides file get folded the same way.
@@ -908,13 +988,12 @@ struct DaemonConfig: Codable {
 
         // DL-07: this merge used to be completely silent. A user_overrides.json
         // that Settings wrote months ago keeps pinning its values across every
-        // upgrade, so when v1.21.4 raised the shipped eventsMaxSizeMB 350 → 420
-        // (itself the fix for a size-cap target that sat BELOW the file's real
-        // floor and made the hourly sweep prune+VACUUM on every tick), a host
-        // carrying an older override of 300 silently kept the broken number and
-        // nothing anywhere said so — the remediation shipped and was inert.
-        // Name every value this file shadows, with both numbers, so config
-        // shadowing is visible in the log instead of only in behaviour.
+        // upgrade, so shipped cap corrections could be inert with no diagnostic.
+        // rc.12 explicitly recognizes only the complete prior UI-generated 420
+        // tuple above and inherits the current 440 default; partial, tuned,
+        // current-generation, and legacy-cap overrides remain authoritative.
+        // Name every value this file shadows, with both numbers, so all other
+        // config shadowing is visible in the log instead of only in behaviour.
         let storageKnobs: [(String, KeyPath<StorageConfig, Int>)] = [
             ("eventsHotTierMinutes", \.eventsHotTierMinutes),
             ("processEventsFloorMinutes", \.processEventsFloorMinutes),

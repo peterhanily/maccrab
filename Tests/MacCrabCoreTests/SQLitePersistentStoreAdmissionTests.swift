@@ -156,6 +156,43 @@ struct SQLitePersistentStoreAdmissionTests {
         )
     }
 
+    /// Grow the main file, then leave those pages on SQLite's freelist. A
+    /// later full VACUUM can physically reclaim them while the store remains
+    /// in shed mode, reproducing the startup maintenance -> normal admission
+    /// transition without manufacturing application rows.
+    private func addFreelistPadding(
+        databasePath: String,
+        bytes: Int
+    ) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(
+            databasePath,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let db = handle else {
+            sqlite3_close(handle)
+            throw FixtureError.sqlite
+        }
+        defer { sqlite3_close(db) }
+
+        for sql in [
+            "PRAGMA busy_timeout = 5000",
+            "CREATE TABLE admission_reprobe_padding (payload BLOB NOT NULL)",
+            "INSERT INTO admission_reprobe_padding VALUES (zeroblob(\(bytes)))",
+            "DROP TABLE admission_reprobe_padding",
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+        ] {
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                throw FixtureError.sqlite
+            }
+        }
+    }
+
+    private enum FixtureError: Error {
+        case sqlite
+    }
+
     @Test("Family accounting is exact and rejects partial, symlinked, or hard-linked families")
     func familyAccounting() throws {
         let dir = try tempDirectory()
@@ -1148,6 +1185,34 @@ struct SQLitePersistentStoreAdmissionTests {
         }
     }
 
+    @Test("post-reopen growth is rejected at the exact alert reserve boundary")
+    func postReopenGrowthConsumesRecoveredHeadroom() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let footprint = Int64Box(90)
+        var admission = try SQLitePersistentStoreAdmission(
+            databasePath: dir.appendingPathComponent("alert.db").path,
+            policy: policy(directory: dir, max: 100, reserve: 10),
+            footprintProbe: { _ in footprint.get() },
+            freeSpaceProbe: { _ in Int64.max }
+        )
+
+        // Equality is the last admissible point. This is the successful
+        // pre-reopen probe cached by the old AlertStore path.
+        try admission.admitWrite(estimatedTransactionBytes: 10)
+        #expect(admission.snapshot().footprintBytes == 90)
+
+        // Schema/statement setup during reopen consumes one byte. A fresh
+        // post-reopen revalidation must latch and reject before any INSERT.
+        footprint.set(91)
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            try admission.admitWrite(estimatedTransactionBytes: 10)
+        }
+        let blocked = admission.snapshot()
+        #expect(blocked.footprintBytes == 91)
+        #expect(blocked.latchedFailure != nil)
+    }
+
     @Test("Every direct read-write store gets safe defaults; read-only stays observational")
     func defaultReadWriteAdmission() async throws {
         let dir = try tempDirectory()
@@ -1163,7 +1228,7 @@ struct SQLitePersistentStoreAdmissionTests {
         let alertSnapshot = try #require(await alerts?.storageAdmissionSnapshot())
         let campaignSnapshot = try #require(await campaigns?.storageAdmissionSnapshot())
         #expect(eventSnapshot.maxFootprintBytes
-            == Int64(320) * SQLitePersistentStorePolicy.bytesPerMiB)
+            == Int64(340) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(alertSnapshot.maxFootprintBytes
             == Int64(200) * SQLitePersistentStorePolicy.bytesPerMiB)
         #expect(campaignSnapshot.maxFootprintBytes
@@ -1381,6 +1446,100 @@ struct SQLitePersistentStoreAdmissionTests {
         try await events.insert(event: event())
         try await alerts.insert(alert: alert())
         try await campaigns.insert(campaign())
+    }
+
+    @Test("Maintenance recovery is proven by normal no-write alert and event lane reprobes")
+    func recoveredStoresReprobeWithoutSacrificialWrites() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let eventPath = dir.appendingPathComponent("events-reprobe.db").path
+        let alertPath = dir.appendingPathComponent("alerts-reprobe.db").path
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let eventReserve = 16 * mib
+        let alertReserve = 4 * mib
+
+        let events = try EventStore(
+            path: eventPath,
+            storagePolicy: policy(
+                directory: dir,
+                max: 128 * mib,
+                reserve: eventReserve
+            )
+        )
+        let alerts = try AlertStore(
+            path: alertPath,
+            storagePolicy: policy(
+                directory: dir,
+                max: 64 * mib,
+                reserve: alertReserve
+            )
+        )
+
+        try addFreelistPadding(
+            databasePath: eventPath,
+            bytes: 24 * Int(mib)
+        )
+        try addFreelistPadding(
+            databasePath: alertPath,
+            bytes: 8 * Int(mib)
+        )
+
+        let eventPolicy = try pressureLatchPolicy(
+            directory: dir,
+            databasePath: eventPath,
+            reserveBytes: eventReserve
+        )
+        let alertPolicy = try pressureLatchPolicy(
+            directory: dir,
+            databasePath: alertPath,
+            reserveBytes: alertReserve
+        )
+        #expect(
+            (try await events.updateStorageAdmission(eventPolicy))?
+                .latchedFailure != nil
+        )
+        #expect(
+            (try await alerts.updateStorageAdmission(alertPolicy))?
+                .latchedFailure != nil
+        )
+
+        let eventRows = try await events.count()
+        let alertRows = try await alerts.count()
+        try await events.vacuum()
+        try await alerts.vacuum()
+
+        let compactedEvents = try SQLitePersistentStoreAdmission.measureFamily(
+            eventPath
+        )
+        #expect(
+            compactedEvents
+                + eventReserve
+                + EventStore.priorityLaneReserveBytes(
+                    maxFootprintBytes: eventPolicy.maxFootprintBytes
+                )
+                <= eventPolicy.maxFootprintBytes
+        )
+        let compactedAlerts = try SQLitePersistentStoreAdmission.measureFamily(
+            alertPath
+        )
+        #expect(
+            compactedAlerts + alertReserve <= alertPolicy.maxFootprintBytes
+        )
+
+        // These probes must clear the maintenance-preserved latch, reopen the
+        // writer, and check the file-only reserve without BEGIN or INSERT.
+        let priority = try await events.reprobeStorageAdmissionForWrite(
+            lane: .priority
+        )
+        let file = try await events.reprobeStorageAdmissionForWrite(lane: .file)
+        let alert = try await alerts.reprobeStorageAdmissionForWrite()
+
+        for snapshot in [priority, file, alert] {
+            #expect(snapshot.latchedFailure == nil)
+            #expect(!snapshot.pageLimitPending)
+        }
+        #expect(try await events.count() == eventRows)
+        #expect(try await alerts.count() == alertRows)
     }
 
     @Test("Fresh schema creation fails before touching disk under the free-space floor")
@@ -2194,6 +2353,15 @@ struct SQLitePersistentStoreAdmissionTests {
                     of: "try revalidateStorageWriteAfterReopen(",
                     in: method
                 ) == 2, "both bounded recovery reopens must receive the full estimate")
+            } else if path.hasSuffix("AlertStore.swift") {
+                #expect(
+                    fullEstimateForwards == 4,
+                    "AlertStore must preserve the full estimate through both post-reopen probes"
+                )
+                #expect(occurrences(
+                    of: "try revalidateStorageWriteAfterReopen(",
+                    in: method
+                ) == 2, "AlertStore must freshly revalidate after every recovery reopen")
             } else {
                 #expect(
                     fullEstimateForwards == 2,
@@ -2259,11 +2427,11 @@ struct SQLitePersistentStoreAdmissionTests {
 
     @Test("the shipped events budget reserves headroom the file lane cannot take")
     func shippedBudgetReservesPriorityHeadroom() {
-        // The shipped default is events_max_size_mb 420 with a 100 MiB evidence
-        // subtraction, so the events family cap is 320 MiB.
-        let familyCap: Int64 = 320 * 1_048_576
+        // The shipped default is events_max_size_mb 440 with a 100 MiB evidence
+        // subtraction, so the events family cap is 340 MiB.
+        let familyCap: Int64 = 340 * 1_048_576
         let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: familyCap)
-        #expect(reserve == 33_554_432, "expected 32 MiB reserve at the shipped cap, got \(reserve)")
+        #expect(reserve == 35_651_584, "expected 34 MiB reserve at the shipped cap, got \(reserve)")
         // A file-lane write must additionally leave the reserve free; a priority
         // write is charged only its own cost and stays admissible below that
         // point.
@@ -2285,7 +2453,7 @@ struct SQLitePersistentStoreAdmissionTests {
         // The reserve therefore must never be expressible as part of a
         // transaction estimate. It is a FOOTPRINT quantity: comparable to the
         // store cap, far larger than any single transaction's reserve.
-        for mib in [50, 320, 420, 2_048] {
+        for mib in [50, 340, 440, 2_048] {
             let cap = Int64(mib) * 1_048_576
             let reserve = EventStore.priorityLaneReserveBytes(maxFootprintBytes: cap)
             #expect(reserve > SQLitePersistentStoreAdmission.conservativeRowMutationBytes,

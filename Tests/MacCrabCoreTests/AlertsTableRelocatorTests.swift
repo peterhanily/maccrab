@@ -77,6 +77,30 @@ struct AlertsTableRelocatorTests {
         }
     }
 
+    private func makeEventsDBWithoutLegacyAlerts(at directory: URL) throws {
+        let path = directory.appendingPathComponent("events.db").path
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(
+            path,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let db = handle else {
+            sqlite3_close(handle)
+            throw TestSetupError.openFailed
+        }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(
+            db,
+            "CREATE TABLE events (id TEXT PRIMARY KEY)",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK else {
+            throw TestSetupError.openFailed
+        }
+    }
+
     private func eventsAlertsCount(at directory: URL) -> Int? {
         let path = directory.appendingPathComponent("events.db").path
         guard FileManager.default.fileExists(atPath: path) else { return nil }
@@ -153,6 +177,52 @@ struct AlertsTableRelocatorTests {
         #expect(migrated == false)
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.db").path) == false)
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("alerts.db").path) == false)
+    }
+
+    @Test("already-migrated source does not preflight a shed-only target")
+    func migratedSourceSkipsTargetAdmission() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try makeEventsDBWithoutLegacyAlerts(at: dir)
+
+        // This is a regular family member but it is deliberately above the
+        // supplied target's ordinary cap-reserve boundary. It is also not a
+        // SQLite database: touching/bootstrap-opening it would fail. With no
+        // legacy source table, relocation must not inspect or mutate it.
+        let alertsPath = dir.appendingPathComponent("alerts.db")
+        let original = Data(repeating: 0xA5, count: 4 * 1_048_576)
+        try original.write(to: alertsPath)
+        let targetPolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 4 * 1_048_576,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes: 1_048_576,
+            storageVolumePath: dir.path
+        )
+
+        #expect(!AlertsTableRelocator.relocate(
+            directory: dir.path,
+            alertStoragePolicy: targetPolicy
+        ))
+        #expect(eventsAlertsCount(at: dir) == nil)
+        #expect(try Data(contentsOf: alertsPath) == original)
+
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent(
+                    "Sources/MacCrabCore/Storage/AlertsTableRelocator.swift"
+                ),
+            encoding: .utf8
+        )
+        let noOpCheck = try #require(source.range(of:
+            "guard tableExists(handle: src, schema: \"main\", name: \"alerts\")"
+        ))
+        let targetAdmission = try #require(source.range(of:
+            "alertAdmission = try SQLitePersistentStoreAdmission("
+        ))
+        #expect(noOpCheck.lowerBound < targetAdmission.lowerBound)
     }
 
     @Test("v1.8-rc-shape events.db migrates alerts to alerts.db")

@@ -13,6 +13,18 @@ import Foundation
 @Suite("DaemonConfig: user_overrides.json overlay (v1.6.14 / v1.8.0)")
 struct DaemonConfigOverridesTests {
 
+    private func oldGeneratedSettingsStorage() -> [String: Any] {
+        [
+            "eventsHotTierMinutes": 30,
+            "eventsMaxSizeMB": 420,
+            "alertsRetentionDays": 365,
+            "alertsMaxSizeMB": 100,
+            "evidenceMaxSizeMB": 100,
+            "campaignsRetentionDays": 365,
+            "campaignsMaxSizeMB": 50,
+        ]
+    }
+
     /// When no `daemon_config.json` exists, `load` returns pure defaults
     /// — this is the pre-v1.6.14 behavior and must not regress.
     @Test("load returns defaults when no config file present")
@@ -22,11 +34,126 @@ struct DaemonConfigOverridesTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.storage.eventsMaxSizeMB == 420)   // v1.21.4: 350 → 420 (footprint cap incl. WAL sidecar)
+        #expect(cfg.storage.eventsMaxSizeMB == 440)   // v1.21.6-rc.12: measured 15-minute floor
         #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         #expect(cfg.storage.campaignsRetentionDays == 365)
         #expect(cfg.storage.aggregateDays == 90)
+    }
+
+    @Test("the prior 420 MiB value remains authoritative when explicitly configured")
+    func explicitPriorDefaultIsPreserved() throws {
+        let tmp = NSTemporaryDirectory()
+            + "MacCrabCfgTest-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: tmp,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let json = #"{"storage":{"events_max_size_mb":420}}"#
+        try json.write(
+            toFile: tmp + "/daemon_config.json",
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+        #expect(cfg.storage.eventsMaxSizeMB == 420)
+    }
+
+    @Test("old complete Settings-generated storage tuple inherits the new default")
+    func oldGeneratedSettingsTupleRebaselinesWithoutOpeningUI() throws {
+        // Parse the production JSON shape rather than constructing only Swift
+        // integers, so Foundation's NSNumber bridging is covered too.
+        let data = """
+        {
+          "storage": {
+            "eventsHotTierMinutes": 30,
+            "eventsMaxSizeMB": 420,
+            "alertsRetentionDays": 365,
+            "alertsMaxSizeMB": 100,
+            "evidenceMaxSizeMB": 100,
+            "campaignsRetentionDays": 365,
+            "campaignsMaxSizeMB": 50
+          }
+        }
+        """.data(using: .utf8)!
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var overrideObject = object
+        #expect(DaemonConfig.rebaselineGeneratedSettingsOverrides(
+            &overrideObject,
+            inheritedEventsMaxSizeMB: 440
+        ))
+        let storage = try #require(
+            overrideObject["storage"] as? [String: Any]
+        )
+        #expect(storage["eventsMaxSizeMB"] as? Int == 440)
+        // The ownership split and retention controls are not reclassified.
+        #expect(storage["evidenceMaxSizeMB"] as? Int == 100)
+        #expect(storage["alertsRetentionDays"] as? Int == 365)
+    }
+
+    @Test("partial manual 420 override is preserved")
+    func partialPriorCapIsNotGeneratedTuple() {
+        var storage: [String: Any] = ["eventsMaxSizeMB": 420]
+        #expect(!DaemonConfig.rebaselineGeneratedSettingsStorage(
+            &storage,
+            inheritedEventsMaxSizeMB: 440
+        ))
+        #expect(storage["eventsMaxSizeMB"] as? Int == 420)
+    }
+
+    @Test("complete but tuned Settings tuple preserves 420")
+    func tunedSettingsTupleIsNotReclassified() {
+        var storage = oldGeneratedSettingsStorage()
+        storage["eventsHotTierMinutes"] = 60
+        #expect(!DaemonConfig.rebaselineGeneratedSettingsStorage(
+            &storage,
+            inheritedEventsMaxSizeMB: 440
+        ))
+        #expect(storage["eventsMaxSizeMB"] as? Int == 420)
+    }
+
+    @Test("current Settings generation marker preserves intentional 420")
+    func currentGenerationPreservesPriorCap() {
+        var storage = oldGeneratedSettingsStorage()
+        storage["settingsDefaultsGeneration"] = 1
+        #expect(!DaemonConfig.rebaselineGeneratedSettingsStorage(
+            &storage,
+            inheritedEventsMaxSizeMB: 440
+        ))
+        #expect(storage["eventsMaxSizeMB"] as? Int == 420)
+    }
+
+    @Test("legacy top-level cap provenance blocks generated-tuple migration")
+    func legacyCapProvenancePreservesPriorCap() throws {
+        for legacyKey in ["maxDatabaseSizeMB", "max_database_size_mb"] {
+            var object: [String: Any] = [
+                "storage": oldGeneratedSettingsStorage(),
+                legacyKey: 420,
+            ]
+            #expect(!DaemonConfig.rebaselineGeneratedSettingsOverrides(
+                &object,
+                inheritedEventsMaxSizeMB: 440
+            ))
+            let storage = try #require(
+                object["storage"] as? [String: Any]
+            )
+            #expect(storage["eventsMaxSizeMB"] as? Int == 420)
+        }
+    }
+
+    @Test("generated UI default does not shadow explicit daemon config")
+    func generatedDefaultInheritsExplicitSystemConfiguration() {
+        var storage = oldGeneratedSettingsStorage()
+        #expect(DaemonConfig.rebaselineGeneratedSettingsStorage(
+            &storage,
+            inheritedEventsMaxSizeMB: 512
+        ))
+        #expect(storage["eventsMaxSizeMB"] as? Int == 512)
     }
 
     /// v1.6.14 + v1.8.0: snake_case `max_database_size_mb` and
@@ -169,7 +296,7 @@ struct DaemonConfigOverridesTests {
         #expect(cfg.storage.reportsRetentionDays == 45)
         #expect(cfg.storage.autoGeneratedRulesMax == 50)
         // Untouched tiers stay at their defaults.
-        #expect(cfg.storage.eventsMaxSizeMB == 420)   // v1.21.4 default
+        #expect(cfg.storage.eventsMaxSizeMB == 440)   // v1.21.6-rc.12 default
     }
 
     @Test("v1.18.0 tracegraph/traces storage keys decode (snake_case)")

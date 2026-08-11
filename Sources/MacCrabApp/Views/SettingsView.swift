@@ -24,6 +24,66 @@ public enum SettingsTab: String {
     static let storageKey = "settings.selectedTab"
 }
 
+// MARK: - Storage-default migration
+
+/// The complete storage tuple emitted by the Settings UI.  The app has always
+/// written this whole tuple to `user_overrides.json`, even when the operator
+/// never moved a storage control, so the tuple (rather than the events value
+/// alone) is the only safe signature of an old UI-generated default.
+struct SettingsStorageDefaultsSnapshot: Equatable {
+    let eventsHotTierMinutes: Int
+    let eventsMaxSizeMB: Int
+    let alertsRetentionDays: Int
+    let alertsMaxSizeMB: Int
+    let evidenceMaxSizeMB: Int
+    let campaignsRetentionDays: Int
+    let campaignsMaxSizeMB: Int
+
+    /// Shipped by the Settings UI immediately before the rc.12 rebaseline.
+    static let generatedBeforeEnvelopeRebaseline = SettingsStorageDefaultsSnapshot(
+        eventsHotTierMinutes: 30,
+        eventsMaxSizeMB: 420,
+        alertsRetentionDays: 365,
+        alertsMaxSizeMB: 100,
+        evidenceMaxSizeMB: 100,
+        campaignsRetentionDays: 365,
+        campaignsMaxSizeMB: 50
+    )
+}
+
+/// Pure classifier for the one-shot 420 → 440 UI-default migration.
+///
+/// A bare value of 420 is deliberately insufficient: it can be a hand-tuned
+/// operator cap and must remain authoritative.  We migrate only the complete
+/// prior generated tuple, only when Settings had actually materialized the
+/// events key, and never when the legacy explicit cap exists.  A generation
+/// marker makes the decision one-shot and gives future default migrations a
+/// provenance boundary of their own.
+enum SettingsStorageDefaultMigration {
+    static let markerKey = "storage.eventsEnvelopeDefaultMigrationVersion"
+    /// Stored inside user_overrides.json's storage object. The daemon uses the
+    /// absence of this field to recognize the exact pre-rc.12 generated tuple;
+    /// once Settings writes it, even an intentional 420 MB cap stays pinned.
+    static let overrideGenerationKey = "settingsDefaultsGeneration"
+    static let currentGeneration = 1
+    static let currentEventsMaxSizeMB = 440
+
+    static func upgradedEventsMaxSizeMB(
+        snapshot: SettingsStorageDefaultsSnapshot,
+        eventsKeyWasPersisted: Bool,
+        legacyCapWasPresent: Bool,
+        completedGeneration: Int
+    ) -> Int? {
+        guard completedGeneration < currentGeneration,
+              eventsKeyWasPersisted,
+              !legacyCapWasPresent,
+              snapshot == .generatedBeforeEnvelopeRebaseline else {
+            return nil
+        }
+        return currentEventsMaxSizeMB
+    }
+}
+
 // MARK: - SettingsView
 
 struct SettingsView: View {
@@ -79,7 +139,10 @@ struct SettingsView: View {
     // DaemonConfig.StorageConfig in MacCrabAgentKit. Legacy keys are
     // migrated onto these on first appear via `migrateLegacyStorageKeys`.
     @AppStorage("storage.eventsHotTierMinutes") private var eventsHotTierMinutes: Int = 30
-    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 420  // match DaemonConfig default (v1.21.4: 350 → 420)
+    // A missing key adopts the new shipped default. The one-shot migration
+    // below upgrades only the complete prior UI-generated default tuple; a
+    // distinguishable operator override, including 420, remains authoritative.
+    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 440  // match DaemonConfig default (v1.21.6-rc.12: 420 → 440)
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
     @AppStorage("storage.evidenceMaxSizeMB")     private var evidenceMaxSizeMB: Int = 100
@@ -1864,6 +1927,8 @@ struct SettingsView: View {
                 "evidenceMaxSizeMB":      effectiveEvidenceMaxSizeMB,
                 "campaignsRetentionDays": campaignsRetentionDays,
                 "campaignsMaxSizeMB":     campaignsMaxSizeMB,
+                SettingsStorageDefaultMigration.overrideGenerationKey:
+                    SettingsStorageDefaultMigration.currentGeneration,
             ]
         }
         _ = V2DaemonControl.reloadDetectionRules()
@@ -2418,6 +2483,44 @@ struct SettingsView: View {
     /// keys remain in UserDefaults but nothing reads them.
     private func migrateLegacyStorageKeys() {
         let defaults = UserDefaults.standard
+
+        // v1.21.6-rc.12: Settings historically materialized its complete shipped
+        // storage tuple into user_overrides.json on first appearance. Without
+        // a one-shot rebaseline, an untouched generated 420 MB envelope would
+        // shadow the new 440 MB daemon default forever. Classify the full old
+        // tuple before applying older-key migrations; any companion deviation
+        // is evidence of operator tuning and preserves the value.
+        let oldGeneratedSnapshot = SettingsStorageDefaultsSnapshot(
+            eventsHotTierMinutes: eventsHotTierMinutes,
+            eventsMaxSizeMB: eventsMaxSizeMB,
+            alertsRetentionDays: alertsRetentionDays,
+            alertsMaxSizeMB: alertsMaxSizeMB,
+            evidenceMaxSizeMB: evidenceMaxSizeMB,
+            campaignsRetentionDays: campaignsRetentionDays,
+            campaignsMaxSizeMB: campaignsMaxSizeMB
+        )
+        let upgradedEventsCap =
+            SettingsStorageDefaultMigration.upgradedEventsMaxSizeMB(
+                snapshot: oldGeneratedSnapshot,
+                eventsKeyWasPersisted: defaults.object(
+                    forKey: "storage.eventsMaxSizeMB"
+                ) != nil,
+                legacyCapWasPresent: defaults.object(
+                    forKey: "maxDatabaseSizeMB"
+                ) != nil,
+                completedGeneration: defaults.integer(
+                    forKey: SettingsStorageDefaultMigration.markerKey
+                )
+            )
+        // Record the classification before mutating @AppStorage. If SwiftUI
+        // re-enters appearance/change delivery, it cannot apply it twice.
+        defaults.set(
+            SettingsStorageDefaultMigration.currentGeneration,
+            forKey: SettingsStorageDefaultMigration.markerKey
+        )
+        if let upgradedEventsCap {
+            eventsMaxSizeMB = upgradedEventsCap
+        }
 
         if let legacyRetention = defaults.object(forKey: "retentionDays") as? Int {
             if alertsRetentionDays == 365 && campaignsRetentionDays == 365 {

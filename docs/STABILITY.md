@@ -77,8 +77,8 @@ all caps are tunable under the `storage` block in `daemon_config.json` (see
 
 | Store | Default cap | Notes |
 |-------|------------:|-------|
-| `events.db` | ~350 MB (`events_max_size_mb`) | Whole-**file** cap. The event working set is bounded by `events_hot_tier_minutes` (default 30), but the file also carries `alert_evidence` (its own ~100 MB `evidence_max_size_mb` sub-cap) and the FTS5 search index (~60 MB on a busy host), so the file floor is ~300–350 MB regardless. |
-| `alerts.db` | 100 MB (`alerts_max_size_mb`) | Retained `alerts_retention_days` (default 365). |
+| `events.db` | 340 MiB steady-state (`events_max_size_mb` 440 minus the 100 MiB evidence allocation) | Whole-family DB+WAL+SHM cap. Upgraded stores temporarily add only their measured legacy-evidence reserve. The default is sized to retain the 15-minute forensic floor above both maintenance and file-lane admission boundaries. |
+| `alerts.db` | 200 MiB physical family (`alerts_max_size_mb` 100 + `evidence_max_size_mb` 100) | Combined DB+WAL+SHM admission covers alert rows and their evidence ownership; each owner also retains its independent 100 MiB sub-cap. Alerts are retained for `alerts_retention_days` (default 365). |
 | `campaigns.db` | 50 MB (`campaigns_max_size_mb`) | Retained `campaigns_retention_days` (default 365). |
 | `tracegraph.db` | 250 MB (`tracegraph_max_size_mb`) | Causal-graph entity/edge substrate; retained `tracegraph_retention_days` (default 90). Over cap, oldest graph is evicted; an orphan sweep also runs. |
 | `traces.db` + WAL + SHM | 100 MB (`traces_max_size_mb`, minimum 50 MB) | Unauthenticated/self-reported OTLP spans; retained `traces_retention_days` (default 90). Exact aggregate footprint is admission-controlled with transaction reserve and a 1 GiB volume free-space floor. |

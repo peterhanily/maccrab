@@ -7,10 +7,17 @@ import copy
 import datetime as dt
 import hashlib
 import importlib.util
+import inspect
+import json
+import os
 import pathlib
+import signal
+import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -31,6 +38,23 @@ def iso(offset: int) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def preinstall_clean_ci_fixture() -> dict:
+    output = "Passed: 20\nFailed: 0\nALL CHECKS PASSED\n"
+    return {
+        "command": ["scripts/ci-local.sh", "--clean"],
+        "exit_code": 0,
+        "output_sha256": qualification.sha256_bytes(output.encode("utf-8")),
+        "output_tail": output,
+        "output_line_count": len(output.splitlines()),
+        "started_at": iso(-3600),
+        "completed_at": iso(-3000),
+        "source_commit": COMMIT,
+        "source_tree": TREE,
+        "clean_source_before": True,
+        "clean_source_after": True,
+    }
+
+
 def llm_heartbeat_payload(*, healthy: bool, started: int = 0, accepted: int = 0,
                           retries: int = 0, rejected: int = 0,
                           current: int = 0) -> dict:
@@ -38,6 +62,19 @@ def llm_heartbeat_payload(*, healthy: bool, started: int = 0, accepted: int = 0,
         is_alert = feature in ("alert_investigation", "totals")
         return {
             "requestedTotal": started if is_alert else 0,
+            "currentInFlight": 0,
+            "currentAdmittedBackendRequests": 0,
+            "currentCircuitRecoveryProbes": 0,
+            "outcomes": {
+                "success": started if is_alert else 0,
+                "cacheHit": 0,
+                "backendFailure": 0,
+                "circuitRejection": 0,
+                "privacyRejection": 0,
+                "admissionShed": 0,
+                "cancellation": 0,
+                "responseOversize": 0,
+            },
             "conservationMaintained": True,
             "backendAdmissionConservationMaintained": True,
             "circuitRecoveryConservationMaintained": True,
@@ -58,9 +95,13 @@ def llm_heartbeat_payload(*, healthy: bool, started: int = 0, accepted: int = 0,
         }
         for index, reason in enumerate(qualification.LLM_ALERT_REJECTION_REASONS)
     ]
-    return {
+    result = {
         "configured": True,
         "healthy": healthy,
+        "provider": "fixture",
+        "model": "fixture-model",
+        "consecutive_failures": 0,
+        "circuit_open": False,
         "runtime_telemetry": {
             "schemaVersion": 2,
             "totals": counters("totals"),
@@ -75,6 +116,9 @@ def llm_heartbeat_payload(*, healthy: bool, started: int = 0, accepted: int = 0,
             },
         },
     }
+    if healthy or started > 0:
+        result["last_success_unix"] = 1_786_363_200.0
+    return result
 
 
 def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
@@ -88,6 +132,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
     samples = []
     for offset in range(0, 901, 30):
         counter_value = offset + (40_000 if offset >= 330 else 0)
+        graph_suppressed = 40_000 if offset >= 330 else 0
         llm_started = 11 if offset >= 330 else 10
         llm_payload = llm_heartbeat_payload(
             healthy=True, started=llm_started, accepted=llm_started
@@ -105,7 +150,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "engine_disk_write_bytes_total": engine_write_bytes * offset // 900,
                 "engine_rss_bytes": rss,
                 "gui_background_cpu_percent": 5.0,
-                "sequence_pending_steps_evicted_total": 7,
+                "sequence_pending_steps_evicted_total": 0,
                 "sequence_state_continuity_maintained": True,
                 "sequence_state_continuity_detail": "nominal",
                 "conservation": {
@@ -126,16 +171,23 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "unclassified_file_queue_loss": 0,
                 },
                 "trace_graph_write_accounting": {
-                    "write_attempts_total": counter_value,
-                    "write_batches_committed_total": counter_value,
+                    "ingest_events_total": counter_value,
+                    "write_attempts_total": counter_value - graph_suppressed,
+                    "write_batches_committed_total": counter_value - graph_suppressed,
                     "write_batches_failed_total": 0,
                     "write_batches_in_flight": 0,
-                    "write_rows_attempted_total": counter_value * 2,
-                    "write_rows_committed_total": counter_value * 2,
+                    "write_rows_attempted_total": (
+                        counter_value * 2 - graph_suppressed
+                    ),
+                    "write_rows_committed_total": (
+                        counter_value * 2 - graph_suppressed
+                    ),
                     "write_rows_failed_total": 0,
                     "write_rows_in_flight": 0,
                     "entity_observations_total": counter_value,
                     "edge_observations_total": counter_value,
+                    "physical_write_suppressed_events_total": graph_suppressed,
+                    "physical_write_suppressed_rows_total": graph_suppressed,
                     "coalesced_noop_rows_total": 0,
                     "pending_entity_rows": 0,
                     "pending_edge_rows": 0,
@@ -287,6 +339,27 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "state": "converged",
                 "sticky": False,
             },
+            "alert_evidence_budget": {
+                "events_family_effective_cap_bytes": 340 * 1024 * 1024,
+                "alerts_family_combined_cap_bytes": 200 * 1024 * 1024,
+                "alerts_family_footprint_bytes": 100 * 1024 * 1024,
+                "alerts_family_admission_cap_bytes": 200 * 1024 * 1024,
+                "alerts_family_transaction_reserve_bytes": 8 * 1024 * 1024,
+                "alerts_family_admission_boundary_bytes": 192 * 1024 * 1024,
+                "alerts_family_recovery_target_bytes": 184 * 1024 * 1024,
+                "alerts_family_blocked": False,
+                "alerts_family_reason": "",
+                "over_budget": False,
+                "capture_offered_total": 0,
+                "capture_completed_total": 0,
+                "capture_failures_total": 0,
+                "capture_shed_total": 0,
+                "capture_pending": 0,
+                "capture_in_flight": 0,
+                "capture_accepting": True,
+                "capture_conserved": True,
+                "legacy_transition_measurement_failed": False,
+            },
             "es_kernel_dropped_total": 0,
             "es_copy_backpressure_dropped_total": 0,
             "es_stream_yield_dropped_total": 0,
@@ -357,27 +430,149 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "output_line_count": len(output.splitlines()),
         }
 
-    focused_output = "✔ Test run with 27 tests passed after 0.2 seconds.\n"
     reload_output = (
         "[SIGHUP] Reloaded 438 single + 41 sequence rules "
         "(rule_profile stable governs the sequence/graph reload)\n"
     )
+    def investigation_json(alert_id: str) -> str:
+        return json.dumps(
+            {
+                "alertId": alert_id,
+                "confidence": 0.75,
+                "verdict": "needs_human",
+                "summary": "Deterministic qualification investigation.",
+                "evidenceChain": [],
+                "mitreReasoning": [],
+                "suggestedActions": [],
+                "confidencePenalties": [],
+                "modelVersion": "fixture-model",
+                "generatedAt": 0.0,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def alert_proof(
+        *, phase: str, run_id: str, alert_id: str, trigger_offset: int,
+        observed_offset: int, before: dict, after: dict,
+    ) -> dict:
+        alert_path, _ = qualification.workload_paths(run_id)
+        investigation = investigation_json(alert_id)
+        trigger_time = qualification.parse_time(
+            iso(trigger_offset), "fixture alert trigger"
+        )
+        return {
+            "phase": phase,
+            "database": {
+                "path": "/Library/Application Support/MacCrab/alerts.db",
+                "owner_uid": 0,
+                "mode": 0o600,
+                "device": 1,
+                "inode": 1,
+                "read_only": True,
+                "no_follow": True,
+                "bound_process_path": alert_path,
+                "triggered_after_unix": trigger_time.timestamp(),
+            },
+            "process_path": alert_path,
+            "trigger_started_at": iso(trigger_offset),
+            "alert": {
+                "id": alert_id,
+                "timestamp_unix": trigger_time.timestamp() + 0.25,
+                "rule_id": "maccrab.qualification.reverse-shell",
+                "severity": "high",
+            },
+            "investigation_json": investigation,
+            "investigation_sha256": qualification.sha256_bytes(
+                investigation.encode("utf-8")
+            ),
+            "telemetry_before": copy.deepcopy(before),
+            "telemetry_after": copy.deepcopy(after),
+            "observed_at": iso(observed_offset),
+        }
+
+    prewarm_run_id = "b" * 32
+    workload_run_id = "c" * 32
+    prewarm_before = qualification.llm_runtime_quality_sample(
+        {"llm": llm_heartbeat_payload(healthy=False, started=0, accepted=0)}
+    )
+    prewarm_after = qualification.llm_runtime_quality_sample(
+        {"llm": llm_heartbeat_payload(healthy=True, started=1, accepted=1)}
+    )
+    prewarm_proof = alert_proof(
+        phase="prewarm", run_id=prewarm_run_id,
+        alert_id="11111111-1111-4111-8111-111111111111",
+        trigger_offset=-120, observed_offset=-60,
+        before=prewarm_before, after=prewarm_after,
+    )
+    workload_before = next(
+        sample["llm_quality"] for sample in samples
+        if sample["offset_seconds"] == qualification.BURST_START_OFFSET_SECONDS
+    )
+    workload_after = next(
+        sample["llm_quality"] for sample in samples
+        if sample["offset_seconds"] == 330
+    )
+    workload_proof = alert_proof(
+        phase="epoch", run_id=workload_run_id,
+        alert_id="22222222-2222-4222-8222-222222222222",
+        trigger_offset=qualification.BURST_START_OFFSET_SECONDS,
+        observed_offset=330, before=workload_before, after=workload_after,
+    )
+    prewarm_alert_path, _ = qualification.workload_paths(prewarm_run_id)
+    workload_alert_path, workload_bulk_path = qualification.workload_paths(
+        workload_run_id
+    )
+    prewarm_output = (
+        f"IDENTITY: run_id={prewarm_run_id} "
+        f"alert_executable={prewarm_alert_path} "
+        f"bulk_path=/Users/Shared/MacCrabQualificationRuntime-{prewarm_run_id}\n"
+        f"PASS: fixed alert-only workload completed run_id={prewarm_run_id} "
+        "alert_triggers=1\n"
+    )
+    workload_output = (
+        f"IDENTITY: run_id={workload_run_id} "
+        f"alert_executable={workload_alert_path} bulk_path={workload_bulk_path}\n"
+        f"PASS: fixed workload completed run_id={workload_run_id} "
+        "iterations=20000 otlp_spans=1 alert_triggers=1 sequence_probes=1\n"
+    )
     evidence = {
-        "rule_lint": probe(["/bin/bash", str(ROOT / "scripts/rule-lint.sh")]),
-        "focused_runtime_tests": {
+        "preinstall_clean_ci": copy.deepcopy(manifest["preinstall_clean_ci"]),
+        "llm_prewarm": {
             **probe(
                 [
-                    "/usr/bin/xcrun", "swift", "test", "--package-path",
-                    str(ROOT), "--filter", qualification.FOCUSED_RUNTIME_TEST_FILTER,
+                    "/bin/bash", str(ROOT / "scripts/runtime-qualification-workload.sh"),
+                    "--alert-only", "--run-id", prewarm_run_id,
                 ],
-                focused_output,
+                prewarm_output,
             ),
-            "observed_test_count": 27,
+            "run_id": prewarm_run_id,
+            "alert_executable": prewarm_alert_path,
+            "started_at": iso(-120),
+            "completed_at": iso(-60),
+            "alert_investigation": prewarm_proof,
         },
-        "workload": probe(
-            ["/bin/bash", str(ROOT / "scripts/runtime-qualification-workload.sh")],
-            "PASS: fixed workload completed iterations=20000 otlp_spans=1 alert_triggers=1\n",
-        ),
+        "workload": {
+            **probe(
+                [
+                    "/bin/bash", str(ROOT / "scripts/runtime-qualification-workload.sh"),
+                    "--run-id", workload_run_id,
+                ],
+                workload_output,
+            ),
+            "run_id": workload_run_id,
+            "alert_executable": workload_alert_path,
+            "bulk_path": workload_bulk_path,
+            "started_at": iso(qualification.BURST_START_OFFSET_SECONDS),
+            "completed_at": iso(360),
+            "deadline_offset_seconds": qualification.BURST_END_OFFSET_SECONDS,
+            "drain_offset_seconds": qualification.BURST_DRAIN_OFFSET_SECONDS,
+            "sequence_path_isolation":
+                qualification.validate_workload_sequence_path_isolation(
+                    ROOT, workload_bulk_path
+                ),
+            "alert_investigation": workload_proof,
+        },
         "disk_diagnostic_log": probe(["/usr/bin/log", "show", "disk"]),
         "storage_convergence_log": probe(["/usr/bin/log", "show", "storage"]),
         "administrator_prompt_log": probe(["/usr/bin/log", "show", "auth"]),
@@ -462,6 +657,7 @@ class CandidateQualificationTests(unittest.TestCase):
             dmg=self.dmg,
             inspection_level="digest",
             notarization_submission_id="",
+            preinstall_clean_ci=preinstall_clean_ci_fixture(),
         )
         self.manifest_path = self.root / "candidate.json"
         qualification.write_json_exclusive(self.manifest_path, self.manifest)
@@ -488,6 +684,7 @@ class CandidateQualificationTests(unittest.TestCase):
             candidate_manifest_sha256=self.manifest_sha,
             candidate=self.validate_candidate(),
             candidate_verification=self.manifest["artifact_verification"],
+            candidate_preinstall_clean_ci=self.manifest["preinstall_clean_ci"],
             payload_inventory_sha256=self.manifest["artifact_verification"]["payload_inventory"]["sha256"],
             source_root=ROOT,
             allow_test_fixture=True,
@@ -530,6 +727,19 @@ class CandidateQualificationTests(unittest.TestCase):
             "shipped_tools": copy.deepcopy(measurements["shipped_tools"]),
             "evidence": copy.deepcopy(self.runtime["recorder_probe_evidence"]),
         }
+
+    def rebuild_runtime_from_observations(
+        self, observations: list[dict]
+    ) -> dict:
+        return qualification.build_runtime_report_from_observations(
+            candidate_manifest=self.manifest,
+            candidate_manifest_sha256=self.manifest_sha,
+            observations=observations,
+            host=copy.deepcopy(self.runtime["host"]),
+            workload=copy.deepcopy(self.runtime["workload"]),
+            probes=self.recorder_probes(),
+            capture_mode="deterministic-fixture",
+        )
 
     def containment_report(self) -> dict:
         def transcript(command: list[str], output: str) -> dict:
@@ -782,9 +992,8 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.canonical_json_bytes(report["recorder_observations"])
         )
 
-    @classmethod
-    def rederive_sample(cls, report: dict, index: int) -> None:
-        observation = report["recorder_observations"][index]
+    @staticmethod
+    def rebind_observation_heartbeat(observation: dict) -> None:
         heartbeat_raw_json = qualification.canonical_json_bytes(
             observation["heartbeat"]
         ).decode("utf-8")
@@ -800,6 +1009,11 @@ class CandidateQualificationTests(unittest.TestCase):
         observation["heartbeat_file"]["mtime_unix"] = observation["heartbeat"][
             "written_at_unix"
         ]
+
+    @classmethod
+    def rederive_sample(cls, report: dict, index: int) -> None:
+        observation = report["recorder_observations"][index]
+        cls.rebind_observation_heartbeat(observation)
         report["samples"][index] = qualification.sample_from_recorder_observation(
             observation,
             f"fixture.observations[{index}]",
@@ -808,6 +1022,357 @@ class CandidateQualificationTests(unittest.TestCase):
 
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()
+
+    def test_pre_prewarm_readiness_allows_only_uninitialized_llm(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=0, accepted=0
+        )
+        self.rederive_sample(report, 0)
+        qualification.validate_runtime_readiness(
+            observation, "fixture prewarm", phase="fixture prewarm",
+            require_drained=True, expected_pid=4321,
+            require_llm_ready=False,
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "not healthy"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture post-prewarm", phase="fixture post-prewarm",
+                require_drained=True, expected_pid=4321,
+                require_llm_ready=True,
+            )
+
+        observation["heartbeat"]["llm"]["last_success_unix"] = 1_786_363_200.0
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "never-used/no-success"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture stale unhealthy", phase="fixture stale unhealthy",
+                require_drained=True, expected_pid=4321,
+                require_llm_ready=False,
+            )
+
+        del observation["heartbeat"]["llm"]["last_success_unix"]
+        observation["heartbeat"]["llm"]["consecutive_failures"] = 1
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "failure streak"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture failed backend", phase="fixture failed backend",
+                require_drained=True, expected_pid=4321,
+                require_llm_ready=False,
+            )
+
+    def test_initial_loss_fails_before_source_probes_or_epoch_sleep(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        pipeline = observation["heartbeat"]["event_pipeline"]
+        pipeline["offered_by_lane"]["file"] += 1
+        pipeline["merged_dropped_by_lane"]["file"] = 1
+        self.rederive_sample(report, 0)
+        source_probe = mock.Mock()
+        capture_path = self.root / "failed-readiness.capture.json"
+        with mock.patch.object(qualification.platform, "system", return_value="Darwin"), \
+                mock.patch.object(qualification.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    qualification, "read_live_heartbeat",
+                    return_value=(observation["heartbeat"], {}),
+                ), \
+                mock.patch.object(
+                    qualification, "installed_runtime_host",
+                    return_value=copy.deepcopy(self.runtime["host"]),
+                ), \
+                mock.patch.object(
+                    qualification, "capture_runtime_observation",
+                    return_value=observation,
+                ), \
+                mock.patch.object(
+                    qualification, "source_runtime_probe_evidence", source_probe
+                ), \
+                mock.patch.object(qualification.time, "sleep") as sleep_probe:
+            with self.assertRaisesRegex(
+                qualification.QualificationError, "cumulative loss"
+            ):
+                qualification.live_runtime_recording(
+                    root=ROOT, candidate_manifest=self.manifest,
+                    candidate_manifest_sha256=self.manifest_sha,
+                    dmg=self.dmg,
+                    heartbeat_path=pathlib.Path(
+                        "/Library/Application Support/MacCrab/heartbeat_rich.json"
+                    ),
+                    data_dirs=[self.root], sqlite_overrides={},
+                    capture_path=capture_path,
+                )
+        source_probe.assert_not_called()
+        sleep_probe.assert_not_called()
+        failure = qualification.read_json_file(capture_path, "failed readiness")
+        self.assertEqual(failure["result"], "failed")
+        self.assertEqual(failure["phase"], "initial-readiness")
+
+    def test_alert_reserve_boundary_and_blocked_state_fail_readiness(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        budget = observation["heartbeat"]["alert_evidence_budget"]
+        self.assertLess(
+            budget["alerts_family_admission_boundary_bytes"],
+            budget["alerts_family_admission_cap_bytes"],
+        )
+        budget["alerts_family_footprint_bytes"] = 193 * 1024 * 1024
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "admission boundary"
+        ):
+            self.rederive_sample(report, 0)
+
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        budget = observation["heartbeat"]["alert_evidence_budget"]
+        budget["alerts_family_blocked"] = True
+        budget["alerts_family_reason"] = "fixture admission latch"
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "admission-blocked"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture alerts", phase="fixture alerts",
+                require_drained=True,
+            )
+
+    def test_sticky_event_budget_and_sqlite_cap_fail_readiness(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        observation["heartbeat"]["events_retention_budget"]["sticky"] = True
+        observation["event_budget_fault"] = True
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "retention budget"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture event budget", phase="fixture event budget",
+                require_drained=True,
+            )
+
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        family = observation["sqlite_families"]["campaigns.db"]
+        family["footprint_bytes"] = family["configured_cap_bytes"] + 1
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "footprint exceeds configured cap"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture SQLite", phase="fixture SQLite",
+                require_drained=True,
+            )
+
+    def test_shipping_sqlite_cap_cannot_be_overridden_by_recorder(self) -> None:
+        self.assertEqual(
+            qualification.DEFAULT_SQLITE_CAP_BYTES["events.db"],
+            340 * qualification.MIB,
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "cannot override a shipping store"
+        ):
+            qualification.parse_sqlite_cap_overrides(["alerts.db=999999999"])
+
+    def test_causal_proof_rejects_unrelated_only_telemetry(self) -> None:
+        proof = copy.deepcopy(
+            self.runtime["recorder_probe_evidence"]["workload"][
+                "alert_investigation"
+            ]
+        )
+        proof["telemetry_after"] = copy.deepcopy(proof["telemetry_before"])
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "one or more completed"
+        ):
+            qualification.validate_alert_investigation_proof(
+                proof, "fixture causal proof"
+            )
+
+    def test_causal_proof_allows_concurrent_accepted_investigations(self) -> None:
+        proof = copy.deepcopy(
+            self.runtime["recorder_probe_evidence"]["workload"][
+                "alert_investigation"
+            ]
+        )
+        proof["telemetry_after"] = qualification.llm_runtime_quality_sample(
+            {"llm": llm_heartbeat_payload(healthy=True, started=12, accepted=12)}
+        )
+        delta = qualification.validate_alert_investigation_proof(
+            proof, "fixture concurrent causal proof"
+        )
+        self.assertEqual(delta["started_delta"], 2)
+        self.assertEqual(delta["accepted_delta"], 2)
+
+    def test_causal_proof_rejects_negative_investigation_confidence(self) -> None:
+        proof = copy.deepcopy(
+            self.runtime["recorder_probe_evidence"]["workload"][
+                "alert_investigation"
+            ]
+        )
+        investigation = json.loads(proof["investigation_json"])
+        investigation["confidence"] = -0.01
+        proof["investigation_json"] = json.dumps(
+            investigation, sort_keys=True, separators=(",", ":")
+        )
+        proof["investigation_sha256"] = qualification.sha256_bytes(
+            proof["investigation_json"].encode("utf-8")
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "must be >= 0"
+        ):
+            qualification.validate_alert_investigation_proof(
+                proof, "fixture negative confidence"
+            )
+
+    def test_live_runtime_source_evidence_launches_no_build_or_lint(self) -> None:
+        with mock.patch.object(qualification, "subprocess_probe") as process_probe:
+            evidence = qualification.source_runtime_probe_evidence(self.manifest)
+        process_probe.assert_not_called()
+        self.assertEqual(
+            evidence["preinstall_clean_ci"], self.manifest["preinstall_clean_ci"]
+        )
+        live_source = inspect.getsource(qualification.live_runtime_recording)
+        source_evidence_source = inspect.getsource(
+            qualification.source_runtime_probe_evidence
+        )
+        self.assertNotIn("xcrun", live_source + source_evidence_source)
+        self.assertNotIn('"swift"', live_source + source_evidence_source)
+
+    def test_runtime_cannot_substitute_clean_ci_receipt(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        receipt = report["recorder_probe_evidence"]["preinstall_clean_ci"]
+        receipt["output_sha256"] = "f" * 64
+        report["measurements"]["correlation_continuity"][
+            "source_bound_clean_ci_sha256"
+        ] = "f" * 64
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "does not match the candidate manifest"
+        ):
+            self.validate_runtime(report)
+
+    def test_readonly_nofollow_alert_query_binds_exact_path(self) -> None:
+        database = (self.root / "alerts.db").resolve()
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE alerts (id TEXT, timestamp REAL, rule_id TEXT, "
+            "severity TEXT, process_path TEXT, llm_investigation_json TEXT)"
+        )
+        exact_path, _ = qualification.workload_paths("d" * 32)
+        connection.executemany(
+            "INSERT INTO alerts VALUES (?1,?2,?3,?4,?5,?6)",
+            [
+                (
+                    "33333333-3333-4333-8333-333333333333", 101.0,
+                    "fixture.rule", "high", exact_path, None,
+                ),
+                (
+                    "44444444-4444-4444-8444-444444444444", 102.0,
+                    "fixture.other", "high", exact_path + "-other", None,
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
+        rows, evidence = qualification.readonly_alert_rows_for_process(
+            database_path=database, process_path=exact_path,
+            triggered_after_unix=100.0,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["process_path"], exact_path)
+        self.assertTrue(evidence["read_only"])
+        self.assertTrue(evidence["no_follow"])
+
+        redirected = self.root / "redirected-alerts.db"
+        os.symlink(database, redirected)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "no-follow alert query failed"
+        ):
+            qualification.readonly_alert_rows_for_process(
+                database_path=redirected, process_path=exact_path,
+                triggered_after_unix=100.0,
+            )
+
+    def test_tracegraph_physical_suppression_is_conserving_not_loss(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        for index, observation in enumerate(report["recorder_observations"]):
+            if observation["offset_seconds"] >= 330:
+                graph = observation["heartbeat"]["tracegraph_storage_admission"]
+                graph["physical_write_suppressed_events_total"] += 1
+                graph["physical_write_suppressed_rows_total"] += 1
+                graph["entity_observations_total"] += 1
+                self.rederive_sample(report, index)
+        report["measurements"]["trace_graph"][
+            "physical_write_suppressed_events_epoch_delta"
+        ] += 1
+        report["measurements"]["trace_graph"][
+            "physical_write_suppressed_rows_epoch_delta"
+        ] += 1
+        report["measurements"]["workload_ingress"][
+            "trace_graph_physical_write_suppressed_events_delta"
+        ] += 1
+        report["measurements"]["workload_ingress"][
+            "trace_graph_physical_write_suppressed_rows_delta"
+        ] += 1
+        self.validate_runtime(report)
+
+    def test_zero_tracegraph_physical_suppression_cannot_pass_workload(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        for index, observation in enumerate(report["recorder_observations"]):
+            graph = observation["heartbeat"]["tracegraph_storage_admission"]
+            suppressed = graph["physical_write_suppressed_rows_total"]
+            graph["write_attempts_total"] += suppressed
+            graph["write_batches_committed_total"] += suppressed
+            graph["write_rows_attempted_total"] += suppressed
+            graph["write_rows_committed_total"] += suppressed
+            graph["physical_write_suppressed_events_total"] = 0
+            graph["physical_write_suppressed_rows_total"] = 0
+            self.rederive_sample(report, index)
+        report["measurements"]["trace_graph"][
+            "physical_write_suppressed_events_epoch_delta"
+        ] = 0
+        report["measurements"]["trace_graph"][
+            "physical_write_suppressed_rows_epoch_delta"
+        ] = 0
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "suppression was not exercised"
+        ):
+            self.validate_runtime(report)
+
+    def test_workload_path_isolated_and_invalid_identity_is_rejected(self) -> None:
+        run_id = "e" * 32
+        _, bulk_path = qualification.workload_paths(run_id)
+        isolation = qualification.validate_workload_sequence_path_isolation(
+            ROOT, bulk_path
+        )
+        self.assertGreater(isolation["stable_predicate_count"], 0)
+        completed = subprocess.run(
+            [
+                "/bin/bash", str(ROOT / "scripts/runtime-qualification-workload.sh"),
+                "--alert-only", "--run-id", "unsafe",
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 64)
+
+    def test_workload_process_group_cleanup_reaps_children(self) -> None:
+        process = subprocess.Popen(
+            ["/bin/sh", "-c", "/bin/sleep 60 & wait"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        try:
+            time.sleep(0.05)
+            qualification.terminate_process_group(process)
+            self.assertIsNotNone(process.poll())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(process.pid, 0)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
 
     def test_report_builder_normalizes_and_verifies_raw_observations(self) -> None:
         report = qualification.build_runtime_report_from_observations(
@@ -843,6 +1408,7 @@ class CandidateQualificationTests(unittest.TestCase):
                 candidate_manifest_sha256=self.manifest_sha,
                 candidate=self.validate_candidate(),
                 candidate_verification=self.manifest["artifact_verification"],
+                candidate_preinstall_clean_ci=self.manifest["preinstall_clean_ci"],
                 payload_inventory_sha256=self.manifest["artifact_verification"]["payload_inventory"]["sha256"],
                 source_root=ROOT,
             )
@@ -871,7 +1437,7 @@ class CandidateQualificationTests(unittest.TestCase):
             "alert_investigations_accepted_epoch_delta": 0,
             "alert_investigations_final_rejected_epoch_delta": 0,
         }
-        with self.assertRaisesRegex(qualification.QualificationError, "unhealthy"):
+        with self.assertRaisesRegex(qualification.QualificationError, "not healthy"):
             self.validate_runtime(report)
 
     def test_configured_llm_final_rejection_is_rejected(self) -> None:
@@ -930,7 +1496,7 @@ class CandidateQualificationTests(unittest.TestCase):
             "alert_investigations_final_rejected_epoch_delta": 0,
         }
         with self.assertRaisesRegex(
-            qualification.QualificationError, "requires configured"
+            qualification.QualificationError, "not configured"
         ):
             self.validate_runtime(report)
 
@@ -951,7 +1517,7 @@ class CandidateQualificationTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(
-            qualification.QualificationError, "still in flight"
+            qualification.QualificationError, "not drained"
         ):
             self.validate_runtime(report)
 
@@ -1033,6 +1599,87 @@ class CandidateQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(qualification.QualificationError, "epoch start"):
             self.validate_runtime(report)
 
+    def test_legal_capture_jitter_cannot_false_pass_workload_rate(self) -> None:
+        samples = copy.deepcopy(self.runtime["samples"])
+        for sample in samples:
+            offset = sample["offset_seconds"]
+            if offset == qualification.BURST_START_OFFSET_SECONDS + 30:
+                sample["captured_at"] = iso(offset + 5)
+            if offset >= qualification.BURST_START_OFFSET_SECONDS + 30:
+                for lane in ("priority", "file"):
+                    boundary = sample["conservation"][f"{lane}-ingress"]
+                    boundary["offered"] = offset + 19_100
+                    boundary["completed"] = offset + 19_100
+
+        start = samples[qualification.BURST_START_OFFSET_SECONDS // 30]
+        end = samples[(qualification.BURST_START_OFFSET_SECONDS + 30) // 30]
+        offered_delta = sum(
+            end["conservation"][f"{lane}-ingress"]["offered"]
+            - start["conservation"][f"{lane}-ingress"]["offered"]
+            for lane in ("priority", "file")
+        )
+        scheduled_rate = offered_delta / 30
+        captured_rate = offered_delta / 35
+        self.assertGreaterEqual(
+            scheduled_rate,
+            qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND,
+        )
+        self.assertLess(
+            captured_rate,
+            qualification.MIN_BURST_COMBINED_OFFERED_PER_SECOND,
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "predeclared reference load"
+        ):
+            qualification.derive_workload_ingress(samples)
+
+    def test_builder_rejects_short_actual_capture_coverage(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[0]["captured_at"] = iso(5)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "captured sample duration is below 900 seconds",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_builder_rejects_actual_capture_gap_above_limit(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[10]["captured_at"] = iso(295)
+        observations[11]["captured_at"] = iso(335)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "captured sample gap exceeds"
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_builder_rejects_reused_heartbeat_tick(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[5]["heartbeat"]["written_at_unix"] = observations[4][
+            "heartbeat"
+        ]["written_at_unix"]
+        self.rebind_observation_heartbeat(observations[5])
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "heartbeat timestamps must be strictly increasing",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_builder_rejects_skipped_heartbeat_tick(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for index, observation in enumerate(observations):
+            offset = observation["offset_seconds"]
+            heartbeat_offset = offset - 25 if index <= 4 else offset + 5
+            observation["heartbeat"]["written_at_unix"] = (
+                qualification.parse_time(
+                    iso(heartbeat_offset), "fixture heartbeat"
+                ).timestamp()
+            )
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "heartbeat and capture intervals diverge",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
     def test_raw_sample_missing_conservation_boundary_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)
         report["recorder_observations"][7]["heartbeat"]["event_pipeline"].pop(
@@ -1064,7 +1711,7 @@ class CandidateQualificationTests(unittest.TestCase):
         report = copy.deepcopy(self.runtime)
         report["recorder_observations"][9]["heartbeat"]["es_kernel_dropped_total"] = 1
         self.rederive_sample(report, 9)
-        with self.assertRaisesRegex(qualification.QualificationError, "must be zero"):
+        with self.assertRaisesRegex(qualification.QualificationError, "cumulative loss"):
             self.validate_runtime(report)
 
     def test_workload_digest_mismatch_is_rejected(self) -> None:
@@ -1111,21 +1758,21 @@ class CandidateQualificationTests(unittest.TestCase):
                 }
                 self.rederive_sample(report, index)
         with self.assertRaisesRegex(
-            qualification.QualificationError, "produced no measured priority"
+            qualification.QualificationError, "predeclared reference load"
         ):
             self.validate_runtime(report)
 
     def test_priority_persistence_backlog_cannot_masquerade_as_delivery(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
-            if 330 <= observation["offset_seconds"] <= 390:
+            if 330 <= observation["offset_seconds"] <= 450:
                 heartbeat = observation["heartbeat"]
                 heartbeat["events_storage_write_offered_by_lane"]["priority"] = 40_300
                 heartbeat["events_storage_write_persisted_by_lane"]["priority"] = 301
                 heartbeat["events_storage_write_buffer_depth_by_lane"]["priority"] = 39_999
                 self.rederive_sample(report, index)
         with self.assertRaisesRegex(
-            qualification.QualificationError, "priority persistence did not drain"
+            qualification.QualificationError, "not drained"
         ):
             self.validate_runtime(report)
 
@@ -1144,7 +1791,7 @@ class CandidateQualificationTests(unittest.TestCase):
         aggregate["offered"] += 1
         aggregate["explicitly_shed"] = 1
         with self.assertRaisesRegex(
-            qualification.QualificationError, "priority event persistence shed"
+            qualification.QualificationError, "explicitly_shed"
         ):
             self.validate_runtime(report)
 
@@ -1155,14 +1802,14 @@ class CandidateQualificationTests(unittest.TestCase):
         ]["store_available"] = False
         self.rederive_sample(report, 12)
         with self.assertRaisesRegex(
-            qualification.QualificationError, "not a full writable store"
+            qualification.QualificationError, "not an enabled full writer"
         ):
             self.validate_runtime(report)
 
     def test_zero_trace_store_workload_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
-            if 330 <= observation["offset_seconds"] <= 390:
+            if 330 <= observation["offset_seconds"] <= 450:
                 ledger = observation["heartbeat"]["traces_storage_admission"][
                     "ingest_conservation"
                 ]
@@ -1209,7 +1856,11 @@ class CandidateQualificationTests(unittest.TestCase):
         workload = (ROOT / "scripts/runtime-qualification-workload.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn('ALERT_EXECUTABLE="$WORKLOAD_DIR/', workload)
+        self.assertIn('ALERT_EXECUTABLE="$ALERT_DIR/', workload)
+        self.assertIn(
+            'BULK_DIR="/Users/Shared/MacCrabQualificationRuntime-$RUN_ID"',
+            workload,
+        )
         self.assertIn('"$ALERT_EXECUTABLE"', workload)
         self.assertNotIn("/bin/echo '/dev/tcp/", workload)
 
@@ -1238,6 +1889,59 @@ class CandidateQualificationTests(unittest.TestCase):
         report["measurements"]["disk_writes"]["average_bytes_per_second"] = report["measurements"]["disk_writes"]["engine_bytes"] / 900
         with self.assertRaises(qualification.QualificationError):
             self.validate_runtime(report)
+
+    def test_legal_capture_jitter_cannot_false_pass_max_write_rate(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[1]["captured_at"] = iso(35)
+        observations[2]["captured_at"] = iso(55)
+        scheduled_passing_bytes = 7 * qualification.MIB * 15
+        first_total = observations[1]["process"][
+            "engine_disk_write_bytes_total"
+        ]
+        original_second_total = observations[2]["process"][
+            "engine_disk_write_bytes_total"
+        ]
+        adjustment = (
+            first_total + scheduled_passing_bytes - original_second_total
+        )
+        for observation in observations[2:]:
+            observation["process"]["engine_disk_write_bytes_total"] += adjustment
+
+        report = self.rebuild_runtime_from_observations(observations)
+        first_window = report["measurements"]["disk_writes"]["windows"][1]
+        self.assertLess(
+            first_window["bytes"]
+            / (
+                first_window["end_offset_seconds"]
+                - first_window["start_offset_seconds"]
+            ),
+            qualification.MAX_WINDOW_WRITE_BYTES_PER_SECOND,
+        )
+        self.assertGreater(
+            first_window["bytes"] / first_window["captured_elapsed_seconds"],
+            qualification.MAX_WINDOW_WRITE_BYTES_PER_SECOND,
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "disk write window 1"
+        ):
+            self.validate_runtime(report)
+
+    def test_full_epoch_cpu_rate_uses_legal_capture_jitter(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[-1]["captured_at"] = iso(905)
+        observations[-1]["process"]["engine_cpu_seconds_total"] = 451.0
+
+        report = self.rebuild_runtime_from_observations(observations)
+        cpu = report["measurements"]["cpu"]
+        self.assertGreater(
+            cpu["engine_cpu_seconds"] / qualification.MIN_EPOCH_SECONDS,
+            qualification.MAX_ENGINE_AVERAGE_CORES,
+        )
+        self.assertLess(
+            cpu["engine_average_cores"],
+            qualification.MAX_ENGINE_AVERAGE_CORES,
+        )
+        self.validate_runtime(report)
 
     def test_disk_windows_cannot_redistribute_raw_sample_bytes(self) -> None:
         report = copy.deepcopy(self.runtime)
@@ -1268,7 +1972,7 @@ class CandidateQualificationTests(unittest.TestCase):
             "pending_later_step_evictions_epoch_delta"
         ] = 1
         report["measurements"]["correlation_continuity"]["journal_shed"] = 1
-        with self.assertRaisesRegex(qualification.QualificationError, "must remain zero"):
+        with self.assertRaisesRegex(qualification.QualificationError, "evictions"):
             self.validate_runtime(report)
 
     def test_sequence_journal_shed_must_reconcile_with_eviction_counter(self) -> None:
@@ -1287,7 +1991,7 @@ class CandidateQualificationTests(unittest.TestCase):
         aggregate["offered"] += 1
         aggregate["explicitly_shed"] += 1
         report["measurements"]["correlation_continuity"]["journal_shed"] = 1
-        with self.assertRaisesRegex(qualification.QualificationError, "does not reconcile"):
+        with self.assertRaisesRegex(qualification.QualificationError, "explicitly_shed"):
             self.validate_runtime(report)
 
     def test_memory_growth_above_64_mib_is_rejected(self) -> None:

@@ -3131,26 +3131,46 @@ public actor AlertStore {
         storageAdmission = admission
         if recovered || (writerSetupPending && !admission.growthBlocked) {
             try reopenAfterStorageRecovery()
+
+            // Opening the replacement connection and preparing its writer can
+            // grow or reshape the SQLite family. Prove the same full ordinary
+            // transaction again against that post-open footprint before the
+            // caller is allowed to BEGIN.
+            try revalidateStorageWriteAfterReopen(
+                estimatedTransactionBytes: estimatedTransactionBytes
+            )
+
+            // Space can disappear between the successful probe and the fresh
+            // open. A shed-only reopen has no insert statement. Retry the open
+            // once, then revalidate the same full estimate a second time; a
+            // cached pre-reopen snapshot is never accepted as proof.
             if !isReadOnly, insertStmt == nil {
-                guard var secondary = storageAdmission else { return }
-                do {
-                    try secondary.admitWrite(
-                        estimatedTransactionBytes: estimatedTransactionBytes,
-                        on: db
-                    )
-                } catch {
-                    storageAdmission = secondary
-                    throw error
-                }
-                storageAdmission = secondary
-                if !secondary.growthBlocked {
-                    try reopenAfterStorageRecovery()
-                }
-                if insertStmt == nil, let failure = storageAdmission?.latchedFailure {
+                try reopenAfterStorageRecovery()
+                try revalidateStorageWriteAfterReopen(
+                    estimatedTransactionBytes: estimatedTransactionBytes
+                )
+                if insertStmt == nil,
+                   let failure = storageAdmission?.latchedFailure {
                     throw failure
                 }
             }
         }
+    }
+
+    private func revalidateStorageWriteAfterReopen(
+        estimatedTransactionBytes: Int64
+    ) throws {
+        guard var admission = storageAdmission else { return }
+        do {
+            try admission.admitWrite(
+                estimatedTransactionBytes: estimatedTransactionBytes,
+                on: db
+            )
+        } catch {
+            storageAdmission = admission
+            throw error
+        }
+        storageAdmission = admission
     }
 
     private func admitStorageMaintenanceWrite(
@@ -3297,6 +3317,49 @@ public actor AlertStore {
         guard var admission = storageAdmission else { return nil }
         defer { storageAdmission = admission }
         return admission.snapshot()
+    }
+
+    /// Proves that an ordinary alert write can enter its bounded transaction
+    /// without actually mutating the database. Maintenance admission is
+    /// intentionally unable to clear a sticky pressure latch, so startup
+    /// recovery must run this normal gate after reclaim and reacquire the
+    /// cached writer statement before any producer is allowed to ingest.
+    @discardableResult
+    public func reprobeStorageAdmissionForWrite() throws
+        -> SQLitePersistentStoreAdmissionSnapshot {
+        guard !isReadOnly, db != nil else {
+            throw AlertStoreError.stepFailed(
+                "alert storage admission reprobe requires a writable database"
+            )
+        }
+        guard storageAdmission != nil else {
+            throw AlertStoreError.stepFailed(
+                "alert storage admission reprobe requires an active policy"
+            )
+        }
+
+        // Use the complete configured transaction reserve. This is the same
+        // upper bound all ordinary writes must fit, and exercises the normal
+        // recovery/reopen path without issuing BEGIN or INSERT.
+        try admitStorageWrite(
+            estimatedTransactionBytes: storageTransactionReserveBytes
+        )
+
+        guard insertStmt != nil else {
+            throw AlertStoreError.stepFailed(
+                "alert storage admission recovered without a writer statement"
+            )
+        }
+        guard let snapshot = storageAdmissionSnapshot(),
+              snapshot.footprintBytes != nil,
+              snapshot.freeSpaceBytes != nil,
+              snapshot.latchedFailure == nil,
+              !snapshot.pageLimitPending else {
+            throw AlertStoreError.stepFailed(
+                "alert storage admission remained blocked after normal reprobe"
+            )
+        }
+        return snapshot
     }
 
     public func updateStorageAdmission(

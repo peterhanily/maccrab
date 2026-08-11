@@ -202,6 +202,60 @@ but `eslogger` also requires root.
 
 ---
 
+## Installed-host qualification aborts before 900 seconds
+
+**Symptom:** `candidate-qualification.py record-runtime` exits during
+readiness/prewarm instead of starting or completing the 900-second timer.
+
+This is intentional fail-fast behavior. A cumulative loss, shed, eviction,
+failed-write, blocked/over-budget store, free-space-floor breach, non-writable
+TraceStore, or failed/open LLM state cannot become a zero-loss epoch by waiting.
+The adjacent `.runtime.json.capture.json` records the failing phase, reason,
+readiness observations, and any samples already captured. Preserve it together
+with `maccrabctl status`, the rich heartbeat, and relevant unified logs before
+changing the running process.
+
+Use this order:
+
+1. Confirm that the exact candidate DMG is installed, Agent Traces and its
+   loopback receiver are enabled, and an alert-investigation LLM is configured.
+   A never-used LLM may initially be unhealthy only because it has no successful
+   request; the recorder's exact alert prewarm is designed to establish health.
+   A failure streak, open circuit, rejected response, or backend failure is not
+   an uninitialized state.
+2. If the capture shows only historical process-lifetime counters from an older
+   candidate or earlier out-of-contract load, retain the diagnostics and
+   gracefully deactivate/reactivate Protection (or reinstall/activate the exact
+   candidate). Confirm that the engine PID changed, allow startup recovery to
+   finish, and retry once.
+3. Keep the shipping configuration and retained databases. Do not increase a
+   cap, disable the LLM/TraceStore, delete SQLite files, run `make clear-data`,
+   or pass `--sqlite-cap` for a shipping database. `make clear-data` is unsafe
+   while the installed system extension still owns open database handles. A
+   wiped store is a separate clean-install test, not evidence that a dirty
+   retained-state candidate can recover.
+4. Treat any storage/backend fault that remains after restart, or any loss that
+   recurs during prewarm or the bounded workload, as a candidate defect. Fix it
+   and build a new candidate; do not reinterpret or reset the failed evidence.
+
+The expected recorder order is storage/loss/conservation readiness, bounded
+queue drain, exact alert-only LLM prewarm, full healthy/drained readiness, then
+t0. At minute 5 the bulk pressure stays under a unique
+`/Users/Shared/MacCrabQualificationRuntime-<run-id>` tree while a separate small
+shell probe tests sequence continuity. The workload must exit by 390 seconds
+and all queues drain by 450 seconds. The causal alert proof queries
+`alerts.db` read-only/no-follow for the exact unique executable and trigger
+boundary; unrelated alert investigations cannot satisfy it.
+
+TraceGraph physical-write suppression is not reported as loss when it is
+proof-safe. Its event/row counters must be monotonic, and row conservation is
+`entity observations + edge observations = attempted + coalesced + physically
+suppressed + pending`. The minute-5 deltas must both be positive and equal under
+the current one-row-per-event suppression contract. Zero or mismatched deltas
+are blocking because they would leave the write-volume repair unexercised.
+
+---
+
 ## Collecting diagnostics for a bug report
 
 If you're opening an issue, include the output of:

@@ -49,7 +49,7 @@ public enum AlertsTableRelocator {
         let eventsDB = directory + "/events.db"
         let alertsDB = directory + "/alerts.db"
         let eventPolicy = suppliedEventPolicy ?? SQLitePersistentStorePolicy(
-            maxFootprintBytes: 320 * SQLitePersistentStorePolicy.bytesPerMiB,
+            maxFootprintBytes: 340 * SQLitePersistentStorePolicy.bytesPerMiB,
             freeSpaceFloorBytes: SQLitePersistentStorePolicy.freeSpaceFloorBytes,
             transactionReserveBytes: SQLitePersistentStorePolicy
                 .eventTransactionReserveBytes,
@@ -66,29 +66,6 @@ public enum AlertsTableRelocator {
 
         // Fresh install (no events.db yet) — nothing to migrate.
         guard FileManager.default.fileExists(atPath: eventsDB) else {
-            return false
-        }
-
-        var eventAdmission: SQLitePersistentStoreAdmission
-        var alertAdmission: SQLitePersistentStoreAdmission
-        do {
-            eventAdmission = try SQLitePersistentStoreAdmission(
-                databasePath: eventsDB,
-                policy: eventPolicy,
-                maintenance: true
-            )
-            alertAdmission = try SQLitePersistentStoreAdmission(
-                databasePath: alertsDB,
-                policy: alertPolicy
-            )
-            // The source-side operation removes old co-resident data and is
-            // therefore the bounded recovery route even when events.db is
-            // already over its growth cap.
-            try eventAdmission.admitMaintenanceWrite(
-                estimatedTransactionBytes: 0
-            )
-        } catch {
-            logger?.error("AlertsTableRelocator: pre-open storage admission failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
 
@@ -134,6 +111,34 @@ public enum AlertsTableRelocator {
         // 1. If events.db has no `alerts` table, the migration ran on a
         //    previous start (or this is a fresh v1.8 install). No-op.
         guard tableExists(handle: src, schema: "main", name: "alerts") else {
+            return false
+        }
+
+        // Admission belongs to the migration, not to the no-op startup probe.
+        // In particular, an already-migrated alerts.db can legitimately open
+        // shed-only while it awaits size-cap maintenance. Checking that target
+        // before proving the legacy source table exists stranded every such
+        // host in a useless "pre-open storage admission failed" path on every
+        // boot. Once migration is actually required, keep both existing gates:
+        // source deletion is maintenance, while target copy growth must fit the
+        // ordinary alert-family policy before either database is mutated.
+        var eventAdmission: SQLitePersistentStoreAdmission
+        var alertAdmission: SQLitePersistentStoreAdmission
+        do {
+            eventAdmission = try SQLitePersistentStoreAdmission(
+                databasePath: eventsDB,
+                policy: eventPolicy,
+                maintenance: true
+            )
+            alertAdmission = try SQLitePersistentStoreAdmission(
+                databasePath: alertsDB,
+                policy: alertPolicy
+            )
+            try eventAdmission.admitMaintenanceWrite(
+                estimatedTransactionBytes: 0
+            )
+        } catch {
+            logger?.error("AlertsTableRelocator: required migration storage admission failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
 

@@ -111,6 +111,10 @@ publish.
   attestation, exact DMG SHA-256/size, Developer ID and Team ID, accepted notary
   submission UUID, staple/Gatekeeper result, complete mounted payload inventory,
   uninterrupted 900-second runtime report, and on-device containment report.
+  The candidate manifest also binds the phase-1 `ci-local.sh --clean`
+  transcript. The installed-host recorder reuses that receipt and never runs a
+  Swift build/test or the process-heavy rule linter inside the daemon process
+  epoch being qualified.
   `--skip-prerelease-check`, `--respin`, and `--publish-rc` do not bypass it.
 
 Release candidates are isolated by default. A standalone development-only RC
@@ -143,18 +147,56 @@ Then run `VERSION=1.2.3-rc.1 make test-corpus` and repeat the release command.
 The second invocation validates and publishes the preserved DMG without
 rebuilding it. The recorder fails quickly, before the 900-second epoch, if the
 installed engine omits any required producer conservation ledger, if TraceStore
-is not an enabled full writer, or if the LLM is disabled. During the minute-5
-window it runs the source-bound fixed workload, sends one bounded OTLP span,
-and generates one harmless high-severity command-line alert (no network
-connection). Both lanes must reach the predeclared 1,274 offered-events/s rate,
-fully drain through persistence with zero shed, the span must advance and drain
-the TraceStore ledger, and at least one alert investigation must finish and be
-accepted. The trigger runs from a per-run unique copy of `/bin/echo`, so the
-one-hour rule/executable alert-deduplication window cannot suppress a retry. At
-minute 7.5 it sends SIGHUP and later requires the installed engine's
+is not an enabled full writer, if any cumulative loss/storage failure makes a
+zero-loss epoch impossible, or if the LLM is disabled or failed. A configured,
+never-used schema-2 LLM may initially be `healthy=false`: before t0 the recorder
+runs an exact alert-only prewarm and requires one uniquely identified committed
+alert row, valid investigation JSON on that same stable alert ID, accepted
+telemetry, full LLM health, and a complete drain. Only then does it establish
+the epoch baseline, so prewarm work is excluded from epoch deltas.
+
+During the minute-5 window it runs the source-bound fixed workload, sends one
+bounded OTLP span, and generates one harmless high-severity command-line alert
+(no network connection). The bulk file/process pressure is confined to a
+rule-neutral, per-run `/Users/Shared/MacCrabQualificationRuntime-<run-id>` tree;
+a separate small non-networking shell invocation proves sequence journal
+continuity. The pressure path is source-checked against stable sequence
+filename predicates before use. Both ingress lanes must reach the predeclared
+1,274 offered-events/s rate and fully drain through persistence with zero shed,
+and the span must advance and drain the TraceStore ledger. The workload must
+exit by offset 390 and all queues must drain by offset 450; failure terminates
+and reaps the dedicated process group. TraceGraph's additive physical-write
+suppression counters are proof-safe rather than loss only when monotonic and
+when observations equal attempted plus coalesced plus physically suppressed
+plus pending rows at every sample. Both minute-5 suppression deltas must be
+positive and, under the current one-row-per-event contract, equal.
+
+The alert trigger runs from a per-run unique copy of `/bin/echo`, so the
+one-hour rule/executable alert-deduplication window cannot suppress a retry. A
+read-only/no-follow, parameter-bound query of the installed `alerts.db` must
+find exactly one new row for that path after the trigger boundary. That same
+row must acquire schema-valid investigation JSON while the LLM ledger advances
+by one or more starts with `accepted == started`, zero rejected/unattributed
+work, and no unfinished operation. Unrelated legitimate investigations may run
+concurrently, but cannot substitute for this causal proof. At minute 7.5 the
+recorder sends SIGHUP and later requires the installed engine's
 log transcript to show a successful non-empty rule reload with no rejection or
 error; this is not represented as a live restart test. The recorder rechecks
 the exact source commit/tree and clean checkout after the 900-second capture.
+
+If preflight reports historical cumulative loss from an earlier candidate or
+an out-of-contract workload, first preserve the failed `.capture.json`, current
+heartbeat/status, and relevant logs. Then gracefully deactivate/reactivate
+Protection (or install and activate the exact candidate), verify a new engine
+PID, wait for retained-store recovery, and retry once with shipping defaults.
+That is a clean process epoch, not a clean database. Do not delete stores, run
+`make clear-data`, raise caps, disable required features, or apply
+`--sqlite-cap` to a shipping family; those actions mask the condition under
+test, and deleting files while the installed system extension owns them is
+unsafe. A fresh-data run is a separate clean-install lane and cannot turn a
+failed retained-state qualification into a publication pass. A storage/backend
+fault or any loss that persists or recurs after the documented restart is a
+candidate defect: repair it and build a new candidate.
 
 `make test-corpus` is also a recorder, not a success-label writer: it verifies
 the full candidate and clean exact checkout before and after execution, runs

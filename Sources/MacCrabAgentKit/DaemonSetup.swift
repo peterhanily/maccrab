@@ -317,7 +317,7 @@ enum DaemonSetup {
     /// "rules_loaded", "collectors_started", "ready". Once `ready`, the
     /// regular livenessTimer takes over (`liveness: true` writes).
     /// Atomic via .tmp + rename, same as the livenessTimer pattern.
-    fileprivate static func writeBootPhase(
+    static func writeBootPhase(
         supportDir: String,
         phase: String,
         startedAt: Date
@@ -359,7 +359,7 @@ enum DaemonSetup {
         }
     }
 
-    static func initialize() async -> DaemonState {
+    static func initialize() async throws -> DaemonState {
         let startupBegin = DispatchTime.now()
         let startedAt = Date()
         let startupWorkLifecycle = DaemonTimerLifecycle(
@@ -710,6 +710,79 @@ enum DaemonSetup {
             )
         }
 
+        // Recover and prove both primary persistence families before the first
+        // collector/monitor is constructed or started. Several later
+        // constructors activate their own bounded streams (Unified Log and
+        // native ES), while fallback collectors, MCP/DNS/FSEvents, Fleet, and
+        // OTLP explicitly start inside this function. A Bootstrap-only barrier
+        // is therefore too late: those local buffers can fill and count drops
+        // during a long inherited-family recovery.
+        let eventRetentionBudgetHealth = EventRetentionBudgetHealth()
+        let eventStartupBoundary = EventsSizeCapBoundary(
+            maxSizeMiB: bootStorage.effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB:
+                    transition.appliedReserveMiB
+            )
+        )
+        let eventStartupRecovery = await recoverEventStoreBeforeProducers(
+            eventStore: eventStore,
+            dbPath: supportDir + "/events.db",
+            boundary: eventStartupBoundary,
+            processFloorMinutes: bootStorage.processEventsFloorMinutes,
+            retentionBudgetHealth: eventRetentionBudgetHealth
+        )
+        guard eventStartupRecovery.writableBeforeProducers else {
+            let detail = [
+                "passes=\(eventStartupRecovery.passes)",
+                "last_footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1)",
+                "probe_error=\(eventStartupRecovery.lastProbeError ?? "none")",
+                "reason=\(eventStartupRecovery.reason)",
+                "15-minute forensic floor preserved",
+            ].joined(separator: ", ")
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: detail
+            )
+        }
+        eventRetentionBudgetHealth.recordSweep(
+            observedFootprintBytes:
+                eventStartupRecovery.lastFootprintBytes,
+            boundary: eventStartupBoundary
+        )
+        logger.notice("EventStore ordinary priority+file admission proved before collector construction after \(eventStartupRecovery.passes) bounded pass(es); footprint=\(eventStartupRecovery.lastFootprintBytes ?? -1), file_boundary=\(eventStartupBoundary.fileLaneAdmissionBoundaryBytes), target=\(eventStartupBoundary.targetBytes)")
+
+        let alertStartupBoundary = AlertsSizeCapBoundary(
+            nominalCapBytes: alertStoragePolicy.maxFootprintBytes,
+            transactionReserveBytes:
+                alertStoragePolicy.transactionReserveBytes
+        )
+        let alertStartupRecovery = await recoverAlertStoreBeforeProducers(
+            alertStore: alertStore,
+            dbPath: supportDir + "/alerts.db",
+            alertCapBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: bootStorage.alertsMaxSizeMB
+            ),
+            evidenceCapBytes: legacyEvidenceCapBytes,
+            boundary: alertStartupBoundary
+        )
+        guard alertStartupRecovery.writableBeforeProducers else {
+            let detail = [
+                "passes=\(alertStartupRecovery.passes)",
+                "last_footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1)",
+                "probe_error=\(alertStartupRecovery.lastProbeError ?? "none")",
+                "reason=\(alertStartupRecovery.reason)",
+            ].joined(separator: ", ")
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "AlertStore",
+                reason: detail
+            )
+        }
+        logger.notice("AlertStore ordinary admission proved before collector construction after \(alertStartupRecovery.passes) bounded pass(es); footprint=\(alertStartupRecovery.lastFootprintBytes ?? -1), boundary=\(alertStartupBoundary.hardAdmissionBoundaryBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
+
         Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
         Self.logBootStep(label: "stores_ready", startedAt: startedAt)
 
@@ -756,6 +829,7 @@ enum DaemonSetup {
         // daemon_config.json as well, mirroring the ultrasonic gate below.
         let honeyfileManager: HoneyfileManager?
         let honeyPromptManager: HoneyPromptManager?
+        let deceptionStartupWork: (@Sendable () async -> Void)?
         if config.deceptionEnabled || ProcessInfo.processInfo.environment["MACCRAB_DECEPTION"] == "1" {
             let mgr = HoneyfileManager()
             honeyfileManager = mgr
@@ -775,8 +849,9 @@ enum DaemonSetup {
                 // performed as the owning console user. The root engine only
                 // loads the bounded manifest and activates event enrichment.
                 logger.info("Deception detection enabled; decoy deployment is delegated to user-run maccrabctl")
+                deceptionStartupWork = nil
             } else {
-                startupWorkLifecycle.submit(label: "deception-deploy") {
+                deceptionStartupWork = {
                     do {
                         let deployed = try await mgr.deploy()
                         logger.info("Deployed \(deployed.count) honeyfiles (deception tier enabled)")
@@ -794,6 +869,7 @@ enum DaemonSetup {
         } else {
             honeyfileManager = nil
             honeyPromptManager = nil
+            deceptionStartupWork = nil
         }
 
         // v1.12.0 — FileContent enricher reads first 64KB of close-write
@@ -865,7 +941,7 @@ enum DaemonSetup {
         // Local hydration + bundled IOCs still load; only the outbound fetch is
         // gated. Capture a Sendable Bool for the detached task.
         let threatIntelNetworkEnabled = config.threatIntelEnabled
-        startupWorkLifecycle.submit(label: "threat-intel-hydration") {
+        let threatIntelStartupWork: @Sendable () async -> Void = {
             let started = await threatIntel.start(
                 networkRefresh: threatIntelNetworkEnabled
             )
@@ -945,6 +1021,7 @@ enum DaemonSetup {
         // Hoisted out of the do-block so the daily retention timer in
         // DaemonTimers can call prune / size-cap on the same store.
         let causalStoreOuter: SQLiteCausalGraphStore?
+        var causalStoreStartupRecovery: CausalGraphStartupRecoveryResult
         // v1.12.0 RC25 audit fix (Int-H3): retry with backup on corrupt
         // tracegraph.db. EventStore + AlertStore have recovery paths
         // (lines 73-122); SQLiteCausalGraphStore previously had none.
@@ -1033,6 +1110,54 @@ enum DaemonSetup {
         let causalStoreOpen = await openCausalStore()
         let causalStoreStartupAdmission = causalStoreOpen.startupAdmission
         if let causalStore = causalStoreOpen.store {
+            // rc.11 can restart with no in-memory latch while the inherited
+            // family is already at the proactive boundary. Recover here—not in
+            // DaemonBootstrap—because every collector-local producer below
+            // this point owns a bounded buffer that can fill/drop before the
+            // merged EventLoop drivers attach. Success requires strict durable
+            // headroom; the one-hour evidence floor is never crossed.
+            let days = max(1, min(bootStorage.tracegraphRetentionDays, 3_650))
+            let recovery = await causalStore.recoverStorageBeforeProducers(
+                configuredRetentionHours: days * 24,
+                cutoffRungs: DaemonTimers.tracegraphRecoveryCutoffHours,
+                now: Date(),
+                maximumPasses:
+                    DaemonTimers.tracegraphStartupRecoveryMaximumPasses
+            )
+            guard recovery.writableBeforeProducers else {
+                let admission = recovery.finalAdmission
+                let disposition: String
+                switch recovery.disposition {
+                case .writable:
+                    disposition = "inconsistent writable result"
+                case .nonconverged(let reason):
+                    disposition = reason.rawValue
+                }
+                let detail = [
+                    "result=\(disposition)",
+                    "passes=\(recovery.passes)",
+                    "cutoffs=\(recovery.attemptedCutoffHours)",
+                    "block=\(admission?.reason?.rawValue ?? "unavailable")",
+                    "footprint=\(admission?.footprintBytes ?? -1)",
+                    "target=\(admission?.resumeBelowBytes ?? -1)",
+                    "detail=\(recovery.failureDetail ?? "none")",
+                    "one-hour evidence floor preserved",
+                ].joined(separator: ", ")
+                try DaemonBootstrap.failPreIngestionStorage(
+                    supportDir: supportDir,
+                    startedAt: startedAt,
+                    component: "TraceGraph",
+                    reason: detail
+                )
+            }
+            causalStoreStartupRecovery = recovery
+            if recovery.normalWriteAdmissionRestored {
+                logger.notice("TraceGraph startup recovery restored normal writable admission before collector construction after \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
+            } else if recovery.passes > 0 {
+                logger.notice("TraceGraph startup recovery established durable headroom before collector construction in \(recovery.passes) bounded pass(es); cutoffs=\(recovery.attemptedCutoffHours)")
+            } else {
+                logger.info("TraceGraph startup admission confirmed below its proactive boundary before collector construction")
+            }
             let materializer = TraceMaterializer(
                 store: causalStore,
                 daemonVersion: MacCrabVersion.current,
@@ -1059,10 +1184,102 @@ enum DaemonSetup {
             causalStoreOuter = causalStore
             logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
         } else {
-            logger.warning("TraceGraph store unavailable; trace materialization disabled this run")
-            causalGraphBridge = nil
-            causalStoreOuter = nil
+            let unavailable = CausalGraphStartupRecoveryResult.unavailable(
+                reason: causalStoreStartupAdmission?.reason,
+                detail: "TraceGraph store actor could not open before collector construction"
+            )
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "TraceGraph",
+                reason: unavailable.failureDetail ?? "store unavailable"
+            )
         }
+
+        // FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY
+        // Recovery above can be lengthy, and shared free space or SQLite
+        // sidecars can change again while the remaining actors are built. Take
+        // a no-maintenance, exact admission snapshot at the actual activation
+        // edge. EventStore/AlertStore install their fresh ordinary-write probes
+        // at this same marker; keep the graph reprobe last so no background
+        // submission or collector can race the retained proof.
+        let eventActivationProof: EventStoreActivationProof
+        do {
+            eventActivationProof = try await
+                reprobeEventStoreAtActivationBoundary(
+                    eventStore: eventStore,
+                    dbPath: supportDir + "/events.db",
+                    boundary: eventStartupBoundary,
+                    retentionBudgetHealth: eventRetentionBudgetHealth
+                )
+        } catch {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "activation-boundary priority+file reprobe failed: \(error.localizedDescription)"
+            )
+        }
+        logger.notice("EventStore activation-boundary proof refreshed immediately before producers; footprint=\(eventActivationProof.footprintBytes), target=\(eventStartupBoundary.targetBytes)")
+
+        let alertActivationProof: AlertStoreActivationProof
+        do {
+            alertActivationProof = try await
+                reprobeAlertStoreAtActivationBoundary(
+                    alertStore: alertStore,
+                    dbPath: supportDir + "/alerts.db",
+                    boundary: alertStartupBoundary
+                )
+        } catch {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "AlertStore",
+                reason: "activation-boundary ordinary reprobe failed: \(error.localizedDescription)"
+            )
+        }
+        logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
+
+        guard let activationCausalStore = causalStoreOuter else {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "TraceGraph",
+                reason: "store handle disappeared before producer activation"
+            )
+        }
+        let activationAdmission = await activationCausalStore.storageAdmissionStatus()
+        let activationProof = causalStoreStartupRecovery.refreshed(
+            finalAdmission: activationAdmission
+        )
+        guard activationProof.writableBeforeProducers else {
+            let detail = [
+                "activation-boundary reprobe failed",
+                "block=\(activationAdmission.reason?.rawValue ?? "none")",
+                "footprint=\(activationAdmission.footprintBytes ?? -1)",
+                "target=\(activationAdmission.resumeBelowBytes ?? -1)",
+                "deficit=\(activationAdmission.recoveryDeficitBytes ?? -1)",
+                "one-hour evidence floor preserved",
+            ].joined(separator: ", ")
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "TraceGraph",
+                reason: detail
+            )
+        }
+        causalStoreStartupRecovery = activationProof
+
+        if let deceptionStartupWork {
+            startupWorkLifecycle.submit(
+                label: "deception-deploy",
+                operation: deceptionStartupWork
+            )
+        }
+        startupWorkLifecycle.submit(
+            label: "threat-intel-hydration",
+            operation: threatIntelStartupWork
+        )
 
         // F-04: the daemon defaults to the "stable" rule profile — only the
         // curated stable tier ships enabled; "all" (daemon_config.json
@@ -2236,6 +2453,7 @@ enum DaemonSetup {
             effectiveRulesDir: effectiveRulesDir,
             eventStore: eventStore,
             legacyEvidenceTransitionBudget: legacyEvidenceTransitionBudget,
+            eventRetentionBudgetHealth: eventRetentionBudgetHealth,
             alertStore: alertStore,
             evidenceBudgetBytes: SQLitePersistentStorePolicy.capBytes(
                 maxSizeMiB: bootStorage.evidenceMaxSizeMB
@@ -2327,6 +2545,7 @@ enum DaemonSetup {
             causalGraphBridge: causalGraphBridge,
             causalStore: causalStoreOuter,
             causalStoreStartupAdmission: causalStoreStartupAdmission,
+            causalStoreStartupRecovery: causalStoreStartupRecovery,
             graphEvaluator: graphEvaluator,
             bayesianIntent: bayesianIntent,
             intentClassifier: intentClassifier,

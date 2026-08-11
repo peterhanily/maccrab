@@ -54,6 +54,51 @@ struct CausalGraphStorageAdmissionTests {
         }
     }
 
+    private final class ReaderLease: @unchecked Sendable {
+        private let lock = NSLock()
+        private var db: OpaquePointer?
+
+        init(path: String) throws {
+            var handle: OpaquePointer?
+            guard sqlite3_open_v2(
+                path, &handle,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK, let handle else {
+                throw CausalGraphStoreError.databaseOpenFailed(
+                    "test reader lease")
+            }
+            db = handle
+            guard sqlite3_exec(handle, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+                release()
+                throw CausalGraphStoreError.stepFailed("test reader BEGIN")
+            }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle, "SELECT COUNT(*) FROM traces", -1, &stmt, nil
+            ) == SQLITE_OK else {
+                release()
+                throw CausalGraphStoreError.prepareFailed("test reader SELECT")
+            }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else {
+                release()
+                throw CausalGraphStoreError.stepFailed("test reader snapshot")
+            }
+        }
+
+        func release() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let db else { return }
+            _ = sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            sqlite3_close(db)
+            self.db = nil
+        }
+
+        deinit { release() }
+    }
+
     private static func tempPath(_ label: String) -> String {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("tracegraph-admission-\(label)-\(UUID().uuidString).db")
@@ -338,8 +383,8 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
-    @Test("Recovery hysteresis is independent of the transaction reserve")
-    func recoveryHysteresisIsIndependentOfTransactionReserve() async throws {
+    @Test("Recovery target reserves durable transaction headroom")
+    func recoveryTargetReservesDurableTransactionHeadroom() async throws {
         let path = Self.tempPath("recovery-hysteresis")
         defer { Self.cleanup(path) }
         let footprint = ProbeBox(0)
@@ -356,24 +401,42 @@ struct CausalGraphStorageAdmissionTests {
         let threshold = try #require(initial.admissionThresholdBytes)
         let resume = try #require(initial.resumeBelowBytes)
         #expect(threshold == 196_608_000)
-        #expect(resume == threshold - (8 * Self.mib))
+        #expect(resume == threshold - 65_536_000,
+                "recovery must leave one complete transaction reserve of headroom")
+        #expect(initial.proactiveRecoveryThresholdBytes
+            == threshold - (65_536_000 / 4))
 
         footprint.set(threshold + 1)
         let latched = await store.storageAdmissionStatus()
         #expect(latched.blocked)
         #expect(latched.footprintLatchTripsTotal == 1)
+        #expect(latched.recoveryDeficitBytes == 65_536_002)
+
+        let measured = try await store.recoverStorageBudget(
+            retentionCutoff: .distantPast,
+            orphanCutoff: .distantPast,
+            maxTraceDeletes: 0,
+            maxTraceChildRows: 0,
+            maxGraphDeletesPerTable: 0,
+            maxVacuumPages: 0
+        )
+        #expect(measured.recoveryTargetBytes == resume)
+        #expect(measured.recoveryDeficitBytes == 65_536_002)
+        #expect(measured.eligibleBacklogRemaining == false)
 
         footprint.set(resume)
         let boundary = await store.storageAdmissionStatus()
         #expect(boundary.blocked,
                 "the latch clears only after crossing below the resume watermark")
         #expect(boundary.footprintLatchClearsTotal == 0)
+        #expect(boundary.recoveryDeficitBytes == 1)
 
         footprint.set(resume - 1)
         let cleared = await store.storageAdmissionStatus()
         #expect(!cleared.blocked)
         #expect(cleared.footprintLatchTripsTotal == 1)
         #expect(cleared.footprintLatchClearsTotal == 1)
+        #expect(cleared.recoveryDeficitBytes == 0)
 
         let reloaded = await store.updateStorageAdmission(
             maxFootprintBytes: cap,
@@ -656,6 +719,75 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
+    @Test("Startup grants a bounded reader grace period and then fails pinned readers closed")
+    func startupPinnedReaderGraceIsBoundedAndNonDestructive() async throws {
+        func makePinned(
+            _ label: String
+        ) async throws -> (SQLiteCausalGraphStore, String, ProbeBox, ReaderLease) {
+            let path = Self.tempPath(label)
+            let footprint = ProbeBox(Self.mib)
+            let store = try await SQLiteCausalGraphStore(
+                databasePath: path,
+                maxFootprintBytes: 64 * Self.mib,
+                transactionReserveBytes: 8 * Self.mib,
+                footprintProbe: { _ in footprint.get() }
+            )
+            try await store.saveTrace(
+                Self.trace("old-\(label)", updatedAt: .distantPast),
+                members: []
+            )
+            #expect(await store.walCheckpointTruncate())
+            let reader = try ReaderLease(path: path)
+            try await store.upsertEntity(Self.entity("after-reader-\(label)"))
+            footprint.set(60 * Self.mib)
+            _ = await store.updateStorageAdmission(
+                maxFootprintBytes: 64 * Self.mib,
+                freeSpaceFloorBytes: nil,
+                transactionReserveBytes: 8 * Self.mib
+            )
+            return (store, path, footprint, reader)
+        }
+
+        let (transient, transientPath, transientFootprint, transientReader) =
+            try await makePinned("startup-transient-pin")
+        defer { Self.cleanup(transientPath) }
+        let release = Task {
+            try? await Task.sleep(for: .milliseconds(60))
+            transientFootprint.set(Self.mib)
+            transientReader.release()
+        }
+        let recovered = await transient.recoverStorageBeforeProducers(
+            configuredRetentionHours: 7 * 24,
+            cutoffRungs: [72, 24, 6, 1],
+            maximumPasses: 12
+        )
+        _ = await release.result
+        #expect(recovered.writableBeforeProducers)
+        #expect(recovered.passes >= 1,
+                "the pin may clear inside SQLite's bounded busy wait or on a retry")
+        #expect(recovered.lastRecovery?.tracesDeleted == 0,
+                "a clearing reader pin must not force evidence deletion")
+        await transient.close()
+
+        let (permanent, permanentPath, _, permanentReader) =
+            try await makePinned("startup-permanent-pin")
+        defer {
+            permanentReader.release()
+            Self.cleanup(permanentPath)
+        }
+        let blocked = await permanent.recoverStorageBeforeProducers(
+            configuredRetentionHours: 7 * 24,
+            cutoffRungs: [72, 24, 6, 1],
+            maximumPasses: 12
+        )
+        #expect(blocked.disposition == .nonconverged(.pinnedReader))
+        #expect(blocked.passes == 8)
+        #expect(blocked.lastRecovery?.tracesDeleted == 0)
+        #expect(try await permanent.loadTrace(
+            id: "old-startup-permanent-pin") != nil)
+        await permanent.close()
+    }
+
     @Test("Pressured legacy mode-0 store preserves evidence for offline conversion")
     func pressuredLegacyStoreDoesNotDeleteWithoutPhysicalReclaim() async throws {
         let path = Self.tempPath("legacy-mode-zero-pressure")
@@ -912,14 +1044,16 @@ struct CausalGraphStorageAdmissionTests {
             edges: [Self.edge("graph-edge", from: "graph-a", to: "graph-b")]
         )
         let traceID = "large-expired-trace"
+        let oldEvidence = Date(timeIntervalSince1970: 1_600_000_000)
         try await store.saveTrace(
-            Self.trace(traceID, updatedAt: .distantPast), members: [])
+            Self.trace(traceID, updatedAt: oldEvidence), members: [])
         let payload = "{\"payload\":\"\(String(repeating: "x", count: 24 * 1_024))\"}"
         for index in 0..<96 {
             try await store.recordRuleHit(TraceRuleHit(
                 id: "hit-\(index)", traceId: traceID,
                 ruleId: "rule", ruleTitle: "rule", ruleVersion: "1",
-                severity: "high", matchedAt: Date(), explanationJson: payload
+                severity: "high", matchedAt: oldEvidence,
+                explanationJson: payload
             ))
         }
         #expect(await store.walCheckpointTruncate())
@@ -934,7 +1068,7 @@ struct CausalGraphStorageAdmissionTests {
 
         let recovery = try await store.recoverStorageBudget(
             retentionCutoff: Date(),
-            orphanCutoff: .distantPast,
+            orphanCutoff: Date(),
             maxTraceDeletes: 1,
             maxTraceChildRows: 16_384,
             maxGraphDeletesPerTable: 10,
@@ -947,6 +1081,47 @@ struct CausalGraphStorageAdmissionTests {
                 "graph pressure fallback ran despite trace reclaim satisfying the cap")
         #expect(try await store.entity(id: "graph-a") != nil)
         #expect(!(await store.storageAdmissionStatus().blocked))
+        await store.close()
+    }
+
+    @Test("Pressured mode-FULL recovery remeasures edges before entity fallback")
+    func edgeReclaimDoesNotCrossIntoEntityEvidenceInTheSamePass() async throws {
+        let path = Self.tempPath("edge-before-entity")
+        defer { Self.cleanup(path) }
+        let bootstrap = try await SQLiteCausalGraphStore(databasePath: path)
+        try await bootstrap.upsertBatch(
+            entities: [
+                Self.entity("edge-source"), Self.entity("edge-target"),
+                Self.entity("independent-orphan"),
+            ],
+            edges: [Self.edge(
+                "eligible-edge", from: "edge-source", to: "edge-target")]
+        )
+        #expect(await bootstrap.walCheckpointTruncate())
+        await bootstrap.close()
+        try Self.rawExec(path: path, sql: """
+            PRAGMA journal_mode = DELETE;
+            PRAGMA auto_vacuum = FULL;
+            """)
+        #expect(try Self.pragmaInt64(path: path, name: "auto_vacuum") == 1)
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path,
+            maxFootprintBytes: 64 * Self.mib,
+            transactionReserveBytes: 8 * Self.mib,
+            footprintProbe: { _ in 60 * Self.mib }
+        )
+        let recovery = try await store.recoverStorageBudget(
+            retentionCutoff: Date(),
+            orphanCutoff: Date(),
+            maxTraceDeletes: 0,
+            maxGraphDeletesPerTable: 8,
+            maxVacuumPages: 0
+        )
+        #expect(recovery.autoVacuumMode == 1)
+        #expect(recovery.edgesDeleted == 1)
+        #expect(recovery.entitiesDeleted == 0,
+                "entity fallback must wait for a fresh post-edge pass")
+        #expect(try await store.entity(id: "independent-orphan") != nil)
         await store.close()
     }
 
@@ -1008,6 +1183,87 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
+    @Test("Recovery skips oversized substrate/trace rows and preserves inverted recent timestamps")
+    func recoverySelectionBoundsDoNotStarveSafeCandidates() async throws {
+        let path = Self.tempPath("bounded-selection-starvation")
+        defer { Self.cleanup(path) }
+        let store = try await SQLiteCausalGraphStore(databasePath: path)
+        let old = Date(timeIntervalSince1970: 1_600_000_000)
+        let recent = Date(timeIntervalSince1970: 2_000_000_000)
+        let cutoff = Date(timeIntervalSince1970: 1_900_000_000)
+
+        let stuckTrace = "a-oversized-child"
+        try await store.saveTrace(
+            Self.trace(stuckTrace, updatedAt: old), members: [])
+        try await store.recordRuleHit(TraceRuleHit(
+            id: "oversized-child", traceId: stuckTrace,
+            ruleId: "rule", ruleTitle: "rule", ruleVersion: "1",
+            severity: "high", matchedAt: old,
+            explanationJson: String(repeating: "x", count: 2 * 1_048_576)
+        ))
+        for index in 0..<12 {
+            let id = "normal-child-\(index)"
+            try await store.saveTrace(Self.trace(id, updatedAt: old), members: [])
+            try await store.recordRuleHit(TraceRuleHit(
+                id: "normal-hit-\(index)", traceId: id,
+                ruleId: "rule", ruleTitle: "rule", ruleVersion: "1",
+                severity: "high", matchedAt: old,
+                explanationJson: "{}"
+            ))
+        }
+
+        let oversizedEntity = Self.entity(
+            "oversized-entity", payloadBytes: 2 * 1_048_576, at: old)
+        let normalEntity = Self.entity("normal-entity", at: old)
+        try await store.upsertBatch(
+            entities: [oversizedEntity, normalEntity],
+            edges: []
+        )
+
+        let recovery = try await store.recoverStorageBudget(
+            retentionCutoff: cutoff,
+            orphanCutoff: cutoff,
+            maxTraceDeletes: 64,
+            maxTraceChildRows: 1_024,
+            maxGraphDeletesPerTable: 64,
+            maxVacuumPages: 0
+        )
+        #expect(recovery.tracesDeleted == 12,
+                "one oversized trace child must not starve later trace batches")
+        #expect(try await store.loadTrace(id: stuckTrace) != nil)
+        #expect(try await store.loadTrace(id: "normal-child-11") == nil)
+        #expect(try await store.entity(id: "normal-entity") == nil)
+        #expect(try await store.entity(id: "oversized-entity") != nil,
+                "a substrate row above the reserve must remain for offline repair")
+        #expect(recovery.orphanBacklogRemaining == true,
+                "the preserved oversized row remains visible for offline repair")
+        await store.close()
+
+        let timestampPath = Self.tempPath("inverted-substrate-time")
+        defer { Self.cleanup(timestampPath) }
+        let timestampStore = try await SQLiteCausalGraphStore(
+            databasePath: timestampPath)
+        let invertedEntity = TraceEntity(
+            id: "inverted-entity", entityType: "process",
+            stableKey: "inverted-entity", displayName: "inverted-entity",
+            firstSeen: recent, lastSeen: old, attributesJson: "{}",
+            source: "test"
+        )
+        try await timestampStore.upsertEntity(invertedEntity)
+        let timestampRecovery = try await timestampStore.recoverStorageBudget(
+            retentionCutoff: cutoff,
+            orphanCutoff: cutoff,
+            maxTraceDeletes: 0,
+            maxGraphDeletesPerTable: 8,
+            maxVacuumPages: 0
+        )
+        #expect(try await timestampStore.entity(id: "inverted-entity") != nil,
+                "recent first_seen evidence must dominate an inherited old last_seen")
+        #expect(timestampRecovery.orphanBacklogRemaining == false,
+                "exact backlog must use the same effective timestamp predicate")
+        await timestampStore.close()
+    }
+
     @Test("FULL and IOERR quota metadata latch configured growth admission")
     func sqliteStorageMetadataLatchesAdmission() async throws {
         let path = Self.tempPath("sqlite-failure-latch")
@@ -1050,7 +1306,7 @@ struct CausalGraphStorageAdmissionTests {
         await store.close()
     }
 
-    @Test("Deferred v2/v3 migrations complete and verify before growth resumes")
+    @Test("Deferred v1 store completes every index/trigger before growth resumes")
     func deferredMigrationsGateRecoveryResume() async throws {
         let path = Self.tempPath("deferred-migrations")
         defer { Self.cleanup(path) }
@@ -1059,7 +1315,9 @@ struct CausalGraphStorageAdmissionTests {
         try Self.rawExec(path: path, sql: """
             DROP TRIGGER trg_hash_chain_global_sequence_unique;
             DROP INDEX idx_hash_chain_global_seq;
-            PRAGMA user_version = 2;
+            DROP INDEX idx_entities_lastseen;
+            DROP INDEX idx_edges_lastseen;
+            PRAGMA user_version = 1;
             """)
         #expect(!(try Self.schemaObjectExists(
             path: path, type: "index", name: "idx_hash_chain_global_seq")))
@@ -1087,6 +1345,10 @@ struct CausalGraphStorageAdmissionTests {
         )
         #expect(try Self.schemaObjectExists(
             path: path, type: "index", name: "idx_hash_chain_global_seq"))
+        #expect(try Self.schemaObjectExists(
+            path: path, type: "index", name: "idx_entities_lastseen"))
+        #expect(try Self.schemaObjectExists(
+            path: path, type: "index", name: "idx_edges_lastseen"))
         #expect(try Self.schemaObjectExists(
             path: path, type: "trigger",
             name: "trg_hash_chain_global_sequence_unique"))
@@ -1281,8 +1543,21 @@ struct CausalGraphStorageAdmissionTests {
         #expect(store.contains("traceCascadeNarrowChildBatchSize"))
         #expect(store.contains("maxTraceChildRows: Int = 16_384"))
         #expect(store.contains("min(requestedBatchSize, Self.substrateDeleteBatchSize)"))
-        #expect(store.components(separatedBy: "batchedCascadeDeleteTraces(").count - 1 >= 6,
+        #expect(store.components(separatedBy: "batchedCascadeDeleteTraces(").count - 1 >= 5,
                 "all public/recovery trace delete paths must share the bounded helper")
+        let recoveryStart = try #require(store.range(
+            of: "public func recoverStorageBudget("))
+        let recoveryEnd = try #require(store.range(
+            of: "private struct RecoveryTraceSelection",
+            range: recoveryStart.upperBound..<store.endIndex))
+        let recoverySource = String(store[
+            recoveryStart.lowerBound..<recoveryEnd.lowerBound])
+        #expect(!recoverySource.contains("olderThan: nil"),
+                "storage pressure must never evict traces newer than an explicit cutoff")
+        #expect(!recoverySource.contains("cutoff: nil"),
+                "storage pressure must never evict graph substrate newer than an explicit cutoff")
+        #expect(recoverySource.contains("eligibleBacklogRemaining"),
+                "the daemon must tighten from post-pass backlog state, not row progress")
         #expect(store.contains("guard !recovering else { return result() }"),
                 "recovery must remain single-flight across actor yields")
         let openCall = try #require(store.range(of: "try openDatabase(forceReadOnly: forceReadOnly)"))

@@ -103,6 +103,26 @@ public enum TraceGraphFileObservationPolicy {
         }
     }
 
+    /// A whole file-shaped event may bypass physical graph persistence only
+    /// when its file is irrelevant and it carries no independent graph anchor
+    /// or lineage observation. The caller computes `processCanAnchor` with the
+    /// active TracePolicy (for example an unsigned Downloads execution).
+    public nonisolated static func canSuppressPhysicalWrite(
+        path: String,
+        kind: FileKind,
+        untrustedContent: Bool,
+        hasAgent: Bool,
+        hasNetwork: Bool,
+        hasProcessLineage: Bool,
+        processCanAnchor: Bool
+    ) -> Bool {
+        !isRelevant(path: path, kind: kind, untrustedContent: untrustedContent)
+            && !hasAgent
+            && !hasNetwork
+            && !hasProcessLineage
+            && !processCanAnchor
+    }
+
     /// Necessary (not sufficient) raw-callback conditions for EventLoop to
     /// generate `untrusted_content=true`: an agent-content OPEN. AI attribution
     /// is evaluated against the atomically-published dynamic process snapshot;

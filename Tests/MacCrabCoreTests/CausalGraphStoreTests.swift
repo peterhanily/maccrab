@@ -410,7 +410,40 @@ struct SQLiteCausalGraphStoreTests {
         try await store.saveTrace(trace, members: members)
 
         let loaded = try await store.loadTrace(id: "t1")
-        #expect(loaded?.trace == trace)
+        let expectedUpdatedAt = members.map(\.addedAt)
+            .reduce(trace.updatedAt, max)
+        let loadedTrace = try #require(loaded?.trace)
+        #expect(
+            abs(loadedTrace.updatedAt.timeIntervalSince(expectedUpdatedAt))
+                < 0.001
+        )
+        let expectedTrace = Trace(
+            id: trace.id,
+            title: trace.title,
+            anchorEventId: trace.anchorEventId,
+            rootEntityId: trace.rootEntityId,
+            severity: trace.severity,
+            confidence: trace.confidence,
+            status: trace.status,
+            createdAt: trace.createdAt,
+            // SQLite stores timestamps as Double seconds. Preserve an exact
+            // full-value comparison for every other field while checking the
+            // intended activity advance above with sub-millisecond tolerance.
+            updatedAt: loadedTrace.updatedAt,
+            summaryJson: trace.summaryJson,
+            attackJson: trace.attackJson,
+            evidenceBundleStatus: trace.evidenceBundleStatus,
+            daemonVersion: trace.daemonVersion,
+            rulesetVersion: trace.rulesetVersion,
+            policyId: trace.policyId,
+            policyVersion: trace.policyVersion,
+            policySha256: trace.policySha256,
+            policySnapshotJson: trace.policySnapshotJson,
+            traceSigningKeyMode: trace.traceSigningKeyMode,
+            replayScope: trace.replayScope,
+            attributionOverridePolicy: trace.attributionOverridePolicy
+        )
+        #expect(loadedTrace == expectedTrace)
         #expect(loaded?.members.count == 3)
         await store.close()
     }

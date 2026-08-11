@@ -479,6 +479,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let fullRefreshesTotal: UInt64?
         public let alertsFamilyFootprintBytes: Int64?
         public let alertsFamilyAdmissionCapBytes: Int64?
+        public let alertsFamilyTransactionReserveBytes: Int64?
+        public let alertsFamilyAdmissionBoundaryBytes: Int64?
+        public let alertsFamilyRecoveryTargetBytes: Int64?
         public let alertsFamilyBlocked: Bool?
         public let alertsFamilyReason: String?
 
@@ -517,6 +520,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case fullRefreshesTotal = "full_refreshes_total"
             case alertsFamilyFootprintBytes = "alerts_family_footprint_bytes"
             case alertsFamilyAdmissionCapBytes = "alerts_family_admission_cap_bytes"
+            case alertsFamilyTransactionReserveBytes = "alerts_family_transaction_reserve_bytes"
+            case alertsFamilyAdmissionBoundaryBytes = "alerts_family_admission_boundary_bytes"
+            case alertsFamilyRecoveryTargetBytes = "alerts_family_recovery_target_bytes"
             case alertsFamilyBlocked = "alerts_family_blocked"
             case alertsFamilyReason = "alerts_family_reason"
         }
@@ -1381,6 +1387,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let recoveryNoPhysicalProgressTotal: Int64?
         public let lastRecoveryFootprintBeforeBytes: Int64?
         public let lastRecoveryFootprintAfterBytes: Int64?
+        public let proactiveRecoveryThresholdBytes: Int64?
+        public let recoveryDeficitBytes: Int64?
+        public let lastRecoveryEligibleBacklogRemaining: Bool?
         public let ingestConservation: TraceStoreIngestConservation?
 
         // Exact rolling-graph persistence accounting. These counters are
@@ -1395,6 +1404,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let edgeObservationsTotal: Int64?
         public let relevanceSuppressedFileEventsTotal: Int64?
         public let relevanceSuppressedRowsTotal: Int64?
+        public let physicalWriteSuppressedEventsTotal: Int64?
+        public let physicalWriteSuppressedRowsTotal: Int64?
         public let writeAttemptsTotal: Int64?
         public let writeBatchesCommittedTotal: Int64?
         public let writeBatchesFailedTotal: Int64?
@@ -1435,6 +1446,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case recoveryNoPhysicalProgressTotal = "recovery_no_physical_progress_total"
             case lastRecoveryFootprintBeforeBytes = "last_recovery_footprint_before_bytes"
             case lastRecoveryFootprintAfterBytes = "last_recovery_footprint_after_bytes"
+            case proactiveRecoveryThresholdBytes = "proactive_recovery_threshold_bytes"
+            case recoveryDeficitBytes = "recovery_deficit_bytes"
+            case lastRecoveryEligibleBacklogRemaining = "last_recovery_eligible_backlog_remaining"
             case ingestConservation = "ingest_conservation"
             case ingestEventsTotal = "ingest_events_total"
             case ingestEventsCommittedTotal = "ingest_events_committed_total"
@@ -1445,6 +1459,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case edgeObservationsTotal = "edge_observations_total"
             case relevanceSuppressedFileEventsTotal = "relevance_suppressed_file_events_total"
             case relevanceSuppressedRowsTotal = "relevance_suppressed_rows_total"
+            case physicalWriteSuppressedEventsTotal = "physical_write_suppressed_events_total"
+            case physicalWriteSuppressedRowsTotal = "physical_write_suppressed_rows_total"
             case writeAttemptsTotal = "write_attempts_total"
             case writeBatchesCommittedTotal = "write_batches_committed_total"
             case writeBatchesFailedTotal = "write_batches_failed_total"
@@ -1495,7 +1511,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             )
         }
 
-        /// entity + edge observations = attempted + coalesced + pending rows.
+        /// entity + edge observations = attempted + coalesced + deliberately
+        /// suppressed physical rows + pending rows.
         public var observationConservationMaintained: Bool? {
             guard let entities = entityObservationsTotal,
                   let edges = edgeObservationsTotal,
@@ -1506,7 +1523,13 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             guard let observations = Self.safeSum([entities, edges]) else { return false }
             return Self.conserves(
                 total: observations,
-                terms: [attempted, coalesced, Int64(pendingEntities), Int64(pendingEdges)]
+                terms: [
+                    attempted,
+                    coalesced,
+                    physicalWriteSuppressedRowsTotal ?? 0,
+                    Int64(pendingEntities),
+                    Int64(pendingEdges),
+                ]
             )
         }
 
@@ -1554,6 +1577,8 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
                 edgeObservationsTotal,
                 relevanceSuppressedFileEventsTotal,
                 relevanceSuppressedRowsTotal,
+                physicalWriteSuppressedEventsTotal,
+                physicalWriteSuppressedRowsTotal,
                 writeAttemptsTotal,
                 writeBatchesCommittedTotal,
                 writeBatchesFailedTotal,

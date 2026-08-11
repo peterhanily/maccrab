@@ -83,8 +83,12 @@ TraceGraph is a bounded derived index, not a second raw-event archive.
   security attributes and anchor-producing events flush synchronously; normal
   last-seen/count deltas flush in bounded batches.
 - Telemetry distinguishes events considered, irrelevant events, coalesced
-  observations, attempted rows, changed rows, transactions, physical-family
-  growth, admission trips, and shed mutations.
+  observations, attempted rows, proof-safe physical-write-suppressed events and
+  rows, changed rows, transactions, physical-family growth, admission trips,
+  and shed mutations. Physical suppression is not loss: at every sample,
+  entity plus edge observations must equal attempted rows plus coalesced no-op
+  rows plus physically suppressed rows plus pending rows. Both suppression
+  counters are cumulative and monotonic.
 - Retention recovery must leave enough headroom to avoid immediate re-blocking.
   Repeated delete/refill oscillation fails qualification even if the hard cap
   itself holds.
@@ -115,16 +119,16 @@ reference Mac using the recorded normal-plus-burst workload:
 | Fixed workload | The minute-5 burst must move and fully drain both ingress and event-persistence lanes with zero persistence shed. Its measured peak must reach at least 1,274 combined offered events/s, the previously observed failure-state rate; a conserving idle collector does not pass. |
 | Priority fidelity | Zero priority-lane, kernel, callback-copy, or upstream collector loss. |
 | File fidelity | Zero unclassified queue loss. Semantic rejects/coalesces must be attributable to a tested reason that is conservative against the complete enabled rule corpus. |
-| Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. Source-bound focused tests exercise restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
+| Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. The source-bound phase-1 clean CI exercises restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
 | Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. |
-| TraceGraph | At least 99% writable duty, no mutation or ingest shed, no recovery oscillation, and exact batch/row/observation/coalescing conservation at every sample. No unmeasured coalescing-bound assertion is accepted. |
+| TraceGraph | At least 99% writable duty, no mutation or ingest shed, no recovery oscillation, and exact batch/row/observation/coalescing/physical-suppression conservation at every sample. The rule-neutral minute-5 burst must produce positive physical-suppressed event and row deltas; the current one-row contract requires those deltas to be equal. Proof-safe suppression is recorded separately from loss and must be monotonic. No unmeasured coalescing-bound assertion is accepted. |
 | TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
 | Disk writes | Engine average at most 1 MiB/s over the epoch and no 60-second interval above 4 MiB/s; no macOS disk-writes diagnostic. |
 | CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI p95 at most 10% of one core. |
 | Memory | Engine RSS at most 450 MiB and growth from minute 5 to minute 15 at most 64 MiB. |
 | Disk safety | Every SQLite family stays beneath its exact DB+WAL+SHM cap and preserves the configured free-space floor. |
 | Rules | Sealed rules synchronize before readers, corpus parity holds, and ordinary launch produces no administrator-password flow. |
-| AI quality | Alert investigation is configured and healthy. Every sample carries conserving schema-2 fixed-cardinality telemetry; the fixed harmless HIGH-alert trigger must yield at least one newly started and accepted investigation, with no operation in flight at either epoch boundary, zero unattributed requests, and zero final rejection. Disabled or zero-operation runs fail this release qualification. |
+| AI quality | Alert investigation is configured and healthy before t0. Every sample carries conserving schema-2 fixed-cardinality telemetry. Both the prewarm and minute-5 harmless HIGH-alert triggers must each create exactly one new row for their unique executable path; the same stable alert ID must acquire non-empty, schema-valid investigation JSON and reconcile with one or more newly started operations, `accepted == started`, zero final rejection, zero unattributed requests, and no unfinished operation. Benign concurrent investigations are allowed but cannot substitute for the causal row proof. Disabled, ambiguous, unrelated-only, or zero-operation runs fail. |
 | Shipped tools | `maccrabctl version` and `maccrab-mcp --version` execute after signing and directly from the mounted DMG under normal SIP/AMFI policy. |
 | Evidence | Candidate report binds source commit/tree, DMG SHA-256, signing/notarization, payload inventory, and the complete host measurements above. |
 
@@ -145,16 +149,39 @@ sudo /usr/bin/python3 -I scripts/candidate-qualification.py record-runtime \
   --output .qualification-evidence/MacCrab-v<VERSION>.runtime.json
 ```
 
-The command verifies the installed process identity, runs focused source-bound
-continuity/rule probes, executes both shipped tools from a read-only `/Volumes`
-mount, records 31 samples, runs the fixed bounded burst at minute 5, and sends
-the live rule-reload probe at minute 7.5. The burst submits one bounded OTLP
-span and executes a harmless `/dev/tcp` command-line token (it opens no network
-connection) from a per-run unique copy of `/bin/echo`, avoiding the one-hour
-rule/executable deduplication window while triggering the stable high-severity
-reverse-shell rule and its real installed alert-investigation path. Both transitive workload executors and
-their SHA-256 values are part of the workload binding. It leaves a restart-safe
-`.runtime.json.capture.json` while sampling. A passing report embeds each raw
+Phase 1 captures the successful `scripts/ci-local.sh --clean` transcript before
+the candidate is built. The candidate manifest binds its digest, terminal tail,
+line count, timestamps, and source commit/tree. The installed-host recorder
+validates and copies that receipt. It deliberately launches neither `swift build` nor
+`swift test`, and does not run the process-heavy rule linter inside the daemon
+process epoch it is about to qualify.
+
+The command verifies the installed process identity, executes both shipped
+tools from a read-only `/Volumes` mount, prewarms the exact alert-investigation
+path, records 31 samples, runs the fixed bounded burst at minute 5, and sends
+the live rule-reload probe at minute 7.5. The prewarm and burst each execute a
+harmless `/dev/tcp` command-line token (they open no network connection) from a
+per-run unique copy of `/bin/echo`, avoiding the one-hour rule/executable
+deduplication window while triggering the stable high-severity reverse-shell
+rule and its real installed alert-investigation path. The recorder opens the
+installed `alerts.db` read-only and no-follow, binds that exact unique process
+path and the trigger-time boundary as query parameters, requires exactly one
+new causal row, retains its stable alert ID, and validates the investigation
+JSON stored on that same row. A global telemetry increase without that row is
+not proof.
+
+The pressure files are created only beneath the unique
+`/Users/Shared/MacCrabQualificationRuntime-<run-id>` tree. Before starting, the
+recorder checks that representative paths do not match a fixed filename
+predicate in any stable sequence's later-step corpus. A separate small,
+non-networking shell probe exercises sequence journal admission and expiry;
+bulk pressure and sequence continuity are distinct proofs. The workload must
+exit by offset 390, every required queue must drain by offset 450, and every
+process in its dedicated process group is terminated and reaped on failure.
+Both transitive workload executors and their SHA-256 values are part of the
+workload binding. The recorder leaves a restart-safe
+`.runtime.json.capture.json` while sampling, including the failing phase and
+reason when it aborts. A passing report embeds each raw
 rich heartbeat, heartbeat-file digest/ownership, Darwin process counters, and
 complete SQLite-family observation; it then canonically hashes and normalizes
 those observations. The verifier repeats that normalization, reconciles sample
@@ -164,10 +191,23 @@ CPU and disk-write totals, engine RSS, GUI background CPU, the complete
 conservation-boundary snapshot, all five zero-loss counters, and LLM quality
 state. Aggregate PASS fields must reconcile to those raw observations.
 
-Before recording, enable Agent Traces/the loopback receiver and configure a
-working alert-investigation LLM. The recorder fails before starting the
-900-second timer when the running engine does not publish a real producer
-conservation ledger or a full writable TraceStore. In particular, it never
+Before recording, enable Agent Traces/the loopback receiver and configure an
+alert-investigation LLM. Initial readiness requires every storage family,
+loss/conservation ledger, and circuit state to be sound, then drains pending
+queues before prewarm. It permits the one expected never-used-backend state:
+configured schema-2 telemetry with no prior successful request may still report
+`healthy=false`. The recorder then runs the exact alert-only prewarm outside the
+measured epoch. It requires the causal persisted row, accepted telemetry, full
+LLM health, and a complete queue
+drain before setting `start_wall` and capturing offset 0, so prewarm work is not
+counted as an epoch delta. All later samples require full LLM readiness.
+
+The recorder fails before starting the 900-second timer when the running engine
+has any cumulative loss/shed/eviction or failed-write counter, an unreachable
+or sticky storage budget, a blocked alert family, a non-writable TraceStore, an
+open/failed LLM backend, an over-cap SQLite family, or a free-space-floor
+violation. It also fails during the epoch as soon as one of those states
+appears; it does not wait out the remaining samples. In particular, it never
 derives shed from a balancing residual and never invents offered/completed
 counters from queue depth. `sequence_checkpoint.conservation`,
 `sequence_journal_conservation`, and
@@ -187,6 +227,27 @@ listed and measured with its exact configured cap (pass
 `--sqlite-cap NAME=BYTES` only for a newly shipped family whose cap is not yet
 published by the heartbeat). Adding a lane, persistence boundary, or database requires
 a gate/schema update so omission cannot manufacture a pass.
+
+### Clean process epoch versus erased state
+
+Cumulative process counters make a previously contaminated daemon epoch
+ineligible. Preserve the failed capture, heartbeat, status output, and relevant
+logs first; then gracefully deactivate and reactivate Protection (or install
+and activate the exact candidate) and confirm that the engine PID changed.
+Wait for startup storage recovery to finish and run the recorder again with
+the shipping configuration and existing databases. This obtains a fresh
+process epoch without concealing whether the repaired candidate can recover
+real retained state.
+
+Do not delete SQLite files, run `make clear-data`, raise a configured cap,
+disable the LLM/TraceStore, or use `--sqlite-cap` for a shipping family to turn
+a failed run green. `make clear-data` is especially unsafe while the installed
+system extension owns open databases. A wiped-data run is a separate
+clean-install test lane and cannot rescue publication after the retained-state
+lane fails. Historical process-lifetime counters that disappear after the one
+documented restart are an operational reset; a blocked/over-budget store,
+backend failure, or any loss that persists or recurs under the candidate is a
+candidate defect and requires a new candidate.
 
 After the first `release.sh` phase has preserved a candidate,
 `VERSION=<VERSION> make test-corpus` invokes the containment recorder. The

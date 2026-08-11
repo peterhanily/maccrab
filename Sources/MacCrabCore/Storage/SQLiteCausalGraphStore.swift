@@ -126,6 +126,9 @@ public enum CausalGraphStorageAdmissionError: Error, LocalizedError, Sendable, E
 
 public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     public let enabled: Bool
+    /// True only for a live read-write SQLite handle. Filesystem headroom is
+    /// not proof that the daemon can admit its first graph mutation.
+    public let writableHandle: Bool
     public let blocked: Bool
     public let reason: CausalGraphStorageBlockReason?
     public let maxFootprintBytes: Int64?
@@ -150,6 +153,13 @@ public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     public let recoveryNoPhysicalProgressTotal: UInt64
     public let lastRecoveryFootprintBeforeBytes: Int64?
     public let lastRecoveryFootprintAfterBytes: Int64?
+    public let proactiveRecoveryThresholdBytes: Int64?
+    /// Current bytes still required to cross strictly below the recovery
+    /// target. Unlike `blocked`, this remains non-zero during proactive drain.
+    public let recoveryDeficitBytes: Int64?
+    /// Whether the most recent bounded pass left rows eligible under the exact
+    /// trace/orphan cutoffs supplied by its caller. nil means measurement failed.
+    public let lastRecoveryEligibleBacklogRemaining: Bool?
 }
 
 public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
@@ -162,6 +172,102 @@ public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
     public let footprintBeforeBytes: Int64?
     public let footprintBytes: Int64?
     public let autoVacuumMode: Int
+    public let recoveryTargetBytes: Int64?
+    public let recoveryDeficitBytes: Int64?
+    public let traceBacklogRemaining: Bool?
+    public let orphanBacklogRemaining: Bool?
+    public let eligibleBacklogRemaining: Bool?
+}
+
+/// Why an awaited boot-time TraceGraph drain could not restore ordinary
+/// mutation admission before ingestion producers were started.
+public enum CausalGraphStartupRecoveryNonconvergenceReason: String, Sendable, Equatable {
+    case storeUnavailable = "store_unavailable"
+    case writableHandleUnavailable = "writable_handle_unavailable"
+    case protectedEvidenceFloor = "protected_evidence_floor"
+    case boundedPassLimit = "bounded_pass_limit"
+    case pinnedReader = "pinned_reader"
+    case incrementalVacuumUnavailable = "incremental_vacuum_unavailable"
+    case noRecoverableProgress = "no_recoverable_progress"
+    case admissionMeasurementUnavailable = "admission_measurement_unavailable"
+    case admissionRemainsBlocked = "admission_remains_blocked"
+    case recoveryFailed = "recovery_failed"
+}
+
+public enum CausalGraphStartupRecoveryDisposition: Sendable, Equatable {
+    case writable
+    case nonconverged(CausalGraphStartupRecoveryNonconvergenceReason)
+}
+
+/// Exact result of the awaited pre-producer recovery lane. The daemon retains
+/// this result in its bootstrap handles so a degraded start cannot be mistaken
+/// for proof that normal TraceGraph writes were restored.
+public struct CausalGraphStartupRecoveryResult: Sendable, Equatable {
+    public let disposition: CausalGraphStartupRecoveryDisposition
+    public let initiallyBlocked: Bool
+    public let passes: Int
+    public let attemptedCutoffHours: [Int]
+    public let finalAdmission: CausalGraphStorageAdmissionStatus?
+    public let lastRecovery: CausalGraphStorageRecoveryResult?
+    public let failureDetail: String?
+
+    public var writableBeforeProducers: Bool {
+        guard disposition == .writable,
+              let finalAdmission,
+              finalAdmission.writableHandle,
+              !finalAdmission.blocked else {
+            return false
+        }
+        // A floor-only policy has no byte target; a successful ordinary-write
+        // reprobe is the complete proof. With a footprint cap, however, retain
+        // the stronger headroom proof: a recovery pass must cross the durable
+        // low watermark, while a healthy zero-pass start must still remain
+        // strictly below the proactive boundary that caused rc.11 to relatch.
+        guard finalAdmission.maxFootprintBytes != nil else { return true }
+        if passes > 0 {
+            return finalAdmission.recoveryDeficitBytes == 0
+        }
+        guard let footprint = finalAdmission.footprintBytes,
+              let proactive = finalAdmission.proactiveRecoveryThresholdBytes else {
+            return false
+        }
+        return footprint < proactive
+    }
+
+    public var normalWriteAdmissionRestored: Bool {
+        initiallyBlocked && writableBeforeProducers
+    }
+
+    /// Replace the early recovery snapshot with the no-maintenance admission
+    /// remeasurement taken at the actual producer-activation boundary. This
+    /// keeps the retained Bootstrap/heartbeat proof and its diagnostics from
+    /// describing stale free-space or SQLite-family state.
+    public func refreshed(finalAdmission: CausalGraphStorageAdmissionStatus) -> Self {
+        Self(
+            disposition: disposition,
+            initiallyBlocked: initiallyBlocked,
+            passes: passes,
+            attemptedCutoffHours: attemptedCutoffHours,
+            finalAdmission: finalAdmission,
+            lastRecovery: lastRecovery,
+            failureDetail: failureDetail
+        )
+    }
+
+    public static func unavailable(
+        reason: CausalGraphStorageBlockReason?,
+        detail: String? = nil
+    ) -> Self {
+        Self(
+            disposition: .nonconverged(.storeUnavailable),
+            initiallyBlocked: reason != nil,
+            passes: 0,
+            attemptedCutoffHours: [],
+            finalAdmission: nil,
+            lastRecovery: nil,
+            failureDetail: detail ?? reason?.rawValue
+        )
+    }
 }
 
 /// Injectable probes keep admission failure modes deterministic in tests. A
@@ -255,6 +361,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private let freeSpaceProbe: CausalGraphStorageProbe
     private let transactionFailureProbe: CausalGraphTransactionFailureProbe?
     private let pageLimitFailureProbe: CausalGraphPageLimitFailureProbe?
+    /// Deterministic test seam at the actor yield between cascade quanta.
+    /// Production callers leave this nil.
+    private let cascadeYieldHook: (@Sendable () async -> Void)?
     private var lastFootprintBytes: Int64?
     private var lastFreeSpaceBytes: Int64?
     private var storageBlockReason: CausalGraphStorageBlockReason?
@@ -262,6 +371,15 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var shedMutationsTotal: UInt64 = 0
     private var pinnedReader = false
     private var recovering = false
+    /// Recovery-only scan cursor. Field databases can contain millions of
+    /// traces but each pass may mutate at most 256 parents. Re-running an
+    /// unindexed effective-activity predicate plus `ORDER BY updated_at` from
+    /// the beginning on every pass made boot work O(passes x all traces).
+    /// Keep a rowid cursor for one exact cutoff instead; selected parents that
+    /// are not fully drained leave the cursor in place, so no evidence can be
+    /// skipped when a child-fanout quantum is exhausted.
+    private var recoveryTraceScanCutoff: Double?
+    private var recoveryTraceScanAfterRowID: Int64 = 0
     private var footprintLatchTripsTotal: UInt64 = 0
     private var footprintLatchClearsTotal: UInt64 = 0
     private var recoveryRunsTotal: UInt64 = 0
@@ -273,6 +391,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var recoveryNoPhysicalProgressTotal: UInt64 = 0
     private var lastRecoveryFootprintBeforeBytes: Int64?
     private var lastRecoveryFootprintAfterBytes: Int64?
+    private var lastRecoveryEligibleBacklogRemaining: Bool?
     /// Bound associated with the currently executing actor-isolated growth
     /// mutation. Used to translate SQLite's own FULL/ENOSPC backstop into the
     /// same typed admission signal if the conservative preflight is exhausted.
@@ -292,12 +411,6 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private static let mib: Int64 = 1_048_576
     private static let defaultMinimumTransactionReserve: Int64 = 8 * mib
     private static let defaultMaximumTransactionReserve: Int64 = 64 * mib
-    /// One default bounded-recovery quantum on the shipped 4 KiB page size.
-    /// The resume watermark stays at least this far below the admission
-    /// threshold at the default 250 MiB policy, so a WAL truncation cannot
-    /// clear the latch with only a few MiB of immediately-refillable headroom.
-    private static let maximumRecoveryHysteresisBytes: Int64 = 8 * mib
-    private static let minimumRecoveryHysteresisBytes: Int64 = 1 * mib
     /// Conservative per-row allowance for B-tree/index page splits in addition
     /// to eight times the caller-controlled UTF-8 payload.
     private static let mutationBaseBytes: Int64 = 1 * mib
@@ -318,27 +431,64 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// prune APIs must share the same bounded write shape as recovery.
     private static let substrateDeleteBatchSize = 256
 
-    /// Derive a real recovery band independently of the transaction reserve.
-    /// At the shipped 250 MiB cap, `cap - reserve` is only 75% of cap, so the
-    /// old `min(threshold, 80% of cap)` collapsed to the threshold itself.
-    /// Eight MiB matches one default 2,048-page incremental-vacuum budget; the
-    /// proportional/minimum terms keep small test/operator caps usable.
+    /// One inherited trace is retention-eligible only when neither the parent
+    /// nor any timed child contains evidence at/after the caller's cutoff.
+    /// Future child writes also advance `traces.updated_at`, but these guards
+    /// are required for rows created by older releases and imported fixtures.
+    /// Keep this single predicate shared by selection and exact backlog
+    /// measurement so protected children cannot create a false perpetual
+    /// backlog at a coarser recovery rung.
+    private static let traceRecoveryEligibilityPredicateSQL = """
+        MAX(traces.created_at, traces.updated_at) < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM trace_membership m
+             WHERE m.trace_id = traces.id AND m.added_at >= ?1)
+        AND NOT EXISTS (
+            SELECT 1 FROM trace_rule_hits h
+             WHERE h.trace_id = traces.id AND h.matched_at >= ?1)
+        AND NOT EXISTS (
+            SELECT 1 FROM trace_replay_runs r
+             WHERE r.trace_id = traces.id
+               AND (r.started_at >= ?1 OR r.completed_at >= ?1))
+        AND NOT EXISTS (
+            SELECT 1 FROM trace_hash_chain c
+             WHERE c.trace_id = traces.id AND c.created_at >= ?1)
+        """
+
+    /// Recover one complete admitted-transaction reserve below the high-water.
+    /// A single 2,048-page vacuum quantum is only about 8 MiB and field runs
+    /// proved that clearing there immediately refills/re-latches. The reserve
+    /// is already the actor's conservative bound for one mutation plus SQLite
+    /// family growth, so reusing it gives admission durable writable headroom.
     nonisolated static func recoveryResumeBelowBytes(
         capBytes cap: Int64,
-        admissionThresholdBytes threshold: Int64
+        admissionThresholdBytes threshold: Int64,
+        transactionReserveBytes reserve: Int64
     ) -> Int64 {
         guard threshold > 1 else { return 0 }
-        let proportionalBand = max(
-            minimumRecoveryHysteresisBytes,
-            threshold / 20
-        )
-        let band = min(
-            maximumRecoveryHysteresisBytes,
-            proportionalBand,
-            max(1, threshold / 2)
-        )
-        let eightyPercentOfCap = cap - (cap / 5)
-        return max(0, min(eightyPercentOfCap, threshold - band))
+        let boundedReserve = min(max(1, reserve), max(1, threshold / 2))
+        return max(0, min(cap, threshold - boundedReserve))
+    }
+
+    nonisolated static func recoveryDeficitBytes(
+        footprintBytes footprint: Int64?,
+        recoveryTargetBytes target: Int64?
+    ) -> Int64? {
+        guard let footprint, let target else { return nil }
+        guard footprint >= target else { return 0 }
+        let (delta, overflow) = footprint.subtractingReportingOverflow(target)
+        guard !overflow, delta < Int64.max else { return Int64.max }
+        return delta + 1
+    }
+
+    nonisolated static func proactiveRecoveryThresholdBytes(
+        admissionThresholdBytes threshold: Int64?,
+        transactionReserveBytes reserve: Int64?
+    ) -> Int64? {
+        guard let threshold, threshold > 1, let reserve, reserve > 0 else { return nil }
+        let desiredLead = max(mib, reserve / 4)
+        let lead = min(desiredLead, max(1, threshold / 2))
+        return max(0, threshold - lead)
     }
 
     // SQLITE_TRANSIENT lives at file scope (see bottom of file) — used
@@ -552,7 +702,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         footprintProbe: CausalGraphStorageProbe? = nil,
         freeSpaceProbe: CausalGraphStorageProbe? = nil,
         transactionFailureProbe: CausalGraphTransactionFailureProbe? = nil,
-        pageLimitFailureProbe: CausalGraphPageLimitFailureProbe? = nil
+        pageLimitFailureProbe: CausalGraphPageLimitFailureProbe? = nil,
+        cascadeYieldHook: (@Sendable () async -> Void)? = nil
     ) async throws {
         // Resolve only the existing parent directory, then keep the leaf name
         // literal. macOS exposes trusted aliases such as /tmp -> /private/tmp;
@@ -568,6 +719,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         self.freeSpaceProbe = freeSpaceProbe ?? { Self.availableFilesystemBytes(path: $0) }
         self.transactionFailureProbe = transactionFailureProbe
         self.pageLimitFailureProbe = pageLimitFailureProbe
+        self.cascadeYieldHook = cascadeYieldHook
 
         let cap = maxFootprintBytes.flatMap { $0 > 0 ? $0 : nil }
         let floor = freeSpaceFloorBytes.flatMap { $0 > 0 ? $0 : nil }
@@ -586,7 +738,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             self.admissionThresholdBytes = threshold
             self.resumeBelowBytes = Self.recoveryResumeBelowBytes(
                 capBytes: cap,
-                admissionThresholdBytes: threshold
+                admissionThresholdBytes: threshold,
+                transactionReserveBytes: reserve
             )
         } else {
             self.transactionReserveBytes = nil
@@ -618,9 +771,19 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     throw admission
                 }
             } else {
-                try applyMigrations()
-                // Re-apply after migration in case SQLite changed page metadata.
-                try configureMaximumPageCount()
+                do {
+                    try applyMigrations()
+                    // Re-apply after migration in case SQLite changed page metadata.
+                    try configureMaximumPageCount()
+                } catch let admission as CausalGraphStorageAdmissionError {
+                    guard hasUsableRuntimeSchema() else { throw admission }
+                    // Ordinary admission can be healthy while a missing index
+                    // still lacks its main-file/page-limit/scratch headroom.
+                    // Preserve the usable v1 runtime schema and let awaited
+                    // startup recovery reclaim to the exact migration bound.
+                    deferredMigrationsPending = true
+                    logger.fault("TraceGraph schema migration deferred by exact storage admission: \(admission.localizedDescription, privacy: .public)")
+                }
             }
         }
         refreshAdmissionMeasurementsAndLatch()
@@ -731,7 +894,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             admissionThresholdBytes = threshold
             resumeBelowBytes = Self.recoveryResumeBelowBytes(
                 capBytes: cap,
-                admissionThresholdBytes: threshold
+                admissionThresholdBytes: threshold,
+                transactionReserveBytes: reserve
             )
         } else {
             transactionReserveBytes = nil
@@ -768,6 +932,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         CausalGraphStorageAdmissionStatus(
             enabled: maxFootprintBytes != nil || freeSpaceFloorBytes != nil
                 || deferredMigrationsPending || sqliteStorageFailure != nil,
+            writableHandle: db != nil && !isReadOnly,
             blocked: storageBlockReason != nil || footprintAdmissionLatched || recovering,
             reason: recovering ? .recoveryInProgress : storageBlockReason,
             maxFootprintBytes: maxFootprintBytes,
@@ -791,7 +956,16 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             recoveryVacuumPagesReclaimedTotal: recoveryVacuumPagesReclaimedTotal,
             recoveryNoPhysicalProgressTotal: recoveryNoPhysicalProgressTotal,
             lastRecoveryFootprintBeforeBytes: lastRecoveryFootprintBeforeBytes,
-            lastRecoveryFootprintAfterBytes: lastRecoveryFootprintAfterBytes
+            lastRecoveryFootprintAfterBytes: lastRecoveryFootprintAfterBytes,
+            proactiveRecoveryThresholdBytes: Self.proactiveRecoveryThresholdBytes(
+                admissionThresholdBytes: admissionThresholdBytes,
+                transactionReserveBytes: transactionReserveBytes
+            ),
+            recoveryDeficitBytes: Self.recoveryDeficitBytes(
+                footprintBytes: lastFootprintBytes,
+                recoveryTargetBytes: resumeBelowBytes
+            ),
+            lastRecoveryEligibleBacklogRemaining: lastRecoveryEligibleBacklogRemaining
         )
     }
 
@@ -1145,6 +1319,27 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             floorBytes,
             max(stableReserve, max(0, mutationUpperBoundBytes))
         )
+    }
+
+    /// Maintenance is allowed to checkpoint with only enough scratch to merge
+    /// the current WAL into the main file, because that operation can itself
+    /// restore free space. DELETE/vacuum transactions need the stronger
+    /// ordinary reserve. Keep this probe side-effect-free with respect to shed
+    /// counters: declining maintenance is not a failed graph mutation.
+    private func recoveryMutationHeadroomAdmitted() -> Bool {
+        guard let floor = freeSpaceFloorBytes else { return true }
+        guard let free = freeSpaceProbe(storageVolumePath) else {
+            lastFreeSpaceBytes = nil
+            storageBlockReason = .probeFailure
+            return false
+        }
+        lastFreeSpaceBytes = free
+        let required = freeSpaceAdmissionRequirement(floorBytes: floor)
+        guard free >= required else {
+            storageBlockReason = .lowFreeSpace
+            return false
+        }
+        return true
     }
 
     private func rejectGrowth(_ error: CausalGraphStorageAdmissionError) throws -> Never {
@@ -1706,28 +1901,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// tries to complete deferred migrations and would recurse. Re-probe here
     /// at the exact DDL boundary. Metadata work keeps the ordinary stable
     /// reserve; index construction gets main-file-scaled growth and scratch.
-    private func admitSchemaStorageWork(_ work: SchemaStorageWork) throws {
-        guard !work.isEmpty else { return }
+    private func schemaStorageAdmissionError(
+        for work: SchemaStorageWork
+    ) -> CausalGraphStorageAdmissionError? {
+        guard !work.isEmpty else { return nil }
         let configured = maxFootprintBytes != nil || freeSpaceFloorBytes != nil
-        guard configured else { return }
+        guard configured else { return nil }
 
         let metadataEstimate = work.boundedTransactionEstimateBytes
         if let reserve = transactionReserveBytes,
            metadataEstimate > reserve {
-            try rejectGrowth(.mutationTooLarge(
+            return .mutationTooLarge(
                 estimatedBytes: metadataEstimate,
                 transactionReserveBytes: reserve
-            ))
+            )
         }
 
         guard let footprint = footprintProbe(databasePath) else {
             lastFootprintBytes = nil
-            try rejectGrowth(.probeFailed("schema SQLite-family footprint"))
+            return .probeFailed("schema SQLite-family footprint")
         }
         lastFootprintBytes = footprint
         guard let free = freeSpaceProbe(storageVolumePath) else {
             lastFreeSpaceBytes = nil
-            try rejectGrowth(.probeFailed("schema free-space"))
+            return .probeFailed("schema free-space")
         }
         lastFreeSpaceBytes = free
 
@@ -1738,9 +1935,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     databasePath
                 )
             } catch {
-                try rejectGrowth(.probeFailed(
+                return .probeFailed(
                     "schema main-file measurement: \(error.localizedDescription)"
-                ))
+                )
             }
             let operations = Int64(work.rebuildStatementCount)
             let growth = SQLitePersistentStoreAdmission.saturatingMultiply(
@@ -1755,13 +1952,25 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 footprint,
                 growth
             )
+            let projectedMain = SQLitePersistentStoreAdmission.saturatingAdd(
+                main,
+                growth
+            )
+            if let threshold = admissionThresholdBytes,
+               projectedMain > threshold {
+                return .footprintLimit(
+                    footprintBytes: footprint,
+                    admissionThresholdBytes: max(0, threshold - growth),
+                    capBytes: maxFootprintBytes ?? threshold
+                )
+            }
             if let cap = maxFootprintBytes,
                projected > cap {
-                try rejectGrowth(.footprintLimit(
+                return .footprintLimit(
                     footprintBytes: footprint,
                     admissionThresholdBytes: max(0, cap - growth),
                     capBytes: cap
-                ))
+                )
             }
             let floor = freeSpaceFloorBytes ?? 0
             let required = SQLitePersistentStoreAdmission.saturatingAdd(
@@ -1769,25 +1978,26 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 scratch
             )
             if growth == Int64.max || scratch == Int64.max
+                || projectedMain == Int64.max
                 || projected == Int64.max || required == Int64.max
                 || free < required {
-                try rejectGrowth(.lowFreeSpace(
+                return .lowFreeSpace(
                     freeBytes: free,
                     floorBytes: floor,
                     requiredFreeBytes: required
-                ))
+                )
             }
-            return
+            return nil
         }
 
         if let cap = maxFootprintBytes,
            let threshold = admissionThresholdBytes,
            footprint > threshold {
-            try rejectGrowth(.footprintLimit(
+            return .footprintLimit(
                 footprintBytes: footprint,
                 admissionThresholdBytes: threshold,
                 capBytes: cap
-            ))
+            )
         }
         if let floor = freeSpaceFloorBytes {
             let required = freeSpaceAdmissionRequirement(
@@ -1795,12 +2005,19 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 mutationUpperBoundBytes: metadataEstimate
             )
             if free < required {
-                try rejectGrowth(.lowFreeSpace(
+                return .lowFreeSpace(
                     freeBytes: free,
                     floorBytes: floor,
                     requiredFreeBytes: required
-                ))
+                )
             }
+        }
+        return nil
+    }
+
+    private func admitSchemaStorageWork(_ work: SchemaStorageWork) throws {
+        if let refusal = schemaStorageAdmissionError(for: work) {
+            try rejectGrowth(refusal)
         }
     }
 
@@ -1915,19 +2132,47 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         }
     }
 
+    private func pendingDeferredMigrationStorageWork() throws -> SchemaStorageWork {
+        guard let db else {
+            throw CausalGraphStoreError.databaseOpenFailed(
+                "nil handle while planning deferred migrations")
+        }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db, "PRAGMA user_version", -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(
+                String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw CausalGraphStoreError.stepFailed(
+                "could not read user_version while planning deferred migrations")
+        }
+        let currentVersion = Int(sqlite3_column_int(stmt, 0))
+        var metadata = 0
+        var rebuilds = 0
+        for migration in Self.schemaMigrations {
+            let pending = SchemaMigrator.pendingStorageWork(
+                on: db,
+                statements: migration.sql
+            )
+            metadata += pending.boundedMetadataStatementCount
+            rebuilds += pending.rebuildStatementCount
+            if migration.version > currentVersion {
+                metadata += 1 // PRAGMA user_version header mutation
+            }
+        }
+        return SchemaStorageWork(
+            boundedMetadataStatementCount: metadata,
+            rebuildStatementCount: rebuilds
+        )
+    }
+
     private func deferredMigrationHasStorageHeadroom() -> Bool {
-        if maxFootprintBytes != nil {
-            guard lastFootprintBytes != nil, !footprintAdmissionLatched else {
-                return false
-            }
+        guard let work = try? pendingDeferredMigrationStorageWork() else {
+            return false
         }
-        if let floor = freeSpaceFloorBytes {
-            guard let free = lastFreeSpaceBytes,
-                  free >= freeSpaceAdmissionRequirement(floorBytes: floor) else {
-                return false
-            }
-        }
-        return true
+        return schemaStorageAdmissionError(for: work) == nil
     }
 
     // MARK: - upsertEntity
@@ -2487,6 +2732,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             for member in members {
                 try insertMembership(member, db: db)
             }
+            if let latestMembership = members.map(\.addedAt).max() {
+                try advanceTraceUpdatedAt(
+                    traceId: trace.id,
+                    through: latestMembership,
+                    db: db
+                )
+            }
             try execTransaction(.commit, db: db)
         } catch {
             try rollbackAndRethrow(error, db: db)
@@ -2728,59 +2980,84 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     public func recordRuleHit(_ hit: TraceRuleHit) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(hit), rows: 1)
+        try admitGrowth(payloadBytes: payloadBytes(hit), rows: 2)
         let sql = """
         INSERT OR REPLACE INTO trace_rule_hits (
             id, trace_id, rule_id, rule_title, rule_version, severity,
             matched_event_id, matched_entity_id, matched_edge_id, matched_at, explanation_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        try execBound(db: db, sql: sql) { stmt in
-            sqlite3_bind_text(stmt, 1, hit.id, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 2, hit.traceId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 3, hit.ruleId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 4, hit.ruleTitle, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 5, hit.ruleVersion, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 6, hit.severity, -1, SQLITE_TRANSIENT)
-            Self.bindOptionalText(stmt, 7, hit.matchedEventId)
-            Self.bindOptionalText(stmt, 8, hit.matchedEntityId)
-            Self.bindOptionalText(stmt, 9, hit.matchedEdgeId)
-            sqlite3_bind_double(stmt, 10, hit.matchedAt.timeIntervalSince1970)
-            sqlite3_bind_text(stmt, 11, hit.explanationJson, -1, SQLITE_TRANSIENT)
+        try execTransaction(.begin, db: db)
+        do {
+            try execBound(db: db, sql: sql) { stmt in
+                sqlite3_bind_text(stmt, 1, hit.id, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, hit.traceId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, hit.ruleId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 4, hit.ruleTitle, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 5, hit.ruleVersion, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 6, hit.severity, -1, SQLITE_TRANSIENT)
+                Self.bindOptionalText(stmt, 7, hit.matchedEventId)
+                Self.bindOptionalText(stmt, 8, hit.matchedEntityId)
+                Self.bindOptionalText(stmt, 9, hit.matchedEdgeId)
+                sqlite3_bind_double(stmt, 10, hit.matchedAt.timeIntervalSince1970)
+                sqlite3_bind_text(stmt, 11, hit.explanationJson, -1, SQLITE_TRANSIENT)
+            }
+            try advanceTraceUpdatedAt(
+                traceId: hit.traceId, through: hit.matchedAt, db: db)
+            try execTransaction(.commit, db: db)
+        } catch {
+            try rollbackAndRethrow(error, db: db)
         }
     }
 
     public func recordReplayRun(_ run: TraceReplayRun) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(run), rows: 1)
+        try admitGrowth(payloadBytes: payloadBytes(run), rows: 2)
         let sql = """
         INSERT OR REPLACE INTO trace_replay_runs (
             id, trace_id, bundle_id, ruleset_version, daemon_version,
             normalization_version, started_at, completed_at, deterministic, result_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        try execBound(db: db, sql: sql) { stmt in
-            sqlite3_bind_text(stmt, 1, run.id, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 2, run.traceId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 3, run.bundleId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 4, run.rulesetVersion, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 5, run.daemonVersion, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 6, run.normalizationVersion, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_double(stmt, 7, run.startedAt.timeIntervalSince1970)
-            if let completed = run.completedAt {
-                sqlite3_bind_double(stmt, 8, completed.timeIntervalSince1970)
-            } else {
-                sqlite3_bind_null(stmt, 8)
+        try execTransaction(.begin, db: db)
+        do {
+            try execBound(db: db, sql: sql) { stmt in
+                sqlite3_bind_text(stmt, 1, run.id, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, run.traceId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, run.bundleId, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 4, run.rulesetVersion, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 5, run.daemonVersion, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 6, run.normalizationVersion, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_double(stmt, 7, run.startedAt.timeIntervalSince1970)
+                if let completed = run.completedAt {
+                    sqlite3_bind_double(stmt, 8, completed.timeIntervalSince1970)
+                } else {
+                    sqlite3_bind_null(stmt, 8)
+                }
+                sqlite3_bind_int(stmt, 9, run.deterministic ? 1 : 0)
+                sqlite3_bind_text(stmt, 10, run.resultJson, -1, SQLITE_TRANSIENT)
             }
-            sqlite3_bind_int(stmt, 9, run.deterministic ? 1 : 0)
-            sqlite3_bind_text(stmt, 10, run.resultJson, -1, SQLITE_TRANSIENT)
+            let activity = max(run.startedAt, run.completedAt ?? run.startedAt)
+            try advanceTraceUpdatedAt(
+                traceId: run.traceId, through: activity, db: db)
+            try execTransaction(.commit, db: db)
+        } catch {
+            try rollbackAndRethrow(error, db: db)
         }
     }
 
     public func appendHashChain(_ entry: TraceHashChainEntry) async throws {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(entry), rows: 1)
-        try insertHashChainRow(entry, db: db)
+        try admitGrowth(payloadBytes: payloadBytes(entry), rows: 2)
+        try execTransaction(.begin, db: db)
+        do {
+            try insertHashChainRow(entry, db: db)
+            try advanceTraceUpdatedAt(
+                traceId: entry.traceId, through: entry.createdAt, db: db)
+            try execTransaction(.commit, db: db)
+        } catch {
+            try rollbackAndRethrow(error, db: db)
+        }
     }
 
     /// Sync INSERT of one hash-chain row. Shared by `appendHashChain` and the
@@ -2896,7 +3173,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 + (eventId?.utf8.count ?? 0)
                 + (edgeId?.utf8.count ?? 0)
                 + (signature?.utf8.count ?? 0),
-            rows: 1
+            rows: 2
         )
         try execTransaction(.begin, db: db, immediate: true)
         do {
@@ -2922,6 +3199,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 createdAt: createdAt
             )
             try insertHashChainRow(entry, db: db)
+            try advanceTraceUpdatedAt(
+                traceId: traceId, through: createdAt, db: db)
             try execTransaction(.commit, db: db)
             return entry
         } catch {
@@ -3118,7 +3397,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
         var ids: [String] = []
         do {
-            let sql = "SELECT id FROM traces WHERE updated_at < ?1 LIMIT 10000"
+            let sql = """
+            SELECT id FROM traces
+             WHERE \(Self.traceRecoveryEligibilityPredicateSQL)
+             LIMIT 10000
+            """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
                 throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
@@ -3132,7 +3415,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             }
         }
         guard !ids.isEmpty else { return 0 }
-        return try await batchedCascadeDeleteTraces(ids: ids).tracesDeleted
+        return try await batchedCascadeDeleteTraces(
+            ids: ids,
+            eligibilityCutoff: cutoffSecs
+        ).tracesDeleted
     }
 
     /// Drop the oldest `count` traces by `updated_at` ascending. Used
@@ -3232,6 +3518,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private static let entityOrphanGuardSQL = """
         id NOT IN (SELECT entity_id FROM trace_membership WHERE entity_id IS NOT NULL) \
         AND id NOT IN (SELECT matched_entity_id FROM trace_rule_hits WHERE matched_entity_id IS NOT NULL) \
+        AND id NOT IN (SELECT root_entity_id FROM traces WHERE root_entity_id IS NOT NULL) \
         AND id NOT IN (SELECT source_entity_id FROM trace_edges) \
         AND id NOT IN (SELECT target_entity_id FROM trace_edges)
         """
@@ -3264,13 +3551,117 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return (edges, entities)
     }
 
-    /// Batched orphan delete. Deletes rows from `table` matching the
-    /// orphan `guardSQL` and, when `cutoff` is non-nil, `last_seen <
-    /// cutoff`. When `oldestFirstLimit` is non-nil, evicts the oldest
-    /// rows by last_seen and bounds total work to that many rows. Loops
-    /// in `batchSize` chunks (each its own statement), yielding the actor
-    /// between batches so concurrent upserts aren't starved. Returns the
-    /// total rows deleted.
+    private struct SubstrateDeleteSelection {
+        var ids: [String] = []
+        var byteLimited = false
+        var exhaustedCandidates = false
+    }
+
+    /// Select only entity/edge rows whose complete conservative delete charge
+    /// fits one transaction reserve. The SQL-level single-row payload filter
+    /// means one inherited oversized JSON row is preserved without preventing
+    /// reclaimable rows behind it from being selected.
+    private func boundedSubstrateDeleteSelection(
+        db: OpaquePointer,
+        table: String,
+        guardSQL: String,
+        cutoff: Double?,
+        oldestFirst: Bool,
+        limit: Int
+    ) throws -> SubstrateDeleteSelection {
+        guard limit > 0 else {
+            return SubstrateDeleteSelection(exhaustedCandidates: true)
+        }
+        let byteColumns: [String]
+        switch table {
+        case "trace_edges":
+            byteColumns = [
+                "id", "source_entity_id", "target_entity_id", "relation",
+                "confidence_tier", "evidence_json", "event_ids_json",
+            ]
+        case "trace_entities":
+            byteColumns = [
+                "id", "entity_type", "stable_key", "display_name",
+                "attributes_json", "source",
+            ]
+        default:
+            throw CausalGraphStoreError.prepareFailed(
+                "unsupported substrate recovery table \(table)")
+        }
+        let payloadExpression = byteColumns.map {
+            "COALESCE(octet_length(\($0)), 0)"
+        }.joined(separator: " + ")
+        let transactionBudget = max(
+            0, transactionReserveBytes ?? Self.defaultMinimumTransactionReserve)
+        let fixedCharge = saturatingAdd(
+            Self.mutationBaseBytes, Self.mutationBytesPerRow)
+        guard transactionBudget > fixedCharge else {
+            return SubstrateDeleteSelection(exhaustedCandidates: true)
+        }
+        let maxSinglePayloadBytes = (transactionBudget - fixedCharge) / 8
+        var predicates = [guardSQL]
+        if cutoff != nil {
+            // Imported/inherited rows are not trusted to satisfy
+            // first_seen <= last_seen. Preserve evidence if either timestamp
+            // lies inside the caller's protected window.
+            predicates.append("MAX(first_seen, last_seen) < ?1")
+        }
+        let payloadBindIndex = cutoff == nil ? 1 : 2
+        predicates.append("(\(payloadExpression)) <= ?\(payloadBindIndex)")
+        let order = oldestFirst ? "ORDER BY last_seen ASC, rowid ASC" : "ORDER BY rowid ASC"
+        let sql = """
+        SELECT id, (\(payloadExpression))
+          FROM \(table)
+         WHERE \(predicates.joined(separator: " AND "))
+         \(order)
+         LIMIT \(limit)
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(
+                String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        if let cutoff { sqlite3_bind_double(stmt, 1, cutoff) }
+        sqlite3_bind_int64(
+            stmt, Int32(payloadBindIndex), maxSinglePayloadBytes)
+
+        var selection = SubstrateDeleteSelection()
+        var estimated = Self.mutationBaseBytes
+        var candidatesRead = 0
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE {
+                selection.exhaustedCandidates = candidatesRead < limit
+                return selection
+            }
+            guard rc == SQLITE_ROW else {
+                try throwSQLiteFailure(
+                    rc: rc, db: db,
+                    context: "size-bounded substrate selection from \(table)")
+            }
+            candidatesRead += 1
+            let payloadBytes = max(0, sqlite3_column_int64(stmt, 1))
+            let payloadCharge = payloadBytes > Int64.max / 8
+                ? Int64.max
+                : payloadBytes * 8
+            let rowCharge = saturatingAdd(
+                payloadCharge, Self.mutationBytesPerRow)
+            let proposed = saturatingAdd(estimated, rowCharge)
+            if proposed > transactionBudget {
+                selection.byteLimited = true
+                return selection
+            }
+            if let raw = sqlite3_column_text(stmt, 0) {
+                selection.ids.append(String(cString: raw))
+                estimated = proposed
+            }
+        }
+    }
+
+    /// Batched orphan delete. Deletes rows from `table` matching the orphan
+    /// guard and optional cutoff. Both row count and conservative encoded-byte
+    /// charge are bounded independently for every transaction.
     private func batchedSubstrateDelete(
         table: String,
         guardSQL: String,
@@ -3285,20 +3676,41 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let boundedBatchSize = max(1, min(requestedBatchSize, Self.substrateDeleteBatchSize))
         while remaining > 0 {
             guard checkpointAllowsMaintenance() else { break }
+            guard recoveryMutationHeadroomAdmitted() else { break }
             let thisBatch = min(boundedBatchSize, remaining)
-            var conds = [guardSQL]
-            if cutoff != nil { conds.append("last_seen < ?1") }
-            let order = oldestFirstLimit != nil ? "ORDER BY last_seen ASC " : ""
-            let sql = """
-            DELETE FROM \(table) WHERE id IN (
-                SELECT id FROM \(table) WHERE \(conds.joined(separator: " AND ")) \(order)LIMIT \(thisBatch)
+            let selection = try boundedSubstrateDeleteSelection(
+                db: db,
+                table: table,
+                guardSQL: guardSQL,
+                cutoff: cutoff,
+                oldestFirst: oldestFirstLimit != nil,
+                limit: thisBatch
             )
+            guard !selection.ids.isEmpty else { break }
+            let placeholders = selection.ids.map { _ in "?" }
+                .joined(separator: ", ")
+            var revalidation = [guardSQL]
+            if cutoff != nil {
+                revalidation.append(
+                    "MAX(first_seen, last_seen) < ?\(selection.ids.count + 1)")
+            }
+            let sql = """
+            DELETE FROM \(table)
+             WHERE id IN (\(placeholders))
+               AND \(revalidation.joined(separator: " AND "))
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
                 throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
             }
-            if let c = cutoff { sqlite3_bind_double(stmt, 1, c) }
+            for (index, id) in selection.ids.enumerated() {
+                sqlite3_bind_text(
+                    stmt, Int32(index + 1), id, -1, SQLITE_TRANSIENT)
+            }
+            if let cutoff {
+                sqlite3_bind_double(
+                    stmt, Int32(selection.ids.count + 1), cutoff)
+            }
             let rc = sqlite3_step(stmt)
             sqlite3_finalize(stmt)
             guard rc == SQLITE_DONE else {
@@ -3309,7 +3721,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             total += n
             remaining -= n
             guard checkpointAllowsMaintenance() else { break }
-            if n < thisBatch { break }
+            if n == 0 || (selection.exhaustedCandidates && !selection.byteLimited) {
+                break
+            }
             await Task.yield()
         }
         return total
@@ -3559,6 +3973,70 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         checkpointObservation(mode: Int32(SQLITE_CHECKPOINT_TRUNCATE)).completed
     }
 
+    private func recoveryBacklogSnapshot(
+        retentionCutoff: Double,
+        orphanCutoff: Double
+    ) -> (trace: Bool?, orphan: Bool?, eligible: Bool?) {
+        let trace = try? sqliteExists(
+            sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM traces
+                 WHERE traces.rowid > ?2
+                   AND \(Self.traceRecoveryEligibilityPredicateSQL)
+                 LIMIT 1)
+            """,
+            cutoff: retentionCutoff,
+            afterRowID: recoveryTraceScanAfterRowID
+        )
+        let edges = try? sqliteExists(
+            sql: "SELECT EXISTS(SELECT 1 FROM trace_edges WHERE \(Self.edgeOrphanGuardSQL) AND MAX(first_seen, last_seen) < ?1 LIMIT 1)",
+            cutoff: orphanCutoff
+        )
+        let entities = try? sqliteExists(
+            sql: "SELECT EXISTS(SELECT 1 FROM trace_entities WHERE \(Self.entityOrphanGuardSQL) AND MAX(first_seen, last_seen) < ?1 LIMIT 1)",
+            cutoff: orphanCutoff
+        )
+        let orphan: Bool?
+        if edges == true || entities == true {
+            orphan = true
+        } else if let edges, let entities {
+            orphan = edges || entities
+        } else {
+            orphan = nil
+        }
+        let eligible: Bool?
+        if trace == true || orphan == true {
+            eligible = true
+        } else if let trace, let orphan {
+            eligible = trace || orphan
+        } else {
+            eligible = nil
+        }
+        return (trace, orphan, eligible)
+    }
+
+    private func sqliteExists(
+        sql: String,
+        cutoff: Double,
+        afterRowID: Int64? = nil
+    ) throws -> Bool {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, cutoff)
+        if let afterRowID {
+            sqlite3_bind_int64(stmt, 2, afterRowID)
+        }
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_ROW else {
+            try throwSQLiteFailure(rc: rc, db: db, context: "measure recovery backlog")
+        }
+        return sqlite3_column_int(stmt, 0) != 0
+    }
+
     /// One small recovery quantum. This is intentionally the only daemon
     /// size-cap path: it detects a reader pin before the first DELETE, bounds
     /// every batch, checkpoints between batches, and uses incremental vacuum
@@ -3582,11 +4060,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         var edgesDeleted = 0
         var entitiesDeleted = 0
         var pagesReclaimed = 0
+        refreshAdmissionMeasurementsAndLatch()
+        let recoveryRequiredAtStart = storageBlockReason != nil
+            || footprintAdmissionLatched
+            || deferredMigrationsPending
+            || (Self.recoveryDeficitBytes(
+                footprintBytes: lastFootprintBytes,
+                recoveryTargetBytes: resumeBelowBytes
+            ) ?? 0) > 0
         let mode = Int(StoragePragmas.readAutoVacuumMode(db))
         let footprintBefore = footprintProbe(databasePath)
+        let retentionCutoffSeconds = retentionCutoff.timeIntervalSince1970
+        let orphanCutoffSeconds = orphanCutoff.timeIntervalSince1970
+        if recoveryTraceScanCutoff != retentionCutoffSeconds {
+            recoveryTraceScanCutoff = retentionCutoffSeconds
+            recoveryTraceScanAfterRowID = 0
+        }
 
         func result() -> CausalGraphStorageRecoveryResult {
-            CausalGraphStorageRecoveryResult(
+            let footprintAfter = footprintProbe(databasePath)
+            let backlog = recoveryBacklogSnapshot(
+                retentionCutoff: retentionCutoffSeconds,
+                orphanCutoff: orphanCutoffSeconds
+            )
+            return CausalGraphStorageRecoveryResult(
                 pinnedReader: pinnedReader,
                 tracesDeleted: tracesDeleted,
                 traceChildRowsDeleted: traceChildRowsDeleted,
@@ -3594,9 +4091,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 entitiesDeleted: entitiesDeleted,
                 vacuumPagesReclaimed: pagesReclaimed,
                 footprintBeforeBytes: footprintBefore,
-                footprintBytes: footprintProbe(databasePath),
-                autoVacuumMode: mode
+                footprintBytes: footprintAfter,
+                autoVacuumMode: mode,
+                recoveryTargetBytes: resumeBelowBytes,
+                recoveryDeficitBytes: Self.recoveryDeficitBytes(
+                    footprintBytes: footprintAfter,
+                    recoveryTargetBytes: resumeBelowBytes
+                ),
+                traceBacklogRemaining: backlog.trace,
+                orphanBacklogRemaining: backlog.orphan,
+                eligibleBacklogRemaining: backlog.eligible
             )
+        }
+
+        func internalAdmissionReachedRecoveryTarget() -> Bool {
+            let targetSatisfied = resumeBelowBytes == nil
+                || Self.recoveryDeficitBytes(
+                    footprintBytes: lastFootprintBytes,
+                    recoveryTargetBytes: resumeBelowBytes
+                ) == 0
+            return targetSatisfied
+                && storageBlockReason == nil
+                && !footprintAdmissionLatched
+                && sqliteStorageFailure == nil
+                && !deferredMigrationsPending
         }
 
         // Actor methods are re-entrant at `await Task.yield()` below. A second
@@ -3618,8 +4136,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 logger.notice("TraceGraph SQLite storage backstop recovered; mutations may retry")
             }
             let footprintAfter = footprintProbe(databasePath)
+            let backlog = recoveryBacklogSnapshot(
+                retentionCutoff: retentionCutoffSeconds,
+                orphanCutoff: orphanCutoffSeconds
+            )
             lastRecoveryFootprintBeforeBytes = footprintBefore
             lastRecoveryFootprintAfterBytes = footprintAfter
+            lastRecoveryEligibleBacklogRemaining = backlog.eligible
             recoveryTracesDeletedTotal &+= UInt64(max(0, tracesDeleted))
             recoveryTraceChildRowsDeletedTotal &+= UInt64(
                 max(0, traceChildRowsDeleted))
@@ -3640,6 +4163,87 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // first and only then guessed pinning from a 64 MB WAL).
         guard checkpointAllowsMaintenance() else { return result() }
 
+        // A usable inherited v1 schema can be deferred solely because free
+        // space was low at open. Once exact DDL/page-limit/scratch headroom is
+        // available, complete and verify that work before deciding whether a
+        // legacy auto_vacuum mode requires offline physical conversion. This
+        // ordering lets a mode-0 store recover without deleting a single row
+        // when schema work—not file size—is its only remaining block.
+        refreshAdmissionMeasurementsAndLatch()
+        if deferredMigrationsPending,
+           deferredMigrationFailure == nil,
+           deferredMigrationHasStorageHeadroom() {
+            do {
+                try completeDeferredMigrations()
+                guard checkpointAllowsMaintenance() else { return result() }
+                refreshAdmissionMeasurementsAndLatch()
+            } catch is CausalGraphStorageAdmissionError {
+                // A probe/page ceiling can change between preflight and DDL.
+                // Keep the usable runtime schema deferred and retry after the
+                // next bounded reclaim rather than deleting on this race.
+                refreshAdmissionMeasurementsAndLatch()
+            }
+        }
+
+        // A DELETE cannot recover low free space—it consumes WAL/page-map
+        // scratch before any later checkpoint can return blocks. If the first
+        // checkpoint (or an admitted deferred migration) already restored
+        // ordinary reserve and the durable byte target, return without erasing
+        // eligible evidence. Otherwise preserve every row and fail closed on
+        // the low-space latch.
+        refreshAdmissionMeasurementsAndLatch()
+        guard recoveryMutationHeadroomAdmitted() else { return result() }
+        refreshAdmissionMeasurementsAndLatch()
+        if sqliteStorageFailure != nil,
+           sqliteStorageFailureGeneration == sqliteFailureGenerationAtStart,
+           sqliteStorageRetryHeadroomIsHealthy() {
+            // This pass has re-proved the ordinary reserve/low-water after its
+            // checkpoint. Clear only the latch inherited at entry; a new FULL
+            // or ENOSPC raised by this pass increments the generation and must
+            // remain fail-closed.
+            sqliteStorageFailure = nil
+            refreshAdmissionMeasurementsAndLatch()
+        }
+        if recoveryRequiredAtStart,
+           internalAdmissionReachedRecoveryTarget() {
+            return result()
+        }
+
+        // First spend the bounded physical-reclaim budget on pages already on
+        // the freelist. A prior crash/timer may have completed logical pruning
+        // but not its final incremental vacuum; deleting more evidence before
+        // trying those pages would be unnecessary and irreversible.
+        if recoveryRequiredAtStart,
+           mode == 2,
+           vacuumBudget > pagesReclaimed {
+            pagesReclaimed += try await incrementalVacuum(
+                maxPages: vacuumBudget - pagesReclaimed)
+            guard checkpointAllowsMaintenance() else { return result() }
+            refreshAdmissionMeasurementsAndLatch()
+            if deferredMigrationsPending,
+               deferredMigrationFailure == nil,
+               deferredMigrationHasStorageHeadroom() {
+                do {
+                    try completeDeferredMigrations()
+                    guard checkpointAllowsMaintenance() else { return result() }
+                    refreshAdmissionMeasurementsAndLatch()
+                } catch is CausalGraphStorageAdmissionError {
+                    refreshAdmissionMeasurementsAndLatch()
+                }
+            }
+            guard recoveryMutationHeadroomAdmitted() else { return result() }
+            refreshAdmissionMeasurementsAndLatch()
+            if internalAdmissionReachedRecoveryTarget() {
+                return result()
+            }
+            if pagesReclaimed > 0 {
+                // One quantum of pre-existing freelist pages made physical
+                // progress. Give the next bounded pass first claim on the
+                // remaining freelist before deleting any logical evidence.
+                return result()
+            }
+        }
+
         // A legacy mode-0 database cannot return freelist pages to the
         // filesystem with incremental_vacuum. Checkpointing may itself clear
         // enough WAL/SHM footprint to restore admission, so remeasure after the
@@ -3649,158 +4253,129 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // stop the engine and perform the explicit offline full-VACUUM
         // conversion to INCREMENTAL mode.
         refreshAdmissionMeasurementsAndLatch()
+        let proactivePressure = {
+            guard let footprint = lastFootprintBytes,
+                  let threshold = Self.proactiveRecoveryThresholdBytes(
+                    admissionThresholdBytes: admissionThresholdBytes,
+                    transactionReserveBytes: transactionReserveBytes
+                  ) else {
+                return false
+            }
+            return footprint >= threshold
+        }()
+        let lowWaterDeficit = Self.recoveryDeficitBytes(
+            footprintBytes: lastFootprintBytes,
+            recoveryTargetBytes: resumeBelowBytes
+        )
+        let admissionMeasurementUnavailable =
+            (maxFootprintBytes != nil && lastFootprintBytes == nil)
+            || (freeSpaceFloorBytes != nil && lastFreeSpaceBytes == nil)
         let legacyStoreNeedsOfflineConversion = mode == 0
-            && (footprintAdmissionLatched
-                || storageBlockReason == .lowFreeSpace)
+            && (deferredMigrationsPending
+                || footprintAdmissionLatched
+                || storageBlockReason == .lowFreeSpace
+                || sqliteStorageFailure != nil
+                || admissionMeasurementUnavailable
+                || proactivePressure
+                || (lowWaterDeficit ?? 0) > 0)
         if legacyStoreNeedsOfflineConversion {
             logger.fault("TraceGraph bounded recovery cannot reclaim a pressured auto_vacuum=\(mode) store online; preserving logical evidence until an offline full-VACUUM conversion")
             return result()
         }
 
         if traceBudget > 0 {
-            let expired = try selectTraceIDs(
-                olderThan: retentionCutoff.timeIntervalSince1970,
-                oldestFirst: true,
+            let expired = try selectRecoveryTraceIDs(
+                olderThan: retentionCutoffSeconds,
                 limit: traceBudget
             )
-            if !expired.isEmpty {
+            if !expired.ids.isEmpty {
+                guard recoveryMutationHeadroomAdmitted() else {
+                    return result()
+                }
                 let cascade = try await batchedCascadeDeleteTraces(
-                    ids: expired,
+                    ids: expired.ids,
+                    eligibilityCutoff: retentionCutoffSeconds,
                     maxChildRows: traceChildBudget - traceChildRowsDeleted)
                 tracesDeleted += cascade.tracesDeleted
                 traceChildRowsDeleted += cascade.childRowsDeleted
+                if cascade.tracesDeleted == expired.ids.count {
+                    // Every eligible parent in this bounded selection is gone;
+                    // the next pass may seek directly past it. If even one
+                    // parent remains (usually bounded child fanout), rescan
+                    // this small window until that evidence is fully drained.
+                    recoveryTraceScanAfterRowID = expired.lastRowID
+                }
                 guard checkpointAllowsMaintenance() else { return result() }
             }
+        }
+
+        // Trace parents and their children carry the strongest causal proof.
+        // Give their freed pages a checkpoint/vacuum/reprobe before falling
+        // back to graph substrate, so satisfying the deficit in this phase
+        // cannot also erase eligible edges/entities unnecessarily.
+        if recoveryRequiredAtStart,
+           tracesDeleted > 0 || traceChildRowsDeleted > 0 {
+            guard recoveryMutationHeadroomAdmitted() else { return result() }
+            if mode == 2, vacuumBudget > pagesReclaimed {
+                pagesReclaimed += try await incrementalVacuum(
+                    maxPages: vacuumBudget - pagesReclaimed)
+            }
+            guard checkpointAllowsMaintenance() else { return result() }
+            refreshAdmissionMeasurementsAndLatch()
+            if internalAdmissionReachedRecoveryTarget() {
+                return result()
+            }
+            // Never cross from trace evidence into graph substrate in the same
+            // pressured quantum. Mode 2 may need the next pass's vacuum budget
+            // to expose this phase's physical gain; mode 1 has already shrunk
+            // on commit and still benefits from a fresh admission decision.
+            return result()
         }
 
         if graphBudget > 0 {
+            guard recoveryMutationHeadroomAdmitted() else { return result() }
             edgesDeleted = try await batchedSubstrateDelete(
                 table: "trace_edges",
                 guardSQL: Self.edgeOrphanGuardSQL,
-                cutoff: orphanCutoff.timeIntervalSince1970,
+                cutoff: orphanCutoffSeconds,
                 oldestFirstLimit: graphBudget,
                 batchSize: min(256, graphBudget)
             )
             guard checkpointAllowsMaintenance() else { return result() }
-            entitiesDeleted = try await batchedSubstrateDelete(
-                table: "trace_entities",
-                guardSQL: Self.entityOrphanGuardSQL,
-                cutoff: orphanCutoff.timeIntervalSince1970,
-                oldestFirstLimit: graphBudget,
-                batchSize: min(256, graphBudget)
-            )
-            guard checkpointAllowsMaintenance() else { return result() }
-        }
-
-        // If retention did not bring a latched store below hysteresis, spend
-        // only the remainder of this tick's budgets on oldest unreferenced
-        // data. There is no unbounded while-loop chasing a file-size target.
-        refreshAdmissionMeasurementsAndLatch()
-        var pressureRemains = footprintAdmissionLatched
-            || storageBlockReason == .lowFreeSpace
-        let pressureTraceStartRows = tracesDeleted + traceChildRowsDeleted
-        let pressureTraceStartPages = pagesReclaimed
-        if pressureRemains,
-           mode == 2,
-           vacuumBudget > pagesReclaimed,
-           tracesDeleted < traceBudget {
-            let oldest = try selectTraceIDs(
-                olderThan: nil,
-                oldestFirst: true,
-                limit: traceBudget - tracesDeleted
-            )
-            if !oldest.isEmpty {
-                let cascade = try await batchedCascadeDeleteTraces(
-                    ids: oldest,
-                    maxChildRows: traceChildBudget - traceChildRowsDeleted)
-                tracesDeleted += cascade.tracesDeleted
-                traceChildRowsDeleted += cascade.childRowsDeleted
-                guard checkpointAllowsMaintenance() else { return result() }
-            }
-        }
-        // DELETE moves pages to the freelist but does not reduce either the
-        // physical cap measurement or free-space pressure. Reclaim and
-        // checkpoint the trace work before deciding whether to cross into a
-        // different evidence class. This is bounded by the same per-tick
-        // vacuum budget; mode-0 legacy stores remain fail-closed/pressured.
-        if (tracesDeleted > 0 || traceChildRowsDeleted > 0
-                || edgesDeleted > 0 || entitiesDeleted > 0),
-           vacuumBudget > pagesReclaimed,
-           mode == 2 {
-            guard checkpointAllowsMaintenance() else { return result() }
-            pagesReclaimed += try await incrementalVacuum(
-                maxPages: vacuumBudget - pagesReclaimed)
-            guard checkpointAllowsMaintenance() else { return result() }
-        }
-        // Trace cascade may have released enough space. Re-sample before
-        // deleting a different evidence class; a stale pressure bit used to
-        // over-delete graph rows even after the trace fallback succeeded.
-        refreshAdmissionMeasurementsAndLatch()
-        pressureRemains = footprintAdmissionLatched
-            || storageBlockReason == .lowFreeSpace
-        if pressureRemains,
-           tracesDeleted + traceChildRowsDeleted + edgesDeleted + entitiesDeleted > 0,
-           pagesReclaimed == 0,
-           mode == 2 {
-            // Retention work was logically valid, but it did not release a
-            // physical page. Do not compound it with pressure eviction.
-            return result()
-        }
-        let pressureTraceRowsDeleted = tracesDeleted + traceChildRowsDeleted
-            - pressureTraceStartRows
-        if pressureRemains,
-           pressureTraceRowsDeleted > 0,
-           pagesReclaimed == pressureTraceStartPages {
-            // The arbitrary trace eviction did not free even one physical
-            // page. Do not cross into a second evidence class on the same
-            // no-progress signal; report it and retry only on a later bounded
-            // tick after the store shape has changed.
-            return result()
-        }
-        if pressureRemains,
-           mode == 2,
-           vacuumBudget > pagesReclaimed,
-           graphBudget > 0 {
-            if edgesDeleted < graphBudget {
-                let pressureEdgeStartRows = edgesDeleted
-                let pressureEdgeStartPages = pagesReclaimed
-                edgesDeleted += try await batchedSubstrateDelete(
-                    table: "trace_edges",
-                    guardSQL: Self.edgeOrphanGuardSQL,
-                    cutoff: nil,
-                    oldestFirstLimit: graphBudget - edgesDeleted,
-                    batchSize: min(256, graphBudget - edgesDeleted)
-                )
-                guard checkpointAllowsMaintenance() else { return result() }
-                if edgesDeleted > pressureEdgeStartRows,
-                   vacuumBudget > pagesReclaimed {
+            if recoveryRequiredAtStart, edgesDeleted > 0 {
+                if mode == 2, vacuumBudget > pagesReclaimed {
+                    guard recoveryMutationHeadroomAdmitted() else {
+                        return result()
+                    }
                     pagesReclaimed += try await incrementalVacuum(
                         maxPages: vacuumBudget - pagesReclaimed)
                     guard checkpointAllowsMaintenance() else { return result() }
                 }
-                if edgesDeleted > pressureEdgeStartRows,
-                   pagesReclaimed == pressureEdgeStartPages {
-                    return result()
-                }
+                refreshAdmissionMeasurementsAndLatch()
+                // Edges precede entities because surviving edges protect both
+                // endpoints. Always return after this physical phase; the next
+                // pass may converge or safely decide entity fallback is still
+                // required.
+                return result()
             }
-            refreshAdmissionMeasurementsAndLatch()
-            pressureRemains = footprintAdmissionLatched
-                || storageBlockReason == .lowFreeSpace
-            if pressureRemains,
-               vacuumBudget > pagesReclaimed,
-               entitiesDeleted < graphBudget {
-                entitiesDeleted += try await batchedSubstrateDelete(
-                    table: "trace_entities",
-                    guardSQL: Self.entityOrphanGuardSQL,
-                    cutoff: nil,
-                    oldestFirstLimit: graphBudget - entitiesDeleted,
-                    batchSize: min(256, graphBudget - entitiesDeleted)
-                )
-                guard checkpointAllowsMaintenance() else { return result() }
-            }
+            guard recoveryMutationHeadroomAdmitted() else { return result() }
+            entitiesDeleted = try await batchedSubstrateDelete(
+                table: "trace_entities",
+                guardSQL: Self.entityOrphanGuardSQL,
+                cutoff: orphanCutoffSeconds,
+                oldestFirstLimit: graphBudget,
+                batchSize: min(256, graphBudget)
+            )
+            guard checkpointAllowsMaintenance() else { return result() }
         }
 
+        // Only rows older than the caller's explicit evidence cutoffs are ever
+        // deleted. A pressured store used to spend leftover budget with nil
+        // cutoffs, silently evicting recent traces/substrate. Repeated bounded
+        // passes and caller-controlled tightening now provide convergence
+        // without crossing the one-hour evidence floor.
         guard checkpointAllowsMaintenance() else { return result() }
+        guard recoveryMutationHeadroomAdmitted() else { return result() }
         if vacuumBudget > pagesReclaimed, mode == 2 {
             pagesReclaimed += try await incrementalVacuum(
                 maxPages: vacuumBudget - pagesReclaimed)
@@ -3810,44 +4385,319 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         if deferredMigrationsPending,
            deferredMigrationFailure == nil,
            deferredMigrationHasStorageHeadroom() {
-            try completeDeferredMigrations()
-            // Migration writes must be checkpointed and measured before the
-            // recovery tick can report that normal growth may resume.
-            guard checkpointAllowsMaintenance() else { return result() }
-            refreshAdmissionMeasurementsAndLatch()
+            do {
+                try completeDeferredMigrations()
+                // Migration writes must be checkpointed and measured before
+                // the recovery tick can report that normal growth may resume.
+                guard checkpointAllowsMaintenance() else { return result() }
+                refreshAdmissionMeasurementsAndLatch()
+            } catch is CausalGraphStorageAdmissionError {
+                // Free space and SQLite-family footprint are external state;
+                // they can change between the exact preflight and CREATE
+                // INDEX. Preserve the usable runtime schema and let the
+                // bounded startup loop reclaim/retry at its next pass instead
+                // of converting a retryable refusal into recoveryFailed.
+                refreshAdmissionMeasurementsAndLatch()
+            }
         }
         return result()
     }
 
-    private func selectTraceIDs(
-        olderThan cutoff: Double?,
-        oldestFirst: Bool,
+    /// Drain an inherited blocked store before the daemon starts any event
+    /// producer. Each pass is the same bounded recovery quantum used by the
+    /// periodic lane. A cutoff is repeated until its exact post-pass backlog is
+    /// empty, then tightened through the supplied rungs. The fixed orphan
+    /// cutoff and the final trace rung never cross the one-hour evidence floor.
+    ///
+    /// This method never promises convergence by row progress alone. Success
+    /// requires a fresh admission snapshot proving ordinary writes are no
+    /// longer blocked; every other terminal state is a typed non-convergence.
+    public func recoverStorageBeforeProducers(
+        configuredRetentionHours: Int,
+        cutoffRungs: [Int],
+        now: Date = Date(),
+        maximumPasses: Int = 64
+    ) async -> CausalGraphStartupRecoveryResult {
+        let evidenceFloorHours = 1
+        let configuredHours = max(
+            evidenceFloorHours,
+            min(configuredRetentionHours, 3_650 * 24)
+        )
+        var normalizedRungs = Array(Set(cutoffRungs.compactMap { value in
+            value >= evidenceFloorHours && value < configuredHours ? value : nil
+        })).sorted(by: >)
+        if configuredHours > evidenceFloorHours,
+           !normalizedRungs.contains(evidenceFloorHours) {
+            normalizedRungs.append(evidenceFloorHours)
+        }
+        let passLimit = max(0, min(maximumPasses, 256))
+
+        refreshAdmissionMeasurementsAndLatch()
+        let initialAdmission = makeStorageAdmissionStatus()
+        guard initialAdmission.writableHandle else {
+            return CausalGraphStartupRecoveryResult(
+                disposition: .nonconverged(.writableHandleUnavailable),
+                initiallyBlocked: initialAdmission.blocked,
+                passes: 0,
+                attemptedCutoffHours: [],
+                finalAdmission: initialAdmission,
+                lastRecovery: nil,
+                failureDetail: db == nil
+                    ? "TraceGraph SQLite handle is closed"
+                    : "TraceGraph SQLite handle is read-only"
+            )
+        }
+        let proactivePressure = {
+            guard let footprint = initialAdmission.footprintBytes,
+                  let threshold = initialAdmission.proactiveRecoveryThresholdBytes else {
+                return false
+            }
+            return footprint >= threshold
+        }()
+        guard initialAdmission.blocked || proactivePressure else {
+            do {
+                if initialAdmission.maxFootprintBytes != nil {
+                    try configureMaximumPageCount()
+                }
+            } catch {
+                refreshAdmissionMeasurementsAndLatch()
+                return CausalGraphStartupRecoveryResult(
+                    disposition: .nonconverged(.recoveryFailed),
+                    initiallyBlocked: false,
+                    passes: 0,
+                    attemptedCutoffHours: [],
+                    finalAdmission: makeStorageAdmissionStatus(),
+                    lastRecovery: nil,
+                    failureDetail: "max_page_count verification failed: \(error.localizedDescription)"
+                )
+            }
+            refreshAdmissionMeasurementsAndLatch()
+            let verifiedAdmission = makeStorageAdmissionStatus()
+            let result = CausalGraphStartupRecoveryResult(
+                disposition: .writable,
+                initiallyBlocked: false,
+                passes: 0,
+                attemptedCutoffHours: [],
+                finalAdmission: verifiedAdmission,
+                lastRecovery: nil,
+                failureDetail: nil
+            )
+            guard result.writableBeforeProducers else {
+                return CausalGraphStartupRecoveryResult(
+                    disposition: .nonconverged(.admissionMeasurementUnavailable),
+                    initiallyBlocked: false,
+                    passes: 0,
+                    attemptedCutoffHours: [],
+                    finalAdmission: verifiedAdmission,
+                    lastRecovery: nil,
+                    failureDetail: "fresh proactive-boundary or writable-handle proof was unavailable"
+                )
+            }
+            return result
+        }
+
+        var cutoffHours = configuredHours
+        var attemptedCutoffs: [Int] = []
+        var lastRecovery: CausalGraphStorageRecoveryResult?
+        var consecutivePinnedPasses = 0
+        let pinnedRetryPassLimit = min(8, max(1, passLimit))
+
+        func finish(
+            _ disposition: CausalGraphStartupRecoveryDisposition,
+            admission: CausalGraphStorageAdmissionStatus,
+            detail: String? = nil
+        ) -> CausalGraphStartupRecoveryResult {
+            CausalGraphStartupRecoveryResult(
+                disposition: disposition,
+                initiallyBlocked: initialAdmission.blocked,
+                passes: attemptedCutoffs.count,
+                attemptedCutoffHours: attemptedCutoffs,
+                finalAdmission: admission,
+                lastRecovery: lastRecovery,
+                failureDetail: detail
+            )
+        }
+
+        while attemptedCutoffs.count < passLimit {
+            attemptedCutoffs.append(cutoffHours)
+            let recovery: CausalGraphStorageRecoveryResult
+            do {
+                recovery = try await recoverStorageBudget(
+                    retentionCutoff: now.addingTimeInterval(
+                        -Double(cutoffHours) * 3_600
+                    ),
+                    orphanCutoff: now.addingTimeInterval(-3_600)
+                )
+            } catch {
+                refreshAdmissionMeasurementsAndLatch()
+                return finish(
+                    .nonconverged(.recoveryFailed),
+                    admission: makeStorageAdmissionStatus(),
+                    detail: error.localizedDescription
+                )
+            }
+            lastRecovery = recovery
+            refreshAdmissionMeasurementsAndLatch()
+            let admission = makeStorageAdmissionStatus()
+            if recovery.pinnedReader {
+                consecutivePinnedPasses += 1
+                if consecutivePinnedPasses < pinnedRetryPassLimit,
+                   attemptedCutoffs.count < passLimit {
+                    // A dashboard snapshot can overlap boot for milliseconds.
+                    // No DELETE ran on a pinned pass; give that reader a small,
+                    // bounded grace window instead of crash-looping the daemon.
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                    continue
+                }
+                return finish(
+                    .nonconverged(.pinnedReader),
+                    admission: admission,
+                    detail: "reader-pinned WAL persisted across \(consecutivePinnedPasses) bounded startup attempts"
+                )
+            }
+            consecutivePinnedPasses = 0
+
+            let targetConfigured = admission.resumeBelowBytes != nil
+            let targetSatisfied = !targetConfigured
+                || admission.recoveryDeficitBytes == 0
+            if !admission.blocked && targetSatisfied {
+                do {
+                    if admission.maxFootprintBytes != nil {
+                        // An inherited oversized file initially forces SQLite
+                        // to install max_page_count at its current page count.
+                        // Reissue and verify after reclaim so ordinary growth is
+                        // bounded by the configured ceiling, not that old size.
+                        try configureMaximumPageCount()
+                    }
+                } catch {
+                    refreshAdmissionMeasurementsAndLatch()
+                    return finish(
+                        .nonconverged(.recoveryFailed),
+                        admission: makeStorageAdmissionStatus(),
+                        detail: "max_page_count verification failed: \(error.localizedDescription)"
+                    )
+                }
+                refreshAdmissionMeasurementsAndLatch()
+                let verifiedAdmission = makeStorageAdmissionStatus()
+                let verified = finish(.writable, admission: verifiedAdmission)
+                if verified.writableBeforeProducers {
+                    return verified
+                }
+                return finish(
+                    .nonconverged(.admissionMeasurementUnavailable),
+                    admission: verifiedAdmission,
+                    detail: "fresh low-water, proactive-boundary, or writable-handle proof was unavailable after max_page_count verification"
+                )
+            }
+            let madeProgress = recovery.tracesDeleted > 0
+                || recovery.traceChildRowsDeleted > 0
+                || recovery.edgesDeleted > 0
+                || recovery.entitiesDeleted > 0
+                || recovery.vacuumPagesReclaimed > 0
+                || {
+                    guard let before = recovery.footprintBeforeBytes,
+                          let after = recovery.footprintBytes else {
+                        return false
+                    }
+                    return after < before
+                }()
+            if targetConfigured && admission.recoveryDeficitBytes == nil {
+                return finish(
+                    .nonconverged(.admissionMeasurementUnavailable),
+                    admission: admission,
+                    detail: "the post-pass footprint or recovery target could not be measured"
+                )
+            }
+            let lowFreeSpaceRecovery = admission.reason == .lowFreeSpace
+            if admission.recoveryDeficitBytes == 0 && !lowFreeSpaceRecovery {
+                return finish(
+                    .nonconverged(.admissionRemainsBlocked),
+                    admission: admission,
+                    detail: admission.reason?.rawValue
+                )
+            }
+            if recovery.autoVacuumMode == 0 {
+                return finish(
+                    .nonconverged(.incrementalVacuumUnavailable),
+                    admission: admission,
+                    detail: "auto_vacuum mode 0 cannot return deleted pages online"
+                )
+            }
+
+            if recovery.eligibleBacklogRemaining != false {
+                if !madeProgress {
+                    return finish(
+                        .nonconverged(.noRecoverableProgress),
+                        admission: admission,
+                        detail: recovery.eligibleBacklogRemaining == nil
+                            ? "eligible-backlog measurement failed without physical progress"
+                            : "eligible rows remain but no bounded row or page quantum could advance"
+                    )
+                }
+                continue
+            }
+
+            if let next = normalizedRungs.first(where: { $0 < cutoffHours }) {
+                cutoffHours = next
+                continue
+            }
+            return finish(
+                .nonconverged(.protectedEvidenceFloor),
+                admission: admission,
+                detail: "the one-hour evidence floor is exhausted; recent graph evidence was preserved"
+            )
+        }
+
+        refreshAdmissionMeasurementsAndLatch()
+        return finish(
+            .nonconverged(.boundedPassLimit),
+            admission: makeStorageAdmissionStatus(),
+            detail: "startup recovery exhausted its \(passLimit) bounded passes"
+        )
+    }
+
+    private struct RecoveryTraceSelection {
+        var ids: [String] = []
+        var lastRowID: Int64 = 0
+    }
+
+    private func selectRecoveryTraceIDs(
+        olderThan cutoff: Double,
         limit: Int
-    ) throws -> [String] {
-        guard let db, limit > 0 else { return [] }
-        let predicate = cutoff == nil ? "" : "WHERE updated_at < ?1"
-        let order = oldestFirst ? "ORDER BY updated_at ASC" : ""
-        let bindIndex = cutoff == nil ? 1 : 2
-        let sql = "SELECT id FROM traces \(predicate) \(order) LIMIT ?\(bindIndex)"
+    ) throws -> RecoveryTraceSelection {
+        guard let db, limit > 0 else { return RecoveryTraceSelection() }
+        if recoveryTraceScanCutoff != cutoff {
+            recoveryTraceScanCutoff = cutoff
+            recoveryTraceScanAfterRowID = 0
+        }
+        let sql = """
+        SELECT rowid, id FROM traces
+         WHERE rowid > ?2
+           AND \(Self.traceRecoveryEligibilityPredicateSQL)
+         ORDER BY rowid
+         LIMIT ?3
+        """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
-        if let cutoff { sqlite3_bind_double(stmt, 1, cutoff) }
-        sqlite3_bind_int64(stmt, Int32(bindIndex), Int64(limit))
-        var ids: [String] = []
+        sqlite3_bind_double(stmt, 1, cutoff)
+        sqlite3_bind_int64(stmt, 2, recoveryTraceScanAfterRowID)
+        sqlite3_bind_int64(stmt, 3, Int64(limit))
+        var selection = RecoveryTraceSelection()
         while true {
             let rc = sqlite3_step(stmt)
-            if rc == SQLITE_DONE { return ids }
+            if rc == SQLITE_DONE { return selection }
             guard rc == SQLITE_ROW else {
                 // Never treat FULL/IOERR/corruption as a short result set and
                 // then delete the partial prefix selected before the fault.
                 try throwSQLiteFailure(
                     rc: rc, db: db, context: "select trace IDs for recovery")
             }
-            if let raw = sqlite3_column_text(stmt, 0) {
-                ids.append(String(cString: raw))
+            if let raw = sqlite3_column_text(stmt, 1) {
+                selection.ids.append(String(cString: raw))
+                selection.lastRowID = sqlite3_column_int64(stmt, 0)
             }
         }
     }
@@ -3909,11 +4759,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let byteExpressions = child.byteColumns.map {
             "COALESCE(octet_length(\($0)), 0)"
         }.joined(separator: ", ")
+        let payloadExpression = child.byteColumns.map {
+            "COALESCE(octet_length(\($0)), 0)"
+        }.joined(separator: " + ")
+        let transactionBudget = max(
+            0, transactionReserveBytes ?? Self.defaultMinimumTransactionReserve)
+        let initialEstimate = max(
+            Self.mutationBaseBytes, initialEstimatedUpperBoundBytes)
+        let fixedRowCharge = saturatingAdd(
+            Self.mutationBytesPerRow, 128 * 8)
+        guard transactionBudget > initialEstimate,
+              transactionBudget - initialEstimate > fixedRowCharge else {
+            return TraceCascadeSelection(
+                estimatedUpperBoundBytes: initialEstimate,
+                oversizedFirstRowBytes: Int64.max
+            )
+        }
+        let maxSinglePayloadBytes =
+            (transactionBudget - initialEstimate - fixedRowCharge) / 8
         let sql = """
         SELECT rowid, \(byteExpressions)
           FROM \(child.name)
          WHERE \(matchColumn) IN (\(placeholders))
                \(additionalPredicate)
+           AND (\(payloadExpression)) <= ?
          ORDER BY rowid
          LIMIT \(maxRows)
         """
@@ -3925,12 +4794,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         for (idx, id) in traceIDs.enumerated() {
             sqlite3_bind_text(stmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
         }
+        sqlite3_bind_int64(
+            stmt, Int32(traceIDs.count + 1), maxSinglePayloadBytes)
 
-        let transactionBudget = max(
-            0, transactionReserveBytes ?? Self.defaultMinimumTransactionReserve)
         var selection = TraceCascadeSelection(
-            estimatedUpperBoundBytes: max(
-                Self.mutationBaseBytes, initialEstimatedUpperBoundBytes))
+            estimatedUpperBoundBytes: initialEstimate)
         while true {
             let rc = sqlite3_step(stmt)
             if rc == SQLITE_DONE { break }
@@ -3971,6 +4839,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// fanout budget, so one timer tick cannot loop forever on that trace.
     private func batchedCascadeDeleteTraces(
         ids: [String],
+        eligibilityCutoff: Double? = nil,
         maxChildRows: Int = .max
     ) async throws -> TraceCascadeProgress {
         guard !ids.isEmpty else { return TraceCascadeProgress() }
@@ -3983,8 +4852,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             let batch = Array(ids[start..<end])
             while true {
                 guard checkpointAllowsMaintenance() else { break batchLoop }
+                guard recoveryMutationHeadroomAdmitted() else {
+                    break batchLoop
+                }
                 let progress = try cascadeDeleteTraceBatch(
-                    ids: batch, maxChildRows: remainingChildBudget)
+                    ids: batch,
+                    eligibilityCutoff: eligibilityCutoff,
+                    maxChildRows: remainingChildBudget)
                 total.tracesDeleted += progress.tracesDeleted
                 total.childRowsDeleted += progress.childRowsDeleted
                 total.remainingTraces = progress.remainingTraces
@@ -3994,10 +4868,18 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 // No rows changed means a constraint or an exhausted fanout
                 // budget prevented forward progress. Never spin indefinitely.
                 if progress.tracesDeleted == 0 && progress.childRowsDeleted == 0 {
-                    break batchLoop
+                    // Preserve an oversized/stuck batch for offline repair,
+                    // but do not let it starve later rowid-selected batches.
+                    break
                 }
                 if remainingChildBudget == 0 { break batchLoop }
                 guard checkpointAllowsMaintenance() else { break batchLoop }
+                guard recoveryMutationHeadroomAdmitted() else {
+                    break batchLoop
+                }
+                if let cascadeYieldHook {
+                    await cascadeYieldHook()
+                }
                 await Task.yield()
             }
         }
@@ -4009,12 +4891,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// traces are removed only once all four child tables are empty.
     private func cascadeDeleteTraceBatch(
         ids: [String],
+        eligibilityCutoff: Double?,
         maxChildRows: Int
     ) throws -> TraceCascadeProgress {
         guard let db, !ids.isEmpty else { return TraceCascadeProgress() }
         try execTransaction(.begin, db: db, immediate: true)
         do {
-            let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+            // The actor yields between bounded quanta. A trace selected as old
+            // can gain a recent child while this recovery task is suspended.
+            // Revalidate under the same immediate transaction as every DELETE
+            // so no newly protected evidence can be removed from a stale ID
+            // list. There is deliberately no await until after COMMIT.
+            let eligibleIDs = try revalidatedCascadeTraceIDs(
+                db: db, ids: ids, olderThan: eligibilityCutoff)
+            guard !eligibleIDs.isEmpty else {
+                let remainingTraces = try countExistingTraces(db: db, ids: ids)
+                try execTransaction(.commit, db: db)
+                return TraceCascadeProgress(remainingTraces: remainingTraces)
+            }
             var childRowsDeleted = 0
             var transactionEstimatedUpperBoundBytes = Self.mutationBaseBytes
             let childTables: [TraceCascadeChildTable] = [
@@ -4054,7 +4948,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     let selection = try boundedCascadeSelection(
                         db: db,
                         child: child,
-                        traceIDs: ids,
+                        traceIDs: eligibleIDs,
                         maxRows: min(child.rowLimit, maxChildRows)
                     )
                     if let oversized = selection.oversizedFirstRowBytes {
@@ -4111,8 +5005,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             let parentSelection = try boundedCascadeSelection(
                 db: db,
                 child: parent,
-                traceIDs: ids,
-                maxRows: min(parent.rowLimit, ids.count),
+                traceIDs: eligibleIDs,
+                maxRows: min(parent.rowLimit, eligibleIDs.count),
                 matchColumn: "id",
                 additionalPredicate: """
                 AND NOT EXISTS (
@@ -4152,22 +5046,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 tracesDeleted = Int(sqlite3_changes(db))
             }
 
-            let remainingSQL = "SELECT COUNT(*) FROM traces WHERE id IN (\(placeholders))"
-            var remainingStmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, remainingSQL, -1, &remainingStmt, nil) == SQLITE_OK else {
-                throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-            }
-            for (idx, id) in ids.enumerated() {
-                sqlite3_bind_text(
-                    remainingStmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
-            }
-            let remainingRC = sqlite3_step(remainingStmt)
-            guard remainingRC == SQLITE_ROW else {
-                sqlite3_finalize(remainingStmt)
-                throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
-            }
-            let remainingTraces = Int(sqlite3_column_int64(remainingStmt, 0))
-            sqlite3_finalize(remainingStmt)
+            let remainingTraces = try countExistingTraces(db: db, ids: ids)
 
             try execTransaction(.commit, db: db)
             return TraceCascadeProgress(
@@ -4178,6 +5057,72 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         } catch {
             try rollbackAndRethrow(error, db: db)
         }
+    }
+
+    /// Filter a stale cascade candidate list against the exact retention
+    /// predicate while holding the immediate write transaction. A nil cutoff
+    /// preserves explicit operator deletions that are not retention based.
+    private func revalidatedCascadeTraceIDs(
+        db: OpaquePointer,
+        ids: [String],
+        olderThan cutoff: Double?
+    ) throws -> [String] {
+        guard let cutoff else { return ids }
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.indices.map { "?\($0 + 2)" }
+            .joined(separator: ", ")
+        let sql = """
+        SELECT id FROM traces
+         WHERE id IN (\(placeholders))
+           AND \(Self.traceRecoveryEligibilityPredicateSQL)
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(
+                String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, cutoff)
+        for (idx, id) in ids.enumerated() {
+            sqlite3_bind_text(
+                stmt, Int32(idx + 2), id, -1, SQLITE_TRANSIENT)
+        }
+        var eligible: [String] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return eligible }
+            guard rc == SQLITE_ROW else {
+                try throwSQLiteFailure(
+                    rc: rc, db: db,
+                    context: "revalidate trace cascade eligibility")
+            }
+            if let raw = sqlite3_column_text(stmt, 0) {
+                eligible.append(String(cString: raw))
+            }
+        }
+    }
+
+    private func countExistingTraces(
+        db: OpaquePointer,
+        ids: [String]
+    ) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = "SELECT COUNT(*) FROM traces WHERE id IN (\(placeholders))"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(
+                String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        for (idx, id) in ids.enumerated() {
+            sqlite3_bind_text(stmt, Int32(idx + 1), id, -1, SQLITE_TRANSIENT)
+        }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw CausalGraphStoreError.stepFailed(
+                String(cString: sqlite3_errmsg(db)))
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     public func hashChainLength(for traceId: String) async throws -> Int {
@@ -4246,6 +5191,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             sqlite3_bind_text(stmt, 5, member.layer, -1, SQLITE_TRANSIENT)
             sqlite3_bind_double(stmt, 6, member.addedAt.timeIntervalSince1970)
         }
+    }
+
+    /// Timed child evidence extends the parent trace's effective retention
+    /// activity. Call only inside the same transaction as the child write so a
+    /// crash can never expose a recent child behind a stale parent timestamp.
+    private func advanceTraceUpdatedAt(
+        traceId: String,
+        through activity: Date,
+        db: OpaquePointer
+    ) throws {
+        try execBound(
+            db: db,
+            sql: "UPDATE traces SET updated_at = MAX(updated_at, ?1) WHERE id = ?2",
+            bindings: { stmt in
+                sqlite3_bind_double(stmt, 1, activity.timeIntervalSince1970)
+                sqlite3_bind_text(stmt, 2, traceId, -1, SQLITE_TRANSIENT)
+            }
+        )
     }
 
     private func fetchTraceRow(id: String, db: OpaquePointer) throws -> Trace? {

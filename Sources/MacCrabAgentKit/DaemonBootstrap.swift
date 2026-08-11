@@ -13,6 +13,17 @@
 import Foundation
 import MacCrabCore
 
+public enum DaemonBootstrapError: Error, LocalizedError, Sendable, Equatable {
+    case preIngestionStorageNotReady(component: String, reason: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .preIngestionStorageNotReady(let component, let reason):
+            return "\(component) storage was not writable before ingestion: \(reason)"
+        }
+    }
+}
+
 /// Opaque handle returned by `DaemonBootstrap.prepare`. Callers hold
 /// it for the lifetime of the daemon so ARC doesn't reclaim the
 /// dispatch-based signal and timer sources, and so the supervisor stays
@@ -23,9 +34,49 @@ public struct DaemonHandles {
     let signalHandles: SignalHandlers.Handles
     let timerHandles: DaemonTimers.Handles
     let supervisor: MonitorSupervisor
+    /// Proof retained across the first event epoch that TraceGraph ordinary
+    /// admission had durable headroom before any producer was started.
+    let traceGraphStartupRecovery: CausalGraphStartupRecoveryResult
 }
 
 public enum DaemonBootstrap {
+
+    /// One fail-closed boundary shared by every pre-ingestion storage lane.
+    /// Overwrite whatever partial boot marker DaemonSetup has published before
+    /// throwing; otherwise the dashboard can report stale construction progress
+    /// while no clean event epoch was ever admitted.
+    static func failPreIngestionStorage(
+        supportDir: String,
+        startedAt: Date,
+        component: String,
+        reason: String
+    ) throws -> Never {
+        logger.fault("Pre-ingestion storage readiness failed for \(component, privacy: .public): \(reason, privacy: .public). No ingestion producer was started.")
+        DaemonSetup.writeBootPhase(
+            supportDir: supportDir,
+            phase: "storage_not_ready",
+            startedAt: startedAt
+        )
+        throw DaemonBootstrapError.preIngestionStorageNotReady(
+            component: component,
+            reason: reason
+        )
+    }
+
+    static func failPreIngestionStorage(
+        state: DaemonState,
+        component: String,
+        reason: String
+    ) throws -> Never {
+        try failPreIngestionStorage(
+            supportDir: state.supportDir,
+            startedAt: Date(
+                timeIntervalSince1970: DaemonProcessIdentity.current.startedAtUnix
+            ),
+            component: component,
+            reason: reason
+        )
+    }
 
     /// Run the full daemon boot sequence (component wiring + monitor
     /// tasks + timers) and return handles the caller should keep alive.
@@ -35,14 +86,60 @@ public enum DaemonBootstrap {
     ///   system-extension entry point suppresses it since sysextd
     ///   captures the process stdout into log archives where the banner
     ///   is noise rather than signal.
-    public static func prepare(printBanner: Bool = true) async -> DaemonHandles {
+    public static func prepare(printBanner: Bool = true) async throws -> DaemonHandles {
         logger.info("MacCrab daemon initialising")
 
-        let state = await DaemonSetup.initialize()
+        let state = try await DaemonSetup.initialize()
 
-        // Start the bounded recovery lane before any monitor/event consumer can
-        // mutate sequence state. DaemonSetup has already loaded the complete
-        // sequence corpus and attempted its fingerprint-bound restore.
+        // DaemonSetup recovered and normally reprobed EventStore, AlertStore,
+        // and TraceGraph immediately after opening each actor, before it
+        // constructed or started any collector-local producer. Doing that work
+        // here was too late: Unified Log/native ES constructors and several
+        // explicit `.start()` calls can fill their own bounded streams before
+        // DaemonSetup returns. The retained graph proof is guarded below; the
+        // event/alert setup guards throw before a DaemonState can be returned.
+
+        // DaemonSetup drained TraceGraph immediately after opening its actor,
+        // before it activated any collector-local producer. Retain and guard
+        // that proof here at the outer bootstrap boundary as well: the first
+        // qualifying event epoch cannot start on an unproven graph store.
+        let traceGraphStartupRecovery = state.causalStoreStartupRecovery
+        guard traceGraphStartupRecovery.writableBeforeProducers else {
+            let admission = traceGraphStartupRecovery.finalAdmission
+            let disposition: String
+            switch traceGraphStartupRecovery.disposition {
+            case .writable:
+                disposition = "inconsistent writable result"
+            case .nonconverged(let reason):
+                disposition = reason.rawValue
+            }
+            let detail = [
+                "result=\(disposition)",
+                "passes=\(traceGraphStartupRecovery.passes)",
+                "cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)",
+                "block=\(admission?.reason?.rawValue ?? "unavailable")",
+                "footprint=\(admission?.footprintBytes ?? -1)",
+                "target=\(admission?.resumeBelowBytes ?? -1)",
+                "detail=\(traceGraphStartupRecovery.failureDetail ?? "none")",
+                "one-hour evidence floor preserved",
+            ].joined(separator: ", ")
+            try Self.failPreIngestionStorage(
+                state: state,
+                component: "TraceGraph",
+                reason: detail
+            )
+        }
+        if traceGraphStartupRecovery.normalWriteAdmissionRestored {
+            logger.notice("TraceGraph startup recovery restored normal writable admission before producers after \(traceGraphStartupRecovery.passes) bounded pass(es); cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)")
+        } else if traceGraphStartupRecovery.passes > 0 {
+            logger.notice("TraceGraph startup recovery established durable pre-producer headroom in \(traceGraphStartupRecovery.passes) bounded pass(es); cutoffs=\(traceGraphStartupRecovery.attemptedCutoffHours)")
+        } else {
+            logger.info("TraceGraph startup admission confirmed below its proactive boundary before producers")
+        }
+
+        // Start the bounded recovery lane only after the retained storage proof
+        // has passed. Even non-ingestion lifecycle tasks must not outlive a
+        // storage_not_ready failure from this outer bootstrap boundary.
         await state.sequenceCheckpointCoordinator.startPeriodicCheckpointing(
             engine: state.sequenceEngine
         )
@@ -93,7 +190,8 @@ public enum DaemonBootstrap {
             state: state,
             signalHandles: signalHandles,
             timerHandles: timerHandles,
-            supervisor: supervisor
+            supervisor: supervisor,
+            traceGraphStartupRecovery: traceGraphStartupRecovery
         )
     }
 
@@ -158,7 +256,7 @@ public enum DaemonBootstrap {
     /// The full bootstrap + run. Most callers want this; the split
     /// version (prepare + runEventLoop) exists for the sysext target,
     /// which starts an XPC listener between the two steps (Phase 3).
-    public static func runForever(printBanner: Bool = true) async {
+    public static func runForever(printBanner: Bool = true) async throws {
         // v1.7.6: write the startup marker as the first action — before
         // storage init, before any actor wiring. Pure synchronous file
         // write. The dashboard reads `sysext_started.json` mtime to
@@ -171,7 +269,7 @@ public enum DaemonBootstrap {
             supportDir: "/Library/Application Support/MacCrab",
             version: MacCrabVersion.current
         )
-        let handles = await prepare(printBanner: printBanner)
+        let handles = try await prepare(printBanner: printBanner)
         // Keep the handles alive for the lifetime of the event loop.
         // Swift ARC otherwise reclaims the dispatch sources.
         defer {

@@ -33,4 +33,4 @@ import MacCrabAgentKit
 // autoreleased objects (NSDictionary/NSError/_NSJSONReader/NSConcreteData)
 // that previously accumulated in long-running async Tasks — fixed a
 // 1+ GB/hour heap growth observed in the field on v1.7.6.
-await DaemonBootstrap.runForever(printBanner: false)
+try await DaemonBootstrap.runForever(printBanner: false)

@@ -256,6 +256,7 @@ enum SensorDegradationEvaluator {
 struct EventsSizeCapBoundary: Sendable, Equatable {
     let nominalCapBytes: Int64
     let hardAdmissionBoundaryBytes: Int64
+    let fileLaneAdmissionBoundaryBytes: Int64
     let proactiveSweepBoundaryBytes: Int64
     let targetBytes: Int64
 
@@ -269,12 +270,26 @@ struct EventsSizeCapBoundary: Sendable, Equatable {
         )
         let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
         let hardBoundary = max(0, cap - reserve)
-        let proactiveBoundary = max(0, hardBoundary - reserve)
+        let fileLaneBoundary = max(
+            0,
+            hardBoundary - EventStore.priorityLaneReserveBytes(
+                maxFootprintBytes: cap
+            )
+        )
+        // Maintenance must arm before either full-reserve production lane can
+        // shed. Up to 320 MiB the transaction reserve is the tighter second
+        // margin; above it, the proportional priority-only reserve makes the
+        // file lane the tighter boundary.
+        let proactiveBoundary = min(
+            max(0, hardBoundary - reserve),
+            fileLaneBoundary
+        )
         // Overflow-safe exact 4/5 calculation (the historical 80% target).
         let eightyPercent = (cap / 5) * 4 + ((cap % 5) * 4) / 5
 
         nominalCapBytes = cap
         hardAdmissionBoundaryBytes = hardBoundary
+        fileLaneAdmissionBoundaryBytes = fileLaneBoundary
         proactiveSweepBoundaryBytes = proactiveBoundary
         targetBytes = min(eightyPercent, proactiveBoundary)
     }
@@ -284,6 +299,255 @@ struct EventsSizeCapBoundary: Sendable, Equatable {
     func requiresMaintenance(footprintBytes: Int64) -> Bool {
         footprintBytes > proactiveSweepBoundaryBytes
     }
+
+    /// Startup must publish a converged retention-health snapshot, not merely
+    /// a currently writable store. The interval `(target, proactive]` is safe
+    /// for an ordinary write but would otherwise start the first epoch with a
+    /// sticky `degraded_budget_unmet` heartbeat that periodic maintenance will
+    /// not revisit until later growth crosses the proactive boundary.
+    func requiresStartupConvergence(footprintBytes: Int64) -> Bool {
+        footprintBytes > targetBytes
+    }
+}
+
+/// Exact alerts.db family boundaries derived from the same absolute cap and
+/// transaction reserve as `AlertStore` admission.
+///
+/// Alert/evidence DBSTAT ownership budgets remain independent maxima, but they
+/// cannot stand in for physical-family recovery: SQLite refuses an ordinary
+/// write once `footprint + reserve > cap`, even when each owner is below its
+/// sub-cap. Maintenance therefore starts at that hard admission boundary and
+/// aims one more reserve below it so the first recovered write does not
+/// immediately re-latch the store.
+struct AlertsSizeCapBoundary: Sendable, Equatable {
+    let nominalCapBytes: Int64
+    let transactionReserveBytes: Int64
+    let hardAdmissionBoundaryBytes: Int64
+    let recoveryTargetBytes: Int64
+
+    init(
+        nominalCapBytes: Int64,
+        transactionReserveBytes: Int64 = 8 * SQLitePersistentStorePolicy.bytesPerMiB
+    ) {
+        let cap = max(0, nominalCapBytes)
+        let reserve = max(0, transactionReserveBytes)
+        let hardBoundary = max(0, cap - reserve)
+
+        self.nominalCapBytes = cap
+        self.transactionReserveBytes = reserve
+        hardAdmissionBoundaryBytes = hardBoundary
+        recoveryTargetBytes = max(0, hardBoundary - reserve)
+    }
+
+    /// Admission permits equality (`footprint + reserve == cap`).
+    func requiresMaintenance(footprintBytes: Int64) -> Bool {
+        footprintBytes > hardAdmissionBoundaryBytes
+    }
+
+    /// Setup requires one complete transaction of durable headroom beyond the
+    /// ordinary write boundary. Periodic maintenance retains its historical
+    /// hard-boundary trigger; only the pre-ingestion path forces this target.
+    func requiresStartupConvergence(footprintBytes: Int64) -> Bool {
+        footprintBytes > recoveryTargetBytes
+    }
+}
+
+let preIngestionStorageRecoveryMaximumPasses = 6
+let preIngestionStoragePinnedRetryPasses = 3
+let preIngestionStoragePinnedRetryDelayNanoseconds: UInt64 = 250_000_000
+
+/// Setup distinguishes a real maintenance pass from a checkpoint preflight
+/// that found a transient reader pin. Only the latter may retry without a
+/// smaller footprint: no row deletion has started, so the grace cannot repeat
+/// destructive work against an unreachable protected-history floor.
+enum PreIngestionStorageMaintenanceResult: Sendable, Equatable {
+    case ran
+    case transientlyPinned
+    case didNotRun
+}
+
+/// Auditable result from the bounded maintenance -> ordinary-admission loop
+/// used before collector construction. A `.ran` maintenance outcome means
+/// only that the helper ran; it is never treated as proof of convergence.
+struct PreIngestionStorageRecoveryResult: Sendable, Equatable {
+    let component: String
+    let writableBeforeProducers: Bool
+    let passes: Int
+    let lastFootprintBytes: Int64?
+    let lastProbeError: String?
+    let reason: String
+}
+
+struct EventStoreActivationProof: Sendable, Equatable {
+    let footprintBytes: Int64
+    let priorityAdmission: SQLitePersistentStoreAdmissionSnapshot
+    let fileAdmission: SQLitePersistentStoreAdmissionSnapshot
+}
+
+struct AlertStoreActivationProof: Sendable, Equatable {
+    let footprintBytes: Int64
+    let admission: SQLitePersistentStoreAdmissionSnapshot
+}
+
+private enum PreIngestionStorageRecoveryError: LocalizedError {
+    case admissionPolicyMismatch(
+        component: String,
+        expectedCapBytes: Int64,
+        actualCapBytes: Int64?,
+        expectedReserveBytes: Int64,
+        actualReserveBytes: Int64?
+    )
+    case startupTargetNotReached(
+        component: String,
+        footprintBytes: Int64,
+        targetBytes: Int64
+    )
+    case activationBoundaryExceeded(
+        component: String,
+        footprintBytes: Int64,
+        boundaryBytes: Int64
+    )
+
+    var errorDescription: String? {
+        switch self {
+        case let .admissionPolicyMismatch(
+            component,
+            expectedCap,
+            actualCap,
+            expectedReserve,
+            actualReserve
+        ):
+            return "\(component) ordinary admission used cap=\(actualCap ?? -1), reserve=\(actualReserve ?? -1); expected cap=\(expectedCap), reserve=\(expectedReserve)"
+        case let .startupTargetNotReached(component, footprint, target):
+            return "\(component) ordinary admission passed at \(footprint) bytes, but startup retention target is \(target) bytes"
+        case let .activationBoundaryExceeded(
+            component,
+            footprint,
+            boundary
+        ):
+            return "\(component) activation footprint \(footprint) bytes exceeded ordinary admission boundary \(boundary) bytes"
+        }
+    }
+}
+
+/// Run a finite number of maintenance passes, stopping immediately when the
+/// helper cannot run, an exact family measurement fails, or a failed normal
+/// reprobe follows a real maintenance pass with no physical progress. A
+/// checkpoint-only reader-pin outcome gets a short no-delete grace; all other
+/// no-progress outcomes stop before another full-file rewrite.
+func runBoundedPreIngestionStorageRecovery(
+    component: String,
+    maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses,
+    maximumPinnedRetries: Int = preIngestionStoragePinnedRetryPasses,
+    pinnedRetryDelayNanoseconds: UInt64 =
+        preIngestionStoragePinnedRetryDelayNanoseconds,
+    measureFootprint: @Sendable () async throws -> Int64,
+    maintenance: @Sendable () async
+        -> PreIngestionStorageMaintenanceResult,
+    reprobeOrdinaryAdmission: @Sendable () async throws -> Void
+) async -> PreIngestionStorageRecoveryResult {
+    let passLimit = max(1, maximumPasses)
+    let pinnedRetryLimit = max(1, min(passLimit, maximumPinnedRetries))
+    var lastFootprint: Int64?
+    var lastProbeError: String?
+    var pinnedRetries = 0
+
+    for pass in 1...passLimit {
+        let before: Int64
+        do {
+            before = try await measureFootprint()
+            lastFootprint = before
+        } catch {
+            return PreIngestionStorageRecoveryResult(
+                component: component,
+                writableBeforeProducers: false,
+                passes: pass - 1,
+                lastFootprintBytes: lastFootprint,
+                lastProbeError: lastProbeError,
+                reason: "exact family measurement before pass \(pass) failed: \(error.localizedDescription)"
+            )
+        }
+
+        let maintenanceResult = await maintenance()
+
+        let after: Int64
+        do {
+            after = try await measureFootprint()
+            lastFootprint = after
+        } catch {
+            return PreIngestionStorageRecoveryResult(
+                component: component,
+                writableBeforeProducers: false,
+                passes: pass,
+                lastFootprintBytes: before,
+                lastProbeError: lastProbeError,
+                reason: "exact family measurement after pass \(pass) failed: \(error.localizedDescription)"
+            )
+        }
+
+        do {
+            try await reprobeOrdinaryAdmission()
+            return PreIngestionStorageRecoveryResult(
+                component: component,
+                writableBeforeProducers: true,
+                passes: pass,
+                lastFootprintBytes: after,
+                lastProbeError: nil,
+                reason: "ordinary write admission reprobe succeeded"
+            )
+        } catch {
+            lastProbeError = error.localizedDescription
+        }
+
+        switch maintenanceResult {
+        case .didNotRun:
+            return PreIngestionStorageRecoveryResult(
+                component: component,
+                writableBeforeProducers: false,
+                passes: pass,
+                lastFootprintBytes: after,
+                lastProbeError: lastProbeError,
+                reason: "maintenance helper did not run on pass \(pass); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+            )
+        case .ran:
+            guard after < before else {
+                return PreIngestionStorageRecoveryResult(
+                    component: component,
+                    writableBeforeProducers: false,
+                    passes: pass,
+                    lastFootprintBytes: after,
+                    lastProbeError: lastProbeError,
+                    reason: "no physical family progress on pass \(pass) (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+                )
+            }
+        case .transientlyPinned:
+            pinnedRetries += 1
+            guard pinnedRetries < pinnedRetryLimit else {
+                return PreIngestionStorageRecoveryResult(
+                    component: component,
+                    writableBeforeProducers: false,
+                    passes: pass,
+                    lastFootprintBytes: after,
+                    lastProbeError: lastProbeError,
+                    reason: "reader-pinned checkpoint did not clear after \(pinnedRetries) bounded no-delete retries (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+                )
+            }
+            if pinnedRetryDelayNanoseconds > 0 {
+                try? await Task.sleep(
+                    nanoseconds: pinnedRetryDelayNanoseconds
+                )
+            }
+        }
+    }
+
+    return PreIngestionStorageRecoveryResult(
+        component: component,
+        writableBeforeProducers: false,
+        passes: passLimit,
+        lastFootprintBytes: lastFootprint,
+        lastProbeError: lastProbeError,
+        reason: "exhausted \(passLimit) bounded maintenance passes; ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+    )
 }
 
 /// Raw-event history that byte-cap maintenance may not delete. Fifteen minutes
@@ -731,13 +995,112 @@ final class TraceStoreRecoveryCadenceGate: @unchecked Sendable {
     }
 }
 
+/// TraceGraph recovery is one bounded store pass per admitted timer tick. The
+/// gate keeps pressure/proactive drains at a short cadence, holds the current
+/// evidence cutoff while eligible backlog remains, and advances only after the
+/// store proves that rung is exhausted. Row progress alone is never convergence.
+final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
+    static let initialDelaySeconds: TimeInterval = 30
+    static let pressureIntervalSeconds: TimeInterval = 30
+    static let healthyIntervalSeconds: TimeInterval = 300
+
+    enum Outcome: Equatable {
+        case converged
+        case draining
+        case advanced(toHours: Int)
+        case evidenceFloorExhausted
+        case waitingAtEvidenceFloor
+    }
+
+    private let lock = NSLock()
+    private var lastRunAt: Date?
+    private var activeCutoffHours: Int?
+    private var drainPending = false
+    private var evidenceFloorExhausted = false
+
+    func cutoffHoursIfShouldRun(
+        blocked: Bool,
+        footprintBytes: Int64?,
+        proactiveThresholdBytes: Int64?,
+        configuredRetentionHours: Int,
+        now: Date = Date()
+    ) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        let proactive = {
+            guard let footprintBytes, let proactiveThresholdBytes else { return false }
+            return footprintBytes >= proactiveThresholdBytes
+        }()
+        let pressure = (blocked || proactive || drainPending)
+            && !evidenceFloorExhausted
+        let interval = pressure
+            ? Self.pressureIntervalSeconds
+            : Self.healthyIntervalSeconds
+        if let lastRunAt {
+            let elapsed = now.timeIntervalSince(lastRunAt)
+            guard elapsed < 0 || elapsed >= interval else { return nil }
+        }
+        lastRunAt = now
+        return activeCutoffHours ?? max(1, configuredRetentionHours)
+    }
+
+    func recordRecoveryOutcome(
+        _ result: CausalGraphStorageRecoveryResult,
+        configuredRetentionHours: Int,
+        cutoffRungs: [Int]
+    ) -> Outcome {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if result.recoveryDeficitBytes == 0 {
+            activeCutoffHours = nil
+            drainPending = result.eligibleBacklogRemaining == true
+            evidenceFloorExhausted = false
+            return drainPending ? .draining : .converged
+        }
+
+        // Without a configured cap there is no byte target, but bounded
+        // retention still drains every pressure tick while old rows remain.
+        if result.recoveryDeficitBytes == nil {
+            drainPending = result.eligibleBacklogRemaining != false
+            if !drainPending {
+                activeCutoffHours = nil
+                evidenceFloorExhausted = false
+                return .converged
+            }
+            return .draining
+        }
+
+        // Unknown or present backlog is proof that this exact cutoff must run
+        // again. This deliberately ignores how many rows/pages the pass moved.
+        if result.pinnedReader || result.eligibleBacklogRemaining != false {
+            drainPending = true
+            evidenceFloorExhausted = false
+            return .draining
+        }
+
+        let current = activeCutoffHours ?? max(1, configuredRetentionHours)
+        if let next = cutoffRungs.first(where: { $0 < current }) {
+            activeCutoffHours = next
+            drainPending = true
+            evidenceFloorExhausted = false
+            return .advanced(toHours: next)
+        }
+
+        let newlyExhausted = !evidenceFloorExhausted
+        drainPending = false
+        evidenceFloorExhausted = true
+        return newlyExhausted ? .evidenceFloorExhausted : .waitingAtEvidenceFloor
+    }
+}
+
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
 enum DaemonTimers {
     /// Progressively tighter retention windows for TraceGraph recovery, used
-    /// ONLY when the configured sweep reclaimed nothing and admission is still
-    /// shed. Ordered coarse→fine and floored at one hour, which is well clear of
+    /// only after the store proves the current cutoff has no eligible backlog
+    /// while a byte deficit remains. Ordered coarse→fine and floored at one hour, which is well clear of
     /// the 5-minute trace materialization window, so a tightened sweep can never
     /// delete the causal context of a trace still being assembled.
     ///
@@ -746,6 +1109,11 @@ enum DaemonTimers {
     /// destruction of the recent graph, which is the evidence most likely to
     /// matter. If the floor is not enough, the condition is reported instead.
     static let tracegraphRecoveryCutoffHours: [Int] = [72, 24, 6, 1]
+    /// Boot may spend several ordinary timer-sized quanta recovering an
+    /// inherited blocked graph, but it remains strictly bounded. At the
+    /// current per-pass limits this can retire at most 16,384 traces and 128k
+    /// orphan rows per table before producers are allowed to start.
+    static let tracegraphStartupRecoveryMaximumPasses = 64
 
     /// How recently sequence eviction must have occurred for continuity to count
     /// as currently degraded. Long enough that a genuinely sustained flush stays
@@ -1434,80 +1802,64 @@ enum DaemonTimers {
         let tracegraphPruneTimer: DispatchSourceTimer?
         if let causalStore = state.causalStore {
             let t = DispatchSource.makeTimerSource(queue: .global())
-            // First sweep at +30 s, then every 5 minutes. rc.1/rc.2 proved an
-            // hourly repair loop cannot govern a store fed by every ES event:
-            // even with trace dedup a fresh DB reached 200 MB in 21 minutes.
-            // The hot-path admission gate now PAUSES writes before the configured
-            // DB+WAL+SHM cap; this timer prunes incrementally below its hysteresis
-            // resume watermark. It is recovery, not the primary safety bound.
-            // tracegraph.db is the per-event-growing "worst offender" and was the
-            // only size-capped store still on a 1h-first / daily cadence — so a
-            // sysext that inherited an over-cap substrate from the previous
-            // session sat at 438 MB+ for a full hour every boot, and on a busy
-            // host drifted back over the 250 MB cap between daily sweeps. Match
-            // the events.db size-cap philosophy. Recovery is deliberately small
-            // and incremental: no online full-file VACUUM rewrite.
-            t.schedule(deadline: .now() + 30, repeating: 300)
+            let recoveryCadence = TraceGraphRecoveryCadenceGate()
+            // Inspect every 30 seconds so a blocked/proactive drain can consume
+            // many bounded quanta before ingest refills the recovered pages.
+            // The cadence gate retains the five-minute healthy sweep and timer
+            // lifecycle label coalescing prevents overlapping actor passes.
+            t.schedule(
+                deadline: .now() + TraceGraphRecoveryCadenceGate.initialDelaySeconds,
+                repeating: TraceGraphRecoveryCadenceGate.pressureIntervalSeconds
+            )
             t.setEventHandler {
                 timerLifecycle.submit(label: "tracegraph-recovery") {
                     let days = max(1, min(state.storage.tracegraphRetentionDays, 3650))
-                    let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
-                    let orphanCutoff = Date().addingTimeInterval(-3600)  // 1h ≫ the 5-min trace window
-                    func reclaimedAnything(_ r: CausalGraphStorageRecoveryResult) -> Bool {
-                        r.tracesDeleted > 0 || r.traceChildRowsDeleted > 0
-                            || r.edgesDeleted > 0 || r.entitiesDeleted > 0
-                            || r.vacuumPagesReclaimed > 0
-                    }
+                    let configuredHours = days * 24
+                    let now = Date()
+                    let before = await causalStore.storageAdmissionStatus()
+                    guard let cutoffHours = recoveryCadence.cutoffHoursIfShouldRun(
+                        blocked: before.blocked,
+                        footprintBytes: before.footprintBytes,
+                        proactiveThresholdBytes: before.proactiveRecoveryThresholdBytes,
+                        configuredRetentionHours: configuredHours,
+                        now: now
+                    ) else { return }
+                    let cutoff = now.addingTimeInterval(-Double(cutoffHours) * 3600)
+                    // Never delete graph substrate or traces newer than this
+                    // one-hour floor; it is well clear of materialization's 5m window.
+                    let orphanCutoff = now.addingTimeInterval(-3600)
                     do {
-                        var result = try await causalStore.recoverStorageBudget(
+                        let result = try await causalStore.recoverStorageBudget(
                             retentionCutoff: cutoff,
                             orphanCutoff: orphanCutoff
                         )
+                        let admission = await causalStore.storageAdmissionStatus()
+                        let outcome = recoveryCadence.recordRecoveryOutcome(
+                            result,
+                            configuredRetentionHours: configuredHours,
+                            cutoffRungs: Self.tracegraphRecoveryCutoffHours
+                        )
+                        let madeProgress = result.tracesDeleted > 0
+                            || result.traceChildRowsDeleted > 0
+                            || result.edgesDeleted > 0
+                            || result.entitiesDeleted > 0
+                            || result.vacuumPagesReclaimed > 0
                         if result.pinnedReader {
                             logger.warning("TraceGraph bounded recovery paused by a reader-pinned WAL; no further delete/vacuum work issued this tick")
-                        } else if reclaimedAnything(result) {
-                            logger.info("TraceGraph bounded recovery: \(result.tracesDeleted) traces + \(result.traceChildRowsDeleted) trace-child rows + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes")
+                        } else if madeProgress {
+                            logger.info("TraceGraph bounded recovery at \(cutoffHours)h: \(result.tracesDeleted) traces + \(result.traceChildRowsDeleted) trace-child rows + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; \(result.vacuumPagesReclaimed) pages reclaimed; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes; target \(result.recoveryTargetBytes ?? -1), deficit \(result.recoveryDeficitBytes ?? -1), eligible backlog=\(String(describing: result.eligibleBacklogRemaining))")
                         }
-                        var admission = await causalStore.storageAdmissionStatus()
-
-                        // v1.21.7: the cutoffs above are the CONFIGURED retention
-                        // (90 days by default) and a 1-hour orphan window. On a
-                        // store that fills in hours rather than months, nothing is
-                        // ever old enough to qualify — so this timer ran every 300s,
-                        // reclaimed exactly zero rows, and the substrate sat pinned
-                        // at its admission threshold shedding every write. Measured
-                        // on an installed rc.7 host: 2,753,096 events shed, footprint
-                        // wedged 86,928 bytes above the threshold with 62 MB of the
-                        // configured cap never used, and not one "bounded recovery:
-                        // N deleted" line in two hours.
-                        //
-                        // Time-based retention alone cannot bound a store whose fill
-                        // rate is set by event volume. When admission is still shed
-                        // after the configured sweep, tighten the window stepwise —
-                        // mirroring `EventRetentionFloor.adaptiveCutoffs` on the
-                        // events path — and stop at a floor rather than deleting the
-                        // recent graph to manufacture convergence.
-                        if admission.blocked, !result.pinnedReader, !reclaimedAnything(result) {
-                            for floorHours in Self.tracegraphRecoveryCutoffHours {
-                                let tightened = Date().addingTimeInterval(-Double(floorHours) * 3600)
-                                guard tightened < cutoff else { continue }
-                                result = try await causalStore.recoverStorageBudget(
-                                    retentionCutoff: tightened,
-                                    orphanCutoff: tightened
-                                )
-                                admission = await causalStore.storageAdmissionStatus()
-                                if reclaimedAnything(result) {
-                                    logger.notice("TraceGraph recovery tightened to \(floorHours)h: \(result.tracesDeleted) traces + \(result.edgesDeleted) edges + \(result.entitiesDeleted) entities deleted; footprint \(result.footprintBeforeBytes ?? -1) -> \(result.footprintBytes ?? -1) bytes; admission blocked=\(admission.blocked)")
-                                }
-                                if !admission.blocked || result.pinnedReader { break }
-                            }
-                            if admission.blocked {
-                                logger.fault("TraceGraph remains storage-shed after tightening retention to the \(Self.tracegraphRecoveryCutoffHours.last ?? 0)-hour floor. The configured tracegraph budget is infeasible at this event rate; recent causal evidence was NOT deleted to manufacture convergence. Graph rules and trace queries are degraded until the cap is raised or ingest falls.")
-                            }
+                        switch outcome {
+                        case .advanced(let nextHours):
+                            logger.notice("TraceGraph recovery still has a \(result.recoveryDeficitBytes ?? -1)-byte deficit after exhausting the \(cutoffHours)h cutoff; the next bounded pass will tighten traces to \(nextHours)h")
+                        case .evidenceFloorExhausted:
+                            logger.fault("TraceGraph remains \(result.recoveryDeficitBytes ?? -1) bytes above its recovery target after exhausting the one-hour evidence floor. Recent causal evidence was NOT deleted. Recovery can resume only as physical-write suppression slows growth and protected rows age past the floor, or when capacity is raised; graph rules and trace queries remain degraded meanwhile.")
+                        case .converged, .draining, .waitingAtEvidenceFloor:
+                            break
                         }
 
-                        if admission.blocked, result.autoVacuumMode != 2 {
-                            logger.warning("TraceGraph remains storage-shed and auto_vacuum mode is \(result.autoVacuumMode), not 2/INCREMENTAL. Stop the engine before performing an offline full-VACUUM conversion; online full VACUUM recovery is intentionally disabled.")
+                        if admission.blocked, result.autoVacuumMode == 0 {
+                            logger.warning("TraceGraph remains storage-shed and auto_vacuum mode is 0/NONE. Stop the engine before performing an offline full-VACUUM conversion; online full VACUUM recovery is intentionally disabled. Mode 1/FULL reclaims on DELETE commit and does not require conversion.")
                         }
                     } catch {
                         logger.warning("TraceGraph bounded recovery failed: \(error.localizedDescription, privacy: .public)")
@@ -1895,113 +2247,25 @@ enum DaemonTimers {
         }
         sizeCapWatchdogTimer.resume()
 
-        // Hourly ownership + family defense for alerts.db. Alert rows and slim
-        // evidence have independent budgets, while SQLite hard admission counts
-        // their exact combined DB+WAL+SHM family ceiling.
+        // Hourly ownership + family defense for alerts.db after the awaited
+        // pre-ingestion bootstrap pass. Alert rows and slim evidence have independent budgets,
+        // while SQLite hard admission counts their exact combined DB+WAL+SHM
+        // family ceiling minus its transaction reserve. The former 30-minute
+        // first-fire delay stranded a shed-only store for twice the forensic
+        // qualification window.
         //
         // Wave 9B (v1.12.6): on a low-disk host the post-prune VACUUM
         // would skip silently. We now run incremental_vacuum first
         // (free, in-place truncate) and only fall through to full
         // VACUUM if the shared floor + 2x-main-file headroom gate passes.
         let alertsSizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
-        alertsSizeCapTimer.schedule(deadline: .now() + 1800, repeating: 3600)
+        // Bootstrap awaits the first pass before starting any producer. The
+        // timer therefore begins one period later instead of racing a duplicate
+        // asynchronous pass against startup.
+        alertsSizeCapTimer.schedule(deadline: .now() + 3600, repeating: 3600)
         alertsSizeCapTimer.setEventHandler {
             timerLifecycle.submit(label: "alerts-size-cap") {
-                let alertsPath = state.supportDir + "/alerts.db"
-                let evidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
-                    maxSizeMiB: state.storage.evidenceMaxSizeMB
-                )
-                let alertCapBytes = SQLitePersistentStorePolicy.capBytes(
-                    maxSizeMiB: state.storage.alertsMaxSizeMB
-                )
-                let familyCapBytes = AlertStore.combinedFamilyCapBytes(
-                    alertsMaxSizeMiB: state.storage.alertsMaxSizeMB,
-                    evidenceMaxSizeMiB: state.storage.evidenceMaxSizeMB
-                )
-                var changed = false
-
-                do {
-                    let pruned = try await state.alertStore
-                        .enforceAlertEvidenceBudget(maxBytes: evidenceCapBytes)
-                    if pruned.perAlert > 0 || pruned.bySize > 0 {
-                        changed = true
-                        logger.warning("Alert evidence cap: pruned \(pruned.perAlert) over per-alert row ceiling and \(pruned.bySize) over the \(state.storage.evidenceMaxSizeMB) MiB evidence ownership budget")
-                    }
-                } catch {
-                    logger.error("Alert evidence cap enforcement failed: \(error.localizedDescription, privacy: .public)")
-                }
-
-                // Enforce the alert-row ownership budget using DBSTAT pages
-                // belonging only to alerts + its indexes (not evidence).
-                if let alertOwned = try? await state.alertStore.alertsAllocatedBytes(),
-                   alertOwned > alertCapBytes {
-                    let total = (try? await state.alertStore.count()) ?? 0
-                    let overFraction = Double(alertOwned - alertCapBytes)
-                        / Double(max(1, alertOwned))
-                    let dropTarget = max(
-                        1,
-                        Int(Double(total) * min(1, overFraction + 0.1))
-                    )
-                    let dropped = (try? await state.alertStore.pruneOldest(
-                        count: dropTarget
-                    )) ?? 0
-                    changed = changed || dropped > 0
-                    logger.warning("Alert-row cap: pruned \(dropped) oldest alerts (owned=\(alertOwned) bytes > \(alertCapBytes), target=\(dropTarget)); evidence cascaded with each parent")
-                }
-
-                // Defense in depth for allocator/page overhead: even when both
-                // table allocations are individually at target, the exact
-                // SQLite family may still be over its combined cap.
-                let beforeFamily = try? measureDatabaseFootprintBytes(
-                    dbPath: alertsPath
-                )
-                if let beforeFamily, beforeFamily > familyCapBytes {
-                    let total = (try? await state.alertStore.count()) ?? 0
-                    let overFraction = Double(beforeFamily - familyCapBytes)
-                        / Double(max(1, beforeFamily))
-                    let dropTarget = max(
-                        1,
-                        Int(Double(total) * min(1, overFraction + 0.1))
-                    )
-                    let dropped = (try? await state.alertStore.pruneOldest(
-                        count: dropTarget
-                    )) ?? 0
-                    changed = changed || dropped > 0
-                    logger.warning("Alerts family cap: pruned \(dropped) oldest alerts (db+wal+shm=\(beforeFamily) bytes > combined \(familyCapBytes), target=\(dropTarget))")
-                }
-
-                guard changed || (beforeFamily ?? 0) > familyCapBytes else {
-                    return
-                }
-
-                // Phase 2a: incremental_vacuum first — free, in-place
-                // truncate of end-of-file freelist pages. No-op if the
-                // DB isn't in INCREMENTAL mode.
-                let postPruneMB = measureDatabaseFootprintMB(dbPath: alertsPath)
-                let reclaimed = (try? await state.alertStore.incrementalVacuum(maxPages: 200_000)) ?? 0
-                let postIncrementalMB = measureDatabaseFootprintMB(dbPath: alertsPath)
-                if reclaimed > 0 {
-                    logger.notice("Alerts size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
-                }
-
-                // Phase 2b: caller-side selection uses the same exact-byte
-                // requirement as the operation-time gate inside AlertStore.
-                let headroom = fullVacuumHeadroom(dbPath: alertsPath)
-                let freeMB = Int((headroom?.freeSpaceBytes ?? 0) / 1_000_000)
-                let needMB = Int((headroom?.requiredFreeBytes ?? Int64.max) / 1_000_000)
-                if headroom?.admitted == true {
-                    do {
-                        try await state.alertStore.vacuum()
-                        let finalMB = measureDatabaseFootprintMB(dbPath: alertsPath)
-                        logger.notice("Alerts size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
-                    } catch {
-                        logger.warning("Alerts size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
-                    }
-                } else if reclaimed == 0 {
-                    logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB) AND incremental_vacuum was no-op. File size unchanged.")
-                } else {
-                    logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB). incremental_vacuum still reclaimed \(reclaimed) pages.")
-                }
+                await enforceAlertsSizeCapNow(state: state)
             }
         }
         alertsSizeCapTimer.resume()
@@ -2427,6 +2691,19 @@ enum DaemonTimers {
                 }
                 if let value = alertsAdmission.maxFootprintBytes {
                     alertEvidenceBudget["alerts_family_admission_cap_bytes"] = value
+                }
+                if let cap = alertsAdmission.maxFootprintBytes,
+                   let reserve = alertsAdmission.transactionReserveBytes {
+                    let boundary = AlertsSizeCapBoundary(
+                        nominalCapBytes: cap,
+                        transactionReserveBytes: reserve
+                    )
+                    alertEvidenceBudget["alerts_family_transaction_reserve_bytes"] =
+                        boundary.transactionReserveBytes
+                    alertEvidenceBudget["alerts_family_admission_boundary_bytes"] =
+                        boundary.hardAdmissionBoundaryBytes
+                    alertEvidenceBudget["alerts_family_recovery_target_bytes"] =
+                        boundary.recoveryTargetBytes
                 }
                 alertEvidenceBudget["alerts_family_blocked"] =
                     alertsAdmission.latchedFailure != nil
@@ -2918,6 +3195,9 @@ enum DaemonTimers {
                 if let value = s.freeSpaceFloorBytes { d["free_space_floor_bytes"] = value }
                 if let value = s.lastRecoveryFootprintBeforeBytes { d["last_recovery_footprint_before_bytes"] = value }
                 if let value = s.lastRecoveryFootprintAfterBytes { d["last_recovery_footprint_after_bytes"] = value }
+                if let value = s.proactiveRecoveryThresholdBytes { d["proactive_recovery_threshold_bytes"] = value }
+                if let value = s.recoveryDeficitBytes { d["recovery_deficit_bytes"] = value }
+                if let value = s.lastRecoveryEligibleBacklogRemaining { d["last_recovery_eligible_backlog_remaining"] = value }
                 if let bridge = state.causalGraphBridge {
                     let w = await bridge.writeTelemetry()
                     d["ingest_events_total"] = Int64(clamping: w.inputEventsTotal)
@@ -2929,6 +3209,8 @@ enum DaemonTimers {
                     d["edge_observations_total"] = Int64(clamping: w.edgeObservationsTotal)
                     d["relevance_suppressed_file_events_total"] = Int64(clamping: w.relevanceSuppressedFileEventsTotal)
                     d["relevance_suppressed_rows_total"] = Int64(clamping: w.relevanceSuppressedRowsTotal)
+                    d["physical_write_suppressed_events_total"] = Int64(clamping: w.physicalWriteSuppressedEventsTotal)
+                    d["physical_write_suppressed_rows_total"] = Int64(clamping: w.physicalWriteSuppressedRowsTotal)
                     d["write_attempts_total"] = Int64(clamping: w.writeAttemptsTotal)
                     d["write_batches_committed_total"] = Int64(clamping: w.writeBatchesCommittedTotal)
                     d["write_batches_failed_total"] = Int64(clamping: w.writeBatchesFailedTotal)
@@ -5813,6 +6095,267 @@ func fullVacuumHeadroom(
     )
 }
 
+// MARK: - Alerts family recovery
+
+/// Enforce the two logical alerts.db ownership budgets and the stricter
+/// physical family boundary used by ordinary write admission.
+///
+/// Returns `true` when a checkpoint or mutation/reclaim pass ran. A false
+/// result means the exact family and both ownership budgets already needed no
+/// work (or the authoritative family could not be measured safely).
+@discardableResult
+func enforceAlertsSizeCap(
+    alertStore: AlertStore,
+    dbPath: String,
+    alertCapBytes: Int64,
+    evidenceCapBytes: Int64,
+    boundary: AlertsSizeCapBoundary,
+    forceConvergenceToTarget: Bool = false
+) async -> Bool {
+    var changed = false
+    var maintenanceRan = false
+
+    do {
+        let pruned = try await alertStore.enforceAlertEvidenceBudget(
+            maxBytes: evidenceCapBytes
+        )
+        if pruned.perAlert > 0 || pruned.bySize > 0 {
+            changed = true
+            logger.warning("Alert evidence cap: pruned \(pruned.perAlert) over per-alert row ceiling and \(pruned.bySize) over the \(evidenceCapBytes)-byte evidence ownership budget")
+        }
+    } catch {
+        logger.error("Alert evidence cap enforcement failed: \(error.localizedDescription, privacy: .public)")
+    }
+
+    // Enforce the alert-row ownership budget using DBSTAT pages belonging only
+    // to alerts + its indexes (not evidence).
+    if let alertOwned = try? await alertStore.alertsAllocatedBytes(),
+       alertOwned > alertCapBytes {
+        let total = (try? await alertStore.count()) ?? 0
+        let overFraction = Double(alertOwned - alertCapBytes)
+            / Double(max(1, alertOwned))
+        let dropTarget = max(
+            1,
+            Int(Double(total) * min(1, overFraction + 0.1))
+        )
+        let dropped = (try? await alertStore.pruneOldest(
+            count: dropTarget
+        )) ?? 0
+        changed = changed || dropped > 0
+        logger.warning("Alert-row cap: pruned \(dropped) oldest alerts (owned=\(alertOwned) bytes > \(alertCapBytes), target=\(dropTarget)); evidence cascaded with each parent")
+    }
+
+    var beforeFamily: Int64
+    do {
+        beforeFamily = try measureDatabaseFootprintBytes(dbPath: dbPath)
+    } catch {
+        logger.fault("Alerts family cap: authoritative DB+WAL+SHM probe failed; refusing family maintenance: \(error.localizedDescription, privacy: .public)")
+        return changed
+    }
+
+    // A WAL-only excursion can clear without sacrificing alert history. Drain
+    // it once before selecting parents, then make the deletion decision from a
+    // fresh exact-family measurement. Failure is non-fatal: deletion and
+    // incremental reclaim remain the bounded recovery route.
+    func requiresFamilyRecovery(_ footprintBytes: Int64) -> Bool {
+        boundary.requiresMaintenance(footprintBytes: footprintBytes)
+            || (forceConvergenceToTarget
+                && boundary.requiresStartupConvergence(
+                    footprintBytes: footprintBytes
+                ))
+    }
+    var familyPressure = requiresFamilyRecovery(beforeFamily)
+    if familyPressure {
+        maintenanceRan = true
+    }
+    if familyPressure, await alertStore.walCheckpointTruncate() {
+        do {
+            beforeFamily = try measureDatabaseFootprintBytes(dbPath: dbPath)
+            familyPressure = requiresFamilyRecovery(beforeFamily)
+        } catch {
+            logger.fault("Alerts family cap: post-checkpoint family probe failed; refusing row deletion: \(error.localizedDescription, privacy: .public)")
+            return true
+        }
+    }
+
+    // Defense in depth for allocator/index/freelist overhead. This must use the
+    // ordinary write boundary (cap - transaction reserve), not the nominal cap:
+    // the interval between those values is already shed-only.
+    if familyPressure {
+        let total = (try? await alertStore.count()) ?? 0
+        let overFraction = Double(
+            max(0, beforeFamily - boundary.recoveryTargetBytes)
+        ) / Double(max(1, beforeFamily))
+        let dropTarget = max(
+            1,
+            Int(Double(total) * min(1, overFraction + 0.1))
+        )
+        let dropped = (try? await alertStore.pruneOldest(
+            count: dropTarget
+        )) ?? 0
+        changed = changed || dropped > 0
+        let triggerBoundary = forceConvergenceToTarget
+            ? boundary.recoveryTargetBytes
+            : boundary.hardAdmissionBoundaryBytes
+        logger.warning("Alerts family admission recovery: pruned \(dropped) oldest alerts (db+wal+shm=\(beforeFamily) bytes > trigger boundary \(triggerBoundary), recovery target \(boundary.recoveryTargetBytes), row target \(dropTarget))")
+    }
+
+    guard changed || familyPressure else { return maintenanceRan }
+
+    let postPruneBytes = (try? measureDatabaseFootprintBytes(
+        dbPath: dbPath
+    )) ?? beforeFamily
+    let reclaimed = (try? await alertStore.incrementalVacuum(
+        maxPages: 200_000
+    )) ?? 0
+    guard let postIncrementalBytes = try? measureDatabaseFootprintBytes(
+        dbPath: dbPath
+    ) else {
+        logger.fault("Alerts size cap: post-incremental family probe failed; refusing full VACUUM")
+        return true
+    }
+    if reclaimed > 0 {
+        logger.notice("Alerts size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneBytes) bytes → \(postIncrementalBytes) bytes")
+    }
+
+    var finalBytes = postIncrementalBytes
+    if familyPressure,
+       postIncrementalBytes > boundary.recoveryTargetBytes {
+        // Caller-side selection uses the same exact-byte requirement as the
+        // operation-time gate inside AlertStore.
+        let headroom = fullVacuumHeadroom(dbPath: dbPath)
+        let freeMB = Int((headroom?.freeSpaceBytes ?? 0) / 1_000_000)
+        let needMB = Int(
+            (headroom?.requiredFreeBytes ?? Int64.max) / 1_000_000
+        )
+        if headroom?.admitted == true {
+            do {
+                try await alertStore.vacuum()
+                finalBytes = (try? measureDatabaseFootprintBytes(
+                    dbPath: dbPath
+                )) ?? finalBytes
+                logger.notice("Alerts size cap: full VACUUM complete — \(postIncrementalBytes) bytes → \(finalBytes) bytes")
+            } catch {
+                logger.warning("Alerts size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
+            }
+        } else if reclaimed == 0 {
+            logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB) AND incremental_vacuum was no-op. File size unchanged.")
+        } else {
+            logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB). incremental_vacuum still reclaimed \(reclaimed) pages.")
+        }
+    }
+
+    if requiresFamilyRecovery(finalBytes) {
+        let requiredBoundary = forceConvergenceToTarget
+            ? boundary.recoveryTargetBytes
+            : boundary.hardAdmissionBoundaryBytes
+        logger.fault("Alerts size cap: recovery left db+wal+shm at \(finalBytes) bytes above the \(requiredBoundary)-byte required boundary; alert persistence remains unready until a later maintenance pass succeeds")
+    } else if familyPressure {
+        logger.notice("Alerts size cap: family recovered \(beforeFamily) bytes → \(finalBytes) bytes (write boundary \(boundary.hardAdmissionBoundaryBytes), target \(boundary.recoveryTargetBytes))")
+    }
+    return true
+}
+
+/// Periodic production entry point. Setup uses the bounded pre-construction
+/// wrapper below; the hourly timer retains this helper's historical `didRun`
+/// meaning. Derive the boundary from the actor's live admission snapshot so a
+/// SIGHUP policy and the maintenance decision cannot disagree about reserve.
+@discardableResult
+func enforceAlertsSizeCapNow(state: DaemonState) async -> Bool {
+    let alertsPath = state.supportDir + "/alerts.db"
+    let evidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
+        maxSizeMiB: state.storage.evidenceMaxSizeMB
+    )
+    let alertCapBytes = SQLitePersistentStorePolicy.capBytes(
+        maxSizeMiB: state.storage.alertsMaxSizeMB
+    )
+    let configuredFamilyCap = AlertStore.combinedFamilyCapBytes(
+        alertsMaxSizeMiB: state.storage.alertsMaxSizeMB,
+        evidenceMaxSizeMiB: state.storage.evidenceMaxSizeMB
+    )
+    let admission = await state.alertStore.storageAdmissionSnapshot()
+    let boundary = AlertsSizeCapBoundary(
+        nominalCapBytes: admission?.maxFootprintBytes
+            ?? configuredFamilyCap,
+        transactionReserveBytes: admission?.transactionReserveBytes
+            ?? 8 * SQLitePersistentStorePolicy.bytesPerMiB
+    )
+    return await enforceAlertsSizeCap(
+        alertStore: state.alertStore,
+        dbPath: alertsPath,
+        alertCapBytes: alertCapBytes,
+        evidenceCapBytes: evidenceCapBytes,
+        boundary: boundary
+    )
+}
+
+/// Setup-time recovery that runs before collector construction. Unlike the
+/// hourly helper, its result means ordinary write readiness, not merely that a
+/// maintenance pass ran.
+func recoverAlertStoreBeforeProducers(
+    alertStore: AlertStore,
+    dbPath: String,
+    alertCapBytes: Int64,
+    evidenceCapBytes: Int64,
+    boundary: AlertsSizeCapBoundary,
+    maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses
+) async -> PreIngestionStorageRecoveryResult {
+    await runBoundedPreIngestionStorageRecovery(
+        component: "AlertStore",
+        maximumPasses: maximumPasses,
+        measureFootprint: {
+            try measureDatabaseFootprintBytes(dbPath: dbPath)
+        },
+        maintenance: {
+            // A GUI/read-only transaction can pin the WAL. Prove drainability
+            // before the enforcer is allowed to prune any parent rows; a
+            // failed preflight gets a short bounded no-delete grace in the
+            // outer loop instead of repeating destructive maintenance.
+            guard await alertStore.walCheckpointTruncate() else {
+                return .transientlyPinned
+            }
+            let ran = await enforceAlertsSizeCap(
+                alertStore: alertStore,
+                dbPath: dbPath,
+                alertCapBytes: alertCapBytes,
+                evidenceCapBytes: evidenceCapBytes,
+                boundary: boundary,
+                forceConvergenceToTarget: true
+            )
+            return ran ? .ran : .didNotRun
+        },
+        reprobeOrdinaryAdmission: {
+            let snapshot = try await alertStore
+                .reprobeStorageAdmissionForWrite()
+            guard snapshot.maxFootprintBytes == boundary.nominalCapBytes,
+                  snapshot.transactionReserveBytes
+                    == boundary.transactionReserveBytes else {
+                throw PreIngestionStorageRecoveryError
+                    .admissionPolicyMismatch(
+                        component: "AlertStore",
+                        expectedCapBytes: boundary.nominalCapBytes,
+                        actualCapBytes: snapshot.maxFootprintBytes,
+                        expectedReserveBytes:
+                            boundary.transactionReserveBytes,
+                        actualReserveBytes:
+                            snapshot.transactionReserveBytes
+                    )
+            }
+            let footprint = try measureDatabaseFootprintBytes(dbPath: dbPath)
+            guard !boundary.requiresStartupConvergence(
+                footprintBytes: footprint
+            ) else {
+                throw PreIngestionStorageRecoveryError
+                    .startupTargetNotReached(
+                        component: "AlertStore",
+                        footprintBytes: footprint,
+                        targetBytes: boundary.recoveryTargetBytes
+                    )
+            }
+        }
+    )
+}
+
 // MARK: - On-demand sweep entry point (v1.6.14)
 
 /// Trigger a size-cap sweep immediately, outside the hourly timer.
@@ -5854,6 +6397,197 @@ func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
     return ran
 }
 
+/// Setup-time events.db recovery. The signal/hourly entry point above retains
+/// its historical `didRun` Bool; this wrapper instead requires normal priority
+/// and file admission at their complete transaction reserves before it reports
+/// a writable first epoch.
+func recoverEventStoreBeforeProducers(
+    eventStore: EventStore,
+    dbPath: String,
+    boundary: EventsSizeCapBoundary,
+    processFloorMinutes: Int,
+    retentionBudgetHealth: EventRetentionBudgetHealth,
+    maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses
+) async -> PreIngestionStorageRecoveryResult {
+    let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
+    return await runBoundedPreIngestionStorageRecovery(
+        component: "EventStore",
+        maximumPasses: maximumPasses,
+        measureFootprint: {
+            try measureDatabaseFootprintBytes(dbPath: dbPath)
+        },
+        maintenance: {
+            guard let footprint = try? measureDatabaseFootprintBytes(
+                dbPath: dbPath
+            ) else {
+                return .didNotRun
+            }
+            if boundary.requiresStartupConvergence(
+                footprintBytes: footprint
+            ) {
+                // The enforcer prunes rows before its own checkpoint. A
+                // reader-pinned WAL therefore has to be detected here, while
+                // it is still safe to retry without repeating any deletion.
+                guard await eventStore.walCheckpointTruncate() else {
+                    return .transientlyPinned
+                }
+            }
+            let ran = await enforceDatabaseSizeCap(
+                dbPath: dbPath,
+                boundary: boundary,
+                eventStore: eventStore,
+                processFloorMinutes: max(0, processFloorMinutes),
+                forceConvergenceToTarget: true
+            )
+            if ran {
+                retentionBudgetHealth.recordSweep(
+                    observedFootprintBytes:
+                        try? measureDatabaseFootprintBytes(dbPath: dbPath),
+                    boundary: boundary
+                )
+            }
+            return ran ? .ran : .didNotRun
+        },
+        reprobeOrdinaryAdmission: {
+            let priority = try await eventStore
+                .reprobeStorageAdmissionForWrite(lane: .priority)
+            guard priority.maxFootprintBytes == boundary.nominalCapBytes,
+                  priority.transactionReserveBytes == reserve else {
+                throw PreIngestionStorageRecoveryError
+                    .admissionPolicyMismatch(
+                        component: "EventStore priority lane",
+                        expectedCapBytes: boundary.nominalCapBytes,
+                        actualCapBytes: priority.maxFootprintBytes,
+                        expectedReserveBytes: reserve,
+                        actualReserveBytes:
+                            priority.transactionReserveBytes
+                    )
+            }
+            let file = try await eventStore
+                .reprobeStorageAdmissionForWrite(lane: .file)
+            guard file.maxFootprintBytes == boundary.nominalCapBytes,
+                  file.transactionReserveBytes == reserve else {
+                throw PreIngestionStorageRecoveryError
+                    .admissionPolicyMismatch(
+                        component: "EventStore file lane",
+                        expectedCapBytes: boundary.nominalCapBytes,
+                        actualCapBytes: file.maxFootprintBytes,
+                        expectedReserveBytes: reserve,
+                        actualReserveBytes: file.transactionReserveBytes
+                    )
+            }
+            let footprint = try measureDatabaseFootprintBytes(dbPath: dbPath)
+            guard !boundary.requiresStartupConvergence(
+                footprintBytes: footprint
+            ) else {
+                throw PreIngestionStorageRecoveryError
+                    .startupTargetNotReached(
+                        component: "EventStore",
+                        footprintBytes: footprint,
+                        targetBytes: boundary.targetBytes
+                    )
+            }
+        }
+    )
+}
+
+/// Fresh no-maintenance proof taken at the last activation boundary. Recovery
+/// may have completed much earlier while other actors were constructed, so its
+/// retained result cannot authorize collectors after a sidecar/free-space
+/// drift. The exact target check also refreshes the first heartbeat's sticky
+/// retention-budget truth.
+func reprobeEventStoreAtActivationBoundary(
+    eventStore: EventStore,
+    dbPath: String,
+    boundary: EventsSizeCapBoundary,
+    retentionBudgetHealth: EventRetentionBudgetHealth
+) async throws -> EventStoreActivationProof {
+    let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
+    let priority = try await eventStore.reprobeStorageAdmissionForWrite(
+        lane: .priority
+    )
+    guard priority.maxFootprintBytes == boundary.nominalCapBytes,
+          priority.transactionReserveBytes == reserve else {
+        throw PreIngestionStorageRecoveryError.admissionPolicyMismatch(
+            component: "EventStore priority lane",
+            expectedCapBytes: boundary.nominalCapBytes,
+            actualCapBytes: priority.maxFootprintBytes,
+            expectedReserveBytes: reserve,
+            actualReserveBytes: priority.transactionReserveBytes
+        )
+    }
+
+    let file = try await eventStore.reprobeStorageAdmissionForWrite(
+        lane: .file
+    )
+    guard file.maxFootprintBytes == boundary.nominalCapBytes,
+          file.transactionReserveBytes == reserve else {
+        throw PreIngestionStorageRecoveryError.admissionPolicyMismatch(
+            component: "EventStore file lane",
+            expectedCapBytes: boundary.nominalCapBytes,
+            actualCapBytes: file.maxFootprintBytes,
+            expectedReserveBytes: reserve,
+            actualReserveBytes: file.transactionReserveBytes
+        )
+    }
+
+    let footprint = try measureDatabaseFootprintBytes(dbPath: dbPath)
+    retentionBudgetHealth.recordSweep(
+        observedFootprintBytes: footprint,
+        boundary: boundary
+    )
+    guard !boundary.requiresStartupConvergence(
+        footprintBytes: footprint
+    ) else {
+        throw PreIngestionStorageRecoveryError.startupTargetNotReached(
+            component: "EventStore activation boundary",
+            footprintBytes: footprint,
+            targetBytes: boundary.targetBytes
+        )
+    }
+
+    return EventStoreActivationProof(
+        footprintBytes: footprint,
+        priorityAdmission: priority,
+        fileAdmission: file
+    )
+}
+
+func reprobeAlertStoreAtActivationBoundary(
+    alertStore: AlertStore,
+    dbPath: String,
+    boundary: AlertsSizeCapBoundary
+) async throws -> AlertStoreActivationProof {
+    let admission = try await alertStore.reprobeStorageAdmissionForWrite()
+    guard admission.maxFootprintBytes == boundary.nominalCapBytes,
+          admission.transactionReserveBytes
+            == boundary.transactionReserveBytes else {
+        throw PreIngestionStorageRecoveryError.admissionPolicyMismatch(
+            component: "AlertStore",
+            expectedCapBytes: boundary.nominalCapBytes,
+            actualCapBytes: admission.maxFootprintBytes,
+            expectedReserveBytes: boundary.transactionReserveBytes,
+            actualReserveBytes: admission.transactionReserveBytes
+        )
+    }
+
+    let footprint = try measureDatabaseFootprintBytes(dbPath: dbPath)
+    guard !boundary.requiresStartupConvergence(
+        footprintBytes: footprint
+    ) else {
+        throw PreIngestionStorageRecoveryError.activationBoundaryExceeded(
+            component: "AlertStore",
+            footprintBytes: footprint,
+            boundaryBytes: boundary.recoveryTargetBytes
+        )
+    }
+
+    return AlertStoreActivationProof(
+        footprintBytes: footprint,
+        admission: admission
+    )
+}
+
 // MARK: - Size-cap enforcement (hardened in v1.6.13)
 
 /// Hardened size-cap enforcer. Runs on the hourly timer and from
@@ -5884,7 +6618,8 @@ private func enforceDatabaseSizeCap(
     dbPath: String,
     boundary: EventsSizeCapBoundary,
     eventStore: EventStore,
-    processFloorMinutes: Int = 0
+    processFloorMinutes: Int = 0,
+    forceConvergenceToTarget: Bool = false
 ) async -> Bool {
     // Reentrancy: if another sweep is already running (hourly timer
     // + on-demand invocation can race), exit cleanly. v1.9.0
@@ -5907,14 +6642,22 @@ private func enforceDatabaseSizeCap(
     }
 
     guard let initialBytes = currentSizeBytes("start") else { return false }
-    guard boundary.requiresMaintenance(footprintBytes: initialBytes) else {
+    let requiresPeriodicMaintenance = boundary.requiresMaintenance(
+        footprintBytes: initialBytes
+    )
+    let requiresStartupConvergence = forceConvergenceToTarget
+        && boundary.requiresStartupConvergence(footprintBytes: initialBytes)
+    guard requiresPeriodicMaintenance || requiresStartupConvergence else {
         // Quiet no-op. Normal hourly tick on a well-sized DB. We did
         // acquire the lock — that counts as "ran" for SIGUSR2's
         // purposes (the dashboard sees the under-cap measurement).
         return true
     }
 
-    logger.warning("Size-cap enforcer armed: events.db family \(initialBytes) bytes exceeds proactive boundary \(boundary.proactiveSweepBoundaryBytes) bytes (hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)); target \(boundary.targetBytes) bytes.")
+    let trigger = requiresPeriodicMaintenance
+        ? "proactive boundary \(boundary.proactiveSweepBoundaryBytes)"
+        : "startup convergence target \(boundary.targetBytes)"
+    logger.warning("Size-cap enforcer armed: events.db family \(initialBytes) bytes exceeds \(trigger) bytes (file admission at \(boundary.fileLaneAdmissionBoundaryBytes), hard admission at \(boundary.hardAdmissionBoundaryBytes), nominal cap \(boundary.nominalCapBytes)); target \(boundary.targetBytes) bytes.")
 
     // --- Phase 1: prune rows (bounded at 50% of total per sweep) ---
     //

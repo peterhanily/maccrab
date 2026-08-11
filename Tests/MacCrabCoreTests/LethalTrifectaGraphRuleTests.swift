@@ -244,6 +244,8 @@ struct LethalTrifectaGraphRuleTests {
         let telemetry = await bridge.writeTelemetry()
         #expect(telemetry.relevanceSuppressedFileEventsTotal == 1)
         #expect(telemetry.relevanceSuppressedRowsTotal == 2)
+        #expect(telemetry.physicalWriteSuppressedEventsTotal == 1)
+        #expect(telemetry.physicalWriteSuppressedRowsTotal == 1)
         await store.close()
     }
 

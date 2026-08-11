@@ -80,4 +80,4 @@ if args.contains("--background") || args.contains("--bg") || args.contains("-b")
 // bootstrap (component wiring, timers, event loop) lives in
 // DaemonBootstrap so the MacCrabAgent system extension target can
 // share identical behaviour without maintaining a parallel copy.
-await DaemonBootstrap.runForever(printBanner: true)
+try await DaemonBootstrap.runForever(printBanner: true)

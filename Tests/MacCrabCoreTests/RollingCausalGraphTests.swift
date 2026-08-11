@@ -451,7 +451,7 @@ struct RollingCausalGraphTests {
         await store.close()
     }
 
-    @Test("Ordinary unique file churn is suppressed before SQL while process provenance remains")
+    @Test("Graph-irrelevant file churn performs no physical SQL writes")
     func fileRelevanceAdmissionSuppressesUniqueChurn() async throws {
         let (store, dbPath) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: dbPath) }
@@ -480,11 +480,115 @@ struct RollingCausalGraphTests {
         let telemetry = await graph.writeTelemetry()
         #expect(telemetry.relevanceSuppressedFileEventsTotal == 1_000)
         #expect(telemetry.relevanceSuppressedRowsTotal == 2_000)
-        #expect(telemetry.writeAttemptsTotal == 1)
-        #expect(telemetry.writeRowsAttemptedTotal == 1)
-        #expect(telemetry.coalescedNoopRowsTotal == 999)
-        #expect(try await store.entity(id: "process:compiler")?.observationCount == 1_000)
+        #expect(telemetry.physicalWriteSuppressedEventsTotal == 1_000)
+        #expect(telemetry.physicalWriteSuppressedRowsTotal == 1_000)
+        #expect(telemetry.inputEventsTotal == telemetry.eventsCommittedTotal)
+        #expect(telemetry.entityObservationsTotal
+            == telemetry.physicalWriteSuppressedRowsTotal)
+        #expect(telemetry.writeAttemptsTotal == 0)
+        #expect(telemetry.writeRowsAttemptedTotal == 0)
+        #expect(telemetry.coalescedNoopRowsTotal == 0)
+        #expect(try await store.entity(id: "process:compiler") == nil)
         #expect(try await store.entity(id: "file:scratch-999") == nil)
+        await store.close()
+    }
+
+    @Test("Whole-event file suppression preserves an independent process anchor")
+    func fileSuppressionPreservesUnsignedDownloadAnchor() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let graph = makeRollingGraph(store)
+
+        let traces = try await graph.ingest(.init(
+            eventId: "unsigned-anchor",
+            timestamp: now,
+            category: .file,
+            action: .fileRead,
+            process: proc(
+                "downloaded-payload",
+                "/Users/me/Downloads/payload",
+                appleSigned: false
+            ),
+            file: file("/private/tmp/ordinary-input.o", hash: "ordinary-input")
+        ))
+
+        #expect(traces.count == 1)
+        #expect(try await store.entity(id: "process:downloaded-payload") != nil)
+        #expect(try await store.entity(id: "file:ordinary-input") == nil)
+        let telemetry = await graph.writeTelemetry()
+        #expect(telemetry.relevanceSuppressedFileEventsTotal == 1)
+        #expect(telemetry.physicalWriteSuppressedEventsTotal == 0)
+        await store.close()
+    }
+
+    @Test("Suppressed process context is restored when that process later becomes relevant")
+    func fileSuppressionDefersProcessContextUntilRelevantEvent() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let graph = makeRollingGraph(store)
+        let process = proc("deferred-process", "/usr/bin/swiftc")
+
+        for index in 0..<3 {
+            _ = try await graph.ingest(.init(
+                eventId: "deferred-file-\(index)",
+                timestamp: now.addingTimeInterval(Double(index)),
+                category: .file,
+                action: .fileRead,
+                process: process,
+                file: file("/private/tmp/deferred-\(index).o")
+            ))
+        }
+        #expect(try await store.entity(id: "process:deferred-process") == nil)
+
+        _ = try await graph.ingest(.init(
+            eventId: "later-exec",
+            timestamp: now.addingTimeInterval(10),
+            category: .process,
+            action: .exec,
+            process: process
+        ))
+
+        #expect(try await store.entity(id: "process:deferred-process")?.observationCount == 4)
+        let telemetry = await graph.writeTelemetry()
+        #expect(telemetry.entityObservationsTotal == 4)
+        #expect(telemetry.physicalWriteSuppressedRowsTotal == 3)
+        #expect(telemetry.writeRowsAttemptedTotal == 1)
+        await store.close()
+    }
+
+    @Test("A file event carrying parent lineage is never wholly suppressed")
+    func fileSuppressionPreservesParentLineage() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let graph = makeRollingGraph(store)
+
+        _ = try await graph.ingest(.init(
+            eventId: "lineage-parent-exec",
+            timestamp: now.addingTimeInterval(-1),
+            category: .process,
+            action: .exec,
+            process: proc("lineage-parent", "/bin/zsh")
+        ))
+        _ = try await graph.ingest(.init(
+            eventId: "lineage-file",
+            timestamp: now,
+            category: .file,
+            action: .fileRead,
+            process: proc(
+                "lineage-child",
+                "/usr/bin/swiftc",
+                parentKey: "lineage-parent"
+            ),
+            file: file("/private/tmp/ordinary-lineage-input.o")
+        ))
+
+        #expect(try await store.entity(id: "process:lineage-child") != nil)
+        #expect(try await store.edge(id: EdgeBuilder.edgeId(
+            sourceEntityId: "process:lineage-parent",
+            targetEntityId: "process:lineage-child",
+            relation: .spawned
+        )) != nil)
+        #expect((await graph.writeTelemetry()).physicalWriteSuppressedEventsTotal == 0)
         await store.close()
     }
 
@@ -649,6 +753,27 @@ struct RollingCausalGraphTests {
         #expect(RollingCausalGraph.fileObservationIsRelevant(kind: .unknown, untrustedContent: true))
         #expect(!RollingCausalGraph.fileObservationIsRelevant(kind: .unknown, untrustedContent: false))
         #expect(!RollingCausalGraph.fileObservationIsRelevant(kind: .packageFile, untrustedContent: false))
+
+        #expect(TraceGraphFileObservationPolicy.canSuppressPhysicalWrite(
+            path: "/private/tmp/ordinary.o",
+            kind: .unknown,
+            untrustedContent: false,
+            hasAgent: false,
+            hasNetwork: false,
+            hasProcessLineage: false,
+            processCanAnchor: false
+        ))
+        for protectedInput in 0..<4 {
+            #expect(!TraceGraphFileObservationPolicy.canSuppressPhysicalWrite(
+                path: "/private/tmp/ordinary.o",
+                kind: .unknown,
+                untrustedContent: false,
+                hasAgent: protectedInput == 0,
+                hasNetwork: protectedInput == 1,
+                hasProcessLineage: protectedInput == 2,
+                processCanAnchor: protectedInput == 3
+            ))
+        }
     }
 
     @Test("Every built-in CredentialFence pattern remains graph-relevant")
