@@ -2294,9 +2294,9 @@ public actor EventStore {
             // Daemon startup historically opens with the full 420-MiB combined
             // transition envelope and narrows it only after measuring legacy
             // evidence. Never let journal DDL borrow that later alert-owned
-            // space. 353 MiB is the measured installed transition ceiling
-            // (320-MiB steady event tier + 33-MiB bounded transition reserve);
-            // custom/test policies below that remain authoritative.
+            // space. The caller supplies the exact whole-family transition
+            // ceiling proven before this open; custom/test policies below that
+            // remain authoritative.
             let journalTransitionCap = effectivePolicy?.maxFootprintBytes
                 ?? Int64.max
             var journalTransitionReady = true

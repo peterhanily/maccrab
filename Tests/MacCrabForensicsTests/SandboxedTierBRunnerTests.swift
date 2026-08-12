@@ -171,6 +171,47 @@ struct SandboxedTierBRunnerTests {
         #expect(argv == ["/T", "--profile", "/P.sb", "--exec", "/E"])
     }
 
+    @Test("scratch path canonicalization matches the sandbox kernel spelling")
+    func scratchPathCanonicalization() throws {
+        let scratch = NSTemporaryDirectory()
+            + "sandbox-scratch-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: scratch,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+
+        let canonical = SandboxedTierBRunner.canonicalPath(scratch)
+        if scratch.hasPrefix("/var/") {
+            #expect(canonical == "/private" + scratch)
+            #expect(canonical.hasPrefix("/private/var/"))
+        } else {
+            #expect(canonical == scratch)
+        }
+
+        let manifest = TierBManifest(
+            id: "org.maccrab.test.scratch",
+            displayName: "scratch",
+            version: "1.0.0",
+            schemaVersion: 1,
+            description: "scratch canonicalization"
+        )
+        let profile = SandboxProfileBuilder.compileDenyDefault(
+            manifest.toBrokeredSandboxProfileSpec(scratchDir: canonical)
+        )
+        #expect(profile.contains(
+            "(allow file-write* (subpath \"\(canonical)\"))"
+        ))
+        let policy = TierBFileBroker.Policy.readOnly(
+            manifest: manifest,
+            scratchDir: canonical
+        )
+        #expect(TierBFileBroker.resolve(
+            canonical + "/allowed.txt",
+            policy: policy
+        )?.root == canonical)
+    }
+
     // MARK: - Trampoline SBPL shape
 
     @Test("compileTrampolineDenyDefault is deny-default AND grants exec of the self-exec target")

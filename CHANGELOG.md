@@ -3,6 +3,23 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.14] — 2026-08-12
+
+### Audit retest corrections
+- **Retained schema-v8 upgrades no longer restart at the storage boundary.** The
+  transition controller now admits the smallest reserve that covers both the
+  measured legacy-evidence ownership and the exact whole-family footprint plus
+  its fixed transaction reserve. This closes a one-MiB rounding gap exposed by
+  an installed rc.12 database while retaining the configured 100-MiB ceiling.
+- **The exact-candidate containment proof restores its positive broker
+  control.** Sandbox policy, broker allowlist and child request now share the
+  kernel-canonical `/private/var/...` scratch path, so the C and Swift probes can
+  create and broker-read their allowed sentinel while undeclared file, network,
+  fork/exec, metadata and Mach-service operations remain denied.
+
+rc.13 was built and notarized locally but rejected before publication by these
+two installed-host audit gates. rc.14 supersedes it.
+
 ## [1.21.6-rc.13] — 2026-08-12
 
 ### Evidence integrity

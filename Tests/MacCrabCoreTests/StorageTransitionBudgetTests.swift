@@ -123,6 +123,42 @@ struct StorageTransitionBudgetTests {
         #expect(failed.measurementFailed)
     }
 
+    @Test("retained store reserve covers exact whole-family rounding")
+    func retainedStoreWholeFamilyRounding() {
+        var storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
+        storage.eventsMaxSizeMB = 420
+        let budget = LegacyEvidenceTransitionBudget(storageConfig: storage)
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let charged: Int64 = 34_492_416
+        let evidence = AlertEvidenceBudgetSnapshot(
+            rowCount: 11_651,
+            logicalBytes: 21_386_393,
+            allocatedBytes: charged,
+            chargedBytes: charged,
+            maxBytes: 100 * mib
+        )
+
+        // Evidence ownership rounds to 33 MiB, but the installed family plus
+        // the fixed transaction reserve is one byte above the 353-MiB
+        // boundary.  The bounded transition must select 34 MiB rather than
+        // crash-looping or granting the full 100-MiB allowance.
+        let family = (320 + 33) * mib
+            - SQLitePersistentStorePolicy.eventTransactionReserveBytes + 1
+        let ticket = budget.measurementTicket()
+        let measured = budget.update(
+            measurement: transitionMeasurement(
+                evidence: evidence,
+                familyFootprintBytes: family
+            ),
+            ticket: ticket
+        )
+        #expect(measured.appliedReserveMiB == 100)
+        #expect(measured.pendingReserveMiB == 34)
+        #expect(measured.pendingReserveFitsHardBoundary == true)
+        #expect(measured.proposedHardAdmissionBoundaryBytes == 354 * mib)
+        #expect(budget.commitPendingReserve(34, ticket: ticket).reserveMiB == 34)
+    }
+
     @Test("stale sweep cannot overwrite a newer storage config generation")
     func reloadSweepRace() {
         let storage = DaemonConfig.StorageConfig().clampedToSafeFloors()

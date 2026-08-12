@@ -210,11 +210,38 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 maxSizeMiB: maximum
             )
             let charged = min(maximumBytes, max(0, evidence.chargedBytes))
-            let candidate = evidence.rowCount == 0 || charged == 0
+            let evidenceCandidate = evidence.rowCount == 0 || charged == 0
                 ? 0
                 : Int(
                     (charged - 1) / SQLitePersistentStorePolicy.bytesPerMiB + 1
                 )
+            // DBSTAT ownership and the whole-family admission boundary are
+            // independently rounded.  On a retained store the evidence-only
+            // ceiling can therefore be one MiB too small even though the
+            // complete transition still fits inside the configured evidence
+            // allowance.  Charge the smallest reserve that proves both facts:
+            // the legacy table's ownership and the exact family footprint plus
+            // the fixed event transaction reserve.  Do not manufacture a
+            // transition reserve for an evidence-empty store; its ordinary
+            // over-cap recovery remains a separate, fail-closed path.
+            let steadyBoundary = SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: state.storage.effectiveEventsFamilyMaxSizeMB
+            )
+            let required = SQLitePersistentStoreAdmission.saturatingAdd(
+                measurement.familyFootprintBytes,
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes
+            )
+            let physicalReserveBytes = evidenceCandidate > 0
+                && required > steadyBoundary
+                ? required - steadyBoundary
+                : 0
+            let physicalCandidate = physicalReserveBytes == 0
+                ? 0
+                : Int(
+                    (physicalReserveBytes - 1)
+                        / SQLitePersistentStorePolicy.bytesPerMiB + 1
+                )
+            let candidate = max(evidenceCandidate, physicalCandidate)
             let boundedCandidate = min(maximum, max(0, candidate))
             let proposedCapMiB = state.storage
                 .effectiveEventsFamilyMaxSizeMB(
@@ -223,10 +250,6 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 )
             let proposedBoundary = SQLitePersistentStorePolicy.capBytes(
                 maxSizeMiB: proposedCapMiB
-            )
-            let required = SQLitePersistentStoreAdmission.saturatingAdd(
-                measurement.familyFootprintBytes,
-                SQLitePersistentStorePolicy.eventTransactionReserveBytes
             )
             let physicalMeasurementValid = measurement.familyFootprintBytes >= 0
                 && measurement.pageSizeBytes > 0

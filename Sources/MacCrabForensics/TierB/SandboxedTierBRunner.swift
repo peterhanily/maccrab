@@ -322,6 +322,14 @@ public struct SandboxedTierBRunner: Sendable {
                 message: "trampoline not found or not executable at \(trampolinePath)")
         }
 
+        // NSTemporaryDirectory() is normally spelled through /var, while the
+        // sandbox kernel evaluates the same inode through /private/var. Bind the
+        // profile, broker policy and child request to one realpath spelling.
+        // Otherwise the profile denies the plugin's legitimate scratch write;
+        // the subsequent broker request then correctly finds no file and the
+        // positive containment proof disappears even though all denials hold.
+        let canonicalScratch = Self.canonicalPath(scratchDir)
+
         // Brokered file access (Model B): the SBPL grants NO manifest reads. The
         // host snapshots manifest-declared TCC sources into a host-owned,
         // plugin-UNWRITABLE dir and the broker serves read-fds over fd 3, so the
@@ -334,7 +342,9 @@ public struct SandboxedTierBRunner: Sendable {
             manifestReadPaths: verified.manifest.fileReadSubpaths,
             snapshotDir: snapshotDir,
             home: NSHomeDirectory())
-        let brokerPolicy = readPlan.brokerPolicy(scratchDir: scratchDir)
+        let brokerPolicy = readPlan.brokerPolicy(
+            scratchDir: canonicalScratch
+        )
 
         // Canonicalize the verified-binary path: NSTemporaryDirectory() lives
         // under /var/folders, but /var is a symlink to /private/var, and the
@@ -345,7 +355,9 @@ public struct SandboxedTierBRunner: Sendable {
 
         // Build + write the Model-B deny-default SBPL the trampoline applies to
         // itself (reads brokered, not in the profile). 0o400 owner-read-only temp.
-        let spec = verified.manifest.toBrokeredSandboxProfileSpec(scratchDir: scratchDir)
+        let spec = verified.manifest.toBrokeredSandboxProfileSpec(
+            scratchDir: canonicalScratch
+        )
         let profile = SandboxProfileBuilder.compileTrampolineDenyDefault(spec, selfExecPath: canonicalExec)
         let profilePath = NSTemporaryDirectory() + "maccrab-tier-b-profile-\(UUID().uuidString).sb"
         do {
@@ -408,7 +420,7 @@ public struct SandboxedTierBRunner: Sendable {
                 request: TierBCollectRequest(
                     pluginID: verified.pluginID,
                     pluginVersion: verified.manifest.version,
-                    scratchDir: scratchDir,
+                    scratchDir: canonicalScratch,
                     windowStartUnix: windowStartUnix,
                     windowEndUnix: windowEndUnix),
                 timeout: timeout,
