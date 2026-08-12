@@ -14,15 +14,7 @@ import CSQLCipher
 struct BatchedEventWriterTests {
 
     private func isolatedMemoryBudget() -> EventPipelineLiveMemoryBudget {
-        EventPipelineLiveMemoryBudget(
-            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
-            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
-                .productionForwardProgressReserveBytes,
-            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
-                .productionEventStoreWorkspaceReserveBytes,
-            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
-                .productionCompactReceiptReserveBytes
-        )
+        .isolatedProductionEquivalentForTesting()
     }
 
     private func makeEvent(_ i: Int) -> Event {

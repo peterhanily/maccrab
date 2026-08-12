@@ -114,6 +114,24 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         compactReceiptReserveBytes: productionCompactReceiptReserveBytes
     )
 
+    /// A production-shaped envelope with independent accounting.
+    ///
+    /// Parallel unit fixtures are unrelated processes in production terms;
+    /// giving each fixture store one of these prevents the Swift Testing
+    /// runner from turning suite scheduling into synthetic pipeline pressure.
+    /// Shipped components must continue to use ``processShared``. Package-only
+    /// visibility keeps this seam out of the public library API.
+    package static func isolatedProductionEquivalentForTesting()
+        -> EventPipelineLiveMemoryBudget {
+        EventPipelineLiveMemoryBudget(
+            maximumBytes: productionMaximumBytes,
+            forwardProgressReserveBytes: productionForwardProgressReserveBytes,
+            eventStoreWorkspaceReserveBytes:
+                productionEventStoreWorkspaceReserveBytes,
+            compactReceiptReserveBytes: productionCompactReceiptReserveBytes
+        )
+    }
+
     private struct Reservation {
         var owner: EventPipelineMemoryOwner
         var bytes: Int

@@ -22,18 +22,6 @@ struct CLIReadOnlyStoreTests {
         return directory
     }
 
-    private func isolatedEventMemoryBudget() -> EventPipelineLiveMemoryBudget {
-        EventPipelineLiveMemoryBudget(
-            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
-            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
-                .productionForwardProgressReserveBytes,
-            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
-                .productionEventStoreWorkspaceReserveBytes,
-            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
-                .productionCompactReceiptReserveBytes
-        )
-    }
-
     private func event(sessionID: String) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: 4_242,
@@ -88,15 +76,8 @@ struct CLIReadOnlyStoreTests {
         )
     }
 
-    private func seedEvents(
-        at directory: URL,
-        sessionID: String,
-        liveMemoryBudget: EventPipelineLiveMemoryBudget
-    ) async throws {
-        let writer = try EventStore(
-            directory: directory.path,
-            liveMemoryBudget: liveMemoryBudget
-        )
+    private func seedEvents(at directory: URL, sessionID: String) async throws {
+        let writer = try EventStore(directory: directory.path)
         try await writer.insert(event: event(sessionID: sessionID))
         #expect(await writer.walCheckpointTruncate())
     }
@@ -200,7 +181,8 @@ struct CLIReadOnlyStoreTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let sessionID = UUID().uuidString
-        let liveMemoryBudget = isolatedEventMemoryBudget()
+        let liveMemoryBudget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
         let fixtureEvent = event(sessionID: sessionID)
         let rejectedAlert = alert(
             id: "must-not-write",
@@ -209,11 +191,7 @@ struct CLIReadOnlyStoreTests {
             sessionID: sessionID
         )
 
-        try await seedEvents(
-            at: directory,
-            sessionID: sessionID,
-            liveMemoryBudget: liveMemoryBudget
-        )
+        try await seedEvents(at: directory, sessionID: sessionID)
         try await seedAlerts(at: directory, sessionID: sessionID)
         try makeOwnerUnwritable(directory)
 
@@ -361,8 +339,18 @@ struct CLIReadOnlyStoreTests {
         // it deliberately prunes, vacuums, and checkpoints the DB.
         #expect(eventConstructors.count == 2, "classify every new EventStore open")
         #expect(eventConstructors.contains {
-            $0.0 == "ReadOnlyStores.swift" && $0.1.contains("forceReadOnly: true")
+            $0.0 == "ReadOnlyStores.swift"
         })
+        let eventReaderFactory = try String(
+            contentsOf: sourceDirectory.appendingPathComponent(
+                "ReadOnlyStores.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(eventReaderFactory.contains("forceReadOnly: true"))
+        #expect(eventReaderFactory.contains(
+            "liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared"
+        ))
         #expect(eventConstructors.contains {
             $0.0 == "RollupCommand.swift" && $0.1.contains("path: dbPath")
                 && !$0.1.contains("forceReadOnly: true")
@@ -436,7 +424,16 @@ struct CLIReadOnlyStoreTests {
         #expect(mcpEventConstructors.count == 1,
                 "all MCP EventStore opens are query-only")
         #expect(mcpEventConstructors[0].0 == "ReadOnlyStores.swift")
-        #expect(mcpEventConstructors[0].1.contains("forceReadOnly: true"))
+        let mcpEventReaderFactory = try String(
+            contentsOf: mcpSourceDirectory.appendingPathComponent(
+                "ReadOnlyStores.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(mcpEventReaderFactory.contains("forceReadOnly: true"))
+        #expect(mcpEventReaderFactory.contains(
+            "liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared"
+        ))
         #expect(mcpAlertConstructors.count == 1,
                 "all MCP AlertStore opens are query-only")
         #expect(mcpAlertConstructors[0].0 == "ReadOnlyStores.swift")

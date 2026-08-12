@@ -104,7 +104,11 @@ public final class V2LiveDataProvider: V2DataProvider {
         }.value
         async let eventStoreT: EventStore? = Task.detached { () -> EventStore? in
             guard let dir = eventsDir else { return nil }
-            return try? EventStore(directory: dir, forceReadOnly: true)
+            return try? EventStore(
+                directory: dir,
+                forceReadOnly: true,
+                liveMemoryBudget: .processShared
+            )
         }.value
         async let campaignStoreT: CampaignStore? = Task.detached { () -> CampaignStore? in
             guard let dir = campaignDir else { return nil }

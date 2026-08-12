@@ -190,7 +190,8 @@ enum DaemonSetup {
         do {
             let store = try EventStore(
                 directory: supportDir,
-                storagePolicy: storagePolicy
+                storagePolicy: storagePolicy,
+                liveMemoryBudget: .processShared
             )
             // First attempt actually succeeded (transient failure
             // resolved itself). Return immediately; skip backup.
@@ -227,7 +228,8 @@ enum DaemonSetup {
         do {
             return try EventStore(
                 directory: supportDir,
-                storagePolicy: storagePolicy
+                storagePolicy: storagePolicy,
+                liveMemoryBudget: .processShared
             )
         } catch {
             let msg = "EventStore recovery failed: \(error.localizedDescription)"
@@ -687,7 +689,8 @@ enum DaemonSetup {
         do {
             eventStore = try EventStore(
                 directory: supportDir,
-                storagePolicy: eventStoragePolicy
+                storagePolicy: eventStoragePolicy,
+                liveMemoryBudget: .processShared
             )
         } catch let error as EventStoreError {
             if case .storageNotReady(_) = error {

@@ -19,7 +19,11 @@ extension MacCrabCtl {
         directory: String,
         liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
     ) throws -> EventStore {
-        try EventStore(directory: directory, forceReadOnly: true, liveMemoryBudget: liveMemoryBudget)
+        try EventStore(
+            directory: directory,
+            forceReadOnly: true,
+            liveMemoryBudget: liveMemoryBudget
+        )
     }
 
     static func openAlertStoreForReading(directory: String) throws -> AlertStore {

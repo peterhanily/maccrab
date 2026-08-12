@@ -1434,7 +1434,11 @@ final class AppState: ObservableObject {
             try? AlertStore(directory: alertDir, forceReadOnly: true)
         }.value
         async let eventResult: EventStore? = Task.detached(priority: .userInitiated) {
-            try? EventStore(directory: eventDir, forceReadOnly: true)
+            try? EventStore(
+                directory: eventDir,
+                forceReadOnly: true,
+                liveMemoryBudget: .processShared
+            )
         }.value
         let (alert, event) = await (alertResult, eventResult)
         if let store = alert {
@@ -1746,7 +1750,11 @@ final class AppState: ObservableObject {
         }
         cachedEventStore = nil   // release the old connection (and its WAL mark) before reopening
         // Wave 9A.1 (v1.12.6 RC2): dashboard event store is read-only.
-        let store = try EventStore(directory: chosen, forceReadOnly: true)
+        let store = try EventStore(
+            directory: chosen,
+            forceReadOnly: true,
+            liveMemoryBudget: .processShared
+        )
         cachedEventStore = store
         cachedEventStorePath = chosen
         cachedEventStoreOpenedAt = Date()

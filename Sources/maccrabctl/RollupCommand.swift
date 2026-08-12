@@ -46,7 +46,7 @@ func runRollup(olderThanHours: Double, dbPathOverride: String? = nil) async {
 
     let started = Date()
     do {
-        let store = try EventStore(path: dbPath)
+        let store = try EventStore(path: dbPath, liveMemoryBudget: .processShared)
         let cutoff = Date().addingTimeInterval(-olderThanHours * 3600)
         let pruned = try await store.rollUpAndPrune(olderThan: cutoff)
         try await store.vacuum()                  // reclaim freed pages

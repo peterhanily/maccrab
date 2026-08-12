@@ -9,7 +9,11 @@ func openMCPEventStoreForReading(
     directory: String,
     liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
 ) throws -> EventStore {
-    try EventStore(directory: directory, forceReadOnly: true, liveMemoryBudget: liveMemoryBudget)
+    try EventStore(
+        directory: directory,
+        forceReadOnly: true,
+        liveMemoryBudget: liveMemoryBudget
+    )
 }
 
 func openMCPAlertStoreForReading(directory: String) throws -> AlertStore {

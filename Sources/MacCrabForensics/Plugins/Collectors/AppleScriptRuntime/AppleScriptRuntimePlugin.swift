@@ -109,7 +109,10 @@ public struct AppleScriptRuntimePlugin: Collector {
             )
         }
 
-        let store = try await EventStore(path: eventStorePath)
+        let store = try await EventStore(
+            path: eventStorePath,
+            liveMemoryBudget: .processShared
+        )
         let events: [Event]
         let snapshot: ExactEventQuerySnapshot
         do {
