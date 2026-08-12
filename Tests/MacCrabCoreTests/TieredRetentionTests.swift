@@ -1,24 +1,20 @@
 // TieredRetentionTests.swift
 //
-// Phase 2a (v1.8.0): coverage for the new three-tier storage model that
-// replaces the legacy size-cap-and-VACUUM dance.
+// Coverage for the schema-v8 retention split between the exact event journal,
+// aggregate history, and alert-owned evidence.
 //
 // The contract under test:
-//   1. `recordAlertEvidence` snapshots the ±60s window of events into
-//      `alert_evidence`, idempotently.
-//   2. `evidenceFor` reads back exactly what was captured.
-//   3. `rollUpAndPrune` aggregates events older than `cutoff` into
-//      `event_aggregates` (with day/category/signer/path grouping) AND
-//      deletes them from the hot tier.
-//   4. The aggregate rollup is idempotent — running rollUpAndPrune twice
-//      with no new events between runs doesn't double-count.
-//   5. `aggregates(sinceDay:category:)` returns the expected counts.
+//   1. EventStore selects bounded backward context; AlertStore owns the copy.
+//   2. Alert-owned capture is idempotent and evicts oldest context first.
+//   3. Source timestamps cannot prematurely prune newly admitted journal rows.
+//   4. Whole expired journal blocks roll up exact events atomically.
+//   5. Journal expiry and aggregate maintenance are idempotent.
 
 import Testing
 import Foundation
 @testable import MacCrabCore
 
-@Suite("Tiered retention (v1.8.0)")
+@Suite("Tiered retention (schema v8)")
 struct TieredRetentionTests {
 
     private func makeTempStore() throws -> (EventStore, URL) {
@@ -29,11 +25,17 @@ struct TieredRetentionTests {
         return (store, tmp)
     }
 
-    private func sampleEvent(at date: Date, name: String = "sample", path: String = "/bin/sample") -> Event {
+    private func sampleEvent(
+        at date: Date,
+        name: String = "sample",
+        path: String = "/bin/sample",
+        padding: Int = 0
+    ) -> Event {
+        let command = path + String(repeating: "x", count: padding)
         let proc = ProcessInfo(
             pid: 1000, ppid: 1, rpid: 1,
             name: name, executable: path,
-            commandLine: path, args: [],
+            commandLine: command, args: padding > 0 ? [command] : [],
             workingDirectory: "/",
             userId: 501, userName: "t", groupId: 20,
             startTime: date,
@@ -47,93 +49,182 @@ struct TieredRetentionTests {
         )
     }
 
-    // MARK: - Alert evidence
-
-    @Test("recordAlertEvidence snapshots the backward window (events up to the alert)")
-    func evidenceCapturesSurroundingEvents() async throws {
-        let (store, tmp) = try makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let alertTime = Date()
-        let alertId = UUID().uuidString
-
-        // 5 events: -120s, -30s, 0s, +30s, +120s. Capture is BACKWARD-looking
-        // (audit corr-storage): with the default 30s window, the range is
-        // [alertTime-30, alertTime], so only the -30s and 0s events are
-        // captured. The +30s / +120s events are after the alert (a real capture
-        // at fire time could not see them), and -120s is outside the window.
-        for offset in [-120.0, -30.0, 0.0, 30.0, 120.0] {
-            try await store.insert(event: sampleEvent(at: alertTime.addingTimeInterval(offset)))
-        }
-
-        try await store.recordAlertEvidence(alertId: alertId, alertTimestamp: alertTime)
-        let evidence = try await store.evidenceFor(alertId: alertId)
-        #expect(evidence.count == 2)
+    private func evidenceCandidate(
+        _ event: Event
+    ) throws -> AlertEvidenceCandidate {
+        let data = try JSONEncoder().encode(event)
+        return AlertEvidenceCandidate(
+            eventId: event.id.uuidString,
+            timestamp: event.timestamp,
+            rawJSON: String(decoding: data, as: UTF8.self)
+        )
     }
 
-    @Test("recordAlertEvidence is idempotent")
-    func evidenceRecordingIsIdempotent() async throws {
-        let (store, tmp) = try makeTempStore()
+    private func sampleAlert(id: String, event: Event) -> Alert {
+        Alert(
+            id: id,
+            timestamp: event.timestamp,
+            ruleId: "test.tiered-retention",
+            ruleTitle: "Tiered retention test",
+            severity: .high,
+            eventId: event.id.uuidString
+        )
+    }
+
+    private func expireFreshJournal(_ store: EventStore) async throws -> Int {
+        try await store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(16 * 60),
+            maximumBlocks: 256
+        )
+    }
+
+    // MARK: - Alert evidence
+
+    @Test("alert-owned evidence captures the backward window")
+    func evidenceCapturesSurroundingEvents() async throws {
+        let (events, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
+        let alerts = try AlertStore(directory: tmp.path)
 
         let alertTime = Date()
         let alertId = UUID().uuidString
-        try await store.insert(event: sampleEvent(at: alertTime))
+        var expectedIDs: [UUID] = []
+        var trigger: Event?
 
-        try await store.recordAlertEvidence(alertId: alertId, alertTimestamp: alertTime)
-        try await store.recordAlertEvidence(alertId: alertId, alertTimestamp: alertTime)
-        try await store.recordAlertEvidence(alertId: alertId, alertTimestamp: alertTime)
+        for offset in [-120.0, -30.0, 0.0, 30.0, 120.0] {
+            let event = sampleEvent(at: alertTime.addingTimeInterval(offset))
+            try await events.insert(event: event)
+            if offset == -30 { expectedIDs.append(event.id) }
+            if offset == 0 {
+                expectedIDs.append(event.id)
+                trigger = event
+            }
+        }
+
+        let parent = sampleAlert(id: alertId, event: try #require(trigger))
+        try await alerts.insert(alert: parent)
+        let candidates = try await events.alertEvidenceCandidates(
+            alertTimestamp: alertTime
+        )
+        let result = try await alerts.captureEvidence(
+            alertId: alertId,
+            candidates: candidates,
+            maxBytes: 100 * 1_048_576
+        )
+        let evidence = try await alerts.evidenceFor(alertId: alertId)
+        #expect(result.insertedRows == 2)
+        #expect(evidence.map(\.id) == expectedIDs)
+    }
+
+    @Test("alert-owned evidence capture is idempotent")
+    func evidenceRecordingIsIdempotent() async throws {
+        let (_, tmp) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try AlertStore(directory: tmp.path)
+
+        let alertTime = Date()
+        let alertId = UUID().uuidString
+        let event = sampleEvent(at: alertTime)
+        try await store.insert(alert: sampleAlert(id: alertId, event: event))
+        let candidate = try evidenceCandidate(event)
+
+        let first = try await store.captureEvidence(
+            alertId: alertId,
+            candidates: [candidate],
+            maxBytes: 100 * 1_048_576
+        )
+        let second = try await store.captureEvidence(
+            alertId: alertId,
+            candidates: [candidate],
+            maxBytes: 100 * 1_048_576
+        )
+        let third = try await store.captureEvidence(
+            alertId: alertId,
+            candidates: [candidate],
+            maxBytes: 100 * 1_048_576
+        )
 
         let evidence = try await store.evidenceFor(alertId: alertId)
+        #expect(first.insertedRows == 1)
+        #expect(second.insertedRows == 0 && second.duplicateRows == 1)
+        #expect(third.insertedRows == 0 && third.duplicateRows == 1)
         #expect(evidence.count == 1)
     }
 
-    @Test("pruneAlertEvidenceBySize evicts oldest until under the byte cap (RC H2)")
+    @Test("alert-owned evidence budget evicts oldest context first")
     func evidenceSizeCapEvictsOldest() async throws {
-        let (store, tmp) = try makeTempStore()
+        let (_, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try AlertStore(directory: tmp.path)
 
-        // 30 alerts, each with one evidence row, spaced 1 min apart (oldest first).
         let base = Date(timeIntervalSince1970: 1_700_000_000)
         var ids: [String] = []
+        var tenRowCap: Int64 = 0
         for i in 0..<30 {
             let t = base.addingTimeInterval(Double(i) * 60)
-            try await store.insert(event: sampleEvent(at: t))
+            let event = sampleEvent(at: t, padding: 20_000)
             let id = "alert-\(i)"
             ids.append(id)
-            try await store.recordAlertEvidence(alertId: id, alertTimestamp: t)
+            try await store.insert(alert: sampleAlert(id: id, event: event))
+            let result = try await store.captureEvidence(
+                alertId: id,
+                candidates: [try evidenceCandidate(event)],
+                maxBytes: 100 * 1_048_576
+            )
+            #expect(result.insertedRows == 1)
+            if i == 9 {
+                tenRowCap = try await store.refreshEvidenceBudgetSnapshot(
+                    maxBytes: .max
+                ).chargedBytes
+            }
         }
-        // Measure one row's payload to set a cap that keeps ~10 rows.
-        let oneRow = try await store.evidenceFor(alertId: ids[0]).count
-        #expect(oneRow == 1)
+        #expect(try await store.evidenceFor(alertId: ids[0]).count == 1)
 
-        // Cap above current size -> no-op.
-        let noop = try await store.pruneAlertEvidenceBySize(maxBytes: 100_000_000)
+        let full = try await store.refreshEvidenceBudgetSnapshot(
+            maxBytes: tenRowCap
+        )
+        #expect(full.overBudget)
+        let noop = try await store.pruneAlertEvidenceToBudget(
+            maxBytes: 100_000_000
+        )
         #expect(noop == 0)
+        #expect(try await store.pruneAlertEvidenceToBudget(maxBytes: -1) == 0)
 
-        // Cap of 0 / negative -> guard returns 0 (no deletion).
-        #expect(try await store.pruneAlertEvidenceBySize(maxBytes: 0) == 0)
-
-        // Tight cap with a tiny batch -> evicts the OLDEST rows, newest survive.
-        let deleted = try await store.pruneAlertEvidenceBySize(maxBytes: 1500, batchSize: 3)
+        // Bound each maintenance transaction so the test observes the
+        // oldest-first ordering instead of a deliberate whole-batch overshoot.
+        _ = try await store.updateStorageAdmission(
+            SQLitePersistentStorePolicy(
+                maxFootprintBytes: 200 * 1_048_576,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: 512 * 1_024,
+                storageVolumePath: tmp.path
+            )
+        )
+        let deleted = try await store.pruneAlertEvidenceToBudget(
+            maxBytes: tenRowCap
+        )
         #expect(deleted > 0)
-        // The oldest alert's evidence must be gone; the newest must remain.
         #expect(try await store.evidenceFor(alertId: ids[0]).isEmpty)
         #expect(try await store.evidenceFor(alertId: ids[29]).count == 1)
+        let final = try await store.refreshEvidenceBudgetSnapshot(
+            maxBytes: tenRowCap
+        )
+        #expect(!final.overBudget)
     }
 
     @Test("evidenceFor returns empty for unknown alert id")
     func evidenceForUnknownAlertEmpty() async throws {
-        let (store, tmp) = try makeTempStore()
+        let (_, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try AlertStore(directory: tmp.path)
 
         let evidence = try await store.evidenceFor(alertId: UUID().uuidString)
         #expect(evidence.isEmpty)
     }
 
-    // MARK: - Roll-up + prune
+    // MARK: - Journal expiry + aggregate retention
 
-    @Test("rollUpAndPrune deletes hot-tier rows older than cutoff and aggregates them")
+    @Test("source time cannot prune fresh journal rows; whole-block expiry rolls them up")
     func rollUpDeletesAndAggregates() async throws {
         let (store, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -142,28 +233,44 @@ struct TieredRetentionTests {
         let oldDay = now.addingTimeInterval(-3 * 86400)   // 3 days old
         let recent = now.addingTimeInterval(-1 * 3600)    // 1 hour old
 
-        // 5 old events (will roll up), 2 recent events (stay in hot tier).
+        var ids: [UUID] = []
         for _ in 0..<5 {
-            try await store.insert(event: sampleEvent(at: oldDay))
+            let event = sampleEvent(at: oldDay)
+            ids.append(event.id)
+            try await store.insert(event: event)
         }
         for _ in 0..<2 {
-            try await store.insert(event: sampleEvent(at: recent))
+            let event = sampleEvent(at: recent)
+            ids.append(event.id)
+            try await store.insert(event: event)
         }
 
         let cutoff = now.addingTimeInterval(-86400) // 24h ago
         let deleted = try await store.rollUpAndPrune(olderThan: cutoff)
-        #expect(deleted == 5)
+        #expect(deleted == 0)
+        #expect(try await store.aggregateCount() == 0)
+        for id in ids {
+            let snapshot = try await store.exactEventSnapshot(id: id)
+            #expect(snapshot.event?.id == id)
+        }
 
-        // Hot tier: only the 2 recent events.
-        let remaining = try await store.events(since: Date.distantPast, limit: 100)
-        #expect(remaining.count == 2)
-
-        // Aggregates: one row for the old day + category + signer + path.
-        let aggCount = try await store.aggregateCount()
-        #expect(aggCount >= 1)
+        // A journal block is admitted for 15 minutes regardless of an
+        // attacker-controlled source timestamp.
+        #expect(try await store.expireJournalBlocks(
+            retainedThrough: now.addingTimeInterval(14 * 60)
+        ) == 0)
+        #expect(try await expireFreshJournal(store) == 7)
+        #expect(try await expireFreshJournal(store) == 0)
+        for id in ids {
+            let snapshot = try await store.exactEventSnapshot(id: id)
+            #expect(snapshot.event == nil)
+        }
+        let aggregates = try await store.aggregates(sinceDay: "2000-01-01")
+        #expect(aggregates.count == 2)
+        #expect(aggregates.reduce(0) { $0 + $1.count } == 7)
     }
 
-    @Test("rollUpAndPrune is idempotent — re-running with no new events doesn't double-count")
+    @Test("whole-block journal expiry is idempotent")
     func rollUpIsIdempotent() async throws {
         let (store, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -173,14 +280,10 @@ struct TieredRetentionTests {
             try await store.insert(event: sampleEvent(at: oldDay))
         }
 
-        let cutoff = Date().addingTimeInterval(-86400)
-        try await store.rollUpAndPrune(olderThan: cutoff)
-        try await store.rollUpAndPrune(olderThan: cutoff)
-        try await store.rollUpAndPrune(olderThan: cutoff)
+        #expect(try await expireFreshJournal(store) == 10)
+        #expect(try await expireFreshJournal(store) == 0)
+        #expect(try await expireFreshJournal(store) == 0)
 
-        // The aggregate row should still report 10 events even after
-        // three roll-up calls — the second + third had nothing left in
-        // the hot tier to count.
         let agg = try await store.aggregates(sinceDay: "2000-01-01")
         let total = agg.reduce(0) { $0 + $1.count }
         #expect(total == 10)
@@ -195,8 +298,7 @@ struct TieredRetentionTests {
         for _ in 0..<3 {
             try await store.insert(event: sampleEvent(at: oldDay))
         }
-        let cutoff = Date().addingTimeInterval(-86400)
-        try await store.rollUpAndPrune(olderThan: cutoff)
+        #expect(try await expireFreshJournal(store) == 3)
 
         // Future day → empty.
         let futureDay = "2099-01-01"
@@ -221,16 +323,18 @@ struct TieredRetentionTests {
         let (store, tmp) = try makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Plant: one 60-day-old event (will be trimmed after rollup) + one
-        // 5-day-old event (will survive the 30-day trim window).
         let veryOld = Date().addingTimeInterval(-60 * 86400)
         let recentlyOld = Date().addingTimeInterval(-5 * 86400)
         try await store.insert(event: sampleEvent(at: veryOld))
         try await store.insert(event: sampleEvent(at: recentlyOld, name: "recent", path: "/bin/recent"))
 
-        // Single rollup: aggregates both → trim drops the 60-day-old → only
-        // the 5-day-old aggregate row survives.
-        try await store.rollUpAndPrune(olderThan: Date().addingTimeInterval(-86400))
+        #expect(try await expireFreshJournal(store) == 2)
+        #expect(try await store.aggregateCount() == 2)
+
+        // Legacy-row maintenance also retains the 30-day aggregate trim.
+        #expect(try await store.rollUpAndPrune(
+            olderThan: Date().addingTimeInterval(-86400)
+        ) == 0)
 
         let agg = try await store.aggregates(sinceDay: "2000-01-01")
         #expect(agg.count == 1)

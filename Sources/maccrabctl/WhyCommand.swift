@@ -35,7 +35,7 @@ extension MacCrabCtl {
         // 1. Load the alert.
         let alert: Alert
         do {
-            let store = try AlertStore(directory: dataDir)
+            let store = try openAlertStoreForReading(directory: dataDir)
             guard let found = try await store.alert(id: alertID) else {
                 print("No alert with id '\(alertID)' in \(dataDir)/alerts.db")
                 print("Tip: copy the ID from `maccrabctl alerts` (the first column).")

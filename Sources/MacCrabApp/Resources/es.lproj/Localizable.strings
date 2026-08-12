@@ -557,7 +557,7 @@
 "appearance.mode" = "Modo";
 "appearance.note" = "Consejo: la detección, la prevención y la respuesta están siempre activas, independientemente del modo. Solo cambia la navegación del panel.";
 "appearance.title" = "Complejidad del panel";
-"events.aggregateModeBanner" = "Mostrando resúmenes diarios — reduzca el intervalo de tiempo a las últimas 24 h o menos para ver el detalle por evento";
+"events.aggregateModeBanner" = "Mostrando resúmenes diarios — los detalles exactos de eventos solo están disponibles para el intervalo conservado";
 "events.category" = "Categoría";
 "events.count" = "Recuento";
 "events.day" = "Día";

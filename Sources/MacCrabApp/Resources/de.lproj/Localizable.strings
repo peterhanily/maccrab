@@ -557,7 +557,7 @@
 "appearance.mode" = "Modus";
 "appearance.note" = "Tipp: Erkennung, Prävention und Reaktion sind unabhängig vom Modus immer aktiv. Nur die Dashboard-Navigation ändert sich.";
 "appearance.title" = "Dashboard-Komplexität";
-"events.aggregateModeBanner" = "Tageszusammenfassungen werden angezeigt — verkürzen Sie den Zeitraum auf die letzten 24 Std. oder weniger für Details pro Ereignis";
+"events.aggregateModeBanner" = "Tageszusammenfassungen werden angezeigt — genaue Ereignisdetails sind nur für den gespeicherten Zeitraum verfügbar";
 "events.category" = "Kategorie";
 "events.count" = "Anzahl";
 "events.day" = "Tag";

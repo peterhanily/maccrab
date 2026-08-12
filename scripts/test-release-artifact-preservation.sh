@@ -1185,6 +1185,13 @@ make_release_fixture() {
     write_executable "$fixture/fake-bin/curl" \
         '#!/bin/bash' \
         'cat release.json'
+    # release.sh deliberately waits between remote-state retries in production.
+    # These disposable fixtures provide every remote transition synchronously,
+    # so real 2s/10s sleeps add minutes without exercising another state. Keep
+    # the retry loops and assertions intact while making fixture time bounded.
+    write_executable "$fixture/fake-bin/sleep" \
+        '#!/bin/bash' \
+        'exit 0'
     write_executable "$fixture/scripts/build-release.sh" \
         '#!/bin/bash' \
         'set -euo pipefail' \

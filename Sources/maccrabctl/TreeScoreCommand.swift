@@ -51,7 +51,7 @@ extension MacCrabCtl {
         print("──────────────────────────────────────────")
 
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = Date().addingTimeInterval(-86400)
             let alerts = try await store.alerts(since: since, limit: 5000)
 

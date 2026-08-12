@@ -4,7 +4,7 @@ import MacCrabCore
 extension MacCrabCtl {
     static func listVulns(hours: Double? = nil, severityFilter: Severity? = nil) async {
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
             let all = try await store.alerts(since: since, severity: severityFilter, limit: 500)
             let vulns = all.filter { $0.ruleId.hasPrefix("maccrab.vuln.") }

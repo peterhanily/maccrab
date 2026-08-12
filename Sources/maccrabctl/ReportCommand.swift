@@ -23,7 +23,7 @@ extension MacCrabCtl {
         let supportDir = maccrabDataDir()
         let store: AlertStore
         do {
-            store = try AlertStore(directory: supportDir)
+            store = try openAlertStoreForReading(directory: supportDir)
         } catch {
             print("Error opening alert store: \(error)")
             return

@@ -71,6 +71,13 @@ struct EventLossObservabilityWiringTests {
         #expect(timers.contains(
             "let eventInsertFilterCounters = await state.eventStore.insertFilterCounters()"
         ))
+        #expect(timers.contains(".payloadPoisonTotalSnapshot()"),
+                "qualification poison must come from the throwing durable ledger")
+        #expect(!timers.contains("state.eventStore.payloadTruncatedTotal()"),
+                "an unavailable poison ledger must not be published as zero")
+        #expect(timers.contains(
+            "payload[\"payload_truncated_total\"] = payloadPoisonTotal"
+        ))
         #expect(timers.contains(
             "\"events_storage_write_dropped_total\": eventWriterTelemetry.droppedCount"
         ), "legacy storage-drop meaning must remain the writer's permanent sheds")
@@ -109,6 +116,54 @@ struct EventLossObservabilityWiringTests {
         ))
         #expect(timers.contains(
             "payload[\"events_insert_filter_passed_total\"] = eventInsertFilterCounters.passed"
+        ))
+    }
+
+    @Test("boot rule and journal evidence plus sparse coverage reach heartbeat")
+    func bootEvidenceWiringDoesNotDrift() throws {
+        let setup = try source("Sources/MacCrabAgentKit/DaemonSetup.swift")
+        let state = try source("Sources/MacCrabAgentKit/DaemonState.swift")
+        let timers = try source("Sources/MacCrabAgentKit/DaemonTimers.swift")
+
+        #expect(setup.contains(
+            "let ruleSyncOutcome = ruleSyncObservation.outcome"
+        ))
+        #expect(setup.contains(
+            "bundledRuleSyncObservation: ruleSyncObservation"
+        ))
+        #expect(setup.contains("eventJournalRecovery: journalRecovery"))
+        #expect(state.contains(
+            "let bundledRuleSyncObservation: BundledRuleSyncBootObservation"
+        ))
+        #expect(state.contains(
+            "let eventJournalRecovery: EventStore.EventJournalRecoverySnapshot"
+        ))
+
+        #expect(timers.contains("switch ruleSyncObservation.outcome"))
+        #expect(timers.contains(
+            "ruleSyncObservation.installedCorpus != nil"
+        ), "corpus verification must come from verifier evidence")
+        #expect(timers.contains(
+            "ruleSync[\"installed_manifest_sha256\"] = corpus.manifestSHA256"
+        ))
+        #expect(timers.contains(
+            "\"source_events\": journalRecovery.sourceEvents"
+        ))
+        #expect(timers.contains(
+            "\"corrupt_preserved_events\":"
+        ))
+        #expect(timers.contains(
+            "\"conserved\": journalRecoveryConserved"
+        ))
+        #expect(timers.contains(
+            "let snapshot = try await state.eventStore.searchSnapshot("
+        ))
+        #expect(timers.contains("text: \"\""))
+        #expect(timers.contains(
+            "\"projection_omitted_total\": snapshot.projectionOmitted"
+        ))
+        #expect(timers.contains(
+            "\"event_search_projection\": eventSearchProjection"
         ))
     }
 }

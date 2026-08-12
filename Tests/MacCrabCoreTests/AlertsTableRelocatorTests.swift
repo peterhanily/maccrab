@@ -375,10 +375,17 @@ struct AlertsTableRelocatorTests {
             transactionReserveBytes: 1_048_576,
             storageVolumePath: dir.path
         )
+        // Test-only alert policy: production has no named low-volume reserve
+        // constant, and this fixture needs at least the 1.5 MiB schema bound.
+        let alertFixtureTransactionReserveBytes = Int64(2 * 1_048_576)
         let alertPolicy = SQLitePersistentStorePolicy(
             maxFootprintBytes: 16 * 1_048_576,
             freeSpaceFloorBytes: 0,
-            transactionReserveBytes: 1_048_576,
+            // Current alert bootstrap has a 1.5 MiB indexed-schema upper
+            // bound. Keep that transaction valid so this fixture reaches the
+            // intended indexed-copy headroom refusal rather than failing early
+            // on an undersized schema reserve.
+            transactionReserveBytes: alertFixtureTransactionReserveBytes,
             storageVolumePath: dir.path
         )
 

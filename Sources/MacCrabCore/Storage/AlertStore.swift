@@ -337,6 +337,113 @@ public actor AlertStore {
                 """,
             ]
         ),
+        // v9: persist whether the exact capture-time journal window was
+        // complete. A direct trigger may still be present when surrounding
+        // context contains a poison/corrupt record or selection fails; without
+        // this row, an empty/partial evidence set would look falsely complete.
+        Migration(
+            version: 9,
+            name: "add_alert_evidence_context_status",
+            sql: [
+                """
+                CREATE TABLE IF NOT EXISTS alert_evidence_context (
+                    alert_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('pending', 'complete', 'incomplete', 'capture_failed')
+                    ),
+                    source_mutation_generation INTEGER NOT NULL CHECK (
+                        source_mutation_generation >= 0
+                    ),
+                    poison_record_count INTEGER NOT NULL CHECK (
+                        poison_record_count >= 0
+                    ),
+                    corrupt_record_count INTEGER NOT NULL CHECK (
+                        corrupt_record_count >= 0
+                    ),
+                    CHECK (
+                        status != 'complete'
+                        OR (
+                            source_mutation_generation > 0
+                            AND poison_record_count = 0
+                            AND corrupt_record_count = 0
+                        )
+                    ),
+                    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+                ) WITHOUT ROWID
+                """,
+                """
+                CREATE TRIGGER IF NOT EXISTS alerts_initialize_evidence_context
+                AFTER INSERT ON alerts
+                BEGIN
+                    INSERT OR IGNORE INTO alert_evidence_context (
+                        alert_id, status, source_mutation_generation,
+                        poison_record_count, corrupt_record_count
+                    ) VALUES (NEW.id, 'pending', 0, 0, 0);
+                END
+                """,
+            ]
+        ),
+        // v10: an incomplete bit without a reason is not actionable and can
+        // falsely hide inherited rc.12 loss or exact-query resource limiting.
+        // Add reason counters in place (no unbounded table rewrite), then
+        // enforce the complete/incomplete equations on every future write.
+        Migration(
+            version: 10,
+            name: "reason_alert_evidence_context_gaps",
+            sql: [
+                "ALTER TABLE alert_evidence_context ADD COLUMN inherited_loss_count INTEGER NOT NULL DEFAULT 0 CHECK (inherited_loss_count >= 0)",
+                "ALTER TABLE alert_evidence_context ADD COLUMN resource_limit_count INTEGER NOT NULL DEFAULT 0 CHECK (resource_limit_count >= 0)",
+                "ALTER TABLE alert_evidence_context ADD COLUMN journal_admission_gap_count INTEGER NOT NULL DEFAULT 0 CHECK (journal_admission_gap_count >= 0)",
+                """
+                CREATE TRIGGER IF NOT EXISTS alert_evidence_context_validate_insert
+                BEFORE INSERT ON alert_evidence_context
+                WHEN (
+                    NEW.status = 'complete' AND (
+                        NEW.source_mutation_generation <= 0
+                        OR NEW.poison_record_count != 0
+                        OR NEW.corrupt_record_count != 0
+                        OR NEW.inherited_loss_count != 0
+                        OR NEW.resource_limit_count != 0
+                        OR NEW.journal_admission_gap_count != 0
+                    )
+                ) OR (
+                    NEW.status = 'incomplete'
+                    AND NEW.poison_record_count = 0
+                    AND NEW.corrupt_record_count = 0
+                    AND NEW.inherited_loss_count = 0
+                    AND NEW.resource_limit_count = 0
+                    AND NEW.journal_admission_gap_count = 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'invalid alert evidence context status equation');
+                END
+                """,
+                """
+                CREATE TRIGGER IF NOT EXISTS alert_evidence_context_validate_update
+                BEFORE UPDATE ON alert_evidence_context
+                WHEN (
+                    NEW.status = 'complete' AND (
+                        NEW.source_mutation_generation <= 0
+                        OR NEW.poison_record_count != 0
+                        OR NEW.corrupt_record_count != 0
+                        OR NEW.inherited_loss_count != 0
+                        OR NEW.resource_limit_count != 0
+                        OR NEW.journal_admission_gap_count != 0
+                    )
+                ) OR (
+                    NEW.status = 'incomplete'
+                    AND NEW.poison_record_count = 0
+                    AND NEW.corrupt_record_count = 0
+                    AND NEW.inherited_loss_count = 0
+                    AND NEW.resource_limit_count = 0
+                    AND NEW.journal_admission_gap_count = 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'invalid alert evidence context status equation');
+                END
+                """,
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -580,6 +687,42 @@ public actor AlertStore {
                 PRIMARY KEY (alert_id, event_id),
                 FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
             ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS alert_evidence_context (
+                alert_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'complete', 'incomplete', 'capture_failed')
+                ),
+                source_mutation_generation INTEGER NOT NULL CHECK (
+                    source_mutation_generation >= 0
+                ),
+                poison_record_count INTEGER NOT NULL CHECK (
+                    poison_record_count >= 0
+                ),
+                corrupt_record_count INTEGER NOT NULL CHECK (
+                    corrupt_record_count >= 0
+                ),
+                CHECK (
+                    status != 'complete'
+                    OR (
+                        source_mutation_generation > 0
+                        AND poison_record_count = 0
+                        AND corrupt_record_count = 0
+                    )
+                ),
+                FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS alerts_initialize_evidence_context
+            AFTER INSERT ON alerts
+            BEGIN
+                INSERT OR IGNORE INTO alert_evidence_context (
+                    alert_id, status, source_mutation_generation,
+                    poison_record_count, corrupt_record_count
+                ) VALUES (NEW.id, 'pending', 0, 0, 0);
+            END
             """,
             "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
@@ -876,12 +1019,26 @@ public actor AlertStore {
     /// - Parameter alert: The alert to store.
     /// - Throws: `AlertStoreError` on database failure.
     public func insert(alert: Alert) throws {
-        try insert(alert: alert) { rowBytes in
-            try self.admitStorageWrite(
-                estimatedTransactionBytes: self.alertTransactionEstimate(
-                    rowMutationBytes: rowBytes
+        var transactionOpen = false
+        do {
+            try insert(alert: alert) { rowBytes in
+                // The AFTER INSERT trigger writes `.pending` in this same
+                // bounded transaction. `rowBytes` includes that context-row
+                // mutation, so storage admission cannot approve the alert while
+                // omitting its durable completeness truth from the estimate.
+                try self.execute(
+                    "BEGIN TRANSACTION",
+                    estimatedTransactionBytes: self.alertTransactionEstimate(
+                        rowMutationBytes: rowBytes
+                    )
                 )
-            )
+                transactionOpen = true
+            }
+            try execute("COMMIT")
+            transactionOpen = false
+        } catch {
+            if transactionOpen { try? execute("ROLLBACK") }
+            throw error
         }
     }
 
@@ -900,9 +1057,13 @@ public actor AlertStore {
                 "alert transaction estimate encode failed: \(error.localizedDescription)"
             )
         }
-        let rowBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+        let alertRowBytes = SQLitePersistentStoreAdmission.saturatingAdd(
             newRowBytes,
             try existingAlertMutationBytes(id: alert.id)
+        )
+        let rowBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+            alertRowBytes,
+            pendingEvidenceContextMutationBytes(alertId: alert.id)
         )
         try beforeWrite(rowBytes)
 
@@ -1023,6 +1184,12 @@ public actor AlertStore {
                 systemErrno: failure.systemErrno
             )
         }
+        // The insert trigger handles genuinely new rows. This explicit
+        // idempotent step also repairs an updated pre-v9 alert whose INSERT ...
+        // ON CONFLICT took the UPDATE branch and therefore did not fire it.
+        // Every caller opens a bounded transaction before entering this helper,
+        // so alert + pending context commit or roll back together.
+        try ensurePendingEvidenceContext(alertId: alert.id)
         maintenanceRowMutationHighWaterBytes = max(
             maintenanceRowMutationHighWaterBytes ?? 0,
             rowBytes
@@ -1134,6 +1301,38 @@ public actor AlertStore {
             pageSizeBytes: sqlitePageSizeBytes,
             maximumTreePathPageTouches: 32
         )
+    }
+
+    private func pendingEvidenceContextMutationBytes(alertId: String) -> Int64 {
+        SQLitePersistentStoreAdmission.conservativeEncodedRowMutationBytes(
+            logicalRepresentationBytes: Int64(alertId.utf8.count + 128),
+            pageSizeBytes: sqlitePageSizeBytes,
+            maximumLeafPageTouches: 2
+        )
+    }
+
+    private func ensurePendingEvidenceContext(alertId: String) throws {
+        let statement = try prepare(
+            """
+            INSERT OR IGNORE INTO alert_evidence_context (
+                alert_id, status, source_mutation_generation,
+                poison_record_count, corrupt_record_count,
+                inherited_loss_count, resource_limit_count,
+                journal_admission_gap_count
+            ) VALUES (?1, 'pending', 0, 0, 0, 0, 0, 0)
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: alertId)
+        let rc = sqlite3_step(statement)
+        guard rc == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            let message = db.map { String(cString: sqlite3_errmsg($0)) }
+                ?? "unknown error"
+            throw AlertStoreError.stepFailed(
+                "pending alert evidence context insert failed: \(message)"
+            )
+        }
     }
 
     /// Persists alerts in reserve-bounded transactions. Alert ids use an UPSERT,
@@ -1720,6 +1919,234 @@ public actor AlertStore {
     }
 
     // MARK: - Alert-owned evidence (schema v8)
+
+    /// Persist fail-closed completeness metadata for the exact journal window.
+    /// Upserts are monotonic: a retry can advance the source generation and
+    /// counts, but it can never turn a previously observed gap into complete.
+    public func recordEvidenceContext(
+        _ record: AlertEvidenceContextRecord
+    ) throws {
+        guard !record.alertId.isEmpty else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence context requires an alert id"
+            )
+        }
+        guard try tableExists("alert_evidence_context") else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence context schema is unavailable"
+            )
+        }
+        try admitStorageWrite(
+            estimatedTransactionBytes:
+                SQLitePersistentStoreAdmission.conservativeRowMutationBytes
+        )
+        let sql = """
+            INSERT INTO alert_evidence_context (
+                alert_id, status, source_mutation_generation,
+                poison_record_count, corrupt_record_count,
+                inherited_loss_count, resource_limit_count,
+                journal_admission_gap_count
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(alert_id) DO UPDATE SET
+                status = CASE
+                    WHEN alert_evidence_context.status = 'capture_failed'
+                      OR excluded.status = 'capture_failed'
+                    THEN 'capture_failed'
+                    WHEN alert_evidence_context.status = 'incomplete'
+                      OR excluded.status = 'incomplete'
+                    THEN 'incomplete'
+                    WHEN excluded.status = 'pending'
+                    THEN alert_evidence_context.status
+                    ELSE 'complete'
+                END,
+                source_mutation_generation = MAX(
+                    alert_evidence_context.source_mutation_generation,
+                    excluded.source_mutation_generation
+                ),
+                poison_record_count = MAX(
+                    alert_evidence_context.poison_record_count,
+                    excluded.poison_record_count
+                ),
+                corrupt_record_count = MAX(
+                    alert_evidence_context.corrupt_record_count,
+                    excluded.corrupt_record_count
+                ),
+                inherited_loss_count = MAX(
+                    alert_evidence_context.inherited_loss_count,
+                    excluded.inherited_loss_count
+                ),
+                journal_admission_gap_count = MAX(
+                    alert_evidence_context.journal_admission_gap_count,
+                    excluded.journal_admission_gap_count
+                ),
+                resource_limit_count = MAX(
+                    alert_evidence_context.resource_limit_count,
+                    excluded.resource_limit_count,
+                    CASE
+                        WHEN alert_evidence_context.status = 'incomplete'
+                          AND alert_evidence_context.poison_record_count = 0
+                          AND alert_evidence_context.corrupt_record_count = 0
+                          AND alert_evidence_context.inherited_loss_count = 0
+                          AND alert_evidence_context.resource_limit_count = 0
+                          AND alert_evidence_context.journal_admission_gap_count = 0
+                        THEN 1 ELSE 0
+                    END
+                )
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: record.alertId)
+        bindText(statement, index: 2, value: record.status.rawValue)
+        sqlite3_bind_int64(
+            statement,
+            3,
+            Int64(clamping: record.sourceMutationGeneration)
+        )
+        sqlite3_bind_int64(
+            statement,
+            4,
+            Int64(clamping: record.poisonRecordCount)
+        )
+        sqlite3_bind_int64(
+            statement,
+            5,
+            Int64(clamping: record.corruptRecordCount)
+        )
+        sqlite3_bind_int64(
+            statement,
+            6,
+            Int64(clamping: record.inheritedLossCount)
+        )
+        sqlite3_bind_int64(
+            statement,
+            7,
+            Int64(clamping: record.resourceLimitedCount)
+        )
+        sqlite3_bind_int64(
+            statement,
+            8,
+            Int64(clamping: record.journalAdmissionGapCount)
+        )
+        let rc = sqlite3_step(statement)
+        guard rc == SQLITE_DONE else {
+            try throwLatchedStoragePressureIfPresent(resultCode: rc)
+            let message = db.map { String(cString: sqlite3_errmsg($0)) }
+                ?? "unknown error"
+            throw AlertStoreError.stepFailed(
+                "alert evidence context insert failed: \(message)"
+            )
+        }
+    }
+
+    public func evidenceContext(
+        alertId: String
+    ) throws -> AlertEvidenceContextRecord? {
+        guard try tableExists("alert_evidence_context") else { return nil }
+        let statement = try prepare(
+            "SELECT status, source_mutation_generation, poison_record_count, corrupt_record_count, inherited_loss_count, resource_limit_count, journal_admission_gap_count FROM alert_evidence_context WHERE alert_id = ?1"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: alertId)
+        let rc = sqlite3_step(statement)
+        if rc == SQLITE_DONE { return nil }
+        guard rc == SQLITE_ROW,
+              let statusBytes = sqlite3_column_text(statement, 0),
+              let status = AlertEvidenceContextRecord.Status(
+                rawValue: String(cString: statusBytes)
+              ) else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence context read failed"
+            )
+        }
+        let generation = max(0, sqlite3_column_int64(statement, 1))
+        let poison = Int(sqlite3_column_int64(statement, 2))
+        let corrupt = Int(sqlite3_column_int64(statement, 3))
+        let inherited = Int(sqlite3_column_int64(statement, 4))
+        var resource = Int(sqlite3_column_int64(statement, 5))
+        let journalAdmissionGap = Int(sqlite3_column_int64(statement, 6))
+        if status == .incomplete, poison == 0, corrupt == 0,
+           inherited == 0, resource == 0, journalAdmissionGap == 0 {
+            // A v9 row may predate the reason columns. Surface that inherited
+            // anonymous incomplete bit as explicit representation/resource
+            // debt without rewriting the whole table during migration.
+            resource = 1
+        }
+        return AlertEvidenceContextRecord(
+            alertId: alertId,
+            status: status,
+            sourceMutationGeneration: UInt64(generation),
+            poisonRecordCount: poison,
+            corruptRecordCount: corrupt,
+            inheritedLossCount: inherited,
+            resourceLimitedCount: resource,
+            journalAdmissionGapCount: journalAdmissionGap
+        )
+    }
+
+    /// Durable work left in the atomic post-alert capture state. Unlike the
+    /// sink's in-memory queue depth this survives crash/restart and includes
+    /// jobs shed before they could enter that queue.
+    public func pendingEvidenceContextCount() throws -> Int {
+        try evidenceContextCounts().pending
+    }
+
+    public func evidenceContextCounts() throws -> AlertEvidenceContextCounts {
+        guard try tableExists("alert_evidence_context") else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence context schema is unavailable"
+            )
+        }
+        let statement = try prepare(
+            """
+            SELECT
+                COUNT(*),
+                SUM(CASE WHEN c.status = 'pending' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN c.status = 'complete' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN c.status = 'incomplete' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN c.status = 'capture_failed' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN c.alert_id IS NULL THEN 1 ELSE 0 END),
+                COALESCE(SUM(c.poison_record_count), 0),
+                COALESCE(SUM(c.corrupt_record_count), 0),
+                COALESCE(SUM(c.inherited_loss_count), 0),
+                COALESCE(SUM(c.journal_admission_gap_count), 0),
+                COALESCE(SUM(
+                    c.resource_limit_count
+                    + CASE
+                        WHEN c.status = 'incomplete'
+                          AND c.poison_record_count = 0
+                          AND c.corrupt_record_count = 0
+                          AND c.inherited_loss_count = 0
+                          AND c.resource_limit_count = 0
+                          AND c.journal_admission_gap_count = 0
+                        THEN 1 ELSE 0
+                      END
+                ), 0)
+            FROM alerts AS a
+            LEFT JOIN alert_evidence_context AS c ON c.alert_id = a.id
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed(
+                "alert evidence context status count failed"
+            )
+        }
+        return AlertEvidenceContextCounts(
+            alertRows: Int(sqlite3_column_int64(statement, 0)),
+            pending: Int(sqlite3_column_int64(statement, 1)),
+            complete: Int(sqlite3_column_int64(statement, 2)),
+            incomplete: Int(sqlite3_column_int64(statement, 3)),
+            captureFailed: Int(sqlite3_column_int64(statement, 4)),
+            legacyUnverified: Int(sqlite3_column_int64(statement, 5)),
+            poisonRecords: Int(sqlite3_column_int64(statement, 6)),
+            corruptRecords: Int(sqlite3_column_int64(statement, 7)),
+            inheritedLossRecords: Int(sqlite3_column_int64(statement, 8)),
+            resourceLimitedRecords: Int(sqlite3_column_int64(statement, 10)),
+            journalAdmissionGapRecords: Int(
+                sqlite3_column_int64(statement, 9)
+            )
+        )
+    }
 
     /// Capture a bounded evidence snapshot after its parent alert has committed.
     /// The alert insert is intentionally a separate transaction: a best-effort

@@ -192,6 +192,54 @@ struct MacCrabCtlUnitTests {
         #expect(mcp.joined(separator: "\n").contains("batches=1"))
     }
 
+    @Test("status treats a non-accepting TraceGraph recovery barrier as a live fault")
+    func traceGraphRecoveryBarrierStatus() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrabctl-tracegraph-barrier-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        {"schema_version":5,"written_at_unix":1700000000,
+         "tracegraph_storage_admission":{"enabled":true,"blocked":false,
+         "store_available":true,"startup_blocked":false,"reason":"",
+         "accepting_mutations":false,"recovering":true,
+         "recovery_mutation_waiters":0,"recovery_mutation_waiter_limit":256,
+         "recovery_mutation_queue_saturated":false,
+         "recovery_mutation_waiter_high_watermark":0,
+         "recovery_mutation_waits_total":0,
+         "recovery_mutation_wait_releases_total":0,
+         "recovery_mutation_wait_cancellations_total":0,
+         "recovery_mutation_wait_closed_total":0,
+         "recovery_mutation_wait_saturations_total":0,
+         "recovery_mutation_wait_nanoseconds_total":0,
+         "recovery_mutation_max_wait_nanoseconds":0,
+         "recovery_mutation_oldest_wait_nanoseconds":0,
+         "recovery_writer_preemptions_total":0,
+         "ingest_events_total":1,"ingest_events_committed_total":1,
+         "ingest_events_failed_total":0,"ingest_events_in_flight":0,
+         "ingest_events_pending":0,"entity_observations_total":1,
+         "edge_observations_total":0,"relevance_suppressed_file_events_total":0,
+         "relevance_suppressed_rows_total":0,"write_attempts_total":1,
+         "write_batches_committed_total":1,"write_batches_failed_total":0,
+         "write_batches_in_flight":0,"write_rows_attempted_total":1,
+         "write_rows_committed_total":1,"write_rows_failed_total":0,
+         "write_rows_in_flight":0,"coalesced_noop_rows_total":0,
+         "pending_entity_rows":0,"pending_edge_rows":0}}
+        """.write(
+            to: dir.appendingPathComponent("heartbeat_rich.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let lines = MacCrabCtl.traceGraphStorageStatusLines(supportDir: dir.path)
+        let output = lines.joined(separator: "\n")
+        #expect(lines.first == "TraceGraph:      Evidence writes degraded ⚠")
+        #expect(output.contains("Recovery handoff is not healthy now"))
+        #expect(output.contains("accepting=false"))
+        #expect(!output.contains("earlier this boot"))
+    }
+
     @Test("CLI and MCP expose conserving fixed-cardinality AI runtime quality")
     func llmRuntimeStatus() throws {
         func counters(

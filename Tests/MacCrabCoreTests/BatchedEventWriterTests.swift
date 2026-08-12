@@ -10,8 +10,20 @@ import CSQLCipher
 @testable import MacCrabCore
 @testable import MacCrabAgentKit
 
-@Suite("F2/A1 BatchedEventWriter")
+@Suite("F2/A1 BatchedEventWriter", .serialized)
 struct BatchedEventWriterTests {
+
+    private func isolatedMemoryBudget() -> EventPipelineLiveMemoryBudget {
+        EventPipelineLiveMemoryBudget(
+            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
+            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
+                .productionForwardProgressReserveBytes,
+            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
+                .productionEventStoreWorkspaceReserveBytes,
+            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
+                .productionCompactReceiptReserveBytes
+        )
+    }
 
     private func makeEvent(_ i: Int) -> Event {
         let proc = ProcessInfo(
@@ -113,6 +125,52 @@ struct BatchedEventWriterTests {
         )
     }
 
+    /// Mirrors EventStore's current append-local block formation bound. Base
+    /// commits reserve this mutation plus one complete future terminal/poison
+    /// transaction, so footprint fixtures must include both rather than the
+    /// obsolete wide-row estimate alone.
+    private func journalBlockTransactionEstimate(
+        for events: [Event],
+        pageSize: Int64
+    ) throws -> Int64 {
+        guard !events.isEmpty,
+              events.count <= EventJournalCodec.maximumEventsPerBlock else {
+            throw EventStoreError.encodingFailed("invalid test journal block")
+        }
+        var payloadBytes: Int64 = 12
+        for event in events {
+            let canonical = try EventJournalAdmissionValidator.prepare(event)
+                .canonicalJSON
+            payloadBytes = SQLitePersistentStoreAdmission.saturatingAdd(
+                payloadBytes,
+                Int64(4 + canonical.count)
+            )
+        }
+        let rosterAndMetadata = SQLitePersistentStoreAdmission.saturatingAdd(
+            Int64(events.count * (16 + 48)),
+            4_096
+        )
+        let journalLogical = SQLitePersistentStoreAdmission.saturatingAdd(
+            payloadBytes,
+            rosterAndMetadata
+        )
+        let logical = SQLitePersistentStoreAdmission.saturatingAdd(
+            journalLogical,
+            1 * 1_024 * 1_024
+        )
+        let mutation = SQLitePersistentStoreAdmission
+            .conservativeEncodedRowMutationBytes(
+                logicalRepresentationBytes: logical,
+                pageSizeBytes: pageSize,
+                maximumLeafPageTouches: 16
+            )
+        return SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+            rowMutationBytes: mutation,
+            pageSizeBytes: pageSize,
+            maximumTreePathPageTouches: 48
+        )
+    }
+
     /// A fake inserter that fails transiently (EventStoreError.busy) until told to
     /// succeed — used to exercise the #13 retry-not-drop path deterministically.
     private actor FakeInserter: EventBatchInserting {
@@ -156,7 +214,13 @@ struct BatchedEventWriterTests {
                         inputCount: events.count,
                         persistedCount: prefix,
                         filteredCount: 0,
-                        committedTransactionCount: prefix == 0 ? 0 : 1
+                        committedTransactionCount: prefix == 0 ? 0 : 1,
+                        inputDispositions:
+                            events.prefix(prefix).map {
+                                .durable(eventID: $0.id)
+                            } + events.dropFirst(prefix).map {
+                                .uncommitted(eventID: $0.id)
+                            }
                     ),
                     uncommittedEvents: Array(events.dropFirst(prefix)),
                     underlyingError: EventStoreError.busy("chunk N busy")
@@ -167,7 +231,10 @@ struct BatchedEventWriterTests {
                 inputCount: events.count,
                 persistedCount: events.count,
                 filteredCount: 0,
-                committedTransactionCount: events.isEmpty ? 0 : 1
+                committedTransactionCount: events.isEmpty ? 0 : 1,
+                inputDispositions: events.map {
+                    .durable(eventID: $0.id)
+                }
             )
         }
     }
@@ -212,7 +279,12 @@ struct BatchedEventWriterTests {
                             inputCount: 3,
                             persistedCount: 1,
                             filteredCount: 1,
-                            committedTransactionCount: 1
+                            committedTransactionCount: 1,
+                            inputDispositions: [
+                                .durable(eventID: events[0].id),
+                                .uncommitted(eventID: events[1].id),
+                                .filtered(eventID: events[2].id),
+                            ]
                         ),
                         uncommittedEvents: [events[1]],
                         underlyingError: EventStoreError.busy(
@@ -225,7 +297,12 @@ struct BatchedEventWriterTests {
                             inputCount: 3,
                             persistedCount: 0,
                             filteredCount: 1,
-                            committedTransactionCount: 0
+                            committedTransactionCount: 0,
+                            inputDispositions: [
+                                .uncommitted(eventID: events[0].id),
+                                .uncommitted(eventID: events[1].id),
+                                .filtered(eventID: events[2].id),
+                            ]
                         ),
                         uncommittedEvents: [events[0], events[1]],
                         underlyingError: EventStoreError.stepFailed(
@@ -243,7 +320,10 @@ struct BatchedEventWriterTests {
                 inputCount: events.count,
                 persistedCount: events.count,
                 filteredCount: 0,
-                committedTransactionCount: events.isEmpty ? 0 : 1
+                committedTransactionCount: events.isEmpty ? 0 : 1,
+                inputDispositions: events.map {
+                    .durable(eventID: $0.id)
+                }
             )
         }
     }
@@ -280,7 +360,11 @@ struct BatchedEventWriterTests {
                         inputCount: 2,
                         persistedCount: 0,
                         filteredCount: 1,
-                        committedTransactionCount: 0
+                        committedTransactionCount: 0,
+                        inputDispositions: [
+                            .uncommitted(eventID: events[0].id),
+                            .filtered(eventID: events[1].id),
+                        ]
                     ),
                     uncommittedEvents: [events[0]],
                     underlyingError: EventStoreError.busy(
@@ -294,7 +378,10 @@ struct BatchedEventWriterTests {
                 inputCount: events.count,
                 persistedCount: events.count,
                 filteredCount: 0,
-                committedTransactionCount: events.isEmpty ? 0 : 1
+                committedTransactionCount: events.isEmpty ? 0 : 1,
+                inputDispositions: events.map {
+                    .durable(eventID: $0.id)
+                }
             )
         }
     }
@@ -539,7 +626,12 @@ struct BatchedEventWriterTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         // Threshold high enough that no auto-drain fires: the ONLY flush is
         // shutdown's, so this proves the shutdown path alone persists the batch.
-        let writer = BatchedEventWriter(store: store, flushThreshold: 100_000, hardCap: 100_000)
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
         for i in 0..<100 { await writer.enqueue(makeEvent(i)) }
         let queued = await writer.telemetrySnapshot()
         #expect(queued.bufferDepth == 100)
@@ -561,7 +653,12 @@ struct BatchedEventWriterTests {
     func autoDrainOnThreshold() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let writer = BatchedEventWriter(store: store, flushThreshold: 50, hardCap: 100_000)
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 50,
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
         for i in 0..<500 { await writer.enqueue(makeEvent(i)) }
         // The auto-drain loops until the buffer empties, so all 500 land without
         // an explicit shutdown — poll for convergence.
@@ -576,7 +673,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: SuspendedInserter(gate: gate),
             flushThreshold: 2,
-            hardCap: 100
+            hardCap: 100,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         await writer.enqueue(makeEvent(0))
         await writer.enqueue(makeEvent(1))
@@ -610,7 +708,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: SuspendedInserter(gate: gate),
             flushThreshold: 2,
-            hardCap: 100
+            hardCap: 100,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         await writer.enqueue(makeEvent(0), lane: .priority)
         await writer.enqueue(makeEvent(1), lane: .priority)
@@ -715,7 +814,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
 
         await writer.enqueue(makeEvent(0), lane: .priority) // filtered
@@ -750,7 +850,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
 
         for i in 0..<4 {
@@ -811,7 +912,8 @@ struct BatchedEventWriterTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("events.db").path
         let mib = SQLitePersistentStorePolicy.bytesPerMiB
-        let transactionReserve = 32 * mib
+        let transactionReserve = SQLitePersistentStorePolicy
+            .eventTransactionReserveBytes
         let store = try EventStore(
             path: path,
             storagePolicy: SQLitePersistentStorePolicy(
@@ -828,17 +930,18 @@ struct BatchedEventWriterTests {
 
         let firstFile = makeFileEvent(10)
         let secondFile = makeFileEvent(11)
-        let firstEstimate = try transactionEstimate(
+        let firstEstimate = try journalBlockTransactionEstimate(
             for: [firstFile],
             pageSize: pageSize
         )
-        #expect(try transactionEstimate(
+        #expect(try journalBlockTransactionEstimate(
             for: [secondFile],
             pageSize: pageSize
         ) == firstEstimate)
         #expect(firstEstimate <= transactionReserve)
         let priorityReserve = 16 * mib
         let cap = footprint + transactionReserve + priorityReserve
+            + firstEstimate
         #expect(
             EventStore.priorityLaneReserveBytes(maxFootprintBytes: cap)
                 == priorityReserve,
@@ -860,7 +963,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100,
-            hardCap: 100
+            hardCap: 100,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         await writer.enqueue(firstFile, lane: .file)
         await writer.shutdown()
@@ -891,10 +995,10 @@ struct BatchedEventWriterTests {
         #expect(final.droppedByLane == ["priority": 0, "file": 1])
         #expect(final.persistedByLane == ["priority": 1, "file": 1])
         #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
-        let stored = try await store.events(
+        let stored = try await store.exactEventsSnapshot(
             since: .distantPast
         )
-        #expect(Set(stored.map(\.id)) == [firstFile.id, priority.id])
+        #expect(Set(stored.events.map(\.id)) == [firstFile.id, priority.id])
         expectConserved(final, lane: .priority)
         expectConserved(final, lane: .file)
     }
@@ -910,7 +1014,8 @@ struct BatchedEventWriterTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("events.db").path
         let mib = SQLitePersistentStorePolicy.bytesPerMiB
-        let transactionReserve = 32 * mib
+        let transactionReserve = SQLitePersistentStorePolicy
+            .eventTransactionReserveBytes
         let store = try EventStore(
             path: path,
             storagePolicy: SQLitePersistentStorePolicy(
@@ -928,25 +1033,40 @@ struct BatchedEventWriterTests {
         // single-row calls. The former bug admitted only the first row's
         // estimate, then appended the rest without another lane check.
         let fileBatch = (0..<256).map { makeFileEvent(1_000 + $0) }
-        let firstEstimate = try transactionEstimate(
+        let firstEstimate = try journalBlockTransactionEstimate(
             for: [fileBatch[0]],
             pageSize: pageSize
         )
-        let chunkEstimate = try transactionEstimate(
-            for: fileBatch,
+        let firstBlock = Array(
+            fileBatch.prefix(EventJournalCodec.maximumEventsPerBlock)
+        )
+        let chunkEstimate = try journalBlockTransactionEstimate(
+            for: firstBlock,
             pageSize: pageSize
         )
         #expect(chunkEstimate > firstEstimate)
         #expect(chunkEstimate <= transactionReserve,
                 "fixture must fit in one EventStore transaction")
 
-        let prioritySlack = 1 * mib
-        let cap = footprint + transactionReserve + prioritySlack
+        let priorityReserve = EventStore.priorityLaneReserveBytes(
+            maxFootprintBytes: footprint + transactionReserve
+                + 16 * mib + firstEstimate
+        )
+        let cap = footprint + transactionReserve + priorityReserve
+            + firstEstimate
+        let effectivePriorityReserve = EventStore.priorityLaneReserveBytes(
+            maxFootprintBytes: cap
+        )
+        #expect(effectivePriorityReserve == priorityReserve)
         #expect(
-            firstEstimate
-                + EventStore.priorityLaneReserveBytes(maxFootprintBytes: cap)
-                <= transactionReserve + prioritySlack,
+            firstEstimate + effectivePriorityReserve
+                == cap - footprint - transactionReserve,
             "the obsolete first-row-only gate would admit this fixture"
+        )
+        #expect(
+            chunkEstimate + effectivePriorityReserve
+                > cap - footprint - transactionReserve,
+            "the complete journal block must cross the same lane boundary"
         )
         let tightened = try await store.updateStorageAdmission(
             SQLitePersistentStorePolicy(
@@ -983,8 +1103,8 @@ struct BatchedEventWriterTests {
         let priority = makeEvent(2_000)
         try await store.insert(event: priority)
         #expect(try await store.count() == 1)
-        let stored = try await store.events(since: .distantPast)
-        #expect(stored.map(\.id) == [priority.id])
+        let stored = try await store.exactEventsSnapshot(since: .distantPast)
+        #expect(stored.events.map(\.id) == [priority.id])
         #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
     }
 
@@ -995,7 +1115,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100,
-            hardCap: 100
+            hardCap: 100,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let credentialOpen = makeFileEvent(
             20,
@@ -1018,16 +1139,16 @@ struct BatchedEventWriterTests {
         #expect(telemetry.offeredByLane == ["priority": 2, "file": 0])
         #expect(telemetry.persistedByLane == ["priority": 2, "file": 0])
         #expect(telemetry.droppedCount == 0)
-        let stored = try await store.events(
+        let stored = try await store.exactEventsSnapshot(
             since: .distantPast,
             category: .file
         )
-        #expect(Set(stored.map(\.id)) == [credentialOpen.id, btmAdd.id])
+        #expect(Set(stored.events.map(\.id)) == [credentialOpen.id, btmAdd.id])
         expectConserved(telemetry, lane: .priority)
         expectConserved(telemetry, lane: .file)
     }
 
-    @Test("saturated file lane uses O(1) tail eviction and conserves both lanes")
+    @Test("saturated lossless ingress drains within the cap and conserves both lanes")
     func saturatedFileLaneHasConstantTimeEvictionGuard() async throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1039,86 +1160,167 @@ struct BatchedEventWriterTests {
             ),
             encoding: .utf8
         )
-        let enqueueStart = try #require(source.range(
-            of: "func enqueue("
+        let boundaryStart = try #require(source.range(
+            of: "/// Lossless production preparation boundary"
         ))
-        let enqueueEnd = try #require(source.range(
-            of: "private func isTransient",
-            range: enqueueStart.upperBound..<source.endIndex
+        let boundaryEnd = try #require(source.range(
+            of: "func enqueuePrepared(",
+            range: boundaryStart.upperBound..<source.endIndex
         ))
-        let enqueueSource = source[enqueueStart.lowerBound..<enqueueEnd.lowerBound]
-        #expect(enqueueSource.contains(
-            "buffers[EventPipelineLane.file.rawValue].removeLast()"
+        let boundarySource = source[
+            boundaryStart.lowerBound..<boundaryEnd.lowerBound
+        ]
+        #expect(boundarySource.contains(
+            "await liveMemoryBudget.acquire("
         ))
-        #expect(!enqueueSource.contains(".firstIndex(where:"))
-        #expect(!enqueueSource.contains(".remove(at:"))
-        #expect(!enqueueSource.contains(
-            "buffers[EventPipelineLane.file.rawValue].removeFirst()"
+        #expect(boundarySource.contains(
+            "EventJournalAdmissionValidator.prepare("
+        ))
+        #expect(boundarySource.contains("await enqueuePreparedLosslessly("))
+
+        let losslessStart = try #require(source.range(
+            of: "private func enqueuePreparedLosslessly("
+        ))
+        let losslessEnd = try #require(source.range(
+            of: "private func admitPreparedHandle(",
+            range: losslessStart.upperBound..<source.endIndex
+        ))
+        let losslessSource = source[
+            losslessStart.lowerBound..<losslessEnd.lowerBound
+        ]
+        #expect(losslessSource.contains("while !Task.isCancelled"))
+        #expect(losslessSource.contains("ownershipBudget.adopt("))
+        #expect(losslessSource.contains("hasPendingStorageWork { startDrain() }"))
+        #expect(!losslessSource.contains(
+            "evictNewestQueuedFileForPriorityAdmission()"
         ))
 
-        // A bounded saturation exercise complements the source guard: every
-        // priority admission replaces one file row without changing the cap or
-        // losing ledger conservation.
+        // A bounded saturation exercise complements the source guard. Once the
+        // local handle cap is full, the async production boundary drains before
+        // adopting the priority handle; it neither exceeds the cap nor silently
+        // discards already-admitted file evidence.
+        let hardCap = 128
         let store = RecordingInserter()
         let writer = BatchedEventWriter(
             store: store,
             flushThreshold: 100_000,
-            hardCap: 4_000
+            hardCap: hardCap,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
-        for i in 0..<4_000 {
+        for i in 0..<hardCap {
             await writer.enqueue(makeFileEvent(i), lane: .file)
         }
-        for i in 0..<1_000 {
-            await writer.enqueue(makeEvent(i), lane: .priority)
-        }
-        let saturated = await writer.telemetrySnapshot()
-        #expect(saturated.bufferDepth == 4_000)
-        #expect(saturated.bufferDepthByLane["file"] == 3_000)
-        #expect(saturated.bufferDepthByLane["priority"] == 1_000)
-        #expect(saturated.droppedByLane["file"] == 1_000)
-        #expect(saturated.droppedByLane["priority"] == 0)
-        expectConserved(saturated, lane: .priority)
-        expectConserved(saturated, lane: .file)
+        let atCap = await writer.telemetrySnapshot()
+        #expect(atCap.bufferDepth == hardCap)
+        #expect(atCap.preparedOwnershipCount <= hardCap)
+        #expect(atCap.droppedCount == 0)
+
+        await writer.enqueue(makeEvent(10_000), lane: .priority)
+        let progressed = await writer.telemetrySnapshot()
+        #expect(progressed.bufferDepth <= hardCap)
+        #expect(progressed.preparedOwnershipCount <= hardCap)
+        #expect(progressed.droppedCount == 0)
+        #expect(progressed.offeredByLane == [
+            "priority": 1,
+            "file": hardCap,
+        ])
+        expectConserved(progressed, lane: .priority)
+        expectConserved(progressed, lane: .file)
         await writer.shutdown()
+        let drained = await writer.telemetrySnapshot()
+        #expect(drained.bufferDepth == 0)
+        #expect(drained.persistedByLane == [
+            "priority": 1,
+            "file": hardCap,
+        ])
+        #expect(drained.droppedCount == 0)
+        expectConserved(drained, lane: .priority)
+        expectConserved(drained, lane: .file)
     }
 
-    @Test("hard cap drops the NEWEST events and counts them distinctly")
+    @Test("hard cap drains and backpressures without dropping admitted events")
     func hardCapDropsAndCounts() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
-        // High threshold so no drain runs until shutdown; cap at 10 so the
-        // 11th..25th enqueue overflow and drop.
-        let writer = BatchedEventWriter(store: store, flushThreshold: 100_000, hardCap: 10)
-        for i in 0..<25 { await writer.enqueue(makeEvent(i)) }
-        #expect(writer.droppedCount == 15, "25 enqueued, cap 10 → 15 dropped")
+        // The threshold is deliberately unreachable through ordinary batching.
+        // Once ten handles are retained, lossless admission must force a drain
+        // and wait rather than exceed the count cap or shed the next event.
+        let hardCap = 10
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: hardCap,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
+        for i in 0..<25 {
+            #expect(await writer.enqueue(makeEvent(i)) != nil)
+            let bounded = await writer.telemetrySnapshot()
+            #expect(bounded.preparedOwnershipCount <= hardCap)
+            #expect(bounded.droppedCount == 0)
+        }
         await writer.shutdown()
-        #expect(try await store.count() == 10, "only the first 10 (pre-overflow) persisted")
+        let drained = await writer.telemetrySnapshot()
+        #expect(try await store.count() == 25)
+        #expect(drained.offeredByLane == ["priority": 25, "file": 0])
+        #expect(drained.persistedByLane == ["priority": 25, "file": 0])
+        #expect(drained.droppedCount == 0)
+        #expect(drained.preparedOwnershipCount == 0)
+        expectConserved(drained, lane: .priority)
     }
 
-    @Test("#24: at the cap, a high-value event evicts a file row rather than being shed")
+    @Test("priority and file evidence both survive a full file queue")
     func highValueSurvivesFileFloodAtCap() async throws {
         let (store, dir) = try tempStore()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let writer = BatchedEventWriter(store: store, flushThreshold: 100_000, hardCap: 10)
+        let hardCap = 10
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 100_000,
+            hardCap: hardCap,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
         // Fill the buffer to the cap with a file/write flood.
-        for i in 0..<10 { await writer.enqueue(makeFileEvent(i)) }
-        // A priority process event at the cap → evict the newest file, keep it.
-        await writer.enqueue(makeEvent(999))          // pid 3999, category .process
-        #expect(writer.droppedCount == 1, "one file row shed to make room for the process event")
-        // Another FILE event at the cap → nothing cheaper to shed → drop incoming.
-        await writer.enqueue(makeFileEvent(100))
-        #expect(writer.droppedCount == 2)
+        for i in 0..<hardCap {
+            #expect(await writer.enqueue(makeFileEvent(i)) != nil)
+        }
+        let atCap = await writer.telemetrySnapshot()
+        #expect(atCap.preparedOwnershipCount == hardCap)
+        #expect(atCap.droppedCount == 0)
+
+        // Both lanes take the same lossless boundary. The priority event
+        // forces progress, then the later file event is also admitted.
+        #expect(await writer.enqueue(makeEvent(999)) != nil)
+        #expect(await writer.enqueue(makeFileEvent(100)) != nil)
+        let progressed = await writer.telemetrySnapshot()
+        #expect(progressed.preparedOwnershipCount <= hardCap)
+        #expect(progressed.droppedCount == 0)
         await writer.shutdown()
-        #expect(try await store.count() == 10)
-        let procRows = try await store.events(since: .distantPast, category: .process)
-        #expect(procRows.contains { $0.process.pid == 3999 },
-                "the process event must survive the file flood at the cap (not be the shed row)")
+        #expect(try await store.count() == hardCap + 2)
+        let procRows = try await store.exactEventsSnapshot(
+            since: .distantPast,
+            category: .process
+        )
+        #expect(procRows.events.contains { $0.process.pid == 3999 },
+                "the process event must survive lossless cap backpressure")
+        let drained = await writer.telemetrySnapshot()
+        #expect(drained.persistedByLane == [
+            "priority": 1,
+            "file": hardCap + 1,
+        ])
+        #expect(drained.droppedCount == 0)
+        expectConserved(drained, lane: .priority)
+        expectConserved(drained, lane: .file)
     }
 
     @Test("#13: a transient (SQLITE_BUSY) batch failure re-queues and retries, never drops")
     func transientBusyRetriesNotDrops() async throws {
         let fake = FakeInserter()
-        let writer = BatchedEventWriter(store: fake, flushThreshold: 50, hardCap: 100_000)
+        let writer = BatchedEventWriter(
+            store: fake,
+            flushThreshold: 50,
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
         for i in 0..<200 { await writer.enqueue(makeEvent(i)) }
         // Auto-drains hit .busy and re-queue; give them a moment to run.
         try? await Task.sleep(nanoseconds: 150_000_000)
@@ -1132,12 +1334,12 @@ struct BatchedEventWriterTests {
         #expect(writer.droppedCount == 0)
     }
 
-    @Test("a BUSY priority retry displaces concurrent file tail rows at the cap")
+    @Test("a BUSY priority retry backpressures concurrent file work without loss")
     func saturatedBusyPriorityRetryPreservesPriority() async throws {
         try await saturatedPriorityRetryPreservesPriority(mode: .busy)
     }
 
-    @Test("a replacement priority retry displaces concurrent file tail rows at the cap")
+    @Test("a replacement priority retry backpressures concurrent file work without loss")
     func saturatedReplacementPriorityRetryPreservesPriority() async throws {
         try await saturatedPriorityRetryPreservesPriority(mode: .replacement)
     }
@@ -1150,7 +1352,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 2,
-            hardCap: 5
+            hardCap: 5,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let priority = [makeEvent(4_000), makeEvent(4_001)]
         for event in priority {
@@ -1162,36 +1365,48 @@ struct BatchedEventWriterTests {
         #expect(gate.hasEntered(), "priority batch must be suspended in SQLite")
 
         let files = (0..<5).map { makeFileEvent(4_100 + $0) }
-        for event in files {
-            _ = try #require(await writer.enqueue(event, lane: .file))
+        let fileAdmissions = Task {
+            var admitted = 0
+            for event in files {
+                if await writer.enqueue(event, lane: .file) != nil {
+                    admitted += 1
+                }
+            }
+            return admitted
         }
         var telemetry = await writer.telemetrySnapshot()
+        for _ in 0..<100 {
+            telemetry = await writer.telemetrySnapshot()
+            if telemetry.bufferDepthByLane["file"] == 3 { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
         #expect(telemetry.inFlightDepthByLane == ["priority": 2, "file": 0])
-        #expect(telemetry.bufferDepthByLane == ["priority": 0, "file": 5])
+        #expect(telemetry.bufferDepthByLane == ["priority": 0, "file": 3])
+        #expect(telemetry.preparedOwnershipCount <= 5)
         #expect(telemetry.droppedCount == 0)
         expectConserved(telemetry, lane: .priority)
         expectConserved(telemetry, lane: .file)
 
         gate.releaseInsert()
+        #expect(await fileAdmissions.value == files.count)
         await writer.shutdown()
 
         let calls = await fake.calls
-        #expect(calls.count == 3)
-        #expect(calls[0].lane == .priority)
-        #expect(calls[0].ids == priority.map(\.id))
-        #expect(calls[1].lane == .priority)
-        #expect(calls[1].ids == priority.map(\.id),
+        #expect(calls.count >= 3)
+        #expect(calls.first?.lane == .priority)
+        #expect(calls.first?.ids == priority.map(\.id))
+        #expect(calls.dropFirst().first?.lane == .priority)
+        #expect(calls.dropFirst().first?.ids == priority.map(\.id),
                 "the exact detached priority identities must retry first")
-        #expect(calls[2].lane == .file)
-        #expect(calls[2].ids == files.prefix(3).map(\.id),
-                "only the newest file tail may be displaced")
-        #expect(await fake.insertedIDs == priority.map(\.id) + files.prefix(3).map(\.id))
+        let insertedIDs = await fake.insertedIDs
+        #expect(Array(insertedIDs.prefix(priority.count)) == priority.map(\.id))
+        #expect(Set(insertedIDs) == Set((priority + files).map(\.id)))
 
         telemetry = await writer.telemetrySnapshot()
         #expect(telemetry.offeredByLane == ["priority": 2, "file": 5])
-        #expect(telemetry.persistedByLane == ["priority": 2, "file": 3])
+        #expect(telemetry.persistedByLane == ["priority": 2, "file": 5])
         #expect(telemetry.retriedByLane == ["priority": 2, "file": 0])
-        #expect(telemetry.droppedByLane == ["priority": 0, "file": 2])
+        #expect(telemetry.droppedByLane == ["priority": 0, "file": 0])
         #expect(telemetry.bufferDepth == 0)
         #expect(telemetry.inFlightDepth == 0)
         #expect(telemetry.terminalGeneration == telemetry.admittedGeneration)
@@ -1199,14 +1414,15 @@ struct BatchedEventWriterTests {
         expectConserved(telemetry, lane: .file)
     }
 
-    @Test("an older priority retry evicts file first, then the newest queued priority")
+    @Test("an older priority retry backpressures newer work and remains first")
     func mixedSaturatedPriorityRetryPreservesChronology() async throws {
         let gate = InsertGate()
         let fake = SaturatedRetryInserter(mode: .busy, gate: gate)
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 2,
-            hardCap: 5
+            hardCap: 5,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let older = [makeEvent(4_200), makeEvent(4_201)]
         for event in older {
@@ -1219,41 +1435,61 @@ struct BatchedEventWriterTests {
 
         let newerPriority = (0..<4).map { makeEvent(4_300 + $0) }
         let newerFile = makeFileEvent(4_400)
-        for event in newerPriority {
-            _ = try #require(await writer.enqueue(event, lane: .priority))
+        let newerAdmissions = Task {
+            var admitted = 0
+            for event in newerPriority {
+                if await writer.enqueue(event, lane: .priority) != nil {
+                    admitted += 1
+                }
+            }
+            if await writer.enqueue(newerFile, lane: .file) != nil {
+                admitted += 1
+            }
+            return admitted
         }
-        _ = try #require(await writer.enqueue(newerFile, lane: .file))
+        var saturated = await writer.telemetrySnapshot()
+        for _ in 0..<100 {
+            saturated = await writer.telemetrySnapshot()
+            if saturated.bufferDepthByLane["priority"] == 3 { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(saturated.inFlightDepthByLane == ["priority": 2, "file": 0])
+        #expect(saturated.bufferDepthByLane == ["priority": 3, "file": 0])
+        #expect(saturated.preparedOwnershipCount <= 5)
+        #expect(saturated.droppedCount == 0)
 
         gate.releaseInsert()
+        #expect(await newerAdmissions.value == newerPriority.count + 1)
         await writer.shutdown()
 
-        let expectedPriority = older.map(\.id) + newerPriority.prefix(3).map(\.id)
         let calls = await fake.calls
-        #expect(calls.count == 2)
-        #expect(calls[0].ids == older.map(\.id))
-        #expect(calls[1].lane == .priority)
-        #expect(calls[1].ids == expectedPriority,
-                "the older retry must precede surviving newer priority rows")
-        #expect(await fake.insertedIDs == expectedPriority)
+        #expect(calls.first?.ids == older.map(\.id))
+        let insertedIDs = await fake.insertedIDs
+        #expect(Array(insertedIDs.prefix(older.count)) == older.map(\.id),
+                "the older retry must precede newer priority rows")
+        #expect(Set(insertedIDs) == Set(
+            (older + newerPriority + [newerFile]).map(\.id)
+        ))
 
         let telemetry = await writer.telemetrySnapshot()
         #expect(telemetry.offeredByLane == ["priority": 6, "file": 1])
-        #expect(telemetry.persistedByLane == ["priority": 5, "file": 0])
-        #expect(telemetry.droppedByLane == ["priority": 1, "file": 1])
+        #expect(telemetry.persistedByLane == ["priority": 6, "file": 1])
+        #expect(telemetry.droppedByLane == ["priority": 0, "file": 0])
         #expect(telemetry.retriedByLane == ["priority": 2, "file": 0])
         #expect(telemetry.terminalGeneration == telemetry.admittedGeneration)
         expectConserved(telemetry, lane: .priority)
         expectConserved(telemetry, lane: .file)
     }
 
-    @Test("an older file retry evicts only newer file tail rows, never priority")
+    @Test("an older file retry backpressures later work without losing either lane")
     func saturatedFileRetryPreservesLaneDominanceAndChronology() async throws {
         let gate = InsertGate()
         let fake = SaturatedRetryInserter(mode: .busy, gate: gate)
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 2,
-            hardCap: 5
+            hardCap: 5,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let olderFile = [makeFileEvent(4_500), makeFileEvent(4_501)]
         for event in olderFile {
@@ -1266,31 +1502,50 @@ struct BatchedEventWriterTests {
 
         let priority = [makeEvent(4_600), makeEvent(4_601)]
         let newerFile = (0..<3).map { makeFileEvent(4_700 + $0) }
-        for event in priority {
-            _ = try #require(await writer.enqueue(event, lane: .priority))
+        let newerAdmissions = Task {
+            var admitted = 0
+            for event in priority {
+                if await writer.enqueue(event, lane: .priority) != nil {
+                    admitted += 1
+                }
+            }
+            for event in newerFile {
+                if await writer.enqueue(event, lane: .file) != nil {
+                    admitted += 1
+                }
+            }
+            return admitted
         }
-        for event in newerFile {
-            _ = try #require(await writer.enqueue(event, lane: .file))
+        var saturated = await writer.telemetrySnapshot()
+        for _ in 0..<100 {
+            saturated = await writer.telemetrySnapshot()
+            if saturated.bufferDepthByLane["priority"] == 2,
+               saturated.bufferDepthByLane["file"] == 1 { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        #expect(saturated.inFlightDepthByLane == ["priority": 0, "file": 2])
+        #expect(saturated.bufferDepthByLane == ["priority": 2, "file": 1])
+        #expect(saturated.preparedOwnershipCount <= 5)
+        #expect(saturated.droppedCount == 0)
 
         gate.releaseInsert()
+        #expect(await newerAdmissions.value == priority.count + newerFile.count)
         await writer.shutdown()
 
-        let expectedFile = olderFile.map(\.id) + [newerFile[0].id]
         let calls = await fake.calls
-        #expect(calls.count == 3)
-        #expect(calls[0].lane == .file)
-        #expect(calls[0].ids == olderFile.map(\.id))
-        #expect(calls[1].lane == .priority)
-        #expect(calls[1].ids == priority.map(\.id))
-        #expect(calls[2].lane == .file)
-        #expect(calls[2].ids == expectedFile)
-        #expect(await fake.insertedIDs == priority.map(\.id) + expectedFile)
+        #expect(calls.first?.lane == .file)
+        #expect(calls.first?.ids == olderFile.map(\.id))
+        let insertedIDs = await fake.insertedIDs
+        #expect(Array(insertedIDs.prefix(priority.count)) == priority.map(\.id),
+                "priority remains the first successful lane after the retry")
+        #expect(Set(insertedIDs) == Set(
+            (olderFile + priority + newerFile).map(\.id)
+        ))
 
         let telemetry = await writer.telemetrySnapshot()
         #expect(telemetry.offeredByLane == ["priority": 2, "file": 5])
-        #expect(telemetry.persistedByLane == ["priority": 2, "file": 3])
-        #expect(telemetry.droppedByLane == ["priority": 0, "file": 2])
+        #expect(telemetry.persistedByLane == ["priority": 2, "file": 5])
+        #expect(telemetry.droppedByLane == ["priority": 0, "file": 0])
         #expect(telemetry.retriedByLane == ["priority": 0, "file": 2])
         #expect(telemetry.terminalGeneration == telemetry.admittedGeneration)
         expectConserved(telemetry, lane: .priority)
@@ -1303,7 +1558,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let events = (0..<10).map(makeEvent)
         for event in events { await writer.enqueue(event) }
@@ -1331,7 +1587,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let a = makeEvent(3_000)
         let b = makeEvent(3_001)
@@ -1393,7 +1650,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let sharedID = UUID()
         let firstBase = makeEvent(3_050)
@@ -1459,7 +1717,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let a = makeEvent(3_100)
         let b = makeEvent(3_101)
@@ -1517,7 +1776,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let events = (0..<10).map(makeEvent)
         for event in events { await writer.enqueue(event) }
@@ -1540,7 +1800,8 @@ struct BatchedEventWriterTests {
         let writer = BatchedEventWriter(
             store: fake,
             flushThreshold: 100_000,
-            hardCap: 100_000
+            hardCap: 100_000,
+            liveMemoryBudget: isolatedMemoryBudget()
         )
         let events = (0..<10).map(makeEvent)
         for event in events { await writer.enqueue(event) }

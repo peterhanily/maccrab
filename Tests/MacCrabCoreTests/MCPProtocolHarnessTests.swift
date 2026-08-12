@@ -24,8 +24,8 @@ import MacCrabCore
 //      the binary (swift build links maccrab-mcp), so binaryURL() finds it and
 //      never builds in-test, but serialization still bounds spawn concurrency.
 //   2. hermetic HOME (see `hermeticHome`) — the spawned server's store is an
-//      isolated temp dir, so a slow first-spawn migration can't half-write a
-//      shared DB that a later test then reads (the intermittent isError flake).
+//      isolated temp dir whose canonical empty schemas are created by the
+//      harness before the read-only server starts.
 //   3. a 60s read watchdog (see `drive`) — generous enough that a load-starved
 //      first spawn's DB-create/migrate completes instead of being killed →
 //      empty response. A healthy server still answers in milliseconds.
@@ -74,6 +74,24 @@ struct MCPProtocolHarnessTests {
         return dir
     }()
 
+    /// The MCP is intentionally a read-only client of daemon-owned stores. A
+    /// missing database is therefore unavailable evidence, not an observed
+    /// empty result, and the server must not create or migrate it on demand.
+    /// Bootstrap canonical empty schemas in the writer-capable test process so
+    /// bounded-absence assertions exercise a real readable snapshot.
+    static func prepareCanonicalStores(at home: URL) throws {
+        let dataDir = home.appendingPathComponent(
+            "Library/Application Support/MacCrab",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: dataDir,
+            withIntermediateDirectories: true
+        )
+        _ = try EventStore(directory: dataDir.path)
+        _ = try AlertStore(directory: dataDir.path)
+    }
+
     /// Feed newline-delimited request lines and return the parsed responses,
     /// retrying on an EMPTY result. A CI runner building 442 suites in parallel
     /// can starve the first cold 28MB-binary spawn (dyld load + Swift runtime
@@ -82,6 +100,12 @@ struct MCPProtocolHarnessTests {
     /// so a retry of the cold first call almost always succeeds. A genuinely
     /// broken server returns empty on every attempt → the test still fails.
     func drive(_ requestLines: [String], home: URL = MCPProtocolHarnessTests.hermeticHome) -> [[String: Any]] {
+        do {
+            try Self.prepareCanonicalStores(at: home)
+        } catch {
+            Issue.record("failed to prepare canonical MCP stores: \(error)")
+            return []
+        }
         var objs: [[String: Any]] = []
         for _ in 0..<3 {
             objs = driveOnce(requestLines, home: home)

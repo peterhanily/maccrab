@@ -255,7 +255,11 @@ public enum OTLPAttributeSanitizer {
     // to a static let so we don't rebuild a 13-element array literal on
     // every attribute value. Order matters — more specific patterns
     // first so they don't get partly consumed by broader ones.
-    private static let valueReplacements: [(NSRegularExpression, String)] = [
+    /// Known credential shapes only. Unlike `redactString`, this list does not
+    /// contain local-network/host privacy transforms or the generic entropy
+    /// heuristic, so it is safe for forensic records that must retain hashes,
+    /// opaque malware evidence, and endpoint identity.
+    private static let credentialValueReplacements: [(NSRegularExpression, String)] = [
         (anthropicKey,         "[ANTHROPIC_KEY]"),
         (openaiKey,            "[OPENAI_KEY]"),
         (googleKey,            "[GOOGLE_KEY]"),
@@ -278,10 +282,20 @@ public enum OTLPAttributeSanitizer {
         (herokuToken,          "[HEROKU_TOKEN]"),
         (vercelToken,          "[VERCEL_TOKEN]"),
         (bearerToken,          "Bearer [REDACTED]"),
+    ]
+
+    private static let privacyValueReplacements: [(NSRegularExpression, String)] = [
         (privateIPv4,          "[PRIVATE_IP]"),
         (privateIPv6,          "[PRIVATE_IPV6]"),
         (computerName,         "[COMPUTER_NAME]"),
     ]
+
+    /// Redact only explicit credential/vendor-token shapes. This is the shared
+    /// value boundary for encrypted at-rest security evidence, where endpoint
+    /// addresses and high-entropy forensic payloads must remain exact.
+    public static func redactCredentialShapes(_ value: String) -> String {
+        apply(credentialValueReplacements, to: value).value
+    }
 
     /// Public single-string redactor. Used by `OTLPSpanExtractor` on
     /// the four free-form span identity fields (`service.name`,
@@ -301,17 +315,10 @@ public enum OTLPAttributeSanitizer {
     /// returns the unchanged string when there's no match, so we count
     /// matches once via `numberOfMatches` and skip the replace when zero.
     internal static func redactValue(_ value: String) -> (String, Bool) {
-        var working = value
-        var didRedact = false
-        for (regex, template) in valueReplacements {
-            let nsRange = NSRange(working.startIndex..., in: working)
-            if regex.numberOfMatches(in: working, range: nsRange) > 0 {
-                didRedact = true
-                working = regex.stringByReplacingMatches(
-                    in: working, range: nsRange, withTemplate: template
-                )
-            }
-        }
+        let credentials = apply(credentialValueReplacements, to: value)
+        let privacy = apply(privacyValueReplacements, to: credentials.value)
+        var working = privacy.value
+        var didRedact = credentials.didRedact || privacy.didRedact
         // v1.9 Phase-2.1: entropy-based fallback. Catches unknown-vendor
         // secrets that didn't match any of the explicit shapes above.
         // Conservative: 40+ char tokens, base62-or-symbol, Shannon
@@ -322,6 +329,24 @@ public enum OTLPAttributeSanitizer {
         if entropyHit {
             didRedact = true
             working = entropyCleaned
+        }
+        return (working, didRedact)
+    }
+
+    private static func apply(
+        _ replacements: [(NSRegularExpression, String)],
+        to value: String
+    ) -> (value: String, didRedact: Bool) {
+        var working = value
+        var didRedact = false
+        for (regex, template) in replacements {
+            let nsRange = NSRange(working.startIndex..., in: working)
+            if regex.numberOfMatches(in: working, range: nsRange) > 0 {
+                didRedact = true
+                working = regex.stringByReplacingMatches(
+                    in: working, range: nsRange, withTemplate: template
+                )
+            }
         }
         return (working, didRedact)
     }

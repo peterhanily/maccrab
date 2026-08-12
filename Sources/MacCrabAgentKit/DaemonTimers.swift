@@ -852,6 +852,13 @@ final class TamperAlertState: @unchecked Sendable {
 // the kernel/ingest path vs the store/eviction path, not reported as an
 // undifferentiated "we lost it". Deterministic → unit-tested without a spawn.
 enum CoverageCanaryEvaluator {
+    enum StorePresence: Equatable {
+        case present
+        case absent
+        /// Sparse projection or retained-window coverage cannot prove absence.
+        case coverageUnknown
+    }
+
     enum Verdict: Equatable {
         /// Seen at the callback AND present in the DB — full coverage.
         case healthy
@@ -868,6 +875,9 @@ enum CoverageCanaryEvaluator {
         /// drop was reported as `.evictionGap`, pointing the operator at the
         /// storage/retention subsystem for a loss that happened in ingest.
         case ingestHandoffGap
+        /// The canary was seen at ingest, but the exact retained/search coverage
+        /// ledger cannot prove whether an empty projection means absence.
+        case storeQueryUnknown
 
         /// Human-readable stage name for the alert (nil when healthy).
         var stageLabel: String? {
@@ -876,6 +886,7 @@ enum CoverageCanaryEvaluator {
             case .kernelGap:         return "kernel/ingest"
             case .evictionGap:       return "store/eviction"
             case .ingestHandoffGap:  return "ingest hand-off (worker backpressure)"
+            case .storeQueryUnknown: return "store/query coverage unknown"
             }
         }
     }
@@ -890,9 +901,23 @@ enum CoverageCanaryEvaluator {
     /// existing two-point call sites and unit tests are source-compatible.
     static func verdict(seenAtCallback: Bool, foundInDB: Bool,
                         droppedAtHandoff: Bool = false) -> Verdict {
+        verdict(
+            seenAtCallback: seenAtCallback,
+            storePresence: foundInDB ? .present : .absent,
+            droppedAtHandoff: droppedAtHandoff
+        )
+    }
+
+    static func verdict(
+        seenAtCallback: Bool,
+        storePresence: StorePresence,
+        droppedAtHandoff: Bool = false
+    ) -> Verdict {
         guard seenAtCallback else { return .kernelGap }
-        if foundInDB { return .healthy }
-        return droppedAtHandoff ? .ingestHandoffGap : .evictionGap
+        if storePresence == .present { return .healthy }
+        if droppedAtHandoff { return .ingestHandoffGap }
+        return storePresence == .coverageUnknown
+            ? .storeQueryUnknown : .evictionGap
     }
 }
 
@@ -1098,6 +1123,20 @@ final class TraceGraphRecoveryCadenceGate: @unchecked Sendable {
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
 enum DaemonTimers {
+    /// Journal retention is a separate contract from the configurable legacy
+    /// size-cap sweep. Honor a tighter operator cadence, but never permit more
+    /// than the fixed five-minute canonical overhang.
+    static func journalExpiryCadenceMinutes(
+        configuredMinutes: Int
+    ) -> Int {
+        min(5, max(1, configuredMinutes > 0 ? configuredMinutes : 5))
+    }
+
+    /// One actor turn remains finite even when large canonical records force
+    /// small blocks. The timer immediately yields and continues bounded turns
+    /// until the store itself proves no eligible block remains.
+    static let journalExpiryMaximumBlocksPerQuantum = 64
+
     /// Progressively tighter retention windows for TraceGraph recovery, used
     /// only after the store proves the current cutoff has no eligible backlog
     /// while a byte deficit remains. Ordered coarse→fine and floored at one hour, which is well clear of
@@ -1281,6 +1320,9 @@ enum DaemonTimers {
         let campaignsPruneTimer: DispatchSourceTimer?
         let campaignsSizeCapTimer: DispatchSourceTimer?
         let sizeCapTimer: DispatchSourceTimer
+        /// Canonical event-journal expiry is independent of the legacy
+        /// projection/cap sweep and must never lag by more than five minutes.
+        let eventJournalExpiryTimer: DispatchSourceTimer
         /// v1.12.6: early-fire watchdog (60 s cadence) for the events.db
         /// size cap. Defense-in-depth for the configurable scheduled
         /// `sizeCapTimer` — catches growth before hard admission pauses writes
@@ -1731,13 +1773,19 @@ enum DaemonTimers {
                 // Event flow health check: warn if no new events stored in the last 5 minutes.
                 // Skips the first 2 minutes of uptime to allow collectors to start up.
                 guard uptime > 120 else { return }
-                if let latestEvent = try? await state.eventStore.events(since: Date.distantPast, limit: 1).first {
+                if let snapshot = try? await state.eventStore
+                    .exactEventsSnapshot(
+                        since: Date.distantPast,
+                        limit: 1
+                    ), snapshot.isComplete,
+                   let latestEvent = snapshot.events.first {
                     let staleness = Date().timeIntervalSince(latestEvent.timestamp)
                     if staleness > 300 {
                         let staleMinutes = Int(staleness / 60)
                         logger.warning("Event flow stalled: no new events stored for \(staleMinutes)m — collectors may need restart")
                         logger.warning("Check: log stream --predicate 'subsystem==\"com.maccrab.agent\" AND category==\"EventStream\"'")
                     }
+                    withExtendedLifetime(snapshot) {}
                 }
             }
         }
@@ -2026,6 +2074,9 @@ enum DaemonTimers {
             sweepIntervalMinutes = 60
             logger.warning("eventsSizeCapIntervalMinutes=\(configuredSweepMinutes) is non-positive — falling back to default 60 min cadence.")
         }
+        let journalExpiryIntervalMinutes = journalExpiryCadenceMinutes(
+            configuredMinutes: configuredSweepMinutes
+        )
         logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, live events-family cap=\(startupCapMiB) MiB (steady=\(state.storage.effectiveEventsFamilyMaxSizeMB) MiB, applied legacy evidence reserve=\(startupTransition.appliedReserveMiB) MiB, pending reserve=\(startupTransition.pendingReserveMiB ?? -1) MiB, evidence allocation=\(state.storage.evidenceMaxSizeMB) MiB), proactive boundary=\(startupBoundary.proactiveSweepBoundaryBytes / SQLitePersistentStorePolicy.bytesPerMiB) MiB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
 
         // v1.10.0 audit fix: first sweep at .now() + 60 s instead of
@@ -2127,6 +2178,79 @@ enum DaemonTimers {
             }
         }
         sizeCapTimer.resume()
+
+        // The canonical tier owns a fixed 15-minute admission-time floor and a
+        // maximum five-minute sweep overhang. Serialize with every legacy cap /
+        // on-demand recovery path through the same EventStore guard so aggregate
+        // rollup, FTS cleanup and cap convergence can never overlap each other.
+        let eventJournalExpiryTimer = DispatchSource.makeTimerSource(
+            queue: .global()
+        )
+        eventJournalExpiryTimer.schedule(
+            deadline: .now() + .seconds(journalExpiryIntervalMinutes * 60),
+            repeating: .seconds(journalExpiryIntervalMinutes * 60)
+        )
+        eventJournalExpiryTimer.setEventHandler {
+            timerLifecycle.submit(label: "event-journal-expiry") {
+                // One admitted timer task owns one immutable cutoff. Advancing
+                // Date() between quanta can chase an old backlog indefinitely
+                // and makes the five-minute overhang proof ill-defined.
+                let retainedThrough = Date()
+                var reportedCoalescing = false
+                var totalExpired = 0
+                while !Task.isCancelled {
+                    var acquired = false
+                    while !Task.isCancelled {
+                        if await state.eventStore.beginJournalExpiryPrune() {
+                            acquired = true
+                            break
+                        }
+                        if !reportedCoalescing {
+                            await state.eventStore
+                                .recordJournalExpiryPendingTick()
+                            logger.info("Event journal expiry: storage recovery is in flight; retaining this tick for prompt retry.")
+                            reportedCoalescing = true
+                        }
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            return
+                        }
+                    }
+                    guard acquired else { return }
+                    if Task.isCancelled {
+                        await state.eventStore.endSizeCapPrune()
+                        return
+                    }
+                    let expired: Int
+                    do {
+                        expired = try await state.eventStore
+                            .expireJournalBlocks(
+                                retainedThrough: retainedThrough,
+                                maximumBlocks:
+                                    journalExpiryMaximumBlocksPerQuantum
+                            )
+                    } catch {
+                        await state.eventStore.recordJournalExpiryFailure()
+                        await state.eventStore.endSizeCapPrune()
+                        logger.fault("Event journal expiry failed: \(error.localizedDescription, privacy: .public)")
+                        return
+                    }
+                    await state.eventStore.endSizeCapPrune()
+                    totalExpired += expired
+                    guard expired > 0 else { break }
+                    // Release the shared maintenance exclusion after every
+                    // finite quantum. A legacy cap/watchdog pass can win the
+                    // next acquisition instead of being starved by a large
+                    // canonical backlog.
+                    await Task.yield()
+                }
+                if totalExpired > 0, !Task.isCancelled {
+                    logger.info("Event journal expiry: aggregate-rolled and expired \(totalExpired) authenticated event records across bounded quanta.")
+                }
+            }
+        }
+        eventJournalExpiryTimer.resume()
 
         // v1.12.6: early-fire size-cap watchdog. Defense-in-depth for the
         // configurable scheduled cadence above — if the DB crosses the
@@ -2497,16 +2621,122 @@ enum DaemonTimers {
             let events = eventCount()
             let alerts = alertCount()
 
-            // v1.7.1: per-event-category counts over the last hour. Empty
-            // dict on a fresh DB; populated as soon as events accumulate.
-            // Best-effort — never blocks the heartbeat write.
-            let oneHourAgo = Date().addingTimeInterval(-3600)
+            // Exact admission-time category counts. The retained journal can be
+            // shorter than the requested hour, so publish the effective interval
+            // and gap ledger with the values. The legacy `_1h` alias is emitted
+            // only when storage proves the complete requested hour.
+            let categoryCountUntil = Date()
+            let oneHourAgo = categoryCountUntil.addingTimeInterval(-3600)
             var eventTypeCounts: [String: Int] = [:]
+            var eventTypeCountSnapshot: EventCategoryCountSnapshot?
             do {
-                eventTypeCounts = try await state.eventStore.eventCountsByCategory(since: oneHourAgo)
+                let snapshot = try await state.eventStore
+                    .eventCategoryCountSnapshot(
+                        since: oneHourAgo,
+                        until: categoryCountUntil
+                    )
+                eventTypeCounts = snapshot.counts
+                eventTypeCountSnapshot = snapshot
             } catch {
                 // Heartbeat write must succeed even when the EventStore
                 // query fails (db locked under contention, etc.).
+            }
+            let eventTypeCountWindow: [String: Any]
+            if let snapshot = eventTypeCountSnapshot {
+                eventTypeCountWindow = [
+                    "query_available": true,
+                    "mutation_generation": Int64(clamping:
+                        snapshot.mutationGeneration),
+                    "requested_duration_seconds": max(0, Int(
+                        snapshot.requestedUntil.timeIntervalSince(
+                            snapshot.requestedSince
+                        )
+                    )),
+                    "effective_duration_seconds": max(0, Int(
+                        snapshot.effectiveUntil.timeIntervalSince(
+                            snapshot.effectiveSince
+                        )
+                    )),
+                    "requested_window_complete":
+                        snapshot.requestedWindowComplete,
+                    "complete": snapshot.isComplete,
+                    "canonical_poison_records":
+                        snapshot.gaps.canonicalPoisonRecords,
+                    "corrupt_legacy_records":
+                        snapshot.gaps.corruptLegacyRecords,
+                    "inherited_legacy_loss_records":
+                        snapshot.gaps.inheritedLegacyLossRecords,
+                    "resource_limited_records":
+                        snapshot.gaps.resourceLimitedRecords,
+                    "gap_records": snapshot.gaps.total,
+                ]
+            } else {
+                eventTypeCountWindow = [
+                    "query_available": false,
+                    "requested_duration_seconds": 3600,
+                    "effective_duration_seconds": 0,
+                    "requested_window_complete": false,
+                    "complete": false,
+                ]
+            }
+            let eventSearchProjection: [String: Any]
+            do {
+                let snapshot = try await state.eventStore.searchSnapshot(
+                    text: "",
+                    since: oneHourAgo,
+                    until: categoryCountUntil,
+                    limit: 1
+                )
+                eventSearchProjection = [
+                    "query_available": true,
+                    "mutation_generation": Int64(clamping:
+                        snapshot.mutationGeneration),
+                    "requested_duration_seconds": max(0, Int(
+                        snapshot.requestedUntil.timeIntervalSince(
+                            snapshot.requestedSince
+                        )
+                    )),
+                    "effective_duration_seconds": max(0, Int(
+                        snapshot.effectiveUntil.timeIntervalSince(
+                            snapshot.effectiveSince
+                        )
+                    )),
+                    "requested_window_complete":
+                        snapshot.requestedWindowComplete,
+                    "projection_considered": snapshot.projectionConsidered,
+                    "projection_materialized":
+                        snapshot.projectionMaterialized,
+                    "projection_omitted_quota":
+                        snapshot.projectionOmittedQuota,
+                    "projection_omitted_replaced":
+                        snapshot.projectionOmittedReplaced,
+                    "projection_omitted_physical":
+                        snapshot.projectionOmittedPhysical,
+                    "projection_omitted_external":
+                        snapshot.projectionOmittedExternal,
+                    "projection_omitted_migration":
+                        snapshot.projectionOmittedMigration,
+                    "projection_pending": snapshot.projectionPending,
+                    "projection_omitted_total": snapshot.projectionOmitted,
+                    "canonical_poison_records":
+                        snapshot.gaps.canonicalPoisonRecords,
+                    "corrupt_legacy_records":
+                        snapshot.gaps.corruptLegacyRecords,
+                    "inherited_legacy_loss_records":
+                        snapshot.gaps.inheritedLegacyLossRecords,
+                    "resource_limited_records":
+                        snapshot.gaps.resourceLimitedRecords,
+                    "gap_records_total": snapshot.gaps.total,
+                    "complete": snapshot.isComplete,
+                ]
+            } catch {
+                eventSearchProjection = [
+                    "query_available": false,
+                    "requested_duration_seconds": 3600,
+                    "effective_duration_seconds": 0,
+                    "requested_window_complete": false,
+                    "complete": false,
+                ]
             }
 
             // v1.21.6 (PERF-04): honest retention. The configured hot tier is 30
@@ -2563,6 +2793,13 @@ enum DaemonTimers {
             let alertsAdmission = await state.alertStore
                 .storageAdmissionSnapshot()
             let evidenceCaptureStats = await state.alertSink.evidenceStats()
+            // Unlike the actor-local queue, this count survives a crash between
+            // alert commit and post-commit evidence capture. `-1` is explicit
+            // unknown/fail-closed rather than a fabricated healthy zero.
+            let durableEvidenceContextCounts = try? await state.alertStore
+                .evidenceContextCounts()
+            let durablePendingEvidenceContexts =
+                durableEvidenceContextCounts?.pending ?? -1
             let legacyTransition = state.legacyEvidenceTransitionBudget.snapshot()
             let liveEventsFamilyCapMiB = state.storage
                 .effectiveEventsFamilyMaxSizeMB(
@@ -2637,6 +2874,39 @@ enum DaemonTimers {
                 "capture_queue_capacity": evidenceCaptureStats.queueCapacity,
                 "capture_accepting": evidenceCaptureStats.accepting,
                 "capture_conserved": evidenceCaptureStats.conserved,
+                "capture_exact_context_incomplete_total":
+                    evidenceCaptureStats.exactContextIncomplete,
+                "capture_exact_context_query_failures_total":
+                    evidenceCaptureStats.exactContextQueryFailures,
+                "capture_durable_pending_contexts":
+                    durablePendingEvidenceContexts,
+                "capture_durable_complete_contexts":
+                    durableEvidenceContextCounts?.complete ?? -1,
+                "capture_durable_incomplete_contexts":
+                    durableEvidenceContextCounts?.incomplete ?? -1,
+                "capture_durable_failed_contexts":
+                    durableEvidenceContextCounts?.captureFailed ?? -1,
+                "capture_durable_unhealthy_contexts":
+                    durableEvidenceContextCounts?.unhealthy ?? -1,
+                "capture_durable_context_rows":
+                    durableEvidenceContextCounts?.contextRows ?? -1,
+                "capture_durable_alert_rows":
+                    durableEvidenceContextCounts?.alertRows ?? -1,
+                "capture_durable_legacy_unverified_contexts":
+                    durableEvidenceContextCounts?.legacyUnverified ?? -1,
+                "capture_durable_poison_records":
+                    durableEvidenceContextCounts?.poisonRecords ?? -1,
+                "capture_durable_corrupt_records":
+                    durableEvidenceContextCounts?.corruptRecords ?? -1,
+                "capture_durable_inherited_loss_records":
+                    durableEvidenceContextCounts?.inheritedLossRecords ?? -1,
+                "capture_durable_resource_limited_records":
+                    durableEvidenceContextCounts?.resourceLimitedRecords ?? -1,
+                "capture_durable_journal_admission_gap_records":
+                    durableEvidenceContextCounts?.journalAdmissionGapRecords
+                        ?? -1,
+                "capture_durable_contexts_reconcile":
+                    durableEvidenceContextCounts?.reconciles ?? false,
             ]
             if let rowCount = legacyTransition.rowCount {
                 alertEvidenceBudget["legacy_row_count"] = rowCount
@@ -2744,11 +3014,11 @@ enum DaemonTimers {
 
             // v1.12.6 Wave 9K: previously-orphaned operator counters
             // wired into the rich heartbeat:
-            //  - `payload_truncated_total`: how many events have hit
-            //    EventStore's 64 KB raw_json cap since boot. Pre-9K
-            //    the counter incremented on every truncation but was
-            //    never surfaced — Wave 1's cap could fire 10⁴× per
-            //    minute without operator visibility.
+            //  - `payload_truncated_total`: the durable distinct-UUID count of
+            //    canonical journal poison. Projection-only truncation is not
+            //    evidence loss. Qualification must distinguish a proven zero
+            //    from an unavailable/corrupt ledger, so this key is omitted on
+            //    error rather than manufacturing zero.
             //  - `eslogger_dropped_total`: `global_seq_num` gaps observed by
             //    the dev-fallback `EsloggerCollector` subprocess (nil in the
             //    release sysext, so 0 there). This is the *eslogger fallback's*
@@ -2756,7 +3026,13 @@ enum DaemonTimers {
             //    which are surfaced separately below as `es_kernel_dropped_total`
             //    / `es_kernel_dropped_by_type` (v1.21.4 Phase-0 D1). Pre-9K it
             //    was only logged as a warning every 30 s.
-            let payloadTruncatedTotal = await state.eventStore.payloadTruncatedTotal()
+            let payloadPoisonTotal: Int?
+            do {
+                payloadPoisonTotal = try await state.eventStore
+                    .payloadPoisonTotalSnapshot()
+            } catch {
+                payloadPoisonTotal = nil
+            }
             let eventInsertFilterCounters = await state.eventStore.insertFilterCounters()
             let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
 
@@ -3168,6 +3444,7 @@ enum DaemonTimers {
                 let s = await causalStore.storageAdmissionStatus()
                 var d: [String: Any] = [
                     "enabled": s.enabled,
+                    "accepting_mutations": s.acceptingMutations,
                     "blocked": s.blocked,
                     "store_available": true,
                     "startup_blocked": false,
@@ -3175,6 +3452,19 @@ enum DaemonTimers {
                     "shed_mutations_total": Int64(clamping: s.shedMutationsTotal),
                     "pinned_reader": s.pinnedReader,
                     "recovering": s.recovering,
+                    "recovery_mutation_waiters": s.recoveryMutationWaiters,
+                    "recovery_mutation_waiter_limit": s.recoveryMutationWaiterLimit,
+                    "recovery_mutation_queue_saturated": s.recoveryMutationQueueSaturated,
+                    "recovery_mutation_waiter_high_watermark": s.recoveryMutationWaiterHighWatermark,
+                    "recovery_mutation_waits_total": Int64(clamping: s.recoveryMutationWaitsTotal),
+                    "recovery_mutation_wait_releases_total": Int64(clamping: s.recoveryMutationWaitReleasesTotal),
+                    "recovery_mutation_wait_cancellations_total": Int64(clamping: s.recoveryMutationWaitCancellationsTotal),
+                    "recovery_mutation_wait_closed_total": Int64(clamping: s.recoveryMutationWaitClosedTotal),
+                    "recovery_mutation_wait_saturations_total": Int64(clamping: s.recoveryMutationWaitSaturationsTotal),
+                    "recovery_mutation_wait_nanoseconds_total": Int64(clamping: s.recoveryMutationWaitNanosecondsTotal),
+                    "recovery_mutation_max_wait_nanoseconds": Int64(clamping: s.recoveryMutationMaxWaitNanoseconds),
+                    "recovery_mutation_oldest_wait_nanoseconds": Int64(clamping: s.recoveryMutationOldestWaitNanoseconds),
+                    "recovery_writer_preemptions_total": Int64(clamping: s.recoveryWriterPreemptionsTotal),
                     "auto_vacuum_mode": s.autoVacuumMode,
                     "footprint_latch_trips_total": Int64(clamping: s.footprintLatchTripsTotal),
                     "footprint_latch_clears_total": Int64(clamping: s.footprintLatchClearsTotal),
@@ -3232,6 +3522,7 @@ enum DaemonTimers {
                 // when they were not one of the typed admission errors above.
                 traceGraphStorageDict = [
                     "enabled": false,
+                    "accepting_mutations": false,
                     "blocked": true,
                     "store_available": false,
                     "startup_blocked": false,
@@ -3340,6 +3631,8 @@ enum DaemonTimers {
                 .heavyEnrichmentSnapshot()
             let deferredEnrichmentBuffer = await state.deferredEnrichmentBuffer
                 .snapshot()
+            let eventPipelineLiveMemory = EventPipelineLiveMemoryBudget
+                .processShared.snapshot()
 
             func workLifecycleDictionary(
                 _ plane: DaemonTimerLifecycleSnapshot
@@ -3395,12 +3688,25 @@ enum DaemonTimers {
                     heavyEnrichmentPlane
                         .lingeringTimedOutOrCancelledWorkers,
                 "deferred_results": heavyEnrichmentPlane.deferredResults,
+                "active_reserved_result_bytes":
+                    heavyEnrichmentPlane.activeReservedResultBytes,
+                "deferred_result_bytes":
+                    heavyEnrichmentPlane.deferredResultBytes,
+                "cache_result_bytes": heavyEnrichmentPlane.cacheResultBytes,
+                "retained_result_bytes_high_watermark":
+                    heavyEnrichmentPlane.retainedResultBytesHighWatermark,
+                "maximum_retained_result_bytes":
+                    heavyEnrichmentPlane.maximumRetainedResultBytes,
+                "oversized_result_values_total":
+                    heavyEnrichmentPlane.oversizedResultValuesTotal,
                 "cached_results": heavyEnrichmentPlane.cachedResults,
                 "maximum_concurrent_workers":
                     heavyEnrichmentPlane.maximumConcurrentWorkers,
                 "requests_conserved": heavyEnrichmentPlane.requestsConserved,
                 "physical_capacity_conserved":
                     heavyEnrichmentPlane.physicalCapacityConserved,
+                "result_byte_capacity_conserved":
+                    heavyEnrichmentPlane.resultByteCapacityConserved,
                 "cleanly_drained": heavyEnrichmentPlane.cleanlyDrained,
             ]
             let deferredEnrichmentBufferDict: [String: Any] = [
@@ -3408,14 +3714,41 @@ enum DaemonTimers {
                     deferredEnrichmentBuffer.acceptingReservations,
                 "event_capacity": deferredEnrichmentBuffer.eventCapacity,
                 "patch_capacity": deferredEnrichmentBuffer.patchCapacity,
+                "raw_event_byte_capacity":
+                    deferredEnrichmentBuffer.rawEventByteCapacity,
+                "reservation_raw_event_byte_charge":
+                    deferredEnrichmentBuffer.reservationRawEventByteCharge,
+                "patch_byte_capacity":
+                    deferredEnrichmentBuffer.patchByteCapacity,
                 "reserved_slots": deferredEnrichmentBuffer.reservedSlots,
                 "retained_events": deferredEnrichmentBuffer.retainedEvents,
+                "rejected_pending_events":
+                    deferredEnrichmentBuffer.rejectedPendingEvents,
+                "reserved_raw_event_bytes":
+                    deferredEnrichmentBuffer.reservedRawEventBytes,
+                "retained_raw_event_bytes":
+                    deferredEnrichmentBuffer.retainedRawEventBytes,
+                "retained_raw_event_bytes_high_watermark":
+                    deferredEnrichmentBuffer
+                        .retainedRawEventBytesHighWatermark,
+                "buffered_patch_bytes":
+                    deferredEnrichmentBuffer.bufferedPatchBytes,
+                "buffered_patch_bytes_high_watermark":
+                    deferredEnrichmentBuffer
+                        .bufferedPatchBytesHighWatermark,
+                "applied_patch_bytes":
+                    deferredEnrichmentBuffer.appliedPatchBytes,
+                "applied_patch_bytes_high_watermark":
+                    deferredEnrichmentBuffer
+                        .appliedPatchBytesHighWatermark,
                 "buffered_patches": deferredEnrichmentBuffer.bufferedPatches,
                 "orphan_patches": deferredEnrichmentBuffer.orphanPatches,
                 "waiting_reservations":
                     deferredEnrichmentBuffer.waitingReservations,
                 "drain_capacity_claimed":
                     deferredEnrichmentBuffer.drainCapacityClaimed,
+                "drain_byte_capacity_claimed":
+                    deferredEnrichmentBuffer.drainByteCapacityClaimed,
                 "reservation_requests_total":
                     deferredEnrichmentBuffer.reservationRequestsTotal,
                 "reservations_granted_total":
@@ -3429,19 +3762,157 @@ enum DaemonTimers {
                     deferredEnrichmentBuffer.retainedEventsTotal,
                 "closed_events_total":
                     deferredEnrichmentBuffer.closedEventsTotal,
+                "retained_raw_event_bytes_total":
+                    deferredEnrichmentBuffer.retainedRawEventBytesTotal,
+                "released_raw_event_bytes_total":
+                    deferredEnrichmentBuffer.releasedRawEventBytesTotal,
+                "raw_event_byte_rejections_total":
+                    deferredEnrichmentBuffer.rawEventByteRejectionsTotal,
+                "rejected_pending_events_total":
+                    deferredEnrichmentBuffer.rejectedPendingEventsTotal,
+                "rejected_pending_events_closed_total":
+                    deferredEnrichmentBuffer
+                        .rejectedPendingEventsClosedTotal,
                 "patches_received_total":
                     deferredEnrichmentBuffer.patchesReceivedTotal,
                 "patches_consumed_total":
                     deferredEnrichmentBuffer.patchesConsumedTotal,
+                "patch_bytes_received_total":
+                    deferredEnrichmentBuffer.patchBytesReceivedTotal,
+                "patch_bytes_consumed_total":
+                    deferredEnrichmentBuffer.patchBytesConsumedTotal,
                 "identity_rejected_patches_total":
                     deferredEnrichmentBuffer.identityRejectedPatchesTotal,
                 "reservation_conserved":
                     deferredEnrichmentBuffer.reservationConserved,
                 "slots_conserved": deferredEnrichmentBuffer.slotsConserved,
                 "events_conserved": deferredEnrichmentBuffer.eventsConserved,
+                "raw_event_bytes_conserved":
+                    deferredEnrichmentBuffer.rawEventBytesConserved,
                 "patches_conserved": deferredEnrichmentBuffer.patchesConserved,
+                "patch_bytes_conserved":
+                    deferredEnrichmentBuffer.patchBytesConserved,
                 "within_capacity": deferredEnrichmentBuffer.withinCapacity,
                 "cleanly_drained": deferredEnrichmentBuffer.cleanlyDrained,
+            ]
+            let eventPipelineLiveMemoryDict: [String: Any] = [
+                "current_bytes": eventPipelineLiveMemory.currentBytes,
+                "high_watermark_bytes":
+                    eventPipelineLiveMemory.highWatermarkBytes,
+                "maximum_bytes": eventPipelineLiveMemory.maximumBytes,
+                "forward_progress_reserve_bytes":
+                    eventPipelineLiveMemory.forwardProgressReserveBytes,
+                "event_store_workspace_reserve_bytes":
+                    eventPipelineLiveMemory.eventStoreWorkspaceReserveBytes,
+                "compact_receipt_reserve_bytes":
+                    eventPipelineLiveMemory.compactReceiptReserveBytes,
+                "active_leases": eventPipelineLiveMemory.activeLeases,
+                "waiting_acquisitions":
+                    eventPipelineLiveMemory.waitingAcquisitions,
+                "waiter_high_watermark":
+                    eventPipelineLiveMemory.waiterHighWatermark,
+                "acquisition_total":
+                    Int64(clamping: eventPipelineLiveMemory.acquisitionTotal),
+                "release_total":
+                    Int64(clamping: eventPipelineLiveMemory.releaseTotal),
+                "waits_total":
+                    Int64(clamping: eventPipelineLiveMemory.waitsTotal),
+                "nonblocking_rejections_total": Int64(clamping:
+                    eventPipelineLiveMemory.nonblockingRejectionsTotal),
+                "waiter_limit_saturations_total": Int64(clamping:
+                    eventPipelineLiveMemory.waiterLimitSaturationsTotal),
+                "oversized_requests_total": Int64(clamping:
+                    eventPipelineLiveMemory.oversizedRequestsTotal),
+                "cancelled_waiter_total": Int64(clamping:
+                    eventPipelineLiveMemory.cancelledWaiterTotal),
+                "bytes_by_owner": eventPipelineLiveMemory.bytesByOwner,
+                "within_capacity": eventPipelineLiveMemory.withinCapacity,
+                "leases_conserved": eventPipelineLiveMemory.leasesConserved,
+            ]
+
+            let ruleSyncObservation = state.bundledRuleSyncObservation
+            var ruleSync: [String: Any]
+            switch ruleSyncObservation.outcome {
+            case .skipped(let reason):
+                ruleSync = [
+                    "status": "skipped",
+                    "reason": reason,
+                    "bundled_tampered": false,
+                    "installed_tampered": false,
+                    "installed_corpus_verified": false,
+                ]
+            case .unchanged(let version):
+                ruleSync = [
+                    "status": "unchanged",
+                    "version": version,
+                    "bundled_tampered": false,
+                    "installed_tampered": false,
+                    "installed_corpus_verified":
+                        ruleSyncObservation.installedCorpus != nil,
+                ]
+            case .installed(let version):
+                ruleSync = [
+                    "status": "installed",
+                    "version": version,
+                    "bundled_tampered": false,
+                    "installed_tampered": false,
+                    "installed_corpus_verified":
+                        ruleSyncObservation.installedCorpus != nil,
+                ]
+            case .failed(
+                let reason,
+                let bundledTampered,
+                let installedTampered,
+                let installedCorpusVerified
+            ):
+                ruleSync = [
+                    "status": "failed",
+                    "reason": reason,
+                    "bundled_tampered": bundledTampered,
+                    "installed_tampered": installedTampered,
+                    "installed_corpus_verified":
+                        installedCorpusVerified
+                            && ruleSyncObservation.installedCorpus != nil,
+                ]
+            }
+            if let corpus = ruleSyncObservation.installedCorpus {
+                ruleSync["version"] = corpus.version
+                ruleSync["installed_manifest_sha256"] = corpus.manifestSHA256
+                ruleSync["installed_manifest_hash_entry_count"] =
+                    corpus.manifestHashEntryCount
+            }
+
+            let journalRecovery = state.eventJournalRecovery
+            var journalAccountedEvents = 0
+            var journalConservationOverflow = false
+            for count in [
+                journalRecovery.migratedEvents,
+                journalRecovery.rolledExpiredEvents,
+                journalRecovery.corruptPreservedEvents,
+                journalRecovery.remainingEvents,
+            ] {
+                let addition = journalAccountedEvents
+                    .addingReportingOverflow(count)
+                journalAccountedEvents = addition.partialValue
+                journalConservationOverflow =
+                    journalConservationOverflow || addition.overflow
+            }
+            let journalRecoveryConserved = !journalConservationOverflow
+                && journalRecovery.sourceEvents >= 0
+                && journalRecovery.migratedEvents >= 0
+                && journalRecovery.rolledExpiredEvents >= 0
+                && journalRecovery.corruptPreservedEvents >= 0
+                && journalRecovery.remainingEvents >= 0
+                && journalRecovery.sourceEvents == journalAccountedEvents
+            let eventJournalRecovery: [String: Any] = [
+                "source_events": journalRecovery.sourceEvents,
+                "migrated_events": journalRecovery.migratedEvents,
+                "rolled_expired_events": journalRecovery.rolledExpiredEvents,
+                "corrupt_preserved_events":
+                    journalRecovery.corruptPreservedEvents,
+                "remaining_events": journalRecovery.remainingEvents,
+                "complete": journalRecovery.complete,
+                "conserved": journalRecoveryConserved,
             ]
 
             var payload: [String: Any] = [
@@ -3465,6 +3936,8 @@ enum DaemonTimers {
                 "heavy_enrichment_plane": heavyEnrichmentPlaneDict,
                 "deferred_enrichment_buffer":
                     deferredEnrichmentBufferDict,
+                "event_pipeline_live_memory":
+                    eventPipelineLiveMemoryDict,
                 "prevention": preventionDict,
                 "browser_inventory": browserInventoryDict,
                 "uptime_seconds": uptime,
@@ -3472,7 +3945,11 @@ enum DaemonTimers {
                 "alerts_emitted": alerts,
                 "sysext_has_fda": sysextHasFDA,
                 "fda_checked_at_unix": nowUnix,
-                "event_type_counts_1h": eventTypeCounts,
+                "event_type_counts": eventTypeCounts,
+                "event_type_count_window": eventTypeCountWindow,
+                "event_search_projection": eventSearchProjection,
+                "rule_sync": ruleSync,
+                "event_journal_recovery": eventJournalRecovery,
                 // v1.21.6 (PERF-04): the DELIVERED retention window per category,
                 // which is not the configured one. The companion list is the
                 // categories under the 15-minute raw-event forensic/correlation
@@ -3578,8 +4055,6 @@ enum DaemonTimers {
                 "event_insert_errors_total": insertErrorSnapshot.total,
                 "event_insert_error_rate_per_min": insertErrorSnapshot.ratePerMin,
                 "last_event_insert_error_kind": insertErrorSnapshot.lastKind ?? "",
-                // Wave 9K additions.
-                "payload_truncated_total": payloadTruncatedTotal,
                 "eslogger_dropped_total": esloggerDroppedTotal,
                 // v1.21.4 (F3): effective vs on-disk single-event rule coverage.
                 "rules_loaded": rulesLoaded,
@@ -3645,12 +4120,50 @@ enum DaemonTimers {
                 "events_storage_write_persisted_by_lane": eventWriterTelemetry.persistedByLane,
                 "events_storage_write_filtered_total": eventWriterTelemetry.filteredCount,
                 "events_storage_write_filtered_by_lane": eventWriterTelemetry.filteredByLane,
+                "events_storage_write_poisoned_total": eventWriterTelemetry.poisonedCount,
+                "events_storage_write_poisoned_by_lane": eventWriterTelemetry.poisonedByLane,
                 "events_storage_write_retried_total": eventWriterTelemetry.retriedCount,
                 "events_storage_write_retried_by_lane": eventWriterTelemetry.retriedByLane,
                 "events_storage_write_buffer_depth": eventWriterTelemetry.bufferDepth,
                 "events_storage_write_buffer_depth_by_lane": eventWriterTelemetry.bufferDepthByLane,
+                "events_storage_write_buffer_bytes": eventWriterTelemetry.bufferRetainedBytes,
+                "events_storage_write_buffer_bytes_by_lane": eventWriterTelemetry.bufferRetainedBytesByLane,
                 "events_storage_write_in_flight_depth": eventWriterTelemetry.inFlightDepth,
                 "events_storage_write_in_flight_depth_by_lane": eventWriterTelemetry.inFlightDepthByLane,
+                "events_storage_write_in_flight_bytes": eventWriterTelemetry.inFlightRetainedBytes,
+                "events_storage_write_in_flight_bytes_by_lane": eventWriterTelemetry.inFlightRetainedBytesByLane,
+                "event_terminal_revision_offered_total": eventWriterTelemetry.terminalRevisionOfferedCount,
+                "event_terminal_revision_offered_by_lane": eventWriterTelemetry.terminalRevisionOfferedByLane,
+                "event_terminal_revision_unchanged_total": eventWriterTelemetry.terminalRevisionUnchangedCount,
+                "event_terminal_revision_unchanged_by_lane": eventWriterTelemetry.terminalRevisionUnchangedByLane,
+                "event_terminal_revision_durable_total": eventWriterTelemetry.terminalRevisionDurableCount,
+                "event_terminal_revision_durable_by_lane": eventWriterTelemetry.terminalRevisionDurableByLane,
+                "event_terminal_revision_dropped_total": eventWriterTelemetry.terminalRevisionDroppedCount,
+                "event_terminal_revision_dropped_by_lane": eventWriterTelemetry.terminalRevisionDroppedByLane,
+                "event_terminal_revision_poisoned_total": eventWriterTelemetry.terminalRevisionPoisonedCount,
+                "event_terminal_revision_poisoned_by_lane": eventWriterTelemetry.terminalRevisionPoisonedByLane,
+                "event_terminal_revision_retried_total": eventWriterTelemetry.terminalRevisionRetriedCount,
+                "event_terminal_revision_retried_by_lane": eventWriterTelemetry.terminalRevisionRetriedByLane,
+                "event_terminal_revision_buffer_depth": eventWriterTelemetry.terminalRevisionBufferDepth,
+                "event_terminal_revision_buffer_depth_by_lane": eventWriterTelemetry.terminalRevisionBufferDepthByLane,
+                "event_terminal_revision_buffer_bytes": eventWriterTelemetry.terminalRevisionBufferRetainedBytes,
+                "event_terminal_revision_buffer_bytes_by_lane": eventWriterTelemetry.terminalRevisionBufferRetainedBytesByLane,
+                "event_terminal_revision_in_flight_depth": eventWriterTelemetry.terminalRevisionInFlightDepth,
+                "event_terminal_revision_in_flight_depth_by_lane": eventWriterTelemetry.terminalRevisionInFlightDepthByLane,
+                "event_terminal_revision_in_flight_bytes": eventWriterTelemetry.terminalRevisionInFlightRetainedBytes,
+                "event_terminal_revision_in_flight_bytes_by_lane": eventWriterTelemetry.terminalRevisionInFlightRetainedBytesByLane,
+                "event_terminal_revision_conservation": eventWriterTelemetry.terminalRevisionConservationHolds,
+                "event_terminal_revision_evidence_poisoned": eventWriterTelemetry.terminalRevisionEvidencePoisoned,
+                "event_terminal_revision_storage_mutation_generation": eventWriterTelemetry.terminalStorageMutationGeneration,
+                "event_journal_prepared_ownership_count": eventWriterTelemetry.preparedOwnershipCount,
+                "event_journal_compact_receipt_count": eventWriterTelemetry.preparedOwnershipCompactReceiptCount,
+                "event_journal_live_handle_count": eventWriterTelemetry.preparedOwnershipLiveHandleCount,
+                "event_journal_prepared_ownership_bytes": eventWriterTelemetry.preparedOwnershipBytes,
+                "event_journal_prepared_ownership_maximum_count": eventWriterTelemetry.preparedOwnershipMaximumCount,
+                "event_journal_prepared_ownership_maximum_bytes": eventWriterTelemetry.preparedOwnershipMaximumBytes,
+                "event_journal_repairable_gap_count": eventWriterTelemetry.repairableJournalGapCount,
+                "event_journal_repair_payload_lease_count": eventWriterTelemetry.repairPayloadLeaseCount,
+                "event_journal_repair_payload_expired_total": Int64(clamping: eventWriterTelemetry.repairPayloadExpiredTotal),
                 "events_retention_budget": eventRetentionBudget,
                 "alert_evidence_budget": alertEvidenceBudget,
                 "trace_registry": traceRegistryDict,
@@ -3658,6 +4171,15 @@ enum DaemonTimers {
                 "traces_storage_admission": traceStoreStorageDict,
                 "schema_version": 5,
             ]
+            if let payloadPoisonTotal {
+                payload["payload_truncated_total"] = payloadPoisonTotal
+            }
+            if eventTypeCountSnapshot?.isComplete == true {
+                // Backward-compatible alias only when the label is literally
+                // true. Short-retention or gap-bearing counts remain available
+                // under `event_type_counts` with their explicit window ledger.
+                payload["event_type_counts_1h"] = eventTypeCounts
+            }
             // The default production EventStore has an insert filter, but a
             // test/dev store may not. Omit absent counters instead of publishing
             // fabricated zeros; optional decoders preserve honest-unknown.
@@ -3999,6 +4521,7 @@ enum DaemonTimers {
             campaignsPruneTimer,
             campaignsSizeCapTimer,
             sizeCapTimer,
+            eventJournalExpiryTimer,
             sizeCapWatchdogTimer,
             maintenanceTimer,
             heartbeatTimer,
@@ -4025,6 +4548,7 @@ enum DaemonTimers {
             campaignsPruneTimer: campaignsPruneTimer,
             campaignsSizeCapTimer: campaignsSizeCapTimer,
             sizeCapTimer: sizeCapTimer,
+            eventJournalExpiryTimer: eventJournalExpiryTimer,
             sizeCapWatchdogTimer: sizeCapWatchdogTimer,
             maintenanceTimer: maintenanceTimer,
             heartbeatTimer: heartbeatTimer,
@@ -4071,7 +4595,7 @@ enum DaemonTimers {
     /// Returns false on any query error or when no signer dominates — the
     /// safe default is "not benign" (keeps the alert at HIGH).
     static func dominantFileWriterIsBenign(state: DaemonState) async -> Bool {
-        let recent = try? await state.eventStore.events(
+        let recent = try? await state.eventStore.exactEventsPageSnapshot(
             before: nil, category: .file, pageSize: 200
         )
         guard let items = recent?.items, !items.isEmpty else { return false }
@@ -4084,7 +4608,11 @@ enum DaemonTimers {
         // Require a clear majority so a benign signer that merely appears
         // alongside the real flood-writer doesn't downgrade the alert.
         guard Double(topCount) >= Double(items.count) * 0.5 else { return false }
-        return benignHighIOSignerIDs.contains { topSigner.contains($0) }
+        let result = benignHighIOSignerIDs.contains {
+            topSigner.contains($0)
+        }
+        withExtendedLifetime(recent) {}
+        return result
     }
 
     // MARK: - v1.21.4 Phase-2 (D3) coverage-canary watchdog
@@ -4139,11 +4667,19 @@ enum DaemonTimers {
         // nonce). Re-check a few times so a slow insert batch isn't misread as
         // an eviction gap. Window starts slightly before the spawn.
         let since = spawnedAt.addingTimeInterval(-30)
-        var foundInDB = await canaryPresentInDB(state: state, nonce: nonce, since: since)
+        var storePresence = await canaryPresentInDB(
+            state: state,
+            nonce: nonce,
+            since: since
+        )
         var attempt = 0
-        while !foundInDB && attempt < canaryDBRecheckAttempts {
+        while storePresence != .present && attempt < canaryDBRecheckAttempts {
             try? await Task.sleep(nanoseconds: canaryDBRecheckSeconds * 1_000_000_000)
-            foundInDB = await canaryPresentInDB(state: state, nonce: nonce, since: since)
+            storePresence = await canaryPresentInDB(
+                state: state,
+                nonce: nonce,
+                since: since
+            )
             attempt += 1
         }
 
@@ -4155,7 +4691,8 @@ enum DaemonTimers {
         // eviction gaps in the opposite direction.
         let droppedAtHandoff = collector.canaryDroppedAtHandoff(nonce)
         let verdict = CoverageCanaryEvaluator.verdict(
-            seenAtCallback: seenAtCallback, foundInDB: foundInDB,
+            seenAtCallback: seenAtCallback,
+            storePresence: storePresence,
             droppedAtHandoff: droppedAtHandoff
         )
         guard verdict != .healthy, let stage = verdict.stageLabel else { return }
@@ -4172,6 +4709,8 @@ enum DaemonTimers {
             stageDetail = "reached the ES callback, but its retained message was refused at the callback→worker hand-off because the per-client ESMessageWorker was at its in-flight cap (see es_copy_backpressure_dropped_total) — so it never reached the rule engine, the sequence engine, or events.db. "
         case .evictionGap:
             stageDetail = "was seen at the ES callback but is absent from events.db — the store/eviction path lost it (retention sweep or insert gap). "
+        case .storeQueryUnknown:
+            stageDetail = "was seen at the ES callback, but the retained-window or sparse-projection coverage ledger cannot prove whether the empty store query means absence — storage/query coverage is incomplete. "
         case .healthy:
             stageDetail = ""
         }
@@ -4201,11 +4740,26 @@ enum DaemonTimers {
 
     /// Store-side half of the two-point check: is an event carrying `nonce`
     /// present in events.db? Uses the FTS/command-line search the hunt tool
-    /// uses. Any query error ⇒ treated as "not found" (the recheck loop covers
-    /// transient errors; a persistent one degrades to an eviction-gap report).
-    static func canaryPresentInDB(state: DaemonState, nonce: String, since: Date) async -> Bool {
-        let hits = try? await state.eventStore.search(text: nonce, since: since, limit: 1)
-        return (hits?.isEmpty == false)
+    /// uses. An empty sparse result proves absence only when its retained-window,
+    /// projection, and poison ledgers are complete. Errors and incomplete empty
+    /// snapshots stay explicitly unknown instead of masquerading as eviction.
+    static func canaryPresentInDB(
+        state: DaemonState,
+        nonce: String,
+        since: Date
+    ) async -> CoverageCanaryEvaluator.StorePresence {
+        do {
+            let snapshot = try await state.eventStore.searchSnapshot(
+                text: nonce,
+                since: since,
+                until: Date(),
+                limit: 1
+            )
+            if !snapshot.events.isEmpty { return .present }
+            return snapshot.isComplete ? .absent : .coverageUnknown
+        } catch {
+            return .coverageUnknown
+        }
     }
 
     /// posix_spawn the benign probe as `/usr/bin/env /usr/bin/true <nonce>`,
@@ -5851,7 +6405,13 @@ func runAdaptiveRollupSweep(
         logger.warning("Adaptive rollup left DB at \(sizeAfterAdaptiveBytes) bytes (proactive boundary \(capSizeBytes) bytes) — engaging Layer 3 row-count cap.")
         do {
             // Estimate how many rows to drop: the over-cap fraction × row count.
-            let total = (try? await eventStore.count()) ?? 0
+            let total: Int
+            do {
+                total = try await eventStore.maintenanceRetainedRecordCount()
+            } catch {
+                logger.fault("Layer 3 cap: retained-record count unavailable; refusing zero-derived prune: \(error.localizedDescription, privacy: .public)")
+                return
+            }
             let overFraction = Double(sizeAfterAdaptiveBytes - capSizeBytes)
                 / Double(sizeAfterAdaptiveBytes)
             let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
@@ -6666,7 +7226,14 @@ private func enforceDatabaseSizeCap(
     // radically. Cap per-sweep deletion so a misestimate never
     // wipes the whole store.
 
-    let totalEventsBefore = (try? await eventStore.count()) ?? 0
+    let totalEventsBefore: Int
+    do {
+        totalEventsBefore = try await eventStore
+            .maintenanceRetainedRecordCount()
+    } catch {
+        logger.fault("Size-cap enforcer: retained-record count unavailable; refusing zero-derived prune: \(error.localizedDescription, privacy: .public)")
+        return false
+    }
     let maxPerSweep = totalEventsBefore / 2
     let overageFraction = Double(initialBytes - boundary.targetBytes)
         / Double(initialBytes)

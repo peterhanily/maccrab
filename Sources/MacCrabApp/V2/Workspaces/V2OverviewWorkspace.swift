@@ -470,9 +470,12 @@ struct V2OverviewWorkspace: View {
     private var eventRateTile: some View {
         kpiTile(V2KpiCard(
             title: String(localized: "overview.kpiEventRate", defaultValue: "Event Rate"),
-            value: formatRate(kpis.eventsPerSecond),
-            trend: String(localized: "overview.kpiEventRateTrend", defaultValue: "/sec · last 1m"),
-            trendKind: .info,
+            value: kpis.eventRateCoverageComplete
+                ? formatRate(kpis.eventsPerSecond) : "—",
+            trend: kpis.eventRateCoverageComplete
+                ? String(localized: "overview.kpiEventRateTrend", defaultValue: "/sec · last 1m")
+                : String(localized: "overview.kpiEventRateIncomplete", defaultValue: "Evidence coverage incomplete"),
+            trendKind: kpis.eventRateCoverageComplete ? .info : .high,
             icon: "waveform.path",
             iconColor: V2Theme.dataAccent,
             action: V2KpiAction(String(localized: "overview.kpiViewEvents", defaultValue: "View Events")) {
@@ -1023,7 +1026,8 @@ struct V2OverviewWorkspace: View {
             mood: effectiveCrabMood,
             criticalCampaigns: kpis.activeCampaignsCritical,
             canAcknowledge: canAcknowledgeCrab,
-            eventRate: kpis.eventsPerSecond,
+            eventRate: kpis.eventRateCoverageComplete
+                ? kpis.eventsPerSecond : 0,
             eventBuckets: kpis.eventsLast8Buckets,
             aiActive: !appState.aiSessions.isEmpty,
             protectionHealthy: crabProtectionHealthy,
@@ -1622,4 +1626,3 @@ fileprivate struct V2AlertHistogram: View {
     }
 
 }
-

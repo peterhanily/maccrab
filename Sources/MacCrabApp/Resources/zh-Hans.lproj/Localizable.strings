@@ -557,7 +557,7 @@
 "appearance.mode" = "模式";
 "appearance.note" = "提示：无论何种模式，检测、预防与响应始终开启。改变的只是仪表盘导航。";
 "appearance.title" = "仪表盘复杂度";
-"events.aggregateModeBanner" = "正在显示每日摘要 — 将时间范围缩小至最近24小时或更短即可查看单条事件详情";
+"events.aggregateModeBanner" = "正在显示每日摘要 — 仅保留区间内提供精确的事件详情";
 "events.category" = "类别";
 "events.count" = "数量";
 "events.day" = "日期";

@@ -631,10 +631,24 @@ struct EventStream: View {
                 // aggregate fetch.
                 let hotGranularity = hotHistogramGranularity
                 let dailySpanDays = max(1, Int((timeRange.seconds ?? (7 * 86400)) / 86400))
+                let effectiveHistogramEnd =
+                    appState.eventHistogramEffectiveUntil
+                    ?? histogramWindow.endingAt
+                let effectiveHistogramSpan = max(
+                    1,
+                    appState.eventHistogramEffectiveSince.map {
+                        effectiveHistogramEnd.timeIntervalSince($0)
+                    } ?? histogramWindow.span
+                )
                 EventTimeHistogram(
                     bins: isAggregateMode
                         ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: Date(), spanDays: dailySpanDays)
-                        : EventTimeHistogram.bins(fromSQL: histogramRows, granularity: hotGranularity, endingAt: histogramWindow.endingAt, spanSeconds: histogramWindow.span),
+                        : EventTimeHistogram.bins(
+                            fromSQL: histogramRows,
+                            granularity: hotGranularity,
+                            endingAt: effectiveHistogramEnd,
+                            spanSeconds: effectiveHistogramSpan
+                        ),
                     unitLabel: isAggregateMode ? "Day" : "Time",
                     granularity: isAggregateMode ? .day : hotGranularity
                 )
@@ -663,7 +677,7 @@ struct EventStream: View {
                         .accessibilityHidden(true)
                     Text(String(
                         localized: "events.aggregateModeBanner",
-                        defaultValue: "Showing daily summaries — narrow the time range to last 24h or shorter for per-event detail"
+                        defaultValue: "Showing daily summaries — exact event details are available only for the retained interval"
                     ))
                     .font(.caption)
                     .foregroundColor(.accentColor)
@@ -672,6 +686,26 @@ struct EventStream: View {
                 .padding(.horizontal)
                 .padding(.vertical, 6)
                 .background(Color.accentColor.opacity(0.08))
+            }
+
+            if let warning = isAggregateMode
+                ? appState.eventAggregateCoverageWarning
+                : (appState.eventSearchCoverageWarning
+                    ?? (showHistogram
+                        ? appState.eventHistogramCoverageWarning : nil)) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.08))
+                .accessibilityLabel(Text(warning))
             }
 
             // Event table
@@ -1166,4 +1200,3 @@ private struct EventDetailRow: View {
         }
     }
 }
-

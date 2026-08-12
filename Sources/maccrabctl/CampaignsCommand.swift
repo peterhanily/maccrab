@@ -7,7 +7,7 @@ extension MacCrabCtl {
     /// Campaigns are stored as regular alerts with rule IDs prefixed "maccrab.campaign.".
     static func listCampaigns(limit: Int) async {
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             // FF-04: this used to fetch the newest 500 alerts and filter the
             // campaign rows out IN PROCESS — i.e. the row cap was applied BEFORE
             // the filter. On a busy host the most recent 500 alerts contain no
@@ -79,7 +79,7 @@ extension MacCrabCtl {
         var lastSeenIDs = Set<String>()
         let store: AlertStore
         do {
-            store = try AlertStore(directory: maccrabDataDir())
+            store = try openAlertStoreForReading(directory: maccrabDataDir())
         } catch {
             print("Error opening alert store: \(error)")
             return

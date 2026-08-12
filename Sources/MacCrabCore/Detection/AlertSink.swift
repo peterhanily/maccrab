@@ -28,11 +28,14 @@ public actor AlertSink {
     private struct EvidenceCaptureRequest: Sendable {
         let alertId: String
         let timestamp: Date
-        let admittedEventPrefixGeneration: UInt64
-        /// Bounded in-memory fallback for an alert emitted before the hot loop
-        /// has handed its triggering Event to BatchedEventWriter, or when that
-        /// writer terminally sheds the row.
-        let triggeringEvent: Event?
+        /// The exact bounded representation prepared before AlertStore commit.
+        /// Never carry the raw Event onto the post-commit worker: doing so lets
+        /// the snapshot and evidence paths apply different privacy/bounds.
+        let triggeringCandidate: AlertEvidenceCandidate?
+        /// Identity-bound current-trigger durability plus prior filter-passing
+        /// admission completeness, frozen before the parent alert committed.
+        /// This must survive independently of a later exact-window query.
+        let journalContext: EventJournalContextStatus
     }
 
     private let alertStore: AlertStore
@@ -41,8 +44,25 @@ public actor AlertSink {
         _ alertId: String,
         _ timestamp: Date
     ) async throws -> AlertEvidenceCaptureResult)?
-    private let evidencePrefixGeneration: (@Sendable () async -> UInt64)?
-    private let evidencePrefixBarrier: (@Sendable (UInt64) async -> Bool)?
+    /// Identity-bound durability + prior-prefix barrier for EventLoop receipts.
+    /// A terminal writer outcome is insufficient: implementations return
+    /// `.verified` only when this exact UUID is durable and every earlier
+    /// filter-passing admission is durable. Earlier intentional filter outcomes
+    /// are conserved exclusions; drops, failures, and unknown outcomes are gaps.
+    private let journalAdmissionVerifier: (@Sendable (
+        EventJournalAdmission
+    ) async -> EventJournalContextStatus)?
+    /// Event-bearing producers outside EventLoop do not own a batched-writer
+    /// receipt. Production injects an idempotent exact EventStore admission
+    /// here so those alerts cannot commit ahead of their canonical trigger.
+    private let journalEventEnsurer: (@Sendable (
+        Event
+    ) async -> EventJournalContextStatus)?
+    /// The same process-wide envelope used by journal/deferred/heavy storage.
+    /// Trigger sanitization acquires workspace before encoding and releases it
+    /// before AlertStore commit, so a large direct alert cannot allocate an
+    /// unaccounted second Event+JSON graph.
+    private let liveMemoryBudget: EventPipelineLiveMemoryBudget
     private var evidenceBudgetBytes: Int64
     /// A fixed-size ring keeps the alert commit path O(1) and makes memory
     /// ownership explicit. Jobs carry only alert identity/time; event payloads
@@ -59,6 +79,14 @@ public actor AlertSink {
     private var evidenceCaptureShed = 0
     private var evidenceCaptureInFlight = 0
     private var evidencePrefixBarrierTimeouts = 0
+    private var evidenceExactContextIncomplete = 0
+    private var evidenceExactContextQueryFailures = 0
+    private var triggerSnapshotCompleteTotal: UInt64 = 0
+    private var triggerSnapshotCompactedTotal: UInt64 = 0
+    private var triggerSnapshotPoisonTotal: UInt64 = 0
+    private var journalContextGapTotal: UInt64 = 0
+    private var missingJournalAdmissionTotal: UInt64 = 0
+    private var mismatchedJournalAdmissionTotal: UInt64 = 0
     private var evidenceShedAtShutdownDeadline = 0
     private var alertAccepting = true
     private var alertAdmissionsInFlight = 0
@@ -102,8 +130,13 @@ public actor AlertSink {
         evidenceBudgetBytes: Int64 = 100
             * SQLitePersistentStorePolicy.bytesPerMiB,
         evidenceQueueCapacity: Int = 512,
-        evidencePrefixGeneration: (@Sendable () async -> UInt64)? = nil,
-        evidencePrefixBarrier: (@Sendable (UInt64) async -> Bool)? = nil,
+        journalAdmissionVerifier: (@Sendable (
+            EventJournalAdmission
+        ) async -> EventJournalContextStatus)? = nil,
+        journalEventEnsurer: (@Sendable (
+            Event
+        ) async -> EventJournalContextStatus)? = nil,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared,
         evidenceCaptureOverride: (@Sendable (
             _ alertId: String,
             _ timestamp: Date
@@ -112,8 +145,9 @@ public actor AlertSink {
         self.alertStore = alertStore
         self.eventStore = eventStore
         self.evidenceCaptureOverride = evidenceCaptureOverride
-        self.evidencePrefixGeneration = evidencePrefixGeneration
-        self.evidencePrefixBarrier = evidencePrefixBarrier
+        self.journalAdmissionVerifier = journalAdmissionVerifier
+        self.journalEventEnsurer = journalEventEnsurer
+        self.liveMemoryBudget = liveMemoryBudget
         self.evidenceBudgetBytes = max(0, evidenceBudgetBytes)
         self.evidenceQueueCapacity = max(1, evidenceQueueCapacity)
         self.evidenceQueue = Array(
@@ -271,6 +305,165 @@ public actor AlertSink {
         return downweighted("Severity reduced — trusted development-tooling lineage (\(alert.processName ?? "dev tool")); routine build/runtime activity, surfaced for review not escalation.")
     }
 
+    /// Prove the direct trigger and the already-admitted journal prefix durable
+    /// before an alert row can commit. This is a precommit durability barrier,
+    /// not a frozen evidence-selection epoch: post-commit evidence deliberately
+    /// queries a capture-time timestamp-window superset. The direct trigger is
+    /// separately supplied from the precomputed snapshot and UUID-deduplicated.
+    ///
+    /// A false barrier is retained as an honest context gap rather than hiding
+    /// the alert. The shared trigger snapshot still survives with the alert,
+    /// while telemetry makes the incomplete journal prefix operator-visible.
+    private func settleJournalDurabilityBeforeCommit(
+        event: Event,
+        admission: EventJournalAdmission?,
+        preparedTrigger: PreparedAlertTrigger
+    ) async -> EventJournalContextStatus {
+        if let forced = EventJournalAdmissionContext.forcedNonverifiedStatus {
+            if forced == .timedOut || forced == .prefixIncomplete {
+                evidencePrefixBarrierTimeouts += 1
+            }
+            return forced
+        }
+        var status: EventJournalContextStatus
+        if let admission {
+            if admission.eventID == event.id, admission.generation > 0,
+               let baseDigest = admission.canonicalSHA256,
+               baseDigest.count == 32,
+               admission.canonicalByteCount > 0 {
+                if let journalAdmissionVerifier {
+                    status = await journalAdmissionVerifier(admission)
+                    if status == .timedOut || status == .prefixIncomplete {
+                        evidencePrefixBarrierTimeouts += 1
+                    }
+                } else {
+                    status = .unavailable
+                }
+                guard status.isVerified else { return status }
+
+                // A UUID-durable base is not enough when review or deferred
+                // enrichment changed the alert-time Event. Require the exact
+                // sanitized trigger digest to match either that base or a
+                // terminal append outcome settled before this fanout began.
+                guard let triggerDigest = preparedTrigger.canonicalSHA256,
+                      triggerDigest.count == 32,
+                      preparedTrigger.canonicalByteCount > 0 else {
+                    return .poisoned
+                }
+                if triggerDigest == baseDigest {
+                    return .verified
+                }
+                guard let terminal = EventJournalAdmissionContext
+                    .terminalRevision,
+                      terminal.eventID == event.id,
+                      terminal.baseGeneration == admission.generation,
+                      terminal.baseCanonicalSHA256 == baseDigest,
+                      terminal.terminalCanonicalSHA256 == triggerDigest,
+                      terminal.terminalCanonicalByteCount
+                        == preparedTrigger.canonicalByteCount,
+                      terminal.storageMutationGeneration > 0 else {
+                    return .failed
+                }
+                if terminal.status == .timedOut
+                    || terminal.status == .prefixIncomplete {
+                    evidencePrefixBarrierTimeouts += 1
+                }
+                return terminal.status
+            } else {
+                if mismatchedJournalAdmissionTotal < UInt64.max {
+                    mismatchedJournalAdmissionTotal += 1
+                }
+                // A bad receipt never authorizes the barrier. Still run the
+                // universal exact ensure path when present so the trigger is
+                // not lost merely because a caller supplied the wrong token.
+                _ = await journalEventEnsurer?(event)
+                status = .mismatchedReceipt
+            }
+        } else {
+            if let journalEventEnsurer {
+                status = await journalEventEnsurer(event)
+            } else {
+                if missingJournalAdmissionTotal < UInt64.max {
+                    missingJournalAdmissionTotal += 1
+                }
+                status = .unavailable
+            }
+            if status == .timedOut || status == .prefixIncomplete {
+                evidencePrefixBarrierTimeouts += 1
+            }
+        }
+        return status
+    }
+
+    private func recordCommittedJournalContext(
+        _ status: EventJournalContextStatus,
+        alertCount: Int
+    ) {
+        guard !status.isVerified, alertCount > 0 else { return }
+        let amount = UInt64(alertCount)
+        let sum = journalContextGapTotal.addingReportingOverflow(amount)
+        journalContextGapTotal = sum.overflow
+            ? UInt64.max : sum.partialValue
+    }
+
+    private func recordTriggerSnapshot(
+        _ disposition: PreparedAlertTrigger.Disposition
+    ) {
+        switch disposition {
+        case .complete:
+            if triggerSnapshotCompleteTotal < UInt64.max {
+                triggerSnapshotCompleteTotal += 1
+            }
+        case .compacted:
+            if triggerSnapshotCompactedTotal < UInt64.max {
+                triggerSnapshotCompactedTotal += 1
+            }
+        case .poison:
+            if triggerSnapshotPoisonTotal < UInt64.max {
+                triggerSnapshotPoisonTotal += 1
+            }
+        }
+    }
+
+    private func prepareTrigger(
+        event: Event,
+        admission _: EventJournalAdmission?
+    ) async -> PreparedAlertTrigger {
+        // Never borrow the admission handle's payload here. The writer may
+        // compact that shared handle as soon as SQLite verifies the base, while
+        // this exact alert-time Event intentionally remains independent and is
+        // sanitized/bounded before the alert transaction. Preflight does not
+        // allocate a payload-sized copy; the shared J lease is acquired before
+        // sanitizer/JSON work and dies with this scope before SQLite commit.
+        let preflight: EventJournalIngressPreflight
+        do {
+            preflight = try EventJournalAdmissionValidator.preflight(event)
+        } catch {
+            return EventSnapshot.poisonTrigger(for: event)
+        }
+        guard let workspace = await liveMemoryBudget.acquire(
+            bytes: preflight.preparationWorkspaceByteEstimate,
+            owner: .journalPrepared
+        ) else {
+            return EventSnapshot.poisonTrigger(for: event)
+        }
+        do {
+            let prepared = try EventJournalAdmissionValidator.prepare(
+                event,
+                preflight: preflight
+            )
+            guard prepared.event.id == preflight.eventID else {
+                return EventSnapshot.poisonTrigger(for: event)
+            }
+            // Keep `workspace` live through compaction of canonical bytes. The
+            // result is at most 64 KiB and becomes alert-owned after return.
+            _ = workspace.bytes
+            return EventSnapshot.prepare(prepared)
+        } catch {
+            return EventSnapshot.poisonTrigger(for: event)
+        }
+    }
+
     // Post-commit only: queue a small identity record and return to the alert
     // producer. Event selection, validation, SQLite accounting, and pruning all
     // run on one bounded worker lane so an alert storm cannot serialize the
@@ -278,8 +471,9 @@ public actor AlertSink {
     private func enqueueEvidenceCapture(
         alertId: String,
         timestamp: Date,
-        triggeringEvent: Event? = nil
-    ) async {
+        triggeringCandidate: AlertEvidenceCandidate? = nil,
+        journalContext: EventJournalContextStatus
+    ) {
         guard evidenceCaptureOverride != nil || eventStore != nil else { return }
         evidenceCaptureOffered += 1
         guard evidenceAccepting, evidenceBudgetBytes > 0,
@@ -293,19 +487,11 @@ public actor AlertSink {
             }
             return
         }
-        let prefixGeneration = await evidencePrefixGeneration?() ?? 0
-        // The generation lookup is an actor hop. Shutdown or another alert can
-        // claim the last slot while it is suspended, so re-check both gates.
-        guard evidenceAccepting, evidenceBudgetBytes > 0,
-              evidenceQueueCount < evidenceQueueCapacity else {
-            evidenceCaptureShed += 1
-            return
-        }
         evidenceQueue[evidenceQueueTail] = EvidenceCaptureRequest(
             alertId: alertId,
             timestamp: timestamp,
-            admittedEventPrefixGeneration: prefixGeneration,
-            triggeringEvent: triggeringEvent
+            triggeringCandidate: triggeringCandidate,
+            journalContext: journalContext
         )
         evidenceQueueTail = (evidenceQueueTail + 1) % evidenceQueueCapacity
         evidenceQueueCount += 1
@@ -350,19 +536,27 @@ public actor AlertSink {
                     request.alertId,
                     request.timestamp
                 )
+                if !request.journalContext.isVerified {
+                    // Test/fault-injection captures do not expose an exact
+                    // journal generation, but a known precommit admission gap
+                    // must still become restart-stable durable truth.
+                    try await alertStore.recordEvidenceContext(
+                        AlertEvidenceContextRecord(
+                            alertId: request.alertId,
+                            status: .incomplete,
+                            sourceMutationGeneration: 0,
+                            poisonRecordCount: 0,
+                            corruptRecordCount: 0,
+                            journalAdmissionGapCount: 1
+                        )
+                    )
+                    evidenceExactContextIncomplete += 1
+                }
             } else {
                 guard let eventStore else { return }
-                if let evidencePrefixBarrier,
-                   request.admittedEventPrefixGeneration > 0,
-                   !(await evidencePrefixBarrier(
-                        request.admittedEventPrefixGeneration
-                   )) {
-                    evidencePrefixBarrierTimeouts += 1
-                }
                 try Task.checkCancellation()
                 var candidates: [AlertEvidenceCandidate] = []
-                if let event = request.triggeringEvent,
-                   let trigger = Self.evidenceCandidate(event: event) {
+                if let trigger = request.triggeringCandidate {
                     candidates.append(trigger)
                 }
                 let remaining = max(
@@ -370,45 +564,106 @@ public actor AlertSink {
                     AlertEvidencePolicy.maximumEventsPerAlert
                         - candidates.count
                 )
-                candidates.append(contentsOf:
-                    try await eventStore.alertEvidenceCandidates(
+                let exactSnapshot: ExactAlertEvidenceSnapshot?
+                var selectionError: (any Error)?
+                do {
+                    exactSnapshot = try await eventStore
+                        .exactAlertEvidenceSnapshot(
                         alertTimestamp: request.timestamp,
                         maxRows: remaining
                     )
-                )
+                    selectionError = nil
+                } catch {
+                    exactSnapshot = nil
+                    selectionError = error
+                }
+                if let exactSnapshot {
+                    candidates.append(contentsOf: exactSnapshot.candidates)
+                }
                 try Task.checkCancellation()
                 var seen: Set<String> = []
                 candidates = candidates.filter {
                     seen.insert($0.eventId.lowercased()).inserted
                 }
-                result = try await alertStore.captureEvidence(
-                    alertId: request.alertId,
-                    candidates: candidates,
-                    maxBytes: evidenceBudgetBytes
-                )
+                let contextRecord: AlertEvidenceContextRecord
+                if let exactSnapshot {
+                    let journalAdmissionGapCount = request.journalContext
+                        .isVerified ? 0 : 1
+                    let complete = exactSnapshot.isComplete
+                        && journalAdmissionGapCount == 0
+                    contextRecord = AlertEvidenceContextRecord(
+                        alertId: request.alertId,
+                        status: complete ? .complete : .incomplete,
+                        sourceMutationGeneration:
+                            exactSnapshot.mutationGeneration,
+                        poisonRecordCount:
+                            exactSnapshot.poisonRecords.count,
+                        corruptRecordCount:
+                            exactSnapshot.corruptLegacyRecords,
+                        inheritedLossCount:
+                            exactSnapshot.inheritedLegacyLossRecords,
+                        resourceLimitedCount:
+                            exactSnapshot.resourceLimitedRecords,
+                        journalAdmissionGapCount:
+                            journalAdmissionGapCount
+                    )
+                    if !complete {
+                        evidenceExactContextIncomplete += 1
+                    }
+                } else {
+                    contextRecord = AlertEvidenceContextRecord(
+                        alertId: request.alertId,
+                        status: .captureFailed,
+                        sourceMutationGeneration: 0,
+                        poisonRecordCount: 0,
+                        corruptRecordCount: 0,
+                        journalAdmissionGapCount:
+                            request.journalContext.isVerified ? 0 : 1
+                    )
+                    evidenceExactContextIncomplete += 1
+                    evidenceExactContextQueryFailures += 1
+                }
+
+                // Every alert commit already owns a durable `.pending` row.
+                // Write evidence first and publish the terminal context state
+                // only after that succeeds. A crash or context-write failure
+                // therefore remains visibly pending; it can never leave rows
+                // whose completeness is falsely reported as terminal.
+                do {
+                    result = try await alertStore.captureEvidence(
+                        alertId: request.alertId,
+                        candidates: candidates,
+                        maxBytes: evidenceBudgetBytes
+                    )
+                } catch {
+                    throw error
+                }
+                try await alertStore.recordEvidenceContext(contextRecord)
+                if let selectionError {
+                    logger.warning("Exact evidence selection was incomplete for alert \(request.alertId, privacy: .public): \(selectionError.localizedDescription, privacy: .public)")
+                }
             }
             evidenceRowsCaptured += result.insertedRows
             evidenceRowsPruned += result.prunedRows
             evidenceCaptureCompleted += 1
         } catch {
+            // The parent insert's atomic `.pending` row is already fail-visible.
+            // Advance it to a terminal failure when possible; if this write also
+            // fails, leaving `.pending` is deliberately still unhealthy truth.
+            try? await alertStore.recordEvidenceContext(
+                AlertEvidenceContextRecord(
+                    alertId: request.alertId,
+                    status: .captureFailed,
+                    sourceMutationGeneration: 0,
+                    poisonRecordCount: 0,
+                    corruptRecordCount: 0,
+                    journalAdmissionGapCount:
+                        request.journalContext.isVerified ? 0 : 1
+                )
+            )
             evidenceCaptureFailures += 1
             logger.warning("Evidence capture failed for alert \(request.alertId, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-    }
-
-    private nonisolated static func evidenceCandidate(
-        event: Event
-    ) -> AlertEvidenceCandidate? {
-        guard let data = try? JSONEncoder().encode(event),
-              !data.isEmpty,
-              data.count <= AlertEvidencePolicy.maximumRawPayloadBytes else {
-            return nil
-        }
-        return AlertEvidenceCandidate(
-            eventId: event.id.uuidString,
-            timestamp: event.timestamp,
-            rawJSON: String(decoding: data, as: UTF8.self)
-        )
     }
 
     // MARK: - Single alert with event context
@@ -431,12 +686,22 @@ public actor AlertSink {
     public func submit(
         alert: Alert,
         event: Event,
-        dedupProcessPath: String? = nil
+        dedupProcessPath: String? = nil,
+        journalAdmission: EventJournalAdmission? = nil
     ) async throws -> Bool {
         guard beginAlertAdmission(offers: 1) else { return false }
         defer { finishAlertAdmission() }
         // v1.18: built-in maccrab.* rule mute / severity override.
         guard let settled = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
+        // Prepare exactly once and before the first possible AlertStore write.
+        // This value — not the raw Event — feeds both durable trigger columns.
+        let effectiveAdmission = journalAdmission
+            ?? EventJournalAdmissionContext.current
+        let preparedTrigger = await prepareTrigger(
+            event: event,
+            admission: effectiveAdmission
+        )
+        recordTriggerSnapshot(preparedTrigger.disposition)
         // Most detections dedup on the triggering executable. Correlators may
         // supply their actual shared evidence identity (file/destination), but
         // the reservation still belongs here so it commits with the alert row
@@ -445,17 +710,21 @@ public actor AlertSink {
         // Enrich before reserving so same-evidence severity matches the row that
         // will actually be stored. A reservation blocks concurrent duplicates
         // but becomes committed dedup state only after SQLite succeeds.
-        let enriched = recalibrateDevToolingSeverity(
-            Self.enrichWithAttribution(alert: settled, event: event)
+        let reservedAlert = recalibrateDevToolingSeverity(
+            Self.enrichWithAttribution(
+                alert: settled,
+                event: event,
+                precomputedSnapshot: preparedTrigger.snapshotJSON
+            )
         )
         let reservation: AlertDeduplicator.EmissionReservation
         switch await deduplicator.reserveEmission(
-            ruleId: enriched.ruleId,
+            ruleId: reservedAlert.ruleId,
             processPath: dedupKey,
-            eventId: enriched.ruleId.hasPrefix("maccrab.campaign.")
+            eventId: reservedAlert.ruleId.hasPrefix("maccrab.campaign.")
                 ? nil : event.id.uuidString,
-            tactics: enriched.mitreTactics,
-            severity: enriched.severity
+            tactics: reservedAlert.mitreTactics,
+            severity: reservedAlert.severity
         ) {
         case .suppressed:
             suppressedCount += 1
@@ -464,8 +733,21 @@ public actor AlertSink {
             reservation = reserved
         }
 
-        // Shutdown may seal the sink while the deduplicator actor hop above is
-        // suspended. Do not begin a new durable write after that boundary.
+        let journalContext = await settleJournalDurabilityBeforeCommit(
+            event: event,
+            admission: effectiveAdmission,
+            preparedTrigger: preparedTrigger
+        )
+        let enriched = Self.enrichWithAttribution(
+            alert: reservedAlert,
+            event: event,
+            precomputedSnapshot: preparedTrigger.snapshotJSON(
+                journalContext: journalContext
+            )
+        )
+
+        // Shutdown may seal the sink while either the deduplicator or journal
+        // barrier actor hop is suspended. Do not begin a write afterward.
         guard alertAccepting else {
             alertsRejectedAfterSeal += 1
             await deduplicator.rollbackEmission(reservation)
@@ -479,14 +761,16 @@ public actor AlertSink {
             throw error
         }
         await deduplicator.commitEmission(reservation)
+        recordCommittedJournalContext(journalContext, alertCount: 1)
         insertedCount += 1
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
         alertCounter.increment()
-        await enqueueEvidenceCapture(
+        enqueueEvidenceCapture(
             alertId: enriched.id,
             timestamp: enriched.timestamp,
-            triggeringEvent: event
+            triggeringCandidate: preparedTrigger.evidenceCandidate,
+            journalContext: journalContext
         )
         return true
     }
@@ -538,9 +822,10 @@ public actor AlertSink {
         // Count this emitted alert exactly once, here at the chokepoint (post
         // built-in-mute + post-dedup) — see `alertCounter`.
         alertCounter.increment()
-        await enqueueEvidenceCapture(
+        enqueueEvidenceCapture(
             alertId: enriched.id,
-            timestamp: enriched.timestamp
+            timestamp: enriched.timestamp,
+            journalContext: .verified
         )
         return true
     }
@@ -562,20 +847,38 @@ public actor AlertSink {
     /// context, like test harnesses) pass nil and the alerts go through
     /// unchanged.
     @discardableResult
-    public func insertEngineBatch(alerts: [Alert], event: Event? = nil) async throws -> [Alert] {
+    public func insertEngineBatch(
+        alerts: [Alert],
+        event: Event? = nil,
+        journalAdmission: EventJournalAdmission? = nil
+    ) async throws -> [Alert] {
         guard !alerts.isEmpty else { return [] }
         guard beginAlertAdmission(offers: alerts.count) else { return [] }
         defer { finishAlertAdmission() }
         // v1.19.3 FP recalibration runs AFTER enrichment (so the dev-tooling
         // lineage check sees each alert's parent executable) and here too so the
         // engine batch path shares the same chokepoint as direct emissions.
-        let toInsert: [Alert]
+        var toInsert: [Alert]
+        let preparedTrigger: PreparedAlertTrigger?
         var reservations: [AlertDeduplicator.EmissionReservation] = []
         if let event {
             // All alerts in a batch share one triggering event — encode the
             // snapshot ONCE rather than per alert.
-            let snapshot = EventSnapshot.encode([event])
-            let enriched = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot)) }
+            let effectiveAdmission = journalAdmission
+                ?? EventJournalAdmissionContext.current
+            let trigger = await prepareTrigger(
+                event: event,
+                admission: effectiveAdmission
+            )
+            preparedTrigger = trigger
+            recordTriggerSnapshot(trigger.disposition)
+            let enriched = alerts.map {
+                recalibrateDevToolingSeverity(Self.enrichWithAttribution(
+                    alert: $0,
+                    event: event,
+                    precomputedSnapshot: trigger.snapshotJSON
+                ))
+            }
             // Reserve both dedup dimensions before writing, but do not commit
             // their windows yet. A failed batch rolls every reservation back.
             var kept: [Alert] = []
@@ -598,11 +901,42 @@ public actor AlertSink {
             }
             toInsert = kept
         } else {
+            preparedTrigger = nil
             toInsert = alerts.map { recalibrateDevToolingSeverity(Self.enrichWithHostOnly(alert: $0)) }
         }
         // The whole batch can collapse into an already-emitted direct alert on
         // the same evidence; don't hand an empty array to the store.
         guard !toInsert.isEmpty else { return [] }
+        let journalContext: EventJournalContextStatus
+        if let event {
+            if let preparedTrigger {
+                journalContext = await settleJournalDurabilityBeforeCommit(
+                    event: event,
+                    admission: journalAdmission
+                        ?? EventJournalAdmissionContext.current,
+                    preparedTrigger: preparedTrigger
+                )
+            } else {
+                // Construction above is exhaustive, but preserve fail-closed
+                // semantics if a future branch can produce an event without
+                // its precommit trigger representation.
+                journalContext = .poisoned
+            }
+            if let preparedTrigger {
+                let snapshot = preparedTrigger.snapshotJSON(
+                    journalContext: journalContext
+                )
+                toInsert = toInsert.map {
+                    Self.enrichWithAttribution(
+                        alert: $0,
+                        event: event,
+                        precomputedSnapshot: snapshot
+                    )
+                }
+            }
+        } else {
+            journalContext = .verified
+        }
         guard alertAccepting else {
             alertsRejectedAfterSeal += toInsert.count
             for reservation in reservations {
@@ -627,12 +961,17 @@ public actor AlertSink {
                 }
             }
             insertedCount += partial.committedAlerts.count
+            recordCommittedJournalContext(
+                journalContext,
+                alertCount: partial.committedAlerts.count
+            )
             alertCounter.add(partial.committedAlerts.count)
             for alert in partial.committedAlerts {
-                await enqueueEvidenceCapture(
+                enqueueEvidenceCapture(
                     alertId: alert.id,
                     timestamp: alert.timestamp,
-                    triggeringEvent: event
+                    triggeringCandidate: preparedTrigger?.evidenceCandidate,
+                    journalContext: journalContext
                 )
             }
             throw partial
@@ -646,6 +985,10 @@ public actor AlertSink {
             await deduplicator.commitEmission(reservation)
         }
         insertedCount += persistedAlerts.count
+        recordCommittedJournalContext(
+            journalContext,
+            alertCount: persistedAlerts.count
+        )
         // Count every alert in the batch exactly once (the rule-match path's
         // per-match increment was REMOVED from EventLoop so it isn't
         // double-counted) — see `alertCounter`. Callers pre-apply
@@ -656,10 +999,11 @@ public actor AlertSink {
         // is its own timestamp. The PRIMARY KEY (alert_id, event_id) on
         // alert_evidence dedupes overlapping windows automatically.
         for alert in persistedAlerts {
-            await enqueueEvidenceCapture(
+            enqueueEvidenceCapture(
                 alertId: alert.id,
                 timestamp: alert.timestamp,
-                triggeringEvent: event
+                triggeringCandidate: preparedTrigger?.evidenceCandidate,
+                journalContext: journalContext
             )
         }
         // This is the authoritative post-collapse, post-commit set. Callers
@@ -672,6 +1016,21 @@ public actor AlertSink {
 
     public func stats() -> (inserted: Int, suppressed: Int) {
         (insertedCount, suppressedCount)
+    }
+
+    /// Monotonic trigger-preparation truth. Release qualification requires the
+    /// poison total to remain zero; compaction is a bounded alert-row outcome
+    /// and must never be confused with complete canonical journal storage.
+    public func triggerSnapshotStats() -> AlertTriggerSnapshotTelemetry {
+        AlertTriggerSnapshotTelemetry(
+            completeTotal: triggerSnapshotCompleteTotal,
+            compactedTotal: triggerSnapshotCompactedTotal,
+            poisonTotal: triggerSnapshotPoisonTotal,
+            journalContextGapTotal: journalContextGapTotal,
+            missingJournalAdmissionTotal: missingJournalAdmissionTotal,
+            mismatchedJournalAdmissionTotal:
+                mismatchedJournalAdmissionTotal
+        )
     }
 
     public func evidenceStats() -> AlertEvidenceCaptureTelemetry {
@@ -689,6 +1048,8 @@ public actor AlertSink {
             queueCapacity: evidenceQueueCapacity,
             accepting: evidenceAccepting,
             prefixBarrierTimeouts: evidencePrefixBarrierTimeouts,
+            exactContextIncomplete: evidenceExactContextIncomplete,
+            exactContextQueryFailures: evidenceExactContextQueryFailures,
             alertsRejectedAfterSeal: alertsRejectedAfterSeal,
             alertAdmissionsInFlight: alertAdmissionsInFlight
         )
@@ -736,11 +1097,14 @@ public actor AlertSink {
             evidenceWorker?.cancel()
         }
 
+        let durablePendingContexts = (try? await alertStore
+            .pendingEvidenceContextCount()) ?? Int.max
         return AlertSinkShutdownResult(
             completed: evidenceCaptureCompleted,
             failed: evidenceCaptureFailures,
             shedAtDeadline: shedAtDeadline,
             pending: evidenceQueueCount + evidenceCaptureInFlight,
+            durablePendingContexts: durablePendingContexts,
             alertAdmissionsInFlight: alertAdmissionsInFlight,
             alertsRejectedAfterSeal: alertsRejectedAfterSeal,
             deadlineExpired: expired
@@ -811,13 +1175,12 @@ public actor AlertSink {
             parentExecutable: alert.parentExecutable ?? Self.nilIfEmpty(parentExec),
             processSha256: alert.processSha256 ?? Self.nilIfEmpty(sha256),
             hostName: alert.hostName ?? Self.defaultHostName(),
-            // v1.17.2: snapshot the triggering event so it survives events.db
-            // pruning. Preserve a caller-supplied snapshot (e.g. a sequence/
-            // campaign alert that already attached its contributing events);
-            // else use the batch-shared precomputed snapshot; else encode now.
-            triggeringEventsJson: alert.triggeringEventsJson
-                ?? precomputedSnapshot
-                ?? EventSnapshot.encode([event]),
+            // The sink never trusts a caller-supplied JSON blob here: it may
+            // contain the raw secret-bearing Event. Production submit paths
+            // pass the one precomputed, privacy-sanitized representation shared
+            // with alert evidence; direct helper calls prepare the same value.
+            triggeringEventsJson: precomputedSnapshot
+                ?? EventSnapshot.prepare(event).snapshotJSON,
             // Wave-3 P2: tie the alert to the agent session that tripped it.
             aiToolSessionId: alert.aiToolSessionId ?? Self.nilIfEmpty(aiSession)
         )
@@ -870,53 +1233,5 @@ public actor AlertSink {
     nonisolated private static func nilIfEmpty(_ s: String?) -> String? {
         guard let s, !s.isEmpty else { return nil }
         return s
-    }
-}
-
-// MARK: - EventSnapshot (v1.17.2)
-
-/// Encodes the triggering event(s) of an alert into a bounded JSON string
-/// stored on the alert row (`triggering_events_json`, schema v6).
-///
-/// events.db prunes on a ~30 min hot tier while alerts are retained ~365
-/// days, so an old alert's originating event is otherwise gone when reviewed.
-/// Snapshotting it onto the alert keeps the "what did I actually see" context
-/// for the life of the alert without a cross-DB join that fails post-eviction.
-///
-/// Bounds (so this can't balloon the alert DB):
-///  - at most `maxEvents` events (triggering first, then contributing events
-///    for sequence/campaign alerts),
-///  - each event capped at `maxBytesPerEvent` (mirrors EventStore's 64 KB
-///    raw_json cap) — an over-cap event is replaced with a small marker so the
-///    array stays well-formed.
-public enum EventSnapshot {
-    /// Max events captured per alert. A single-event rule alert stores 1; a
-    /// sequence/campaign alert can attach its contributing events up to here.
-    public static let maxEvents = 8
-    /// Per-event byte cap after JSON encoding (matches EventStore.maxRawJsonBytes).
-    public static let maxBytesPerEvent = 64 * 1024
-
-    private static let encoder = JSONEncoder()
-
-    /// Returns a JSON-array string of the (bounded) events, or nil if empty /
-    /// nothing encodable — nil maps to a NULL column, never an empty blob.
-    public static func encode(_ events: [Event]) -> String? {
-        let bounded = events.prefix(maxEvents)
-        guard !bounded.isEmpty else { return nil }
-
-        var jsonElements: [String] = []
-        for event in bounded {
-            guard let data = try? encoder.encode(event) else { continue }
-            if data.count > maxBytesPerEvent {
-                // Don't store an oversized blob; keep the array well-formed
-                // with a marker that records the id + why it was dropped.
-                let marker = "{\"id\":\"\(event.id.uuidString)\",\"snapshot\":\"omitted\",\"reason\":\"event exceeded \(maxBytesPerEvent) bytes\"}"
-                jsonElements.append(marker)
-            } else if let s = String(data: data, encoding: .utf8) {
-                jsonElements.append(s)
-            }
-        }
-        guard !jsonElements.isEmpty else { return nil }
-        return "[" + jsonElements.joined(separator: ",") + "]"
     }
 }

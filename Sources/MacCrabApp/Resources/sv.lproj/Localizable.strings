@@ -557,7 +557,7 @@
 "appearance.mode" = "Läge";
 "appearance.note" = "Tips: detektering, förebyggande och svarsåtgärder är alltid på oavsett läge. Endast instrumentpanelens navigering ändras.";
 "appearance.title" = "Instrumentpanelens komplexitet";
-"events.aggregateModeBanner" = "Visar dagliga sammanfattningar — begränsa tidsintervallet till de senaste 24 timmarna eller kortare för detaljer per händelse";
+"events.aggregateModeBanner" = "Visar dagliga sammanfattningar — exakta händelsedetaljer är endast tillgängliga för det sparade intervallet";
 "events.category" = "Kategori";
 "events.count" = "Antal";
 "events.day" = "Dag";

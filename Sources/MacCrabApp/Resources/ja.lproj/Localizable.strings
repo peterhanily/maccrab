@@ -557,7 +557,7 @@
 "appearance.mode" = "モード";
 "appearance.note" = "ヒント: 検出・予防・応答はモードに関係なく常に有効です。変わるのはダッシュボードのナビゲーションだけです。";
 "appearance.title" = "ダッシュボードの表示レベル";
-"events.aggregateModeBanner" = "日次サマリーを表示中 — イベント単位の詳細を見るには時間範囲を過去24時間以内に絞ってください";
+"events.aggregateModeBanner" = "日次サマリーを表示中 — 正確なイベント詳細は保持されている期間についてのみ利用できます";
 "events.category" = "カテゴリ";
 "events.count" = "件数";
 "events.day" = "日付";

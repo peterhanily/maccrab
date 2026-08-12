@@ -75,17 +75,29 @@ struct EventStoreAgentSessionTests {
         try await store.insert(event: Self.makeEvent(sessionId: "S2", at: t0.addingTimeInterval(3)))
         try await store.insert(event: Self.makeEvent(sessionId: nil, at: t0.addingTimeInterval(4)))
 
-        let s1 = try await store.eventsForAgentSession("S1")
-        #expect(s1.count == 2)
+        let s1 = try await store.exactEventsForAgentSessionSnapshot(
+            "S1",
+            since: .distantPast,
+            until: .distantFuture
+        )
+        #expect(s1.events.count == 2)
         // Ascending by timestamp.
-        #expect(s1.first!.timestamp < s1.last!.timestamp)
+        #expect(s1.events.first!.timestamp < s1.events.last!.timestamp)
 
-        let s2 = try await store.eventsForAgentSession("S2")
-        #expect(s2.count == 1)
+        let s2 = try await store.exactEventsForAgentSessionSnapshot(
+            "S2",
+            since: .distantPast,
+            until: .distantFuture
+        )
+        #expect(s2.events.count == 1)
 
         // Unstamped + unknown sessions return nothing.
-        let none = try await store.eventsForAgentSession("does-not-exist")
-        #expect(none.isEmpty)
+        let none = try await store.exactEventsForAgentSessionSnapshot(
+            "does-not-exist",
+            since: .distantPast,
+            until: .distantFuture
+        )
+        #expect(none.events.isEmpty)
     }
 
     @Test("agentSessions aggregates one summary per session, most-recent first")

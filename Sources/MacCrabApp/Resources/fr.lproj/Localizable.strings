@@ -557,7 +557,7 @@
 "appearance.mode" = "Mode";
 "appearance.note" = "Astuce : la détection, la prévention et la réponse restent toujours actives quel que soit le mode. Seule la navigation du tableau de bord change.";
 "appearance.title" = "Complexité du tableau de bord";
-"events.aggregateModeBanner" = "Synthèses quotidiennes affichées — réduisez la plage de temps à 24 h ou moins pour le détail par événement";
+"events.aggregateModeBanner" = "Synthèses quotidiennes affichées — les détails exacts des événements ne sont disponibles que pour la période conservée";
 "events.category" = "Catégorie";
 "events.count" = "Nombre";
 "events.day" = "Jour";

@@ -292,11 +292,26 @@ public struct V2SystemWorkspace: View {
                 "events_processed": hb.eventsProcessed,
                 "alerts_emitted": hb.alertsEmitted,
                 "sysext_has_fda": hb.sysextHasFDA,
-                "events_per_second_1h": hb.eventsPerSecond1h,
                 "payload_truncated_total": hb.payloadTruncatedTotal,
                 "eslogger_dropped_total": hb.esloggerDroppedTotal,
                 "es_sensor_degraded": hb.esSensorDegraded,
             ]
+            if let eventRate = hb.eventsPerSecond1h {
+                hbDict["events_per_second_1h"] = eventRate
+            }
+            if let window = hb.eventTypeCountWindow {
+                hbDict["event_type_count_window"] = [
+                    "query_available": window.queryAvailable,
+                    "requested_duration_seconds":
+                        window.requestedDurationSeconds,
+                    "effective_duration_seconds":
+                        window.effectiveDurationSeconds,
+                    "requested_window_complete":
+                        window.requestedWindowComplete,
+                    "complete": window.complete,
+                    "gap_records": window.gapRecords,
+                ]
+            }
             if let mem = hb.residentMemoryMB { hbDict["resident_memory_mb"] = mem }
             if let sev = hb.esSensorDegradedSeverity { hbDict["es_sensor_degraded_severity"] = sev }
             if let pipeline = hb.eventPipeline {
@@ -823,7 +838,10 @@ public struct V2SystemWorkspace: View {
         let eventsTotal = h.map { fmtCount($0.eventsProcessed) } ?? "—"
         let alertsTotal = h.map { fmtCount($0.alertsEmitted) } ?? "—"
         let memMB = h?.residentMemoryMB.map { "\($0) MB" } ?? "—"
-        let rate = h.map { String(format: "%.1f /s", $0.eventsPerSecond1h) } ?? "—"
+        let rate = h?.eventsPerSecond1h.map {
+            String(format: "%.1f /s", $0)
+        } ?? "—"
+        let rateCoverageComplete = h?.eventsPerSecond1h != nil
         // When the heartbeat is stale, every "since boot / resident / 1h" card
         // below is a frozen snapshot — flag it rather than present it as live.
         let staleSuffix = stale ? " · " + String(localized: "system.metricStale", defaultValue: "stale") : ""
@@ -860,8 +878,12 @@ public struct V2SystemWorkspace: View {
             metricCard(
                 title: String(localized: "system.metricEventRate", defaultValue: "Event rate"),
                 value: rate,
-                trend: String(localized: "system.eventRate1h", defaultValue: "1h rolling") + staleSuffix,
-                trendKind: liveKind(.info),
+                trend: (rateCoverageComplete
+                    ? String(localized: "system.eventRate1h", defaultValue: "1h rolling")
+                    : String(localized: "system.eventRateIncomplete", defaultValue: "coverage incomplete"))
+                    + staleSuffix,
+                trendKind: rateCoverageComplete
+                    ? liveKind(.info) : .warning,
                 icon: "waveform.path",
                 iconColor: V2Theme.dataAccent
             )

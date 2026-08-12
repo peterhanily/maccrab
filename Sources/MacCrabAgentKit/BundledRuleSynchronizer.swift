@@ -27,6 +27,19 @@ enum BundledRuleSyncOutcome: Equatable, Sendable {
     )
 }
 
+struct BundledRuleCorpusEvidence: Equatable, Sendable {
+    let version: String
+    let manifestSHA256: String
+    let manifestHashEntryCount: Int
+}
+
+struct BundledRuleSyncBootObservation: Equatable, Sendable {
+    let outcome: BundledRuleSyncOutcome
+    /// Present only when the installed corpus was verified against the
+    /// code-sealed bundled manifest during this exact synchronization attempt.
+    let installedCorpus: BundledRuleCorpusEvidence?
+}
+
 enum BundledRuleSynchronizer {
     typealias DirectoryReplacer = (
         _ staged: URL,
@@ -91,6 +104,16 @@ enum BundledRuleSynchronizer {
     private struct VerifiedCorpus {
         let version: String
         let manifestData: Data
+        let manifestSHA256: String
+        let manifestHashEntryCount: Int
+
+        var evidence: BundledRuleCorpusEvidence {
+            BundledRuleCorpusEvidence(
+                version: version,
+                manifestSHA256: manifestSHA256,
+                manifestHashEntryCount: manifestHashEntryCount
+            )
+        }
     }
 
     private struct Inventory {
@@ -136,7 +159,9 @@ enum BundledRuleSynchronizer {
 
     /// Production entry point. It deliberately accepts only the currently
     /// executing, Developer-ID-signed System Extension staged by sysextd.
-    static func synchronizeAtBoot(supportDirectory: String) -> BundledRuleSyncOutcome {
+    static func synchronizeAtBoot(
+        supportDirectory: String
+    ) -> BundledRuleSyncBootObservation {
         let bundleURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let trustedRoot = "/Library/SystemExtensions/"
         let isStagedSystemExtension = bundleURL.path.hasPrefix(trustedRoot)
@@ -148,36 +173,51 @@ enum BundledRuleSynchronizer {
         // is the shipping System Extension, however, identity/privilege drift is
         // a trust failure—not a reason to silently bypass synchronization.
         guard hasProductionIdentifier || isStagedSystemExtension else {
-            return .skipped("not_system_extension_bundle")
+            return BundledRuleSyncBootObservation(
+                outcome: .skipped("not_system_extension_bundle"),
+                installedCorpus: nil
+            )
         }
         guard geteuid() == 0 else {
-            return recordFailure(
-                supportDirectory: supportDirectory,
-                reason: "running System Extension is not root",
-                bundledTampered: true
+            return BundledRuleSyncBootObservation(
+                outcome: recordFailure(
+                    supportDirectory: supportDirectory,
+                    reason: "running System Extension is not root",
+                    bundledTampered: true
+                ),
+                installedCorpus: nil
             )
         }
         guard hasProductionIdentifier else {
-            return recordFailure(
-                supportDirectory: supportDirectory,
-                reason: "running System Extension bundle identifier is invalid",
-                bundledTampered: true
+            return BundledRuleSyncBootObservation(
+                outcome: recordFailure(
+                    supportDirectory: supportDirectory,
+                    reason: "running System Extension bundle identifier is invalid",
+                    bundledTampered: true
+                ),
+                installedCorpus: nil
             )
         }
         guard isStagedSystemExtension else {
             logger.fault("Refusing bundled-rule sync from non-sysextd path: \(bundleURL.path, privacy: .public)")
-            return recordFailure(
-                supportDirectory: supportDirectory,
-                reason: "running System Extension is not staged under /Library/SystemExtensions",
-                bundledTampered: true
+            return BundledRuleSyncBootObservation(
+                outcome: recordFailure(
+                    supportDirectory: supportDirectory,
+                    reason: "running System Extension is not staged under /Library/SystemExtensions",
+                    bundledTampered: true
+                ),
+                installedCorpus: nil
             )
         }
         guard systemExtensionSignatureIsTrusted(bundleURL: bundleURL) else {
             logger.fault("Refusing bundled-rule sync: designated signature/resource seal failed")
-            return recordFailure(
-                supportDirectory: supportDirectory,
-                reason: "System Extension signature or resource seal is invalid",
-                bundledTampered: true
+            return BundledRuleSyncBootObservation(
+                outcome: recordFailure(
+                    supportDirectory: supportDirectory,
+                    reason: "System Extension signature or resource seal is invalid",
+                    bundledTampered: true
+                ),
+                installedCorpus: nil
             )
         }
 
@@ -186,12 +226,13 @@ enum BundledRuleSynchronizer {
         let installedRules = URL(fileURLWithPath: supportDirectory, isDirectory: true)
             .appendingPathComponent("compiled_rules", isDirectory: true)
         let adminGID = getgrnam("admin").map { $0.pointee.gr_gid }
-        let outcome = synchronize(
+        let observation = synchronizeObserved(
             bundledDirectory: bundledRules,
             installedDirectory: installedRules,
             requiredOwnerUID: 0,
             destinationGroupID: adminGID
         )
+        let outcome = observation.outcome
 
         switch outcome {
         case .installed(let version):
@@ -216,7 +257,7 @@ enum BundledRuleSynchronizer {
         case .skipped:
             break
         }
-        return outcome
+        return observation
     }
 
     /// Hermetic/testable transaction. The caller supplies the trusted source
@@ -230,6 +271,50 @@ enum BundledRuleSynchronizer {
         afterStaging: ((URL) throws -> Void)? = nil,
         replacingDirectoryWith replacement: DirectoryReplacer? = nil
     ) -> BundledRuleSyncOutcome {
+        synchronizeObserved(
+            bundledDirectory: bundledDirectory,
+            installedDirectory: installedDirectory,
+            requiredOwnerUID: requiredOwnerUID,
+            destinationGroupID: destinationGroupID,
+            afterStaging: afterStaging,
+            replacingDirectoryWith: replacement
+        ).outcome
+    }
+
+    static func synchronizeObserved(
+        bundledDirectory: URL,
+        installedDirectory: URL,
+        requiredOwnerUID: uid_t,
+        destinationGroupID: gid_t? = nil,
+        afterStaging: ((URL) throws -> Void)? = nil,
+        replacingDirectoryWith replacement: DirectoryReplacer? = nil
+    ) -> BundledRuleSyncBootObservation {
+        var installedCorpus: BundledRuleCorpusEvidence?
+        let outcome = synchronize(
+            bundledDirectory: bundledDirectory,
+            installedDirectory: installedDirectory,
+            requiredOwnerUID: requiredOwnerUID,
+            destinationGroupID: destinationGroupID,
+            afterStaging: afterStaging,
+            replacingDirectoryWith: replacement,
+            observedInstalledCorpus: &installedCorpus
+        )
+        return BundledRuleSyncBootObservation(
+            outcome: outcome,
+            installedCorpus: installedCorpus
+        )
+    }
+
+    private static func synchronize(
+        bundledDirectory: URL,
+        installedDirectory: URL,
+        requiredOwnerUID: uid_t,
+        destinationGroupID: gid_t?,
+        afterStaging: ((URL) throws -> Void)?,
+        replacingDirectoryWith replacement: DirectoryReplacer?,
+        observedInstalledCorpus: inout BundledRuleCorpusEvidence?
+    ) -> BundledRuleSyncOutcome {
+        observedInstalledCorpus = nil
         // Assess the installed tree independently and before trusting the new
         // bundled source. A missing/broken first-install source must not turn
         // an empty compiled_rules carrier into an alleged last-known-good.
@@ -265,6 +350,9 @@ enum BundledRuleSynchronizer {
         if case .verified(let installed) = initialInstalledStatus {
             installedMatchesVerifiedBundle = installed.manifestData == bundled.manifestData
                 && installed.version == bundled.version
+            if installedMatchesVerifiedBundle {
+                observedInstalledCorpus = installed.evidence
+            }
         }
 
         let fm = FileManager.default
@@ -275,6 +363,7 @@ enum BundledRuleSynchronizer {
                 requiredOwnerUID: requiredOwnerUID
             )
         } catch {
+            observedInstalledCorpus = nil
             return .failed(
                 reason: "installed parent: \(error.localizedDescription)",
                 bundledTampered: false,
@@ -299,6 +388,7 @@ enum BundledRuleSynchronizer {
                     requiredOwnerUID: requiredOwnerUID
                 )
             } catch {
+                observedInstalledCorpus = nil
                 return .failed(
                     reason: "installed corpus carrier/runtime data: \(error.localizedDescription)",
                     bundledTampered: false,
@@ -404,6 +494,7 @@ enum BundledRuleSynchronizer {
                   published.version == bundled.version else {
                 throw SyncError.invalid("published manifest differs from signed source")
             }
+            observedInstalledCorpus = published.evidence
         } catch let publicationError {
             do {
                 if destinationExists {
@@ -419,6 +510,7 @@ enum BundledRuleSynchronizer {
                 // With RENAME_SWAP, stagedDirectory still names the previous
                 // corpus. Never delete it if canonical-name restoration fails.
                 preserveStagedForRecovery = destinationExists
+                observedInstalledCorpus = nil
                 return .failed(
                     reason: "post-publish verification failed (\(publicationError.localizedDescription)); rollback failed (\(rollbackError.localizedDescription)); prior corpus retained at \(stagedDirectory.path)",
                     bundledTampered: false,
@@ -643,7 +735,15 @@ enum BundledRuleSynchronizer {
                 "manifest directory set mismatch (missing=\(missing.prefix(3)); extra=\(extra.prefix(3)))"
             )
         }
-        return VerifiedCorpus(version: markerVersion, manifestData: manifestData)
+        let manifestSHA256 = SHA256.hash(data: manifestData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return VerifiedCorpus(
+            version: markerVersion,
+            manifestData: manifestData,
+            manifestSHA256: manifestSHA256,
+            manifestHashEntryCount: manifest.hashes.count
+        )
     }
 
     private static func validateManifestPath(_ path: String) throws {

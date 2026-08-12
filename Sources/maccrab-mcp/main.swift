@@ -334,7 +334,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "get_events",
-        "description": "Get recent security events (process executions, file operations, network connections, TCC changes) from MacCrab. For result sets larger than `limit`, the response ends with `[next_cursor: <token>]` — pass that opaque token back as `cursor` to fetch the next page. Cursor pagination is keyset-based and ignores the `hours` and `search` filters.",
+        "description": "Get recent security events (process executions, file operations, network connections, TCC changes) from MacCrab. Full-text search uses a bounded sparse projection; the response explicitly warns when omissions mean an empty result is not proof of absence. For result sets larger than `limit`, the response ends with `[next_cursor: <token>]` — pass that opaque token back as `cursor` to fetch the next page. Cursor pagination is keyset-based and ignores the `hours` and `search` filters.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -409,7 +409,7 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "hunt",
-        "description": "Full-text threat hunting across events (FTS phrase / substring search over the event stream). Examples: 'ssh', 'launchctl', 'unsigned'. Note: this is a text search, not a natural-language or SQL interpreter.",
+        "description": "Full-text threat hunting across the bounded event-search projection. Examples: 'ssh', 'launchctl', 'unsigned'. The response carries an explicit coverage warning whenever projection omissions or evidence gaps mean absence cannot be proven. This is a text search, not a natural-language or SQL interpreter.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -1803,7 +1803,7 @@ func handleGetIntentPosterior(_ args: [String: Any]) async -> Any {
         return toolError("Error: 'tree_key' required")
     }
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         // Posterior alerts are low-volume by design (strict >= 0.85 + >= 3
         // distinct-evidence gate). v1.21.5: filter on rule_id at the SQL
         // layer — the generic alerts(since:) applied its 500-row cap BEFORE
@@ -1839,7 +1839,10 @@ func handleGetIntentPosterior(_ args: [String: Any]) async -> Any {
             // observation count, and the distinct evidence types observed.
             if let desc = alert.description { lines.append("  Posterior: \(LLMSanitizer.sanitize(desc))") }
         }
-        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+        return ["content": [[
+            "type": "text",
+            "text": lines.joined(separator: "\n"),
+        ]]]
     } catch {
         return toolError("Error reading posterior alerts: \(error.localizedDescription)")
     }
@@ -1869,7 +1872,7 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
         // exactly like handleGetAlerts and every other alert handler —
         // opening events.db here bound this to a dormant/empty `alerts`
         // table, so cluster_alerts always reported "0 alerts → 0 clusters".
-        store = try AlertStore(directory: dataDir)
+        store = try openMCPAlertStoreForReading(directory: dataDir)
     } catch {
         return toolError("Failed to open AlertStore: \(error.localizedDescription)")
     }
@@ -1947,7 +1950,7 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
     let cursor = (args["cursor"] as? String).flatMap(decodeCursor)
 
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         let alerts: [Alert]
         let nextCursor: PaginationCursor?
         let header: String
@@ -2034,27 +2037,59 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
     let cat = category.flatMap { EventCategory(rawValue: $0) }
 
     do {
-        let store = try EventStore(directory: dataDir)
+        let store = try openMCPEventStoreForReading(directory: dataDir)
         let events: [Event]
         let nextCursor: PaginationCursor?
+        var searchCoverageWarning: String?
+        var exactOwnership: ExactEventQuerySnapshot?
+        var searchOwnership: EventSearchSnapshot?
+        var pageOwnership: ExactEventPageSnapshot?
 
         if cursor != nil {
             // Cursor takes precedence over `search` and `hours` — same reasoning
             // as alerts, plus FTS search is relevance-ordered (incompatible
             // with keyset cursor's time ordering).
-            let page = try await store.events(
+            let page = try await store.exactEventsPageSnapshot(
                 before: cursor,
                 category: cat,
                 pageSize: limit
             )
+            pageOwnership = page
             events = page.items
             nextCursor = page.nextCursor
         } else if let q = search, !q.isEmpty {
-            events = try await store.search(text: q, limit: limit)
+            let snapshot = try await store.searchSnapshot(
+                text: q,
+                limit: limit
+            )
+            searchOwnership = snapshot
+            events = snapshot.events
+            if !snapshot.isComplete {
+                searchCoverageWarning = "WARNING: search is partial: "
+                    + "\(snapshot.projectionOmitted) retained events are "
+                    + "omitted from the search projection and "
+                    + "\(snapshot.gaps.total) exact-evidence gaps remain. "
+                    + "No projected match is not proof of absence."
+            }
             nextCursor = nil
         } else {
             let since = Date().addingTimeInterval(-hours * 3600)
-            events = try await store.events(since: since, category: cat, limit: limit)
+            let snapshot = try await store.exactEventsSnapshot(
+                since: since,
+                category: cat,
+                limit: limit
+            )
+            guard snapshot.isComplete else {
+                throw EventStoreError.exactEvidenceGap(
+                    poisonRecords: snapshot.poisonRecords.count,
+                    corruptLegacyRecords: snapshot.corruptLegacyRecords,
+                    inheritedLegacyLossRecords:
+                        snapshot.inheritedLegacyLossRecords,
+                    resourceLimitedRecords: snapshot.resourceLimitedRecords
+                )
+            }
+            exactOwnership = snapshot
+            events = snapshot.events
             if events.count == limit, let oldest = events.last {
                 nextCursor = PaginationCursor(
                     timestamp: oldest.timestamp,
@@ -2066,6 +2101,9 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
         }
 
         var lines: [String] = ["\(events.count) event(s):"]
+        if let searchCoverageWarning {
+            lines.append(searchCoverageWarning)
+        }
         for event in events {
             let time = isoFormatter.string(from: event.timestamp)
             lines.append("")
@@ -2083,7 +2121,16 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
             lines.append("[next_cursor: \(encodeCursor(next))]")
         }
 
-        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+        let result: [String: Any] = [
+            "content": [[
+                "type": "text",
+                "text": lines.joined(separator: "\n"),
+            ]],
+        ]
+        withExtendedLifetime(exactOwnership) {}
+        withExtendedLifetime(searchOwnership) {}
+        withExtendedLifetime(pageOwnership) {}
+        return result
     } catch {
         return toolError("Error reading events: \(error.localizedDescription)")
     }
@@ -2094,7 +2141,7 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
     let cursor = (args["cursor"] as? String).flatMap(decodeCursor)
 
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         // Pre-fix this fetched 1000 alerts and filtered in-process — any
         // campaign older than the most-recent 1000 alerts was silently
         // dropped. Now the SQL filter (`rule_id LIKE 'maccrab.campaign.%'`)
@@ -2134,7 +2181,7 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
 func handleListAgentSessions(_ args: [String: Any]) async -> Any {
     let limit = min(max((args["limit"] as? Int) ?? 50, 1), 500)
     do {
-        let store = try EventStore(directory: dataDir)
+        let store = try openMCPEventStoreForReading(directory: dataDir)
         // Fail-soft on the query: this is a READ tool, so an empty / young
         // store must return an empty list, not isError. On a fresh install
         // the `ai_tool_session_id` column is added by a SchemaMigrator step
@@ -2229,14 +2276,24 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
     }
     let limit = min(max((args["limit"] as? Int) ?? 500, 1), 2000)
     do {
-        let store = try EventStore(directory: dataDir)
-        // Fail-soft on the event query: a READ tool against an empty / young
-        // store (or an unknown session id) must return an empty timeline, not
-        // isError. The `ai_tool_session_id` column is migration-added and can
-        // be absent on a fresh store whose migration lost a create-time lock
-        // race (see handleListAgentSessions / EventStore.openDatabase). The
-        // alert / mutation / tool-call rails below are already best-effort.
-        let events = (try? await store.eventsForAgentSession(sessionId, limit: limit)) ?? []
+        let store = try openMCPEventStoreForReading(directory: dataDir)
+        let eventSnapshot = try await store
+            .exactEventsForAgentSessionSnapshot(
+                sessionId,
+                since: .distantPast,
+                until: .distantFuture,
+                limit: limit
+            )
+        guard eventSnapshot.isComplete else {
+            throw EventStoreError.exactEvidenceGap(
+                poisonRecords: eventSnapshot.poisonRecords.count,
+                corruptLegacyRecords: eventSnapshot.corruptLegacyRecords,
+                inheritedLegacyLossRecords:
+                    eventSnapshot.inheritedLegacyLossRecords,
+                resourceLimitedRecords: eventSnapshot.resourceLimitedRecords
+            )
+        }
+        let events = eventSnapshot.events
         let iso = ISO8601DateFormatter()
         let timeline = events.map { e -> [String: Any] in
             var row: [String: Any] = [
@@ -2257,7 +2314,7 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
         // Wave-3 P2: the alert rail — what this session's activity tripped.
         // Best-effort: the alert rail is supplementary, so a fresh-store
         // alerts.db open/query failure must not turn this read into isError.
-        let alertStore = try? AlertStore(directory: dataDir)
+        let alertStore = try? openMCPAlertStoreForReading(directory: dataDir)
         let sessionAlerts = (try? await alertStore?.alerts(forAgentSession: sessionId)) ?? []
         let alerts = sessionAlerts.map { a -> [String: Any] in
             [
@@ -2275,7 +2332,7 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
         let mutations = await mutationsForSession(sessionId, store: store)
         // Wave-3 P5: the per-tool-call rail — the agent's full MCP interaction.
         let toolCalls = await toolCallsForSession(sessionId, store: store)
-        return ["content": [["type": "text", "text": jsonStringify([
+        let result: [String: Any] = ["content": [["type": "text", "text": jsonStringify([
             "session_id": sessionId,
             "event_count": events.count,
             "alert_count": alerts.count,
@@ -2286,21 +2343,13 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
             "mutations": mutations,
             "tool_calls": toolCalls,
         ] as [String: Any])]]]
+        withExtendedLifetime(eventSnapshot) {}
+        return result
     } catch {
-        // READ tool: a store that can't be opened (fresh box / create-time
-        // lock race under load) means an empty timeline for the caller, not
-        // isError. Mutation tools still surface store-open failures.
-        return ["content": [["type": "text", "text": jsonStringify([
-            "session_id": sessionId,
-            "event_count": 0,
-            "alert_count": 0,
-            "mutation_count": 0,
-            "tool_call_count": 0,
-            "timeline": [Any](),
-            "alerts": [Any](),
-            "mutations": [Any](),
-            "tool_calls": [Any](),
-        ] as [String: Any])]]]
+        return toolError(
+            "Agent-session evidence is unavailable or incomplete: "
+                + error.localizedDescription
+        )
     }
 }
 
@@ -2316,13 +2365,30 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
     }
     auditLog("export_session_bundle", details: "session_id=\(sessionId) ppid=\(getppid())")
     do {
-        let store = try EventStore(directory: dataDir)
-        let events = try await store.eventsForAgentSession(sessionId, limit: 10000)
+        let store = try openMCPEventStoreForReading(directory: dataDir)
+        let eventSnapshot = try await store
+            .exactEventsForAgentSessionSnapshot(
+                sessionId,
+                since: .distantPast,
+                until: .distantFuture,
+                limit: 10_000
+            )
+        guard eventSnapshot.isComplete else {
+            throw EventStoreError.exactEvidenceGap(
+                poisonRecords: eventSnapshot.poisonRecords.count,
+                corruptLegacyRecords: eventSnapshot.corruptLegacyRecords,
+                inheritedLegacyLossRecords:
+                    eventSnapshot.inheritedLegacyLossRecords,
+                resourceLimitedRecords: eventSnapshot.resourceLimitedRecords
+            )
+        }
+        let events = eventSnapshot.events
+        defer { withExtendedLifetime(eventSnapshot) {} }
         let encoder = JSONEncoder()
         let eventsJsonl: [String] = events.compactMap { e in
             (try? encoder.encode(e)).flatMap { String(data: $0, encoding: .utf8) }
         }
-        let alertStore = try AlertStore(directory: dataDir)
+        let alertStore = try openMCPAlertStoreForReading(directory: dataDir)
         let alerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
         let alertsJson = (try? encoder.encode(alerts)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         let mutations = await mutationsForSession(sessionId, store: store)
@@ -2714,13 +2780,18 @@ func handleGetStatus() async -> Any {
     }
 
     do {
-        let eventStore = try EventStore(directory: dataDir)
-        let alertStore = try AlertStore(directory: dataDir)
+        let eventStore = try openMCPEventStoreForReading(directory: dataDir)
+        let alertStore = try openMCPAlertStoreForReading(directory: dataDir)
         let eventCount = try await eventStore.count()
         let alertCount = try await alertStore.count()
         lines.append("Total Events: \(eventCount)")
         lines.append("Total Alerts: \(alertCount)")
-    } catch {}
+    } catch {
+        lines.append(
+            "Evidence counts: unavailable — "
+                + error.localizedDescription
+        )
+    }
 
     // Count compiled single-event rules (exclude manifest.json — it is
     // build-time metadata, not a rule; counting it reported 439 vs the true
@@ -2833,14 +2904,35 @@ func handleHunt(_ args: [String: Any]) async -> Any {
     let limit = min(max(args["limit"] as? Int ?? 50, 1), 100)
 
     do {
-        let store = try EventStore(directory: dataDir)
-        let results = try await store.search(text: query, limit: limit)
+        let store = try openMCPEventStoreForReading(directory: dataDir)
+        let snapshot = try await store.searchSnapshot(
+            text: query,
+            limit: limit
+        )
+        let results = snapshot.events
 
         if results.isEmpty {
-            return ["content": [["type": "text", "text": "No results for: \(query)\n\nTry broader terms or check different time ranges."]]]
+            let message: String
+            if snapshot.isComplete {
+                message = "No results for: \(query)\n\nTry broader terms or check different time ranges."
+            } else {
+                message = "No projected results for: \(query)\n\n"
+                    + "Coverage is incomplete: \(snapshot.projectionOmitted) "
+                    + "retained events are omitted from the search projection "
+                    + "and \(snapshot.gaps.total) exact-evidence gaps remain. "
+                    + "This is not proof of absence."
+            }
+            return ["content": [["type": "text", "text": message]]]
         }
 
         var lines: [String] = ["\(results.count) result(s) for: \(query)"]
+        if !snapshot.isComplete {
+            lines.append(
+                "WARNING: Partial search coverage ("
+                    + "\(snapshot.projectionOmitted) projection omissions, "
+                    + "\(snapshot.gaps.total) exact-evidence gaps)."
+            )
+        }
         for event in results {
             let time = isoFormatter.string(from: event.timestamp)
             lines.append("")
@@ -2849,7 +2941,14 @@ func handleHunt(_ args: [String: Any]) async -> Any {
             if !event.process.commandLine.isEmpty { lines.append("  Cmd: \(event.process.commandLine.prefix(200))") }
         }
 
-        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+        let result: [String: Any] = [
+            "content": [[
+                "type": "text",
+                "text": lines.joined(separator: "\n"),
+            ]],
+        ]
+        withExtendedLifetime(snapshot) {}
+        return result
     } catch {
         return toolError("Hunt error: \(error.localizedDescription)")
     }
@@ -2919,7 +3018,7 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
     }
 
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         guard let alert = try await store.alert(id: alertId) else {
             return toolError("Alert \(alertId) not found.")
         }
@@ -2990,7 +3089,7 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
     do {
         // The fan-out confirmation gate only needs to COUNT — open the store
         // read-only so it works against the root-owned 0o640 alerts.db.
-        let store = try AlertStore(directory: dataDir, forceReadOnly: true)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
 
         // v1.18: fan-out confirmation. A campaign can suppress many alerts;
         // require an explicit confirm for large fan-outs so an agent can't
@@ -3036,7 +3135,7 @@ func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
     let hours = min(requestedHours, 8_760)
 
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         let since = Date().addingTimeInterval(-hours * 3600)
         // v1.11.1 (audit perf HIGH): SQL-side rule_id LIKE prefix
         // filter instead of "pull 10K + Swift substring match across

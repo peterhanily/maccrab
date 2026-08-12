@@ -11,6 +11,45 @@ struct EventToRollingCausalGraphBridgeTests {
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
+    private actor RecoveryYieldGate {
+        private var paused = false
+        private var released = false
+        private var pauseWaiter: CheckedContinuation<Void, Never>?
+        private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+        func pauseOnce() async {
+            guard !paused else { return }
+            paused = true
+            pauseWaiter?.resume()
+            pauseWaiter = nil
+            guard !released else { return }
+            await withCheckedContinuation { releaseWaiter = $0 }
+        }
+
+        func waitUntilPaused() async {
+            guard !paused else { return }
+            await withCheckedContinuation { pauseWaiter = $0 }
+        }
+
+        func resume() {
+            released = true
+            releaseWaiter?.resume()
+            releaseWaiter = nil
+        }
+    }
+
+    private func waitForRecoveryWaiters(
+        _ expected: Int,
+        in store: SQLiteCausalGraphStore
+    ) async -> CausalGraphStorageAdmissionStatus? {
+        for _ in 0..<10_000 {
+            let status = await store.storageAdmissionStatus()
+            if status.recoveryMutationWaiters == expected { return status }
+            await Task.yield()
+        }
+        return nil
+    }
+
     private func makeStore() async throws -> (SQLiteCausalGraphStore, URL) {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("bridge-\(UUID().uuidString).db")
@@ -82,6 +121,354 @@ struct EventToRollingCausalGraphBridgeTests {
         #expect(entity?.entityType == "process")
         #expect(entity?.displayName == "curl")
         await store.close()
+    }
+
+    @Test("Daemon-coalesced bridge batch survives concurrent periodic recovery without upstream loss")
+    func daemonBridgeBatchWaitsForRecoveryAndReconcilesExactly() async throws {
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-recovery-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: dbPath.path + suffix)
+            }
+        }
+        let gate = RecoveryYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: dbPath.path,
+            cascadeYieldHook: { await gate.pauseOnce() }
+        )
+        let old = now.addingTimeInterval(-7_200)
+        let recoveryTraceID = "bridge-recovery-seed"
+        let recoveryTrace = Trace(
+            id: recoveryTraceID,
+            title: "Bridge recovery seed",
+            anchorEventId: "bridge-recovery-anchor",
+            rootEntityId: nil,
+            severity: "low",
+            confidence: 1,
+            createdAt: old,
+            updatedAt: old,
+            daemonVersion: "test",
+            rulesetVersion: "test",
+            policyId: "default",
+            policyVersion: "1",
+            policySha256: "test",
+            policySnapshotJson: "{}",
+            traceSigningKeyMode: "filesystem_degraded",
+            replayScope: "declared_deterministic_subset",
+            attributionOverridePolicy:
+                "include_as_human_annotation_do_not_apply_by_default"
+        )
+        try await store.saveTrace(
+            recoveryTrace,
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: recoveryTraceID,
+                    entityId: "bridge-recovery-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+
+        let rollingGraph = RollingCausalGraph(
+            store: store,
+            materializer: TraceMaterializer(store: store),
+            ingestionWritePolicy: .daemonCoalesced
+        )
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+        func event(_ index: Int) -> Event {
+            Event(
+                timestamp: now.addingTimeInterval(Double(index) / 1_000),
+                eventCategory: .process,
+                eventType: .start,
+                eventAction: "exec",
+                process: processInfo(
+                    pid: Int32(index + 1),
+                    executable: "/usr/bin/true"
+                ),
+                enrichments: [
+                    EventToRollingCausalGraphBridge.processKeyEnrichmentKey:
+                        "bridge-recovery-process-\(index)"
+                ]
+            )
+        }
+
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: self.now.addingTimeInterval(-3_600),
+                orphanCutoff: self.now.addingTimeInterval(-3_600)
+            )
+        }
+        await gate.waitUntilPaused()
+
+        // Reproduce rc.12's 81-event failed physical batch with the actual
+        // daemon policy and bridge. These logical events remain pending until
+        // the explicit flush takes one store-writer slot behind recovery.
+        for index in 0..<81 {
+            _ = await bridge.process(event(index))
+        }
+        let beforeFlush = await bridge.writeTelemetry()
+        #expect(beforeFlush.inputEventsTotal == 81)
+        #expect(beforeFlush.eventsPending == 81)
+        #expect(beforeFlush.eventsFailedTotal == 0)
+
+        let flush = Task { try await bridge.flushPending() }
+        let queued = try #require(await waitForRecoveryWaiters(1, in: store))
+        #expect(!queued.blocked)
+        #expect(queued.acceptingMutations)
+        #expect(!queued.recoveryMutationQueueSaturated)
+        #expect(queued.shedMutationsTotal == 0)
+
+        // Actor reentrancy permits detection ingestion to continue while the
+        // first physical batch waits. It stays inside daemonCoalesced's explicit
+        // 256-event/1,024-row bounds and is drained after the handoff.
+        await withTaskGroup(of: Void.self) { group in
+            for index in 81..<101 {
+                group.addTask { _ = await bridge.process(event(index)) }
+            }
+        }
+        let during = await bridge.writeTelemetry()
+        #expect(during.inputEventsTotal == 101)
+        #expect(during.eventsCommittedTotal == 0)
+        #expect(during.eventsFailedTotal == 0)
+        #expect(during.eventsInFlight == 81)
+        #expect(during.eventsPending == 20)
+        #expect(during.inputEventsTotal
+            == during.eventsCommittedTotal + during.eventsFailedTotal
+                + UInt64(during.eventsInFlight + during.eventsPending))
+        #expect(during.eventsPending
+            <= CausalGraphIngestionWritePolicy.daemonCoalesced.maximumPendingEvents)
+        #expect(during.pendingEntityRows + during.pendingEdgeRows
+            <= CausalGraphIngestionWritePolicy.daemonCoalesced.maximumPendingRows)
+
+        await gate.resume()
+        let recoveryResult = try await recovery.value
+        try await flush.value
+        try await bridge.flushPending()
+
+        let after = await bridge.writeTelemetry()
+        #expect(after.inputEventsTotal == 101)
+        #expect(after.eventsCommittedTotal == 101)
+        #expect(after.eventsFailedTotal == 0)
+        #expect(after.eventsInFlight == 0)
+        #expect(after.eventsPending == 0)
+        #expect(after.writeBatchesFailedTotal == 0)
+        #expect(after.writeRowsFailedTotal == 0)
+        #expect(after.inputEventsTotal
+            == after.eventsCommittedTotal + after.eventsFailedTotal
+                + UInt64(after.eventsInFlight + after.eventsPending))
+        #expect(after.writeAttemptsTotal
+            == after.writeBatchesCommittedTotal + after.writeBatchesFailedTotal
+                + UInt64(after.writeBatchesInFlight))
+        #expect(after.writeRowsAttemptedTotal
+            == after.writeRowsCommittedTotal + after.writeRowsFailedTotal
+                + UInt64(after.writeRowsInFlight))
+        for index in 0..<101 {
+            #expect(try await store.entity(
+                id: "process:bridge-recovery-process-\(index)") != nil)
+        }
+
+        let status = await store.storageAdmissionStatus()
+        #expect(recoveryResult.traceChildRowsDeleted > 0)
+        #expect(recoveryResult.traceChildRowsDeleted <= 256)
+        #expect(recoveryResult.traceChildRowsDeleted < 600)
+        #expect(status.recoveryMutationWaiterHighWatermark == 1)
+        #expect(status.recoveryMutationWaitsTotal == 1)
+        #expect(status.recoveryMutationWaitReleasesTotal == 1)
+        #expect(status.recoveryMutationWaitCancellationsTotal == 0)
+        #expect(status.recoveryMutationWaitClosedTotal == 0)
+        #expect(status.recoveryMutationWaitsTotal
+            == UInt64(status.recoveryMutationWaiters)
+                + status.recoveryMutationWaitReleasesTotal
+                + status.recoveryMutationWaitCancellationsTotal
+                + status.recoveryMutationWaitClosedTotal)
+        #expect(status.recoveryMutationWaitSaturationsTotal == 0)
+        #expect(status.recoveryWriterPreemptionsTotal == 1)
+        #expect(status.recoveryMutationMaxWaitNanoseconds > 0)
+        #expect(status.shedMutationsTotal == 0)
+
+        // The production event loop awaits the bridge inline; the short
+        // recovery handoff therefore applies backpressure instead of creating
+        // an unowned task plane that could silently lose this batch upstream.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let eventLoop = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/MacCrabAgentKit/EventLoop.swift"),
+            encoding: .utf8
+        )
+        #expect(eventLoop.contains(
+            "let materialized = await bridge.process(enrichedEvent)"))
+        await store.close()
+    }
+
+    @Test("Pathological recovery queue saturation and close remain explicit upstream failures")
+    func recoveryQueueTerminalPathsReconcileBridgeTelemetry() async throws {
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-recovery-terminal-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: dbPath.path + suffix)
+            }
+        }
+        let gate = RecoveryYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: dbPath.path,
+            cascadeYieldHook: { await gate.pauseOnce() },
+            recoveryMutationWaiterLimit: 1
+        )
+        let old = now.addingTimeInterval(-7_200)
+        let traceID = "bridge-recovery-terminal-seed"
+        try await store.saveTrace(
+            Trace(
+                id: traceID,
+                title: "Bridge terminal-path seed",
+                anchorEventId: "bridge-terminal-anchor",
+                rootEntityId: nil,
+                severity: "low",
+                confidence: 1,
+                createdAt: old,
+                updatedAt: old,
+                daemonVersion: "test",
+                rulesetVersion: "test",
+                policyId: "default",
+                policyVersion: "1",
+                policySha256: "test",
+                policySnapshotJson: "{}",
+                traceSigningKeyMode: "filesystem_degraded",
+                replayScope: "declared_deterministic_subset",
+                attributionOverridePolicy:
+                    "include_as_human_annotation_do_not_apply_by_default"
+            ),
+            members: (0..<300).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "bridge-terminal-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+        func makeBridge() -> EventToRollingCausalGraphBridge {
+            EventToRollingCausalGraphBridge(
+                rollingGraph: RollingCausalGraph(
+                    store: store,
+                    materializer: TraceMaterializer(store: store),
+                    ingestionWritePolicy: .immediate
+                )
+            )
+        }
+        func event(_ key: String, pid: Int32) -> Event {
+            Event(
+                timestamp: now,
+                eventCategory: .process,
+                eventType: .start,
+                eventAction: "exec",
+                process: processInfo(pid: pid, executable: "/usr/bin/true"),
+                enrichments: [
+                    EventToRollingCausalGraphBridge.processKeyEnrichmentKey: key
+                ]
+            )
+        }
+        func expectOneFailedEvent(
+            _ telemetry: CausalGraphIngestionWriteTelemetry
+        ) {
+            #expect(telemetry.inputEventsTotal == 1)
+            #expect(telemetry.eventsCommittedTotal == 0)
+            #expect(telemetry.eventsFailedTotal == 1)
+            #expect(telemetry.eventsInFlight == 0)
+            #expect(telemetry.eventsPending == 0)
+            #expect(telemetry.writeAttemptsTotal == 1)
+            #expect(telemetry.writeBatchesCommittedTotal == 0)
+            #expect(telemetry.writeBatchesFailedTotal == 1)
+            #expect(telemetry.writeBatchesInFlight == 0)
+            #expect(telemetry.writeRowsAttemptedTotal == 1)
+            #expect(telemetry.writeRowsCommittedTotal == 0)
+            #expect(telemetry.writeRowsFailedTotal == 1)
+            #expect(telemetry.writeRowsInFlight == 0)
+            #expect(telemetry.inputEventsTotal
+                == telemetry.eventsCommittedTotal + telemetry.eventsFailedTotal
+                    + UInt64(telemetry.eventsInFlight + telemetry.eventsPending))
+            #expect(telemetry.writeAttemptsTotal
+                == telemetry.writeBatchesCommittedTotal
+                    + telemetry.writeBatchesFailedTotal
+                    + UInt64(telemetry.writeBatchesInFlight))
+            #expect(telemetry.writeRowsAttemptedTotal
+                == telemetry.writeRowsCommittedTotal
+                    + telemetry.writeRowsFailedTotal
+                    + UInt64(telemetry.writeRowsInFlight))
+        }
+
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: self.now.addingTimeInterval(-3_600),
+                orphanCutoff: self.now.addingTimeInterval(-3_600)
+            )
+        }
+        await gate.waitUntilPaused()
+
+        let waitingBridge = makeBridge()
+        let waitingIngest = Task {
+            await waitingBridge.process(event("terminal-closed", pid: 1))
+        }
+        _ = try #require(await waitForRecoveryWaiters(1, in: store))
+
+        // This shape requires two independent physical graph writers and an
+        // intentionally tiny test cap. It is not the production daemon path,
+        // but proves the safety ceiling cannot disappear into a healthy sample.
+        let saturatedBridge = makeBridge()
+        _ = await saturatedBridge.process(event("terminal-saturated", pid: 2))
+        expectOneFailedEvent(await saturatedBridge.writeTelemetry())
+        let saturated = await store.storageAdmissionStatus()
+        #expect(saturated.recoveryMutationQueueSaturated)
+        #expect(!saturated.acceptingMutations)
+        #expect(saturated.recoveryMutationWaitSaturationsTotal == 1)
+        #expect(saturated.shedMutationsTotal == 0)
+
+        let closing = Task { await store.close() }
+        var closeObserved = false
+        for _ in 0..<10_000 {
+            if !(await store.storageAdmissionStatus()).writableHandle {
+                closeObserved = true
+                break
+            }
+            await Task.yield()
+        }
+        #expect(closeObserved)
+        await gate.resume()
+        _ = try await recovery.value
+        await closing.value
+        _ = await waitingIngest.value
+        expectOneFailedEvent(await waitingBridge.writeTelemetry())
+
+        let final = await store.storageAdmissionStatus()
+        #expect(!final.acceptingMutations)
+        #expect(final.recoveryMutationWaiters == 0)
+        #expect(final.recoveryMutationWaitsTotal == 1)
+        #expect(final.recoveryMutationWaitReleasesTotal == 0)
+        #expect(final.recoveryMutationWaitCancellationsTotal == 0)
+        #expect(final.recoveryMutationWaitClosedTotal == 1)
+        #expect(final.recoveryMutationWaitsTotal
+            == UInt64(final.recoveryMutationWaiters)
+                + final.recoveryMutationWaitReleasesTotal
+                + final.recoveryMutationWaitCancellationsTotal
+                + final.recoveryMutationWaitClosedTotal)
+        #expect(final.recoveryMutationWaitSaturationsTotal == 1)
+        #expect(final.recoveryMutationWaitNanosecondsTotal
+            >= final.recoveryMutationMaxWaitNanoseconds)
+        #expect(final.recoveryMutationMaxWaitNanoseconds > 0)
+        #expect(final.recoveryMutationOldestWaitNanoseconds == 0)
+        #expect(final.shedMutationsTotal == 0)
+
+        let reopened = try await SQLiteCausalGraphStore(databasePath: dbPath.path)
+        #expect(try await reopened.entity(id: "process:terminal-closed") == nil)
+        #expect(try await reopened.entity(id: "process:terminal-saturated") == nil)
+        await reopened.close()
     }
 
     @Test("Insert filter gates graph ingest — dropped events never reach the store (v1.17.4 perf)")

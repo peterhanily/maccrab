@@ -9,8 +9,9 @@
 //      the failure)
 //   5. enabled=false is a true passthrough (no prefix)
 //
-// Tests use a per-test on-disk Keychain key; both v1 and v2 share the
-// same key (the format change doesn't rotate keys).
+// Crypto tests use a deterministic injected in-memory key so the broad
+// suite never depends on Keychain entitlement, UI, or shared state. Dedicated
+// tests below still pin persistence failure and reconstructed-instance behavior.
 
 import Testing
 import Foundation
@@ -19,6 +20,15 @@ import Security
 
 @Suite("DatabaseEncryption (v1.8.1: AES-GCM)")
 struct DatabaseEncryptionTests {
+
+    private func deterministicEncryption() -> DatabaseEncryption {
+        DatabaseEncryption(
+            enabled: true,
+            keyLoader: { Data(repeating: 0x6D, count: 32) },
+            keySaver: { _ in errSecSuccess },
+            keyGenerator: { Data(repeating: 0x6D, count: 32) }
+        )
+    }
 
     @Test("Keychain persistence failure never enables an ephemeral encryption key")
     func persistenceFailureDisablesEncryptedWrites() {
@@ -77,7 +87,7 @@ struct DatabaseEncryptionTests {
 
     @Test("v2 round-trip preserves the original plaintext")
     func v2RoundTrip() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let original = "sensitive data: password=hunter2"
         let cipher = enc.encrypt(original)
         #expect(cipher.hasPrefix("ENC2:"))
@@ -88,7 +98,7 @@ struct DatabaseEncryptionTests {
 
     @Test("Empty string is a no-op (not encrypted)")
     func emptyStringPassthrough() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let result = enc.encrypt("")
         #expect(result == "")
     }
@@ -107,7 +117,7 @@ struct DatabaseEncryptionTests {
 
     @Test("#19: plaintext in an encryption-enabled column is a distinct advisory, NOT a CRITICAL tamper")
     func substitutionInEncryptedColumnIsAdvisory() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let beforeSub = enc.plaintextInEncryptedColumnCount
         let beforeTamper = enc.authenticatedDecryptFailures
         // A plaintext value where a ciphertext was expected (substitution OR a
@@ -122,7 +132,7 @@ struct DatabaseEncryptionTests {
 
     @Test("#19: plaintext in a column NOT marked expectingEncrypted is a benign passthrough")
     func plaintextWithoutExpectationIsNotFlagged() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let before = enc.plaintextInEncryptedColumnCount
         let out = enc.decrypt("legitimately never-encrypted value", expectingEncrypted: false)
         #expect(out == "legitimately never-encrypted value")
@@ -131,7 +141,7 @@ struct DatabaseEncryptionTests {
 
     @Test("#19: a valid ciphertext still round-trips under expectingEncrypted with no counts touched")
     func validCipherUnderExpectationIsClean() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let cipher = enc.encrypt("real secret")
         #expect(enc.decrypt(cipher, expectingEncrypted: true) == "real secret")
         #expect(enc.plaintextInEncryptedColumnCount == 0)
@@ -140,14 +150,14 @@ struct DatabaseEncryptionTests {
 
     @Test("Non-encrypted input passes through decrypt unchanged")
     func decryptPassthrough() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         #expect(enc.decrypt("plain text without prefix") == "plain text without prefix")
         #expect(enc.decrypt("") == "")
     }
 
     @Test("Tampered v2 ciphertext is detected (returns input)")
     func v2TamperDetection() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let original = "auth-tag protects this"
         let cipher = enc.encrypt(original)
         #expect(cipher.hasPrefix("ENC2:"))
@@ -170,7 +180,7 @@ struct DatabaseEncryptionTests {
 
     @Test("Malformed ENC2 base64 cannot bypass the tamper counter")
     func malformedV2EnvelopeIsDetected() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let malformed = "ENC2:not/base64!!!"
         let before = enc.authenticatedDecryptFailures
 
@@ -180,7 +190,7 @@ struct DatabaseEncryptionTests {
 
     @Test("Multiple encrypts of same plaintext produce different ciphertexts")
     func nonceIsRandomized() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let plaintext = "same input, different nonces"
         let c1 = enc.encrypt(plaintext)
         let c2 = enc.encrypt(plaintext)
@@ -192,7 +202,7 @@ struct DatabaseEncryptionTests {
 
     @Test("Unicode round-trips correctly")
     func unicodeRoundTrip() async throws {
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let inputs = [
             "Hello, world!",
             "🦀 MacCrab",

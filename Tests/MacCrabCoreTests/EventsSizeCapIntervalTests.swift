@@ -552,22 +552,17 @@ struct EventsSizeCapIntervalTests {
 
     // MARK: - 3. Integration: runAdaptiveRollupSweep drives prune end-to-end
 
-    /// Pours events past Layer 2's hot-tier cutoff into a real
-    /// EventStore, runs the sweep, and asserts both that rows were
-    /// pruned and that the DB file size on disk decreased. This is
-    /// the contract the size-cap timer relies on; if the sweep stops
-    /// pruning (e.g. a future refactor breaks `rollUpAndPrune`'s
-    /// transaction), this test catches it immediately.
-    @Test("runAdaptiveRollupSweep prunes rows when DB exceeds cap")
+    /// Backdated source timestamps cannot bypass rc.13's durable-admission
+    /// floor. The legacy adaptive sweep may target those timestamps, but fresh
+    /// canonical blocks remain intact until whole-block expiry is eligible.
+    @Test("runAdaptiveRollupSweep cannot prune fresh journal blocks with backdated source time")
     func sweepDrivesPrune() async throws {
         let (store, tmp) = try await makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Insert enough backdated events (older than 30 min so the
-        // hotTier cutoff catches them) to drive a non-trivial prune.
-        // 5,000 is enough to exceed Layer-3's 10,000-min-row floor
-        // and verify the loop actually deletes from the hot tier
-        // rather than no-opping.
+        // Insert a non-trivial block corpus whose source timestamps are older
+        // than the adaptive cutoff. Only their admission age may make them
+        // eligible for canonical expiry.
         try await insertSampleSpread(store, count: 5_000, endingSecondsAgo: 3600)
         let before = try await store.count()
         #expect(before == 5_000)
@@ -578,10 +573,8 @@ struct EventsSizeCapIntervalTests {
         let dbPath = tmp.appendingPathComponent("events.db").path
 
         // Tight cap to force Layer 2 + Layer 3 to do work. The
-        // sweep targets 80% of cap; with 5k events the file is
-        // typically < 5 MB but we want adaptive logic to engage —
-        // a 1 MB cap gets Layer 3 into the picture even on a
-        // small store.
+        // sweep targets 80% of cap; a 1 MB cap guarantees the legacy adaptive
+        // logic engages even though it must leave fresh journal blocks alone.
         await runAdaptiveRollupSweep(
             eventStore: store,
             dbPath: dbPath,
@@ -592,14 +585,13 @@ struct EventsSizeCapIntervalTests {
             alertsRetentionDays: 365
         )
 
-        // Layer 2 + Layer 3 between them must have removed at least
-        // some rows. We deliberately don't pin the exact count — the
-        // sweep is allowed to leave the most-recent hot-tier-window
-        // rows alone if they're newer than the cutoff. The contract
-        // is "fewer rows than before", not "zero rows".
+        // The source timestamps are old, but every block was admitted now and
+        // owns the complete 15-minute floor. Generic rollup/oldest-row pruning
+        // is legacy-only and cannot manufacture convergence by deleting it.
         let after = try await store.count()
-        #expect(after < before,
-                "Sweep should have pruned at least one row (was \(before), now \(after))")
+        #expect(after == before,
+                "adaptive legacy pruning must not delete fresh journal evidence (was \(before), now \(after))")
+        #expect(try await store.maintenanceRetainedRecordCount() == before)
     }
 
     /// Layer 3 may request oldest-first pruning when the tightest Layer-2
@@ -694,9 +686,13 @@ struct EventsSizeCapIntervalTests {
             processFloorMinutes: 60
         )
 
-        let byCat = try await store.eventCountsByCategory(since: .distantPast)
-        #expect(byCat["process"] == 100, "all exec rows within the floor survive the file-storm sweep")
-        #expect(byCat["file"] == 2_000, "the hard floor applies to every category")
+        let byCat = try await store.eventCategoryCountSnapshot(
+            since: .distantPast
+        )
+        #expect(byCat.requestedWindowComplete == false)
+        #expect(byCat.gaps.total == 0)
+        #expect(byCat.counts["process"] == 100, "all exec rows within the floor survive the file-storm sweep")
+        #expect(byCat.counts["file"] == 2_000, "the hard floor applies to every category")
         let after = try await store.count()
         #expect(after == before, "an infeasible budget is exposed instead of erasing recent rows")
     }

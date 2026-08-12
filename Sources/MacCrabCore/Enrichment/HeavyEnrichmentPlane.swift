@@ -60,6 +60,20 @@ public extension HeavyEnrichmentComponent {
         }
     }
 
+    /// Worst-case value ownership reserved before a heavyweight operation is
+    /// accepted. Callers with a tighter authoritative bound (notably the file
+    /// content scanner) pass it to `offer`; these defaults remain fail-safe for
+    /// direct users of the plane.
+    var defaultMaximumResultBytes: Int {
+        switch self {
+        case .codeSignature: return 256 * 1_024
+        case .processHashes: return 4 * 1_024
+        case .environment: return 8 * 1_024 * 1_024
+        case .fileContent: return 64 * 1_024
+        case .userName: return 16 * 1_024
+        }
+    }
+
     /// The one authoritative mapping from rule field names (canonical paths
     /// and supported Sigma aliases) to heavyweight evidence ownership.
     /// Numeric user IDs are intentionally absent: they are present on the raw
@@ -288,6 +302,60 @@ public enum HeavyEnrichmentValue: Sendable, Equatable {
     case fileContent(HeavyFileContentEvidence?)
     case userName(String?)
 
+    /// Conservative graph/string charge used by both sides of the deferred
+    /// transfer. This is memory accounting, not canonical identity, so a cheap
+    /// field-wise calculation is preferable to encoding or reflection.
+    public var retainedByteEstimate: Int {
+        switch self {
+        case .codeSignature(let evidence):
+            guard let value = evidence.value else { return 512 }
+            var bytes = 1_024
+            bytes = Self.add(bytes, value.teamId)
+            bytes = Self.add(bytes, value.signingId)
+            bytes = Self.add(bytes, value.authorities)
+            bytes = Self.add(bytes, value.issuerChain ?? [])
+            bytes = Self.add(bytes, value.certHashes ?? [])
+            bytes = Self.add(bytes, value.entitlements ?? [])
+            return bytes
+        case .processHashes(let evidence):
+            guard let value = evidence.value else { return 512 }
+            var bytes = 512
+            bytes = Self.add(bytes, value.sha256)
+            bytes = Self.add(bytes, value.cdhash)
+            bytes = Self.add(bytes, value.md5)
+            return bytes
+        case .environment(let environment):
+            guard let environment else { return 512 }
+            var bytes = 1_024
+            for (key, value) in environment {
+                bytes = Self.add(bytes, key.utf8.count)
+                bytes = Self.add(bytes, value.utf8.count)
+                bytes = Self.add(bytes, 128)
+            }
+            return bytes
+        case .fileContent(let evidence):
+            guard let evidence else { return 512 }
+            return Self.add(512, evidence.content.utf8.count)
+        case .userName(let value):
+            return Self.add(256, value?.utf8.count ?? 0)
+        }
+    }
+
+    private static func add(_ current: Int, _ value: String?) -> Int {
+        add(current, value?.utf8.count ?? 0)
+    }
+
+    private static func add(_ current: Int, _ values: [String]) -> Int {
+        values.reduce(current) { partial, value in
+            add(add(partial, value.utf8.count), 64)
+        }
+    }
+
+    private static func add(_ lhs: Int, _ rhs: Int) -> Int {
+        let sum = lhs.addingReportingOverflow(max(0, rhs))
+        return sum.overflow ? Int.max : sum.partialValue
+    }
+
     fileprivate var hasEvidence: Bool {
         switch self {
         case .codeSignature(let evidence):
@@ -335,6 +403,14 @@ public struct HeavyEnrichmentBinding: Sendable, Hashable {
             && event.process.userId == userID
             && event.file?.path == filePath
             && event.file?.size == eventFileSize
+    }
+
+    public var retainedByteEstimate: Int {
+        let strings = [executablePath, filePath ?? ""]
+        return strings.reduce(512) { partial, value in
+            let sum = partial.addingReportingOverflow(value.utf8.count + 64)
+            return sum.overflow ? Int.max : sum.partialValue
+        }
     }
 }
 
@@ -401,6 +477,15 @@ public struct DeferredEventEnrichment: Sendable, Equatable {
         self.component = component
         self.outcome = outcome
         self.value = value
+    }
+
+    public var retainedByteEstimate: Int {
+        let valueBytes = value?.retainedByteEstimate ?? 512
+        let bindingBytes = binding.retainedByteEstimate
+        let sum = bindingBytes.addingReportingOverflow(valueBytes)
+        guard !sum.overflow else { return Int.max }
+        let overhead = sum.partialValue.addingReportingOverflow(512)
+        return overhead.overflow ? Int.max : overhead.partialValue
     }
 
     /// Applies the patch only to the exact event/process/file identity it was
@@ -561,12 +646,29 @@ public struct DeferredEventEnrichment: Sendable, Equatable {
     }
 }
 
+/// Package-internal transfer envelope. Production moves the same aggregate
+/// memory lease from the heavy plane into DeferredEnrichmentBuffer, so the
+/// handoff never creates an uncharged or double-charged patch window.
+package struct OwnedDeferredEventEnrichment: Sendable {
+    package let patch: DeferredEventEnrichment
+    package let memoryLease: EventPipelineMemoryLease
+
+    package init(
+        patch: DeferredEventEnrichment,
+        memoryLease: EventPipelineMemoryLease
+    ) {
+        self.patch = patch
+        self.memoryLease = memoryLease
+    }
+}
+
 // MARK: - Plane lifecycle
 
 public struct HeavyEnrichmentPlaneConfiguration: Sendable, Equatable {
     public let maximumConcurrentWorkers: Int
     public let maximumQueuedWorkItems: Int
     public let maximumOutstandingResults: Int
+    public let maximumRetainedResultBytes: Int
     public let cacheCapacity: Int
     public let operationTimeoutSeconds: TimeInterval
 
@@ -574,17 +676,23 @@ public struct HeavyEnrichmentPlaneConfiguration: Sendable, Equatable {
         maximumConcurrentWorkers: Int = 4,
         maximumQueuedWorkItems: Int = 128,
         maximumOutstandingResults: Int = 512,
+        maximumRetainedResultBytes: Int = EventPipelineLiveMemoryBudget
+            .productionMaximumBytes
+                - EventPipelineLiveMemoryBudget
+                    .productionForwardProgressReserveBytes,
         cacheCapacity: Int = 256,
         operationTimeoutSeconds: TimeInterval = 0.050
     ) {
         precondition(maximumConcurrentWorkers > 0)
         precondition(maximumQueuedWorkItems >= 0)
         precondition(maximumOutstandingResults > 0)
+        precondition(maximumRetainedResultBytes > 0)
         precondition(cacheCapacity >= 0)
         precondition(operationTimeoutSeconds >= 0)
         self.maximumConcurrentWorkers = maximumConcurrentWorkers
         self.maximumQueuedWorkItems = maximumQueuedWorkItems
         self.maximumOutstandingResults = maximumOutstandingResults
+        self.maximumRetainedResultBytes = maximumRetainedResultBytes
         self.cacheCapacity = cacheCapacity
         self.operationTimeoutSeconds = operationTimeoutSeconds
     }
@@ -605,6 +713,12 @@ public struct HeavyEnrichmentPlaneSnapshot: Sendable, Equatable {
     public let physicalWorkers: Int
     public let lingeringTimedOutOrCancelledWorkers: Int
     public let deferredResults: Int
+    public let activeReservedResultBytes: Int
+    public let deferredResultBytes: Int
+    public let cacheResultBytes: Int
+    public let retainedResultBytesHighWatermark: Int
+    public let maximumRetainedResultBytes: Int
+    public let oversizedResultValuesTotal: UInt64
     public let cachedResults: Int
     public let maximumConcurrentWorkers: Int
 
@@ -627,8 +741,29 @@ public struct HeavyEnrichmentPlaneSnapshot: Sendable, Equatable {
         physicalWorkers <= maximumConcurrentWorkers
     }
 
+    public var resultByteCapacityConserved: Bool {
+        guard activeReservedResultBytes >= 0,
+              deferredResultBytes >= 0,
+              cacheResultBytes >= 0,
+              activeReservedResultBytes <= maximumRetainedResultBytes,
+              deferredResultBytes
+                <= maximumRetainedResultBytes - activeReservedResultBytes,
+              cacheResultBytes <= maximumRetainedResultBytes
+                - activeReservedResultBytes - deferredResultBytes else {
+            return false
+        }
+        return retainedResultBytesHighWatermark
+                >= activeReservedResultBytes + deferredResultBytes
+                    + cacheResultBytes
+            && retainedResultBytesHighWatermark
+                <= maximumRetainedResultBytes
+    }
+
     public var cleanlyDrained: Bool {
         queuedRequests == 0 && runningRequests == 0 && physicalWorkers == 0
+            && activeReservedResultBytes == 0
+            && deferredResults == 0
+            && deferredResultBytes == 0
     }
 }
 
@@ -678,6 +813,9 @@ public actor HeavyEnrichmentPlane {
     private struct Subscriber: Sendable {
         let ticket: HeavyEnrichmentTicket
         let binding: HeavyEnrichmentBinding
+        let memoryLease: EventPipelineMemoryLease
+
+        var reservedResultBytes: Int { memoryLease.bytes }
     }
 
     private enum WorkState: Sendable, Equatable {
@@ -698,12 +836,21 @@ public actor HeavyEnrichmentPlane {
         var state: WorkState
     }
 
+    private struct BufferedDeferredResult: Sendable {
+        let patch: DeferredEventEnrichment
+        let retainedByteCharge: Int
+        let memoryLease: EventPipelineMemoryLease
+    }
+
     private struct CachedValue: Sendable {
         let value: HeavyEnrichmentValue
+        let retainedByteCharge: Int
+        let memoryLease: EventPipelineMemoryLease
         var accessSequence: UInt64
     }
 
     private let configuration: HeavyEnrichmentPlaneConfiguration
+    private let liveMemoryBudget: EventPipelineLiveMemoryBudget
     private var accepting = true
     private var nextWorkID: UInt64 = 0
     private var cacheAccessSequence: UInt64 = 0
@@ -712,8 +859,11 @@ public actor HeavyEnrichmentPlane {
     private var queuedWorkIDs: [UInt64] = []
     private var workerTasks: [UInt64: Task<Void, Never>] = [:]
     private var deadlineTasks: [UInt64: Task<Void, Never>] = [:]
-    private var deferred: [DeferredEventEnrichment] = []
+    private var deferred: [BufferedDeferredResult] = []
+    private var deferredResultBytes = 0
+    private var retainedResultBytesHighWatermark = 0
     private var cache: [WorkKey: CachedValue] = [:]
+    private var cacheResultBytes = 0
 
     private var offeredRequestsTotal: UInt64 = 0
     private var completedRequestsTotal: UInt64 = 0
@@ -723,9 +873,14 @@ public actor HeavyEnrichmentPlane {
     private var cacheHitsTotal: UInt64 = 0
     private var coalescedRequestsTotal: UInt64 = 0
     private var lateWorkerExitsTotal: UInt64 = 0
+    private var oversizedResultValuesTotal: UInt64 = 0
 
-    public init(configuration: HeavyEnrichmentPlaneConfiguration = .init()) {
+    public init(
+        configuration: HeavyEnrichmentPlaneConfiguration = .init(),
+        liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
+    ) {
         self.configuration = configuration
+        self.liveMemoryBudget = liveMemoryBudget
     }
 
     /// Offers one component operation.  The call performs no supplied work;
@@ -736,6 +891,7 @@ public actor HeavyEnrichmentPlane {
         binding: HeavyEnrichmentBinding,
         cacheResult: Bool = true,
         timeoutSeconds: TimeInterval? = nil,
+        maximumResultBytes: Int? = nil,
         operation: @escaping Operation
     ) -> HeavyEnrichmentOffer {
         increment(&offeredRequestsTotal)
@@ -750,8 +906,33 @@ public actor HeavyEnrichmentPlane {
             return .cacheHit(cached.value)
         }
 
+        let resultBytes = max(
+            1,
+            maximumResultBytes ?? component.defaultMaximumResultBytes
+        )
+        let baseBytes = binding.retainedByteEstimate
+            .addingReportingOverflow(1_024)
+        let reservationBytes: Int
+        if baseBytes.overflow {
+            reservationBytes = Int.max
+        } else {
+            let combined = baseBytes.partialValue.addingReportingOverflow(
+                resultBytes
+            )
+            reservationBytes = combined.overflow
+                ? Int.max : combined.partialValue
+        }
         guard accepting,
-              deferred.count + activeRequestCount < configuration.maximumOutstandingResults else {
+              deferred.count + activeRequestCount
+                < configuration.maximumOutstandingResults,
+              canReserveResultBytes(reservationBytes) else {
+            increment(&rejectedRequestsTotal)
+            return .rejected
+        }
+        guard let memoryLease = liveMemoryBudget.tryAcquire(
+            bytes: reservationBytes,
+            owner: .heavyResult
+        ) else {
             increment(&rejectedRequestsTotal)
             return .rejected
         }
@@ -759,8 +940,13 @@ public actor HeavyEnrichmentPlane {
         let ticket = HeavyEnrichmentTicket()
         if let existingID = activeByKey[key], var existing = works[existingID],
            existing.state == .queued || existing.state == .running {
-            existing.subscribers.append(Subscriber(ticket: ticket, binding: binding))
+            existing.subscribers.append(Subscriber(
+                ticket: ticket,
+                binding: binding,
+                memoryLease: memoryLease
+            ))
             works[existingID] = existing
+            updateRetainedResultBytesHighWatermark()
             increment(&coalescedRequestsTotal)
             return .pending(ticket: ticket, coalesced: true)
         }
@@ -785,11 +971,16 @@ public actor HeavyEnrichmentPlane {
             operation: operation,
             cacheResult: cacheResult && Self.componentMayCache(component),
             deadlineUptimeNanoseconds: deadlineNanos,
-            subscribers: [Subscriber(ticket: ticket, binding: binding)],
+            subscribers: [Subscriber(
+                ticket: ticket,
+                binding: binding,
+                memoryLease: memoryLease
+            )],
             state: canRunNow ? .running : .queued
         )
         works[workID] = work
         activeByKey[key] = workID
+        updateRetainedResultBytesHighWatermark()
         scheduleDeadline(for: workID, timeoutNanoseconds: timeoutNanoseconds)
         if canRunNow {
             startWorker(for: workID)
@@ -801,11 +992,40 @@ public actor HeavyEnrichmentPlane {
 
     /// Removes a bounded prefix of terminal patches.  Accepted operations
     /// reserve result capacity at admission, so this queue never drops a patch.
-    public func drainDeferredResults(limit: Int = 128) -> [DeferredEventEnrichment] {
+    public func drainDeferredResults(
+        limit: Int = 128,
+        maximumBytes: Int = Int.max
+    ) -> [DeferredEventEnrichment] {
+        drainOwnedDeferredResults(
+            limit: limit,
+            maximumBytes: maximumBytes
+        ).map(\.patch)
+    }
+
+    package func drainOwnedDeferredResults(
+        limit: Int = 128,
+        maximumBytes: Int = Int.max
+    ) -> [OwnedDeferredEventEnrichment] {
         guard limit > 0, !deferred.isEmpty else { return [] }
-        let count = min(limit, deferred.count)
-        let result = Array(deferred.prefix(count))
+        let countLimit = min(limit, deferred.count)
+        let byteLimit = max(0, maximumBytes)
+        var count = 0
+        var bytes = 0
+        for item in deferred.prefix(countLimit) {
+            guard item.retainedByteCharge <= byteLimit
+                    - min(bytes, byteLimit) else { break }
+            bytes += item.retainedByteCharge
+            count += 1
+        }
+        guard count > 0 else { return [] }
+        let result = deferred.prefix(count).map {
+            OwnedDeferredEventEnrichment(
+                patch: $0.patch,
+                memoryLease: $0.memoryLease
+            )
+        }
         deferred.removeFirst(count)
+        deferredResultBytes = max(0, deferredResultBytes - bytes)
         return result
     }
 
@@ -834,6 +1054,14 @@ public actor HeavyEnrichmentPlane {
             physicalWorkers: physicalWorkerCount,
             lingeringTimedOutOrCancelledWorkers: lingering,
             deferredResults: deferred.count,
+            activeReservedResultBytes: activeReservedResultBytes,
+            deferredResultBytes: deferredResultBytes,
+            cacheResultBytes: cacheResultBytes,
+            retainedResultBytesHighWatermark:
+                retainedResultBytesHighWatermark,
+            maximumRetainedResultBytes:
+                configuration.maximumRetainedResultBytes,
+            oversizedResultValuesTotal: oversizedResultValuesTotal,
             cachedResults: cache.count,
             maximumConcurrentWorkers: configuration.maximumConcurrentWorkers
         )
@@ -863,6 +1091,45 @@ public actor HeavyEnrichmentPlane {
                 count += work.subscribers.count
             }
         }
+    }
+
+    private var activeReservedResultBytes: Int {
+        works.values.reduce(0) { total, work in
+            return work.subscribers.reduce(total) { subtotal, subscriber in
+                let sum = subtotal.addingReportingOverflow(
+                    subscriber.reservedResultBytes
+                )
+                return sum.overflow ? Int.max : sum.partialValue
+            }
+        }
+    }
+
+    private var retainedResultBytes: Int {
+        let activeAndDeferred = activeReservedResultBytes
+            .addingReportingOverflow(deferredResultBytes)
+        guard !activeAndDeferred.overflow else { return Int.max }
+        let total = activeAndDeferred.partialValue.addingReportingOverflow(
+            cacheResultBytes
+        )
+        return total.overflow ? Int.max : total.partialValue
+    }
+
+    private func canReserveResultBytes(_ bytes: Int) -> Bool {
+        guard bytes > 0, bytes <= configuration.maximumRetainedResultBytes else {
+            return false
+        }
+        let retained = min(
+            retainedResultBytes,
+            configuration.maximumRetainedResultBytes
+        )
+        return bytes <= configuration.maximumRetainedResultBytes - retained
+    }
+
+    private func updateRetainedResultBytesHighWatermark() {
+        retainedResultBytesHighWatermark = max(
+            retainedResultBytesHighWatermark,
+            retainedResultBytes
+        )
     }
 
     /// Includes timed-out/cancelled workers that have not physically exited.
@@ -909,17 +1176,16 @@ public actor HeavyEnrichmentPlane {
         switch work.state {
         case .running:
             activeByKey.removeValue(forKey: work.key)
-            if work.cacheResult { insertCache(value, for: work.key) }
             for subscriber in work.subscribers {
                 increment(&completedRequestsTotal)
-                deferred.append(DeferredEventEnrichment(
-                    ticket: subscriber.ticket,
-                    binding: subscriber.binding,
+                appendDeferred(
+                    subscriber: subscriber,
                     component: work.component,
                     outcome: .completed,
                     value: value
-                ))
+                )
             }
+            if work.cacheResult { insertCache(value, for: work.key) }
         case .timedOut, .cancelled:
             // Requests became terminal at deadline/shutdown.  A late value is
             // intentionally discarded and never cached or applied.
@@ -954,7 +1220,11 @@ public actor HeavyEnrichmentPlane {
             work.state = .timedOut
             works[workID] = work
             workerTasks[workID]?.cancel()
-            terminalize(work: work, outcome: .timedOut)
+            terminalize(
+                work: work,
+                outcome: .timedOut,
+                retainLingeringReservation: true
+            )
             // Do not start a replacement: the cancelled worker still owns one
             // physical slot until it actually exits.
         case .timedOut, .cancelled:
@@ -963,6 +1233,22 @@ public actor HeavyEnrichmentPlane {
     }
 
     private func terminalize(work: Work, outcome: HeavyEnrichmentTerminalOutcome) {
+        terminalize(
+            work: work,
+            outcome: outcome,
+            retainLingeringReservation: false
+        )
+    }
+
+    private func terminalize(
+        work: Work,
+        outcome: HeavyEnrichmentTerminalOutcome,
+        retainLingeringReservation: Bool
+    ) {
+        var terminalSubscribers: [Subscriber] = []
+        terminalSubscribers.reserveCapacity(work.subscribers.count)
+        var lingeringSubscribers: [Subscriber] = []
+        lingeringSubscribers.reserveCapacity(work.subscribers.count)
         for subscriber in work.subscribers {
             switch outcome {
             case .completed:
@@ -972,14 +1258,92 @@ public actor HeavyEnrichmentPlane {
             case .cancelled:
                 increment(&cancelledRequestsTotal)
             }
-            deferred.append(DeferredEventEnrichment(
+            let marker = DeferredEventEnrichment(
                 ticket: subscriber.ticket,
                 binding: subscriber.binding,
                 component: work.component,
                 outcome: outcome,
                 value: nil
+            )
+            let markerCharge = marker.retainedByteEstimate
+            precondition(markerCharge <= subscriber.reservedResultBytes)
+            let markerLease: EventPipelineMemoryLease
+            if retainLingeringReservation {
+                markerLease = subscriber.memoryLease.split(
+                    bytes: markerCharge,
+                    owner: .heavyResult
+                )!
+            } else {
+                precondition(subscriber.memoryLease.resize(to: markerCharge))
+                markerLease = subscriber.memoryLease
+            }
+            terminalSubscribers.append(Subscriber(
+                ticket: subscriber.ticket,
+                binding: subscriber.binding,
+                memoryLease: markerLease
             ))
+            if retainLingeringReservation {
+                lingeringSubscribers.append(Subscriber(
+                    ticket: subscriber.ticket,
+                    binding: subscriber.binding,
+                    memoryLease: subscriber.memoryLease
+                ))
+            }
         }
+        if retainLingeringReservation {
+            var lingering = work
+            lingering.subscribers = lingeringSubscribers
+            works[work.id] = lingering
+        }
+        for subscriber in terminalSubscribers {
+            appendDeferred(
+                subscriber: subscriber,
+                component: work.component,
+                outcome: outcome,
+                value: nil
+            )
+        }
+    }
+
+    private func appendDeferred(
+        subscriber: Subscriber,
+        component: HeavyEnrichmentComponent,
+        outcome: HeavyEnrichmentTerminalOutcome,
+        value: HeavyEnrichmentValue?
+    ) {
+        var patch = DeferredEventEnrichment(
+            ticket: subscriber.ticket,
+            binding: subscriber.binding,
+            component: component,
+            outcome: outcome,
+            value: value
+        )
+        if patch.retainedByteEstimate > subscriber.reservedResultBytes {
+            increment(&oversizedResultValuesTotal)
+            patch = DeferredEventEnrichment(
+                ticket: subscriber.ticket,
+                binding: subscriber.binding,
+                component: component,
+                outcome: outcome,
+                value: nil
+            )
+        }
+        let charge = patch.retainedByteEstimate
+        // Admission reserved at least binding + terminal-marker ownership for
+        // every subscriber. A supplied operation that exceeds its declared
+        // value bound is converted to explicit unavailable coverage above.
+        precondition(
+            charge <= subscriber.reservedResultBytes,
+            "heavy result terminal marker exceeded its admission reservation"
+        )
+        precondition(subscriber.memoryLease.resize(to: charge))
+        deferred.append(BufferedDeferredResult(
+            patch: patch,
+            retainedByteCharge: charge,
+            memoryLease: subscriber.memoryLease
+        ))
+        deferredResultBytes += charge
+        updateRetainedResultBytesHighWatermark()
     }
 
     private func startAvailableWorkers() {
@@ -1020,19 +1384,50 @@ public actor HeavyEnrichmentPlane {
             activeByKey.removeValue(forKey: work.key)
             work.state = .cancelled
             works[workID] = work
-            terminalize(work: work, outcome: .cancelled)
+            terminalize(
+                work: work,
+                outcome: .cancelled,
+                retainLingeringReservation: true
+            )
             workerTasks[workID]?.cancel()
         }
     }
 
     private func insertCache(_ value: HeavyEnrichmentValue, for key: WorkKey) {
         guard configuration.cacheCapacity > 0 else { return }
-        increment(&cacheAccessSequence)
-        cache[key] = CachedValue(value: value, accessSequence: cacheAccessSequence)
-        while cache.count > configuration.cacheCapacity,
-              let victim = cache.min(by: { $0.value.accessSequence < $1.value.accessSequence })?.key {
-            cache.removeValue(forKey: victim)
+        let charge = value.retainedByteEstimate
+        if let old = cache.removeValue(forKey: key) {
+            cacheResultBytes = max(
+                0,
+                cacheResultBytes - old.retainedByteCharge
+            )
         }
+        while (!canReserveResultBytes(charge)
+                || cache.count >= configuration.cacheCapacity),
+              let victim = cache.min(by: {
+                  $0.value.accessSequence < $1.value.accessSequence
+              })?.key,
+              let removed = cache.removeValue(forKey: victim) {
+            cacheResultBytes = max(
+                0,
+                cacheResultBytes - removed.retainedByteCharge
+            )
+        }
+        guard canReserveResultBytes(charge),
+              cache.count < configuration.cacheCapacity,
+              let memoryLease = liveMemoryBudget.tryAcquire(
+                bytes: charge,
+                owner: .heavyResult
+              ) else { return }
+        increment(&cacheAccessSequence)
+        cache[key] = CachedValue(
+            value: value,
+            retainedByteCharge: charge,
+            memoryLease: memoryLease,
+            accessSequence: cacheAccessSequence
+        )
+        cacheResultBytes += charge
+        updateRetainedResultBytesHighWatermark()
     }
 
     private func increment(_ value: inout UInt64) {
@@ -1050,6 +1445,10 @@ public actor HeavyEnrichmentPlane {
     private nonisolated static func componentMayCache(
         _ component: HeavyEnrichmentComponent
     ) -> Bool {
-        component == .userName || component == .fileContent
+        // File-content identity is one exact callback UUID, so retaining its
+        // potentially large payload cannot produce a future cache hit. Keeping
+        // only tiny UID->name values also prevents cache ownership from pinning
+        // the reserved J headroom while no source event can release it.
+        component == .userName
     }
 }

@@ -12,6 +12,15 @@ import CSQLCipher
 @Suite("TraceStore: column-level AES-GCM for attributes_json")
 struct TraceStoreEncryptionTests {
 
+    private func deterministicEncryption() -> DatabaseEncryption {
+        DatabaseEncryption(
+            enabled: true,
+            keyLoader: { Data(repeating: 0x7A, count: 32) },
+            keySaver: { _ in 0 },
+            keyGenerator: { Data(repeating: 0x7A, count: 32) }
+        )
+    }
+
     private static func tempDB() -> String {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("trace-enc-\(UUID().uuidString).db").path
@@ -36,7 +45,7 @@ struct TraceStoreEncryptionTests {
     func roundTripEncrypted() async throws {
         let path = Self.tempDB()
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let store = try TraceStore(path: path, encryption: enc)
         try await store.insertSpan(Self.sample())
         let read = try await store.spansForTrace("4bf92f3577b34da6a3ce929d0e0e4736")
@@ -48,7 +57,7 @@ struct TraceStoreEncryptionTests {
     func storedBytesAreEncrypted() async throws {
         let path = Self.tempDB()
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let store = try TraceStore(path: path, encryption: enc)
         try await store.insertSpan(Self.sample())
 
@@ -98,7 +107,7 @@ struct TraceStoreEncryptionTests {
         }
         // Re-open WITH encryption — old row should still decode (decrypt
         // is a passthrough for non-ENC: input).
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let store = try TraceStore(path: path, encryption: enc)
         let read = try await store.spansForTrace("4bf92f3577b34da6a3ce929d0e0e4736")
         #expect(read.first?.attributesJson?.contains("tool_name") == true)
@@ -108,7 +117,7 @@ struct TraceStoreEncryptionTests {
     func tamperReturnsRaw() async throws {
         let path = Self.tempDB()
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let enc = DatabaseEncryption(enabled: true)
+        let enc = deterministicEncryption()
         let store = try TraceStore(path: path, encryption: enc)
         try await store.insertSpan(Self.sample())
 

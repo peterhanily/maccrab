@@ -308,25 +308,20 @@ fi
 
 section "PASS 2 — AlertSink single-sink invariant"
 
-# Every alertStore.insert call in production code outside AlertSink
-# itself is either a regression of the v1.6.9 NoiseFilter-layering bug
-# class, or a documented exception. Two exceptions exist in
-# DaemonSetup.swift (lines 229 + 265 as of v1.6.19); they're audited
-# because the closures capture alertStore before AlertSink is built.
+# Every actual alertStore.insert(...) call in production code outside AlertSink
+# itself is a regression of the v1.6.9 NoiseFilter-layering bug class.
+# The former DaemonSetup bootstrap exceptions now route through AlertSink too,
+# so the audited target is zero direct inserts everywhere.
 
 # Allowed file: AlertSink.swift uses alertStore.insert internally.
-# Allowed exception sites — self-protection alerts that MUST bypass the
-# NoiseFilter so they can't be muted/suppressed (same rationale as the
-# SelfDefense tamper alerts):
-#   DaemonSetup.swift  ×2 — self-defense file/rules tamper + ES-health
-#   DaemonTimers.swift ×1 — emitSelfProtectionAlert (inbox config-tamper
-#                            meta-alerts: capability grant / ES-subscription
-#                            disable / remote-LLM-endpoint enable)
-ALLOWED_SETUP_TARGET=2
-ALLOWED_TIMERS_TARGET=1
+# No exception sites remain.
+ALLOWED_SETUP_TARGET=0
+ALLOWED_TIMERS_TARGET=0
 
 # Find all production-code direct inserts.
-direct_inserts=$(grep -rnE 'alertStore\.insert' Sources \
+# Require a call parenthesis so comments that merely name the old API do not
+# satisfy or perturb the release invariant.
+direct_inserts=$(grep -rnE 'alertStore\.insert[[:space:]]*\(' Sources \
     --include='*.swift' 2>/dev/null \
     | grep -v 'AlertSink\.swift')
 
@@ -2481,6 +2476,12 @@ else
         # CURRENT scoring session — same-process semantics are the
         # documented contract, not an oversight).
         "sharedStylometric"
+        # classify_package_intent is request-driven, not daemon-evidence-driven:
+        # it constructs a bounded BehaviorBrief from the MCP call itself. This
+        # cached Task resolves an optional configured backend once; nil selects
+        # IntentClassifier's deterministic heuristic, so the handler remains
+        # functional and cannot be an empty process-local evidence reader.
+        "sharedMCPLLMService"
     )
 
     # Extract the dispatch case map: lines of the form `case "<tool>":`

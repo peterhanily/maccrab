@@ -299,16 +299,23 @@ public struct EventStoreInjectionSource: InjectionEvidenceSource {
     }
 
     public func agentContentReads(sessionId: String, since: Date, until: Date) async -> [AgentContentRead] {
-        guard let events = try? await eventStore.eventsForAgentSession(sessionId, since: since, until: until) else {
+        guard let snapshot = try? await eventStore
+            .exactEventsForAgentSessionSnapshot(
+                sessionId,
+                since: since,
+                until: until
+            ), snapshot.isComplete else {
             return []
         }
-        return events.compactMap { ev -> AgentContentRead? in
+        let result = snapshot.events.compactMap { ev -> AgentContentRead? in
             guard ev.eventCategory == .file,
                   ev.eventAction == "open",
                   let path = ev.file?.path,
                   ESCollector.isAgentContentReadPath(path) else { return nil }
             return AgentContentRead(path: path, readAt: ev.timestamp)
         }
+        withExtendedLifetime(snapshot) {}
+        return result
     }
 
     public func readContent(path: String) async -> String? {

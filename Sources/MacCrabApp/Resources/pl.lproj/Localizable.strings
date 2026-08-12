@@ -557,7 +557,7 @@
 "appearance.mode" = "Tryb";
 "appearance.note" = "Wskazówka: wykrywanie, zapobieganie i reagowanie są zawsze włączone niezależnie od trybu. Zmienia się tylko nawigacja panelu.";
 "appearance.title" = "Złożoność panelu";
-"events.aggregateModeBanner" = "Wyświetlane są podsumowania dzienne — zawęź zakres czasu do 24 godzin lub krócej, aby zobaczyć szczegóły pojedynczych zdarzeń";
+"events.aggregateModeBanner" = "Wyświetlane są podsumowania dzienne — dokładne szczegóły zdarzeń są dostępne tylko dla zachowanego zakresu";
 "events.category" = "Kategoria";
 "events.count" = "Liczba";
 "events.day" = "Dzień";

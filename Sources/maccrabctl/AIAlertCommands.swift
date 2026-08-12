@@ -19,7 +19,7 @@ extension MacCrabCtl {
         }
         let boundedHours = min(hours, 8_760)
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = Date().addingTimeInterval(-boundedHours * 3600)
             let aiAlerts = try await store.aiAlerts(since: since, limit: clampedLimit)
 

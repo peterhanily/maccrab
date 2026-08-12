@@ -148,7 +148,7 @@ func handleExplainAlert(_ args: [String: Any]) async -> Any {
         return toolError("'alert_id' is required (get it from get_alerts).")
     }
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         // No id-lookup on the store protocol; scan a bounded recent window, the
         // same way the CLI does.
         let recent = try await store.alerts(since: Date.distantPast, limit: 2000)
@@ -220,7 +220,7 @@ private func alertsWithPrefix(
     _ prefix: String, hours: Double, limit: Int, emptyHint: String
 ) async -> Any {
     do {
-        let store = try AlertStore(directory: dataDir)
+        let store = try openMCPAlertStoreForReading(directory: dataDir)
         let since = Date().addingTimeInterval(-hours * 3600)
         // Over-fetch then filter: the store has no rule-prefix predicate, and a
         // limit applied before filtering would return a near-empty page

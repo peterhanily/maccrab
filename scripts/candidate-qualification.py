@@ -56,6 +56,11 @@ MAX_GUI_P95_PERCENT = 10.0
 MAX_ENGINE_RSS_BYTES = 450 * MIB
 MAX_ENGINE_RSS_GROWTH_BYTES = 64 * MIB
 MIN_TRACE_WRITABLE_DUTY = 0.99
+# Foreground mutations may wait behind one bounded recovery SQLite quantum,
+# but a candidate that ever reports a completed or currently-live wait above
+# five seconds has not demonstrated responsive causal-evidence admission.
+MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS = 5_000_000_000
+TRACE_RECOVERY_MUTATION_WAITER_LIMIT = 1_024
 BURST_START_OFFSET_SECONDS = 300
 BURST_END_OFFSET_SECONDS = 390
 BURST_DRAIN_OFFSET_SECONDS = 450
@@ -168,6 +173,8 @@ REQUIRED_CONSERVATION_BOUNDARIES = frozenset(
         "file-ingress",
         "priority-event-persistence",
         "file-event-persistence",
+        "priority-event-terminal-persistence",
+        "file-event-terminal-persistence",
         "sequence-checkpoint",
         "sequence-journal",
         "trace-graph-mutation",
@@ -204,6 +211,11 @@ EXPECTED_AGENT_IDENTIFIER = "com.maccrab.agent"
 AGENT_PAYLOAD_PATH = (
     "MacCrab.app/Contents/Library/SystemExtensions/"
     "com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+)
+AGENT_RULE_MANIFEST_PATH = (
+    "MacCrab.app/Contents/Library/SystemExtensions/"
+    "com.maccrab.agent.systemextension/Contents/Resources/"
+    "compiled_rules/manifest.json"
 )
 
 HEX_OBJECT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -469,31 +481,136 @@ def fixed_tool(path: str) -> str:
     return path
 
 
+def validate_payload_inventory_symlink_modes(
+    entries: Sequence[Any], *, path: str
+) -> None:
+    """Reject candidate inventories whose links are unsafe after root install."""
+    for index, raw_entry in enumerate(entries):
+        entry = object_value(raw_entry, f"{path}[{index}]")
+        if entry.get("kind") != "symlink":
+            continue
+        mode = int_value(entry.get("mode"), f"{path}[{index}].mode")
+        if mode > 0o7777:
+            fail(f"{path}[{index}].mode must be a filesystem permission mode")
+        if mode & 0o555 != 0o555:
+            fail(
+                f"{path}[{index}] symbolic link is not readable/traversable "
+                "by every user"
+            )
+        if mode & 0o022:
+            fail(f"{path}[{index}] symbolic link is group/world writable")
+
+
+def rule_corpus_artifact_evidence(raw: Any, path: str) -> Dict[str, Any]:
+    evidence = object_value(raw, path)
+    if set(evidence) != {
+        "manifest_path",
+        "manifest_sha256",
+        "bundle_version",
+        "manifest_hash_entry_count",
+    }:
+        fail(f"{path} inventory is incomplete or unknown")
+    if string_value(
+        evidence.get("manifest_path"), f"{path}.manifest_path"
+    ) != AGENT_RULE_MANIFEST_PATH:
+        fail(f"{path}.manifest_path is not the sealed System Extension corpus")
+    return {
+        "manifest_path": AGENT_RULE_MANIFEST_PATH,
+        "manifest_sha256": require_sha(
+            evidence.get("manifest_sha256"), f"{path}.manifest_sha256"
+        ),
+        "bundle_version": string_value(
+            evidence.get("bundle_version"), f"{path}.bundle_version"
+        ),
+        "manifest_hash_entry_count": int_value(
+            evidence.get("manifest_hash_entry_count"),
+            f"{path}.manifest_hash_entry_count",
+            minimum=1,
+        ),
+    }
+
+
+def validate_payload_inventory_binding(
+    inventory: Mapping[str, Any], *, rule_corpus: Mapping[str, Any], path: str
+) -> None:
+    entries = list_value(
+        inventory.get("entries"), f"{path}.entries", nonempty=True
+    )
+    validate_payload_inventory_symlink_modes(entries, path=f"{path}.entries")
+    if int_value(
+        inventory.get("entry_count"), f"{path}.entry_count", minimum=1
+    ) != len(entries):
+        fail(f"{path}.entry_count does not match its entries")
+    paths: List[str] = []
+    for index, raw_entry in enumerate(entries):
+        entry = object_value(raw_entry, f"{path}.entries[{index}]")
+        paths.append(
+            string_value(entry.get("path"), f"{path}.entries[{index}].path")
+        )
+    if len(set(paths)) != len(paths):
+        fail(f"{path}.entries contains duplicate paths")
+    if require_sha(inventory.get("sha256"), f"{path}.sha256") \
+            != sha256_bytes(canonical_json_bytes(entries)):
+        fail(f"{path}.sha256 does not bind its canonical entries")
+    manifest_rows = [
+        object_value(entry, f"{path}.manifest entry")
+        for entry in entries
+        if object_value(entry, f"{path}.entry").get("path")
+        == AGENT_RULE_MANIFEST_PATH
+    ]
+    if len(manifest_rows) != 1:
+        fail(f"{path} must contain exactly one sealed rule manifest row")
+    manifest_row = manifest_rows[0]
+    if manifest_row.get("kind") != "file" \
+            or require_sha(
+                manifest_row.get("sha256"), f"{path}.manifest.sha256"
+            ) != rule_corpus["manifest_sha256"] \
+            or int_value(
+                manifest_row.get("size_bytes"),
+                f"{path}.manifest.size_bytes",
+                minimum=1,
+            ) < 1:
+        fail(f"{path} sealed rule manifest row is not the recorded corpus")
+
+
 def inventory_mounted_payload(mountpoint: pathlib.Path) -> Tuple[List[Dict[str, Any]], str]:
     entries: List[Dict[str, Any]] = []
     for path in sorted(mountpoint.rglob("*"), key=lambda item: item.relative_to(mountpoint).as_posix()):
         relative = path.relative_to(mountpoint).as_posix()
         stat_result = path.lstat()
-        if path.is_symlink():
+        mode = stat_result.st_mode & 0o7777
+        if stat.S_ISLNK(stat_result.st_mode):
+            # A release inspection normally runs as the build owner, so an
+            # owner-only link can look usable here and then become unreadable
+            # when install.sh changes ownership to root.  Enforce the numeric
+            # cross-user contract and reject write authority for non-owners.
+            # lstat/readlink never dereference an arbitrary signed link target.
+            if mode & 0o555 != 0o555:
+                fail(
+                    "mounted payload symbolic link is not readable/traversable "
+                    f"by every user: {relative}"
+                )
+            if mode & 0o022:
+                fail(f"mounted payload symbolic link is group/world writable: {relative}")
             entries.append({
                 "path": relative,
                 "kind": "symlink",
                 "target": os.readlink(str(path)),
-                "mode": stat_result.st_mode & 0o7777,
+                "mode": mode,
             })
-        elif path.is_file():
+        elif stat.S_ISREG(stat_result.st_mode):
             entries.append({
                 "path": relative,
                 "kind": "file",
                 "size_bytes": stat_result.st_size,
                 "sha256": sha256_file(path),
-                "mode": stat_result.st_mode & 0o7777,
+                "mode": mode,
             })
-        elif path.is_dir():
+        elif stat.S_ISDIR(stat_result.st_mode):
             entries.append({
                 "path": relative,
                 "kind": "directory",
-                "mode": stat_result.st_mode & 0o7777,
+                "mode": mode,
             })
         else:
             fail(f"mounted payload contains unsupported filesystem object: {relative}")
@@ -585,6 +702,44 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
         )
 
         entries, inventory_sha = inventory_mounted_payload(mountpoint)
+        rule_manifest_path = mountpoint / AGENT_RULE_MANIFEST_PATH
+        if rule_manifest_path.is_symlink() or not rule_manifest_path.is_file():
+            fail("sealed System Extension rule manifest is missing or redirected")
+        if rule_manifest_path.stat().st_size <= 0 \
+                or rule_manifest_path.stat().st_size > 8 * MIB:
+            fail("sealed System Extension rule manifest has an invalid size")
+        rule_manifest_data = rule_manifest_path.read_bytes()
+        try:
+            rule_manifest = object_value(
+                json.loads(rule_manifest_data), "sealed rule manifest"
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            fail(f"sealed System Extension rule manifest is invalid JSON: {exc}")
+        if set(rule_manifest) != {"schema_version", "bundle_version", "hashes"}:
+            fail("sealed System Extension rule manifest inventory is invalid")
+        if int_value(
+            rule_manifest.get("schema_version"),
+            "sealed rule manifest.schema_version",
+            minimum=1,
+        ) != 1:
+            fail("sealed System Extension rule manifest schema is unsupported")
+        rule_hashes = object_value(
+            rule_manifest.get("hashes"), "sealed rule manifest.hashes"
+        )
+        if not rule_hashes:
+            fail("sealed System Extension rule manifest has no hash entries")
+        for relative, digest in rule_hashes.items():
+            string_value(relative, "sealed rule manifest hash path")
+            require_sha(digest, f"sealed rule manifest hash {relative}")
+        rule_corpus = {
+            "manifest_path": AGENT_RULE_MANIFEST_PATH,
+            "manifest_sha256": sha256_bytes(rule_manifest_data),
+            "bundle_version": string_value(
+                rule_manifest.get("bundle_version"),
+                "sealed rule manifest.bundle_version",
+            ),
+            "manifest_hash_entry_count": len(rule_hashes),
+        }
         attestation_path = mountpoint / "MacCrab.app/Contents/Resources/release-input-attestation.txt"
         attestation_sha = sha256_file(attestation_path)
         attestation_lines = attestation_path.read_text(encoding="utf-8").splitlines()
@@ -612,6 +767,7 @@ def inspect_artifact_full(dmg: pathlib.Path) -> Dict[str, Any]:
                 "bundle_version": agent_short_version,
                 "build_version": agent_build_version,
             },
+            "rule_corpus": rule_corpus,
             "notarization_status": "accepted",
             "stapled": True,
             "gatekeeper_accepted": True,
@@ -639,6 +795,35 @@ def inspect_artifact(dmg: pathlib.Path, level: str) -> Dict[str, Any]:
         return inspect_artifact_full(dmg)
     if level != "digest":
         fail(f"unsupported artifact inspection level: {level}")
+    fixture_entries = [
+        {
+            "path": dmg.name,
+            "kind": "file",
+            "size_bytes": dmg.stat().st_size,
+            "sha256": sha256_file(dmg),
+        },
+        {
+            "path": AGENT_PAYLOAD_PATH,
+            "kind": "file",
+            "size_bytes": dmg.stat().st_size,
+            "sha256": sha256_file(dmg),
+        },
+        {
+            "path": AGENT_RULE_MANIFEST_PATH,
+            "kind": "file",
+            "size_bytes": dmg.stat().st_size,
+            "sha256": sha256_file(dmg),
+        },
+        *[
+            {
+                "path": relative,
+                "kind": "file",
+                "size_bytes": dmg.stat().st_size,
+                "sha256": sha256_file(dmg),
+            }
+            for relative, _ in CONTAINMENT_CANDIDATE_BINARIES.values()
+        ],
+    ]
     return {
         "inspection_level": "digest-only-test-fixture",
         "codesign_verified": False,
@@ -655,6 +840,12 @@ def inspect_artifact(dmg: pathlib.Path, level: str) -> Dict[str, Any]:
             "bundle_version": "test-fixture",
             "build_version": "test-fixture",
         },
+        "rule_corpus": {
+            "manifest_path": AGENT_RULE_MANIFEST_PATH,
+            "manifest_sha256": sha256_file(dmg),
+            "bundle_version": "test-fixture",
+            "manifest_hash_entry_count": 1,
+        },
         "notarization_status": "not-checked",
         "notarization_submission_id": "00000000-0000-4000-8000-000000000000",
         "stapled": False,
@@ -663,21 +854,9 @@ def inspect_artifact(dmg: pathlib.Path, level: str) -> Dict[str, Any]:
         "release_input_attestation": {},
         "payload_inventory": {
             "format": "test-fixture",
-            "entry_count": 2 + len(CONTAINMENT_CANDIDATE_BINARIES),
-            "sha256": sha256_file(dmg),
-            "entries": [
-                {"path": dmg.name, "kind": "file", "size_bytes": dmg.stat().st_size, "sha256": sha256_file(dmg)},
-                {"path": AGENT_PAYLOAD_PATH, "kind": "file", "size_bytes": dmg.stat().st_size, "sha256": sha256_file(dmg)},
-                *[
-                    {
-                        "path": relative,
-                        "kind": "file",
-                        "size_bytes": dmg.stat().st_size,
-                        "sha256": sha256_file(dmg),
-                    }
-                    for relative, _ in CONTAINMENT_CANDIDATE_BINARIES.values()
-                ],
-            ],
+            "entry_count": len(fixture_entries),
+            "sha256": sha256_bytes(canonical_json_bytes(fixture_entries)),
+            "entries": fixture_entries,
         },
     }
 
@@ -834,6 +1013,10 @@ def candidate_document(
         )
         fixture_agent["bundle_version"] = version
         fixture_agent["build_version"] = build_number
+        fixture_rule_corpus = object_value(
+            inspection.get("rule_corpus"), "fixture rule corpus"
+        )
+        fixture_rule_corpus["bundle_version"] = version
     return {
         "schema": CANDIDATE_SCHEMA,
         "created_at": utc_now(),
@@ -902,6 +1085,20 @@ def validate_candidate_document(
         fail("candidate manifest does not describe the exact DMG bytes supplied to the release")
 
     verification = object_value(document.get("artifact_verification"), "artifact_verification")
+    recorded_rule_corpus = rule_corpus_artifact_evidence(
+        verification.get("rule_corpus"), "artifact_verification.rule_corpus"
+    )
+    recorded_inventory = object_value(
+        verification.get("payload_inventory"),
+        "artifact_verification.payload_inventory",
+    )
+    if recorded_rule_corpus["bundle_version"] != version:
+        fail("candidate sealed rule corpus version does not match candidate version")
+    validate_payload_inventory_binding(
+        recorded_inventory,
+        rule_corpus=recorded_rule_corpus,
+        path="artifact_verification.payload_inventory",
+    )
     recorded_level = string_value(verification.get("inspection_level"), "artifact_verification.inspection_level")
     if artifact_checks == "full":
         if recorded_level != "full":
@@ -963,10 +1160,14 @@ def validate_candidate_document(
         for key in ("release_input_attestation_sha256",):
             if inspected.get(key) != require_sha(verification.get(key), f"artifact_verification.{key}"):
                 fail(f"current DMG {key} does not match the candidate manifest")
-        recorded_inventory = object_value(verification.get("payload_inventory"), "artifact_verification.payload_inventory")
         inspected_inventory = object_value(inspected.get("payload_inventory"), "inspected payload inventory")
         if require_sha(recorded_inventory.get("sha256"), "artifact_verification.payload_inventory.sha256") != inspected_inventory.get("sha256"):
             fail("mounted DMG payload inventory changed since candidate recording")
+        inspected_rule_corpus = rule_corpus_artifact_evidence(
+            inspected.get("rule_corpus"), "inspected rule corpus"
+        )
+        if inspected_rule_corpus != recorded_rule_corpus:
+            fail("mounted sealed rule corpus changed since candidate recording")
     return dict(candidate)
 
 
@@ -1674,6 +1875,81 @@ def validate_runtime_report(
         require_zero(storage.get(key), f"runtime.measurements.event_storage.{key}")
     require_true(storage.get("search_tier_gaps_reconcile_exactly"), "runtime.measurements.event_storage.search_tier_gaps_reconcile_exactly")
     require_true(storage.get("search_tier_gaps_visible"), "runtime.measurements.event_storage.search_tier_gaps_visible")
+    count_windows = list_value(
+        storage.get("event_type_count_windows"),
+        "runtime.measurements.event_storage.event_type_count_windows",
+    )
+    if len(count_windows) != len(samples):
+        fail("event-type count window evidence does not cover every sample")
+    normalized_count_windows = [
+        object_value(
+            row,
+            f"runtime.measurements.event_storage.event_type_count_windows[{index}]",
+        )
+        for index, row in enumerate(count_windows)
+    ]
+    sample_count_windows = [
+        object_value(
+            object_value(sample, f"runtime.samples[{index}]").get(
+                "event_type_count_window"
+            ),
+            f"runtime.samples[{index}].event_type_count_window",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if normalized_count_windows != sample_count_windows:
+        fail("event-type count window aggregate does not match raw samples")
+    for index, row in enumerate(normalized_count_windows):
+        if int_value(
+            row.get("gap_records"),
+            f"runtime event-type count window {index}.gap_records",
+        ) != 0:
+            fail("event-type count window contains exact-evidence gaps")
+    search_rows = list_value(
+        storage.get("event_search_projections"),
+        "runtime.measurements.event_storage.event_search_projections",
+    )
+    if len(search_rows) != len(samples):
+        fail("event-search coverage evidence does not cover every sample")
+    normalized_search_rows = [
+        object_value(
+            row,
+            f"runtime.measurements.event_storage.event_search_projections[{index}]",
+        )
+        for index, row in enumerate(search_rows)
+    ]
+    sample_search_rows = [
+        object_value(
+            object_value(sample, f"runtime.samples[{index}]").get(
+                "event_search_projection"
+            ),
+            f"runtime.samples[{index}].event_search_projection",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if normalized_search_rows != sample_search_rows:
+        fail("event-search coverage aggregate does not match raw samples")
+    for index, row in enumerate(normalized_search_rows):
+        if int_value(
+            row.get("gap_records_total"),
+            f"runtime event-search projection {index}.gap_records_total",
+        ) != 0:
+            fail("event-search coverage contains exact-evidence gaps")
+    journal_recovery = object_value(
+        storage.get("journal_recovery"),
+        "runtime.measurements.event_storage.journal_recovery",
+    )
+    sample_journal_recovery = [
+        object_value(
+            object_value(sample, f"runtime.samples[{index}]").get(
+                "event_journal_recovery"
+            ),
+            f"runtime.samples[{index}].event_journal_recovery",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if any(row != journal_recovery for row in sample_journal_recovery):
+        fail("event-journal recovery aggregate does not match every sample")
     observed_budget_faults = sum(
         1
         for observation in observations
@@ -1693,6 +1969,97 @@ def validate_runtime_report(
         fail("TraceGraph writable duty does not reconcile with recorder observations")
     if writable < MIN_TRACE_WRITABLE_DUTY or writable > 1:
         fail("TraceGraph writable duty must be between 0.99 and 1.0")
+    graph_barrier_rows = [
+        trace_graph_recovery_barrier_sample(
+            object_value(
+                object_value(sample, "runtime sample").get(
+                    "trace_graph_recovery_barrier"
+                ),
+                "runtime sample.trace_graph_recovery_barrier",
+            ),
+            "runtime sample.trace_graph_recovery_barrier",
+        )
+        for sample in samples
+    ]
+    accepting_duty = sum(
+        1 for row in graph_barrier_rows
+        if row["accepting_mutations"] is True
+    ) / len(graph_barrier_rows)
+    recorded_accepting_duty = number_value(
+        trace.get("accepting_mutations_duty_fraction"),
+        "runtime.measurements.trace_graph.accepting_mutations_duty_fraction",
+        minimum=0,
+    )
+    if abs(recorded_accepting_duty - accepting_duty) > 0.000001:
+        fail("TraceGraph accepting-mutations duty does not reconcile with samples")
+    if accepting_duty < MIN_TRACE_WRITABLE_DUTY or accepting_duty > 1:
+        fail("TraceGraph accepting-mutations duty must be between 0.99 and 1.0")
+    if any(
+        row["recovery_mutation_queue_saturated"] is not False
+        for row in graph_barrier_rows
+    ):
+        fail("TraceGraph recovery mutation queue saturated during a sample")
+    if len({row["recovery_mutation_waiter_limit"] for row in graph_barrier_rows}) != 1:
+        fail("TraceGraph recovery mutation waiter limit changed during the epoch")
+    if graph_barrier_rows[0]["recovery_mutation_waiter_limit"] \
+            != TRACE_RECOVERY_MUTATION_WAITER_LIMIT:
+        fail("TraceGraph recovery mutation waiter limit is not the fixed production bound")
+    barrier_cumulative_keys = (
+        "recovery_mutation_waiter_high_watermark",
+        "recovery_mutation_waits_total",
+        "recovery_mutation_wait_releases_total",
+        "recovery_mutation_wait_cancellations_total",
+        "recovery_mutation_wait_closed_total",
+        "recovery_mutation_wait_saturations_total",
+        "recovery_mutation_wait_nanoseconds_total",
+        "recovery_mutation_max_wait_nanoseconds",
+        "recovery_writer_preemptions_total",
+    )
+    for key in barrier_cumulative_keys:
+        values = [row[key] for row in graph_barrier_rows]
+        if any(later < earlier for earlier, later in zip(values, values[1:])):
+            fail(f"TraceGraph barrier {key} counter reset during the epoch")
+
+    def barrier_delta(key: str) -> int:
+        return graph_barrier_rows[-1][key] - graph_barrier_rows[0][key]
+
+    waits_delta = barrier_delta("recovery_mutation_waits_total")
+    wait_releases_delta = barrier_delta(
+        "recovery_mutation_wait_releases_total"
+    )
+    wait_cancellations_delta = barrier_delta(
+        "recovery_mutation_wait_cancellations_total"
+    )
+    wait_closed_delta = barrier_delta("recovery_mutation_wait_closed_total")
+    waiter_gauge_delta = (
+        graph_barrier_rows[-1]["recovery_mutation_waiters"]
+        - graph_barrier_rows[0]["recovery_mutation_waiters"]
+    )
+    if waits_delta != (
+        waiter_gauge_delta + wait_releases_delta
+        + wait_cancellations_delta + wait_closed_delta
+    ):
+        fail("TraceGraph recovery mutation waiter epoch ledger does not conserve")
+    saturation_delta = barrier_delta("recovery_mutation_wait_saturations_total")
+    require_zero(
+        saturation_delta,
+        "runtime.measurements.trace_graph.recovery_mutation_wait_saturations_epoch_delta",
+    )
+    maximum_completed_wait = max(
+        row["recovery_mutation_max_wait_nanoseconds"]
+        for row in graph_barrier_rows
+    )
+    maximum_oldest_wait = max(
+        row["recovery_mutation_oldest_wait_nanoseconds"]
+        for row in graph_barrier_rows
+    )
+    if maximum_completed_wait > MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS:
+        fail("TraceGraph recovery mutation maximum wait exceeded five seconds")
+    if maximum_oldest_wait > MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS:
+        fail("TraceGraph oldest live recovery mutation wait exceeded five seconds")
+    if graph_barrier_rows[-1]["recovery_mutation_waiters"] != 0 \
+            or graph_barrier_rows[-1]["recovery_mutation_oldest_wait_nanoseconds"] != 0:
+        fail("TraceGraph recovery mutation queue did not drain at the epoch boundary")
     first_trace_shed = int_value(
         object_value(observations[0], "first recorder observation").get("trace_shed_mutations_total"),
         "first recorder trace shed",
@@ -1761,8 +2128,35 @@ def validate_runtime_report(
     )
     expected_trace_graph = {
         "writable_duty_fraction": writable,
+        "accepting_mutations_duty_fraction": accepting_duty,
         "mutation_shed": last_trace_shed - first_trace_shed,
         "recovery_oscillation_count": trace.get("recovery_oscillation_count"),
+        "recovery_mutation_queue_saturated_samples": 0,
+        "recovery_mutation_waiter_limit": graph_barrier_rows[0][
+            "recovery_mutation_waiter_limit"
+        ],
+        "recovery_mutation_waiter_high_watermark": max(
+            row["recovery_mutation_waiter_high_watermark"]
+            for row in graph_barrier_rows
+        ),
+        "recovery_mutation_waits_epoch_delta": waits_delta,
+        "recovery_mutation_wait_releases_epoch_delta": wait_releases_delta,
+        "recovery_mutation_wait_cancellations_epoch_delta":
+            wait_cancellations_delta,
+        "recovery_mutation_wait_closed_epoch_delta": wait_closed_delta,
+        "recovery_mutation_wait_saturations_epoch_delta": saturation_delta,
+        "recovery_writer_preemptions_epoch_delta": barrier_delta(
+            "recovery_writer_preemptions_total"
+        ),
+        "recovery_mutation_max_wait_nanoseconds": maximum_completed_wait,
+        "recovery_mutation_max_oldest_wait_nanoseconds": maximum_oldest_wait,
+        "final_recovery_mutation_waiters": graph_barrier_rows[-1][
+            "recovery_mutation_waiters"
+        ],
+        "final_recovery_mutation_oldest_wait_nanoseconds":
+            graph_barrier_rows[-1][
+                "recovery_mutation_oldest_wait_nanoseconds"
+            ],
         "write_accounting_reconciled_all_samples": True,
         "coalesced_noop_rows_epoch_delta": graph_coalesced_delta,
         "physical_write_suppressed_events_epoch_delta":
@@ -1770,6 +2164,7 @@ def validate_runtime_report(
         "physical_write_suppressed_rows_epoch_delta": graph_suppressed_rows_delta,
         "failed_batches_epoch_delta": graph_failed_batches_delta,
         "failed_rows_epoch_delta": graph_failed_rows_delta,
+        "failed_events_epoch_delta": graph_ingest_shed_delta,
     }
     if trace != expected_trace_graph:
         fail("TraceGraph aggregate does not reconcile with exact write ledgers")
@@ -1784,6 +2179,10 @@ def validate_runtime_report(
     require_zero(
         graph_failed_rows_delta,
         "runtime.measurements.trace_graph.failed_rows_epoch_delta",
+    )
+    require_zero(
+        graph_ingest_shed_delta,
+        "runtime.measurements.trace_graph.failed_events_epoch_delta",
     )
 
     trace_store = object_value(
@@ -2126,6 +2525,36 @@ def validate_runtime_report(
     rules = object_value(metrics.get("rules"), "runtime.measurements.rules")
     for key in ("sealed_rules_synchronized_before_readers", "corpus_parity", "ordinary_launch_without_admin_prompt"):
         require_true(rules.get(key), f"runtime.measurements.rules.{key}")
+    observed_rule_sync = object_value(
+        rules.get("observed_sync"),
+        "runtime.measurements.rules.observed_sync",
+    )
+    candidate_rule_corpus = rule_corpus_artifact_evidence(
+        rules.get("candidate_corpus"),
+        "runtime.measurements.rules.candidate_corpus",
+    )
+    manifest_rule_corpus = rule_corpus_artifact_evidence(
+        candidate_verification.get("rule_corpus"),
+        "candidate.artifact_verification.rule_corpus",
+    )
+    if candidate_rule_corpus != manifest_rule_corpus:
+        fail("runtime rule evidence does not bind the candidate manifest corpus")
+    if observed_rule_sync.get("installed_manifest_sha256") \
+            != candidate_rule_corpus["manifest_sha256"] \
+            or observed_rule_sync.get("installed_manifest_hash_entry_count") \
+            != candidate_rule_corpus["manifest_hash_entry_count"] \
+            or observed_rule_sync.get("version") \
+            != candidate_rule_corpus["bundle_version"]:
+        fail("installed rule corpus digest/count/version does not match candidate")
+    sample_rule_sync = [
+        object_value(
+            object_value(sample, f"runtime.samples[{index}]").get("rule_sync"),
+            f"runtime.samples[{index}].rule_sync",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if any(row != observed_rule_sync for row in sample_rule_sync):
+        fail("rule synchronization aggregate does not match every sample")
 
     tools = object_value(metrics.get("shipped_tools"), "runtime.measurements.shipped_tools")
     for tool_name in ("maccrabctl", "maccrab_mcp"):
@@ -2142,16 +2571,26 @@ def validate_runtime_report(
 
     evidence = object_value(report.get("evidence"), "runtime.evidence")
     payload_inventory_sha = require_sha(evidence.get("payload_inventory_sha256"), "runtime.evidence.payload_inventory_sha256")
-    candidate_verification = object_value(
+    runtime_candidate_verification = object_value(
         report.get("candidate_artifact_verification"), "runtime.candidate_artifact_verification"
     )
     if payload_inventory_sha != require_sha(
-        candidate_verification.get("payload_inventory_sha256"),
+        runtime_candidate_verification.get("payload_inventory_sha256"),
         "runtime.candidate_artifact_verification.payload_inventory_sha256",
     ):
         fail("runtime payload inventory binding is internally inconsistent")
     if payload_inventory_sha != payload_inventory_sha256:
         fail("runtime report does not bind the candidate manifest payload inventory")
+    runtime_rule_corpus = rule_corpus_artifact_evidence(
+        runtime_candidate_verification.get("rule_corpus"),
+        "runtime.candidate_artifact_verification.rule_corpus",
+    )
+    expected_rule_corpus = rule_corpus_artifact_evidence(
+        candidate_verification.get("rule_corpus"),
+        "candidate.artifact_verification.rule_corpus",
+    )
+    if runtime_rule_corpus != expected_rule_corpus:
+        fail("runtime report does not bind the candidate rule corpus")
     raw_samples_sha = require_sha(evidence.get("raw_samples_sha256"), "runtime.evidence.raw_samples_sha256")
     if raw_samples_sha != samples_sha:
         fail("runtime raw_samples_sha256 does not match the embedded full-interval samples")
@@ -2183,6 +2622,298 @@ def heartbeat_counter_map(
         )
         for name, value in raw.items()
     }
+
+
+def heartbeat_lane_counter_map(
+    container: Mapping[str, Any], map_key: str, total_key: str, path: str
+) -> Tuple[Dict[str, int], int]:
+    """Read a fixed two-lane ledger and bind it to its published scalar."""
+    result = heartbeat_counter_map(container, map_key, path)
+    required_lanes = {"priority", "file"}
+    if set(result) != required_lanes:
+        fail(
+            f"{path}.{map_key} must publish the exact lane inventory "
+            f"{sorted(required_lanes)}"
+        )
+    total = heartbeat_counter(container, total_key, path)
+    if sum(result.values()) != total:
+        fail(f"{path}.{map_key} does not reconcile with {path}.{total_key}")
+    return result, total
+
+
+def event_type_count_window_sample(
+    heartbeat: Mapping[str, Any], path: str = "heartbeat"
+) -> Dict[str, Any]:
+    """Normalize and verify the exact count-window evidence ledger."""
+    window_path = f"{path}.event_type_count_window"
+    window = object_value(
+        heartbeat.get("event_type_count_window"), window_path
+    )
+    available = bool_value(
+        window.get("query_available"), f"{window_path}.query_available"
+    )
+    if not available:
+        fail(f"{window_path} is unavailable")
+    result = {
+        "query_available": available,
+        "mutation_generation": int_value(
+            window.get("mutation_generation"),
+            f"{window_path}.mutation_generation",
+        ),
+        "requested_duration_seconds": int_value(
+            window.get("requested_duration_seconds"),
+            f"{window_path}.requested_duration_seconds",
+            minimum=1,
+        ),
+        "effective_duration_seconds": int_value(
+            window.get("effective_duration_seconds"),
+            f"{window_path}.effective_duration_seconds",
+        ),
+        "requested_window_complete": bool_value(
+            window.get("requested_window_complete"),
+            f"{window_path}.requested_window_complete",
+        ),
+        "complete": bool_value(
+            window.get("complete"), f"{window_path}.complete"
+        ),
+        "canonical_poison_records": heartbeat_counter(
+            window, "canonical_poison_records", window_path
+        ),
+        "corrupt_legacy_records": heartbeat_counter(
+            window, "corrupt_legacy_records", window_path
+        ),
+        "inherited_legacy_loss_records": heartbeat_counter(
+            window, "inherited_legacy_loss_records", window_path
+        ),
+        "resource_limited_records": heartbeat_counter(
+            window, "resource_limited_records", window_path
+        ),
+        "gap_records": heartbeat_counter(window, "gap_records", window_path),
+    }
+    reason_total = sum(
+        result[key]
+        for key in (
+            "canonical_poison_records",
+            "corrupt_legacy_records",
+            "inherited_legacy_loss_records",
+            "resource_limited_records",
+        )
+    )
+    if result["gap_records"] != reason_total:
+        fail(f"{window_path}.gap_records does not equal its reason ledger")
+    expected_complete = (
+        result["requested_window_complete"] and reason_total == 0
+    )
+    if result["complete"] is not expected_complete:
+        fail(f"{window_path}.complete hides an incomplete window or evidence gap")
+    if result["requested_window_complete"] \
+            and result["effective_duration_seconds"] \
+            != result["requested_duration_seconds"]:
+        fail(f"{window_path} complete window has a different effective duration")
+    return result
+
+
+def event_search_projection_sample(
+    heartbeat: Mapping[str, Any], path: str = "heartbeat"
+) -> Dict[str, Any]:
+    """Normalize the sparse-search coverage ledger without claiming exactness."""
+    search_path = f"{path}.event_search_projection"
+    search = object_value(
+        heartbeat.get("event_search_projection"), search_path
+    )
+    available = bool_value(
+        search.get("query_available"), f"{search_path}.query_available"
+    )
+    if not available:
+        fail(f"{search_path} is unavailable")
+    result = {
+        "query_available": available,
+        "mutation_generation": int_value(
+            search.get("mutation_generation"),
+            f"{search_path}.mutation_generation",
+        ),
+        "requested_duration_seconds": int_value(
+            search.get("requested_duration_seconds"),
+            f"{search_path}.requested_duration_seconds",
+            minimum=1,
+        ),
+        "effective_duration_seconds": int_value(
+            search.get("effective_duration_seconds"),
+            f"{search_path}.effective_duration_seconds",
+        ),
+        "requested_window_complete": bool_value(
+            search.get("requested_window_complete"),
+            f"{search_path}.requested_window_complete",
+        ),
+        "projection_considered": heartbeat_counter(
+            search, "projection_considered", search_path
+        ),
+        "projection_materialized": heartbeat_counter(
+            search, "projection_materialized", search_path
+        ),
+        "projection_omitted_quota": heartbeat_counter(
+            search, "projection_omitted_quota", search_path
+        ),
+        "projection_omitted_replaced": heartbeat_counter(
+            search, "projection_omitted_replaced", search_path
+        ),
+        "projection_omitted_physical": heartbeat_counter(
+            search, "projection_omitted_physical", search_path
+        ),
+        "projection_omitted_external": heartbeat_counter(
+            search, "projection_omitted_external", search_path
+        ),
+        "projection_omitted_migration": heartbeat_counter(
+            search, "projection_omitted_migration", search_path
+        ),
+        "projection_pending": heartbeat_counter(
+            search, "projection_pending", search_path
+        ),
+        "projection_omitted_total": heartbeat_counter(
+            search, "projection_omitted_total", search_path
+        ),
+        "canonical_poison_records": heartbeat_counter(
+            search, "canonical_poison_records", search_path
+        ),
+        "corrupt_legacy_records": heartbeat_counter(
+            search, "corrupt_legacy_records", search_path
+        ),
+        "inherited_legacy_loss_records": heartbeat_counter(
+            search, "inherited_legacy_loss_records", search_path
+        ),
+        "resource_limited_records": heartbeat_counter(
+            search, "resource_limited_records", search_path
+        ),
+        "gap_records_total": heartbeat_counter(
+            search, "gap_records_total", search_path
+        ),
+        "complete": bool_value(
+            search.get("complete"), f"{search_path}.complete"
+        ),
+    }
+    omitted_total = sum(
+        result[key]
+        for key in (
+            "projection_omitted_quota",
+            "projection_omitted_replaced",
+            "projection_omitted_physical",
+            "projection_omitted_external",
+            "projection_omitted_migration",
+            "projection_pending",
+        )
+    )
+    if result["projection_omitted_total"] != omitted_total:
+        fail(f"{search_path}.projection_omitted_total does not reconcile")
+    if result["projection_considered"] != (
+        result["projection_materialized"] + omitted_total
+    ):
+        fail(f"{search_path} projection coverage does not conserve")
+    gap_total = sum(
+        result[key]
+        for key in (
+            "canonical_poison_records",
+            "corrupt_legacy_records",
+            "inherited_legacy_loss_records",
+            "resource_limited_records",
+        )
+    )
+    if result["gap_records_total"] != gap_total:
+        fail(f"{search_path}.gap_records_total does not equal its reason ledger")
+    expected_complete = (
+        result["requested_window_complete"]
+        and gap_total == 0
+        and omitted_total == 0
+        and result["projection_considered"]
+        == result["projection_materialized"]
+    )
+    if result["complete"] is not expected_complete:
+        fail(f"{search_path}.complete hides sparse or gapped coverage")
+    return result
+
+
+def rule_sync_sample(
+    heartbeat: Mapping[str, Any], path: str = "heartbeat"
+) -> Dict[str, Any]:
+    sync_path = f"{path}.rule_sync"
+    sync = object_value(heartbeat.get("rule_sync"), sync_path)
+    status = string_value(sync.get("status"), f"{sync_path}.status")
+    if status not in ("installed", "unchanged"):
+        fail(f"{sync_path} did not verify and synchronize the sealed corpus")
+    result = {
+        "status": status,
+        "version": string_value(sync.get("version"), f"{sync_path}.version"),
+        "bundled_tampered": bool_value(
+            sync.get("bundled_tampered"), f"{sync_path}.bundled_tampered"
+        ),
+        "installed_tampered": bool_value(
+            sync.get("installed_tampered"), f"{sync_path}.installed_tampered"
+        ),
+        "installed_corpus_verified": bool_value(
+            sync.get("installed_corpus_verified"),
+            f"{sync_path}.installed_corpus_verified",
+        ),
+        "installed_manifest_sha256": require_sha(
+            sync.get("installed_manifest_sha256"),
+            f"{sync_path}.installed_manifest_sha256",
+        ),
+        "installed_manifest_hash_entry_count": int_value(
+            sync.get("installed_manifest_hash_entry_count"),
+            f"{sync_path}.installed_manifest_hash_entry_count",
+            minimum=1,
+        ),
+    }
+    if result["bundled_tampered"] or result["installed_tampered"] \
+            or not result["installed_corpus_verified"]:
+        fail(f"{sync_path} reports an unverified or tampered rule corpus")
+    return result
+
+
+def event_journal_recovery_sample(
+    heartbeat: Mapping[str, Any], path: str = "heartbeat"
+) -> Dict[str, Any]:
+    recovery_path = f"{path}.event_journal_recovery"
+    recovery = object_value(
+        heartbeat.get("event_journal_recovery"), recovery_path
+    )
+    result = {
+        "source_events": heartbeat_counter(
+            recovery, "source_events", recovery_path
+        ),
+        "migrated_events": heartbeat_counter(
+            recovery, "migrated_events", recovery_path
+        ),
+        "rolled_expired_events": heartbeat_counter(
+            recovery, "rolled_expired_events", recovery_path
+        ),
+        "corrupt_preserved_events": heartbeat_counter(
+            recovery, "corrupt_preserved_events", recovery_path
+        ),
+        "remaining_events": heartbeat_counter(
+            recovery, "remaining_events", recovery_path
+        ),
+        "complete": bool_value(
+            recovery.get("complete"), f"{recovery_path}.complete"
+        ),
+        "conserved": bool_value(
+            recovery.get("conserved"), f"{recovery_path}.conserved"
+        ),
+    }
+    accounted = sum(
+        result[key]
+        for key in (
+            "migrated_events",
+            "rolled_expired_events",
+            "corrupt_preserved_events",
+            "remaining_events",
+        )
+    )
+    expected_conserved = result["source_events"] == accounted
+    if result["conserved"] is not expected_conserved:
+        fail(f"{recovery_path}.conserved does not match its event ledger")
+    if not result["conserved"] or not result["complete"] \
+            or result["remaining_events"] != 0:
+        fail(f"{recovery_path} is not a complete conserving boundary")
+    return result
 
 
 def recorder_boundary(
@@ -2269,6 +3000,70 @@ def trace_graph_write_accounting_sample(
     if result["physical_write_suppressed_events_total"] \
             > heartbeat_counter(graph, "ingest_events_total", path):
         fail(f"{path} physical-write suppressed events exceed ingested events")
+    return result
+
+
+def trace_graph_recovery_barrier_sample(
+    graph: Mapping[str, Any], path: str
+) -> Dict[str, Any]:
+    """Read the exact bounded recovery-writer queue and prove its ledger."""
+    result: Dict[str, Any] = {
+        "accepting_mutations": bool_value(
+            graph.get("accepting_mutations"), f"{path}.accepting_mutations"
+        ),
+        "recovering": bool_value(graph.get("recovering"), f"{path}.recovering"),
+        "recovery_mutation_queue_saturated": bool_value(
+            graph.get("recovery_mutation_queue_saturated"),
+            f"{path}.recovery_mutation_queue_saturated",
+        ),
+    }
+    counter_keys = (
+        "recovery_mutation_waiters",
+        "recovery_mutation_waiter_limit",
+        "recovery_mutation_waiter_high_watermark",
+        "recovery_mutation_waits_total",
+        "recovery_mutation_wait_releases_total",
+        "recovery_mutation_wait_cancellations_total",
+        "recovery_mutation_wait_closed_total",
+        "recovery_mutation_wait_saturations_total",
+        "recovery_mutation_wait_nanoseconds_total",
+        "recovery_mutation_max_wait_nanoseconds",
+        "recovery_mutation_oldest_wait_nanoseconds",
+        "recovery_writer_preemptions_total",
+    )
+    result.update({key: heartbeat_counter(graph, key, path) for key in counter_keys})
+    waiters = result["recovery_mutation_waiters"]
+    limit = result["recovery_mutation_waiter_limit"]
+    high_watermark = result["recovery_mutation_waiter_high_watermark"]
+    if limit < 1:
+        fail(f"{path}.recovery_mutation_waiter_limit must be >= 1")
+    if limit != TRACE_RECOVERY_MUTATION_WAITER_LIMIT:
+        fail(
+            f"{path}.recovery_mutation_waiter_limit must equal the fixed "
+            f"production limit {TRACE_RECOVERY_MUTATION_WAITER_LIMIT}"
+        )
+    if waiters > limit:
+        fail(f"{path} recovery mutation waiters exceed the fixed queue limit")
+    if high_watermark < waiters or high_watermark > limit:
+        fail(f"{path} recovery mutation waiter high-watermark is outside the queue bounds")
+    if result["recovery_mutation_waits_total"] != (
+        waiters
+        + result["recovery_mutation_wait_releases_total"]
+        + result["recovery_mutation_wait_cancellations_total"]
+        + result["recovery_mutation_wait_closed_total"]
+    ):
+        fail(f"{path} recovery mutation waiter ledger does not conserve")
+    expected_saturated = result["recovering"] and waiters >= limit
+    if result["recovery_mutation_queue_saturated"] is not expected_saturated:
+        fail(f"{path} recovery mutation queue saturation gauge is inconsistent")
+    if result["recovery_mutation_queue_saturated"] \
+            and result["accepting_mutations"]:
+        fail(f"{path} saturated recovery queue cannot accept mutations")
+    if waiters == 0 and result["recovery_mutation_oldest_wait_nanoseconds"] != 0:
+        fail(f"{path} empty recovery queue reports a non-zero oldest wait")
+    if result["recovery_mutation_max_wait_nanoseconds"] \
+            > result["recovery_mutation_wait_nanoseconds_total"]:
+        fail(f"{path} recovery maximum wait exceeds total completed wait time")
     return result
 
 
@@ -2667,6 +3462,94 @@ def normalized_runtime_sample(
             path=f"recorder.{lane}-event-persistence",
         )
 
+    terminal_offered, terminal_offered_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_offered_by_lane",
+        "event_terminal_revision_offered_total",
+        "heartbeat",
+    )
+    terminal_unchanged, terminal_unchanged_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_unchanged_by_lane",
+        "event_terminal_revision_unchanged_total",
+        "heartbeat",
+    )
+    terminal_durable, terminal_durable_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_durable_by_lane",
+        "event_terminal_revision_durable_total",
+        "heartbeat",
+    )
+    terminal_dropped, terminal_dropped_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_dropped_by_lane",
+        "event_terminal_revision_dropped_total",
+        "heartbeat",
+    )
+    terminal_poisoned, terminal_poisoned_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_poisoned_by_lane",
+        "event_terminal_revision_poisoned_total",
+        "heartbeat",
+    )
+    terminal_buffer, terminal_buffer_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_buffer_depth_by_lane",
+        "event_terminal_revision_buffer_depth",
+        "heartbeat",
+    )
+    terminal_in_flight, terminal_in_flight_total = heartbeat_lane_counter_map(
+        heartbeat,
+        "event_terminal_revision_in_flight_depth_by_lane",
+        "event_terminal_revision_in_flight_depth",
+        "heartbeat",
+    )
+    terminal_conservation = bool_value(
+        heartbeat.get("event_terminal_revision_conservation"),
+        "heartbeat.event_terminal_revision_conservation",
+    )
+    computed_terminal_conservation = terminal_offered_total == (
+        terminal_unchanged_total
+        + terminal_durable_total
+        + terminal_dropped_total
+        + terminal_poisoned_total
+        + terminal_buffer_total
+        + terminal_in_flight_total
+    )
+    if terminal_conservation is not computed_terminal_conservation:
+        fail(
+            "heartbeat.event_terminal_revision_conservation does not match "
+            "the published terminal counters"
+        )
+    terminal_evidence_poisoned = bool_value(
+        heartbeat.get("event_terminal_revision_evidence_poisoned"),
+        "heartbeat.event_terminal_revision_evidence_poisoned",
+    )
+    computed_terminal_evidence_poisoned = (
+        terminal_dropped_total > 0
+        or terminal_poisoned_total > 0
+        or not computed_terminal_conservation
+    )
+    if terminal_evidence_poisoned is not computed_terminal_evidence_poisoned:
+        fail(
+            "heartbeat.event_terminal_revision_evidence_poisoned does not "
+            "match the published terminal counters"
+        )
+    terminal_repair_payload_expired_total = heartbeat_counter(
+        heartbeat, "event_journal_repair_payload_expired_total", "heartbeat"
+    )
+    for lane in ("priority", "file"):
+        boundaries[f"{lane}-event-terminal-persistence"] = recorder_boundary(
+            offered=terminal_offered[lane],
+            completed=terminal_unchanged[lane] + terminal_durable[lane],
+            queued=terminal_buffer[lane],
+            in_flight=terminal_in_flight[lane],
+            explicitly_shed=(
+                terminal_dropped[lane] + terminal_poisoned[lane]
+            ),
+            path=f"recorder.{lane}-event-terminal-persistence",
+        )
+
     checkpoint = object_value(
         heartbeat.get("sequence_checkpoint"), "heartbeat.sequence_checkpoint"
     )
@@ -2719,10 +3602,17 @@ def normalized_runtime_sample(
     graph_write_accounting = trace_graph_write_accounting_sample(
         graph, "heartbeat.tracegraph_storage_admission"
     )
+    graph_recovery_barrier = trace_graph_recovery_barrier_sample(
+        graph, "heartbeat.tracegraph_storage_admission"
+    )
     trace_store_admission = trace_store_admission_sample(
         trace_store, "heartbeat.traces_storage_admission"
     )
     alert_storage_admission = alert_storage_admission_sample(heartbeat)
+    event_type_count_window = event_type_count_window_sample(heartbeat)
+    event_search_projection = event_search_projection_sample(heartbeat)
+    rule_sync = rule_sync_sample(heartbeat)
+    event_journal_recovery = event_journal_recovery_sample(heartbeat)
 
     upstream_loss = sum(
         heartbeat_counter_map(
@@ -2750,10 +3640,20 @@ def normalized_runtime_sample(
             heartbeat.get("sequence_state_continuity_detail"),
             "heartbeat.sequence_state_continuity_detail",
         ),
+        "event_terminal_revision_conservation": terminal_conservation,
+        "event_terminal_revision_evidence_poisoned":
+            terminal_evidence_poisoned,
+        "event_journal_repair_payload_expired_total":
+            terminal_repair_payload_expired_total,
         "conservation": boundaries,
         "trace_graph_write_accounting": graph_write_accounting,
+        "trace_graph_recovery_barrier": graph_recovery_barrier,
         "trace_store_admission": trace_store_admission,
         "alert_storage_admission": alert_storage_admission,
+        "event_type_count_window": event_type_count_window,
+        "event_search_projection": event_search_projection,
+        "rule_sync": rule_sync,
+        "event_journal_recovery": event_journal_recovery,
         "losses": {
             "priority_lane_loss": boundaries["priority-ingress"]["explicitly_shed"],
             "kernel_loss": heartbeat_counter(heartbeat, "es_kernel_dropped_total", "heartbeat"),
@@ -2934,6 +3834,43 @@ def runtime_readiness_failures(
         if queued or in_flight:
             pending.append(f"{name} queued={queued} in_flight={in_flight}")
 
+    if sample.get("event_terminal_revision_conservation") is not True:
+        fatal.append("event terminal revision conservation is not holding")
+    if sample.get("event_terminal_revision_evidence_poisoned") is not False:
+        fatal.append("event terminal revision evidence is poisoned")
+    repair_payload_expired = int_value(
+        sample.get("event_journal_repair_payload_expired_total"),
+        f"{path}.event_journal_repair_payload_expired_total",
+    )
+    if repair_payload_expired:
+        fatal.append(
+            "cumulative event journal repair payload expirations="
+            f"{repair_payload_expired}"
+        )
+
+    count_window = object_value(
+        sample.get("event_type_count_window"),
+        f"{path}.event_type_count_window",
+    )
+    count_window_gaps = int_value(
+        count_window.get("gap_records"),
+        f"{path}.event_type_count_window.gap_records",
+    )
+    if count_window_gaps:
+        fatal.append(
+            f"exact event-type count window evidence gaps={count_window_gaps}"
+        )
+    search_projection = object_value(
+        sample.get("event_search_projection"),
+        f"{path}.event_search_projection",
+    )
+    search_gaps = int_value(
+        search_projection.get("gap_records_total"),
+        f"{path}.event_search_projection.gap_records_total",
+    )
+    if search_gaps:
+        fatal.append(f"event search exact-evidence gaps={search_gaps}")
+
     sequence_evictions = int_value(
         sample.get("sequence_pending_steps_evicted_total"),
         f"{path}.sequence_pending_steps_evicted_total",
@@ -2963,10 +3900,47 @@ def runtime_readiness_failures(
         if value:
             pending.append(f"TraceGraph {key}={value}")
 
+    barrier = object_value(
+        sample.get("trace_graph_recovery_barrier"),
+        f"{path}.trace_graph_recovery_barrier",
+    )
+    if barrier.get("accepting_mutations") is not True:
+        fatal.append("TraceGraph recovery barrier is not accepting mutations")
+    if barrier.get("recovery_mutation_queue_saturated") is not False:
+        fatal.append("TraceGraph recovery mutation queue is saturated")
+    saturation_total = int_value(
+        barrier.get("recovery_mutation_wait_saturations_total"),
+        f"{path}.trace_graph_recovery_barrier.recovery_mutation_wait_saturations_total",
+    )
+    if saturation_total:
+        fatal.append(
+            "cumulative TraceGraph recovery mutation queue saturations="
+            f"{saturation_total}"
+        )
+    max_wait = int_value(
+        barrier.get("recovery_mutation_max_wait_nanoseconds"),
+        f"{path}.trace_graph_recovery_barrier.recovery_mutation_max_wait_nanoseconds",
+    )
+    oldest_wait = int_value(
+        barrier.get("recovery_mutation_oldest_wait_nanoseconds"),
+        f"{path}.trace_graph_recovery_barrier.recovery_mutation_oldest_wait_nanoseconds",
+    )
+    if max_wait > MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS:
+        fatal.append(f"TraceGraph recovery maximum mutation wait is {max_wait}ns")
+    if oldest_wait > MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS:
+        fatal.append(f"TraceGraph oldest live recovery mutation wait is {oldest_wait}ns")
+    waiters = int_value(
+        barrier.get("recovery_mutation_waiters"),
+        f"{path}.trace_graph_recovery_barrier.recovery_mutation_waiters",
+    )
+    if waiters:
+        pending.append(f"TraceGraph recovery mutation waiters={waiters}")
+
     if observation.get("trace_writable") is not True:
         fatal.append("TraceGraph is not writable")
-    if observation.get("trace_recovering") is not False:
-        fatal.append("TraceGraph is recovering")
+    # Recovery is orthogonal to hard storage admission. A recovering graph is
+    # healthy while its bounded barrier remains accepting, unsaturated and
+    # conserving; the queue gauges above determine whether a drain must wait.
     graph_shed = int_value(
         observation.get("trace_shed_mutations_total"),
         f"{path}.trace_shed_mutations_total",
@@ -3241,6 +4215,24 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         "file_persistence_explicitly_shed_delta": delta(
             "file-event-persistence", "explicitly_shed"
         ),
+        "priority_terminal_persistence_offered_delta": delta(
+            "priority-event-terminal-persistence", "offered"
+        ),
+        "priority_terminal_persistence_completed_delta": delta(
+            "priority-event-terminal-persistence", "completed"
+        ),
+        "priority_terminal_persistence_explicitly_shed_delta": delta(
+            "priority-event-terminal-persistence", "explicitly_shed"
+        ),
+        "file_terminal_persistence_offered_delta": delta(
+            "file-event-terminal-persistence", "offered"
+        ),
+        "file_terminal_persistence_completed_delta": delta(
+            "file-event-terminal-persistence", "completed"
+        ),
+        "file_terminal_persistence_explicitly_shed_delta": delta(
+            "file-event-terminal-persistence", "explicitly_shed"
+        ),
         "combined_peak_offered_per_second": max(interval_rates),
         "trace_store_offered_delta": delta("trace-store-ingest", "offered"),
         "trace_store_completed_delta": delta("trace-store-ingest", "completed"),
@@ -3285,6 +4277,20 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             )
         if result[f"{lane}_persistence_explicitly_shed_delta"] != 0:
             fail(f"{lane} persistence shed fixed-workload events")
+        if result[f"{lane}_terminal_persistence_offered_delta"] <= 0 \
+                or result[f"{lane}_terminal_persistence_completed_delta"] <= 0:
+            fail(
+                f"fixed workload produced no measured {lane}-lane terminal "
+                "persistence/completion"
+            )
+        if result[f"{lane}_terminal_persistence_offered_delta"] \
+                != result[f"{lane}_terminal_persistence_completed_delta"]:
+            fail(
+                f"{lane} terminal persistence did not drain by the workload "
+                "window boundary"
+            )
+        if result[f"{lane}_terminal_persistence_explicitly_shed_delta"] != 0:
+            fail(f"{lane} terminal persistence shed fixed-workload revisions")
     if result["combined_peak_offered_per_second"] \
             < MIN_BURST_COMBINED_OFFERED_PER_SECOND:
         fail(
@@ -3351,6 +4357,46 @@ def build_runtime_report_from_observations(
         sample_from_recorder_observation(item, f"recorder.observations[{index}]")
         for index, item in enumerate(raw_observations)
     ]
+    event_type_count_windows = [
+        object_value(
+            sample.get("event_type_count_window"),
+            f"sample[{index}].event_type_count_window",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    count_window_generations = [
+        int_value(
+            row.get("mutation_generation"),
+            f"sample[{index}].event_type_count_window.mutation_generation",
+        )
+        for index, row in enumerate(event_type_count_windows)
+    ]
+    if any(
+        later < earlier
+        for earlier, later in zip(
+            count_window_generations, count_window_generations[1:]
+        )
+    ):
+        fail("event-type count mutation generation regressed during the epoch")
+    event_search_projections = [
+        object_value(
+            sample.get("event_search_projection"),
+            f"sample[{index}].event_search_projection",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    search_generations = [
+        int_value(
+            row.get("mutation_generation"),
+            f"sample[{index}].event_search_projection.mutation_generation",
+        )
+        for index, row in enumerate(event_search_projections)
+    ]
+    if any(
+        later < earlier
+        for earlier, later in zip(search_generations, search_generations[1:])
+    ):
+        fail("event-search mutation generation regressed during the epoch")
     workload_ingress = derive_workload_ingress(samples)
     duration = number_value(samples[-1].get("offset_seconds"), "last sample offset", minimum=MIN_EPOCH_SECONDS)
     captured_times = [
@@ -3397,6 +4443,36 @@ def build_runtime_report_from_observations(
     candidate = copy.deepcopy(object_value(candidate_manifest.get("candidate"), "candidate"))
     verification = object_value(candidate_manifest.get("artifact_verification"), "artifact_verification")
     inventory = object_value(verification.get("payload_inventory"), "artifact_verification.payload_inventory")
+    candidate_rule_corpus = rule_corpus_artifact_evidence(
+        verification.get("rule_corpus"),
+        "artifact_verification.rule_corpus",
+    )
+    rule_sync_rows = [
+        object_value(
+            sample.get("rule_sync"), f"sample[{index}].rule_sync"
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if any(row != rule_sync_rows[0] for row in rule_sync_rows[1:]):
+        fail("rule synchronization evidence changed during the epoch")
+    observed_rule_sync = rule_sync_rows[0]
+    if observed_rule_sync["installed_manifest_sha256"] \
+            != candidate_rule_corpus["manifest_sha256"] \
+            or observed_rule_sync["installed_manifest_hash_entry_count"] \
+            != candidate_rule_corpus["manifest_hash_entry_count"] \
+            or observed_rule_sync["version"] \
+            != candidate_rule_corpus["bundle_version"]:
+        fail("installed rule corpus does not match the sealed candidate corpus")
+    journal_recovery_rows = [
+        object_value(
+            sample.get("event_journal_recovery"),
+            f"sample[{index}].event_journal_recovery",
+        )
+        for index, sample in enumerate(samples)
+    ]
+    if any(row != journal_recovery_rows[0] for row in journal_recovery_rows[1:]):
+        fail("event-journal recovery evidence changed during the epoch")
+    observed_journal_recovery = journal_recovery_rows[0]
     workload_fields = {
         key: copy.deepcopy(workload.get(key))
         for key in (
@@ -3467,6 +4543,75 @@ def build_runtime_report_from_observations(
         )
         for sample in samples
     ]
+    graph_barrier_rows = [
+        trace_graph_recovery_barrier_sample(
+            object_value(
+                sample.get("trace_graph_recovery_barrier"),
+                "sample.trace_graph_recovery_barrier",
+            ),
+            "sample.trace_graph_recovery_barrier",
+        )
+        for sample in samples
+    ]
+    graph_accepting_duty = sum(
+        1 for row in graph_barrier_rows
+        if row["accepting_mutations"] is True
+    ) / len(graph_barrier_rows)
+    graph_barrier_cumulative_keys = (
+        "recovery_mutation_waiter_high_watermark",
+        "recovery_mutation_waits_total",
+        "recovery_mutation_wait_releases_total",
+        "recovery_mutation_wait_cancellations_total",
+        "recovery_mutation_wait_closed_total",
+        "recovery_mutation_wait_saturations_total",
+        "recovery_mutation_wait_nanoseconds_total",
+        "recovery_mutation_max_wait_nanoseconds",
+        "recovery_writer_preemptions_total",
+    )
+    for key in graph_barrier_cumulative_keys:
+        values = [int_value(row.get(key), f"TraceGraph barrier {key}") for row in graph_barrier_rows]
+        if any(later < earlier for earlier, later in zip(values, values[1:])):
+            fail(f"TraceGraph barrier {key} counter reset during the qualification epoch")
+    graph_waiter_limits = {
+        int_value(row.get("recovery_mutation_waiter_limit"), "TraceGraph waiter limit")
+        for row in graph_barrier_rows
+    }
+    if len(graph_waiter_limits) != 1:
+        fail("TraceGraph recovery mutation waiter limit changed during the epoch")
+    if graph_waiter_limits != {TRACE_RECOVERY_MUTATION_WAITER_LIMIT}:
+        fail("TraceGraph recovery mutation waiter limit is not the fixed production bound")
+
+    def graph_barrier_delta(key: str) -> int:
+        return int_value(graph_barrier_rows[-1].get(key), f"last TraceGraph {key}") \
+            - int_value(graph_barrier_rows[0].get(key), f"first TraceGraph {key}")
+
+    graph_waits_delta = graph_barrier_delta("recovery_mutation_waits_total")
+    graph_wait_releases_delta = graph_barrier_delta(
+        "recovery_mutation_wait_releases_total"
+    )
+    graph_wait_cancellations_delta = graph_barrier_delta(
+        "recovery_mutation_wait_cancellations_total"
+    )
+    graph_wait_closed_delta = graph_barrier_delta(
+        "recovery_mutation_wait_closed_total"
+    )
+    graph_wait_saturations_delta = graph_barrier_delta(
+        "recovery_mutation_wait_saturations_total"
+    )
+    graph_writer_preemptions_delta = graph_barrier_delta(
+        "recovery_writer_preemptions_total"
+    )
+    graph_waiter_gauge_delta = (
+        graph_barrier_rows[-1]["recovery_mutation_waiters"]
+        - graph_barrier_rows[0]["recovery_mutation_waiters"]
+    )
+    if graph_waits_delta != (
+        graph_waiter_gauge_delta
+        + graph_wait_releases_delta
+        + graph_wait_cancellations_delta
+        + graph_wait_closed_delta
+    ):
+        fail("TraceGraph recovery mutation waiter epoch ledger does not conserve")
     graph_cumulative_keys = (
         "write_attempts_total", "write_batches_committed_total",
         "write_batches_failed_total", "write_rows_attempted_total",
@@ -3511,6 +4656,19 @@ def build_runtime_report_from_observations(
     graph_failed_rows_delta = (
         int_value(graph_accounting_rows[-1].get("write_rows_failed_total"), "last graph failed rows")
         - int_value(graph_accounting_rows[0].get("write_rows_failed_total"), "first graph failed rows")
+    )
+    graph_failed_events_delta = (
+        int_value(
+            object_value(last_boundaries.get("trace-graph-mutation"), "last TraceGraph mutation").get("explicitly_shed"),
+            "last TraceGraph failed events",
+        )
+        - int_value(
+            object_value(
+                object_value(samples[0].get("conservation"), "first sample conservation").get("trace-graph-mutation"),
+                "first TraceGraph mutation",
+            ).get("explicitly_shed"),
+            "first TraceGraph failed events",
+        )
     )
     trace_store_rows = [
         object_value(sample.get("trace_store_admission"), "sample.trace_store_admission")
@@ -3657,13 +4815,75 @@ def build_runtime_report_from_observations(
             "event_storage": {
                 "unreachable_budget_fault_count": sum(1 for item in raw_observations if item.get("event_budget_fault") is True),
                 "prune_vacuum_refill_loop_count": int_value(probes.get("prune_vacuum_refill_loop_count"), "probes.prune_vacuum_refill_loop_count"),
-                "search_tier_gaps_reconcile_exactly": bool_value(probes.get("search_tier_gaps_reconcile_exactly"), "probes.search_tier_gaps_reconcile_exactly"),
-                "search_tier_gaps_visible": bool_value(probes.get("search_tier_gaps_visible"), "probes.search_tier_gaps_visible"),
+                "event_type_count_windows": copy.deepcopy(
+                    event_type_count_windows
+                ),
+                "event_search_projections": copy.deepcopy(
+                    event_search_projections
+                ),
+                "journal_recovery": copy.deepcopy(
+                    observed_journal_recovery
+                ),
+                "search_tier_gaps_reconcile_exactly": all(
+                    row["gap_records_total"]
+                    == row["canonical_poison_records"]
+                    + row["corrupt_legacy_records"]
+                    + row["inherited_legacy_loss_records"]
+                    + row["resource_limited_records"]
+                    and row["projection_considered"]
+                    == row["projection_materialized"]
+                    + row["projection_omitted_total"]
+                    for row in event_search_projections
+                ),
+                "search_tier_gaps_visible": all(
+                    row["query_available"] is True
+                    and row["complete"] is (
+                        row["requested_window_complete"]
+                        and row["gap_records_total"] == 0
+                        and row["projection_omitted_total"] == 0
+                    )
+                    for row in event_search_projections
+                ),
             },
             "trace_graph": {
                 "writable_duty_fraction": trace_writable,
+                "accepting_mutations_duty_fraction": graph_accepting_duty,
                 "mutation_shed": trace_shed_delta,
                 "recovery_oscillation_count": max(0, recovery_transitions - 1),
+                "recovery_mutation_queue_saturated_samples": sum(
+                    1 for row in graph_barrier_rows
+                    if row["recovery_mutation_queue_saturated"] is True
+                ),
+                "recovery_mutation_waiter_limit": next(iter(graph_waiter_limits)),
+                "recovery_mutation_waiter_high_watermark": max(
+                    row["recovery_mutation_waiter_high_watermark"]
+                    for row in graph_barrier_rows
+                ),
+                "recovery_mutation_waits_epoch_delta": graph_waits_delta,
+                "recovery_mutation_wait_releases_epoch_delta":
+                    graph_wait_releases_delta,
+                "recovery_mutation_wait_cancellations_epoch_delta":
+                    graph_wait_cancellations_delta,
+                "recovery_mutation_wait_closed_epoch_delta": graph_wait_closed_delta,
+                "recovery_mutation_wait_saturations_epoch_delta":
+                    graph_wait_saturations_delta,
+                "recovery_writer_preemptions_epoch_delta":
+                    graph_writer_preemptions_delta,
+                "recovery_mutation_max_wait_nanoseconds": max(
+                    row["recovery_mutation_max_wait_nanoseconds"]
+                    for row in graph_barrier_rows
+                ),
+                "recovery_mutation_max_oldest_wait_nanoseconds": max(
+                    row["recovery_mutation_oldest_wait_nanoseconds"]
+                    for row in graph_barrier_rows
+                ),
+                "final_recovery_mutation_waiters": graph_barrier_rows[-1][
+                    "recovery_mutation_waiters"
+                ],
+                "final_recovery_mutation_oldest_wait_nanoseconds":
+                    graph_barrier_rows[-1][
+                        "recovery_mutation_oldest_wait_nanoseconds"
+                    ],
                 "write_accounting_reconciled_all_samples": True,
                 "coalesced_noop_rows_epoch_delta": graph_coalesced_delta,
                 "physical_write_suppressed_events_epoch_delta":
@@ -3672,6 +4892,7 @@ def build_runtime_report_from_observations(
                     graph_suppressed_rows_delta,
                 "failed_batches_epoch_delta": graph_failed_batches_delta,
                 "failed_rows_epoch_delta": graph_failed_rows_delta,
+                "failed_events_epoch_delta": graph_failed_events_delta,
             },
             "trace_store": {
                 "full_writer_duty_fraction": trace_store_writable,
@@ -3716,7 +4937,28 @@ def build_runtime_report_from_observations(
                     "investigation_sha256"
                 ),
             },
-            "rules": copy.deepcopy(object_value(probes.get("rules"), "probes.rules")),
+            "rules": {
+                "sealed_rules_synchronized_before_readers": (
+                    observed_rule_sync["installed_corpus_verified"] is True
+                ),
+                "corpus_parity": (
+                    observed_rule_sync["installed_manifest_sha256"]
+                    == candidate_rule_corpus["manifest_sha256"]
+                    and observed_rule_sync[
+                        "installed_manifest_hash_entry_count"
+                    ] == candidate_rule_corpus["manifest_hash_entry_count"]
+                    and observed_rule_sync["version"]
+                    == candidate_rule_corpus["bundle_version"]
+                ),
+                "ordinary_launch_without_admin_prompt": bool_value(
+                    object_value(
+                        probes.get("rules"), "probes.rules"
+                    ).get("ordinary_launch_without_admin_prompt"),
+                    "probes.rules.ordinary_launch_without_admin_prompt",
+                ),
+                "observed_sync": copy.deepcopy(observed_rule_sync),
+                "candidate_corpus": copy.deepcopy(candidate_rule_corpus),
+            },
             "shipped_tools": copy.deepcopy(object_value(probes.get("shipped_tools"), "probes.shipped_tools")),
         },
         "evidence": {
@@ -3732,7 +4974,10 @@ def build_runtime_report_from_observations(
         "recorder_probe_evidence": copy.deepcopy(
             object_value(probes.get("evidence"), "probes.evidence")
         ),
-        "candidate_artifact_verification": {"payload_inventory_sha256": inventory["sha256"]},
+        "candidate_artifact_verification": {
+            "payload_inventory_sha256": inventory["sha256"],
+            "rule_corpus": copy.deepcopy(candidate_rule_corpus),
+        },
     }
     return report
 
@@ -5367,15 +6612,6 @@ def live_runtime_recording(
         ),
         "live rule-reload output",
     )
-    below_floor = [
-        list_value(
-            object_value(item.get("heartbeat"), "observation heartbeat").get(
-                "events_retention_below_forensic_floor"
-            ),
-            "heartbeat.events_retention_below_forensic_floor",
-        )
-        for item in observations
-    ]
     graph_rows = [
         object_value(item["heartbeat"].get("tracegraph_storage_admission"), "tracegraph")
         for item in observations
@@ -5433,12 +6669,8 @@ def live_runtime_recording(
         "rule_corpus_sha256": rule_corpus_digest(root),
         "semantic_reasons": [],
         "prune_vacuum_refill_loop_count": vacuum_events,
-        "search_tier_gaps_reconcile_exactly": all(not values for values in below_floor),
-        "search_tier_gaps_visible": all(not values for values in below_floor),
         "macos_disk_writes_diagnostic_count": disk_diagnostics,
         "rules": {
-            "sealed_rules_synchronized_before_readers": True,
-            "corpus_parity": True,
             "ordinary_launch_without_admin_prompt": auth_events == 0,
         },
         "shipped_tools": tools,
@@ -6345,14 +7577,30 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
             "event_storage": {"unreachable_budget_fault_count": 0, "prune_vacuum_refill_loop_count": 0, "search_tier_gaps_reconcile_exactly": False, "search_tier_gaps_visible": False},
             "trace_graph": {
                 "writable_duty_fraction": 0,
+                "accepting_mutations_duty_fraction": 0,
                 "mutation_shed": 0,
                 "recovery_oscillation_count": 0,
+                "recovery_mutation_queue_saturated_samples": 0,
+                "recovery_mutation_waiter_limit":
+                    TRACE_RECOVERY_MUTATION_WAITER_LIMIT,
+                "recovery_mutation_waiter_high_watermark": 0,
+                "recovery_mutation_waits_epoch_delta": 0,
+                "recovery_mutation_wait_releases_epoch_delta": 0,
+                "recovery_mutation_wait_cancellations_epoch_delta": 0,
+                "recovery_mutation_wait_closed_epoch_delta": 0,
+                "recovery_mutation_wait_saturations_epoch_delta": 0,
+                "recovery_writer_preemptions_epoch_delta": 0,
+                "recovery_mutation_max_wait_nanoseconds": 0,
+                "recovery_mutation_max_oldest_wait_nanoseconds": 0,
+                "final_recovery_mutation_waiters": 0,
+                "final_recovery_mutation_oldest_wait_nanoseconds": 0,
                 "write_accounting_reconciled_all_samples": False,
                 "coalesced_noop_rows_epoch_delta": 0,
                 "physical_write_suppressed_events_epoch_delta": 0,
                 "physical_write_suppressed_rows_epoch_delta": 0,
                 "failed_batches_epoch_delta": 0,
                 "failed_rows_epoch_delta": 0,
+                "failed_events_epoch_delta": 0,
             },
             "trace_store": {
                 "full_writer_duty_fraction": 0,
@@ -6363,6 +7611,12 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
                 "start_offset_seconds": BURST_START_OFFSET_SECONDS,
                 "end_offset_seconds": BURST_END_OFFSET_SECONDS,
                 "drain_offset_seconds": BURST_DRAIN_OFFSET_SECONDS,
+                "priority_terminal_persistence_offered_delta": 0,
+                "priority_terminal_persistence_completed_delta": 0,
+                "priority_terminal_persistence_explicitly_shed_delta": 0,
+                "file_terminal_persistence_offered_delta": 0,
+                "file_terminal_persistence_completed_delta": 0,
+                "file_terminal_persistence_explicitly_shed_delta": 0,
                 "trace_graph_physical_write_suppressed_events_delta": 0,
                 "trace_graph_physical_write_suppressed_rows_delta": 0,
             },

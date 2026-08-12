@@ -557,7 +557,7 @@
 "appearance.mode" = "模式";
 "appearance.note" = "提示：無論何種模式，偵測、預防與回應一律保持開啟。只有儀表板導覽會改變。";
 "appearance.title" = "儀表板複雜度";
-"events.aggregateModeBanner" = "目前顯示每日摘要 — 將時間範圍縮小至最近 24 小時以內可查看逐筆事件詳細資訊";
+"events.aggregateModeBanner" = "目前顯示每日摘要 — 僅保留區間內提供精確的事件詳細資訊";
 "events.category" = "類別";
 "events.count" = "數量";
 "events.day" = "日期";

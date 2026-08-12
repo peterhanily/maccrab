@@ -377,22 +377,17 @@ struct EventStoreIncrementalVacuumTests {
         #expect(r >= 0)
     }
 
-    /// The low-disk fallback path: pruneOldest + incrementalVacuum +
-    /// walCheckpoint(TRUNCATE) is the chain that fires when full
-    /// VACUUM is gated out by free-disk pre-flight. Validate that
-    /// this chain runs to completion without errors and leaves the
-    /// store queryable — the path is exercised inside
-    /// `enforceDatabaseSizeCap` (private) but isolating it here gives
-    /// us a regression target.
-    @Test("Low-disk fallback chain: pruneOldest + incrementalVacuum + walCheckpoint")
+    /// Generic low-disk pruning owns only unmigrated legacy rows in rc.13.
+    /// Fresh canonical blocks retain an absolute 15-minute durable-admission
+    /// floor and may be removed only by authenticated whole-block expiry.
+    @Test("Low-disk fallback preserves fresh journal, then expires eligible whole blocks")
     func lowDiskFallbackChain() async throws {
         let (store, tmp, _) = try await makeStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Build then prune so there are at least some pages to
-        // touch — even though the EventStore-init gap means the
-        // freelist won't actually shrink the file, the chain
-        // shouldn't error or corrupt anything.
+        // Source timestamps do not control the retention floor. These events
+        // are fresh durable admissions even though their source time spans a
+        // historical-looking range.
         let base = Date()
         for i in 0..<100 {
             let proc = ProcessInfo(
@@ -412,19 +407,32 @@ struct EventStoreIncrementalVacuumTests {
             try await store.insert(event: ev)
         }
         let pruned = try await store.pruneOldest(count: 70)
-        #expect(pruned == 70)
+        #expect(pruned == 0)
+        #expect(try await store.maintenanceRetainedRecordCount() == 100)
 
-        // Run the chain. The EventStore gap means reclaim==0, but
-        // the chain must complete and the store must remain
-        // queryable.
+        // The low-disk physical-reclaim chain remains safe and queryable, but
+        // it cannot manufacture headroom by deleting protected evidence.
         _ = await store.walCheckpoint()
         let reclaimed = try await store.incrementalVacuum(maxPages: 200_000)
         #expect(reclaimed >= 0)
         _ = await store.walCheckpoint()
+        #expect(try await store.count() == 100)
 
-        // Queryable after the chain.
-        let remaining = try await store.count()
-        #expect(remaining == 30)
+        // Once the durable floor has elapsed, the journal-owned path expires
+        // complete authenticated blocks and rolls every event into aggregates.
+        let expired = try await store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 4_096
+        )
+        #expect(expired == 100)
+        #expect(try await store.count() == 0)
+        #expect(try await store.maintenanceRetainedRecordCount() == 0)
+        let aggregateCount = try await store.aggregates(
+            sinceDay: "0000-00-00"
+        ).reduce(0) { $0 + $1.count }
+        #expect(aggregateCount == 100)
     }
 }
 

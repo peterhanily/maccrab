@@ -587,7 +587,7 @@
 "appearance.mode" = "Mode";
 "appearance.note" = "Tip: detection, prevention, and response are always on regardless of mode. Only the dashboard navigation changes.";
 "appearance.title" = "Dashboard complexity";
-"events.aggregateModeBanner" = "Showing daily summaries — narrow the time range to last 24h or shorter for per-event detail";
+"events.aggregateModeBanner" = "Showing daily summaries — exact event details are available only for the retained interval";
 "events.category" = "Category";
 "events.count" = "Count";
 "events.day" = "Day";
@@ -965,3 +965,7 @@
 "system.otlpLifecycleDegradedTitle" = "Agent Trace receiver feature degraded";
 "system.sequenceContinuityDegradedTitle" = "Sequence restart continuity degraded";
 "system.sequenceContinuityGapChip" = "Detection continuity gap";
+
+/* rc.13 exact-retention coverage labels. */
+"overview.kpiEventRateIncomplete" = "Evidence coverage incomplete";
+"system.eventRateIncomplete" = "coverage incomplete";

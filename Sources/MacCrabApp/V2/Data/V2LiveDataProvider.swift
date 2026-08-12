@@ -181,13 +181,24 @@ public final class V2LiveDataProvider: V2DataProvider {
     public func events(limit: Int) async -> [V2MockEvent] {
         guard let eventStore else { return [] }
         do {
-            let raw = try await eventStore.events(
+            let snapshot = try await eventStore.exactEventsSnapshot(
                 since: Date().addingTimeInterval(-60 * 60),
                 category: nil, severity: nil, limit: limit
             )
-            return await Task.detached(priority: .userInitiated) {
-                raw.map(V2LiveDataProvider.toV2Event)
+            guard snapshot.isComplete else {
+                throw EventStoreError.exactEvidenceGap(
+                    poisonRecords: snapshot.poisonRecords.count,
+                    corruptLegacyRecords: snapshot.corruptLegacyRecords,
+                    inheritedLegacyLossRecords:
+                        snapshot.inheritedLegacyLossRecords,
+                    resourceLimitedRecords: snapshot.resourceLimitedRecords
+                )
+            }
+            let mapped = await Task.detached(priority: .userInitiated) {
+                snapshot.events.map(V2LiveDataProvider.toV2Event)
             }.value
+            withExtendedLifetime(snapshot) {}
+            return mapped
         } catch {
             lastErrorDescription = "events read: \(error)"
             return []
@@ -585,16 +596,24 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
         // Events/sec from last 1m bucket count.
         var eventsPerSec: Double = 0
+        var eventRateCoverageComplete = false
         var sparkBuckets: [Double] = []
         if let eventStore {
-            let counts = (try? await eventStore.eventCountsByCategory(since: now.addingTimeInterval(-60))) ?? [:]
-            let totalLastMin = counts.values.reduce(0, +)
-            eventsPerSec = Double(totalLastMin) / 60.0
+            if let countSnapshot = try? await eventStore
+                .eventCategoryCountSnapshot(
+                    since: now.addingTimeInterval(-60),
+                    until: now
+                ), countSnapshot.isComplete {
+                let totalLastMin = countSnapshot.counts.values.reduce(0, +)
+                eventsPerSec = Double(totalLastMin) / 60.0
+                eventRateCoverageComplete = true
+            }
             // 8 × 1-minute buckets for the sparkline.
-            let bins = (try? await eventStore.histogramBins(
+            if let histogram = try? await eventStore.histogramSnapshot(
                 spanSeconds: 8 * 60, stepSeconds: 60, endingAt: now, category: nil
-            )) ?? []
-            sparkBuckets = bins.map { Double($0.1) }
+            ), histogram.isComplete {
+                sparkBuckets = histogram.bins.map { Double($0.count) }
+            }
         }
         return V2OverviewKPIs(
             openAlerts24h: openAlerts,
@@ -604,6 +623,7 @@ public final class V2LiveDataProvider: V2DataProvider {
             activeCampaignsHigh: highCount,
             activeCampaignsMedium: medCount,
             eventsPerSecond: eventsPerSec,
+            eventRateCoverageComplete: eventRateCoverageComplete,
             eventsLast8Buckets: sparkBuckets
         )
     }

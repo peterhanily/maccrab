@@ -4,7 +4,7 @@ import MacCrabCore
 extension MacCrabCtl {
     static func listPrivacyAlerts(hours: Double? = nil) async {
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
             let all = try await store.alerts(since: since, limit: 500)
             let privAlerts = all.filter { $0.ruleId.hasPrefix("maccrab.privacy.") }

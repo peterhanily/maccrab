@@ -3,6 +3,50 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.13] — 2026-08-12
+
+### Evidence integrity
+- **Recent events now have one exact, authenticated journal.** Search and
+  dashboard rows are a bounded projection of that journal, and every surface
+  now says when projection coverage or retained history is incomplete instead
+  of presenting a partial result as proof that nothing happened.
+- **Late enrichment is durably tied to the event that produced it.** Reviewed
+  matches, hashes, signing data and deferred enrichment settle as an
+  authenticated terminal revision before downstream alert fan-out. Oversized or
+  damaged evidence becomes an explicit gap rather than a plausible truncated
+  event.
+- **Upgrades preserve legacy evidence fail-closed.** The schema-v8 migration
+  authenticates source rows, records inherited truncation, quarantines malformed
+  rows without losing their bytes, and rolls retained history into aggregates
+  before whole journal blocks expire.
+
+### Reliability and resource bounds
+- **The event pipeline has one process-wide memory budget.** Raw events,
+  prepared journal records, deferred enrichment, patches and storage workspace
+  share a bounded envelope with byte-aware backpressure and reserved forward
+  progress, preventing an enrichment burst from turning into unaccounted memory
+  growth or evidence loss.
+- **Storage recovery is crash-safe and capacity-aware.** Journal append,
+  terminal revision, projection replacement, expiry and migration all recheck
+  the physical family budget under the SQLite writer lock. A finalized database
+  can still open in shed-only mode under disk pressure so maintenance can make
+  it writable again.
+- **Read-only tools stay read-only.** The CLI and MCP server open their event and
+  alert stores without replaying migrations or writing connection metadata.
+
+### Privacy and operator truth
+- **Credential redaction is command-aware without erasing forensic context.**
+  Split and compact password/token arguments, bearer/JWT values and known vendor
+  credentials are removed, while private IP addresses, hostnames, paths, hashes
+  and opaque evidence remain available for investigation.
+- **Rates, histograms and search results report their real coverage.** The app,
+  CLI, MCP server and heartbeat expose effective retained windows and typed gap
+  reasons; missing history is shown as unknown rather than backfilled with zero.
+- **Release qualification now proves the new persistence boundaries.** The
+  installed-host report binds terminal-event conservation, exact search/count
+  coverage, rule-corpus identity and journal migration recovery to the signed
+  candidate before publication can proceed.
+
 ## [1.21.6-rc.7] — 2026-08-04
 
 Covers everything after rc.1. Release candidates rc.2–rc.6 were built and tested

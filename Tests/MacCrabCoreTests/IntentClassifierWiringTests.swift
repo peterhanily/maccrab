@@ -1027,12 +1027,17 @@ struct IntentClassifierWiringTests {
         let classifier = try source("Sources/MacCrabAgentKit/IntentEvidenceClassifier.swift")
         let briefBuilder = try source("Sources/MacCrabAgentKit/IntentBriefBuilder.swift")
 
-        let key = try #require(eventLoop.range(
-            of: "let intentScopeKey = IntentEvidenceClassifier.scopeKey(for: enrichedEvent)"
+        let scopeDefinition =
+            "let intentScopeKey = IntentEvidenceClassifier.scopeKey("
+        #expect(eventLoop.components(separatedBy: scopeDefinition).count == 2)
+        let key = try #require(eventLoop.range(of: scopeDefinition))
+        let keyInput = try #require(eventLoop.range(
+            of: "for: enrichedEvent",
+            range: key.lowerBound..<eventLoop.endIndex
         ))
         let observe = try #require(eventLoop.range(
             of: "treeKey: intentScopeKey",
-            range: key.lowerBound..<eventLoop.endIndex
+            range: keyInput.lowerBound..<eventLoop.endIndex
         ))
         let token = try #require(eventLoop.range(
             of: "observationToken: enrichedEvent.id.uuidString",
@@ -1042,29 +1047,35 @@ struct IntentClassifierWiringTests {
             of: "observedAt: enrichedEvent.timestamp",
             range: token.lowerBound..<eventLoop.endIndex
         ))
+        let snapshot = try #require(eventLoop.range(
+            of: "posteriorForBrief = await state.bayesianIntent.posterior(",
+            range: observedAt.lowerBound..<eventLoop.endIndex
+        ))
+        let snapshotScope = try #require(eventLoop.range(
+            of: "treeKey: intentScopeKey",
+            range: snapshot.lowerBound..<eventLoop.endIndex
+        ))
+        let refinementFallback = try #require(eventLoop.range(
+            of: "fallbackTreeKey: intentScopeKey",
+            range: snapshotScope.lowerBound..<eventLoop.endIndex
+        ))
         let independentGate = try #require(eventLoop.range(
             of: "posterior.observationAddedIndependentEvidence",
-            range: observedAt.lowerBound..<eventLoop.endIndex
+            range: refinementFallback.lowerBound..<eventLoop.endIndex
         ))
         let explanation = try #require(eventLoop.range(
             of: "for intent scope \\(posterior.treeKey)",
             range: independentGate.lowerBound..<eventLoop.endIndex
         ))
-        let snapshot = try #require(eventLoop.range(
-            of: "treeKey: intentScopeKey",
-            range: explanation.lowerBound..<eventLoop.endIndex
-        ))
-        let refinementFallback = try #require(eventLoop.range(
-            of: "fallbackTreeKey: intentScopeKey",
-            range: snapshot.lowerBound..<eventLoop.endIndex
-        ))
-        #expect(key.lowerBound < observe.lowerBound)
+        #expect(key.lowerBound < keyInput.lowerBound)
+        #expect(keyInput.lowerBound < observe.lowerBound)
         #expect(observe.lowerBound < token.lowerBound)
         #expect(token.lowerBound < observedAt.lowerBound)
-        #expect(observedAt.lowerBound < independentGate.lowerBound)
+        #expect(observedAt.lowerBound < snapshot.lowerBound)
+        #expect(snapshot.lowerBound < snapshotScope.lowerBound)
+        #expect(snapshotScope.lowerBound < refinementFallback.lowerBound)
+        #expect(refinementFallback.lowerBound < independentGate.lowerBound)
         #expect(independentGate.lowerBound < explanation.lowerBound)
-        #expect(explanation.lowerBound < snapshot.lowerBound)
-        #expect(snapshot.lowerBound < refinementFallback.lowerBound)
         #expect(!eventLoop.contains("IntentEvidenceClassifier.treeKey(for:"))
         #expect(classifier.contains("event.enrichments[\"ai_tool_session_id\"]"))
         #expect(classifier.contains("ai-operation:\\(boundedSessionID)"))
@@ -1097,12 +1108,16 @@ struct IntentClassifierWiringTests {
         let scopeBuild = try #require(eventLoop.range(
             of: "let refinementScope = IntentRefinementCache.scope("
         ))
-        let sessionID = try #require(eventLoop.range(
-            of: "sessionID: enrichedEvent.enrichments[\"ai_tool_session_id\"]",
+        let sessionLabel = try #require(eventLoop.range(
+            of: "sessionID:",
             range: scopeBuild.lowerBound..<eventLoop.endIndex
         ))
+        let sessionID = try #require(eventLoop.range(
+            of: "enrichedEvent.enrichments[\"ai_tool_session_id\"]",
+            range: sessionLabel.lowerBound..<eventLoop.endIndex
+        ))
         let briefDigestInput = try #require(eventLoop.range(
-            of: "brief: brief",
+            of: "brief: intentBrief",
             range: sessionID.lowerBound..<eventLoop.endIndex
         ))
         let lookup = try #require(eventLoop.range(
@@ -1127,7 +1142,8 @@ struct IntentClassifierWiringTests {
             range: recordStart.lowerBound..<cacheSource.endIndex
         ))
         let recordBody = cacheSource[recordStart.lowerBound..<lookupStart.lowerBound]
-        #expect(scopeBuild.lowerBound < sessionID.lowerBound)
+        #expect(scopeBuild.lowerBound < sessionLabel.lowerBound)
+        #expect(sessionLabel.lowerBound < sessionID.lowerBound)
         #expect(sessionID.lowerBound < briefDigestInput.lowerBound)
         #expect(briefDigestInput.lowerBound < lookup.lowerBound)
         #expect(lookup.lowerBound < begin.lowerBound)

@@ -544,7 +544,8 @@ public actor EventEnricher {
 
         let offer = await heavyEnrichmentPlane.offer(
             component: .fileContent,
-            binding: binding
+            binding: binding,
+            maximumResultBytes: max(1, scanner.maxBytes + 512)
         ) {
             let maximumBytes = scanner.maxBytes
             let maximumFileSize = scanner.maxFileSize
@@ -617,8 +618,24 @@ public actor EventEnricher {
     /// Terminal evidence patches for the daemon's bounded deferred
     /// re-evaluation lane.  The caller should batch by event ID before running
     /// detection so one event with multiple components is evaluated once.
-    public func drainDeferredEnrichments(limit: Int = 128) async -> [DeferredEventEnrichment] {
-        await heavyEnrichmentPlane.drainDeferredResults(limit: limit)
+    public func drainDeferredEnrichments(
+        limit: Int = 128,
+        maximumBytes: Int = Int.max
+    ) async -> [DeferredEventEnrichment] {
+        await heavyEnrichmentPlane.drainDeferredResults(
+            limit: limit,
+            maximumBytes: maximumBytes
+        )
+    }
+
+    package func drainOwnedDeferredEnrichments(
+        limit: Int = 128,
+        maximumBytes: Int = Int.max
+    ) async -> [OwnedDeferredEventEnrichment] {
+        await heavyEnrichmentPlane.drainOwnedDeferredResults(
+            limit: limit,
+            maximumBytes: maximumBytes
+        )
     }
 
     public func heavyEnrichmentSnapshot() async -> HeavyEnrichmentPlaneSnapshot {

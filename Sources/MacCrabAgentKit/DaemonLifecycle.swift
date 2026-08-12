@@ -640,7 +640,7 @@ enum DaemonShutdownCoordinator {
         }
         let evidenceClean = evidenceShutdown?.clean ?? false
         if let evidenceShutdown, !evidenceShutdown.clean {
-            logger.fault("AlertSink shutdown was unclean during \(context, privacy: .public): pending evidence=\(evidenceShutdown.pending), alert admissions in flight=\(evidenceShutdown.alertAdmissionsInFlight), shed at deadline=\(evidenceShutdown.shedAtDeadline)")
+            logger.fault("AlertSink shutdown was unclean during \(context, privacy: .public): pending evidence=\(evidenceShutdown.pending), durable pending contexts=\(evidenceShutdown.durablePendingContexts), alert admissions in flight=\(evidenceShutdown.alertAdmissionsInFlight), shed at deadline=\(evidenceShutdown.shedAtDeadline)")
         } else if evidenceShutdown == nil {
             logger.fault("AlertSink shutdown exceeded the total deadline during \(context, privacy: .public)")
         }

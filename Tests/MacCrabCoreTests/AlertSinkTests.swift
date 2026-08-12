@@ -376,7 +376,14 @@ struct AlertSinkTests {
         // the WAL and setting max == current family + reserve means the first
         // chunk commits and grows the WAL; the fresh admission probe before the
         // second chunk deterministically rejects that later chunk.
-        let eventSnapshot = EventSnapshot.encode([ev])
+        // This sink intentionally has no journal verifier/ensure closure, so
+        // production persists the bounded trigger plus an `.unavailable`
+        // journal-context marker. Use that exact representation seam: the old
+        // raw EventSnapshot estimate was 218 bytes below the row actually
+        // handed to AlertStore.
+        let eventSnapshot = EventSnapshot.prepare(ev).snapshotJSON(
+            journalContext: .unavailable
+        )
         let insertionOrder = candidates
             .map {
                 AlertSink.enrichWithAttribution(
@@ -388,10 +395,23 @@ struct AlertSinkTests {
             .sorted { $0.severity > $1.severity }
         let pageSize: Int64 = 4_096
         let singleTransactionEstimates = try insertionOrder.map {
-            SQLitePersistentStoreAdmission.conservativeTransactionBytes(
-                rowMutationBytes: try AlertStore.estimatedAlertMutationBytes(
-                    $0,
-                    pageSizeBytes: pageSize
+            let alertMutation = try AlertStore.estimatedAlertMutationBytes(
+                $0,
+                pageSizeBytes: pageSize
+            )
+            // Every alert transaction now durably initializes its evidence-
+            // context row. Mirror that second table/PK mutation so this fixture
+            // still chooses a reserve that fits exactly one complete alert.
+            let contextMutation = SQLitePersistentStoreAdmission
+                .conservativeEncodedRowMutationBytes(
+                    logicalRepresentationBytes: Int64($0.id.utf8.count + 128),
+                    pageSizeBytes: pageSize,
+                    maximumLeafPageTouches: 2
+                )
+            return SQLitePersistentStoreAdmission.conservativeTransactionBytes(
+                rowMutationBytes: SQLitePersistentStoreAdmission.saturatingAdd(
+                    alertMutation,
+                    contextMutation
                 ),
                 pageSizeBytes: pageSize,
                 maximumTreePathPageTouches: 32

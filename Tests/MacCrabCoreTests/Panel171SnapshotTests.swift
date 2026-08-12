@@ -156,7 +156,7 @@ struct Panel171SnapshotTests {
         #expect(RuleEngine.readTelemetrySnapshot(at: path) == nil)
     }
 
-    @Test("EventStore.eventCountsByCategory returns empty dict on empty store")
+    @Test("EventStore category snapshot reports empty but incomplete history on an empty store")
     func eventCountsEmpty() async throws {
         let path = NSTemporaryDirectory() + "maccrab-eventcounts-\(UUID().uuidString).db"
         defer {
@@ -165,7 +165,12 @@ struct Panel171SnapshotTests {
             try? FileManager.default.removeItem(atPath: path + "-shm")
         }
         let store = try EventStore(path: path)
-        let counts = try await store.eventCountsByCategory(since: Date(timeIntervalSince1970: 0))
-        #expect(counts.isEmpty)
+        let snapshot = try await store.eventCategoryCountSnapshot(
+            since: Date(timeIntervalSince1970: 0)
+        )
+        #expect(snapshot.counts.isEmpty)
+        #expect(snapshot.requestedWindowComplete == false)
+        #expect(snapshot.isComplete == false)
+        #expect(snapshot.gaps.total == 0)
     }
 }

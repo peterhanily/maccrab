@@ -26,6 +26,7 @@
 
 import Foundation
 import Darwin
+import Dispatch
 import CSQLCipher
 import os.log
 
@@ -124,11 +125,33 @@ public enum CausalGraphStorageAdmissionError: Error, LocalizedError, Sendable, E
     }
 }
 
+/// A pathological number of independent TraceGraph writers attempted to wait
+/// behind one bounded recovery quantum. This is deliberately distinct from a
+/// storage-admission shed: normal daemon ingestion has one coalesced store
+/// write in flight, while the fixed ceiling prevents an accidental task storm
+/// from turning maintenance serialization into unbounded actor-owned memory.
+public enum CausalGraphRecoverySerializationError: Error, LocalizedError, Sendable, Equatable {
+    case waiterLimitReached(limit: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .waiterLimitReached(let limit):
+            return "TraceGraph recovery writer queue reached its \(limit)-mutation safety limit"
+        }
+    }
+}
+
 public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     public let enabled: Bool
     /// True only for a live read-write SQLite handle. Filesystem headroom is
     /// not proof that the daemon can admit its first graph mutation.
     public let writableHandle: Bool
+    /// True when an ordinary growth call can either enter SQLite immediately
+    /// or join the bounded recovery handoff queue. This is deliberately
+    /// separate from `recovering`: healthy maintenance remains writable.
+    public let acceptingMutations: Bool
+    /// Hard storage admission only (footprint, free-space, probe, SQLite, or
+    /// deferred-schema pressure). Recovery by itself is never `blocked`.
     public let blocked: Bool
     public let reason: CausalGraphStorageBlockReason?
     public let maxFootprintBytes: Int64?
@@ -160,6 +183,29 @@ public struct CausalGraphStorageAdmissionStatus: Sendable, Equatable {
     /// Whether the most recent bounded pass left rows eligible under the exact
     /// trace/orphan cutoffs supplied by its caller. nil means measurement failed.
     public let lastRecoveryEligibleBacklogRemaining: Bool?
+    /// Growth calls suspended behind the active bounded recovery quantum.
+    public let recoveryMutationWaiters: Int
+    /// Fixed actor-owned waiter ceiling. Production graph ingest coalesces to a
+    /// single physical writer; this cap is a final task-storm backstop.
+    public let recoveryMutationWaiterLimit: Int
+    public let recoveryMutationQueueSaturated: Bool
+    public let recoveryMutationWaiterHighWatermark: Int
+    public let recoveryMutationWaitsTotal: UInt64
+    /// Mutually exclusive terminal queue outcomes. At every actor snapshot:
+    /// waits = current waiters + releases + cancellations + closed outcomes.
+    public let recoveryMutationWaitReleasesTotal: UInt64
+    public let recoveryMutationWaitCancellationsTotal: UInt64
+    public let recoveryMutationWaitClosedTotal: UInt64
+    public let recoveryMutationWaitSaturationsTotal: UInt64
+    /// Sum and maximum queue residence, measured with monotonic uptime at the
+    /// exact point each waiter is removed. These exclude later actor scheduling.
+    public let recoveryMutationWaitNanosecondsTotal: UInt64
+    public let recoveryMutationMaxWaitNanoseconds: UInt64
+    /// Monotonic residence of the oldest waiter still in the queue.
+    public let recoveryMutationOldestWaitNanoseconds: UInt64
+    /// Recovery passes that stopped after their current bounded SQLite quantum
+    /// because foreground evidence was waiting.
+    public let recoveryWriterPreemptionsTotal: UInt64
 }
 
 public struct CausalGraphStorageRecoveryResult: Sendable, Equatable {
@@ -214,8 +260,7 @@ public struct CausalGraphStartupRecoveryResult: Sendable, Equatable {
     public var writableBeforeProducers: Bool {
         guard disposition == .writable,
               let finalAdmission,
-              finalAdmission.writableHandle,
-              !finalAdmission.blocked else {
+              finalAdmission.acceptingMutations else {
             return false
         }
         // A floor-only policy has no byte target; a successful ordinary-write
@@ -334,6 +379,18 @@ public enum TraceGraphStoragePolicy {
 
 public actor SQLiteCausalGraphStore: CausalGraphStore {
 
+    private enum RecoveryMutationWaitOutcome: Sendable {
+        case released
+        case cancelled
+        case closed
+    }
+
+    private struct RecoveryMutationWaiter {
+        let id: UUID
+        let enqueuedAtNanoseconds: UInt64
+        let continuation: CheckedContinuation<RecoveryMutationWaitOutcome, Never>
+    }
+
     // MARK: Configuration
 
     private var db: OpaquePointer?
@@ -363,7 +420,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private let pageLimitFailureProbe: CausalGraphPageLimitFailureProbe?
     /// Deterministic test seam at the actor yield between cascade quanta.
     /// Production callers leave this nil.
-    private let cascadeYieldHook: (@Sendable () async -> Void)?
+    private let cascadeYieldHook: (@Sendable () async throws -> Void)?
     private var lastFootprintBytes: Int64?
     private var lastFreeSpaceBytes: Int64?
     private var storageBlockReason: CausalGraphStorageBlockReason?
@@ -371,6 +428,27 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private var shedMutationsTotal: UInt64 = 0
     private var pinnedReader = false
     private var recovering = false
+    /// A recovery pass owns SQLite across several actor suspension points. A
+    /// growth call arriving at one of those points waits here instead of being
+    /// falsely classified as shed. Recovery notices the waiter after its
+    /// current count/byte-bounded SQLite quantum and returns, so foreground
+    /// evidence never waits behind the remainder of a full maintenance budget.
+    private var recoveryMutationWaiters: [RecoveryMutationWaiter] = []
+    private let recoveryMutationWaiterLimit: Int
+    private var recoveryMutationWaiterHighWatermark = 0
+    private var recoveryMutationWaitsTotal: UInt64 = 0
+    private var recoveryMutationWaitReleasesTotal: UInt64 = 0
+    private var recoveryMutationWaitCancellationsTotal: UInt64 = 0
+    private var recoveryMutationWaitClosedTotal: UInt64 = 0
+    private var recoveryMutationWaitSaturationsTotal: UInt64 = 0
+    private var recoveryMutationWaitNanosecondsTotal: UInt64 = 0
+    private var recoveryMutationMaxWaitNanoseconds: UInt64 = 0
+    private var recoveryWriterPreemptionsTotal: UInt64 = 0
+    /// Released waiters get first claim over a new recovery pass. Each waiter
+    /// clears one handoff synchronously before re-running fresh admission.
+    private var recoveryMutationHandoffsOutstanding = 0
+    private var recoveryCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var closeRequested = false
     /// Recovery-only scan cursor. Field databases can contain millions of
     /// traces but each pass may mutate at most 256 parents. Re-running an
     /// unindexed effective-activity predicate plus `ORDER BY updated_at` from
@@ -703,7 +781,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         freeSpaceProbe: CausalGraphStorageProbe? = nil,
         transactionFailureProbe: CausalGraphTransactionFailureProbe? = nil,
         pageLimitFailureProbe: CausalGraphPageLimitFailureProbe? = nil,
-        cascadeYieldHook: (@Sendable () async -> Void)? = nil
+        cascadeYieldHook: (@Sendable () async throws -> Void)? = nil,
+        recoveryMutationWaiterLimit: Int = 1_024
     ) async throws {
         // Resolve only the existing parent directory, then keep the leaf name
         // literal. macOS exposes trusted aliases such as /tmp -> /private/tmp;
@@ -720,6 +799,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         self.transactionFailureProbe = transactionFailureProbe
         self.pageLimitFailureProbe = pageLimitFailureProbe
         self.cascadeYieldHook = cascadeYieldHook
+        self.recoveryMutationWaiterLimit = max(1, recoveryMutationWaiterLimit)
 
         let cap = maxFootprintBytes.flatMap { $0 > 0 ? $0 : nil }
         let floor = freeSpaceFloorBytes.flatMap { $0 > 0 ? $0 : nil }
@@ -800,12 +880,147 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         }
     }
 
-    public func close() {
+    public func close() async {
+        closeRequested = true
+        if recovering {
+            await withCheckedContinuation { continuation in
+                // The actor cannot interleave between the `recovering` check
+                // above and this registration. Recovery resumes the closer from
+                // its defer after its current bounded SQLite quantum has ended.
+                recoveryCompletionWaiters.append(continuation)
+            }
+        }
+        finishRecoveryMutationWaiters(outcome: .closed)
         if let db {
             checkpointController?.detach(from: db)
             sqlite3_close(db)
             self.db = nil
             checkpointController = nil
+        }
+    }
+
+    private var recoveryHasForegroundPressure: Bool {
+        closeRequested || !recoveryMutationWaiters.isEmpty
+    }
+
+    /// Suspend one growth call behind the active recovery pass. The caller
+    /// resumes only after recovery's defer has cleared `recovering`; it then
+    /// performs the normal footprint/free-space probes from scratch. Therefore
+    /// waiting never grants admission and cannot weaken either hard boundary.
+    private func awaitRecoveryMutationBarrier() async throws {
+        try Task.checkCancellation()
+        guard !closeRequested, db != nil else {
+            throw CausalGraphStoreError.databaseOpenFailed("closed")
+        }
+        guard recovering else { return }
+        guard recoveryMutationWaiters.count < recoveryMutationWaiterLimit else {
+            recoveryMutationWaitSaturationsTotal &+= 1
+            throw CausalGraphRecoverySerializationError.waiterLimitReached(
+                limit: recoveryMutationWaiterLimit)
+        }
+
+        let waiterID = UUID()
+        let enqueuedAt = DispatchTime.now().uptimeNanoseconds
+        recoveryMutationWaitsTotal &+= 1
+        let outcome = await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<RecoveryMutationWaitOutcome, Never>) in
+                recoveryMutationWaiters.append(RecoveryMutationWaiter(
+                    id: waiterID,
+                    enqueuedAtNanoseconds: enqueuedAt,
+                    continuation: continuation
+                ))
+                recoveryMutationWaiterHighWatermark = max(
+                    recoveryMutationWaiterHighWatermark,
+                    recoveryMutationWaiters.count
+                )
+                // Cancellation can win the race immediately before the
+                // continuation is registered. Remove it synchronously here so
+                // a cancelled producer never waits for maintenance to finish.
+                if Task.isCancelled {
+                    cancelRecoveryMutationWaiter(waiterID)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelRecoveryMutationWaiter(waiterID) }
+        }
+
+        if outcome == .released {
+            recoveryMutationHandoffsOutstanding = max(
+                0, recoveryMutationHandoffsOutstanding - 1)
+        }
+
+        // Cancellation can race a normal recovery handoff after the waiter was
+        // removed from the array. Honor it before any fresh admission/SQLite
+        // work, while still clearing the handoff count above.
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        switch outcome {
+        case .released:
+            guard !closeRequested, db != nil else {
+                throw CausalGraphStoreError.databaseOpenFailed("closed")
+            }
+        case .cancelled:
+            throw CancellationError()
+        case .closed:
+            throw CausalGraphStoreError.databaseOpenFailed("closed")
+        }
+    }
+
+    private func cancelRecoveryMutationWaiter(_ waiterID: UUID) {
+        guard let index = recoveryMutationWaiters.firstIndex(where: {
+            $0.id == waiterID
+        }) else { return }
+        let waiter = recoveryMutationWaiters.remove(at: index)
+        recordRecoveryMutationWaitOutcome(waiter, outcome: .cancelled)
+        recoveryMutationWaitCancellationsTotal &+= 1
+        waiter.continuation.resume(returning: .cancelled)
+    }
+
+    private func recordRecoveryMutationWaitOutcome(
+        _ waiter: RecoveryMutationWaiter,
+        outcome: RecoveryMutationWaitOutcome
+    ) {
+        let elapsed = DispatchTime.now().uptimeNanoseconds
+            &- waiter.enqueuedAtNanoseconds
+        let (sum, overflow) = recoveryMutationWaitNanosecondsTotal
+            .addingReportingOverflow(elapsed)
+        recoveryMutationWaitNanosecondsTotal = overflow ? UInt64.max : sum
+        recoveryMutationMaxWaitNanoseconds = max(
+            recoveryMutationMaxWaitNanoseconds, elapsed)
+        switch outcome {
+        case .released:
+            recoveryMutationWaitReleasesTotal &+= 1
+        case .cancelled:
+            break // Counted by the cancellation owner after removal.
+        case .closed:
+            recoveryMutationWaitClosedTotal &+= 1
+        }
+    }
+
+    private func finishRecoveryMutationWaiters(
+        outcome: RecoveryMutationWaitOutcome
+    ) {
+        guard !recoveryMutationWaiters.isEmpty else { return }
+        let waiters = recoveryMutationWaiters
+        recoveryMutationWaiters.removeAll(keepingCapacity: true)
+        if outcome == .released {
+            recoveryMutationHandoffsOutstanding += waiters.count
+        }
+        for waiter in waiters {
+            recordRecoveryMutationWaitOutcome(waiter, outcome: outcome)
+            waiter.continuation.resume(returning: outcome)
+        }
+    }
+
+    private func finishRecoverySerialization() {
+        finishRecoveryMutationWaiters(
+            outcome: closeRequested ? .closed : .released)
+        let completionWaiters = recoveryCompletionWaiters
+        recoveryCompletionWaiters.removeAll(keepingCapacity: true)
+        for continuation in completionWaiters {
+            continuation.resume()
         }
     }
 
@@ -929,12 +1144,22 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     }
 
     private func makeStorageAdmissionStatus() -> CausalGraphStorageAdmissionStatus {
-        CausalGraphStorageAdmissionStatus(
+        let writableHandle = db != nil && !isReadOnly && !closeRequested
+        let hardBlocked = storageBlockReason != nil || footprintAdmissionLatched
+        let recoveryMutationQueueSaturated = recovering
+            && recoveryMutationWaiters.count >= recoveryMutationWaiterLimit
+        let recoveryMutationOldestWaitNanoseconds = recoveryMutationWaiters
+            .first.map {
+                DispatchTime.now().uptimeNanoseconds &- $0.enqueuedAtNanoseconds
+            } ?? 0
+        return CausalGraphStorageAdmissionStatus(
             enabled: maxFootprintBytes != nil || freeSpaceFloorBytes != nil
                 || deferredMigrationsPending || sqliteStorageFailure != nil,
-            writableHandle: db != nil && !isReadOnly,
-            blocked: storageBlockReason != nil || footprintAdmissionLatched || recovering,
-            reason: recovering ? .recoveryInProgress : storageBlockReason,
+            writableHandle: writableHandle,
+            acceptingMutations: writableHandle && !hardBlocked
+                && !recoveryMutationQueueSaturated,
+            blocked: hardBlocked,
+            reason: storageBlockReason,
             maxFootprintBytes: maxFootprintBytes,
             admissionThresholdBytes: admissionThresholdBytes,
             resumeBelowBytes: resumeBelowBytes,
@@ -965,7 +1190,26 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 footprintBytes: lastFootprintBytes,
                 recoveryTargetBytes: resumeBelowBytes
             ),
-            lastRecoveryEligibleBacklogRemaining: lastRecoveryEligibleBacklogRemaining
+            lastRecoveryEligibleBacklogRemaining: lastRecoveryEligibleBacklogRemaining,
+            recoveryMutationWaiters: recoveryMutationWaiters.count,
+            recoveryMutationWaiterLimit: recoveryMutationWaiterLimit,
+            recoveryMutationQueueSaturated: recoveryMutationQueueSaturated,
+            recoveryMutationWaiterHighWatermark: recoveryMutationWaiterHighWatermark,
+            recoveryMutationWaitsTotal: recoveryMutationWaitsTotal,
+            recoveryMutationWaitReleasesTotal:
+                recoveryMutationWaitReleasesTotal,
+            recoveryMutationWaitCancellationsTotal:
+                recoveryMutationWaitCancellationsTotal,
+            recoveryMutationWaitClosedTotal: recoveryMutationWaitClosedTotal,
+            recoveryMutationWaitSaturationsTotal:
+                recoveryMutationWaitSaturationsTotal,
+            recoveryMutationWaitNanosecondsTotal:
+                recoveryMutationWaitNanosecondsTotal,
+            recoveryMutationMaxWaitNanoseconds:
+                recoveryMutationMaxWaitNanoseconds,
+            recoveryMutationOldestWaitNanoseconds:
+                recoveryMutationOldestWaitNanoseconds,
+            recoveryWriterPreemptionsTotal: recoveryWriterPreemptionsTotal
         )
     }
 
@@ -1204,7 +1448,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     private func admitGrowth(
         payloadBytes: @autoclosure () -> Int,
         rows: Int
-    ) throws {
+    ) async throws {
+        try await awaitRecoveryMutationBarrier()
         guard maxFootprintBytes != nil || freeSpaceFloorBytes != nil
                 || deferredMigrationsPending else { return }
         try admitGrowth(upperBoundBytes: mutationUpperBound(
@@ -1215,9 +1460,6 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let admissionConfigured = maxFootprintBytes != nil
             || freeSpaceFloorBytes != nil
         guard admissionConfigured || deferredMigrationsPending else { return }
-        if recovering {
-            try rejectGrowth(.recoveryInProgress)
-        }
         if let sqliteStorageFailure {
             try rejectGrowth(sqliteStorageFailure)
         }
@@ -2178,8 +2420,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // MARK: - upsertEntity
 
     public func upsertEntity(_ entity: TraceEntity) async throws {
+        try await admitGrowth(payloadBytes: payloadBytes(entity), rows: 1)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(entity), rows: 1)
         let sql = """
         INSERT INTO trace_entities (
             id, entity_type, stable_key, display_name,
@@ -2221,8 +2463,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // MARK: - upsertEdge
 
     public func upsertEdge(_ edge: TraceEdge) async throws {
+        try await admitGrowth(payloadBytes: payloadBytes(edge), rows: 1)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(edge), rows: 1)
         let sql = """
         INSERT INTO trace_edges (
             id, source_entity_id, target_entity_id, relation,
@@ -2278,12 +2520,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // DB) abort and roll back the whole batch. In particular SQLITE_FULL from
     // `max_page_count` must never be logged-and-committed as partial success.
     public func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws {
-        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         guard !entities.isEmpty || !edges.isEmpty else { return }
-        try admitGrowth(
+        try await admitGrowth(
             payloadBytes: payloadAdd(payloadBytes(entities), payloadBytes(edges)),
             rows: entities.count + edges.count
         )
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
 
         try execTransaction(.begin, db: db)
         do {
@@ -2713,11 +2955,11 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // MARK: - Trace lifecycle
 
     public func saveTrace(_ trace: Trace, members: [TraceMembership]) async throws {
-        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(
+        try await admitGrowth(
             payloadBytes: payloadAdd(payloadBytes(trace), payloadBytes(members)),
             rows: members.count + 2
         )
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         try execTransaction(.begin, db: db)
         do {
             try insertOrReplaceTraceRow(trace, db: db)
@@ -2812,8 +3054,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     }
 
     public func updateTraceStatus(id: String, status: String, updatedAt: Date) async throws {
+        try await admitGrowth(
+            payloadBytes: id.utf8.count + status.utf8.count, rows: 1)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: id.utf8.count + status.utf8.count, rows: 1)
         try execBound(
             db: db,
             sql: "UPDATE traces SET status = ?, updated_at = ? WHERE id = ?",
@@ -2979,8 +3222,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // MARK: - Rule hits / replay / chain
 
     public func recordRuleHit(_ hit: TraceRuleHit) async throws {
+        try await admitGrowth(payloadBytes: payloadBytes(hit), rows: 2)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(hit), rows: 2)
         let sql = """
         INSERT OR REPLACE INTO trace_rule_hits (
             id, trace_id, rule_id, rule_title, rule_version, severity,
@@ -3011,8 +3254,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     }
 
     public func recordReplayRun(_ run: TraceReplayRun) async throws {
+        try await admitGrowth(payloadBytes: payloadBytes(run), rows: 2)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(run), rows: 2)
         let sql = """
         INSERT OR REPLACE INTO trace_replay_runs (
             id, trace_id, bundle_id, ruleset_version, daemon_version,
@@ -3047,8 +3290,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     }
 
     public func appendHashChain(_ entry: TraceHashChainEntry) async throws {
+        try await admitGrowth(payloadBytes: payloadBytes(entry), rows: 2)
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        try admitGrowth(payloadBytes: payloadBytes(entry), rows: 2)
         try execTransaction(.begin, db: db)
         do {
             try insertHashChainRow(entry, db: db)
@@ -3164,17 +3407,17 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         publishedToUnifiedLog: Bool,
         createdAt: Date = Date()
     ) async throws -> TraceHashChainEntry {
-        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
-        if let continuityIntegrityFailure {
-            throw CausalGraphStoreError.stepFailed(continuityIntegrityFailure)
-        }
-        try admitGrowth(
+        try await admitGrowth(
             payloadBytes: traceId.utf8.count
                 + (eventId?.utf8.count ?? 0)
                 + (edgeId?.utf8.count ?? 0)
                 + (signature?.utf8.count ?? 0),
             rows: 2
         )
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        if let continuityIntegrityFailure {
+            throw CausalGraphStoreError.stepFailed(continuityIntegrityFailure)
+        }
         try execTransaction(.begin, db: db, immediate: true)
         do {
             if let duplicateSequence = try duplicatedGlobalHeadSequence(db: db) {
@@ -3320,11 +3563,12 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     /// synthetic traces as `[DEMO] ` after the materializer has emitted
     /// them with anchor-derived default titles.
     public func prefixTraceTitles(ids: [String], with prefix: String) async throws {
-        guard let db, !ids.isEmpty else { return }
-        try admitGrowth(
+        guard !ids.isEmpty else { return }
+        try await admitGrowth(
             payloadBytes: payloadAdd(payloadBytes(ids), prefix.utf8.count),
             rows: ids.count
         )
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
         let sql = "UPDATE traces SET title = ? || title WHERE id IN (\(placeholders))"
         var stmt: OpaquePointer?
@@ -3725,6 +3969,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 break
             }
             await Task.yield()
+            if recoveryHasForegroundPressure { break }
         }
         return total
     }
@@ -4117,12 +4362,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 && !deferredMigrationsPending
         }
 
-        // Actor methods are re-entrant at `await Task.yield()` below. A second
+        // Actor methods are re-entrant at the bounded yields below. A second
         // timer/SIGHUP-triggered recovery must observe, not join, the active
-        // run; otherwise two callers can independently spend the same budgets.
-        guard !recovering else { return result() }
+        // run; released foreground writers also get first claim on the actor
+        // before another maintenance pass can begin.
+        guard !recovering,
+              recoveryMutationHandoffsOutstanding == 0,
+              !closeRequested else { return result() }
 
         let sqliteFailureGenerationAtStart = sqliteStorageFailureGeneration
+        var writerPreemptionRecorded = false
+        func shouldPreemptForForeground() -> Bool {
+            guard recoveryHasForegroundPressure else { return false }
+            if !writerPreemptionRecorded {
+                recoveryWriterPreemptionsTotal &+= 1
+                writerPreemptionRecorded = true
+            }
+            return true
+        }
         recoveryRunsTotal &+= 1
         recovering = true
         defer {
@@ -4156,6 +4413,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                mode == 2 {
                 recoveryNoPhysicalProgressTotal &+= 1
             }
+            finishRecoverySerialization()
         }
 
         // This checkpoint is the admission test for maintenance. No retention
@@ -4218,6 +4476,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
            vacuumBudget > pagesReclaimed {
             pagesReclaimed += try await incrementalVacuum(
                 maxPages: vacuumBudget - pagesReclaimed)
+            if shouldPreemptForForeground() { return result() }
             guard checkpointAllowsMaintenance() else { return result() }
             refreshAdmissionMeasurementsAndLatch()
             if deferredMigrationsPending,
@@ -4298,6 +4557,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     maxChildRows: traceChildBudget - traceChildRowsDeleted)
                 tracesDeleted += cascade.tracesDeleted
                 traceChildRowsDeleted += cascade.childRowsDeleted
+                if shouldPreemptForForeground() { return result() }
                 if cascade.tracesDeleted == expired.ids.count {
                     // Every eligible parent in this bounded selection is gone;
                     // the next pass may seek directly past it. If even one
@@ -4319,6 +4579,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             if mode == 2, vacuumBudget > pagesReclaimed {
                 pagesReclaimed += try await incrementalVacuum(
                     maxPages: vacuumBudget - pagesReclaimed)
+                if shouldPreemptForForeground() { return result() }
             }
             guard checkpointAllowsMaintenance() else { return result() }
             refreshAdmissionMeasurementsAndLatch()
@@ -4341,6 +4602,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 oldestFirstLimit: graphBudget,
                 batchSize: min(256, graphBudget)
             )
+            if shouldPreemptForForeground() { return result() }
             guard checkpointAllowsMaintenance() else { return result() }
             if recoveryRequiredAtStart, edgesDeleted > 0 {
                 if mode == 2, vacuumBudget > pagesReclaimed {
@@ -4349,6 +4611,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     }
                     pagesReclaimed += try await incrementalVacuum(
                         maxPages: vacuumBudget - pagesReclaimed)
+                    if shouldPreemptForForeground() { return result() }
                     guard checkpointAllowsMaintenance() else { return result() }
                 }
                 refreshAdmissionMeasurementsAndLatch()
@@ -4366,6 +4629,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 oldestFirstLimit: graphBudget,
                 batchSize: min(256, graphBudget)
             )
+            if shouldPreemptForForeground() { return result() }
             guard checkpointAllowsMaintenance() else { return result() }
         }
 
@@ -4379,6 +4643,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         if vacuumBudget > pagesReclaimed, mode == 2 {
             pagesReclaimed += try await incrementalVacuum(
                 maxPages: vacuumBudget - pagesReclaimed)
+            if shouldPreemptForForeground() { return result() }
             guard checkpointAllowsMaintenance() else { return result() }
         }
         refreshAdmissionMeasurementsAndLatch()
@@ -4878,9 +5143,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     break batchLoop
                 }
                 if let cascadeYieldHook {
-                    await cascadeYieldHook()
+                    try await cascadeYieldHook()
                 }
                 await Task.yield()
+                if recoveryHasForegroundPressure { break batchLoop }
             }
         }
         return total

@@ -3,8 +3,9 @@
 // high-value fields from raw_json into indexed columns and adds the
 // matching Sigma resolver aliases. These tests pin:
 //
-//   - the v5 → v6 ALTER chain runs cleanly and leaves historical rows intact
-//   - a fresh DB lands at user_version = 6 with the new columns + indexes
+//   - the v5 → v8 chain preserves valid historical rows in the exact journal
+//   - a fresh DB lands at user_version = 8 with the v6 columns while v7's
+//     superseded indexes remain absent
 //   - insert() correctly projects ProcessInfo / TCCInfo / enrichments
 //     into the new SQL columns (NULL convention preserved)
 //   - RuleEngine resolves the new Sigma aliases (Architecture, IsNotarized,
@@ -61,6 +62,26 @@ struct EventStoreSchemaV6Tests {
         let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
         sqlite3_bind_text(stmt, 1, name, -1, TRANSIENT)
         return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private static func tableExists(_ db: OpaquePointer, _ name: String) -> Bool {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        let transient = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, name, -1, transient)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private static func scalarInt(_ db: OpaquePointer, _ sql: String) -> Int {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else {
+            return -1
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     /// A canonical fixture process — populated enough to exercise every
@@ -128,7 +149,7 @@ struct EventStoreSchemaV6Tests {
 
     // MARK: - Migration shape
 
-    @Test("Fresh install lands at user_version = 6 with all new columns")
+    @Test("Fresh install lands at v8 with v6 columns and no superseded indexes")
     func freshInstallV6() async throws {
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
@@ -139,10 +160,7 @@ struct EventStoreSchemaV6Tests {
         #expect(sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
         guard let db else { return }
 
-        // v1.21.5: migration v7 (prune_redundant_event_indexes) is the new head
-        // of the events.db chain, so a fresh install lands at 7, not 6. The v6
-        // column/index assertions below are unchanged — v7 is index-only.
-        #expect(Self.userVersion(of: db) == 7)
+        #expect(Self.userVersion(of: db) == 8)
         for col in [
             "user_id", "user_name", "group_id", "working_directory",
             "responsible_pid", "architecture", "is_platform_binary",
@@ -152,25 +170,62 @@ struct EventStoreSchemaV6Tests {
         ] {
             #expect(Self.eventsHasColumn(db, col), "missing column: \(col)")
         }
+        // v7 deliberately removes these wide-table indexes; v8's authenticated
+        // journal is exact truth and `events` is only a bounded projection.
         for idx in [
             "idx_events_user_id",
             "idx_events_ai_tool_ts",
             "idx_events_parent_exe_ts",
         ] {
-            #expect(Self.indexExists(db, idx), "missing index: \(idx)")
+            #expect(!Self.indexExists(db, idx), "superseded index survived: \(idx)")
+        }
+        for table in [
+            "event_journal_blocks",
+            "event_journal_migration",
+            "event_projection_coverage",
+        ] {
+            #expect(Self.tableExists(db, table), "missing v8 table: \(table)")
         }
     }
 
-    @Test("v5 → v6 migration preserves rows but writes NULL into new columns")
+    @Test("v5 → v8 migration journals a valid legacy row exactly and conserves recovery state")
     func upgradeFromV5PreservesRowsWithNullCols() async throws {
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
 
-        // Build a v5 events.db by hand: same baseline CREATE TABLE
-        // EventStore writes, plus the v2/v3/v4/v5 ALTERs, plus
-        // PRAGMA user_version = 5. Then insert one row using only
-        // the v5-known columns. Re-opening through EventStore must
-        // upgrade to v6 cleanly + leave the row readable.
+        // Build a v5 events.db by hand. The source row must be a valid Event
+        // whose v5 typed columns agree with raw_json: v8 intentionally
+        // quarantines malformed or contradictory legacy evidence rather than
+        // treating it as a countable row.
+        let legacyID = UUID()
+        let legacyTimestamp = Date()
+        let legacyProcess = MacCrabCore.ProcessInfo(
+            pid: 4242,
+            ppid: 1,
+            rpid: 1,
+            name: "legacy-tool",
+            executable: "/usr/bin/legacy-tool",
+            commandLine: "/usr/bin/legacy-tool --safe",
+            args: ["legacy-tool", "--safe"],
+            workingDirectory: "/",
+            userId: 501,
+            userName: "legacy-user",
+            groupId: 20,
+            startTime: legacyTimestamp,
+            ancestors: [],
+            isPlatformBinary: false
+        )
+        let legacyEvent = Event(
+            id: legacyID,
+            timestamp: legacyTimestamp,
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: legacyProcess
+        )
+        let legacyJSONData = try JSONEncoder().encode(legacyEvent)
+        let legacyJSON = try #require(String(data: legacyJSONData, encoding: .utf8))
+
         var rawDB: OpaquePointer?
         guard sqlite3_open_v2(path, &rawDB,
                               SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
@@ -194,6 +249,25 @@ struct EventStoreSchemaV6Tests {
                 tcc_service TEXT, tcc_client TEXT, raw_json TEXT NOT NULL
             )
             """,
+            """
+            CREATE VIRTUAL TABLE events_fts USING fts5(
+                process_name, process_path, process_commandline,
+                file_path, network_dest_ip, tcc_service, tcc_client,
+                content=events, content_rowid=rowid
+            )
+            """,
+            """
+            CREATE TRIGGER events_ai AFTER INSERT ON events BEGIN
+                INSERT INTO events_fts(
+                    rowid, process_name, process_path, process_commandline,
+                    file_path, network_dest_ip, tcc_service, tcc_client
+                ) VALUES (
+                    new.rowid, new.process_name, new.process_path,
+                    new.process_commandline, new.file_path,
+                    new.network_dest_ip, new.tcc_service, new.tcc_client
+                );
+            END
+            """,
             "ALTER TABLE events ADD COLUMN mcp_server_name TEXT",
             "ALTER TABLE events ADD COLUMN mcp_server_category TEXT",
             "ALTER TABLE events ADD COLUMN ai_tool_session_id TEXT",
@@ -202,54 +276,82 @@ struct EventStoreSchemaV6Tests {
             "ALTER TABLE events ADD COLUMN agent_tool TEXT",
             "ALTER TABLE events ADD COLUMN machine_agent_confidence TEXT",
             "ALTER TABLE events ADD COLUMN agent_evidence_json TEXT",
-            // Minimal row to confirm the migration is non-destructive.
-            // raw_json carries a fake but parseable Event-like blob so
-            // queryEvents() can still pretend to decode it (the test
-            // here uses the raw SQLite handle, so JSON shape doesn't
-            // matter to the migration itself).
-            "INSERT INTO events (id, timestamp, event_category, event_type, event_action, severity, raw_json) VALUES ('legacy-row-1', 1700000000.0, 'process', 'start', 'exec', 'informational', '{}')",
-            "PRAGMA user_version = 5",
         ]
         for sql in v5Schema {
             let rc = sqlite3_exec(raw, sql, nil, nil, nil)
             #expect(rc == SQLITE_OK, "v5 setup failed at: \(sql)")
         }
+
+        let insertSQL = """
+            INSERT INTO events (
+                id, timestamp, event_category, event_type, event_action,
+                severity, process_pid, process_name, process_path,
+                process_commandline, process_ppid, raw_json
+            ) VALUES (?1, ?2, 'process', 'start', 'exec', 'informational',
+                      ?3, ?4, ?5, ?6, ?7, ?8)
+            """
+        var insertStmt: OpaquePointer?
+        #expect(sqlite3_prepare_v2(raw, insertSQL, -1, &insertStmt, nil) == SQLITE_OK)
+        guard let insertStmt else { return }
+        let transient = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(insertStmt, 1, legacyID.uuidString, -1, transient)
+        sqlite3_bind_double(insertStmt, 2, legacyTimestamp.timeIntervalSince1970)
+        sqlite3_bind_int(insertStmt, 3, legacyProcess.pid)
+        sqlite3_bind_text(insertStmt, 4, legacyProcess.name, -1, transient)
+        sqlite3_bind_text(insertStmt, 5, legacyProcess.executable, -1, transient)
+        sqlite3_bind_text(insertStmt, 6, legacyProcess.commandLine, -1, transient)
+        sqlite3_bind_int(insertStmt, 7, legacyProcess.ppid)
+        sqlite3_bind_text(insertStmt, 8, legacyJSON, -1, transient)
+        #expect(sqlite3_step(insertStmt) == SQLITE_DONE)
+        sqlite3_finalize(insertStmt)
+        #expect(sqlite3_exec(raw, "PRAGMA user_version = 5", nil, nil, nil) == SQLITE_OK)
         sqlite3_close(raw)
 
-        // Reopen via EventStore — migration should kick in.
+        // Opening installs schema v8. Until the explicit pre-producer recovery
+        // boundary runs, exact mixed readers must still preserve the v5 row.
         let store = try EventStore(path: path)
-        // Use the actor's count() to confirm the legacy row survived.
-        let count = try await store.count()
-        #expect(count == 1, "legacy row vanished during v5 → v6 migration")
+        #expect(try await store.count() == 1)
+        let mixedExact = try await store.exactEventSnapshot(id: legacyID)
+        #expect(mixedExact.event?.id == legacyID)
+        #expect(mixedExact.event?.timestamp == legacyTimestamp)
+        #expect(mixedExact.event?.process.executable == legacyProcess.executable)
+        #expect(mixedExact.event?.process.args == legacyProcess.args)
 
-        // Verify user_version bumped to 6 and the new columns are NULL
-        // for the legacy row.
+        let recovery = try await store.recoverJournalBeforeProducers(
+            now: legacyTimestamp.addingTimeInterval(1)
+        )
+        #expect(recovery.sourceEvents == 1)
+        #expect(recovery.migratedEvents == 1)
+        #expect(recovery.rolledExpiredEvents == 0)
+        #expect(recovery.corruptPreservedEvents == 0)
+        #expect(recovery.remainingEvents == 0)
+        #expect(recovery.complete)
+
+        #expect(try await store.count() == 1)
+        let journalExact = try await store.exactEventSnapshot(id: legacyID)
+        #expect(journalExact.event?.id == legacyID)
+        #expect(journalExact.event?.timestamp == legacyTimestamp)
+        #expect(journalExact.event?.process.executable == legacyProcess.executable)
+        #expect(journalExact.event?.process.args == legacyProcess.args)
+
+        // v8 recovery must finish with one authenticated journal event and no
+        // quarantine or unaccounted source row.
         var verifyDB: OpaquePointer?
         defer { if let d = verifyDB { sqlite3_close(d) } }
         sqlite3_open_v2(path, &verifyDB, SQLITE_OPEN_READONLY, nil)
         guard let v = verifyDB else { return }
-        #expect(Self.userVersion(of: v) == 7)   // v1.21.5: v7 index-prune migration is the new head
-
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        let sql = """
-            SELECT user_id, user_name, architecture, is_notarized,
-                   parent_executable, ai_tool, tcc_decision
-            FROM events WHERE id = 'legacy-row-1'
-            """
-        guard sqlite3_prepare_v2(v, sql, -1, &stmt, nil) == SQLITE_OK,
-              sqlite3_step(stmt) == SQLITE_ROW else {
-            Issue.record("could not read legacy row back")
-            return
-        }
-        // All seven new columns must be NULL for pre-v6 rows.
-        for i: Int32 in 0..<7 {
-            #expect(sqlite3_column_type(stmt, i) == SQLITE_NULL,
-                    "pre-v6 column \(i) was not NULL")
-        }
+        #expect(Self.userVersion(of: v) == 8)
+        #expect(Self.scalarInt(v, "SELECT count(*) FROM event_journal_blocks") == 1)
+        #expect(Self.scalarInt(v, "SELECT count(*) FROM event_journal_legacy_quarantine") == 0)
+        #expect(Self.scalarInt(v, """
+            SELECT count(*) FROM event_journal_migration
+            WHERE stage = 2 AND source_events = 1 AND migrated_events = 1
+              AND rolled_expired_events = 0 AND corrupt_preserved_events = 0
+              AND remaining_events = 0 AND schema_finalized = 1
+            """) == 1)
     }
 
-    @Test("Migration v6 is idempotent — re-opening preserves user_version=6")
+    @Test("Migration chain is idempotent — re-opening preserves user_version=8")
     func migrationIsIdempotent() async throws {
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
@@ -261,7 +363,7 @@ struct EventStoreSchemaV6Tests {
         defer { if let d = db { sqlite3_close(d) } }
         sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil)
         guard let db else { return }
-        #expect(Self.userVersion(of: db) == 7)   // v1.21.5: v7 index-prune migration is the new head
+        #expect(Self.userVersion(of: db) == 8)
     }
 
     // MARK: - Insert column projection
@@ -676,9 +778,9 @@ struct EventStoreSchemaV6Tests {
         let originalEvent = Self.makeEvent(process: proc)
         try await store.insert(event: originalEvent)
 
-        let read = try await store.events(since: .distantPast)
-        #expect(read.count == 1)
-        guard let ev = read.first else { return }
+        let read = try await store.exactEventsSnapshot(since: .distantPast)
+        #expect(read.events.count == 1)
+        guard let ev = read.events.first else { return }
         #expect(ev.process.userName == "carol")
         #expect(ev.process.architecture == "x86_64")
         #expect(ev.process.codeSignature?.isNotarized == false)
@@ -729,10 +831,10 @@ struct EventStoreSchemaV6Tests {
         )
         try await store.insert(event: Self.makeEvent(process: proc))
 
-        let read = try await store.events(since: .distantPast)
-        #expect(read.count == 1)
+        let read = try await store.exactEventsSnapshot(since: .distantPast)
+        #expect(read.events.count == 1)
         // CommandSanitizer runs on insert; for a string of plain X's it
         // returns the input unchanged, so length must survive intact.
-        #expect(read.first?.process.commandLine.count == 32_000)
+        #expect(read.events.first?.process.commandLine.count == 32_000)
     }
 }

@@ -9,13 +9,15 @@ import Foundation
 @Suite("CodeSigningCache extended fields")
 struct CodeSigningCacheExtendedTests {
 
-    /// A system binary that's Apple-signed on every macOS version MacCrab
-    /// targets. Used as a positive fixture for the extended fields.
-    private let appleBinary = "/bin/ls"
+    /// A platform binary whose signature remains available through both the
+    /// Security framework and the kernel signature-info API on supported macOS
+    /// releases. `/bin/ls` is not a stable certificate-chain fixture on newer
+    /// sealed-system releases.
+    private let appleBinary = "/usr/bin/true"
 
     @Test("Apple-signed binary populates authorities and issuerChain")
     func appleSignedChain() async throws {
-        // Skip if /bin/ls is unexpectedly absent (CI hardened images).
+        // Skip if the platform fixture is unexpectedly absent (CI hardened images).
         guard FileManager.default.fileExists(atPath: appleBinary) else {
             return
         }
@@ -23,7 +25,7 @@ struct CodeSigningCacheExtendedTests {
         let cache = CodeSigningCache()
         let info = await cache.evaluate(path: appleBinary)
 
-        #expect(info.signerType == .apple, "Expected Apple signer for /bin/ls")
+        #expect(info.signerType == .apple, "Expected Apple signer for \(appleBinary)")
         #expect(!info.authorities.isEmpty,
                 "Expected at least one cert CN in authorities")
 

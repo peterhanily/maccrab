@@ -557,7 +557,7 @@
 "appearance.mode" = "Modus";
 "appearance.note" = "Tip: detectie, preventie en reactie staan altijd aan, ongeacht de modus. Alleen de dashboardnavigatie verandert.";
 "appearance.title" = "Dashboardcomplexiteit";
-"events.aggregateModeBanner" = "Dagsamenvattingen worden getoond — beperk het tijdsbereik tot 24 uur of korter voor details per gebeurtenis";
+"events.aggregateModeBanner" = "Dagsamenvattingen worden getoond — exacte gebeurtenisdetails zijn alleen beschikbaar voor het bewaarde tijdsbereik";
 "events.category" = "Categorie";
 "events.count" = "Aantal";
 "events.day" = "Dag";

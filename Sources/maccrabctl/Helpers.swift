@@ -145,7 +145,7 @@ extension MacCrabCtl {
         Monitoring:
           status              Show daemon status and statistics
           events tail [N] [--hours H] [--category C]  Show recent events
-          events search <q>   Full-text search over events
+          events search <q>   Search the bounded event projection (reports coverage)
           events stats        Show event statistics
           alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)
           ai-alerts [--hours H] [--limit N]  AI-Guard alerts (credential fence, boundary, injection, MCP)

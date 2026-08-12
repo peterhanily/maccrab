@@ -116,7 +116,7 @@ private func sessionList(args: [String]) async throws {
     }
     limit = min(max(limit, 1), 500)
 
-    let store = try EventStore(directory: maccrabDataDir())
+    let store = try MacCrabCtl.openEventStoreForReading(directory: maccrabDataDir())
     // READ surface: an empty / young store (or an absent migration-added
     // ai_tool_session_id column on a fresh box) means "nothing recorded yet",
     // mirroring the MCP handler's fail-soft path — not an error.
@@ -161,11 +161,24 @@ private func sessionShow(args: [String]) async throws {
     }
     limit = min(max(limit, 1), 2000)
 
-    let store = try EventStore(directory: maccrabDataDir())
-    // Fail-soft on the event query (fresh store / unknown id / absent
-    // migration column) — same contract as the MCP handler.
-    let events = (try? await store.eventsForAgentSession(id, limit: limit)) ?? []
-    let alertStore = try? AlertStore(directory: maccrabDataDir())
+    let store = try MacCrabCtl.openEventStoreForReading(directory: maccrabDataDir())
+    let eventSnapshot = try await store.exactEventsForAgentSessionSnapshot(
+        id,
+        since: .distantPast,
+        until: .distantFuture,
+        limit: limit
+    )
+    guard eventSnapshot.isComplete else {
+        throw EventStoreError.exactEvidenceGap(
+            poisonRecords: eventSnapshot.poisonRecords.count,
+            corruptLegacyRecords: eventSnapshot.corruptLegacyRecords,
+            inheritedLegacyLossRecords:
+                eventSnapshot.inheritedLegacyLossRecords,
+            resourceLimitedRecords: eventSnapshot.resourceLimitedRecords
+        )
+    }
+    let events = eventSnapshot.events
+    let alertStore = try? MacCrabCtl.openAlertStoreForReading(directory: maccrabDataDir())
     let alerts = (try? await alertStore?.alerts(forAgentSession: id)) ?? []
 
     let fmt = ISO8601DateFormatter()
@@ -173,6 +186,7 @@ private func sessionShow(args: [String]) async throws {
     print("  events: \(events.count)   alerts: \(alerts.count)")
     if events.isEmpty && alerts.isEmpty {
         print("  (no recorded activity for this session id yet)")
+        withExtendedLifetime(eventSnapshot) {}
         return
     }
 
@@ -196,6 +210,7 @@ private func sessionShow(args: [String]) async throws {
             print("  \(fmt.string(from: a.timestamp))  [\(a.severity.rawValue.uppercased())] \(a.ruleId) — \(a.ruleTitle)\(a.suppressed ? " (suppressed)" : "")")
         }
     }
+    withExtendedLifetime(eventSnapshot) {}
 }
 
 private func sessionExport(args: [String]) async throws {
@@ -211,13 +226,29 @@ private func sessionExport(args: [String]) async throws {
         else { i += 1 }
     }
 
-    let store = try EventStore(directory: maccrabDataDir())
-    let events = try await store.eventsForAgentSession(id, limit: 10_000)
+    let store = try MacCrabCtl.openEventStoreForReading(directory: maccrabDataDir())
+    let eventSnapshot = try await store.exactEventsForAgentSessionSnapshot(
+        id,
+        since: .distantPast,
+        until: .distantFuture,
+        limit: 10_000
+    )
+    guard eventSnapshot.isComplete else {
+        throw EventStoreError.exactEvidenceGap(
+            poisonRecords: eventSnapshot.poisonRecords.count,
+            corruptLegacyRecords: eventSnapshot.corruptLegacyRecords,
+            inheritedLegacyLossRecords:
+                eventSnapshot.inheritedLegacyLossRecords,
+            resourceLimitedRecords: eventSnapshot.resourceLimitedRecords
+        )
+    }
+    let events = eventSnapshot.events
+    defer { withExtendedLifetime(eventSnapshot) {} }
     let encoder = JSONEncoder()
     let eventsJsonl: [String] = events.compactMap { e in
         (try? encoder.encode(e)).flatMap { String(data: $0, encoding: .utf8) }
     }
-    let alertStore = try AlertStore(directory: maccrabDataDir())
+    let alertStore = try MacCrabCtl.openAlertStoreForReading(directory: maccrabDataDir())
     let alerts = (try? await alertStore.alerts(forAgentSession: id)) ?? []
     let alertsJson = (try? encoder.encode(alerts)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
 

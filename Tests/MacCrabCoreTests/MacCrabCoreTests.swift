@@ -464,9 +464,12 @@ struct EventStoreTests {
         let event = makeEvent(processName: "curl", processPath: "/usr/bin/curl")
         try await store.insert(event: event)
 
-        let events = try await store.events(since: Date.distantPast, limit: 10)
-        #expect(events.count == 1)
-        #expect(events[0].process.name == "curl")
+        let snapshot = try await store.exactEventsSnapshot(
+            since: Date.distantPast,
+            limit: 10
+        )
+        #expect(snapshot.events.count == 1)
+        #expect(snapshot.events[0].process.name == "curl")
     }
 
     @Test("Count returns correct number")
@@ -498,7 +501,7 @@ struct EventStoreTests {
         #expect(count == 20)
     }
 
-    @Test("Prune removes old events")
+    @Test("Prune preserves journal events until whole-block expiry")
     func prune() async throws {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -507,9 +510,15 @@ struct EventStoreTests {
         let store = try EventStore(directory: tmpDir.path)
         try await store.insert(event: makeEvent(processName: "old"))
         let pruned = try await store.prune(olderThan: Date().addingTimeInterval(1))
-        #expect(pruned == 1)
-        let count = try await store.count()
-        #expect(count == 0)
+        #expect(pruned == 0)
+        #expect(try await store.count() == 1)
+
+        let expired = try await store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(16 * 60),
+            maximumBlocks: 1
+        )
+        #expect(expired == 1)
+        #expect(try await store.count() == 0)
     }
 
     @Test("FTS5 search finds matching events")
@@ -530,9 +539,9 @@ struct EventStoreTests {
             commandLine: "ls -la"
         ))
 
-        let results = try await store.search(text: "evil", limit: 10)
-        #expect(results.count == 1)
-        #expect(results[0].process.name == "curl")
+        let snapshot = try await store.searchSnapshot(text: "evil", limit: 10)
+        #expect(snapshot.events.count == 1)
+        #expect(snapshot.events[0].process.name == "curl")
     }
 }
 

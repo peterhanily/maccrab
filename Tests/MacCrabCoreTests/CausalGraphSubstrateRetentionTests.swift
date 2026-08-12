@@ -94,6 +94,18 @@ struct CausalGraphSubstrateRetentionTests {
         }
     }
 
+    private func waitForRecoveryWaiters(
+        _ expected: Int,
+        in store: SQLiteCausalGraphStore
+    ) async -> CausalGraphStorageAdmissionStatus? {
+        for _ in 0..<10_000 {
+            let status = await store.storageAdmissionStatus()
+            if status.recoveryMutationWaiters == expected { return status }
+            await Task.yield()
+        }
+        return nil
+    }
+
     private final class PageLimitFailureOnInstall: @unchecked Sendable {
         private let lock = NSLock()
         private var installCalls = 0
@@ -1016,6 +1028,320 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(try await store.memberCount(traceId: traceID) > 0,
                 "the fresh child must stop later cascade quanta")
         await store.close()
+    }
+
+    @Test("Periodic recovery queues one concurrent mutation and yields after one child quantum")
+    func periodicRecoverySerializesForegroundMutationLosslessly() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-recovery-writer-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let gate = CascadeYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path.path,
+            cascadeYieldHook: { await gate.pauseOnce() }
+        )
+        let traceID = "writer-preemption"
+        try await store.saveTrace(
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "writer-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: cutoff,
+                orphanCutoff: cutoff
+            )
+        }
+        await gate.waitUntilPaused()
+        let writer = Task {
+            try await store.upsertEntity(self.ent("during-recovery", lastSeen: self.recent))
+        }
+        let queued = try #require(await waitForRecoveryWaiters(1, in: store))
+        #expect(queued.recovering)
+        #expect(!queued.blocked)
+        #expect(queued.reason == nil)
+        #expect(queued.acceptingMutations)
+        #expect(!queued.recoveryMutationQueueSaturated)
+        #expect(queued.recoveryMutationWaiterHighWatermark == 1)
+        #expect(queued.recoveryMutationWaitsTotal == 1)
+        #expect(queued.shedMutationsTotal == 0,
+                "maintenance serialization is not a shed")
+
+        await gate.resume()
+        let result = try await recovery.value
+        try await writer.value
+
+        // The waiting mutation stops this pass after exactly one child-table
+        // transaction. Its independently enforced row ceiling is 256, while
+        // the conservative byte ceiling may make the actual quantum smaller.
+        #expect(result.traceChildRowsDeleted > 0)
+        #expect(result.traceChildRowsDeleted <= 256)
+        #expect(result.traceChildRowsDeleted < 600)
+        #expect(result.tracesDeleted == 0)
+        #expect(try await store.entity(id: "during-recovery") != nil)
+        let after = await store.storageAdmissionStatus()
+        #expect(after.recoveryMutationWaiters == 0)
+        #expect(after.recoveryMutationWaitReleasesTotal == 1)
+        #expect(after.recoveryMutationWaitCancellationsTotal == 0)
+        #expect(after.recoveryMutationWaitClosedTotal == 0)
+        #expect(after.recoveryMutationWaitsTotal
+            == UInt64(after.recoveryMutationWaiters)
+                + after.recoveryMutationWaitReleasesTotal
+                + after.recoveryMutationWaitCancellationsTotal
+                + after.recoveryMutationWaitClosedTotal)
+        #expect(after.recoveryWriterPreemptionsTotal == 1)
+        #expect(after.recoveryMutationWaitNanosecondsTotal
+            >= after.recoveryMutationMaxWaitNanoseconds)
+        #expect(after.recoveryMutationMaxWaitNanoseconds > 0)
+        #expect(after.recoveryMutationOldestWaitNanoseconds == 0)
+        #expect(after.shedMutationsTotal == 0)
+        await store.close()
+    }
+
+    @Test("Recovery waiter cap is explicit; cancellation promptly releases capacity")
+    func periodicRecoveryWaiterCancellationIsPrompt() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-recovery-cancel-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let gate = CascadeYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path.path,
+            cascadeYieldHook: { await gate.pauseOnce() },
+            recoveryMutationWaiterLimit: 1
+        )
+        let traceID = "cancel-waiter"
+        try await store.saveTrace(
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "cancel-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: cutoff,
+                orphanCutoff: cutoff
+            )
+        }
+        await gate.waitUntilPaused()
+        let cancelled = Task {
+            try await store.upsertEntity(self.ent("cancelled-writer", lastSeen: self.recent))
+        }
+        _ = try #require(await waitForRecoveryWaiters(1, in: store))
+        do {
+            try await store.upsertEntity(ent("task-storm-overflow", lastSeen: recent))
+            Issue.record("one-waiter safety limit admitted an overflow mutation")
+        } catch let error as CausalGraphRecoverySerializationError {
+            #expect(error == .waiterLimitReached(limit: 1))
+        }
+        let saturated = await store.storageAdmissionStatus()
+        #expect(saturated.recoveryMutationWaiters == 1)
+        #expect(saturated.recoveryMutationQueueSaturated)
+        #expect(!saturated.acceptingMutations)
+        #expect(saturated.recoveryMutationWaitSaturationsTotal == 1)
+        #expect(saturated.shedMutationsTotal == 0,
+                "queue saturation is not allowed to masquerade as storage shedding")
+        cancelled.cancel()
+        do {
+            try await cancelled.value
+            Issue.record("cancelled recovery waiter unexpectedly mutated")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let freed = try #require(await waitForRecoveryWaiters(0, in: store))
+        #expect(!freed.recoveryMutationQueueSaturated)
+        #expect(freed.acceptingMutations)
+        #expect(freed.recoveryMutationWaitCancellationsTotal == 1)
+        #expect(freed.recoveryMutationWaiterHighWatermark == 1)
+
+        // The fixed one-waiter capacity is reusable immediately; it is not
+        // stranded by the cancellation-handler race.
+        let replacement = Task {
+            try await store.upsertEntity(self.ent("replacement-writer", lastSeen: self.recent))
+        }
+        _ = try #require(await waitForRecoveryWaiters(1, in: store))
+        await gate.resume()
+        _ = try await recovery.value
+        try await replacement.value
+
+        let after = await store.storageAdmissionStatus()
+        #expect(after.recoveryMutationWaiterLimit == 1)
+        #expect(after.recoveryMutationWaiters == 0)
+        #expect(after.recoveryMutationWaitsTotal == 2)
+        #expect(after.recoveryMutationWaitReleasesTotal == 1)
+        #expect(after.recoveryMutationWaitCancellationsTotal == 1)
+        #expect(after.recoveryMutationWaitClosedTotal == 0)
+        #expect(after.recoveryMutationWaitsTotal
+            == UInt64(after.recoveryMutationWaiters)
+                + after.recoveryMutationWaitReleasesTotal
+                + after.recoveryMutationWaitCancellationsTotal
+                + after.recoveryMutationWaitClosedTotal)
+        #expect(after.recoveryMutationWaitSaturationsTotal == 1)
+        #expect(after.shedMutationsTotal == 0)
+        #expect(try await store.entity(id: "cancelled-writer") == nil)
+        #expect(try await store.entity(id: "replacement-writer") != nil)
+        await store.close()
+    }
+
+    @Test("Recovery throw releases queued mutation for fresh admission")
+    func recoveryThrowCannotStrandMutationWaiter() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-recovery-throw-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let gate = CascadeYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path.path,
+            cascadeYieldHook: {
+                await gate.pauseOnce()
+                throw CausalGraphStoreError.stepFailed("injected recovery throw")
+            }
+        )
+        let traceID = "throw-waiter"
+        try await store.saveTrace(
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "throw-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: cutoff,
+                orphanCutoff: cutoff
+            )
+        }
+        await gate.waitUntilPaused()
+        let writer = Task {
+            try await store.upsertEntity(self.ent("after-recovery-throw", lastSeen: self.recent))
+        }
+        _ = try #require(await waitForRecoveryWaiters(1, in: store))
+        await gate.resume()
+        do {
+            _ = try await recovery.value
+            Issue.record("injected recovery error did not escape")
+        } catch let error as CausalGraphStoreError {
+            #expect(error.localizedDescription.contains("injected recovery throw"))
+        }
+        try await writer.value
+
+        let after = await store.storageAdmissionStatus()
+        #expect(after.recovering == false)
+        #expect(after.recoveryMutationWaiters == 0)
+        #expect(after.recoveryMutationWaitsTotal == 1)
+        #expect(after.recoveryMutationWaitReleasesTotal == 1)
+        #expect(after.recoveryMutationWaitCancellationsTotal == 0)
+        #expect(after.recoveryMutationWaitClosedTotal == 0)
+        #expect(after.recoveryMutationWaitsTotal
+            == UInt64(after.recoveryMutationWaiters)
+                + after.recoveryMutationWaitReleasesTotal
+                + after.recoveryMutationWaitCancellationsTotal
+                + after.recoveryMutationWaitClosedTotal)
+        #expect(after.shedMutationsTotal == 0)
+        #expect(try await store.entity(id: "after-recovery-throw") != nil)
+        await store.close()
+    }
+
+    @Test("Close during recovery wakes queued mutation with closed-store error")
+    func closeDuringRecoveryCannotDeadlockMutationWaiter() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracegraph-recovery-close-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: path.path + suffix)
+            }
+        }
+        let gate = CascadeYieldGate()
+        let store = try await SQLiteCausalGraphStore(
+            databasePath: path.path,
+            cascadeYieldHook: { await gate.pauseOnce() }
+        )
+        let traceID = "close-waiter"
+        try await store.saveTrace(
+            startupTrace(traceID, updatedAt: old, policyPayloadBytes: 256),
+            members: (0..<600).map { index in
+                TraceMembership(
+                    traceId: traceID,
+                    entityId: "close-member-\(index)",
+                    role: "context",
+                    layer: "context",
+                    addedAt: old
+                )
+            }
+        )
+        let recovery = Task {
+            try await store.recoverStorageBudget(
+                retentionCutoff: cutoff,
+                orphanCutoff: cutoff
+            )
+        }
+        await gate.waitUntilPaused()
+        let writer = Task {
+            try await store.upsertEntity(self.ent("closed-writer", lastSeen: self.recent))
+        }
+        _ = try #require(await waitForRecoveryWaiters(1, in: store))
+        let closing = Task { await store.close() }
+        var closeObserved = false
+        for _ in 0..<10_000 {
+            if !(await store.storageAdmissionStatus()).writableHandle {
+                closeObserved = true
+                break
+            }
+            await Task.yield()
+        }
+        #expect(closeObserved, "close request never reached the recovering actor")
+        await gate.resume()
+        _ = try await recovery.value
+        await closing.value
+        do {
+            try await writer.value
+            Issue.record("queued writer mutated after close")
+        } catch let error as CausalGraphStoreError {
+            #expect(error.localizedDescription.contains("closed"))
+        }
+        let after = await store.storageAdmissionStatus()
+        #expect(!after.writableHandle)
+        #expect(!after.recovering)
+        #expect(after.recoveryMutationWaiters == 0)
+        #expect(after.recoveryMutationWaitsTotal == 1)
+        #expect(after.recoveryMutationWaitReleasesTotal == 0)
+        #expect(after.recoveryMutationWaitCancellationsTotal == 0)
+        #expect(after.recoveryMutationWaitClosedTotal == 1)
+        #expect(after.recoveryMutationWaitsTotal
+            == UInt64(after.recoveryMutationWaiters)
+                + after.recoveryMutationWaitReleasesTotal
+                + after.recoveryMutationWaitCancellationsTotal
+                + after.recoveryMutationWaitClosedTotal)
+        #expect(after.shedMutationsTotal == 0)
     }
 
     @Test("Orphan recovery never deletes a surviving trace root entity")

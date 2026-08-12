@@ -157,13 +157,21 @@ struct BundledRuleSynchronizerTests {
         defer { try? FileManager.default.removeItem(at: f.root) }
         try makeCorpus(at: f.bundled, version: "2.0")
 
-        let outcome = BundledRuleSynchronizer.synchronize(
+        let manifestData = try Data(
+            contentsOf: f.bundled.appendingPathComponent("manifest.json")
+        )
+        let observation = BundledRuleSynchronizer.synchronizeObserved(
             bundledDirectory: f.bundled,
             installedDirectory: f.installed,
             requiredOwnerUID: uid
         )
+        let outcome = observation.outcome
 
         #expect(outcome == .installed(version: "2.0"))
+        #expect(observation.installedCorpus?.version == "2.0")
+        #expect(observation.installedCorpus?.manifestSHA256 ==
+            sha256(manifestData))
+        #expect(observation.installedCorpus?.manifestHashEntryCount == 1)
         #expect(try contents(f.installed.appendingPathComponent(".bundle_version")) == "2.0\n")
         #expect(try mode(f.installed) == 0o755)
         #expect(try mode(f.installed.appendingPathComponent("rules/example.json")) == 0o644)

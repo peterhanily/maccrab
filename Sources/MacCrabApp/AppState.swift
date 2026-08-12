@@ -286,7 +286,8 @@ final class AppState: ObservableObject {
     nonisolated private static func traceGraphWriteDegraded(
         from raw: [String: Any]
     ) -> Bool? {
-        guard raw["ingest_events_total"] != nil,
+        guard (raw["ingest_events_total"] != nil
+                || raw["accepting_mutations"] != nil),
               JSONSerialization.isValidJSONObject(raw),
               let data = try? JSONSerialization.data(withJSONObject: raw),
               let status = try? JSONDecoder().decode(
@@ -1019,6 +1020,14 @@ final class AppState: ObservableObject {
     /// its prepend so a relevance-ordered search isn't clobbered by newer
     /// rows arriving on the poll tick.
     @Published var eventSearchActive: Bool = false
+    /// Explicit evidence-coverage warnings for the Events workspace. Sparse
+    /// search, retention-truncated histograms, and aggregate gaps must never
+    /// render as a clean empty result.
+    @Published var eventSearchCoverageWarning: String?
+    @Published var eventHistogramCoverageWarning: String?
+    @Published var eventAggregateCoverageWarning: String?
+    @Published var eventHistogramEffectiveSince: Date?
+    @Published var eventHistogramEffectiveUntil: Date?
     /// Mirror flag for the Alerts tab — same reasoning as `eventSearchActive`
     /// but the underlying query is LIKE-based (no FTS5 on the alerts table).
     @Published var alertSearchActive: Bool = false
@@ -2426,6 +2435,8 @@ final class AppState: ObservableObject {
         do {
             let store = try eventStore()
             let raw: [Event]
+            var exactOwnership: ExactEventQuerySnapshot?
+            var searchOwnership: EventSearchSnapshot?
             let isSearch = filter.map { !$0.isEmpty } ?? false
             if let query = filter, isSearch {
                 // Pass [since, until] through to FTS5/LIKE so an
@@ -2442,7 +2453,23 @@ final class AppState: ObservableObject {
                 // than DB-side. That path is limit-capped, so on a busy
                 // host it undercounts the same way the non-search path
                 // used to — the hot-tier fix below is the primary one.
-                raw = try await store.search(text: query, since: since, until: until, limit: limit)
+                let snapshot = try await store.searchSnapshot(
+                    text: query,
+                    since: since,
+                    until: until,
+                    limit: limit
+                )
+                searchOwnership = snapshot
+                raw = snapshot.events
+                if snapshot.isComplete {
+                    eventSearchCoverageWarning = nil
+                } else {
+                    eventSearchCoverageWarning =
+                        "Search is partial: \(snapshot.projectionOmitted) "
+                        + "retained events are outside the search projection "
+                        + "and \(snapshot.gaps.total) evidence gaps remain. "
+                        + "No match is not proof of absence."
+                }
             } else {
                 // EventStore.events doesn't yet take an upper bound;
                 // narrow client-side after the fetch. The result set
@@ -2450,8 +2477,25 @@ final class AppState: ObservableObject {
                 // capped) so this is fine. `category` IS pushed DB-side
                 // so the picker filters the whole hot tier, not just the
                 // ~500-row loaded window (which undercounts on busy hosts).
-                let all = try await store.events(since: since, category: category, limit: limit)
-                raw = all.filter { $0.timestamp <= until }
+                let snapshot = try await store.exactEventsSnapshot(
+                    since: since,
+                    category: category,
+                    limit: limit
+                )
+                guard snapshot.isComplete else {
+                    throw EventStoreError.exactEvidenceGap(
+                        poisonRecords: snapshot.poisonRecords.count,
+                        corruptLegacyRecords:
+                            snapshot.corruptLegacyRecords,
+                        inheritedLegacyLossRecords:
+                            snapshot.inheritedLegacyLossRecords,
+                        resourceLimitedRecords:
+                            snapshot.resourceLimitedRecords
+                    )
+                }
+                exactOwnership = snapshot
+                raw = snapshot.events.filter { $0.timestamp <= until }
+                eventSearchCoverageWarning = nil
             }
             events = raw.map { eventToViewModel($0) }
             // Gate the live poll: while a search is active, the events array
@@ -2472,8 +2516,12 @@ final class AppState: ObservableObject {
                 eventCursor = nil
                 hasMoreEvents = false
             }
+            withExtendedLifetime(exactOwnership) {}
+            withExtendedLifetime(searchOwnership) {}
         } catch {
-            // DB may not exist yet
+            eventSearchCoverageWarning =
+                "Event evidence could not be read completely: "
+                + error.localizedDescription
         }
     }
 
@@ -2518,7 +2566,11 @@ final class AppState: ObservableObject {
         defer { isLoadingOlderEvents = false }
         do {
             let store = try eventStore()
-            let page = try await store.events(before: cursor, category: category, pageSize: pageSize)
+            let page = try await store.exactEventsPageSnapshot(
+                before: cursor,
+                category: category,
+                pageSize: pageSize
+            )
             let existing = Set(events.map { $0.id })
             let appended = page.items
                 .filter { !existing.contains($0.id) }
@@ -2528,6 +2580,7 @@ final class AppState: ObservableObject {
             }
             eventCursor = page.nextCursor
             hasMoreEvents = page.nextCursor != nil
+            withExtendedLifetime(page) {}
         } catch {}
     }
 
@@ -3009,8 +3062,16 @@ final class AppState: ObservableObject {
         if eventSearchActive { return }
         do {
             let store = try eventStore()
-            let newEvents = try await store.events(since: lastEventTimestamp, limit: 200)
-            let newViewModels = newEvents
+            let snapshot = try await store.exactEventsSnapshot(
+                since: lastEventTimestamp,
+                limit: 200
+            )
+            guard snapshot.isComplete else {
+                eventSearchCoverageWarning =
+                    "Incremental event evidence is incomplete."
+                return
+            }
+            let newViewModels = snapshot.events
                 .filter { $0.timestamp > lastEventTimestamp }
                 .map { eventToViewModel($0) }
             if !newViewModels.isEmpty {
@@ -3019,6 +3080,7 @@ final class AppState: ObservableObject {
                 if events.count > 5000 { events = Array(events.prefix(5000)) }
                 lastEventTimestamp = newViewModels.first?.timestamp ?? lastEventTimestamp
             }
+            withExtendedLifetime(snapshot) {}
         } catch {}
     }
 
@@ -3050,11 +3112,11 @@ final class AppState: ObservableObject {
     /// and ancestors. Returns nil for alerts without a backing Event
     /// (USB, clipboard, tamper) or when the event has already been
     /// pruned from the DB.
-    func fetchEvent(id: String) async -> Event? {
+    func fetchEvent(id: String) async -> ExactEventLookupSnapshot? {
         guard let uuid = UUID(uuidString: id) else { return nil }
         do {
             let store = try eventStore()
-            return try await store.event(id: uuid)
+            return try await store.exactEventSnapshot(id: uuid)
         } catch {
             return nil
         }
@@ -3077,8 +3139,16 @@ final class AppState: ObservableObject {
     func fetchAggregates(sinceDay: String, category: MacCrabCore.EventCategory? = nil) async -> [EventStore.AggregateRow] {
         do {
             let store = try eventStore()
-            return try await store.aggregates(sinceDay: sinceDay, category: category)
+            let rows = try await store.aggregates(
+                sinceDay: sinceDay,
+                category: category
+            )
+            eventAggregateCoverageWarning = nil
+            return rows
         } catch {
+            eventAggregateCoverageWarning =
+                "Daily summaries are incomplete: "
+                + error.localizedDescription
             return []
         }
     }
@@ -3097,13 +3167,36 @@ final class AppState: ObservableObject {
     ) async -> [(Date, Int)] {
         do {
             let store = try eventStore()
-            return try await store.histogramBins(
+            let snapshot = try await store.histogramSnapshot(
                 spanSeconds: spanSeconds,
                 stepSeconds: stepSeconds,
                 endingAt: endingAt,
                 category: category
             )
+            eventHistogramEffectiveSince = snapshot.effectiveSince
+            eventHistogramEffectiveUntil = snapshot.effectiveUntil
+            if snapshot.isComplete {
+                eventHistogramCoverageWarning = nil
+            } else {
+                let effectiveSeconds = max(
+                    0,
+                    Int(snapshot.effectiveUntil.timeIntervalSince(
+                        snapshot.effectiveSince
+                    ))
+                )
+                eventHistogramCoverageWarning =
+                    "Histogram covers only the provable retained "
+                    + "\(effectiveSeconds)-second interval and has "
+                    + "\(snapshot.gaps.total) evidence gaps; missing bins "
+                    + "are unknown, not zero."
+            }
+            return snapshot.bins.map { ($0.start, $0.count) }
         } catch {
+            eventHistogramEffectiveSince = nil
+            eventHistogramEffectiveUntil = nil
+            eventHistogramCoverageWarning =
+                "Histogram evidence could not be read completely: "
+                + error.localizedDescription
             return []
         }
     }

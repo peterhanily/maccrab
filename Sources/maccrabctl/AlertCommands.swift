@@ -4,7 +4,7 @@ import MacCrabCore
 extension MacCrabCtl {
     static func listAlerts(limit: Int, hours: Double? = nil, severityFilter: Severity? = nil) async {
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
             let raw = try await store.alerts(since: since, severity: severityFilter, limit: limit)
             let alerts = raw.filter { !$0.ruleId.hasPrefix("maccrab.campaign.") }
@@ -51,7 +51,7 @@ extension MacCrabCtl {
 
     static func exportAlerts(format: String, limit: Int) async {
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
 
             if alerts.isEmpty {
@@ -239,7 +239,7 @@ extension MacCrabCtl {
     static func listIntelMatches(hours: Double) async {
         let prefix = "maccrab.threat-intel."
         do {
-            let store = try AlertStore(directory: maccrabDataDir())
+            let store = try openAlertStoreForReading(directory: maccrabDataDir())
             let since = Date().addingTimeInterval(-hours * 3600)
             let raw = try await store.alerts(since: since, limit: 500)
             let matches = raw.filter {
@@ -302,7 +302,7 @@ extension MacCrabCtl {
         var lastSeenIDs = Set<String>()
         let store: AlertStore
         do {
-            store = try AlertStore(directory: maccrabDataDir())
+            store = try openAlertStoreForReading(directory: maccrabDataDir())
         } catch {
             print("Error opening alert store: \(error)")
             return

@@ -85,6 +85,21 @@ maccrab_validate_app_executable_roots() {
     fi
 }
 
+# Normalize bundle symlink metadata without ever dereferencing a link.  Sparkle
+# frameworks legitimately use relative symlinks, but a payload assembled under
+# umask 077 can otherwise become root-owned lrwx------ after sudo installation.
+# Explicit -P prevents traversal through a directory link and chmod -h applies
+# 0755 to the link object rather than to an attacker-selected target.
+maccrab_normalize_app_symlink_modes_no_follow() {
+    local app="$1"
+    [ -d "$app" ] && [ ! -L "$app" ] || return 1
+    /usr/bin/find -P "$app" -type l -exec /bin/chmod -h 0755 {} + || return 1
+    if /usr/bin/find -P "$app" -type l ! -perm 0755 -print -quit \
+            | /usr/bin/grep . >/dev/null; then
+        return 1
+    fi
+}
+
 maccrab_normalize_app_modes() {
     local app="$1"
     maccrab_validate_app_executable_roots "$app" || return 1
@@ -102,6 +117,7 @@ maccrab_normalize_app_modes() {
     /usr/bin/find "$app" -type d -exec /bin/chmod a+rx,go-w {} +
     /usr/bin/find "$app" -type f -exec /bin/chmod a+r,go-w {} +
     /usr/bin/find "$app" -type f -perm -u+x -exec /bin/chmod a+x {} +
+    maccrab_normalize_app_symlink_modes_no_follow "$app" || return 1
     /bin/chmod 0755 "$app/Contents/MacOS/MacCrab"
     if [ -d "$app/Contents/Resources/bin" ]; then
         /usr/bin/find "$app/Contents/Resources/bin" -type f \

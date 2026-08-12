@@ -83,6 +83,46 @@ struct HeartbeatSnapshotTests {
       },
       "rules_loaded": 486,
       "rules_active": 98,
+      "rule_sync": {
+        "status": "unchanged",
+        "version": "1.21.6-rc.13",
+        "bundled_tampered": false,
+        "installed_tampered": false,
+        "installed_corpus_verified": true,
+        "installed_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "installed_manifest_hash_entry_count": 486
+      },
+      "event_journal_recovery": {
+        "source_events": 100,
+        "migrated_events": 72,
+        "rolled_expired_events": 20,
+        "corrupt_preserved_events": 8,
+        "remaining_events": 0,
+        "complete": true,
+        "conserved": true
+      },
+      "event_search_projection": {
+        "query_available": true,
+        "mutation_generation": 91,
+        "requested_duration_seconds": 3600,
+        "effective_duration_seconds": 3600,
+        "requested_window_complete": true,
+        "projection_considered": 100,
+        "projection_materialized": 96,
+        "projection_omitted_quota": 1,
+        "projection_omitted_replaced": 1,
+        "projection_omitted_physical": 1,
+        "projection_omitted_external": 1,
+        "projection_omitted_migration": 0,
+        "projection_pending": 0,
+        "projection_omitted_total": 4,
+        "canonical_poison_records": 1,
+        "corrupt_legacy_records": 2,
+        "inherited_legacy_loss_records": 3,
+        "resource_limited_records": 4,
+        "gap_records_total": 10,
+        "complete": false
+      },
       "collector_health": [
         { "name": "ESCollector", "healthy": true, "last_tick_unix": 1700000000.0,
           "event_count": 5000, "error_count": 0 },
@@ -257,13 +297,27 @@ struct HeartbeatSnapshotTests {
       "sequence_state_continuity_maintained": true,
       "sequence_state_continuity_detail": "nominal",
       "tracegraph_storage_admission": {
-        "enabled": true, "blocked": true, "reason": "footprint_limit",
+        "enabled": true, "accepting_mutations": false,
+        "blocked": true, "reason": "footprint_limit",
         "store_available": true, "startup_blocked": false,
         "shed_mutations_total": 73, "max_footprint_bytes": 262144000,
         "admission_threshold_bytes": 195035136, "resume_below_bytes": 195035136,
         "transaction_reserve_bytes": 67108864, "footprint_bytes": 224395952,
         "free_space_bytes": 8589934592, "free_space_floor_bytes": 1073741824,
-        "pinned_reader": false, "recovering": false
+        "pinned_reader": false, "recovering": false,
+        "recovery_mutation_waiters": 0,
+        "recovery_mutation_waiter_limit": 1024,
+        "recovery_mutation_queue_saturated": false,
+        "recovery_mutation_waiter_high_watermark": 7,
+        "recovery_mutation_waits_total": 12,
+        "recovery_mutation_wait_releases_total": 10,
+        "recovery_mutation_wait_cancellations_total": 1,
+        "recovery_mutation_wait_closed_total": 1,
+        "recovery_mutation_wait_saturations_total": 0,
+        "recovery_mutation_wait_nanoseconds_total": 12000000,
+        "recovery_mutation_max_wait_nanoseconds": 2000000,
+        "recovery_mutation_oldest_wait_nanoseconds": 0,
+        "recovery_writer_preemptions_total": 4
       },
       "traces_storage_admission": {
         "enabled": true, "blocked": true, "reason": "low_free_space",
@@ -364,6 +418,41 @@ struct HeartbeatSnapshotTests {
         #expect(h.eventsDropped == 4)
         #expect(h.rulesLoaded == 486)
         #expect(h.rulesActive == 98)
+        #expect(h.ruleSync?.status == "unchanged")
+        #expect(h.ruleSync?.version == "1.21.6-rc.13")
+        #expect(h.ruleSync?.bundledTampered == false)
+        #expect(h.ruleSync?.installedTampered == false)
+        #expect(h.ruleSync?.installedCorpusVerified == true)
+        #expect(h.ruleSync?.installedManifestSHA256 ==
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        #expect(h.ruleSync?.installedManifestHashEntryCount == 486)
+        #expect(h.eventJournalRecovery?.sourceEvents == 100)
+        #expect(h.eventJournalRecovery?.migratedEvents == 72)
+        #expect(h.eventJournalRecovery?.rolledExpiredEvents == 20)
+        #expect(h.eventJournalRecovery?.corruptPreservedEvents == 8)
+        #expect(h.eventJournalRecovery?.remainingEvents == 0)
+        #expect(h.eventJournalRecovery?.complete == true)
+        #expect(h.eventJournalRecovery?.conserved == true)
+        #expect(h.eventSearchProjection?.queryAvailable == true)
+        #expect(h.eventSearchProjection?.mutationGeneration == 91)
+        #expect(h.eventSearchProjection?.requestedDurationSeconds == 3_600)
+        #expect(h.eventSearchProjection?.effectiveDurationSeconds == 3_600)
+        #expect(h.eventSearchProjection?.requestedWindowComplete == true)
+        #expect(h.eventSearchProjection?.projectionConsidered == 100)
+        #expect(h.eventSearchProjection?.projectionMaterialized == 96)
+        #expect(h.eventSearchProjection?.projectionOmittedQuota == 1)
+        #expect(h.eventSearchProjection?.projectionOmittedReplaced == 1)
+        #expect(h.eventSearchProjection?.projectionOmittedPhysical == 1)
+        #expect(h.eventSearchProjection?.projectionOmittedExternal == 1)
+        #expect(h.eventSearchProjection?.projectionOmittedMigration == 0)
+        #expect(h.eventSearchProjection?.projectionPending == 0)
+        #expect(h.eventSearchProjection?.projectionOmittedTotal == 4)
+        #expect(h.eventSearchProjection?.canonicalPoisonRecords == 1)
+        #expect(h.eventSearchProjection?.corruptLegacyRecords == 2)
+        #expect(h.eventSearchProjection?.inheritedLegacyLossRecords == 3)
+        #expect(h.eventSearchProjection?.resourceLimitedRecords == 4)
+        #expect(h.eventSearchProjection?.gapRecordsTotal == 10)
+        #expect(h.eventSearchProjection?.complete == false)
         #expect(h.eventPipeline?.offeredBySource?["ESCollector"] == 100)
         #expect(h.eventPipeline?.offeredBySourceAndLane?["UnifiedLogCollector"]?["file"] == 35)
         #expect(h.eventPipeline?.droppedBySourceAndLane?["ESCollector"]?["file"] == 1)
@@ -504,6 +593,7 @@ struct HeartbeatSnapshotTests {
         #expect(h.sequenceStateContinuityMaintained == true)
         #expect(h.sequenceStateContinuityDetail == "nominal")
         #expect(h.traceGraphStorageAdmission?.enabled == true)
+        #expect(h.traceGraphStorageAdmission?.acceptingMutations == false)
         #expect(h.traceGraphStorageAdmission?.blocked == true)
         #expect(h.traceGraphStorageAdmission?.storeAvailable == true)
         #expect(h.traceGraphStorageAdmission?.startupBlocked == false)
@@ -512,6 +602,17 @@ struct HeartbeatSnapshotTests {
         #expect(h.traceGraphStorageAdmission?.maxFootprintBytes == 262_144_000)
         #expect(h.traceGraphStorageAdmission?.transactionReserveBytes == 67_108_864)
         #expect(h.traceGraphStorageAdmission?.pinnedReader == false)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaiters == 0)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaiterLimit == 1_024)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaiterHighWatermark == 7)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaitsTotal == 12)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaitReleasesTotal == 10)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaitCancellationsTotal == 1)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaitClosedTotal == 1)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationWaitConservationMaintained == true)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationTelemetryComplete == true)
+        #expect(h.traceGraphStorageAdmission?.recoveryMutationBarrierDegraded == true)
+        #expect(h.traceGraphStorageAdmission?.recoveryWriterPreemptionsTotal == 4)
         #expect(h.traceStoreStorageAdmission?.enabled == true)
         #expect(h.traceStoreStorageAdmission?.blocked == true)
         #expect(h.traceStoreStorageAdmission?.reason == "low_free_space")
@@ -558,6 +659,66 @@ struct HeartbeatSnapshotTests {
         #expect(h.traceGraphStorageAdmission?.blocked == true)
         #expect(h.traceGraphStorageAdmission?.reason == "low_free_space")
         #expect(h.traceGraphStorageAdmission?.freeSpaceBytes == 104_857_600)
+    }
+
+    @Test("TraceGraph recovery mutation barrier is exact and fail-visible")
+    func traceGraphRecoveryMutationBarrierHealth() throws {
+        let healthy = try decode("""
+        {"tracegraph_storage_admission":{
+          "enabled":true,"accepting_mutations":true,"blocked":false,
+          "store_available":true,"recovering":true,
+          "recovery_mutation_waiters":2,
+          "recovery_mutation_waiter_limit":1024,
+          "recovery_mutation_queue_saturated":false,
+          "recovery_mutation_waiter_high_watermark":3,
+          "recovery_mutation_waits_total":5,
+          "recovery_mutation_wait_releases_total":2,
+          "recovery_mutation_wait_cancellations_total":1,
+          "recovery_mutation_wait_closed_total":0,
+          "recovery_mutation_wait_saturations_total":0,
+          "recovery_mutation_wait_nanoseconds_total":100,
+          "recovery_mutation_max_wait_nanoseconds":60,
+          "recovery_mutation_oldest_wait_nanoseconds":20,
+          "recovery_writer_preemptions_total":1}}
+        """)
+        let status = try #require(healthy.traceGraphStorageAdmission)
+        #expect(status.recoveryMutationWaitConservationMaintained == true)
+        #expect(status.recoveryMutationTelemetryPresent)
+        #expect(status.recoveryMutationTelemetryComplete)
+        #expect(!status.recoveryMutationBarrierDegraded)
+        #expect(!status.graphWriteDegraded)
+
+        let broken = try decode("""
+        {"tracegraph_storage_admission":{
+          "enabled":true,"accepting_mutations":false,"blocked":false,
+          "store_available":true,"recovering":true,
+          "recovery_mutation_waiters":2,
+          "recovery_mutation_waiter_limit":2,
+          "recovery_mutation_queue_saturated":true,
+          "recovery_mutation_waiter_high_watermark":2,
+          "recovery_mutation_waits_total":4,
+          "recovery_mutation_wait_releases_total":1,
+          "recovery_mutation_wait_cancellations_total":0,
+          "recovery_mutation_wait_closed_total":0,
+          "recovery_mutation_wait_saturations_total":1,
+          "recovery_mutation_wait_nanoseconds_total":100,
+          "recovery_mutation_max_wait_nanoseconds":60,
+          "recovery_mutation_oldest_wait_nanoseconds":20,
+          "recovery_writer_preemptions_total":1}}
+        """)
+        let degraded = try #require(broken.traceGraphStorageAdmission)
+        #expect(degraded.recoveryMutationWaitConservationMaintained == false)
+        #expect(degraded.recoveryMutationBarrierDegraded)
+        #expect(degraded.graphWriteDegraded)
+
+        let partial = try decode("""
+        {"tracegraph_storage_admission":{
+          "accepting_mutations":true,
+          "recovery_mutation_waiters":0}}
+        """)
+        #expect(partial.traceGraphStorageAdmission?.recoveryMutationTelemetryPresent == true)
+        #expect(partial.traceGraphStorageAdmission?.recoveryMutationTelemetryComplete == false)
+        #expect(partial.traceGraphStorageAdmission?.recoveryMutationBarrierDegraded == true)
     }
 
     @Test("Active TraceGraph admission cannot hide a failed conserving batch")
@@ -1114,6 +1275,9 @@ struct HeartbeatSnapshotTests {
         #expect(h.eventsStorageWriteFilteredTotal == nil)
         #expect(h.eventsStorageWriteInFlightDepth == nil)
         #expect(h.eventsRetentionBudget == nil)
+        #expect(h.ruleSync == nil)
+        #expect(h.eventJournalRecovery == nil)
+        #expect(h.eventSearchProjection == nil)
         #expect(h.eventsInsertFilterDroppedTotal == nil)
         #expect(h.traceGraphStorageAdmission == nil)
         #expect(h.traceStoreStorageAdmission == nil)

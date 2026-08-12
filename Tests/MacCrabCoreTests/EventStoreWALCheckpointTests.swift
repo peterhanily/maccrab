@@ -1,31 +1,20 @@
 // EventStoreWALCheckpointTests.swift
-// v1.21.4 per-event perf (#23): events.db WAL autocheckpoint raised to 16 MB
-// (`StoragePragmas.eventWalAutocheckpointPages`) to cut per-write PASSIVE-
-// checkpoint frequency during a file-write flood, plus an explicit TRUNCATE
-// checkpoint (`EventStore.walCheckpointTruncate`) driven from the background
-// size-cap sweep to reclaim the raised WAL high-water mark.
 //
-// These pin the WAL-BOUND SAFETY contract of the change — it tensions the
-// v1.18 WAL-bloat fix (field-observed 251 MB WAL), so the tests prove:
-//   - Under a sustained write burst whose total churn far exceeds the 64 MB
-//     `journalSizeLimitBytes`, the .db-wal sidecar NEVER exceeds that limit —
-//     i.e. SQLite's own auto-checkpoint (now at 16 MB) still owns the bound,
-//     independent of any background timer. A broken/disabled auto-checkpoint
-//     would let the WAL grow to the full churn size (> 64 MB) and fail this.
-//   - `walCheckpointTruncate()` drains the WAL and shrinks the sidecar FILE
-//     back to zero — the "background checkpoint truncates it" property that a
-//     plain PASSIVE→RESTART `walCheckpoint()` does NOT provide (it leaves the
-//     file pinned at its high-water mark).
+// rc.13 WAL tests exercise bounded journal transactions without retaining a
+// large `[Event]` query result. Exact scalar cardinality proves that every
+// canonical record landed, while the physical SQLite-family measurements pin
+// both the WAL limit and the configured family cap.
 
-import Testing
 import Foundation
-import CSQLCipher
+import Testing
 @testable import MacCrabCore
 
-@Suite("EventStore: WAL autocheckpoint bound + TRUNCATE reclaim (v1.21.4 #23)")
+@Suite("EventStore: WAL bound, family cap, and TRUNCATE reclaim")
 struct EventStoreWALCheckpointTests {
-
-    // MARK: - Helpers (mirror EventStoreFTSMergeTests)
+    private static let alphabet = Array(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            .utf8
+    )
 
     private static func tempPath() -> String {
         FileManager.default.temporaryDirectory
@@ -38,138 +27,156 @@ struct EventStoreWALCheckpointTests {
         }
     }
 
-    /// Size in bytes of the `-wal` sidecar, or 0 if absent.
-    private static func walSize(_ path: String) -> Int64 {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path + "-wal")
-        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
-    }
-
-    private static func makeProcess(
-        name: String,
-        path: String,
-        commandLine: String
-    ) -> MacCrabCore.ProcessInfo {
-        MacCrabCore.ProcessInfo(
-            pid: 4242,
-            ppid: 100,
-            rpid: 4242,
-            name: name,
-            executable: path,
-            commandLine: commandLine,
-            args: [commandLine],
-            workingDirectory: "/Users/alice/project",
-            userId: 501,
-            userName: "alice",
-            groupId: 20,
-            startTime: Date(),
-            codeSignature: nil,
-            ancestors: [],
-            architecture: "arm64",
-            isPlatformBinary: false,
-            hashes: nil,
-            session: nil
+    private static func policy(for path: String) -> SQLitePersistentStorePolicy {
+        SQLitePersistentStorePolicy(
+            maxFootprintBytes: 192 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes:
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: URL(fileURLWithPath: path)
+                .deletingLastPathComponent().path
         )
     }
 
-    private static func makeEvent(index: Int, commandLine: String) -> Event {
-        Event(
+    private static func walSize(_ path: String) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(
+            atPath: path + "-wal"
+        )
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    /// Deterministic, printable data with no long repeated runs. Each seed
+    /// produces a different stream so compression cannot turn the complete
+    /// multi-block fixture into a tiny dictionary reference.
+    private static func text(seed: UInt64, count: Int) -> String {
+        var state = seed | 1
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(count)
+        for _ in 0..<count {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            bytes.append(alphabet[Int((state >> 58) & 63)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func makeEvent(index: Int, fieldBytes: Int) -> Event {
+        let commandLine = text(
+            seed: UInt64(index &* 2 + 1),
+            count: fieldBytes
+        )
+        let argument = text(
+            seed: UInt64(index &* 2 + 2),
+            count: fieldBytes
+        )
+        let process = MacCrabCore.ProcessInfo(
+            pid: Int32(4_000 + index),
+            ppid: 100,
+            rpid: Int32(4_000 + index),
+            name: "wal-fixture-\(index)",
+            executable: "/usr/bin/wal-fixture",
+            commandLine: commandLine,
+            args: [argument],
+            workingDirectory: "/Users/tester/project",
+            userId: 501,
+            userName: "tester",
+            groupId: 20,
+            startTime: Date(),
+            ancestors: [],
+            architecture: "arm64",
+            isPlatformBinary: false
+        )
+        return Event(
             eventCategory: .process,
             eventType: .start,
             eventAction: "exec",
-            process: makeProcess(
-                name: "proc\(index)",
-                path: "/usr/bin/proc\(index)",
-                commandLine: commandLine
-            )
+            process: process
         )
     }
 
-    // MARK: - Tests
-
-    /// A sustained burst whose cumulative WAL churn is far larger than the
-    /// 64 MB journal_size_limit must never leave the WAL sidecar over that
-    /// limit — the 16 MB auto-checkpoint keeps draining it.
-    @Test("WAL sidecar stays under journal_size_limit across a burst >> 64 MB churn")
-    func walStaysBoundedUnderBurst() async throws {
+    @Test("WAL and SQLite family stay bounded across more than 64 MiB canonical churn")
+    func walAndFamilyStayBoundedUnderBurst() async throws {
         let path = Self.tempPath()
         defer { Self.cleanup(path) }
-        let store = try EventStore(path: path)
+        let policy = Self.policy(for: path)
+        let store = try EventStore(path: path, storagePolicy: policy)
+        let admissionStart = Date()
 
-        // ~32 KB per row, stored in the process_commandline column AND twice in
-        // the raw_json blob (commandLine + args), so ~96 KB churn/row. 1500 rows
-        // ≈ ~140 MB of raw churn (plus indexes) — ~2× over the 64 MB limit — so a
-        // WAL that failed to checkpoint would blow well past journalSizeLimitBytes.
-        // A single long token keeps FTS tokenization cheap; the bytes drive the WAL.
-        let bigCmd = String(repeating: "x", count: 32_768)
-        let total = 1500
-        // Each batch is one transaction (mirrors BatchedEventWriter). Kept far
-        // below 64 MB so no *single* transaction can overrun the WAL before its
-        // post-commit auto-checkpoint (a mid-transaction WAL can't be
-        // checkpointed). 200 rows ≈ ~20 MB/batch — above the 16 MB checkpoint
-        // threshold, so the auto-checkpoint fires every batch and the file
-        // settles near that mark instead of growing toward the churn total.
-        let batchSize = 200
-
-        let limit = StoragePragmas.journalSizeLimitBytes
-        var peakWal: Int64 = 0
+        // 128 records with two independent 280 KiB fields encode more than
+        // 70 MiB of canonical content. Sixteen-record transactions remain well
+        // inside the fixed 32 MiB transaction reserve.
+        let total = 128
+        let batchSize = 16
+        let fieldBytes = 280 * 1024
+        var peakWAL: Int64 = 0
         var index = 0
         while index < total {
             let upper = min(index + batchSize, total)
-            let batch = (index..<upper).map { Self.makeEvent(index: $0, commandLine: bigCmd) }
-            try await store.insert(events: batch, lane: .priority)
+            let batch = (index..<upper).map {
+                Self.makeEvent(index: $0, fieldBytes: fieldBytes)
+            }
+            _ = try await store.insert(events: batch, lane: .priority)
             index = upper
-            // Measure AFTER each batch commit — the post-commit auto-checkpoint
-            // has already run, so this is the true high-water mark.
-            peakWal = max(peakWal, Self.walSize(path))
-            #expect(Self.walSize(path) < limit,
-                    "events.db-wal exceeded journal_size_limit mid-burst")
+
+            let wal = Self.walSize(path)
+            let family = try SQLitePersistentStoreAdmission.measureFamily(path)
+            peakWAL = max(peakWAL, wal)
+            #expect(
+                wal < StoragePragmas.journalSizeLimitBytes,
+                "events.db-wal exceeded journal_size_limit after a committed batch"
+            )
+            #expect(
+                family <= policy.maxFootprintBytes,
+                "SQLite family exceeded its configured physical cap"
+            )
         }
 
-        // The WAL was actually exercised (non-vacuous test) yet stayed bounded:
-        // well under the 64 MB limit despite ~2× that in churn.
-        #expect(peakWal > 0, "burst produced no WAL activity — test is vacuous")
-        #expect(peakWal < limit,
-                "peak WAL \(peakWal) reached/exceeded journal_size_limit \(limit)")
+        #expect(peakWAL > 0, "fixture produced no WAL activity")
+        #expect(try await store.count() == total)
+        #expect(try await store.maintenanceRetainedRecordCount() == total)
 
-        // Sanity: all rows landed.
-        let stored = try await store.events(since: .distantPast, limit: total + 10)
-        #expect(stored.count == total)
+        // Even very old source timestamps or size pressure cannot remove a
+        // block before the durable admission-time retention floor.
+        #expect(
+            try await store.expireJournalBlocks(
+                retainedThrough: admissionStart.addingTimeInterval(
+                    EventStore.journalRetentionSeconds - 1
+                ),
+                maximumBlocks: 4_096
+            ) == 0
+        )
+        #expect(try await store.count() == total)
     }
 
-    /// The TRUNCATE checkpoint the background sweep runs must shrink the WAL
-    /// FILE to zero — RESTART (walCheckpoint) only drains content and leaves
-    /// the file at its high-water mark.
-    @Test("walCheckpointTruncate() reclaims the WAL sidecar to zero")
-    func truncateReclaimsWal() async throws {
+    @Test("walCheckpointTruncate reclaims WAL without changing exact cardinality")
+    func truncateReclaimsWAL() async throws {
         let path = Self.tempPath()
         defer { Self.cleanup(path) }
-        let store = try EventStore(path: path)
+        let policy = Self.policy(for: path)
+        let store = try EventStore(path: path, storagePolicy: policy)
 
-        // ~16 KB/row × 600 rows in one transaction ≈ ~29 MB churn — enough that
-        // the sidecar is clearly non-empty after commit (its high-water mark),
-        // and comfortably under the 64 MB per-transaction ceiling.
-        let bigCmd = String(repeating: "y", count: 16_384)
-        let batch = (0..<600).map { Self.makeEvent(index: $0, commandLine: bigCmd) }
-        try await store.insert(events: batch, lane: .priority)
+        let total = 64
+        let batch = (0..<total).map {
+            Self.makeEvent(index: $0, fieldBytes: 64 * 1024)
+        }
+        _ = try await store.insert(events: batch, lane: .priority)
 
         let before = Self.walSize(path)
         #expect(before > 0, "expected a non-empty WAL before truncate")
+        #expect(
+            try SQLitePersistentStoreAdmission.measureFamily(path)
+                <= policy.maxFootprintBytes
+        )
 
-        let ok = await store.walCheckpointTruncate()
-        #expect(ok)
-
+        #expect(await store.walCheckpointTruncate())
         let after = Self.walSize(path)
-        // TRUNCATE takes the sidecar to 0 bytes with no competing readers; allow
-        // a small slack in case SQLite re-arms the 32-byte WAL header. The key
-        // invariant: it must NOT stay pinned near its post-write high-water mark
-        // (which a plain PASSIVE→RESTART walCheckpoint would leave it at).
-        #expect(after < before,
-                "truncate must shrink the WAL below its high-water mark (\(after) vs \(before))")
-        #expect(after < 64 * 1024,
-                "WAL should be reclaimed to ~0, not left pinned (\(after) bytes)")
+        #expect(after < before)
+        #expect(after < 64 * 1024)
 
-        // Read path is intact after the checkpoint: rows still queryable.
-        let stored = try await store.events(since: .distantPast, limit: 700)
-        #expect(stored.count == 600)
+        #expect(try await store.count() == total)
+        #expect(try await store.maintenanceRetainedRecordCount() == total)
+        #expect(
+            try SQLitePersistentStoreAdmission.measureFamily(path)
+                <= policy.maxFootprintBytes
+        )
     }
 }

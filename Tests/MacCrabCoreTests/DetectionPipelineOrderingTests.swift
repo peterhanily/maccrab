@@ -119,21 +119,81 @@ struct DetectionPipelineOrderingTests {
             encoding: .utf8
         )
 
-        let primaryFilter = try #require(source.range(of: "&primaryMatches,"))
-        let survivingSequences = try #require(source.range(
-            of: "let survivingSequenceMatches = sequenceMatches.filter"
+        let preparationStart = try #require(source.range(
+            of: "static func prepareReviewedMatches("
         ))
-        let scoring = try #require(source.range(
+        let preparationEnd = try #require(source.range(
+            of: "/// The one reviewed rule-match path",
+            range: preparationStart.upperBound..<source.endIndex
+        ))
+        let preparation = source[
+            preparationStart.lowerBound..<preparationEnd.lowerBound
+        ]
+        let primaryFilter = try #require(preparation.range(
+            of: "NoiseFilter.apply("
+        ))
+        let normalization = try #require(preparation.range(
+            of: "primaryMatches = ReviewedRuleMatches.normalized(primaryMatches)"
+        ))
+        let survivingPrimarySet = try #require(preparation.range(
+            of: "let survivingPrimaryMatches = Set(primaryMatches)"
+        ))
+        let survivingSequences = try #require(preparation.range(
+            of: "sequenceMatches: normalizedSequenceMatches.filter"
+        ))
+        #expect(primaryFilter.lowerBound < normalization.lowerBound)
+        #expect(normalization.lowerBound < survivingPrimarySet.lowerBound)
+        #expect(survivingPrimarySet.lowerBound < survivingSequences.lowerBound)
+        #expect(!preparation.contains("BehaviorScoreAlertEmitter.recordRuleMatch("))
+        #expect(!preparation.contains("insertEngineBatch("))
+
+        let dispatchStart = try #require(source.range(
+            of: "static func dispatchReviewedMatches("
+        ))
+        let dispatchEnd = try #require(source.range(
+            of: "// NoiseFilter logic lives",
+            range: dispatchStart.upperBound..<source.endIndex
+        ))
+        let dispatch = source[dispatchStart.lowerBound..<dispatchEnd.lowerBound]
+        let reviewedPrimary = try #require(dispatch.range(
+            of: "let primaryMatches = reviewed.primaryMatches"
+        ))
+        let reviewedSequences = try #require(dispatch.range(
+            of: "let survivingSequenceMatches = reviewed.sequenceMatches"
+        ))
+        let scoring = try #require(dispatch.range(
             of: "BehaviorScoreAlertEmitter.recordRuleMatch("
         ))
-        let batchCommit = try #require(source.range(
+        let batchCommit = try #require(dispatch.range(
             of: "persistedAlerts = try await state.alertSink.insertEngineBatch("
         ))
-
-        #expect(primaryFilter.lowerBound < survivingSequences.lowerBound)
-        #expect(primaryFilter.lowerBound < scoring.lowerBound)
+        #expect(reviewedPrimary.lowerBound < scoring.lowerBound)
+        #expect(reviewedSequences.lowerBound < scoring.lowerBound)
         #expect(scoring.lowerBound < batchCommit.lowerBound)
-        #expect(survivingSequences.lowerBound < batchCommit.lowerBound)
+        #expect(!dispatch.contains("NoiseFilter.apply("))
+
+        // The reviewed value is made canonical before the one function that
+        // owns scoring and alert commit. This keeps a crash between review and
+        // fanout from making an unjournaled match durable only in alerts.db.
+        let detectionStart = try #require(source.range(
+            of: "// === Detection: 3 layers ==="
+        ))
+        let detectionEnd = try #require(source.range(
+            of: "// Replay cannot overtake the initial evaluation.",
+            range: detectionStart.upperBound..<source.endIndex
+        ))
+        let detection = source[detectionStart.lowerBound..<detectionEnd.lowerBound]
+        let prepareCall = try #require(detection.range(
+            of: "let reviewedDispatch = prepareReviewedMatches("
+        ))
+        let terminalSettlement = try #require(detection.range(
+            of: "let terminalAdmission = await settleTerminalJournalRevision("
+        ))
+        let dispatchCall = try #require(detection.range(
+            of: "await dispatchReviewedMatches("
+        ))
+        #expect(prepareCall.lowerBound < terminalSettlement.lowerBound)
+        #expect(terminalSettlement.lowerBound < dispatchCall.lowerBound)
 
         // Counterfactual/forecast engines remain explicit analyst tools. The
         // old source guard required their automatic one-step derivative after

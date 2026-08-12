@@ -487,6 +487,92 @@ public struct SQLitePersistentStoreAdmission {
         }
     }
 
+    /// Re-probe an already-serialized SQLite writer immediately after
+    /// `BEGIN IMMEDIATE` and before its first DML statement. Ordinary
+    /// `admitWrite` deliberately keeps the complete transaction reserve free
+    /// while an actor is waiting for the cross-process lock; repeating that
+    /// full-reserve test after a preceding, successfully admitted commit would
+    /// make small terminal/retention transactions unable to consume the very
+    /// reserve set aside for them. Once the writer lock is held, the complete
+    /// conservative estimate for this transaction is authoritative instead.
+    ///
+    /// Maintenance still has no free-space floor (it is the route back to a
+    /// healthy footprint), but both modes prove that the current family plus
+    /// the transaction's complete peak estimate stays within the hard family
+    /// cap. No caller may perform DML between `BEGIN IMMEDIATE` and this probe.
+    public mutating func admitSerializedWrite(
+        estimatedTransactionBytes: Int64,
+        postCommitHeadroomBytes: Int64 = 0,
+        maintenance: Bool,
+        on db: OpaquePointer? = nil
+    ) throws {
+        try validateTransactionEstimate(estimatedTransactionBytes)
+        guard postCommitHeadroomBytes >= 0,
+              postCommitHeadroomBytes <= policy.transactionReserveBytes else {
+            throw SQLitePersistentStoreAdmissionError
+                .transactionEstimateExceedsReserve(
+                    estimatedBytes: max(0, postCommitHeadroomBytes),
+                    reserveBytes: policy.transactionReserveBytes
+                )
+        }
+        do {
+            let footprint = try footprintProbe(databasePath)
+            let free = try freeSpaceProbe(policy.storageVolumePath)
+            lastFootprintBytes = footprint
+            lastFreeSpaceBytes = free
+
+            let afterTransaction = footprint.addingReportingOverflow(
+                estimatedTransactionBytes
+            )
+            let requiredFootprint = afterTransaction.partialValue
+                .addingReportingOverflow(postCommitHeadroomBytes)
+            guard !afterTransaction.overflow,
+                  !requiredFootprint.overflow,
+                  requiredFootprint.partialValue <= policy.maxFootprintBytes
+            else {
+                throw SQLitePersistentStoreAdmissionError.footprintLimit(
+                    footprintBytes: footprint,
+                    reserveBytes: Self.saturatingAdd(
+                        estimatedTransactionBytes,
+                        postCommitHeadroomBytes
+                    ),
+                    maxFootprintBytes: policy.maxFootprintBytes
+                )
+            }
+
+            let floor = maintenance ? 0 : policy.freeSpaceFloorBytes
+            let afterFloor = floor.addingReportingOverflow(
+                estimatedTransactionBytes
+            )
+            let requiredFree = afterFloor.partialValue
+                .addingReportingOverflow(postCommitHeadroomBytes)
+            guard !afterFloor.overflow,
+                  !requiredFree.overflow,
+                  free >= requiredFree.partialValue else {
+                throw SQLitePersistentStoreAdmissionError.lowFreeSpace(
+                    freeBytes: free,
+                    floorBytes: floor,
+                    reserveBytes: Self.saturatingAdd(
+                        estimatedTransactionBytes,
+                        postCommitHeadroomBytes
+                    ),
+                    requiredFreeBytes: requiredFree.overflow
+                        ? Int64.max : requiredFree.partialValue
+                )
+            }
+
+            if pageLimitPending, let db {
+                try installPageLimit(on: db)
+            }
+            if !maintenance {
+                latchedFailure = nil
+            }
+        } catch let error as SQLitePersistentStoreAdmissionError {
+            latchedFailure = error
+            throw error
+        }
+    }
+
     /// Atomically adopts a valid live-reload policy. Operational pressure under
     /// a newly lowered cap is reported in the returned sticky snapshot rather
     /// than rolling the policy back to its stale, more-permissive value. Once

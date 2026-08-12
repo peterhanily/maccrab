@@ -1558,8 +1558,47 @@ struct CausalGraphStorageAdmissionTests {
                 "storage pressure must never evict graph substrate newer than an explicit cutoff")
         #expect(recoverySource.contains("eligibleBacklogRemaining"),
                 "the daemon must tighten from post-pass backlog state, not row progress")
-        #expect(store.contains("guard !recovering else { return result() }"),
+        #expect(store.contains("recoveryMutationHandoffsOutstanding == 0"),
                 "recovery must remain single-flight across actor yields")
+        #expect(store.contains("try await awaitRecoveryMutationBarrier()"),
+                "ordinary mutations must serialize behind bounded recovery")
+        let growthAPIs = [
+            "public func upsertEntity(",
+            "public func upsertEdge(",
+            "public func upsertBatch(",
+            "public func saveTrace(",
+            "public func updateTraceStatus(",
+            "public func recordRuleHit(",
+            "public func recordReplayRun(",
+            "public func appendHashChain(",
+            "public func appendTraceContinuity(",
+            "public func prefixTraceTitles(",
+        ]
+        for (index, signature) in growthAPIs.enumerated() {
+            let start = try #require(store.range(of: signature))
+            let nextStart = growthAPIs
+                .dropFirst(index + 1)
+                .compactMap { store.range(
+                    of: $0, range: start.upperBound..<store.endIndex)?.lowerBound
+                }
+                .min() ?? store.endIndex
+            let body = String(store[start.lowerBound..<nextStart])
+            #expect(body.contains("try await admitGrowth("),
+                    "\(signature) must pass the recovery barrier and central gate")
+        }
+        #expect(store.components(separatedBy: "try await admitGrowth(").count - 1
+            == growthAPIs.count,
+                "every growth call must be represented in the audited API list")
+        #expect(!store.contains("try rejectGrowth(.recoveryInProgress)"),
+                "maintenance serialization must never increment the shed counter")
+        #expect(store.contains("blocked: hardBlocked"),
+                "healthy recovery must not falsify hard-blocked duty")
+        #expect(store.contains("acceptingMutations: writableHandle && !hardBlocked"),
+                "status must distinguish bounded recovery admission from hard refusal")
+        #expect(store.contains("finalAdmission.acceptingMutations"),
+                "startup proof must use the live mutation-acceptance contract")
+        #expect(store.contains("if recoveryHasForegroundPressure { break batchLoop }"),
+                "a queued writer must preempt the remainder of the recovery budget")
         let openCall = try #require(store.range(of: "try openDatabase(forceReadOnly: forceReadOnly)"))
         let migration = try #require(store.range(of: "try applyMigrations()"))
         #expect(openCall.lowerBound < migration.lowerBound)

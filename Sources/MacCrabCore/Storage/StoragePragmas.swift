@@ -143,15 +143,46 @@ enum StoragePragmas {
     }
 
     static func applyAlertStorePragmasChecked(to handle: OpaquePointer) throws {
+        // Assigning auto_vacuum writes page 1 even when the database is already
+        // in incremental mode. AlertStore reopens its writer connection on every
+        // daemon start, so avoid manufacturing a WAL frame (and data-version
+        // change) when the durable setting is already correct.
+        try applyIncrementalAutoVacuumIfNeeded(to: handle)
         try applyChecked([
-            // auto_vacuum MUST come first — see Wave 9B.1 ordering note above.
-            "PRAGMA auto_vacuum = INCREMENTAL",
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA journal_size_limit = \(journalSizeLimitBytes)",
             "PRAGMA cache_size = \(alertCacheSizeKB)",
             "PRAGMA mmap_size = \(alertMmapSizeBytes)",
         ], to: handle)
+    }
+
+    private static func applyIncrementalAutoVacuumIfNeeded(
+        to handle: OpaquePointer
+    ) throws {
+        let sql = "PRAGMA auto_vacuum"
+        var statement: OpaquePointer?
+        let prepareRC = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepareRC == SQLITE_OK else {
+            throw ApplicationFailure(
+                sql: sql,
+                metadata: SQLiteFailureDetails(resultCode: prepareRC, db: handle)
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+
+        let stepRC = sqlite3_step(statement)
+        guard stepRC == SQLITE_ROW else {
+            throw ApplicationFailure(
+                sql: sql,
+                metadata: SQLiteFailureDetails(resultCode: stepRC, db: handle)
+            )
+        }
+        guard sqlite3_column_int(statement, 0) != 2 else { return }
+
+        // This remains the first mutating database pragma for a fresh store.
+        // See the ordering contract above: it must precede journal_mode = WAL.
+        try applyChecked(["PRAGMA auto_vacuum = INCREMENTAL"], to: handle)
     }
 
     private static func applyChecked(

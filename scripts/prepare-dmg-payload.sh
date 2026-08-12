@@ -15,6 +15,21 @@ fail() {
     exit 1
 }
 
+# A signed bundle legitimately contains framework symlinks.  Their mode is not
+# part of the code-signature byte seal, and an umask-077 build can leave them
+# owner-only even after every regular file and directory has been normalized.
+# Operate on link objects only: BSD find's explicit -P refuses directory-link
+# traversal and chmod -h refuses to apply the mode to an arbitrary link target.
+normalize_payload_symlink_modes_no_follow() {
+    local root="$1"
+    /usr/bin/find -P "$root" -type l -exec /bin/chmod -h 0755 {} + \
+        || fail "could not normalize payload symbolic-link modes"
+    if /usr/bin/find -P "$root" -type l ! -perm 0755 -print -quit \
+            | /usr/bin/grep . >/dev/null; then
+        fail "payload retains a symbolic link with an unsafe mode"
+    fi
+}
+
 # Keep the release-time corpus gate behaviorally aligned with the root System
 # Extension verifier.  Byte equality between the app and sysext is insufficient:
 # two identically malformed trees would otherwise pass packaging and make the
@@ -447,6 +462,7 @@ fi
 /usr/bin/find "$PAYLOAD_ROOT" -type d -exec /bin/chmod a+rx,go-w {} +
 /usr/bin/find "$PAYLOAD_ROOT" -type f -exec /bin/chmod a+r,go-w {} +
 /usr/bin/find "$PAYLOAD_ROOT" -type f -perm -u+x -exec /bin/chmod a+x {} +
+normalize_payload_symlink_modes_no_follow "$PAYLOAD_ROOT"
 /bin/chmod 0755 "$PAYLOAD_ROOT/install.sh"
 /bin/chmod 0755 "$APP_MAIN"
 if [ -d "$APP_BIN" ]; then

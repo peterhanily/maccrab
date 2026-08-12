@@ -92,6 +92,16 @@ TraceGraph is a bounded derived index, not a second raw-event archive.
 - Retention recovery must leave enough headroom to avoid immediate re-blocking.
   Repeated delete/refill oscillation fails qualification even if the hard cap
   itself holds.
+- Recovery is orthogonal to hard storage admission. Foreground graph writers
+  wait behind only the current bounded SQLite quantum in a fixed actor-owned
+  queue; recovery preempts before another quantum when writers are waiting.
+  Every heartbeat must conserve `waits = current + releases + cancellations +
+  closed`, keep the waiter high-watermark within the fixed 1,024-mutation
+  production limit, and report
+  saturation separately from `blocked`. A candidate must remain accepting for
+  at least 99% of samples, enter the epoch with zero cumulative saturation and
+  never saturate during it, drain all waiters at the final boundary, and keep
+  both completed maximum and live oldest waits at or below five seconds.
 
 ### AI features
 
@@ -121,7 +131,7 @@ reference Mac using the recorded normal-plus-burst workload:
 | File fidelity | Zero unclassified queue loss. Semantic rejects/coalesces must be attributable to a tested reason that is conservative against the complete enabled rule corpus. |
 | Correlation continuity | At least 900 seconds of sequence recovery coverage and zero checkpoint/journal shed. The source-bound phase-1 clean CI exercises restart, rule reload, expiry, and rule-hash mismatch semantics; the installed engine must also log a successful non-empty SIGHUP reload with no rejection/error and survive later samples. The runtime report does not claim a live restart it did not perform. |
 | Event storage | No unreachable-budget fault and no prune/VACUUM/refill loop. Search-tier gaps, if any, reconcile exactly and are visible. |
-| TraceGraph | At least 99% writable duty, no mutation or ingest shed, no recovery oscillation, and exact batch/row/observation/coalescing/physical-suppression conservation at every sample. The rule-neutral minute-5 burst must produce positive physical-suppressed event and row deltas; the current one-row contract requires those deltas to be equal. Proof-safe suppression is recorded separately from loss and must be monotonic. No unmeasured coalescing-bound assertion is accepted. |
+| TraceGraph | At least 99% hard-writable duty and at least 99% foreground-mutation-accepting duty, no mutation/ingest shed, no failed event/batch/row epoch delta, and no recovery oscillation. The bounded recovery-writer ledger must conserve at every sample; its high-watermark stays within the fixed limit, saturation is false and its cumulative counter remains zero throughout, completed and live waits never exceed five seconds, and the final waiter count/oldest wait are zero. Batch/row/observation/coalescing/physical-suppression accounting remains exact. The rule-neutral minute-5 burst must produce positive equal physical-suppressed event and row deltas. Proof-safe suppression is separate from loss and monotonic; no unmeasured coalescing-bound assertion is accepted. |
 | TraceStore | Agent Traces and the loopback receiver are enabled. `traces.db` is available, unblocked, below its writer-admission threshold and free-space floor, and not recovering at every sample. A fixed OTLP span must increase and fully drain the real TraceStore ingest ledger with zero shed. |
 | Disk writes | Engine average at most 1 MiB/s over the epoch and no 60-second interval above 4 MiB/s; no macOS disk-writes diagnostic. |
 | CPU | Engine average at most 0.50 CPU core over the epoch. Background GUI p95 at most 10% of one core. |
@@ -204,7 +214,8 @@ counted as an epoch delta. All later samples require full LLM readiness.
 
 The recorder fails before starting the 900-second timer when the running engine
 has any cumulative loss/shed/eviction or failed-write counter, an unreachable
-or sticky storage budget, a blocked alert family, a non-writable TraceStore, an
+or sticky storage budget, a blocked alert family, a non-accepting or saturated
+TraceGraph recovery-writer barrier, a non-writable TraceStore, an
 open/failed LLM backend, an over-cap SQLite family, or a free-space-floor
 violation. It also fails during the epoch as soon as one of those states
 appears; it does not wait out the remaining samples. In particular, it never

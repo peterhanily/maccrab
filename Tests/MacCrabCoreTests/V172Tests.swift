@@ -159,9 +159,11 @@ struct EventStoreV2Tests {
         // Round-trip: read back via raw_json query and confirm
         // enrichment fields are preserved. The indexed columns are
         // verified by the migration succeeding (no SQL error on insert).
-        let events = try await store.events(since: Date(timeIntervalSince1970: 0))
-        #expect(events.count == 1)
-        #expect(events.first?.enrichments["mcp_server_name"] == "filesystem")
+        let snapshot = try await store.exactEventsSnapshot(
+            since: Date(timeIntervalSince1970: 0)
+        )
+        #expect(snapshot.events.count == 1)
+        #expect(snapshot.events.first?.enrichments["mcp_server_name"] == "filesystem")
     }
 
     @Test("Insert without MCP attribution leaves indexed columns nil")

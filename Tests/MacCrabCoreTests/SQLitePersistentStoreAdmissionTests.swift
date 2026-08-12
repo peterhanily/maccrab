@@ -814,9 +814,9 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(setup.contains(
             "maxSizeMiB: bootStorage.campaignsMaxSizeMB"
         ))
-        #expect(occurrences(of: "eventStoragePolicy: eventStoragePolicy", in: setup) == 1)
+        #expect(occurrences(of: "eventStoragePolicy: eventStoragePolicy", in: setup) == 0)
         #expect(occurrences(of: "alertStoragePolicy: alertStoragePolicy", in: setup) == 1)
-        #expect(occurrences(of: "storagePolicy: eventStoragePolicy", in: setup) == 2)
+        #expect(occurrences(of: "storagePolicy: eventStoragePolicy", in: setup) == 3)
         #expect(occurrences(of: "storagePolicy: alertStoragePolicy", in: setup) == 2)
         #expect(occurrences(of: "storagePolicy: campaignStoragePolicy", in: setup) == 1)
         #expect(occurrences(of: "storagePolicy: storagePolicy", in: setup) == 4,
@@ -997,15 +997,16 @@ struct SQLitePersistentStoreAdmissionTests {
     @Test("Every persistent SQLite checkpoint surface has the fresh sidecar gate")
     func checkpointSurfaceDriftGuard() throws {
         let primaryStores = [
-            "Sources/MacCrabCore/Storage/EventStore.swift",
-            "Sources/MacCrabCore/Storage/AlertStore.swift",
-            "Sources/MacCrabCore/Storage/CampaignStore.swift",
+            "Sources/MacCrabCore/Storage/EventStore.swift": 5,
+            "Sources/MacCrabCore/Storage/AlertStore.swift": 3,
+            "Sources/MacCrabCore/Storage/CampaignStore.swift": 3,
         ]
-        for path in primaryStores {
+        for (path, expectedCheckpointCalls) in primaryStores {
             let source = try repositoryText(path)
             #expect(source.contains("private func admitStorageCheckpoint()"))
             #expect(source.contains("try admission.admitCheckpoint()"))
-            #expect(occurrences(of: "sqlite3_wal_checkpoint_v2", in: source) == 3,
+            #expect(occurrences(of: "sqlite3_wal_checkpoint_v2", in: source)
+                    == expectedCheckpointCalls,
                     "new checkpoint calls must route through the existing gated surfaces")
         }
 
@@ -1362,13 +1363,16 @@ struct SQLitePersistentStoreAdmissionTests {
                 reserve: SQLitePersistentStorePolicy.bytesPerMiB
             )
         )
+        _ = try await eventBootstrap?.recoverJournalBeforeProducers()
         eventBootstrap = nil
         alertBootstrap = nil
         campaignBootstrap = nil
         overrideBootstrap = nil
 
-        func loweredPolicy(_ path: String) throws -> SQLitePersistentStorePolicy {
-            let reserve = SQLitePersistentStorePolicy.bytesPerMiB
+        func loweredPolicy(
+            _ path: String,
+            reserve: Int64
+        ) throws -> SQLitePersistentStorePolicy {
             let footprint = try SQLitePersistentStoreAdmission.measureFamily(path)
             return policy(
                 directory: dir,
@@ -1376,31 +1380,36 @@ struct SQLitePersistentStoreAdmissionTests {
                 reserve: reserve
             )
         }
-        func raisedPolicy(_ path: String) throws -> SQLitePersistentStorePolicy {
-            let reserve = SQLitePersistentStorePolicy.bytesPerMiB
+        func raisedPolicy(
+            _ path: String,
+            reserve: Int64
+        ) throws -> SQLitePersistentStorePolicy {
             let footprint = try SQLitePersistentStoreAdmission.measureFamily(path)
             return policy(
                 directory: dir,
-                max: footprint + reserve + 1_048_576,
+                max: max(128 * 1_048_576, footprint + reserve + 8 * 1_048_576),
                 reserve: reserve
             )
         }
 
         let events = try EventStore(
             path: eventPath,
-            storagePolicy: try loweredPolicy(eventPath)
+            storagePolicy: try loweredPolicy(
+                eventPath,
+                reserve: SQLitePersistentStorePolicy.eventTransactionReserveBytes
+            )
         )
         let alerts = try AlertStore(
             path: alertPath,
-            storagePolicy: try loweredPolicy(alertPath)
+            storagePolicy: try loweredPolicy(alertPath, reserve: 8 * 1_048_576)
         )
         let campaigns = try CampaignStore(
             path: campaignPath,
-            storagePolicy: try loweredPolicy(campaignPath)
+            storagePolicy: try loweredPolicy(campaignPath, reserve: 8 * 1_048_576)
         )
         let overrides = try AttributionOverrideStore(
             path: overridePath,
-            storagePolicy: try loweredPolicy(overridePath)
+            storagePolicy: try loweredPolicy(overridePath, reserve: 4 * 1_048_576)
         )
 
         #expect((await events.storageAdmissionSnapshot())?.latchedFailure != nil)
@@ -1408,8 +1417,11 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect((await campaigns.storageAdmissionSnapshot())?.latchedFailure != nil)
         #expect((await overrides.storageAdmissionSnapshot())?.latchedFailure != nil)
 
-        await #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+        do {
             try await events.insert(event: event())
+            Issue.record("shed-mode EventStore insert unexpectedly succeeded")
+        } catch let failure as EventBatchInsertFailure {
+            #expect(failure.underlyingError is SQLitePersistentStoreAdmissionError)
         }
         await #expect(throws: SQLitePersistentStoreAdmissionError.self) {
             try await alerts.insert(alert: alert())
@@ -1431,13 +1443,16 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(try await campaigns.pruneOldest(count: 1) == 0)
 
         let eventRaised = try await events.updateStorageAdmission(
-            raisedPolicy(eventPath)
+            raisedPolicy(
+                eventPath,
+                reserve: SQLitePersistentStorePolicy.eventTransactionReserveBytes
+            )
         )
         let alertRaised = try await alerts.updateStorageAdmission(
-            raisedPolicy(alertPath)
+            raisedPolicy(alertPath, reserve: 8 * 1_048_576)
         )
         let campaignRaised = try await campaigns.updateStorageAdmission(
-            raisedPolicy(campaignPath)
+            raisedPolicy(campaignPath, reserve: 8 * 1_048_576)
         )
         #expect(eventRaised?.latchedFailure == nil)
         #expect(alertRaised?.latchedFailure == nil)
@@ -1565,25 +1580,29 @@ struct SQLitePersistentStoreAdmissionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("events.db").path
         var bootstrap: EventStore? = try EventStore(path: path)
+        _ = try await bootstrap?.recoverJournalBeforeProducers()
         bootstrap = nil
 
-        let reserve = SQLitePersistentStorePolicy.bytesPerMiB
+        let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
         let lowFloor = policy(
             directory: dir,
-            max: 16 * 1_048_576,
+            max: 128 * 1_048_576,
             floor: Int64.max,
             reserve: reserve
         )
         let store = try EventStore(path: path, storagePolicy: lowFloor)
         #expect((await store.storageAdmissionSnapshot())?.latchedFailure != nil)
-        await #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+        do {
             try await store.insert(event: event())
+            Issue.record("low-floor EventStore insert unexpectedly succeeded")
+        } catch let failure as EventBatchInsertFailure {
+            #expect(failure.underlyingError is SQLitePersistentStoreAdmissionError)
         }
         #expect(try await store.pruneOldest(count: 1) == 0)
 
         let recovered = try await store.updateStorageAdmission(policy(
             directory: dir,
-            max: 16 * 1_048_576,
+            max: 128 * 1_048_576,
             floor: 0,
             reserve: reserve
         ))
@@ -1601,7 +1620,7 @@ struct SQLitePersistentStoreAdmissionTests {
         // the independently-derived footprint ceiling supplies the pressure.
         // Use page-size-independent headroom: at SQLite's supported 64 KiB
         // maximum, the event row plus fixed tree/WAL estimate is about 5 MiB.
-        let reserve = 16 * SQLitePersistentStorePolicy.bytesPerMiB
+        let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
         let store = try EventStore(
             path: path,
             storagePolicy: policy(
@@ -1623,6 +1642,11 @@ struct SQLitePersistentStoreAdmissionTests {
                 #expect(seed.persistedCount == 8)
             }
 
+            try addFreelistPadding(
+                databasePath: path,
+                bytes: 8 * Int(SQLitePersistentStorePolicy.bytesPerMiB)
+            )
+
             let tight = try pressureLatchPolicy(
                 directory: dir,
                 databasePath: path,
@@ -1632,10 +1656,17 @@ struct SQLitePersistentStoreAdmissionTests {
             #expect(blocked?.latchedFailure != nil, "cycle \(cycle) did not latch")
 
             let rows = try await store.count()
-            #expect(try await store.pruneOldest(count: rows) == rows)
+            let reopened = try await store.updateStorageAdmission(policy(
+                directory: dir,
+                max: 128 * SQLitePersistentStorePolicy.bytesPerMiB,
+                reserve: reserve
+            ))
+            #expect(reopened?.latchedFailure == nil)
+            #expect(try await store.pruneOldest(count: rows) == 0,
+                    "generic pressure recovery must preserve fresh journal evidence")
             try await store.vacuum()
             let compacted = try SQLitePersistentStoreAdmission.measureFamily(path)
-            #expect(compacted + reserve <= tight.maxFootprintBytes)
+            #expect(compacted + reserve <= 128 * SQLitePersistentStorePolicy.bytesPerMiB)
 
             let batch = (0..<16).map { _ in event() }
             let recovered = try await store.insert(
@@ -1645,7 +1676,7 @@ struct SQLitePersistentStoreAdmissionTests {
             #expect(recovered.persistedCount == batch.count)
             #expect(recovered.filteredCount == 0)
             #expect((await store.storageAdmissionSnapshot())?.latchedFailure == nil)
-            #expect(try await store.count() == batch.count)
+            #expect(try await store.count() == rows + batch.count)
         }
     }
 
@@ -1902,7 +1933,7 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(retainedCampaign.description.utf8.count == large.utf8.count)
     }
 
-    @Test("Alert evidence sizes every projected source field before INSERT SELECT")
+    @Test("Alert evidence copies a bounded projection while the journal remains exact")
     func alertEvidenceChargesLargeLegacyProjection() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1911,13 +1942,13 @@ struct SQLitePersistentStoreAdmissionTests {
             directory: dir,
             max: 64 * 1_048_576,
             floor: 0,
-            reserve: 16 * 1_048_576
+            reserve: SQLitePersistentStorePolicy.eventTransactionReserveBytes
         )
         let constrained = policy(
             directory: dir,
             max: 64 * 1_048_576,
             floor: 0,
-            reserve: 1_048_576
+            reserve: SQLitePersistentStorePolicy.eventTransactionReserveBytes
         )
         let timestamp = Date(timeIntervalSince1970: 1_700_123_456)
         let base = event()
@@ -1945,14 +1976,18 @@ struct SQLitePersistentStoreAdmissionTests {
             path: path,
             storagePolicy: constrained
         )
-        await #expect(throws: SQLitePersistentStoreAdmissionError.self) {
-            try await store.recordAlertEvidence(
-                alertId: "oversized-evidence",
-                alertTimestamp: timestamp,
-                windowSeconds: 1
-            )
-        }
-        #expect(try await store.evidenceFor(alertId: "oversized-evidence").isEmpty)
+        try await store.recordAlertEvidence(
+            alertId: "bounded-evidence",
+            alertTimestamp: timestamp,
+            windowSeconds: 1
+        )
+        let evidence = try await store.evidenceFor(alertId: "bounded-evidence")
+        #expect(evidence.count == 1)
+        #expect(evidence.first?.eventAction.utf8.count == 2_048,
+                "legacy alert evidence copies the bounded sparse projection")
+        let exact = try await store.exactEventSnapshot(id: legacy.id)
+        #expect(exact.event?.eventAction.utf8.count == oversizedAction.utf8.count,
+                "the canonical journal must retain the complete event")
     }
 
     @Test("Representative 1000-event batch remains transaction-amortized")
@@ -2003,12 +2038,15 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(result.committedTransactionCount == Int(after - before))
         #expect(result.committedTransactionCount > 1,
                 "the reserve guard must actually split a large batch")
-        #expect(result.committedTransactionCount <= 4,
-                "ordinary rows regressed toward per-event commits")
+        let expectedBlocks = (
+            events.count + EventJournalCodec.maximumEventsPerBlock - 1
+        ) / EventJournalCodec.maximumEventsPerBlock
+        #expect(result.committedTransactionCount == expectedBlocks,
+                "ordinary rows must commit one bounded journal block per transaction")
         #expect(try await store.count() == 1_000)
     }
 
-    @Test("One event larger than the reserve is refused before SQLite and keeps typed cause")
+    @Test("A structural ingress overflow becomes durable qualification poison")
     func oversizedEventRefusalRetainsCause() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -2030,26 +2068,28 @@ struct SQLitePersistentStoreAdmissionTests {
             process: event().process
         )
 
-        do {
-            _ = try await store.insert(events: [oversized], lane: .priority)
-            Issue.record("oversized event unexpectedly passed transaction admission")
-        } catch let failure as EventBatchInsertFailure {
-            #expect(failure.progress.persistedCount == 0)
-            #expect(failure.uncommittedEvents.map(\.id) == [oversized.id])
-            let cause = try #require(
-                failure.underlyingError as? SQLitePersistentStoreAdmissionError
-            )
-            guard case .transactionEstimateExceedsReserve(
-                let estimated,
-                let reserve
-            ) = cause else {
-                Issue.record("unexpected admission cause: \(cause)")
-                return
-            }
-            #expect(estimated > reserve)
-            #expect(failure.sqliteFailureDetails == nil)
+        let result = try await store.insert(
+            events: [oversized],
+            lane: .priority
+        )
+        #expect(result.persistedCount == 0)
+        #expect(result.inputDispositions.count == 1)
+        if case .poisoned(let evidence) = try #require(
+            result.inputDispositions.first
+        ) {
+            #expect(evidence.originalEventID == oversized.id)
+            #expect(evidence.digestKind == .structuralPreflight)
+        } else {
+            Issue.record("structural ingress overflow was not durably poisoned")
         }
-        #expect(try await store.count() == 0)
+        #expect(try await store.payloadPoisonTotalSnapshot() == 1)
+        let snapshot = try await store.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(snapshot.events.isEmpty)
+        #expect(snapshot.poisonRecords.map(\.eventID) == [oversized.id])
+        #expect(!snapshot.isComplete)
 
         let details = SQLiteFailureDetails(
             resultCode: SQLITE_BUSY,
@@ -2097,8 +2137,8 @@ struct SQLitePersistentStoreAdmissionTests {
         let handle = try #require(raw)
         #expect(sqlite3_exec(
             handle,
-            "DROP INDEX idx_events_timestamp; "
-                + "DROP INDEX idx_events_ai_session; "
+            "DROP VIEW idx_events_timestamp; "
+                + "DROP INDEX idx_event_projection_timestamp; "
                 + "DROP TRIGGER events_ai;",
             nil,
             nil,
@@ -2124,7 +2164,8 @@ struct SQLitePersistentStoreAdmissionTests {
         #expect(sqlite3_prepare_v2(
             verifyHandle,
             "SELECT type, name FROM sqlite_master WHERE name IN "
-                + "('idx_events_timestamp', 'idx_events_ai_session', 'events_ai') "
+                + "('idx_events_timestamp', 'idx_event_projection_timestamp', "
+                + "'idx_events_ai_session', 'events_ai') "
                 + "ORDER BY name",
             -1,
             &stmt,
@@ -2139,8 +2180,8 @@ struct SQLitePersistentStoreAdmissionTests {
         }
         #expect(repaired == [
             "events_ai": "trigger",
-            "idx_events_ai_session": "index",
-            "idx_events_timestamp": "index",
+            "idx_event_projection_timestamp": "index",
+            "idx_events_timestamp": "view",
         ])
     }
 

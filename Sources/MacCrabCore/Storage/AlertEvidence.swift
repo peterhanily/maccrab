@@ -45,6 +45,121 @@ public struct AlertEvidenceCaptureResult: Sendable, Equatable {
     }
 }
 
+/// Durable truth about the exact-journal window selected for one alert. The
+/// direct trigger is captured independently; this record prevents poison,
+/// corrupt legacy rows, or a query failure from looking like a complete empty
+/// surrounding window after process restart.
+public struct AlertEvidenceContextRecord: Sendable, Equatable {
+    public enum Status: String, Sendable, Equatable {
+        /// Installed atomically with the parent alert. It remains durable when
+        /// the process exits, the bounded capture queue sheds, or a capture
+        /// worker fails before publishing a terminal result.
+        case pending
+        case complete
+        case incomplete
+        case captureFailed = "capture_failed"
+    }
+
+    public let alertId: String
+    public let status: Status
+    public let sourceMutationGeneration: UInt64
+    public let poisonRecordCount: Int
+    public let corruptRecordCount: Int
+    public let inheritedLossCount: Int
+    public let resourceLimitedCount: Int
+    /// The identity-bound trigger admission or an earlier filter-passing
+    /// admission was not proven durable before this alert committed.
+    public let journalAdmissionGapCount: Int
+
+    public var isComplete: Bool {
+        status == .complete
+            && poisonRecordCount == 0
+            && corruptRecordCount == 0
+            && inheritedLossCount == 0
+            && resourceLimitedCount == 0
+            && journalAdmissionGapCount == 0
+    }
+
+    public init(
+        alertId: String,
+        status: Status,
+        sourceMutationGeneration: UInt64,
+        poisonRecordCount: Int,
+        corruptRecordCount: Int,
+        inheritedLossCount: Int = 0,
+        resourceLimitedCount: Int = 0,
+        journalAdmissionGapCount: Int = 0
+    ) {
+        self.alertId = alertId
+        self.status = status
+        self.sourceMutationGeneration = sourceMutationGeneration
+        self.poisonRecordCount = max(0, poisonRecordCount)
+        self.corruptRecordCount = max(0, corruptRecordCount)
+        self.inheritedLossCount = max(0, inheritedLossCount)
+        self.resourceLimitedCount = max(0, resourceLimitedCount)
+        self.journalAdmissionGapCount = max(0, journalAdmissionGapCount)
+    }
+}
+
+/// Restart-stable alert-context health. Qualification consumes absolute values
+/// at both epoch boundaries; actor-local deltas alone cannot reveal a crash or
+/// queue shed that happened before the current process started.
+public struct AlertEvidenceContextCounts: Sendable, Equatable {
+    public let alertRows: Int
+    public let pending: Int
+    public let complete: Int
+    public let incomplete: Int
+    public let captureFailed: Int
+    public let poisonRecords: Int
+    public let corruptRecords: Int
+    public let inheritedLossRecords: Int
+    public let resourceLimitedRecords: Int
+    public let journalAdmissionGapRecords: Int
+    /// Alerts inherited from a schema/version that predates durable context.
+    /// This debt is operator-visible but is not rewritten in one unbounded
+    /// migration transaction. Updating such an alert installs `.pending`.
+    public let legacyUnverified: Int
+
+    public var contextRows: Int {
+        pending + complete + incomplete + captureFailed
+    }
+
+    public var total: Int { alertRows }
+    public var unhealthy: Int { pending + incomplete + captureFailed }
+    public var reconciles: Bool {
+        alertRows == contextRows + legacyUnverified
+    }
+
+    public init(
+        alertRows: Int,
+        pending: Int,
+        complete: Int,
+        incomplete: Int,
+        captureFailed: Int,
+        legacyUnverified: Int,
+        poisonRecords: Int = 0,
+        corruptRecords: Int = 0,
+        inheritedLossRecords: Int = 0,
+        resourceLimitedRecords: Int = 0,
+        journalAdmissionGapRecords: Int = 0
+    ) {
+        self.alertRows = max(0, alertRows)
+        self.pending = max(0, pending)
+        self.complete = max(0, complete)
+        self.incomplete = max(0, incomplete)
+        self.captureFailed = max(0, captureFailed)
+        self.legacyUnverified = max(0, legacyUnverified)
+        self.poisonRecords = max(0, poisonRecords)
+        self.corruptRecords = max(0, corruptRecords)
+        self.inheritedLossRecords = max(0, inheritedLossRecords)
+        self.resourceLimitedRecords = max(0, resourceLimitedRecords)
+        self.journalAdmissionGapRecords = max(
+            0,
+            journalAdmissionGapRecords
+        )
+    }
+}
+
 /// One actor-consistent view of the bounded post-commit capture lane.
 ///
 /// Every accepted alert owns exactly one terminal or outstanding state:
@@ -71,6 +186,10 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
     /// The triggering Event carried by the request is still captured, but the
     /// wider preceding window may be incomplete and must be reported as such.
     public let prefixBarrierTimeouts: Int
+    /// Exact-window snapshots that contained durable poison/corrupt gaps, and
+    /// selector failures for which a fail-closed marker was persisted.
+    public let exactContextIncomplete: Int
+    public let exactContextQueryFailures: Int
     /// Alert rows refused after the terminal seal, including pre-seal methods
     /// that were suspended in dedup and had not started their durable write.
     /// These are distinct from rule deduplication and evidence-queue shedding.
@@ -97,6 +216,8 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
         queueCapacity: Int,
         accepting: Bool,
         prefixBarrierTimeouts: Int = 0,
+        exactContextIncomplete: Int = 0,
+        exactContextQueryFailures: Int = 0,
         alertsRejectedAfterSeal: Int = 0,
         alertAdmissionsInFlight: Int = 0
     ) {
@@ -113,6 +234,8 @@ public struct AlertEvidenceCaptureTelemetry: Sendable, Equatable {
         self.queueCapacity = queueCapacity
         self.accepting = accepting
         self.prefixBarrierTimeouts = prefixBarrierTimeouts
+        self.exactContextIncomplete = exactContextIncomplete
+        self.exactContextQueryFailures = exactContextQueryFailures
         self.alertsRejectedAfterSeal = alertsRejectedAfterSeal
         self.alertAdmissionsInFlight = alertAdmissionsInFlight
     }
@@ -131,12 +254,17 @@ public struct AlertSinkShutdownResult: Sendable, Equatable {
     public let failed: Int
     public let shedAtDeadline: Int
     public let pending: Int
+    /// Durable `.pending` rows include post-commit work that never reached the
+    /// in-memory queue (for example a crash or queue shed). They are part of the
+    /// shutdown/readiness contract rather than inferred from actor-local state.
+    public let durablePendingContexts: Int
     public let alertAdmissionsInFlight: Int
     public let alertsRejectedAfterSeal: Int
     public let deadlineExpired: Bool
 
     public var clean: Bool {
-        !deadlineExpired && pending == 0 && alertAdmissionsInFlight == 0
+        !deadlineExpired && pending == 0 && durablePendingContexts == 0
+            && alertAdmissionsInFlight == 0
     }
 
     public init(
@@ -144,6 +272,7 @@ public struct AlertSinkShutdownResult: Sendable, Equatable {
         failed: Int,
         shedAtDeadline: Int,
         pending: Int,
+        durablePendingContexts: Int = 0,
         alertAdmissionsInFlight: Int,
         alertsRejectedAfterSeal: Int,
         deadlineExpired: Bool
@@ -152,6 +281,7 @@ public struct AlertSinkShutdownResult: Sendable, Equatable {
         self.failed = failed
         self.shedAtDeadline = shedAtDeadline
         self.pending = pending
+        self.durablePendingContexts = durablePendingContexts
         self.alertAdmissionsInFlight = alertAdmissionsInFlight
         self.alertsRejectedAfterSeal = alertsRejectedAfterSeal
         self.deadlineExpired = deadlineExpired

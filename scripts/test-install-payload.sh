@@ -61,6 +61,7 @@ pass "repo and DMG roots resolve deterministically"
 
 MODE_APP="$TMP_ROOT/mode/MacCrab.app"
 /bin/mkdir -p "$MODE_APP/Contents/MacOS" \
+    "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions" \
     "$MODE_APP/Contents/Resources/bin" \
     "$MODE_APP/Contents/Resources/data" \
     "$MODE_APP/Contents/Library/SystemExtensions/test.systemextension/Contents/MacOS"
@@ -72,6 +73,13 @@ printf 'agent\n' > "$MODE_APP/Contents/Library/SystemExtensions/test.systemexten
     "$MODE_APP/Contents/Resources/bin/maccrabctl" \
     "$MODE_APP/Contents/Library/SystemExtensions/test.systemextension/Contents/MacOS/agent"
 /bin/chmod 0600 "$MODE_APP/Contents/Resources/data/rules.json"
+MODE_LINK_TARGET="$TMP_ROOT/mode-link-target"
+printf 'must remain private\n' > "$MODE_LINK_TARGET"
+/bin/chmod 0600 "$MODE_LINK_TARGET"
+/bin/ln -s "$MODE_LINK_TARGET" \
+    "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
+/bin/chmod -h 0700 \
+    "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
 /bin/chmod +a 'everyone allow read' "$MODE_APP/Contents/Resources/data/rules.json"
 /usr/bin/chflags uchg "$MODE_APP/Contents/Resources/data/rules.json"
 maccrab_normalize_app_modes "$MODE_APP"
@@ -84,6 +92,12 @@ maccrab_normalize_app_modes "$MODE_APP"
     || fail "system-extension executable was not made traversable/executable"
 [ "$(/usr/bin/stat -f '%Lp' "$MODE_APP/Contents/Resources/data/rules.json")" = 644 ] \
     || fail "ordinary app resource was not normalized to 0644"
+[ "$(/usr/bin/stat -f '%Lp' "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions/Current")" = 755 ] \
+    || fail "owner-only framework symlink was not normalized to 0755"
+[ "$(/usr/bin/readlink "$MODE_APP/Contents/Frameworks/Sparkle.framework/Versions/Current")" = "$MODE_LINK_TARGET" ] \
+    || fail "normalized framework symlink is not readable/followable"
+[ "$(/usr/bin/stat -f '%Lp' "$MODE_LINK_TARGET")" = 600 ] \
+    || fail "manual installer symlink normalization followed and chmodded its target"
 if /bin/ls -lde "$MODE_APP/Contents/Resources/data/rules.json" \
         | /usr/bin/grep -E '^[[:space:]][[:digit:]]+: ' >/dev/null; then
     fail "manual installer mode helper retained a resource ACL"
@@ -92,7 +106,7 @@ if /usr/bin/find "$MODE_APP/Contents/Resources/data/rules.json" -flags +uchg \
         -print | /usr/bin/grep . >/dev/null; then
     fail "manual installer mode helper retained an immutable resource flag"
 fi
-pass "sudo-installed app remains readable and executable by non-root users"
+pass "sudo-installed app and framework links remain readable by non-root users without target traversal"
 
 for linked_entry in main cli sysext; do
     LINK_APP="$TMP_ROOT/link-$linked_entry/MacCrab.app"
@@ -330,6 +344,13 @@ METADATA_FIXTURE="$TMP_ROOT/metadata-normalization"
 /bin/cp -R "$TAMPER_BASE" "$METADATA_FIXTURE"
 METADATA_APP_RULES="$METADATA_FIXTURE/MacCrab.app/Contents/Resources/compiled_rules"
 METADATA_SYSEXT_RULES="$METADATA_FIXTURE/MacCrab.app/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/Resources/compiled_rules"
+METADATA_LINK="$METADATA_FIXTURE/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/Current"
+METADATA_LINK_TARGET="$TMP_ROOT/metadata-link-target"
+/bin/mkdir -p "$(/usr/bin/dirname "$METADATA_LINK")"
+printf 'must remain private\n' > "$METADATA_LINK_TARGET"
+/bin/chmod 0600 "$METADATA_LINK_TARGET"
+/bin/ln -s "$METADATA_LINK_TARGET" "$METADATA_LINK"
+/bin/chmod -h 0700 "$METADATA_LINK"
 /bin/chmod +a 'everyone allow read' "$METADATA_APP_RULES/rule.json"
 /usr/bin/chflags uchg "$METADATA_SYSEXT_RULES/rule.json"
 "$SCRIPT_DIR/prepare-dmg-payload.sh" "$METADATA_FIXTURE" >/dev/null
@@ -343,7 +364,13 @@ if /usr/bin/find "$METADATA_FIXTURE" \( -type d -o -type f \) \
         | /usr/bin/grep -E '^[[:space:]][[:digit:]]+: ' >/dev/null; then
     fail "payload normalization retained an extended ACL"
 fi
-pass "payload normalization strips ACLs and immutable/append-only flags before signature re-verification"
+[ "$(/usr/bin/stat -f '%Lp' "$METADATA_LINK")" = 755 ] \
+    || fail "DMG preparation retained an owner-only framework symlink"
+[ "$(/usr/bin/readlink "$METADATA_LINK")" = "$METADATA_LINK_TARGET" ] \
+    || fail "DMG framework symlink is not readable/followable after normalization"
+[ "$(/usr/bin/stat -f '%Lp' "$METADATA_LINK_TARGET")" = 600 ] \
+    || fail "DMG symlink normalization followed and chmodded its target"
+pass "payload normalization strips unsafe metadata and repairs framework links without target traversal"
 
 # The release validator uses numeric Darwin flag values in its isolated Python
 # helper while the runtime uses imported Darwin constants. Pin both sides so a

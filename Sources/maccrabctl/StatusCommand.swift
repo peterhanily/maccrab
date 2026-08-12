@@ -85,9 +85,24 @@ extension MacCrabCtl {
 
         // ── Events ────────────────────────────────────────────────────────
         do {
-            let eventStore = try EventStore(directory: supportDir)
-            let eventCount = (try? await eventStore.count()) ?? 0
-            let recentEvents = (try? await eventStore.events(since: Date.distantPast, limit: 1)) ?? []
+            let eventStore = try openEventStoreForReading(directory: supportDir)
+            let eventCount = try await eventStore.count()
+            let recentSnapshot = try await eventStore.exactEventsSnapshot(
+                since: Date.distantPast,
+                limit: 1
+            )
+            guard recentSnapshot.isComplete else {
+                throw EventStoreError.exactEvidenceGap(
+                    poisonRecords: recentSnapshot.poisonRecords.count,
+                    corruptLegacyRecords:
+                        recentSnapshot.corruptLegacyRecords,
+                    inheritedLegacyLossRecords:
+                        recentSnapshot.inheritedLegacyLossRecords,
+                    resourceLimitedRecords:
+                        recentSnapshot.resourceLimitedRecords
+                )
+            }
+            let recentEvents = recentSnapshot.events
             print("Events:          \(eventCount) stored")
             if let latest = recentEvents.first {
                 print("Last Event:      \(formatDate(latest.timestamp))")
@@ -101,13 +116,14 @@ extension MacCrabCtl {
             } else {
                 print("Last Event:      None recorded")
             }
+            withExtendedLifetime(recentSnapshot) {}
         } catch {
             print("Events:          (error reading: \(error))")
         }
 
         // ── Alerts ────────────────────────────────────────────────────────
         do {
-            let alertStore = try AlertStore(directory: supportDir)
+            let alertStore = try openAlertStoreForReading(directory: supportDir)
             let alertCount = (try? await alertStore.count()) ?? 0
 
             // Campaign count: alerts whose rule_id starts with "maccrab.campaign."
@@ -220,7 +236,7 @@ extension MacCrabCtl {
         var total = 0
         for dir in candidateDirs {
             guard FileManager.default.fileExists(atPath: dir + "/events.db") else { continue }
-            if let es = try? EventStore(directory: dir),
+            if let es = try? openEventStoreForReading(directory: dir),
                let n = try? await es.eventCountWithMachineAttribution() {
                 total = max(total, n)
             }
@@ -608,7 +624,9 @@ extension MacCrabCtl {
             // and a warning that never clears is one an operator learns to
             // ignore, which is the opposite of what an evidence-gap notice is
             // for. Say which of the two it is.
-            let liveFault = !storage.writeTelemetryComplete
+            let barrierFault = storage.recoveryMutationBarrierDegraded
+            let liveFault = barrierFault
+                || !storage.writeTelemetryComplete
                 || storage.hasOutstandingBacklog == true
                 || storage.writeConservationMaintained != true
             var lines = [
@@ -630,6 +648,13 @@ extension MacCrabCtl {
             if storage.hasOutstandingBacklog == true {
                 let rows = (storage.pendingEntityRows ?? 0) + (storage.pendingEdgeRows ?? 0)
                 lines.append("                 ⚠  Outstanding backlog: \(storage.ingestEventsPending ?? -1) event(s), \(rows) row(s); repeated heartbeats mean the writer is stuck.")
+            }
+            if barrierFault {
+                let accepting = storage.acceptingMutations.map(String.init) ?? "unknown"
+                let saturated = storage.recoveryMutationQueueSaturated.map(String.init) ?? "unknown"
+                lines.append(
+                    "                 ⚠  Recovery handoff is not healthy now: accepting=\(accepting), waiters=\(storage.recoveryMutationWaiters ?? -1)/\(storage.recoveryMutationWaiterLimit ?? -1), saturated=\(saturated)."
+                )
             }
             return lines
         }

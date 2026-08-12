@@ -162,7 +162,24 @@ enum SignalHandlers {
 
                     // Retroactive detection: scan last 6 hours of events against new rules
                     let retroSince = Date().addingTimeInterval(-6 * 3600)
-                    let recentEvents = try await state.eventStore.events(since: retroSince, limit: 10_000)
+                    let retroSnapshot = try await state.eventStore
+                        .exactEventsSnapshot(
+                            since: retroSince,
+                            limit: 10_000
+                        )
+                    guard retroSnapshot.isComplete else {
+                        throw EventStoreError.exactEvidenceGap(
+                            poisonRecords:
+                                retroSnapshot.poisonRecords.count,
+                            corruptLegacyRecords:
+                                retroSnapshot.corruptLegacyRecords,
+                            inheritedLegacyLossRecords:
+                                retroSnapshot.inheritedLegacyLossRecords,
+                            resourceLimitedRecords:
+                                retroSnapshot.resourceLimitedRecords
+                        )
+                    }
+                    let recentEvents = retroSnapshot.events
                     var retroMatches = 0
                     for event in recentEvents {
                         try Task.checkCancellation()
@@ -193,6 +210,7 @@ enum SignalHandlers {
                             if inserted { retroMatches += 1 }
                         }
                     }
+                    withExtendedLifetime(retroSnapshot) {}
                     if retroMatches > 0 {
                         print("[SIGHUP] Retroactive scan: \(retroMatches) new detections from \(recentEvents.count) events")
                     } else {

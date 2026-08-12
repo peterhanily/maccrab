@@ -1,311 +1,277 @@
 // EventStorePayloadCapTests.swift
 //
-// v1.12.6: regression coverage for the per-event raw_json size cap added
-// to `EventStore.insert(event:)`.
-//
-// Background: live events.db rows had four payloads near 1 MB each
-// (base64-encoded appcast.xml passed through `python3 -c '...'`).
-// Median exec event raw_json is ~700 B; P99 < 16 KB. The 64 KB cap
-// trims the long-tail outliers while leaving normal traffic untouched.
+// rc.13 stores the privacy-sanitized canonical Event losslessly in the exact
+// journal through the journal admission ceiling. The historical 64-KiB limit
+// now applies only to the sparse compatibility/search projection.
 
 import Testing
 import Foundation
+import CSQLCipher
 @testable import MacCrabCore
 
-@Suite("EventStore: payload size cap (v1.12.6)")
+@Suite("EventStore: exact journal and bounded sparse payload")
 struct EventStorePayloadCapTests {
 
-    // MARK: Helpers
-
-    private func makeTempStore() async throws -> (EventStore, URL) {
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("maccrab-payloadcap-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        let store = try EventStore(directory: tmp.path)
-        return (store, tmp)
+    private enum TestError: Error {
+        case sqlite(String)
+        case missingProjection
     }
 
-    private func makeEvent(args: [String], commandLine: String? = nil) -> Event {
-        let proc = ProcessInfo(
-            pid: 1234, ppid: 1, rpid: 1,
-            name: "payloadcap-test",
-            executable: "/usr/local/bin/payloadcap-test",
-            commandLine: commandLine ?? args.joined(separator: " "),
-            args: args,
-            workingDirectory: "/",
-            userId: 501, userName: "tester", groupId: 20,
-            startTime: Date(),
-            ancestors: [],
-            isPlatformBinary: false
+    private func makeTempStore() throws -> (EventStore, URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "maccrab-payloadcap-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
         )
+        return (try EventStore(directory: directory.path), directory)
+    }
+
+    private func makeEvent(
+        args: [String],
+        commandLine: String? = nil,
+        enrichments: [String: String] = [:]
+    ) -> Event {
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
         return Event(
-            timestamp: Date(),
+            timestamp: timestamp,
             eventCategory: .process,
             eventType: .start,
             eventAction: "exec",
-            process: proc
+            process: ProcessInfo(
+                pid: 1234,
+                ppid: 1,
+                rpid: 1,
+                name: "payloadcap-test",
+                executable: "/usr/local/bin/payloadcap-test",
+                commandLine: commandLine ?? args.joined(separator: " "),
+                args: args,
+                workingDirectory: "/",
+                userId: 501,
+                userName: "tester",
+                groupId: 20,
+                startTime: timestamp,
+                ancestors: [],
+                isPlatformBinary: false
+            ),
+            enrichments: enrichments
         )
     }
 
-    /// Fetch the single stored event back. Asserts exactly one row.
-    private func fetchOnly(_ store: EventStore) async throws -> Event {
-        let rows = try await store.events(since: .distantPast, limit: 10)
-        #expect(rows.count == 1)
-        return rows[0]
+    private func fetchOnlyExact(
+        _ store: EventStore
+    ) async throws -> ExactEventQuerySnapshot {
+        let snapshot = try await store.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(snapshot.events.count == 1)
+        #expect(snapshot.isComplete)
+        return snapshot
     }
 
-    // MARK: - Tests
+    private func fetchOnlyProjection(
+        in directory: URL
+    ) throws -> (event: Event, rawBytes: Int) {
+        let path = directory.appendingPathComponent("events.db").path
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(
+            path,
+            &db,
+            SQLITE_OPEN_READONLY,
+            nil
+        ) == SQLITE_OK, let db else {
+            throw TestError.sqlite("open projection")
+        }
+        defer { sqlite3_close(db) }
 
-    @Test("maxRawJsonBytes default is 65536")
-    func defaultCapValue() {
-        // Sanity assertion so any future change to the constant is
-        // visible in the PR diff. The 64 KB cap is field-calibrated
-        // and not safe to nudge without re-validating the long tail.
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT raw_json FROM events ORDER BY rowid",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            throw TestError.sqlite("prepare projection")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw TestError.missingProjection
+        }
+        let count = Int(sqlite3_column_bytes(statement, 0))
+        guard count > 0, let bytes = sqlite3_column_blob(statement, 0) else {
+            throw TestError.missingProjection
+        }
+        let data = Data(bytes: bytes, count: count)
+        let event = try JSONDecoder().decode(Event.self, from: data)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw TestError.sqlite("projection cardinality")
+        }
+        return (event, count)
+    }
+
+    private func projectionRowCount(in directory: URL) throws -> Int {
+        let path = directory.appendingPathComponent("events.db").path
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(
+            path,
+            &db,
+            SQLITE_OPEN_READONLY,
+            nil
+        ) == SQLITE_OK, let db else {
+            throw TestError.sqlite("open projection count")
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT COUNT(*) FROM events",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            throw TestError.sqlite("prepare projection count")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw TestError.sqlite("read projection count")
+        }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    @Test("64 KiB is projection-only; exact journal uses the canonical ceiling")
+    func contractCeilings() {
         #expect(EventStore.maxRawJsonBytes == 65_536)
+        #expect(
+            EventJournalAdmissionValidator.maximumCanonicalRecordBytes
+                == 12 * 1_024 * 1_024
+        )
+        #expect(
+            EventJournalAdmissionValidator.maximumAcceptedSourceRetainedBytes
+                == 24 * 1_024 * 1_024
+        )
     }
 
-    @Test("insertEvent passes through under cap (no enrichment markers)")
-    func passthroughUnderCap() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Build an event with ~10 KB of args spread over many small entries.
-        // Stays well under the 64 KB cap.
-        let smallArgs = (0..<200).map { _ in String(repeating: "x", count: 50) }
-        let event = makeEvent(args: smallArgs)
-
-        let beforeCount = await store.payloadTruncatedTotal()
-        try await store.insert(event: event)
-
-        let stored = try await fetchOnly(store)
-        #expect(stored.enrichments["payload.truncated"] == nil)
-        #expect(stored.enrichments["payload.original_bytes"] == nil)
-        #expect(stored.process.args == smallArgs)
-        #expect(await store.payloadTruncatedTotal() == beforeCount)
-    }
-
-    @Test("insertEvent truncates a single oversized arg")
-    func truncateSingleOversizedArg() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let bigArg = String(repeating: "A", count: 200_000)  // 200 KB
-        let event = makeEvent(args: ["/usr/bin/python3", "-c", bigArg])
+    @Test("small canonical event is exact and projection-equivalent")
+    func smallEventRoundTripsUnchanged() async throws {
+        let (store, directory) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let args = ["payloadcap-test", "--safe", "value"]
+        let event = makeEvent(args: args)
 
         try await store.insert(event: event)
 
-        let stored = try await fetchOnly(store)
-
-        // Marker for the oversized arg.
-        #expect(stored.process.args.count == 3)
-        #expect(stored.process.args[0] == "/usr/bin/python3")
-        #expect(stored.process.args[1] == "-c")
-        #expect(stored.process.args[2] == "<truncated:200000 bytes>")
-
-        // Enrichments.
-        #expect(stored.enrichments["payload.truncated"] == "true")
-        let originalBytesStr = stored.enrichments["payload.original_bytes"]
-        #expect(originalBytesStr != nil)
-        if let s = originalBytesStr, let originalBytes = Int(s) {
-            // Original event encoded to > 200 KB (the arg itself was 200 KB).
-            #expect(originalBytes > 200_000)
-        }
-
-        // Counter incremented.
-        #expect(await store.payloadTruncatedTotal() == 1)
+        let exact = try await fetchOnlyExact(store)
+        #expect(exact.events[0].process.args == args)
+        #expect(exact.events[0].enrichments["payload.truncated"] == nil)
+        let projection = try fetchOnlyProjection(in: directory)
+        #expect(projection.event.process.args == args)
+        #expect(projection.event.enrichments["payload.truncated"] == nil)
+        #expect(projection.rawBytes <= EventStore.maxRawJsonBytes)
+        #expect(try await store.payloadPoisonTotalSnapshot() == 0)
     }
 
-    @Test("insertEvent truncates multiple oversized args")
-    func truncateMultipleOversizedArgs() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Three args, each > argTruncationThreshold (4 KB), total > 64 KB.
-        let big1 = String(repeating: "1", count: 30_000)
-        let big2 = String(repeating: "2", count: 30_000)
-        let big3 = String(repeating: "3", count: 30_000)
-        let event = makeEvent(args: [big1, big2, big3])
+    @Test("200 KiB fields stay exact while sparse projection is bounded and marked")
+    func largeFieldsAreExactAndProjectionIsBounded() async throws {
+        let (store, directory) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let largeArg = String(repeating: "A", count: 200_000)
+        let largeEvidence = String(repeating: "E", count: 200_000)
+        let event = makeEvent(
+            args: ["/usr/bin/python3", "-c", largeArg],
+            commandLine: "python3 -c payload",
+            enrichments: ["agent_evidence_json": largeEvidence]
+        )
 
         try await store.insert(event: event)
 
-        let stored = try await fetchOnly(store)
-        #expect(stored.process.args == [
-            "<truncated:30000 bytes>",
-            "<truncated:30000 bytes>",
-            "<truncated:30000 bytes>",
-        ])
-        #expect(stored.enrichments["payload.truncated"] == "true")
+        let exact = try await fetchOnlyExact(store)
+        #expect(exact.events[0].process.args[2] == largeArg)
+        #expect(
+            exact.events[0].enrichments["agent_evidence_json"]
+                == largeEvidence
+        )
+        #expect(exact.events[0].enrichments["payload.truncated"] == nil)
+
+        let projection = try fetchOnlyProjection(in: directory)
+        #expect(projection.rawBytes <= EventStore.maxRawJsonBytes)
+        #expect(
+            projection.event.process.args[2]
+                == "<truncated:200000 bytes>"
+        )
+        #expect(
+            projection.event.enrichments["agent_evidence_json"]
+                == "<truncated:200000 bytes>"
+        )
+        #expect(projection.event.enrichments["payload.truncated"] == "true")
+        #expect(try await store.payloadPoisonTotalSnapshot() == 0)
     }
 
-    @Test("insertEvent leaves small args alone, truncates only oversized ones")
-    func mixedArgSizes() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("canonical ceiling overflow is durably poisoned and idempotent")
+    func canonicalOverflowIsDurablePoison() async throws {
+        let (store, directory) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-        let small = "small-arg"
-        let big = String(repeating: "B", count: 100_000)
-        let event = makeEvent(args: [small, big, small])
+        // Each field remains below the 8-MiB structural string ceiling and the
+        // raw graph remains below 24 MiB. Only the canonical JSON crosses the
+        // true 12-MiB journal record ceiling.
+        let chunkBytes =
+            EventJournalAdmissionValidator.maximumCanonicalRecordBytes / 2
+                + 32 * 1_024
+        let event = makeEvent(
+            args: [
+                String(repeating: "P", count: chunkBytes),
+                String(repeating: "Q", count: chunkBytes),
+            ],
+            commandLine: "payloadcap canonical overflow"
+        )
+        let preflight = try EventJournalAdmissionValidator.preflight(event)
+        #expect(!preflight.structurallyOverflowed)
+        let prepared = try EventJournalAdmissionValidator.prepare(
+            event,
+            preflight: preflight
+        )
+        #expect(prepared.overflow?.digestKind == .canonicalJSON)
+        #expect(
+            prepared.overflow?.originalBytes ?? 0
+                > EventJournalAdmissionValidator.maximumCanonicalRecordBytes
+        )
 
-        try await store.insert(event: event)
+        let first = try await store.insert(
+            preparedEvents: [prepared],
+            lane: .priority
+        )
+        #expect(first.persistedCount == 0)
+        #expect(
+            first.inputDispositions
+                == [.poisoned(prepared.overflow!)]
+        )
+        #expect(try await store.payloadPoisonTotalSnapshot() == 1)
+        #expect(try projectionRowCount(in: directory) == 0)
 
-        let stored = try await fetchOnly(store)
-        #expect(stored.process.args.count == 3)
-        #expect(stored.process.args[0] == small)
-        #expect(stored.process.args[1] == "<truncated:100000 bytes>")
-        #expect(stored.process.args[2] == small)
-        #expect(stored.enrichments["payload.truncated"] == "true")
-    }
+        let snapshot = try await store.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(snapshot.events.isEmpty)
+        #expect(snapshot.poisonRecords.count == 1)
+        #expect(snapshot.poisonRecords[0].eventID == event.id)
+        #expect(snapshot.poisonRecords[0].digestKind == .canonicalJSON)
+        #expect(!snapshot.isComplete)
 
-    @Test("insertEvent applies final fallback for non-arg overflow (huge commandLine)")
-    func nonArgOverflowFallback() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Empty args; mass lives in commandLine. Per-arg pass won't help.
-        // 200 KB commandLine forces pass 2 (commandLine collapse).
-        let bigCmd = String(repeating: "C", count: 200_000)
-        let event = makeEvent(args: [], commandLine: bigCmd)
-
-        try await store.insert(event: event)
-
-        let stored = try await fetchOnly(store)
-        // Must still be stored. (events() returning it proves the row landed.)
-        #expect(stored.enrichments["payload.truncated"] == "true")
-        // commandLine must be collapsed to a marker (pass 2 of the pipeline).
-        #expect(stored.process.commandLine.hasPrefix("<truncated:"))
-        #expect(stored.process.commandLine.hasSuffix("bytes>"))
-    }
-
-    @Test("insertEvent Pass 3: oversized enrichment is truncated and the row stays VALID, readable JSON")
-    func pass3EnrichmentStripKeepsRowReadable() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Force the Pass-3 fail-open: small args + small commandLine, but a
-        // 200 KB ENRICHMENT value. Pass 1 (per-arg) and Pass 2 (commandLine
-        // collapse) can't shrink it — only enrichment truncation can.
-        //
-        // Regression guard: the previous fail-open byte-SLICED the encoded
-        // JSON and appended a tail marker, producing syntactically invalid
-        // JSON. queryEvents() decodes raw_json and `catch { continue }`s, so
-        // the row was silently dropped on READ — fetchOnly() would then see 0
-        // rows and trap. This test only passes if Pass 3 stores VALID JSON.
-        var event = makeEvent(args: ["small"])
-        event.enrichments["agent_evidence_json"] = String(repeating: "E", count: 200_000)
-
-        try await store.insert(event: event)
-
-        // The row MUST round-trip — proves raw_json is valid, decodable JSON.
-        let stored = try await fetchOnly(store)
-        #expect(stored.enrichments["payload.truncated"] == "true")
-        // The oversized enrichment was replaced with a size marker.
-        #expect(stored.enrichments["agent_evidence_json"]?.hasPrefix("<truncated:") == true)
-        #expect(await store.payloadTruncatedTotal() == 1)
-        // And the stored row fits under the cap after the strip.
-        let bytes = try JSONEncoder().encode(stored).count
-        #expect(bytes <= EventStore.maxRawJsonBytes)
-    }
-
-    @Test("insertEvent keeps stored raw_json under maxRawJsonBytes after truncation")
-    func storedRowFitsUnderCap() async throws {
-        // We can't directly read the raw_json column from outside the
-        // actor, but we can re-encode the round-tripped event and assert
-        // it fits. (The decoded form's encoded size is the upper bound
-        // of what landed in the DB for the structured-truncation case.)
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let bigArg = String(repeating: "Z", count: 500_000)
-        let event = makeEvent(args: [bigArg])
-
-        try await store.insert(event: event)
-        let stored = try await fetchOnly(store)
-
-        let encoder = JSONEncoder()
-        let bytes = try encoder.encode(stored).count
-        #expect(bytes <= EventStore.maxRawJsonBytes)
-    }
-
-    @Test("insertEvent boundary: event exactly at cap is not truncated")
-    func boundaryExactlyAtCap() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Calibrate an arg so the encoded event lands right around the cap,
-        // then assert it's NOT truncated.
-        //
-        // Determinism note: the event's timestamp encodes as a Double whose
-        // decimal-string length varies run-to-run (e.g. "…316.2495" vs
-        // "…316.249535"), so an arg calibrated against one timestamp can encode
-        // a few bytes larger when a fresh event is built below. We therefore
-        // calibrate to a small headroom UNDER the cap so that drift can't push
-        // the final instance over — the over-cap side is covered separately by
-        // `boundaryOneByteOver`. Without the margin this test flaked under the
-        // parallel suite (passed in isolation).
-        let encoder = JSONEncoder()
-        let target = EventStore.maxRawJsonBytes - 64
-        var lo = 1
-        var hi = target
-        var calibratedArg = ""
-        for _ in 0..<32 {
-            let mid = (lo + hi) / 2
-            let candidate = String(repeating: "a", count: mid)
-            let event = makeEvent(args: [candidate])
-            let size = try encoder.encode(event).count
-            if size == target {
-                calibratedArg = candidate
-                break
-            } else if size < target {
-                calibratedArg = candidate
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-        // We may not hit exactly the cap byte-for-byte; assert we found
-        // a candidate at-or-under the cap and that it round-trips intact.
-        let event = makeEvent(args: [calibratedArg])
-        let encodedSize = try encoder.encode(event).count
-        #expect(encodedSize <= EventStore.maxRawJsonBytes)
-
-        try await store.insert(event: event)
-        let stored = try await fetchOnly(store)
-        #expect(stored.enrichments["payload.truncated"] == nil)
-        #expect(stored.process.args == [calibratedArg])
-    }
-
-    @Test("insertEvent boundary: 1 byte over cap triggers truncation")
-    func boundaryOneByteOver() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Build an event whose encoded form is just barely over the cap.
-        // Start from a known-large arg and let the cap path kick in.
-        let arg = String(repeating: "x", count: EventStore.maxRawJsonBytes)
-        let event = makeEvent(args: [arg])
-        let encoder = JSONEncoder()
-        let originalSize = try encoder.encode(event).count
-        #expect(originalSize > EventStore.maxRawJsonBytes)
-
-        try await store.insert(event: event)
-        let stored = try await fetchOnly(store)
-        #expect(stored.enrichments["payload.truncated"] == "true")
-        // Per-arg threshold is 4 KB, so this arg should be replaced.
-        #expect(stored.process.args[0].hasPrefix("<truncated:"))
-    }
-
-    @Test("payloadTruncatedTotal accumulates across multiple oversized inserts")
-    func counterAccumulates() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        for i in 0..<3 {
-            let big = String(repeating: "D", count: 100_000 + i)
-            try await store.insert(event: makeEvent(args: [big]))
-        }
-        // And one under-cap insert should NOT bump the counter.
-        try await store.insert(event: makeEvent(args: ["small"]))
-
-        #expect(await store.payloadTruncatedTotal() == 3)
+        let retry = try await store.insert(
+            preparedEvents: [prepared],
+            lane: .priority
+        )
+        #expect(retry.persistedCount == 0)
+        #expect(
+            retry.inputDispositions
+                == [.poisoned(prepared.overflow!)]
+        )
+        #expect(try await store.payloadPoisonTotalSnapshot() == 1)
     }
 }

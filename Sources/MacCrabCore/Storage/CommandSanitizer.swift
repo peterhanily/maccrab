@@ -13,6 +13,13 @@ import Foundation
 /// repeated compilation overhead on every call.
 enum CommandSanitizer {
 
+    private static let sensitiveArgumentFlags: Set<String> = [
+        "--password", "--passwd", "--secret", "--token", "--auth",
+        "--credential", "--api-key", "--api_key", "--apikey", "--key",
+        "--access-key", "--access_key", "--secret-key", "--secret_key",
+        "--private-key", "--private_key", "-p",
+    ]
+
     // MARK: - Pre-compiled Patterns
 
     /// MySQL-style: `-p'password'`, `-p"password"`, or `-pPASSWORD` (no space).
@@ -176,6 +183,78 @@ enum CommandSanitizer {
             withTemplate: "$1[REDACTED]"
         )
 
+        return result
+    }
+
+    /// Redact argv with token boundaries intact. A command-line regex cannot
+    /// protect `process.args` when the captured commandLine is empty, differs
+    /// from argv, or stores a sensitive flag and its value in separate array
+    /// elements.
+    static func sanitize(arguments: [String]) -> [String] {
+        var result: [String] = []
+        result.reserveCapacity(arguments.count)
+        var redactNext = false
+        var optionsEnded = false
+
+        for argument in arguments {
+            if optionsEnded {
+                result.append(sanitize(argument))
+                continue
+            }
+            if argument == "--" {
+                result.append(argument)
+                redactNext = false
+                optionsEnded = true
+                continue
+            }
+
+            let lowered = argument.lowercased()
+            // In argv, unlike a reconstructed command-line string, token
+            // boundaries make MySQL's compact `-pVALUE` form unambiguous as a
+            // single option/value unit. Conservatively redact every non-empty
+            // compact `-p` token, including alphabetic passwords. This may hide
+            // an unrelated one-dash option such as `-path`; at-rest credential
+            // safety wins over preserving that uncommon spelling. `--` above
+            // remains the explicit escape hatch for positional arguments.
+            if lowered.hasPrefix("-p"),
+               !lowered.hasPrefix("--"),
+               argument.count > 2 {
+                result.append("\(argument.prefix(2))[REDACTED]")
+                redactNext = false
+                continue
+            }
+            let flag = lowered.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            ).first.map(String.init) ?? lowered
+            let isSensitiveFlag = sensitiveArgumentFlags.contains(flag)
+
+            if redactNext, !isSensitiveFlag {
+                result.append("[REDACTED]")
+                redactNext = false
+                continue
+            }
+
+            if isSensitiveFlag {
+                if argument.contains("=") {
+                    let originalFlag = argument.prefix {
+                        $0 != "="
+                    }
+                    result.append("\(originalFlag)=[REDACTED]")
+                    redactNext = false
+                } else {
+                    // A repeated sensitive flag is still a flag, not the prior
+                    // flag's value. The final flag consumes the next ordinary
+                    // token, preserving deterministic option structure.
+                    result.append(argument)
+                    redactNext = true
+                }
+                continue
+            }
+            result.append(sanitize(argument))
+            redactNext = false
+        }
         return result
     }
 }

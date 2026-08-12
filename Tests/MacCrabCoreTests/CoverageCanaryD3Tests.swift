@@ -51,10 +51,28 @@ struct CoverageCanaryEvaluatorTests {
         #expect(Eval.verdict(seenAtCallback: true, foundInDB: true) == .healthy)
     }
 
+    @Test("incomplete empty search stays coverage-unknown, never eviction")
+    func incompleteEmptySearchIsUnknown() {
+        #expect(Eval.verdict(
+            seenAtCallback: true,
+            storePresence: .coverageUnknown
+        ) == .storeQueryUnknown)
+        #expect(Eval.verdict(
+            seenAtCallback: true,
+            storePresence: .present
+        ) == .healthy)
+        #expect(Eval.verdict(
+            seenAtCallback: true,
+            storePresence: .absent
+        ) == .evictionGap)
+    }
+
     @Test("verdict stage labels name the failing stage (nil when healthy)")
     func stageLabels() {
         #expect(Eval.Verdict.kernelGap.stageLabel == "kernel/ingest")
         #expect(Eval.Verdict.evictionGap.stageLabel == "store/eviction")
+        #expect(Eval.Verdict.storeQueryUnknown.stageLabel
+            == "store/query coverage unknown")
         #expect(Eval.Verdict.healthy.stageLabel == nil)
     }
 
@@ -67,6 +85,23 @@ struct CoverageCanaryEvaluatorTests {
         }
         #expect(DaemonTimers.canaryMinIntervalSeconds == 300)
         #expect(DaemonTimers.canaryMaxIntervalSeconds == 900)
+    }
+
+    @Test("heartbeat and canary retain explicit query coverage")
+    func exactSnapshotSourceGuards() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let timers = try String(contentsOf: root.appendingPathComponent(
+            "Sources/MacCrabAgentKit/DaemonTimers.swift"
+        ))
+        #expect(timers.contains(".eventCategoryCountSnapshot("))
+        #expect(timers.contains("\"event_type_count_window\""))
+        #expect(timers.contains("\"effective_duration_seconds\""))
+        #expect(timers.contains("snapshot.gaps.total"))
+        #expect(timers.contains("state.eventStore.searchSnapshot("))
+        #expect(timers.contains("snapshot.isComplete ? .absent : .coverageUnknown"))
+        #expect(!timers.contains("state.eventStore.search(text: nonce"))
     }
 }
 

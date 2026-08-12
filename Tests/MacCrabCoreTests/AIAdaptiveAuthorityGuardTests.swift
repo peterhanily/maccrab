@@ -70,9 +70,15 @@ struct AIAdaptiveAuthorityGuardTests {
             encoding: .utf8
         )
 
-        #expect(eventLoop.contains(
-            "enrichedEvent.enrichments[\"IntentLabel\"] = heuristicResult.label.rawValue"
+        let deterministicStamp = try #require(eventLoop.range(of:
+            "enrichedEvent.enrichments[\"IntentLabel\"] ="
         ))
+        #expect(eventLoop.contains("result.label.rawValue"))
+        let immutableBase = try #require(eventLoop.range(of:
+            "let journalBaseEvent = enrichedEvent"
+        ))
+        #expect(deterministicStamp.lowerBound < immutableBase.lowerBound,
+                "deterministic intent must be stamped before immutable journal admission")
         #expect(eventLoop.contains("IntentModelLabel"))
         #expect(eventLoop.contains("IntentModelDisagrees"))
         #expect(!eventLoop.contains("stampedLabel = refinement.label"))

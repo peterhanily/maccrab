@@ -61,6 +61,14 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     // MARK: Rule coverage
     public let rulesLoaded: Int?
     public let rulesActive: Int?
+    /// Immutable boot-time observation from the signed bundled-rule
+    /// synchronizer. Missing means the running engine predates this evidence.
+    public let ruleSync: RuleSync?
+    /// Immutable pre-producer rc.12 -> rc.13 journal migration result.
+    public let eventJournalRecovery: EventJournalRecovery?
+    /// Current sparse-search projection coverage for the heartbeat's one-hour
+    /// observation window. An unavailable query is never represented as zero.
+    public let eventSearchProjection: EventSearchProjection?
 
     // MARK: Nested health blocks
     public let collectorHealth: [CollectorHealth]?
@@ -223,6 +231,9 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         case eventsDropped = "events_dropped"
         case rulesLoaded = "rules_loaded"
         case rulesActive = "rules_active"
+        case ruleSync = "rule_sync"
+        case eventJournalRecovery = "event_journal_recovery"
+        case eventSearchProjection = "event_search_projection"
         case collectorHealth = "collector_health"
         case llm
         case timerLifecycle = "timer_lifecycle"
@@ -295,6 +306,95 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     }
 
     // MARK: - Nested blocks
+
+    public struct RuleSync: Codable, Sendable, Equatable {
+        public let status: String?
+        public let version: String?
+        public let reason: String?
+        public let bundledTampered: Bool?
+        public let installedTampered: Bool?
+        public let installedCorpusVerified: Bool?
+        public let installedManifestSHA256: String?
+        public let installedManifestHashEntryCount: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case status
+            case version
+            case reason
+            case bundledTampered = "bundled_tampered"
+            case installedTampered = "installed_tampered"
+            case installedCorpusVerified = "installed_corpus_verified"
+            case installedManifestSHA256 = "installed_manifest_sha256"
+            case installedManifestHashEntryCount =
+                "installed_manifest_hash_entry_count"
+        }
+    }
+
+    public struct EventJournalRecovery: Codable, Sendable, Equatable {
+        public let sourceEvents: Int?
+        public let migratedEvents: Int?
+        public let rolledExpiredEvents: Int?
+        public let corruptPreservedEvents: Int?
+        public let remainingEvents: Int?
+        public let complete: Bool?
+        public let conserved: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case sourceEvents = "source_events"
+            case migratedEvents = "migrated_events"
+            case rolledExpiredEvents = "rolled_expired_events"
+            case corruptPreservedEvents = "corrupt_preserved_events"
+            case remainingEvents = "remaining_events"
+            case complete
+            case conserved
+        }
+    }
+
+    public struct EventSearchProjection: Codable, Sendable, Equatable {
+        public let queryAvailable: Bool?
+        public let mutationGeneration: UInt64?
+        public let requestedDurationSeconds: Int?
+        public let effectiveDurationSeconds: Int?
+        public let requestedWindowComplete: Bool?
+        public let projectionConsidered: Int?
+        public let projectionMaterialized: Int?
+        public let projectionOmittedQuota: Int?
+        public let projectionOmittedReplaced: Int?
+        public let projectionOmittedPhysical: Int?
+        public let projectionOmittedExternal: Int?
+        public let projectionOmittedMigration: Int?
+        public let projectionPending: Int?
+        public let projectionOmittedTotal: Int?
+        public let canonicalPoisonRecords: Int?
+        public let corruptLegacyRecords: Int?
+        public let inheritedLegacyLossRecords: Int?
+        public let resourceLimitedRecords: Int?
+        public let gapRecordsTotal: Int?
+        public let complete: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case queryAvailable = "query_available"
+            case mutationGeneration = "mutation_generation"
+            case requestedDurationSeconds = "requested_duration_seconds"
+            case effectiveDurationSeconds = "effective_duration_seconds"
+            case requestedWindowComplete = "requested_window_complete"
+            case projectionConsidered = "projection_considered"
+            case projectionMaterialized = "projection_materialized"
+            case projectionOmittedQuota = "projection_omitted_quota"
+            case projectionOmittedReplaced = "projection_omitted_replaced"
+            case projectionOmittedPhysical = "projection_omitted_physical"
+            case projectionOmittedExternal = "projection_omitted_external"
+            case projectionOmittedMigration = "projection_omitted_migration"
+            case projectionPending = "projection_pending"
+            case projectionOmittedTotal = "projection_omitted_total"
+            case canonicalPoisonRecords = "canonical_poison_records"
+            case corruptLegacyRecords = "corrupt_legacy_records"
+            case inheritedLegacyLossRecords = "inherited_legacy_loss_records"
+            case resourceLimitedRecords = "resource_limited_records"
+            case gapRecordsTotal = "gap_records_total"
+            case complete
+        }
+    }
 
     /// Per-collector liveness (the `collector_health` array). Mirrors the
     /// shape `V2HeartbeatSnapshot.Collector` reads; `expected_interval_seconds`
@@ -1357,6 +1457,10 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
     /// deliberate forensic-evidence gap while detection continues in memory.
     public struct TraceGraphStorageAdmission: Codable, Sendable, Equatable {
         public let enabled: Bool?
+        /// True when a foreground graph mutation can enter SQLite now or join
+        /// the actor's bounded recovery handoff queue. Recovery is orthogonal:
+        /// a recovering store remains accepting until that queue is saturated.
+        public let acceptingMutations: Bool?
         public let blocked: Bool?
         /// False when the daemon could not construct the TraceGraph store at
         /// boot. Missing means the heartbeat predates this fail-visible field.
@@ -1375,6 +1479,19 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let freeSpaceFloorBytes: Int64?
         public let pinnedReader: Bool?
         public let recovering: Bool?
+        public let recoveryMutationWaiters: Int?
+        public let recoveryMutationWaiterLimit: Int?
+        public let recoveryMutationQueueSaturated: Bool?
+        public let recoveryMutationWaiterHighWatermark: Int?
+        public let recoveryMutationWaitsTotal: Int64?
+        public let recoveryMutationWaitReleasesTotal: Int64?
+        public let recoveryMutationWaitCancellationsTotal: Int64?
+        public let recoveryMutationWaitClosedTotal: Int64?
+        public let recoveryMutationWaitSaturationsTotal: Int64?
+        public let recoveryMutationWaitNanosecondsTotal: Int64?
+        public let recoveryMutationMaxWaitNanoseconds: Int64?
+        public let recoveryMutationOldestWaitNanoseconds: Int64?
+        public let recoveryWriterPreemptionsTotal: Int64?
         public let autoVacuumMode: Int?
         public let footprintLatchTripsTotal: Int64?
         public let footprintLatchClearsTotal: Int64?
@@ -1420,6 +1537,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
 
         private enum CodingKeys: String, CodingKey {
             case enabled
+            case acceptingMutations = "accepting_mutations"
             case blocked
             case storeAvailable = "store_available"
             case startupBlocked = "startup_blocked"
@@ -1434,6 +1552,19 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
             case freeSpaceFloorBytes = "free_space_floor_bytes"
             case pinnedReader = "pinned_reader"
             case recovering
+            case recoveryMutationWaiters = "recovery_mutation_waiters"
+            case recoveryMutationWaiterLimit = "recovery_mutation_waiter_limit"
+            case recoveryMutationQueueSaturated = "recovery_mutation_queue_saturated"
+            case recoveryMutationWaiterHighWatermark = "recovery_mutation_waiter_high_watermark"
+            case recoveryMutationWaitsTotal = "recovery_mutation_waits_total"
+            case recoveryMutationWaitReleasesTotal = "recovery_mutation_wait_releases_total"
+            case recoveryMutationWaitCancellationsTotal = "recovery_mutation_wait_cancellations_total"
+            case recoveryMutationWaitClosedTotal = "recovery_mutation_wait_closed_total"
+            case recoveryMutationWaitSaturationsTotal = "recovery_mutation_wait_saturations_total"
+            case recoveryMutationWaitNanosecondsTotal = "recovery_mutation_wait_nanoseconds_total"
+            case recoveryMutationMaxWaitNanoseconds = "recovery_mutation_max_wait_nanoseconds"
+            case recoveryMutationOldestWaitNanoseconds = "recovery_mutation_oldest_wait_nanoseconds"
+            case recoveryWriterPreemptionsTotal = "recovery_writer_preemptions_total"
             case autoVacuumMode = "auto_vacuum_mode"
             case footprintLatchTripsTotal = "footprint_latch_trips_total"
             case footprintLatchClearsTotal = "footprint_latch_clears_total"
@@ -1485,6 +1616,101 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
                 total: input,
                 terms: [committed, failed, Int64(inFlight), Int64(pending)]
             )
+        }
+
+        /// Every recovery waiter has exactly one terminal outcome, or remains
+        /// in the actor-owned queue at this snapshot.
+        public var recoveryMutationWaitConservationMaintained: Bool? {
+            guard let waits = recoveryMutationWaitsTotal,
+                  let current = recoveryMutationWaiters,
+                  let releases = recoveryMutationWaitReleasesTotal,
+                  let cancellations = recoveryMutationWaitCancellationsTotal,
+                  let closed = recoveryMutationWaitClosedTotal else { return nil }
+            return Self.conserves(
+                total: waits,
+                terms: [Int64(current), releases, cancellations, closed]
+            )
+        }
+
+        /// Barrier telemetry is all-or-nothing for a current TraceGraph
+        /// heartbeat. Absence remains compatible with older engines, while a
+        /// partial block is fail-visible instead of being treated as healthy.
+        public var recoveryMutationTelemetryPresent: Bool {
+            let int64Values: [Int64?] = [
+                recoveryMutationWaitsTotal,
+                recoveryMutationWaitReleasesTotal,
+                recoveryMutationWaitCancellationsTotal,
+                recoveryMutationWaitClosedTotal,
+                recoveryMutationWaitSaturationsTotal,
+                recoveryMutationWaitNanosecondsTotal,
+                recoveryMutationMaxWaitNanoseconds,
+                recoveryMutationOldestWaitNanoseconds,
+                recoveryWriterPreemptionsTotal,
+            ]
+            let intValues: [Int?] = [
+                recoveryMutationWaiters,
+                recoveryMutationWaiterLimit,
+                recoveryMutationWaiterHighWatermark,
+            ]
+            return acceptingMutations != nil
+                || recoveryMutationQueueSaturated != nil
+                || int64Values.contains { $0 != nil }
+                || intValues.contains { $0 != nil }
+        }
+
+        public var recoveryMutationTelemetryComplete: Bool {
+            guard recoveryMutationTelemetryPresent else { return false }
+            return acceptingMutations != nil
+                && recoveryMutationWaiters != nil
+                && recoveryMutationWaiterLimit != nil
+                && recoveryMutationQueueSaturated != nil
+                && recovering != nil
+                && recoveryMutationWaiterHighWatermark != nil
+                && recoveryMutationWaitsTotal != nil
+                && recoveryMutationWaitReleasesTotal != nil
+                && recoveryMutationWaitCancellationsTotal != nil
+                && recoveryMutationWaitClosedTotal != nil
+                && recoveryMutationWaitSaturationsTotal != nil
+                && recoveryMutationWaitNanosecondsTotal != nil
+                && recoveryMutationMaxWaitNanoseconds != nil
+                && recoveryMutationOldestWaitNanoseconds != nil
+                && recoveryWriterPreemptionsTotal != nil
+        }
+
+        /// A foreground queue can be occupied during healthy recovery. The
+        /// degraded cases are loss/admission signals: it stopped accepting,
+        /// saturated at least once, exceeded its fixed bound, or broke its
+        /// exact waiter ledger.
+        public var recoveryMutationBarrierDegraded: Bool {
+            guard recoveryMutationTelemetryPresent else { return false }
+            guard recoveryMutationTelemetryComplete,
+                  let accepting = acceptingMutations,
+                  let current = recoveryMutationWaiters,
+                  let limit = recoveryMutationWaiterLimit,
+                  let saturated = recoveryMutationQueueSaturated,
+                  let recovering = recovering,
+                  let highWatermark = recoveryMutationWaiterHighWatermark,
+                  let saturations = recoveryMutationWaitSaturationsTotal,
+                  let totalWait = recoveryMutationWaitNanosecondsTotal,
+                  let maxWait = recoveryMutationMaxWaitNanoseconds,
+                  let oldestWait = recoveryMutationOldestWaitNanoseconds else {
+                return true
+            }
+            return !accepting
+                || saturated
+                || current < 0
+                || limit <= 0
+                || current > limit
+                || highWatermark < current
+                || highWatermark > limit
+                || saturated != (recovering && current >= limit)
+                || saturations != 0
+                || totalWait < 0
+                || maxWait < 0
+                || maxWait > totalWait
+                || oldestWait < 0
+                || (current == 0 && oldestWait != 0)
+                || recoveryMutationWaitConservationMaintained != true
         }
 
         /// attempts = committed batches + failed batches + in-flight batches.
@@ -1632,6 +1858,7 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         }
 
         public var graphWriteDegraded: Bool {
+            if recoveryMutationBarrierDegraded { return true }
             guard writeTelemetryPresent else { return false }
             return !writeTelemetryComplete
                 || hasStickyWriteFailure != false

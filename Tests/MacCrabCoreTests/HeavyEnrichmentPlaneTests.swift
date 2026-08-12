@@ -49,6 +49,18 @@ private actor HeavyEnrichmentTestCounter {
 struct HeavyEnrichmentPlaneTests {
     private static let start = Date(timeIntervalSince1970: 1_750_000_000)
 
+    private static func isolatedMemoryBudget() -> EventPipelineLiveMemoryBudget {
+        EventPipelineLiveMemoryBudget(
+            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
+            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
+                .productionForwardProgressReserveBytes,
+            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
+                .productionEventStoreWorkspaceReserveBytes,
+            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
+                .productionCompactReceiptReserveBytes
+        )
+    }
+
     private static func event(
         id: UUID = UUID(),
         pid: Int32 = 4242,
@@ -117,13 +129,19 @@ struct HeavyEnrichmentPlaneTests {
             maximumOutstandingResults: 8,
             cacheCapacity: 0,
             operationTimeoutSeconds: 0.02
-        ))
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         let firstBinding = HeavyEnrichmentBinding(event: Self.event(uid: 501))
 
-        _ = await plane.offer(component: .userName, binding: firstBinding) {
+        let firstOffer = await plane.offer(component: .userName, binding: firstBinding) {
             await gate.runIgnoringCancellation()
             return .userName("first")
+        }
+        guard case .pending = firstOffer else {
+            Issue.record("first offer should be accepted before waiting on its worker")
+            await gate.release()
+            _ = await plane.shutdown()
+            return
         }
         await gate.waitUntilEntered()
         let timedOut = await Self.waitForSnapshot(plane) {
@@ -187,16 +205,22 @@ struct HeavyEnrichmentPlaneTests {
             // 50 ms budget. Keep a coarse test-only hang deadline so executor
             // contention cannot turn this into a timeout-policy test.
             operationTimeoutSeconds: 60
-        ))
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         let counter = HeavyEnrichmentTestCounter()
         let first = HeavyEnrichmentBinding(event: Self.event(uid: 501))
         let second = HeavyEnrichmentBinding(event: Self.event(uid: 501))
 
-        _ = await plane.offer(component: .userName, binding: first) {
+        let firstOffer = await plane.offer(component: .userName, binding: first) {
             await counter.increment()
             await gate.runIgnoringCancellation()
             return .userName("alice")
+        }
+        guard case .pending = firstOffer else {
+            Issue.record("first offer should be accepted before waiting on its worker")
+            await gate.release()
+            _ = await plane.shutdown()
+            return
         }
         await gate.waitUntilEntered()
         let coalesced = await plane.offer(component: .userName, binding: second) {
@@ -205,6 +229,8 @@ struct HeavyEnrichmentPlaneTests {
         }
         guard case .pending(_, let wasCoalesced) = coalesced else {
             Issue.record("second offer should be pending")
+            await gate.release()
+            _ = await plane.shutdown()
             return
         }
         #expect(wasCoalesced)
@@ -236,20 +262,26 @@ struct HeavyEnrichmentPlaneTests {
 
     @Test("shutdown seals admission and reports an uncooperative owned worker")
     func shutdownIsBoundedAndTruthful() async {
+        let declaredMaximum = EventJournalAdmissionValidator
+            .maximumAcceptedSourceRetainedBytes
         let plane = HeavyEnrichmentPlane(configuration: .init(
             maximumConcurrentWorkers: 1,
             maximumQueuedWorkItems: 1,
             maximumOutstandingResults: 8,
             cacheCapacity: 0,
             operationTimeoutSeconds: 10
-        ))
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
         let gate = HeavyEnrichmentTestGate()
         _ = await plane.offer(
             component: .userName,
-            binding: HeavyEnrichmentBinding(event: Self.event(uid: 501))
+            binding: HeavyEnrichmentBinding(event: Self.event(uid: 501)),
+            maximumResultBytes: declaredMaximum
         ) {
             await gate.runIgnoringCancellation()
-            return .userName("late")
+            return .userName(String(
+                repeating: "x",
+                count: declaredMaximum - 8_192
+            ))
         }
         await gate.waitUntilEntered()
         _ = await plane.offer(
@@ -262,6 +294,13 @@ struct HeavyEnrichmentPlaneTests {
         #expect(stopped.cancelledRequestsTotal == 2)
         #expect(stopped.physicalWorkers == 1)
         #expect(stopped.lingeringTimedOutOrCancelledWorkers == 1)
+        #expect(stopped.activeReservedResultBytes > 0,
+                "uncooperative worker keeps its value reservation")
+        #expect(stopped.activeReservedResultBytes >= declaredMaximum,
+                "the full declared maximum remains charged after cancel")
+        #expect(stopped.deferredResultBytes > 0,
+                "cancel marker transfers within the original reservation")
+        #expect(stopped.resultByteCapacityConserved)
         #expect(stopped.requestsConserved)
 
         let afterSeal = await plane.offer(
@@ -275,10 +314,71 @@ struct HeavyEnrichmentPlaneTests {
         #expect(sealed.requestsConserved)
 
         await gate.release()
-        let exited = await Self.waitForSnapshot(plane) { $0.physicalWorkers == 0 }
+        _ = await Self.waitForSnapshot(plane) { $0.physicalWorkers == 0 }
+        _ = await plane.drainDeferredResults(limit: 8)
+        let exited = await plane.snapshot()
         #expect(exited.cleanlyDrained)
         #expect(exited.lateWorkerExitsTotal == 1)
         #expect(exited.requestsConserved)
+    }
+
+    @Test("512-result count cannot bypass the shared result and cache byte cap")
+    func resultByteCapacityBackpressures() async {
+        let binding = HeavyEnrichmentBinding(event: Self.event(uid: 700))
+        let declaredValueBytes = 1_048_576
+        let perResult = binding.retainedByteEstimate
+            + declaredValueBytes + 1_024
+        let plane = HeavyEnrichmentPlane(configuration: .init(
+            maximumConcurrentWorkers: 1,
+            maximumQueuedWorkItems: 512,
+            maximumOutstandingResults: 512,
+            maximumRetainedResultBytes: perResult * 2,
+            cacheCapacity: 512,
+            operationTimeoutSeconds: 60
+        ), liveMemoryBudget: Self.isolatedMemoryBudget())
+        let gate = HeavyEnrichmentTestGate()
+        var accepted = 0
+        for index in 0..<512 {
+            let offer = await plane.offer(
+                component: .environment,
+                binding: HeavyEnrichmentBinding(event: Self.event(
+                    pid: Int32(8_000 + index),
+                    uid: UInt32(700 + index)
+                )),
+                cacheResult: false,
+                maximumResultBytes: declaredValueBytes
+            ) {
+                await gate.runIgnoringCancellation()
+                return .environment(["PATH": String(
+                    repeating: "x",
+                    count: declaredValueBytes - 2_048
+                )])
+            }
+            if case .pending = offer { accepted += 1 }
+        }
+        let saturated = await plane.snapshot()
+        #expect(accepted <= 2)
+        #expect(saturated.rejectedRequestsTotal == UInt64(512 - accepted))
+        #expect(saturated.activeReservedResultBytes
+            <= saturated.maximumRetainedResultBytes)
+        #expect(saturated.resultByteCapacityConserved)
+        #expect(saturated.requestsConserved)
+
+        await gate.release()
+        let completed = await Self.waitForSnapshot(plane) {
+            Int($0.completedRequestsTotal) == accepted
+        }
+        #expect(completed.deferredResultBytes
+            <= completed.maximumRetainedResultBytes)
+        #expect(completed.retainedResultBytesHighWatermark
+            <= completed.maximumRetainedResultBytes)
+        #expect(completed.resultByteCapacityConserved)
+        #expect(completed.requestsConserved)
+        _ = await plane.drainDeferredResults(
+            limit: 512,
+            maximumBytes: completed.maximumRetainedResultBytes
+        )
+        _ = await plane.shutdown()
     }
 
     @Test("deferred patches reject event or stable-file identity mismatch")
@@ -362,7 +462,8 @@ struct HeavyEnrichmentPlaneTests {
         #expect(plane.contains("private var deadlineTasks: [UInt64: Task<Void, Never>]"))
         #expect(plane.contains("lingeringTimedOutOrCancelledWorkers"))
         #expect(plane.contains("public func shutdown(deadlineSeconds:"))
-        #expect(enricher.contains("public func drainDeferredEnrichments(limit:"))
+        #expect(enricher.contains("public func drainDeferredEnrichments("))
+        #expect(enricher.contains("maximumBytes: Int = Int.max"))
         #expect(enricher.contains("HeavyEnrichmentCoverage"))
         #expect(!enricher.contains("await scanner.scan(path:"))
         #expect(!enricher.contains("await codeSigningCache.evaluate(path:"))

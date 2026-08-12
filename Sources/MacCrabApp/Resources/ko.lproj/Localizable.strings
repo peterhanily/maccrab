@@ -557,7 +557,7 @@
 "appearance.mode" = "모드";
 "appearance.note" = "팁: 탐지, 예방, 대응은 모드와 관계없이 항상 켜져 있습니다. 대시보드 탐색만 변경됩니다.";
 "appearance.title" = "대시보드 복잡도";
-"events.aggregateModeBanner" = "일별 요약 표시 중 — 이벤트별 세부 정보를 보려면 시간 범위를 최근 24시간 이하로 좁히세요";
+"events.aggregateModeBanner" = "일별 요약 표시 중 — 정확한 이벤트 세부 정보는 보존된 기간에만 제공됩니다";
 "events.category" = "카테고리";
 "events.count" = "개수";
 "events.day" = "날짜";

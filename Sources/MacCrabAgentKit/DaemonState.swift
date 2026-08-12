@@ -411,6 +411,7 @@ struct TraceGraphStartupAdmissionStatus: Sendable, Equatable {
     var heartbeatDictionary: [String: Any] {
         var result: [String: Any] = [
             "enabled": true,
+            "accepting_mutations": false,
             "blocked": true,
             "store_available": false,
             "startup_blocked": true,
@@ -482,6 +483,16 @@ final class DaemonState {
     let rulesURL: URL
     let sequenceRulesDir: String
     let effectiveRulesDir: String
+
+    // MARK: - Boot Evidence
+    /// Exact signed-corpus synchronization result observed before any rule
+    /// reader was constructed. The heartbeat renders this immutable value;
+    /// it never infers success from the later rule count.
+    let bundledRuleSyncObservation: BundledRuleSyncBootObservation
+    /// Exact crash-resumable journal transition result observed before any
+    /// collector started. Retained so every heartbeat carries the same boot
+    /// conservation proof instead of manufacturing a current healthy state.
+    let eventJournalRecovery: EventStore.EventJournalRecoverySnapshot
 
     // MARK: - Storage
     let eventStore: EventStore
@@ -915,6 +926,8 @@ final class DaemonState {
         rulesURL: URL,
         sequenceRulesDir: String,
         effectiveRulesDir: String,
+        bundledRuleSyncObservation: BundledRuleSyncBootObservation,
+        eventJournalRecovery: EventStore.EventJournalRecoverySnapshot,
         eventStore: EventStore,
         legacyEvidenceTransitionBudget: LegacyEvidenceTransitionBudget,
         eventRetentionBudgetHealth: EventRetentionBudgetHealth,
@@ -1030,6 +1043,8 @@ final class DaemonState {
         self.rulesURL = rulesURL
         self.sequenceRulesDir = sequenceRulesDir
         self.effectiveRulesDir = effectiveRulesDir
+        self.bundledRuleSyncObservation = bundledRuleSyncObservation
+        self.eventJournalRecovery = eventJournalRecovery
         self.eventStore = eventStore
         self.legacyEvidenceTransitionBudget = legacyEvidenceTransitionBudget
         self.eventRetentionBudgetHealth = eventRetentionBudgetHealth
@@ -1067,11 +1082,11 @@ final class DaemonState {
             builtinSettingsDir: supportDir,
             alertCounter: _sharedAlertCount,
             evidenceBudgetBytes: evidenceBudgetBytes,
-            evidencePrefixGeneration: {
-                await eventWriter.evidencePrefixGeneration()
+            journalAdmissionVerifier: { admission in
+                await eventWriter.awaitJournalAdmission(admission)
             },
-            evidencePrefixBarrier: { generation in
-                await eventWriter.awaitEvidencePrefix(through: generation)
+            journalEventEnsurer: { event in
+                await eventWriter.ensureJournalAdmission(event)
             }
         )
         self.enricher = enricher

@@ -64,6 +64,23 @@ struct AlertStoreSchemaV5Tests {
         return names
     }
 
+    private func pragmaInt64(
+        _ name: String,
+        in db: OpaquePointer
+    ) -> Int64? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA \(name)", -1, &stmt, nil)
+                == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
+    private func fileSize(_ path: String) -> UInt64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        return (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
     /// Build an Event with all attribution fields populated so AlertSink
     /// has something to enrich the alert with.
     private func eventWith(
@@ -231,6 +248,20 @@ struct AlertStoreSchemaV5Tests {
         #expect(preserved?.processSha256 == nil)
         #expect(preserved?.hostName == nil)
 
+        // Migration does not rewrite an unbounded legacy alert corpus. Missing
+        // context is counted explicitly; the first ordinary UPSERT repairs just
+        // that alert by installing `.pending` in the same transaction.
+        var contextCounts = try await store.evidenceContextCounts()
+        #expect(contextCounts.legacyUnverified == 1)
+        #expect(contextCounts.contextRows == 0)
+        #expect(contextCounts.reconciles)
+        let preservedAlert = try #require(preserved)
+        try await store.insert(alert: preservedAlert)
+        contextCounts = try await store.evidenceContextCounts()
+        #expect(contextCounts.legacyUnverified == 0)
+        #expect(contextCounts.pending == 1)
+        #expect(contextCounts.reconciles)
+
         // Version bumped to 5.
         let raw = try #require(openRaw(path))
         defer { sqlite3_close(raw) }
@@ -238,7 +269,7 @@ struct AlertStoreSchemaV5Tests {
         #expect(version >= 5)
     }
 
-    @Test("Migration is idempotent — re-opening DB preserves user_version (v8)")
+    @Test("Migration is idempotent — re-opening DB preserves user_version (v10)")
     func migrationIdempotent() async throws {
         let path = makeTempPath()
         defer { cleanup(path) }
@@ -255,7 +286,46 @@ struct AlertStoreSchemaV5Tests {
         let raw = try #require(openRaw(path))
         defer { sqlite3_close(raw) }
         let version = try #require(try? SchemaMigrator.readVersion(db: raw))
-        #expect(version == 8, "version should be exactly 8 after multiple opens, got \(version)")
+        #expect(version == 10, "version should be exactly 10 after multiple opens, got \(version)")
+    }
+
+    @Test("second v10 reopen performs no schema, data, or WAL mutation")
+    func v10ReopenHasNoPersistentDDLChurn() async throws {
+        let path = makeTempPath()
+        defer { cleanup(path) }
+
+        var first: AlertStore? = try AlertStore(path: path)
+        try await first?.insert(alert: bareAlert(id: "v10-stable-row"))
+        first = nil
+
+        let observer = try #require(openRaw(path))
+        defer { sqlite3_close(observer) }
+        #expect(Set(columnNames(
+            in: observer,
+            table: "alert_evidence_context"
+        )).contains("journal_admission_gap_count"))
+        let schemaBefore = try #require(
+            pragmaInt64("schema_version", in: observer)
+        )
+        let dataBefore = try #require(
+            pragmaInt64("data_version", in: observer)
+        )
+        let walBefore = fileSize(path + "-wal")
+
+        var reopened: AlertStore? = try AlertStore(path: path)
+        #expect(reopened != nil)
+        reopened = nil
+
+        let schemaAfter = try #require(
+            pragmaInt64("schema_version", in: observer)
+        )
+        let dataAfter = try #require(
+            pragmaInt64("data_version", in: observer)
+        )
+        let walAfter = fileSize(path + "-wal")
+        #expect(schemaAfter == schemaBefore)
+        #expect(dataAfter == dataBefore)
+        #expect(walAfter == walBefore)
     }
 
     @Test("v2-shape DB opens cleanly on v5 binary — forward-compatible migration")

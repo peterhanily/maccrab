@@ -66,6 +66,7 @@ public final class V2MockDataProvider: V2DataProvider {
             activeCampaignsHigh: V2MockRepository.campaigns.filter { $0.severity == .high }.count,
             activeCampaignsMedium: V2MockRepository.campaigns.filter { $0.severity == .medium }.count,
             eventsPerSecond: 1700,
+            eventRateCoverageComplete: true,
             eventsLast8Buckets: [2.0, 2.2, 2.5, 2.1, 2.4, 2.6, 2.3, 2.4]
         )
     }

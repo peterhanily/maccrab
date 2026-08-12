@@ -270,13 +270,18 @@ public struct V2OverviewKPIs: Sendable, Equatable {
     public let activeCampaignsHigh: Int
     public let activeCampaignsMedium: Int
     public let eventsPerSecond: Double
+    /// False means the requested one-minute evidence window was truncated or
+    /// contained a durable gap. In that state zero is a placeholder only and
+    /// must not be rendered as an observed zero rate.
+    public let eventRateCoverageComplete: Bool
     public let eventsLast8Buckets: [Double]
 
     public static let zero = V2OverviewKPIs(
         openAlerts24h: 0, openAlertsLast24hDelta: 0,
         activeCampaigns: 0, activeCampaignsCritical: 0,
         activeCampaignsHigh: 0, activeCampaignsMedium: 0,
-        eventsPerSecond: 0, eventsLast8Buckets: []
+        eventsPerSecond: 0, eventRateCoverageComplete: false,
+        eventsLast8Buckets: []
     )
 }
 

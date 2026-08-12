@@ -192,6 +192,23 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "pending_entity_rows": 0,
                     "pending_edge_rows": 0,
                 },
+                "trace_graph_recovery_barrier": {
+                    "accepting_mutations": True,
+                    "recovering": False,
+                    "recovery_mutation_waiters": 0,
+                    "recovery_mutation_waiter_limit": 1_024,
+                    "recovery_mutation_queue_saturated": False,
+                    "recovery_mutation_waiter_high_watermark": 0,
+                    "recovery_mutation_waits_total": 0,
+                    "recovery_mutation_wait_releases_total": 0,
+                    "recovery_mutation_wait_cancellations_total": 0,
+                    "recovery_mutation_wait_closed_total": 0,
+                    "recovery_mutation_wait_saturations_total": 0,
+                    "recovery_mutation_wait_nanoseconds_total": 0,
+                    "recovery_mutation_max_wait_nanoseconds": 0,
+                    "recovery_mutation_oldest_wait_nanoseconds": 0,
+                    "recovery_writer_preemptions_total": 0,
+                },
                 "trace_store_admission": {
                     "enabled": True,
                     "blocked": False,
@@ -299,6 +316,76 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 lane: boundaries[f"{lane}-event-persistence"]["in_flight"]
                 for lane in ("priority", "file")
             },
+            "event_terminal_revision_offered_total": sum(
+                boundaries[f"{lane}-event-terminal-persistence"]["offered"]
+                for lane in ("priority", "file")
+            ),
+            "event_terminal_revision_offered_by_lane": {
+                lane: boundaries[f"{lane}-event-terminal-persistence"]["offered"]
+                for lane in ("priority", "file")
+            },
+            "event_terminal_revision_unchanged_total": sum(
+                boundaries[f"{lane}-event-terminal-persistence"]["completed"]
+                for lane in ("priority", "file")
+            ),
+            "event_terminal_revision_unchanged_by_lane": {
+                lane: boundaries[f"{lane}-event-terminal-persistence"]["completed"]
+                for lane in ("priority", "file")
+            },
+            "event_terminal_revision_durable_total": 0,
+            "event_terminal_revision_durable_by_lane": {
+                "priority": 0, "file": 0
+            },
+            "event_terminal_revision_dropped_total": sum(
+                boundaries[f"{lane}-event-terminal-persistence"][
+                    "explicitly_shed"
+                ]
+                for lane in ("priority", "file")
+            ),
+            "event_terminal_revision_dropped_by_lane": {
+                lane: boundaries[f"{lane}-event-terminal-persistence"][
+                    "explicitly_shed"
+                ]
+                for lane in ("priority", "file")
+            },
+            "event_terminal_revision_poisoned_total": 0,
+            "event_terminal_revision_poisoned_by_lane": {
+                "priority": 0, "file": 0
+            },
+            "event_terminal_revision_retried_total": 0,
+            "event_terminal_revision_retried_by_lane": {
+                "priority": 0, "file": 0
+            },
+            "event_terminal_revision_buffer_depth": sum(
+                boundaries[f"{lane}-event-terminal-persistence"]["queued"]
+                for lane in ("priority", "file")
+            ),
+            "event_terminal_revision_buffer_depth_by_lane": {
+                lane: boundaries[f"{lane}-event-terminal-persistence"]["queued"]
+                for lane in ("priority", "file")
+            },
+            "event_terminal_revision_buffer_bytes": 0,
+            "event_terminal_revision_buffer_bytes_by_lane": {
+                "priority": 0, "file": 0
+            },
+            "event_terminal_revision_in_flight_depth": sum(
+                boundaries[f"{lane}-event-terminal-persistence"]["in_flight"]
+                for lane in ("priority", "file")
+            ),
+            "event_terminal_revision_in_flight_depth_by_lane": {
+                lane: boundaries[f"{lane}-event-terminal-persistence"]["in_flight"]
+                for lane in ("priority", "file")
+            },
+            "event_terminal_revision_in_flight_bytes": 0,
+            "event_terminal_revision_in_flight_bytes_by_lane": {
+                "priority": 0, "file": 0
+            },
+            "event_terminal_revision_conservation": True,
+            "event_terminal_revision_evidence_poisoned": False,
+            "event_terminal_revision_storage_mutation_generation": 0,
+            "event_journal_repairable_gap_count": 0,
+            "event_journal_repair_payload_lease_count": 0,
+            "event_journal_repair_payload_expired_total": 0,
             "sequence_checkpoint": {
                 "conservation": boundaries["sequence-checkpoint"]
             },
@@ -310,6 +397,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "sequence_state_continuity_detail": "nominal",
             "tracegraph_storage_admission": {
                 "enabled": True,
+                **sample["trace_graph_recovery_barrier"],
                 "blocked": False,
                 "store_available": True,
                 "recovering": False,
@@ -334,6 +422,69 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "footprint_bytes": 100 * 1024 * 1024,
                 "free_space_bytes": 20 * 1024 * 1024 * 1024,
                 "free_space_floor_bytes": 10 * 1024 * 1024 * 1024,
+            },
+            "event_type_count_window": {
+                "query_available": True,
+                "mutation_generation": counter_value,
+                "requested_duration_seconds": 3_600,
+                "effective_duration_seconds": min(
+                    900, sample["offset_seconds"]
+                ),
+                "requested_window_complete": False,
+                "complete": False,
+                "canonical_poison_records": 0,
+                "corrupt_legacy_records": 0,
+                "inherited_legacy_loss_records": 0,
+                "resource_limited_records": 0,
+                "gap_records": 0,
+            },
+            "event_search_projection": {
+                "query_available": True,
+                "mutation_generation": counter_value,
+                "requested_duration_seconds": 3_600,
+                "effective_duration_seconds": min(
+                    900, sample["offset_seconds"]
+                ),
+                "requested_window_complete": False,
+                "projection_considered": counter_value,
+                "projection_materialized": min(counter_value, 4),
+                "projection_omitted_quota": max(0, counter_value - 4),
+                "projection_omitted_replaced": 0,
+                "projection_omitted_physical": 0,
+                "projection_omitted_external": 0,
+                "projection_omitted_migration": 0,
+                "projection_pending": 0,
+                "projection_omitted_total": max(0, counter_value - 4),
+                "canonical_poison_records": 0,
+                "corrupt_legacy_records": 0,
+                "inherited_legacy_loss_records": 0,
+                "resource_limited_records": 0,
+                "gap_records_total": 0,
+                "complete": False,
+            },
+            "rule_sync": {
+                "status": "unchanged",
+                "version": manifest["artifact_verification"]["rule_corpus"][
+                    "bundle_version"
+                ],
+                "bundled_tampered": False,
+                "installed_tampered": False,
+                "installed_corpus_verified": True,
+                "installed_manifest_sha256": manifest[
+                    "artifact_verification"
+                ]["rule_corpus"]["manifest_sha256"],
+                "installed_manifest_hash_entry_count": manifest[
+                    "artifact_verification"
+                ]["rule_corpus"]["manifest_hash_entry_count"],
+            },
+            "event_journal_recovery": {
+                "source_events": 10,
+                "migrated_events": 8,
+                "rolled_expired_events": 1,
+                "corrupt_preserved_events": 1,
+                "remaining_events": 0,
+                "complete": True,
+                "conserved": True,
             },
             "events_retention_budget": {
                 "state": "converged",
@@ -596,8 +747,6 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
         "rule_corpus_sha256": "c" * 64,
         "semantic_reasons": [],
         "prune_vacuum_refill_loop_count": 0,
-        "search_tier_gaps_reconcile_exactly": True,
-        "search_tier_gaps_visible": True,
         "macos_disk_writes_diagnostic_count": 0,
         "rules": {
             "sealed_rules_synchronized_before_readers": True,
@@ -678,6 +827,14 @@ class CandidateQualificationTests(unittest.TestCase):
             artifact_checks="digest",
         )
 
+    @staticmethod
+    def rehash_payload_inventory(manifest: dict) -> None:
+        inventory = manifest["artifact_verification"]["payload_inventory"]
+        inventory["entry_count"] = len(inventory["entries"])
+        inventory["sha256"] = qualification.sha256_bytes(
+            qualification.canonical_json_bytes(inventory["entries"])
+        )
+
     def validate_runtime(self, report: dict | None = None) -> None:
         qualification.validate_runtime_report(
             self.runtime if report is None else report,
@@ -689,6 +846,21 @@ class CandidateQualificationTests(unittest.TestCase):
             source_root=ROOT,
             allow_test_fixture=True,
         )
+
+    def test_runtime_template_tracks_exact_trace_graph_aggregate_schema(self) -> None:
+        """The deliberately failing template must still name every live field.
+
+        Operators use this document to see what evidence the recorder must
+        produce.  Omitting newly required ledger fields makes the template
+        stale even though its overall result remains intentionally INCOMPLETE.
+        """
+        template = qualification.make_runtime_template(
+            self.manifest, self.manifest_sha
+        )
+        template_trace = template["measurements"]["trace_graph"]
+        live_trace = self.runtime["measurements"]["trace_graph"]
+        self.assertEqual(set(template_trace), set(live_trace))
+        self.assertEqual(template["result"], "INCOMPLETE")
 
     def recorder_probes(self) -> dict:
         measurements = self.runtime["measurements"]
@@ -1318,6 +1490,160 @@ class CandidateQualificationTests(unittest.TestCase):
         ] += 1
         self.validate_runtime(report)
 
+    def test_tracegraph_recovery_waiter_ledger_must_conserve(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][8])
+        graph = observation["heartbeat"]["tracegraph_storage_admission"]
+        graph["recovery_mutation_waits_total"] = 1
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "waiter ledger does not conserve"
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture broken recovery ledger"
+            )
+
+    def test_tracegraph_recovery_waiter_limit_is_fixed_at_production_bound(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["heartbeat"]["tracegraph_storage_admission"][
+                "recovery_mutation_waiter_limit"
+            ] = 2_048
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "must equal the fixed production limit 1024",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_tracegraph_must_accept_mutations_for_ninety_nine_percent(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        observations[8]["heartbeat"]["tracegraph_storage_admission"][
+            "accepting_mutations"
+        ] = False
+        self.rebind_observation_heartbeat(observations[8])
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "recovery barrier is not accepting mutations",
+        ):
+            self.validate_runtime(report)
+
+    def test_tracegraph_hidden_recovery_queue_saturation_delta_is_rejected(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            if observation["offset_seconds"] >= 330:
+                observation["heartbeat"]["tracegraph_storage_admission"][
+                    "recovery_mutation_wait_saturations_total"
+                ] = 1
+                self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "cumulative TraceGraph recovery mutation queue saturations=1",
+        ):
+            self.validate_runtime(report)
+
+    def test_tracegraph_prior_recovery_queue_saturation_poisoned_epoch_is_rejected(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["heartbeat"]["tracegraph_storage_admission"][
+                "recovery_mutation_wait_saturations_total"
+            ] = 1
+            self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        self.assertEqual(
+            report["measurements"]["trace_graph"][
+                "recovery_mutation_wait_saturations_epoch_delta"
+            ],
+            0,
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "cumulative TraceGraph recovery mutation queue saturations=1",
+        ):
+            self.validate_runtime(report)
+
+    def test_tracegraph_recovery_is_orthogonal_while_barrier_accepts(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            if observation["offset_seconds"] >= 450:
+                observation["heartbeat"]["tracegraph_storage_admission"][
+                    "recovering"
+                ] = True
+                observation["trace_recovering"] = True
+                self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        self.validate_runtime(report)
+
+    def test_tracegraph_recovery_mutation_wait_is_bounded_to_five_seconds(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        excessive = qualification.MAX_TRACE_RECOVERY_MUTATION_WAIT_NANOSECONDS + 1
+        for observation in observations:
+            if observation["offset_seconds"] >= 330:
+                graph = observation["heartbeat"]["tracegraph_storage_admission"]
+                graph["recovery_mutation_waiter_high_watermark"] = 1
+                graph["recovery_mutation_waits_total"] = 1
+                graph["recovery_mutation_wait_releases_total"] = 1
+                graph["recovery_mutation_wait_nanoseconds_total"] = excessive
+                graph["recovery_mutation_max_wait_nanoseconds"] = excessive
+                graph["recovery_writer_preemptions_total"] = 1
+                self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "recovery maximum mutation wait is 5000000001ns",
+        ):
+            self.validate_runtime(report)
+
+    def test_tracegraph_final_recovery_mutation_waiter_must_drain(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        graph = observations[-1]["heartbeat"]["tracegraph_storage_admission"]
+        graph["recovering"] = True
+        graph["recovery_mutation_waiters"] = 1
+        graph["recovery_mutation_waiter_high_watermark"] = 1
+        graph["recovery_mutation_waits_total"] = 1
+        graph["recovery_mutation_oldest_wait_nanoseconds"] = 1
+        observations[-1]["trace_recovering"] = True
+        self.rebind_observation_heartbeat(observations[-1])
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "not drained at a fixed readiness boundary"
+        ):
+            self.validate_runtime(report)
+
+    def test_tracegraph_bridge_event_batch_and_row_failure_deltas_are_rejected(self) -> None:
+        for failure_kind, expected in (
+            ("event", "trace-graph-mutation explicitly_shed=1"),
+            ("batch", "write_batches_failed_total=1"),
+            ("row", "write_rows_failed_total=1"),
+        ):
+            with self.subTest(failure_kind=failure_kind):
+                observations = copy.deepcopy(
+                    self.runtime["recorder_observations"]
+                )
+                for observation in observations:
+                    if observation["offset_seconds"] < 330:
+                        continue
+                    graph = observation["heartbeat"][
+                        "tracegraph_storage_admission"
+                    ]
+                    if failure_kind == "event":
+                        graph["ingest_events_total"] += 1
+                        graph["ingest_events_failed_total"] += 1
+                    elif failure_kind == "batch":
+                        graph["write_attempts_total"] += 1
+                        graph["write_batches_failed_total"] += 1
+                    else:
+                        graph["write_rows_attempted_total"] += 1
+                        graph["write_rows_failed_total"] += 1
+                        graph["entity_observations_total"] += 1
+                    self.rebind_observation_heartbeat(observation)
+                report = self.rebuild_runtime_from_observations(observations)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError, expected
+                ):
+                    self.validate_runtime(report)
+
     def test_zero_tracegraph_physical_suppression_cannot_pass_workload(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
@@ -1525,6 +1851,168 @@ class CandidateQualificationTests(unittest.TestCase):
         self.dmg.write_bytes(b"different bytes\n")
         with self.assertRaisesRegex(qualification.QualificationError, "exact DMG bytes"):
             self.validate_candidate()
+
+    def test_payload_inventory_rejects_unsafe_symlink_modes(self) -> None:
+        mountpoint = self.root / "mounted-payload"
+        mountpoint.mkdir()
+        target = self.root / "outside-target"
+        target.write_text("outside bytes\n", encoding="utf-8")
+        link = mountpoint / "Current"
+        link.symlink_to(target)
+
+        for mode in (0o700, 0o644):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(link, mode, follow_symlinks=False)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "not readable/traversable by every user",
+                ):
+                    qualification.inventory_mounted_payload(mountpoint)
+
+        os.chmod(link, 0o777, follow_symlinks=False)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "group/world writable"
+        ):
+            qualification.inventory_mounted_payload(mountpoint)
+
+    def test_candidate_document_rejects_recorded_unsafe_symlink_modes(self) -> None:
+        for mode, diagnostic in (
+            (0o700, "not readable/traversable by every user"),
+            (0o644, "not readable/traversable by every user"),
+            (0o777, "group/world writable"),
+        ):
+            with self.subTest(mode=oct(mode)):
+                manifest = copy.deepcopy(self.manifest)
+                manifest["artifact_verification"]["payload_inventory"][
+                    "entries"
+                ].append({
+                    "path": "MacCrab.app/Contents/Frameworks/F.framework/Current",
+                    "kind": "symlink",
+                    "target": "A",
+                    "mode": mode,
+                })
+                with self.assertRaisesRegex(
+                    qualification.QualificationError, diagnostic
+                ):
+                    qualification.validate_candidate_document(
+                        manifest,
+                        expected_version=VERSION,
+                        expected_source_commit=COMMIT,
+                        expected_source_tree=TREE,
+                        expected_build_number=BUILD_NUMBER,
+                        dmg=self.dmg,
+                        artifact_checks="digest",
+                    )
+
+    def test_candidate_rule_corpus_version_must_match_candidate(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["artifact_verification"]["rule_corpus"][
+            "bundle_version"
+        ] = "0.0.0"
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "rule corpus version does not match candidate version",
+        ):
+            qualification.validate_candidate_document(
+                manifest,
+                expected_version=VERSION,
+                expected_source_commit=COMMIT,
+                expected_source_tree=TREE,
+                expected_build_number=BUILD_NUMBER,
+                dmg=self.dmg,
+                artifact_checks="digest",
+            )
+
+    def test_candidate_rule_manifest_inventory_row_is_authoritative(self) -> None:
+        def manifest_row(manifest: dict) -> dict:
+            return next(
+                row
+                for row in manifest["artifact_verification"][
+                    "payload_inventory"
+                ]["entries"]
+                if row["path"] == qualification.AGENT_RULE_MANIFEST_PATH
+            )
+
+        mutations = {
+            "missing": lambda manifest: manifest["artifact_verification"][
+                "payload_inventory"
+            ]["entries"].remove(manifest_row(manifest)),
+            "duplicate": lambda manifest: manifest["artifact_verification"][
+                "payload_inventory"
+            ]["entries"].append(copy.deepcopy(manifest_row(manifest))),
+            "wrong-kind": lambda manifest: manifest_row(manifest).__setitem__(
+                "kind", "directory"
+            ),
+            "wrong-sha": lambda manifest: manifest_row(manifest).__setitem__(
+                "sha256", "f" * 64
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                manifest = copy.deepcopy(self.manifest)
+                mutate(manifest)
+                self.rehash_payload_inventory(manifest)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "duplicate paths|exactly one sealed rule manifest row|"
+                    "sealed rule manifest row is not the recorded corpus",
+                ):
+                    qualification.validate_candidate_document(
+                        manifest,
+                        expected_version=VERSION,
+                        expected_source_commit=COMMIT,
+                        expected_source_tree=TREE,
+                        expected_build_number=BUILD_NUMBER,
+                        dmg=self.dmg,
+                        artifact_checks="digest",
+                    )
+
+    def test_candidate_payload_inventory_count_and_digest_are_bound(self) -> None:
+        for field in ("entry_count", "sha256"):
+            with self.subTest(field=field):
+                manifest = copy.deepcopy(self.manifest)
+                inventory = manifest["artifact_verification"][
+                    "payload_inventory"
+                ]
+                inventory[field] = (
+                    inventory["entry_count"] + 1
+                    if field == "entry_count"
+                    else "f" * 64
+                )
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "entry_count does not match|sha256 does not bind",
+                ):
+                    qualification.validate_candidate_document(
+                        manifest,
+                        expected_version=VERSION,
+                        expected_source_commit=COMMIT,
+                        expected_source_tree=TREE,
+                        expected_build_number=BUILD_NUMBER,
+                        dmg=self.dmg,
+                        artifact_checks="digest",
+                    )
+
+    def test_payload_inventory_records_safe_link_without_traversing_target(self) -> None:
+        mountpoint = self.root / "mounted-payload"
+        mountpoint.mkdir()
+        outside = self.root / "outside-directory"
+        outside.mkdir()
+        (outside / "must-not-be-inventoried").write_text("secret\n", encoding="utf-8")
+        link = mountpoint / "Current"
+        link.symlink_to(outside, target_is_directory=True)
+        os.chmod(link, 0o755, follow_symlinks=False)
+
+        entries, _ = qualification.inventory_mounted_payload(mountpoint)
+        self.assertEqual(
+            entries,
+            [{
+                "path": "Current",
+                "kind": "symlink",
+                "target": str(outside),
+                "mode": 0o755,
+            }],
+        )
 
     def test_source_tree_mismatch_is_rejected(self) -> None:
         with self.assertRaisesRegex(qualification.QualificationError, "source commit/tree"):
@@ -1794,6 +2282,243 @@ class CandidateQualificationTests(unittest.TestCase):
             qualification.QualificationError, "explicitly_shed"
         ):
             self.validate_runtime(report)
+
+    def test_terminal_drop_and_poison_are_rejected_as_shed(self) -> None:
+        for result_name in ("dropped", "poisoned"):
+            with self.subTest(result=result_name):
+                observations = copy.deepcopy(
+                    self.runtime["recorder_observations"]
+                )
+                for observation in observations:
+                    if observation["offset_seconds"] < 480:
+                        continue
+                    heartbeat = observation["heartbeat"]
+                    heartbeat["event_terminal_revision_offered_total"] += 1
+                    heartbeat[
+                        "event_terminal_revision_offered_by_lane"
+                    ]["priority"] += 1
+                    heartbeat[
+                        f"event_terminal_revision_{result_name}_total"
+                    ] = 1
+                    heartbeat[
+                        f"event_terminal_revision_{result_name}_by_lane"
+                    ]["priority"] = 1
+                    heartbeat[
+                        "event_terminal_revision_evidence_poisoned"
+                    ] = True
+                    self.rebind_observation_heartbeat(observation)
+                report = self.rebuild_runtime_from_observations(observations)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "priority-event-terminal-persistence explicitly_shed=1",
+                ):
+                    self.validate_runtime(report)
+
+    def test_terminal_queue_and_in_flight_must_drain(self) -> None:
+        for gauge in ("buffer_depth", "in_flight_depth"):
+            with self.subTest(gauge=gauge):
+                observations = copy.deepcopy(
+                    self.runtime["recorder_observations"]
+                )
+                observation = observations[-1]
+                heartbeat = observation["heartbeat"]
+                heartbeat["event_terminal_revision_offered_total"] += 1
+                heartbeat[
+                    "event_terminal_revision_offered_by_lane"
+                ]["priority"] += 1
+                heartbeat[f"event_terminal_revision_{gauge}"] = 1
+                heartbeat[
+                    f"event_terminal_revision_{gauge}_by_lane"
+                ]["priority"] = 1
+                self.rebind_observation_heartbeat(observation)
+                report = self.rebuild_runtime_from_observations(observations)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "not drained at a fixed readiness boundary",
+                ):
+                    self.validate_runtime(report)
+
+    def test_terminal_zero_ledger_cannot_claim_workload_persistence(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            heartbeat = observation["heartbeat"]
+            for outcome in ("offered", "unchanged", "durable"):
+                heartbeat[f"event_terminal_revision_{outcome}_total"] = 0
+                heartbeat[
+                    f"event_terminal_revision_{outcome}_by_lane"
+                ] = {"priority": 0, "file": 0}
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "no measured priority-lane terminal persistence",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_terminal_repair_payload_expiry_poison_is_rejected(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            if observation["offset_seconds"] >= 330:
+                observation["heartbeat"][
+                    "event_journal_repair_payload_expired_total"
+                ] = 1
+                self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "event journal repair payload expirations=1",
+        ):
+            self.validate_runtime(report)
+
+    def test_event_type_count_window_unavailable_is_rejected(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["event_type_count_window"][
+            "query_available"
+        ] = False
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "count_window is unavailable"
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture unavailable count window"
+            )
+
+    def test_event_type_count_window_reason_sum_must_reconcile(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["event_type_count_window"][
+            "canonical_poison_records"
+        ] = 1
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "does not equal its reason ledger"
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture inconsistent count window"
+            )
+
+    def test_event_type_count_window_cannot_hide_incompleteness(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["event_type_count_window"]["complete"] = True
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "hides an incomplete window"
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture hidden incomplete count window"
+            )
+
+    def test_event_type_count_window_evidence_gap_is_rejected(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        window = observations[-1]["heartbeat"]["event_type_count_window"]
+        window["canonical_poison_records"] = 1
+        window["gap_records"] = 1
+        self.rebind_observation_heartbeat(observations[-1])
+        report = self.rebuild_runtime_from_observations(observations)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "exact event-type count window evidence gaps=1",
+        ):
+            self.validate_runtime(report)
+
+    def test_event_search_projection_unavailable_is_rejected(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["event_search_projection"][
+            "query_available"
+        ] = False
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "event_search_projection is unavailable",
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture unavailable search projection"
+            )
+
+    def test_event_search_projection_omission_ledger_must_reconcile(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][1])
+        observation["heartbeat"]["event_search_projection"][
+            "projection_omitted_total"
+        ] += 1
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "projection_omitted_total does not reconcile",
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture inconsistent search projection"
+            )
+
+    def test_event_search_projection_cannot_hide_sparse_coverage(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][1])
+        observation["heartbeat"]["event_search_projection"]["complete"] = True
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "complete hides sparse or gapped coverage",
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture hidden sparse search projection"
+            )
+
+    def test_rule_sync_must_match_sealed_candidate_manifest(self) -> None:
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["heartbeat"]["rule_sync"][
+                "installed_manifest_sha256"
+            ] = "f" * 64
+            self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "installed rule corpus does not match the sealed candidate corpus",
+        ):
+            self.rebuild_runtime_from_observations(observations)
+
+    def test_rule_sync_skipped_or_unverified_is_rejected(self) -> None:
+        for mutation in (
+            {"status": "skipped"},
+            {"installed_corpus_verified": False},
+        ):
+            with self.subTest(mutation=mutation):
+                observation = copy.deepcopy(
+                    self.runtime["recorder_observations"][0]
+                )
+                observation["heartbeat"]["rule_sync"].update(mutation)
+                self.rebind_observation_heartbeat(observation)
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "did not verify|unverified or tampered",
+                ):
+                    qualification.sample_from_recorder_observation(
+                        observation, "fixture invalid rule sync"
+                    )
+
+    def test_event_journal_recovery_ledger_must_conserve(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        observation["heartbeat"]["event_journal_recovery"][
+            "migrated_events"
+        ] += 1
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "conserved does not match its event ledger",
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture broken journal recovery"
+            )
+
+    def test_event_journal_recovery_must_be_complete_and_drained(self) -> None:
+        observation = copy.deepcopy(self.runtime["recorder_observations"][0])
+        recovery = observation["heartbeat"]["event_journal_recovery"]
+        recovery["migrated_events"] -= 1
+        recovery["remaining_events"] = 1
+        recovery["complete"] = False
+        self.rebind_observation_heartbeat(observation)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "not a complete conserving boundary",
+        ):
+            qualification.sample_from_recorder_observation(
+                observation, "fixture incomplete journal recovery"
+            )
 
     def test_unavailable_trace_store_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)

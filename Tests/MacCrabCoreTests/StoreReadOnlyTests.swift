@@ -221,8 +221,11 @@ struct StoreReadOnlyTests {
         let campaignRO = try CampaignStore(directory: dir.path, forceReadOnly: true)
 
         // Each read should observe the seeded row.
-        let events = try await eventRO.events(since: .distantPast, limit: 10)
-        #expect(events.count == 1)
+        let events = try await eventRO.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(events.events.count == 1)
 
         let alerts = try await alertRO.alerts(since: .distantPast, limit: 10)
         #expect(alerts.count == 1)
@@ -247,16 +250,22 @@ struct StoreReadOnlyTests {
         let reader = try EventStore(directory: dir.path, forceReadOnly: true)
 
         // The reader sees the row from step 1.
-        let firstRead = try await reader.events(since: .distantPast, limit: 10)
-        #expect(firstRead.count == 1)
+        let firstRead = try await reader.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(firstRead.events.count == 1)
 
         // Step 3: writer can keep writing while the reader is open.
         try await writer.insert(event: sampleEvent())
 
         // The reader picks up the new row on its next query (WAL mode
         // makes committed rows visible to the RO connection).
-        let secondRead = try await reader.events(since: .distantPast, limit: 10)
-        #expect(secondRead.count == 2)
+        let secondRead = try await reader.exactEventsSnapshot(
+            since: .distantPast,
+            limit: 10
+        )
+        #expect(secondRead.events.count == 2)
 
         // Step 4: the reader still cannot insert.
         await #expect(throws: (any Error).self) {

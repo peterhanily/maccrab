@@ -82,15 +82,24 @@ struct PaginationCursorTests {
             try await store.insert(event: sampleEvent(at: base.addingTimeInterval(Double(i))))
         }
 
-        let page1 = try await store.events(before: nil, pageSize: 10)
+        let page1 = try await store.exactEventsPageSnapshot(
+            before: nil,
+            pageSize: 10
+        )
         #expect(page1.items.count == 10)
         #expect(page1.nextCursor != nil)
 
-        let page2 = try await store.events(before: page1.nextCursor, pageSize: 10)
+        let page2 = try await store.exactEventsPageSnapshot(
+            before: page1.nextCursor,
+            pageSize: 10
+        )
         #expect(page2.items.count == 10)
         #expect(page2.nextCursor != nil)
 
-        let page3 = try await store.events(before: page2.nextCursor, pageSize: 10)
+        let page3 = try await store.exactEventsPageSnapshot(
+            before: page2.nextCursor,
+            pageSize: 10
+        )
         #expect(page3.items.count == 5)
         #expect(page3.nextCursor == nil)
 
@@ -115,12 +124,20 @@ struct PaginationCursorTests {
 
         // Process category should return all 5; a category we didn't insert
         // should return empty + nil cursor.
-        let processPage = try await store.events(before: nil, category: .process, pageSize: 10)
+        let processPage = try await store.exactEventsPageSnapshot(
+            before: nil,
+            category: .process,
+            pageSize: 10
+        )
         #expect(processPage.items.count == 5)
         #expect(processPage.items.allSatisfy { $0.eventCategory == .process })
         #expect(processPage.nextCursor == nil)
 
-        let networkPage = try await store.events(before: nil, category: .network, pageSize: 10)
+        let networkPage = try await store.exactEventsPageSnapshot(
+            before: nil,
+            category: .network,
+            pageSize: 10
+        )
         #expect(networkPage.items.isEmpty)
         #expect(networkPage.nextCursor == nil)
     }
@@ -132,10 +149,16 @@ struct PaginationCursorTests {
 
         try await store.insert(event: sampleEvent(at: Date()))
 
-        let zero = try await store.events(before: nil, pageSize: 0)
+        let zero = try await store.exactEventsPageSnapshot(
+            before: nil,
+            pageSize: 0
+        )
         #expect(zero.items.count == 1)
 
-        let huge = try await store.events(before: nil, pageSize: 100_000)
+        let huge = try await store.exactEventsPageSnapshot(
+            before: nil,
+            pageSize: 100_000
+        )
         #expect(huge.items.count == 1)
     }
 

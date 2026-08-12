@@ -65,16 +65,40 @@ struct V2HeartbeatSnapshotTests {
 
     // MARK: - eventsPerSecond1h
 
-    @Test("eventsPerSecond1h sums all categories and divides by 3600")
+    @Test("legacy eventsPerSecond1h sums categories over its declared hour")
     func eventsPerSecondMath() {
         let snap = makeSnapshot(eventTypeCounts1h: ["exec": 1800, "file": 1800])
         #expect(snap.eventsPerSecond1h == 1.0)
     }
 
-    @Test("eventsPerSecond1h returns 0 when counts are empty")
+    @Test("legacy complete hour returns observed zero when counts are empty")
     func eventsPerSecondEmpty() {
         let snap = makeSnapshot(eventTypeCounts1h: [:])
         #expect(snap.eventsPerSecond1h == 0.0)
+    }
+
+    @Test("new incomplete retained window reports unknown rate, not zero")
+    func incompleteEventRateIsUnknown() throws {
+        let path = try writeFixture([
+            "written_at_unix": Date().timeIntervalSince1970,
+            "schema_version": 5,
+            "event_type_counts": ["process": 900],
+            "event_type_count_window": [
+                "query_available": true,
+                "requested_duration_seconds": 3600,
+                "effective_duration_seconds": 900,
+                "requested_window_complete": false,
+                "complete": false,
+                "gap_records": 0,
+            ],
+        ])
+        defer { try? FileManager.default.removeItem(
+            at: path.deletingLastPathComponent()
+        ) }
+        let snapshot = try #require(V2HeartbeatSnapshot.decode(at: path.path))
+        #expect(snapshot.eventTypeCounts == ["process": 900])
+        #expect(snapshot.eventTypeCountWindow?.effectiveDurationSeconds == 900)
+        #expect(snapshot.eventsPerSecond1h == nil)
     }
 
     // MARK: - prevention block (UX-3)
@@ -224,6 +248,53 @@ struct V2HeartbeatSnapshotTests {
 
         #expect(!status.evidenceUnavailable)
         #expect(status.reason == nil)
+    }
+
+    @Test("TraceGraph recovery queue stays active until bounded admission saturates")
+    func traceGraphRecoveryMutationBarrierDecode() throws {
+        let healthy = try #require(V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: [
+            "enabled": true,
+            "accepting_mutations": true,
+            "blocked": false,
+            "store_available": true,
+            "startup_blocked": false,
+            "recovering": true,
+            "recovery_mutation_waiters": 2,
+            "recovery_mutation_waiter_limit": 1_024,
+            "recovery_mutation_queue_saturated": false,
+            "recovery_mutation_waiter_high_watermark": 3,
+            "recovery_mutation_waits_total": 5,
+            "recovery_mutation_wait_releases_total": 3,
+            "recovery_mutation_wait_cancellations_total": 0,
+            "recovery_mutation_wait_closed_total": 0,
+            "recovery_mutation_wait_saturations_total": 0,
+            "recovery_mutation_wait_nanoseconds_total": 100,
+            "recovery_mutation_max_wait_nanoseconds": 60,
+            "recovery_mutation_oldest_wait_nanoseconds": 20,
+            "recovery_writer_preemptions_total": 1,
+        ]))
+        #expect(healthy.acceptingMutations == true)
+        #expect(healthy.recovering == true)
+        #expect(healthy.recoveryMutationWaiters == 2)
+        #expect(healthy.writeTelemetry?.recoveryMutationWaitConservationMaintained == true)
+        #expect(!healthy.evidenceUnavailable)
+
+        var saturated = healthy.diagnosticDictionary
+        #expect(saturated["recovery_mutation_wait_conservation_maintained"] as? Bool == true)
+        #expect(saturated["recovery_mutation_barrier_degraded"] as? Bool == false)
+        saturated["accepting_mutations"] = false
+        saturated["recovery_mutation_waiters"] = 1_024
+        saturated["recovery_mutation_queue_saturated"] = true
+        saturated["recovery_mutation_waiter_high_watermark"] = 1_024
+        saturated["recovery_mutation_waits_total"] = 1_027
+        saturated["recovery_mutation_wait_saturations_total"] = 1
+        let degraded = try #require(
+            V2HeartbeatSnapshot.TraceGraphStorageAdmission(from: saturated)
+        )
+        #expect(degraded.evidenceUnavailable)
+        #expect(degraded.graphWriteDegraded)
+        #expect(degraded.operatorDetail.contains("queue is saturated"))
+        #expect(degraded.operatorDetail.contains("1024 of 1024"))
     }
 
     @Test("failed TraceGraph batch degrades an otherwise active admission")
@@ -747,6 +818,8 @@ struct V2HeartbeatSnapshotTests {
             residentMemoryMB: nil,
             sysextHasFDA: false,
             schemaVersion: 2,
+            eventTypeCounts: eventTypeCounts1h,
+            eventTypeCountWindow: nil,
             eventTypeCounts1h: eventTypeCounts1h,
             collectors: [],
             payloadTruncatedTotal: 0,

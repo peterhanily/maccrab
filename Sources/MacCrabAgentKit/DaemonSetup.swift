@@ -495,7 +495,7 @@ enum DaemonSetup {
         // must flow through startup migration, primary open, recovery probes,
         // and retry opens; falling back to store defaults at any one of those
         // sites silently defeats the operator's configured hard cap.
-        let eventStoragePolicy = SQLitePersistentStorePolicy(
+        let eventRelocationStoragePolicy = SQLitePersistentStorePolicy(
             maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
                 // Startup must be safe before the legacy evidence table can be
                 // measured. Retain the complete bounded transition reserve,
@@ -571,9 +571,10 @@ enum DaemonSetup {
         // the designated Developer ID requirement + resource seal in production,
         // then publishes an exact manifest-verified tree with an atomic swap.
         // Standalone/dev maccrabd runs deliberately skip this bundle-only path.
-        let ruleSyncOutcome = BundledRuleSynchronizer.synchronizeAtBoot(
+        let ruleSyncObservation = BundledRuleSynchronizer.synchronizeAtBoot(
             supportDirectory: supportDir
         )
+        let ruleSyncOutcome = ruleSyncObservation.outcome
         if BundledRuleSynchronizer.shouldAbortBoot(after: ruleSyncOutcome) {
             let reason: String
             if case .failed(let detail, _, _, _) = ruleSyncOutcome {
@@ -617,15 +618,91 @@ enum DaemonSetup {
         // family policies as the stores they precede.
         AlertsTableRelocator.relocate(
             directory: supportDir,
-            eventStoragePolicy: eventStoragePolicy,
+            eventStoragePolicy: eventRelocationStoragePolicy,
             alertStoragePolicy: alertStoragePolicy,
             logger: logger
+        )
+
+        // Establish the legacy-evidence reserve before EventStore performs its
+        // first rc.13 schema/journal mutation. The probe uses the trusted Core
+        // SQLite open path and may write only a fully admitted TRUNCATE
+        // checkpoint. A pin or unprovable measurement stops boot as
+        // storage_not_ready; it must never silently grant the old full reserve.
+        let legacyEvidenceTransitionBudget = LegacyEvidenceTransitionBudget(
+            storageConfig: bootStorage
+        )
+        let legacyEvidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
+            maxSizeMiB: bootStorage.evidenceMaxSizeMB
+        )
+        let legacyEvidenceTicket = legacyEvidenceTransitionBudget
+            .measurementTicket()
+        let legacyEvidenceMeasurement: LegacyAlertEvidenceTransitionMeasurement
+        do {
+            legacyEvidenceMeasurement = try EventStore
+                .preopenLegacyAlertEvidenceTransitionMeasurement(
+                    path: supportDir + "/events.db",
+                    maxBytes: legacyEvidenceCapBytes,
+                    checkpointPolicy: eventRelocationStoragePolicy
+                )
+        } catch {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "pre-open legacy-evidence measurement failed: \(error.localizedDescription)"
+            )
+        }
+        var transition = legacyEvidenceTransitionBudget.update(
+            measurement: legacyEvidenceMeasurement,
+            ticket: legacyEvidenceTicket
+        )
+        if transition.measurementFailed
+            || transition.walCheckpointDrained != true
+            || (transition.pendingReserveMiB != nil
+                && transition.pendingReserveFitsHardBoundary != true) {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "measured legacy-evidence reserve cannot satisfy the hard transition boundary"
+            )
+        }
+        let policyReserve = transition.pendingReserveMiB
+            ?? transition.appliedReserveMiB
+        let measuredEventsFamilyCap = bootStorage
+            .effectiveEventsFamilyMaxSizeMB(
+                appliedLegacyEvidenceTransitionReserveMiB: policyReserve
+            )
+        let eventStoragePolicy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
+                maxSizeMiB: measuredEventsFamilyCap
+            ),
+            freeSpaceFloorBytes: SQLitePersistentStorePolicy
+                .freeSpaceFloorBytes,
+            transactionReserveBytes: SQLitePersistentStorePolicy
+                .eventTransactionReserveBytes,
+            storageVolumePath: supportDir
         )
 
         do {
             eventStore = try EventStore(
                 directory: supportDir,
                 storagePolicy: eventStoragePolicy
+            )
+        } catch let error as EventStoreError {
+            if case .storageNotReady(_) = error {
+                try DaemonBootstrap.failPreIngestionStorage(
+                    supportDir: supportDir,
+                    startedAt: startedAt,
+                    component: "EventStore",
+                    reason: error.localizedDescription
+                )
+            }
+            eventStore = Self.recoverEventStore(
+                supportDir: supportDir,
+                storagePolicy: eventStoragePolicy,
+                logger: logger,
+                initialFailure: error
             )
         } catch {
             eventStore = Self.recoverEventStore(
@@ -635,66 +712,18 @@ enum DaemonSetup {
                 initialFailure: error
             )
         }
-
-        let legacyEvidenceTransitionBudget = LegacyEvidenceTransitionBudget(
-            storageConfig: bootStorage
-        )
-        let legacyEvidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
-            maxSizeMiB: bootStorage.evidenceMaxSizeMB
-        )
-        let legacyEvidenceTicket = legacyEvidenceTransitionBudget
-            .measurementTicket()
-        let legacyEvidenceMeasurement: LegacyAlertEvidenceTransitionMeasurement?
-        do {
-            legacyEvidenceMeasurement = try await eventStore
-                .legacyAlertEvidenceTransitionMeasurement(
-                    maxBytes: legacyEvidenceCapBytes
-                )
-        } catch {
-            legacyEvidenceMeasurement = nil
-            logger.warning("Legacy alert-evidence ownership could not be measured; retaining the full \(bootStorage.evidenceMaxSizeMB) MiB upgrade reserve: \(error.localizedDescription, privacy: .public)")
+        if transition.pendingReserveFitsHardBoundary == true,
+           let pending = transition.pendingReserveMiB {
+            transition = legacyEvidenceTransitionBudget.commitPendingReserve(
+                pending,
+                ticket: legacyEvidenceTicket
+            )
         }
-        var transition = legacyEvidenceTransitionBudget.update(
-            measurement: legacyEvidenceMeasurement,
-            ticket: legacyEvidenceTicket
+        let liveCap = bootStorage.effectiveEventsFamilyMaxSizeMB(
+            appliedLegacyEvidenceTransitionReserveMiB:
+                transition.appliedReserveMiB
         )
-        let policyReserve = transition.pendingReserveFitsHardBoundary == true
-            ? transition.pendingReserveMiB ?? transition.appliedReserveMiB
-            : transition.appliedReserveMiB
-        let measuredEventsFamilyCap = bootStorage
-            .effectiveEventsFamilyMaxSizeMB(
-                appliedLegacyEvidenceTransitionReserveMiB:
-                    policyReserve
-            )
-        do {
-            _ = try await eventStore.updateStorageAdmission(
-                SQLitePersistentStorePolicy(
-                    maxFootprintBytes: SQLitePersistentStorePolicy.capBytes(
-                        maxSizeMiB: measuredEventsFamilyCap
-                    ),
-                    freeSpaceFloorBytes: SQLitePersistentStorePolicy
-                        .freeSpaceFloorBytes,
-                    transactionReserveBytes: SQLitePersistentStorePolicy
-                        .eventTransactionReserveBytes,
-                    storageVolumePath: supportDir
-                )
-            )
-            if transition.pendingReserveFitsHardBoundary == true,
-               let pending = transition.pendingReserveMiB {
-                transition = legacyEvidenceTransitionBudget
-                    .commitPendingReserve(
-                        pending,
-                        ticket: legacyEvidenceTicket
-                    )
-            }
-            let liveCap = bootStorage.effectiveEventsFamilyMaxSizeMB(
-                appliedLegacyEvidenceTransitionReserveMiB:
-                    transition.appliedReserveMiB
-            )
-            logger.notice("events.db upgrade budget: steady-state=\(bootStorage.effectiveEventsFamilyMaxSizeMB) MiB, applied legacy reserve=\(transition.appliedReserveMiB) MiB, pending reserve=\(transition.pendingReserveMiB ?? -1) MiB, live cap=\(liveCap) MiB, legacy rows=\(transition.rowCount ?? -1), WAL drained=\(transition.walCheckpointDrained ?? false)")
-        } catch {
-            logger.fault("events.db measured upgrade budget could not be applied fail-closed: \(error.localizedDescription, privacy: .public)")
-        }
+        logger.notice("events.db upgrade budget established before journal transition: steady-state=\(bootStorage.effectiveEventsFamilyMaxSizeMB) MiB, applied legacy reserve=\(transition.appliedReserveMiB) MiB, live cap=\(liveCap) MiB, legacy rows=\(transition.rowCount ?? -1), WAL drained=\(transition.walCheckpointDrained ?? false)")
 
         do {
             alertStore = try AlertStore(
@@ -724,6 +753,55 @@ enum DaemonSetup {
                     transition.appliedReserveMiB
             )
         )
+        // The rc.12 wide table is the only source of truth until its rows are
+        // checksummed into the rc.13 journal. Generic size-cap recovery may
+        // prune non-process rows, so journal transcode/integrity/schema parity
+        // must complete first, while the measured transition reserve is still
+        // active and before any collector can produce a new Event.
+        let journalRecovery: EventStore.EventJournalRecoverySnapshot
+        do {
+            journalRecovery = try await eventStore
+                .recoverJournalBeforeProducers()
+        } catch {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "event journal pre-producer recovery failed: \(error.localizedDescription)"
+            )
+        }
+        guard journalRecovery.complete,
+              journalRecovery.remainingEvents == 0 else {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "event journal migration did not conserve to a complete boundary (source=\(journalRecovery.sourceEvents), migrated=\(journalRecovery.migratedEvents), expired=\(journalRecovery.rolledExpiredEvents), corrupt_preserved=\(journalRecovery.corruptPreservedEvents), remaining=\(journalRecovery.remainingEvents))"
+            )
+        }
+        logger.notice("EventStore journal migration and integrity proved before generic cap recovery: source=\(journalRecovery.sourceEvents), migrated=\(journalRecovery.migratedEvents), expired=\(journalRecovery.rolledExpiredEvents), corrupt_preserved=\(journalRecovery.corruptPreservedEvents)")
+        do {
+            var expired = 0
+            while true {
+                let batch = try await eventStore.expireJournalBlocks(
+                    retainedThrough: Date(),
+                    maximumBlocks: 1_024
+                )
+                expired += batch
+                if batch == 0 { break }
+                await Task.yield()
+            }
+            if expired > 0 {
+                logger.notice("EventStore expired and aggregate-rolled \(expired) authenticated journal events before generic cap recovery")
+            }
+        } catch {
+            try DaemonBootstrap.failPreIngestionStorage(
+                supportDir: supportDir,
+                startedAt: startedAt,
+                component: "EventStore",
+                reason: "event journal expiry/rollup failed before producers: \(error.localizedDescription)"
+            )
+        }
         let eventStartupRecovery = await recoverEventStoreBeforeProducers(
             eventStore: eventStore,
             dbPath: supportDir + "/events.db",
@@ -2451,6 +2529,8 @@ enum DaemonSetup {
             rulesURL: rulesURL,
             sequenceRulesDir: sequenceRulesDir,
             effectiveRulesDir: effectiveRulesDir,
+            bundledRuleSyncObservation: ruleSyncObservation,
+            eventJournalRecovery: journalRecovery,
             eventStore: eventStore,
             legacyEvidenceTransitionBudget: legacyEvidenceTransitionBudget,
             eventRetentionBudgetHealth: eventRetentionBudgetHealth,

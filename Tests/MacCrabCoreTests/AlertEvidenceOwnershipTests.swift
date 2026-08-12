@@ -62,6 +62,19 @@ struct AlertEvidenceOwnershipTests {
         )
     }
 
+    private func admission(
+        for event: Event,
+        generation: UInt64
+    ) throws -> EventJournalAdmission {
+        let prepared = try EventJournalAdmissionValidator.prepare(event)
+        return EventJournalAdmission(
+            eventID: event.id,
+            generation: generation,
+            canonicalSHA256: prepared.canonicalSHA256,
+            canonicalByteCount: prepared.canonicalJSON.count
+        )
+    }
+
     private func alert(id: String, event: Event) -> Alert {
         Alert(
             id: id,
@@ -138,6 +151,96 @@ struct AlertEvidenceOwnershipTests {
         #expect(try await store.evidenceFor(alertId: parent.id).count == 50)
         #expect(try await store.delete(alertId: parent.id))
         #expect(try await store.evidenceFor(alertId: parent.id).isEmpty)
+    }
+
+    @Test("exact-window context gaps persist monotonically and cascade")
+    func contextGapPersistence() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let trigger = event(timestamp: Date(timeIntervalSince1970: 20_500))
+        let parent = alert(id: "context-gap", event: trigger)
+        try await store.insert(alert: parent)
+        let pending = try #require(await store.evidenceContext(
+            alertId: parent.id
+        ))
+        #expect(pending.status == .pending,
+                "alert commit must atomically install crash-visible context")
+        #expect(!pending.isComplete)
+        #expect(try await store.pendingEvidenceContextCount() == 1)
+        var counts = try await store.evidenceContextCounts()
+        #expect(counts.pending == 1 && counts.unhealthy == 1)
+        #expect(counts.legacyUnverified == 0 && counts.reconciles)
+        try await store.recordEvidenceContext(AlertEvidenceContextRecord(
+            alertId: parent.id,
+            status: .incomplete,
+            sourceMutationGeneration: 7,
+            poisonRecordCount: 2,
+            corruptRecordCount: 1,
+            inheritedLossCount: 3,
+            resourceLimitedCount: 4,
+            journalAdmissionGapCount: 5
+        ))
+        // A later clean retry may advance generation but must not erase the
+        // gap observed by the original capture epoch.
+        try await store.recordEvidenceContext(AlertEvidenceContextRecord(
+            alertId: parent.id,
+            status: .complete,
+            sourceMutationGeneration: 9,
+            poisonRecordCount: 0,
+            corruptRecordCount: 0
+        ))
+        let context = try #require(await store.evidenceContext(
+            alertId: parent.id
+        ))
+        #expect(context.status == .incomplete)
+        #expect(context.sourceMutationGeneration == 9)
+        #expect(context.poisonRecordCount == 2)
+        #expect(context.corruptRecordCount == 1)
+        #expect(context.inheritedLossCount == 3)
+        #expect(context.resourceLimitedCount == 4)
+        #expect(context.journalAdmissionGapCount == 5)
+        #expect(!context.isComplete)
+        #expect(try await store.pendingEvidenceContextCount() == 0)
+        counts = try await store.evidenceContextCounts()
+        #expect(counts.incomplete == 1 && counts.unhealthy == 1)
+        #expect(counts.poisonRecords == 2)
+        #expect(counts.corruptRecords == 1)
+        #expect(counts.inheritedLossRecords == 3)
+        #expect(counts.resourceLimitedRecords == 4)
+        #expect(counts.journalAdmissionGapRecords == 5)
+        #expect(counts.legacyUnverified == 0 && counts.reconciles)
+
+        #expect(try await store.delete(alertId: parent.id))
+        #expect(try await store.evidenceContext(alertId: parent.id) == nil)
+        #expect(try await store.pendingEvidenceContextCount() == 0)
+    }
+
+    @Test("single and batch alert commits atomically own pending context rows")
+    func committedAlertsOwnPendingContext() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try AlertStore(directory: dir.path)
+        let base = Date(timeIntervalSince1970: 20_750)
+        let first = alert(id: "pending-single", event: event(timestamp: base))
+        try await store.insert(alert: first)
+
+        let second = alert(
+            id: "pending-batch-1",
+            event: event(timestamp: base.addingTimeInterval(1))
+        )
+        let third = alert(
+            id: "pending-batch-2",
+            event: event(timestamp: base.addingTimeInterval(2))
+        )
+        let committed = try await store.insert(alerts: [second, third])
+        #expect(committed.map(\.id) == [second.id, third.id])
+        let counts = try await store.evidenceContextCounts()
+        #expect(counts.pending == 3)
+        for id in [first.id, second.id, third.id] {
+            #expect(try await store.evidenceContext(alertId: id)?.status
+                == .pending)
+        }
     }
 
     @Test("oldest evidence is evicted until the charged physical budget fits")
@@ -322,10 +425,16 @@ struct AlertEvidenceOwnershipTests {
             deduplicator: AlertDeduplicator(suppressionWindow: 60),
             evidenceCaptureOverride: { _, _ in throw SyntheticFailure.expected }
         )
-        #expect(try await sink.submit(alert: makeAlert()))
+        let submittedAlert = makeAlert()
+        #expect(try await sink.submit(alert: submittedAlert))
         #expect(try await store.count() == 1)
         await sink.flushEvidenceCapture()
         #expect(await sink.evidenceStats().failures == 1)
+        let context = try #require(await store.evidenceContext(
+            alertId: submittedAlert.id
+        ))
+        #expect(context.status == .captureFailed)
+        #expect(try await store.pendingEvidenceContextCount() == 0)
     }
 
     @Test("post-commit evidence uses a bounded single-worker conservation lane")
@@ -390,7 +499,9 @@ struct AlertEvidenceOwnershipTests {
         #expect(drained.conserved)
 
         let shutdown = await sink.shutdownEvidenceCapture()
-        #expect(shutdown.clean)
+        #expect(!shutdown.clean)
+        #expect(shutdown.durablePendingContexts == 6,
+                "override captures and intentional queue sheds must remain durable pending truth")
         let late = try await sink.insertEngineBatch(
             alerts: [alert(id: "after-shutdown", event: trigger)]
         )
@@ -419,27 +530,25 @@ struct AlertEvidenceOwnershipTests {
             alertStore: alerts,
             deduplicator: AlertDeduplicator(suppressionWindow: 60),
             eventStore: events,
-            evidencePrefixGeneration: {
-                await writer.evidencePrefixGeneration()
-            },
-            evidencePrefixBarrier: { generation in
-                await writer.awaitEvidencePrefix(
-                    through: generation,
+            journalAdmissionVerifier: { receipt in
+                await writer.awaitJournalAdmission(
+                    receipt,
                     timeout: .seconds(1)
                 )
             }
         )
         let trigger = event(timestamp: Date(timeIntervalSince1970: 45_500))
-        let generation = await writer.enqueue(trigger)
-        #expect(generation != nil)
+        let generation = try #require(await writer.enqueue(trigger))
         #expect(writer.persistedCount == 0)
 
-        // No Event context is passed to the sink, so this can succeed only if
-        // the generation barrier makes the unflushed writer prefix durable.
-        #expect(try await sink.submit(alert: alert(
-            id: "writer-prefix",
-            event: trigger
-        )))
+        #expect(try await sink.submit(
+            alert: alert(id: "writer-prefix", event: trigger),
+            event: trigger,
+            journalAdmission: try admission(
+                for: trigger,
+                generation: generation
+            )
+        ))
         await sink.flushEvidenceCapture()
 
         let captured = try await alerts.evidenceFor(alertId: "writer-prefix")
@@ -460,13 +569,13 @@ struct AlertEvidenceOwnershipTests {
             alertStore: alerts,
             deduplicator: AlertDeduplicator(suppressionWindow: 60),
             eventStore: events,
-            evidencePrefixGeneration: { 7 },
-            evidencePrefixBarrier: { _ in false }
+            journalAdmissionVerifier: { _ in .timedOut }
         )
         let trigger = event(timestamp: Date(timeIntervalSince1970: 45_600))
         #expect(try await sink.submit(
             alert: alert(id: "prefix-timeout", event: trigger),
-            event: trigger
+            event: trigger,
+            journalAdmission: try admission(for: trigger, generation: 7)
         ))
         await sink.flushEvidenceCapture()
 
@@ -686,13 +795,16 @@ struct AlertEvidenceOwnershipTests {
         }
         let sink = try source("Sources/MacCrabCore/Detection/AlertSink.swift")
         #expect(!sink.contains("recordAlertEvidence("))
-        #expect(sink.contains("alertEvidenceCandidates("))
+        #expect(sink.contains("exactAlertEvidenceSnapshot("))
+        #expect(sink.contains("recordEvidenceContext("))
         #expect(sink.contains("alertStore.captureEvidence("))
 
         let setup = try source("Sources/MacCrabAgentKit/DaemonSetup.swift")
         #expect(setup.contains("bootStorage.effectiveEventsFamilyMaxSizeMB"))
         #expect(setup.contains("AlertStore.combinedFamilyCapBytes("))
-        #expect(setup.contains("legacyAlertEvidenceTransitionMeasurement("))
+        #expect(setup.contains(
+            "preopenLegacyAlertEvidenceTransitionMeasurement("
+        ))
         #expect(setup.contains("measurementTicket()"))
         #expect(setup.contains("commitPendingReserve("))
         #expect(!setup.contains("legacyEvidenceTransitionReserveMiB:"))
@@ -720,7 +832,15 @@ struct AlertEvidenceOwnershipTests {
         ))
         #expect(!timers.contains("legacyEvidenceTransitionReserveMiB:"))
 
-        for transitionSource in [setup, reload, timers] {
+        let bootPolicy = try #require(
+            setup.range(of: "storagePolicy: eventStoragePolicy")
+        )
+        let bootCommit = try #require(
+            setup.range(of: "commitPendingReserve(")
+        )
+        #expect(bootPolicy.lowerBound < bootCommit.lowerBound)
+
+        for transitionSource in [reload, timers] {
             let policy = try #require(
                 transitionSource.range(of: "updateStorageAdmission(")
             )

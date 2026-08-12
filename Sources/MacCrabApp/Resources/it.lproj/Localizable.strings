@@ -557,7 +557,7 @@
 "appearance.mode" = "Modalità";
 "appearance.note" = "Suggerimento: rilevamento, prevenzione e risposta restano sempre attivi indipendentemente dalla modalità. Cambia solo la navigazione della dashboard.";
 "appearance.title" = "Complessità della dashboard";
-"events.aggregateModeBanner" = "Vengono mostrati riepiloghi giornalieri — restringi l'intervallo di tempo alle ultime 24 ore o meno per il dettaglio dei singoli eventi";
+"events.aggregateModeBanner" = "Vengono mostrati riepiloghi giornalieri — i dettagli esatti degli eventi sono disponibili solo per l'intervallo conservato";
 "events.category" = "Categoria";
 "events.count" = "Conteggio";
 "events.day" = "Giorno";

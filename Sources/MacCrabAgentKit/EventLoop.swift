@@ -215,6 +215,166 @@ enum EventLoop {
         "sign_update", "generate_keys",
     ]
 
+    /// Synchronous pre-detection preparation followed by bounded ownership.
+    /// Detection continues on the original enriched Event; only the journal
+    /// handle contains the credential-sanitized canonical value.
+    private struct JournalBaseBoundary: Sendable {
+        let admission: EventJournalAdmission?
+        let sourceRetainedByteEstimate: Int
+        let poisoned: Bool
+    }
+
+    private static func admitJournalBase(
+        _ event: Event,
+        lane: EventPipelineLane,
+        sourceReservation: DeferredEnrichmentReservation,
+        state: DaemonState
+    ) async -> JournalBaseBoundary? {
+        let preflight: EventJournalIngressPreflight
+        do {
+            preflight = try EventJournalAdmissionValidator.preflight(event)
+        } catch {
+            await state.eventWriter.recordRejectedBasePreparation(lane: lane)
+            await StorageErrorTracker.shared.recordEventError(error)
+            return nil
+        }
+        if !preflight.structurallyOverflowed {
+            guard await state.deferredEnrichmentBuffer.resizeReservation(
+                sourceReservation,
+                to: preflight.sourceRetainedByteEstimate
+            ) else {
+                await state.eventWriter.recordRejectedBasePreparation(
+                    lane: lane
+                )
+                return nil
+            }
+        }
+        guard let outcome = await state.eventWriter.prepareAndEnqueueBase(
+            event,
+            lane: lane,
+            precomputedPreflight: preflight
+        ) else { return nil }
+        return JournalBaseBoundary(
+            admission: outcome.admission,
+            sourceRetainedByteEstimate:
+                outcome.sourceRetainedByteEstimate,
+            poisoned: outcome.poisoned
+        )
+    }
+
+    static func enqueueTerminalJournalRevision(
+        _ event: Event,
+        lane: EventPipelineLane,
+        admission: EventJournalAdmission?,
+        unchangedFrom rawBase: Event? = nil,
+        state: DaemonState
+    ) async {
+        if let rawBase, rawBase == event {
+            _ = await state.eventWriter.completeUnchangedTerminalRevision(
+                eventID: event.id,
+                lane: lane,
+                admission: admission
+            )
+            return
+        }
+        _ = await state.eventWriter.prepareAndEnqueueTerminalRevision(
+            event,
+            lane: lane,
+            admission: admission
+        )
+    }
+
+    /// Establish a digest-specific canonical terminal outcome before reviewed
+    /// alerts or sparse projection promotion. Byte-identical completion needs
+    /// no overlay; AlertSink still joins the immutable base receipt itself.
+    static func settleTerminalJournalRevision(
+        _ event: Event,
+        lane: EventPipelineLane,
+        admission: EventJournalAdmission?,
+        unchangedFrom rawBase: Event? = nil,
+        state: DaemonState
+    ) async -> EventJournalTerminalAdmission {
+        if let rawBase, rawBase == event {
+            let outcome = await state.eventWriter
+                .completeUnchangedTerminalRevision(
+                    eventID: event.id,
+                    lane: lane,
+                    admission: admission
+                )
+            return EventJournalTerminalAdmission(
+                eventID: event.id,
+                baseGeneration: admission?.generation ?? 0,
+                baseCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalByteCount:
+                    admission?.canonicalByteCount ?? 0,
+                status: outcome == .unchanged
+                    ? .verified : .mismatchedReceipt
+            )
+        }
+        guard let rawBase else {
+            return EventJournalTerminalAdmission(
+                eventID: event.id,
+                baseGeneration: admission?.generation ?? 0,
+                baseCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalSHA256: nil,
+                terminalCanonicalByteCount: 0,
+                status: .mismatchedReceipt
+            )
+        }
+        return await state.eventWriter.prepareAndSettleTerminalDelta(
+            base: rawBase,
+            terminal: event,
+            lane: lane,
+            admission: admission
+        )
+    }
+
+    static func settleTerminalJournalDelta(
+        _ delta: EventTerminalDelta?,
+        eventID: UUID,
+        lane: EventPipelineLane,
+        admission: EventJournalAdmission?,
+        state: DaemonState
+    ) async -> EventJournalTerminalAdmission {
+        guard let delta else {
+            await state.eventWriter.recordRejectedTerminalPreparation(
+                lane: lane
+            )
+            return EventJournalTerminalAdmission(
+                eventID: eventID,
+                baseGeneration: admission?.generation ?? 0,
+                baseCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalSHA256: nil,
+                terminalCanonicalByteCount: 0,
+                status: .failed
+            )
+        }
+        if delta.isEmpty {
+            let outcome = await state.eventWriter
+                .completeUnchangedTerminalRevision(
+                    eventID: eventID,
+                    lane: lane,
+                    admission: admission
+                )
+            return EventJournalTerminalAdmission(
+                eventID: eventID,
+                baseGeneration: admission?.generation ?? 0,
+                baseCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalSHA256: admission?.canonicalSHA256,
+                terminalCanonicalByteCount:
+                    admission?.canonicalByteCount ?? 0,
+                status: outcome == .unchanged
+                    ? .verified : .mismatchedReceipt
+            )
+        }
+        return await state.eventWriter.prepareAndSettleTerminalDelta(
+            delta,
+            lane: lane,
+            admission: admission
+        )
+    }
+
     /// Shared root/descendant enforcement. Keeping both direct controls here
     /// prevents the root branch from silently bypassing a guard that descendants
     /// receive, while preserving the credential-only honey/signing exclusions.
@@ -308,6 +468,136 @@ enum EventLoop {
         }
     }
 
+    /// Alert-producing AI-child checks run only after the immutable journal
+    /// base has captured every synchronous tool/session/lineage attribution.
+    /// Keeping these checks out of the attribution branch makes the source
+    /// ordering auditable: no BehaviorScore or AlertSink path can overtake the
+    /// single base-admission boundary in `run`.
+    private static func enforceAIChildBehaviorGuards(
+        state: DaemonState,
+        event: Event,
+        aiType: AIToolType?
+    ) async {
+        let process = event.process
+
+        // AI child spawning a shell -- track it
+        let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]
+        if shellNames.contains(where: { process.executable.hasSuffix($0) }) {
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_spawns_shell",
+                detail: "\(aiType?.displayName ?? "AI tool") spawned \(process.name)",
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+
+        // AI child running sudo
+        if process.executable.hasSuffix("/sudo")
+            || process.commandLine.hasPrefix("sudo ") {
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_runs_sudo",
+                detail: "\(aiType?.displayName ?? "AI tool") child running sudo: \(process.commandLine.prefix(100))",
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+
+        // AI child installing packages
+        let packageCommands = [
+            "npm install", "npm i ", "pip install", "pip3 install",
+            "cargo add", "brew install",
+        ]
+        if packageCommands.contains(where: {
+            process.commandLine.lowercased().contains($0)
+        }) {
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_installs_unknown_pkg",
+                detail: process.commandLine.prefix(200).description,
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+
+        // AI child downloading and executing
+        let downloadCommands = ["curl", "wget"]
+        let executionPipes = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
+        if downloadCommands.contains(where: { process.commandLine.contains($0) })
+            && executionPipes.contains(where: { process.commandLine.contains($0) }) {
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: "ai_tool_downloads_and_exec",
+                detail: process.commandLine.prefix(200).description,
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+
+        // AI child writing to persistence locations
+        if let file = event.file {
+            let persistencePaths = [
+                "/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/",
+                ".zshrc", ".bashrc", ".bash_profile",
+            ]
+            if persistencePaths.contains(where: { file.path.contains($0) }) {
+                await BehaviorScoreAlertEmitter.record(
+                    state: state,
+                    event: event,
+                    named: "ai_tool_persistence_write",
+                    detail: "AI tool writing to \(file.path)",
+                    forProcess: process.pid,
+                    path: process.executable
+                )
+            }
+        }
+
+        // Prompt injection scanning is alert-producing and therefore also
+        // belongs on the post-admission side of the boundary.
+        let textToScan = process.commandLine
+        if !textToScan.isEmpty,
+           textToScan.count > 20,
+           let threat = await state.clipboardInjectionDetector.scan(textToScan) {
+            let detail = threat.patterns.joined(separator: ", ")
+            let isCompound = threat.patterns.count > 1
+            let alert = Alert(
+                ruleId: "maccrab.ai-guard.prompt-injection",
+                ruleTitle: isCompound
+                    ? "🦀 Compound Prompt Injection Detected in AI Tool Command"
+                    : "🦀 Prompt Injection Detected in AI Tool Command",
+                severity: threat.severity == .critical ? .critical : .high,
+                eventId: event.id.uuidString,
+                processPath: process.executable,
+                processName: process.name,
+                description: "Prompt injection detected in command executed by \(aiType?.displayName ?? "AI tool"). \(detail)",
+                mitreTactics: "attack.initial_access",
+                mitreTechniques: "attack.t1195.001",
+                suppressed: false
+            )
+            do {
+                if try await state.alertSink.submit(alert: alert, event: event) {
+                    await state.notifier.notify(alert: alert)
+                }
+            } catch {
+                await StorageErrorTracker.shared.recordAlertError(error)
+            }
+            await BehaviorScoreAlertEmitter.record(
+                state: state,
+                event: event,
+                named: threat.severity == .critical
+                    ? "prompt_injection_critical" : "prompt_injection",
+                detail: detail,
+                forProcess: process.pid,
+                path: process.executable
+            )
+        }
+    }
+
     static func run(
         state: DaemonState,
         lane: EventPipelineLane,
@@ -371,15 +661,11 @@ enum EventLoop {
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await state.yaraEnricher.enrich(enrichedEvent)
             }
-            let hasPendingHeavyEnrichment = await state.deferredEnrichmentBuffer
-                .retain(enrichedEvent, using: heavyReservation)
-
             // Network consumers below must all see the same recovered hostname.
             // In particular MCPBaseline and CrossProcessCorrelator previously ran
             // before the later DNS enrichment and permanently learned nil/IP-only
             // observations even when DNSCollector already knew the domain.
             await backfillDNSHostname(state: state, event: &enrichedEvent)
-
             // === AI Tool Detection ===
             //
             let aiProc = enrichedEvent.process
@@ -694,123 +980,6 @@ enum EventLoop {
                         }
                     }
 
-                    // AI child spawning a shell -- track it
-                    let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]
-                    if shellNames.contains(where: { aiProc.executable.hasSuffix($0) }) {
-                        await BehaviorScoreAlertEmitter.record(
-                            state: state,
-                            event: enrichedEvent,
-                            named: "ai_tool_spawns_shell",
-                            detail: "\(aiType?.displayName ?? "AI tool") spawned \(aiProc.name)",
-                            forProcess: aiProc.pid, path: aiProc.executable
-                        )
-                    }
-
-                    // AI child running sudo
-                    if aiProc.executable.hasSuffix("/sudo") || aiProc.commandLine.hasPrefix("sudo ") {
-                        await BehaviorScoreAlertEmitter.record(
-                            state: state,
-                            event: enrichedEvent,
-                            named: "ai_tool_runs_sudo",
-                            detail: "\(aiType?.displayName ?? "AI tool") child running sudo: \(aiProc.commandLine.prefix(100))",
-                            forProcess: aiProc.pid, path: aiProc.executable
-                        )
-                    }
-
-                    // AI child installing packages
-                    let pkgCmds = ["npm install", "npm i ", "pip install", "pip3 install", "cargo add", "brew install"]
-                    if pkgCmds.contains(where: { aiProc.commandLine.lowercased().contains($0) }) {
-                        await BehaviorScoreAlertEmitter.record(
-                            state: state,
-                            event: enrichedEvent,
-                            named: "ai_tool_installs_unknown_pkg",
-                            detail: aiProc.commandLine.prefix(200).description,
-                            forProcess: aiProc.pid, path: aiProc.executable
-                        )
-                    }
-
-                    // AI child downloading and executing
-                    let dlExec = ["curl", "wget"]
-                    let execPipe = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
-                    if dlExec.contains(where: { aiProc.commandLine.contains($0) })
-                        && execPipe.contains(where: { aiProc.commandLine.contains($0) }) {
-                        await BehaviorScoreAlertEmitter.record(
-                            state: state,
-                            event: enrichedEvent,
-                            named: "ai_tool_downloads_and_exec",
-                            detail: aiProc.commandLine.prefix(200).description,
-                            forProcess: aiProc.pid, path: aiProc.executable
-                        )
-                    }
-
-                    // AI child writing to persistence locations
-                    if let file = enrichedEvent.file {
-                        let persistPaths = ["/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/", ".zshrc", ".bashrc", ".bash_profile"]
-                        if persistPaths.contains(where: { file.path.contains($0) }) {
-                            await BehaviorScoreAlertEmitter.record(
-                                state: state,
-                                event: enrichedEvent,
-                                named: "ai_tool_persistence_write",
-                                detail: "AI tool writing to \(file.path)",
-                                forProcess: aiProc.pid, path: aiProc.executable
-                            )
-                        }
-                    }
-
-                    // === Prompt Injection Scanning (native) ===
-                    // v1.21.6: was gated on `injectionScanner.isAvailable`, which
-                    // probed for an uninstallable `forensicate` CLI — so this alert
-                    // could never fire on any install. Now backed by the native
-                    // ClipboardInjectionDetector and unconditionally live.
-                    do {
-                        let textToScan = aiProc.commandLine
-                        if !textToScan.isEmpty, textToScan.count > 20 {
-                            if let threat = await state.clipboardInjectionDetector.scan(textToScan) {
-                                let detail = threat.patterns.joined(separator: ", ")
-                                // More than one independent pattern class is the
-                                // multi-vector case. CampaignDetector's
-                                // isCompoundPromptInjection keys on "compound" in
-                                // the title to weight it as two categories, so say
-                                // it — otherwise that weighting stays unreachable.
-                                let isCompound = threat.patterns.count > 1
-                                let alert = Alert(
-                                    ruleId: "maccrab.ai-guard.prompt-injection",
-                                    ruleTitle: isCompound
-                                        ? "🦀 Compound Prompt Injection Detected in AI Tool Command"
-                                        : "🦀 Prompt Injection Detected in AI Tool Command",
-                                    severity: threat.severity == .critical ? .critical : .high,
-                                    eventId: enrichedEvent.id.uuidString,
-                                    processPath: aiProc.executable,
-                                    processName: aiProc.name,
-                                    description: "Prompt injection detected in command executed by \(aiType?.displayName ?? "AI tool"). \(detail)",
-                                    mitreTactics: "attack.initial_access",
-                                    mitreTechniques: "attack.t1195.001",
-                                    suppressed: false
-                                )
-                                do {
-                                    if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                        await state.notifier.notify(alert: alert)
-                                    }
-                                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                await BehaviorScoreAlertEmitter.record(
-                                    state: state,
-                                    event: enrichedEvent,
-                                    named: threat.severity == .critical
-                                        ? "prompt_injection_critical" : "prompt_injection",
-                                    detail: detail,
-                                    forProcess: aiProc.pid, path: aiProc.executable
-                                )
-                            }
-                        }
-                    }
-            }
-
-            if let resolvedAIAttribution {
-                await enforceAIFilesystemGuards(
-                    state: state,
-                    event: enrichedEvent,
-                    attribution: resolvedAIAttribution
-                )
             }
 
             // v1.21.4 Phase-6 6A: agent-trace correlation for the event's
@@ -865,6 +1034,212 @@ enum EventLoop {
                     TraceCorrelator.apply(correlation, to: &enrichedEvent)
                 }
             }
+
+            // Finish every synchronous Event mutation before the immutable
+            // base boundary. Direct detections below may alert immediately and
+            // therefore must never observe a value whose canonical digest has
+            // drifted from the receipt they inherit. Side effects (alerts,
+            // behavior scoring, graph work, and advisory dispatch) remain in
+            // their original source-order sections and consume these frozen
+            // results without mutating the Event again.
+            if enrichedEvent.eventCategory == .process,
+               enrichedEvent.eventAction == "exec",
+               let cached = await state.notarizationChecker.cachedResult(
+                    binaryPath: enrichedEvent.process.executable
+               ) {
+                enrichedEvent.enrichments["notarization.status"] =
+                    cached.status.rawValue
+                if let source = cached.source {
+                    enrichedEvent.enrichments["notarization.source"] = source
+                }
+            }
+
+            let processTreeLogProbability: Double?
+            if enrichedEvent.eventCategory == .process,
+               enrichedEvent.eventAction == "exec" {
+                let parentName = enrichedEvent.process.ancestors.first?.name
+                    ?? "unknown"
+                let childName = enrichedEvent.process.name
+                let grandparentName = enrichedEvent.process.ancestors.count >= 2
+                    ? enrichedEvent.process.ancestors[1].name : nil
+                processTreeLogProbability = await state.processTreeAnalyzer
+                    .recordTransition(
+                        parentName: parentName,
+                        childName: childName,
+                        grandparentName: grandparentName
+                    )
+                if let logProbability = processTreeLogProbability,
+                   logProbability < -8.0 {
+                    enrichedEvent.enrichments["tree.anomaly_score"] = String(
+                        format: "%.2f",
+                        logProbability
+                    )
+                }
+            } else {
+                processTreeLogProbability = nil
+            }
+
+            if let filePath = enrichedEvent.file?.path {
+                await state.quarantineEnricher.enrich(
+                    &enrichedEvent.enrichments,
+                    forFile: filePath,
+                    userID: enrichedEvent.process.userId
+                )
+            }
+
+            if enrichedEvent.eventCategory == .file,
+               enrichedEvent.eventAction == "open",
+               enrichedEvent.enrichments["ai_tool"] != nil
+                    || enrichedEvent.enrichments["ai_tool_child"] != nil,
+               let injectionPath = enrichedEvent.file?.path,
+               await state.injectionEvidenceWeld.readsInjectedContent(
+                    path: injectionPath
+               ) {
+                enrichedEvent.enrichments["untrusted_content"] = "true"
+            }
+
+            // Resolve and stamp deterministic intent fields before admission;
+            // later alert/advisory work consumes these values but cannot alter
+            // the canonical Event after the first security alert is possible.
+            let intentEvidence = IntentEvidenceClassifier.extract(enrichedEvent)
+            var latestIntentPosterior: BayesianIntentEngine.Posterior?
+            let intentScopeKey = IntentEvidenceClassifier.scopeKey(
+                for: enrichedEvent
+            )
+            for evidence in intentEvidence {
+                latestIntentPosterior = await state.bayesianIntent.observe(
+                    evidence,
+                    treeKey: intentScopeKey,
+                    observationToken: enrichedEvent.id.uuidString,
+                    observedAt: enrichedEvent.timestamp
+                )
+            }
+            let isInstallExecCandidate = enrichedEvent.eventCategory == .process
+                && enrichedEvent.eventAction.caseInsensitiveCompare("exec")
+                    == .orderedSame
+            let posteriorForBrief: BayesianIntentEngine.Posterior?
+            if !isInstallExecCandidate {
+                posteriorForBrief = nil
+            } else if let latestIntentPosterior {
+                posteriorForBrief = latestIntentPosterior
+            } else {
+                posteriorForBrief = await state.bayesianIntent.posterior(
+                    treeKey: intentScopeKey
+                )
+            }
+            let intentBrief = IntentBriefBuilder.brief(
+                for: enrichedEvent,
+                posterior: posteriorForBrief
+            )
+            var intentHeuristicResult: IntentClassifier.ClassificationResult?
+            var intentRefinementScope: IntentRefinementCache.Scope?
+            var intentCachedRefinement: IntentRefinementCache.Refinement?
+            if let intentBrief {
+                let result = IntentClassifier.heuristicClassifyPublic(
+                    intentBrief
+                )
+                intentHeuristicResult = result
+                let refinementScope = IntentRefinementCache.scope(
+                    sessionID:
+                        enrichedEvent.enrichments["ai_tool_session_id"],
+                    fallbackTreeKey: intentScopeKey,
+                    brief: intentBrief
+                )
+                intentRefinementScope = refinementScope
+
+                enrichedEvent.enrichments["IntentLabel"] =
+                    result.label.rawValue
+                enrichedEvent.enrichments["IntentConfidence"] = String(
+                    format: "%.2f",
+                    result.confidence
+                )
+                enrichedEvent.enrichments["IntentProvider"] = result.provider
+                if let refinementScope,
+                   let refinement = await state.intentRefinementCache
+                    .refinement(for: refinementScope) {
+                    intentCachedRefinement = refinement
+                    enrichedEvent.enrichments["IntentModelLabel"] =
+                        refinement.label
+                    enrichedEvent.enrichments["IntentModelScore"] = String(
+                        format: "%.2f",
+                        refinement.confidence
+                    )
+                    enrichedEvent.enrichments["IntentModelProvider"] =
+                        refinement.provider
+                    enrichedEvent.enrichments["IntentModelDisagrees"] = String(
+                        refinement.label != result.label.rawValue
+                    )
+                    if !refinement.reasons.isEmpty {
+                        enrichedEvent.enrichments["IntentModelReasons"] =
+                            refinement.reasons.prefix(3).joined(separator: " | ")
+                    }
+                }
+                if result.confidence >= 0.5 {
+                    enrichedEvent.enrichments["IntentHighConfidence"] = "true"
+                }
+            }
+
+            // This is the latest common source-order boundary before any direct
+            // AlertSink submission, BehaviorScore threshold emission, response
+            // action, or derived detection task. It deliberately follows all
+            // synchronous enrichment, DNS, AI tool/session/MCP attribution,
+            // lineage materialization, and direct trace correlation so those
+            // fields are immutable in the base rather than terminal overlays.
+            let journalBaseEvent = enrichedEvent
+            let journalBoundary = await admitJournalBase(
+                journalBaseEvent,
+                lane: lane,
+                sourceReservation: heavyReservation,
+                state: state
+            )
+            let journalAdmission = journalBoundary?.admission
+            let retention = await state.deferredEnrichmentBuffer
+                .retainWithOwnership(
+                    enrichedEvent,
+                    using: heavyReservation,
+                    journalAdmission: journalAdmission,
+                    sourceRetainedByteEstimate:
+                        journalAdmission != nil
+                            && journalBoundary?.poisoned == false
+                        ? journalBoundary?.sourceRetainedByteEstimate ?? Int.max
+                        : Int.max
+                )
+            let hasPendingHeavyEnrichment = retention
+                .hasPendingHeavyEnrichment
+            // The same ARC lease is also held by DeferredEnrichmentBuffer when
+            // pending; no bytes are charged twice. Keep this reference through
+            // the complete local detection scope while `enrichedEvent` is live.
+            let eventLoopSourceLease = retention.eventLoopSourceLease
+
+            // Detection always runs, including attacker-shaped overflow. A
+            // pressure-rejected base binds an explicit nonverified status so
+            // every resulting alert preserves its bounded trigger while the
+            // gap remains qualification poison. A typed poisoned admission is
+            // resolved by the normal identity-bound writer verifier.
+            let forcedJournalStatus: EventJournalContextStatus? =
+                journalAdmission == nil ? .dropped : nil
+            await EventJournalAdmissionContext.$sourceMemoryLease.withValue(
+                eventLoopSourceLease
+            ) {
+                await EventJournalAdmissionContext.$forcedNonverifiedStatus
+                    .withValue(forcedJournalStatus) {
+                    await EventJournalAdmissionContext.$current.withValue(
+                        journalAdmission
+                    ) {
+                if childAttribution.isChild {
+                    await enforceAIChildBehaviorGuards(
+                        state: state,
+                        event: enrichedEvent,
+                        aiType: childAttribution.toolType
+                    )
+                }
+                if let resolvedAIAttribution {
+                    await enforceAIFilesystemGuards(
+                        state: state,
+                        event: enrichedEvent,
+                        attribution: resolvedAIAttribution
+                    )
+                }
 
             // === Package freshness check for install commands ===
             // v1.19.1: the registry GET reveals the package name being installed,
@@ -1045,15 +1420,9 @@ enum EventLoop {
             // Rules/defense_evasion/developer_cert_revoked.yml keys on it. On a
             // cold first-seen exec the enrichment is absent, so the YAML rule
             // can't fire yet; the detached check below covers that first exec
-            // for the security-critical 'revoked' case specifically.
+            // for the security-critical 'revoked' case specifically. Cached
+            // values were already stamped before immutable base admission.
             if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
-                if let cached = await state.notarizationChecker.cachedResult(binaryPath: enrichedEvent.process.executable) {
-                    enrichedEvent.enrichments["notarization.status"] = cached.status.rawValue
-                    if let source = cached.source {
-                        enrichedEvent.enrichments["notarization.source"] = source
-                    }
-                }
-
                 // Capture only Sendable values — never the non-Sendable DaemonState.
                 let execPath = enrichedEvent.process.executable
                 let procPid = enrichedEvent.process.pid
@@ -1312,14 +1681,8 @@ enum EventLoop {
             if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
                 let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
                 let childName = enrichedEvent.process.name
-                let grandparentName = enrichedEvent.process.ancestors.count >= 2
-                    ? enrichedEvent.process.ancestors[1].name : nil
-                if let logProb = await state.processTreeAnalyzer.recordTransition(
-                    parentName: parentName, childName: childName,
-                    grandparentName: grandparentName
-                ) {
+                if let logProb = processTreeLogProbability {
                     if logProb < -8.0 {
-                        enrichedEvent.enrichments["tree.anomaly_score"] = String(format: "%.2f", logProb)
                         await BehaviorScoreAlertEmitter.record(
                             state: state,
                             event: enrichedEvent,
@@ -1355,15 +1718,6 @@ enum EventLoop {
                         path: enrichedEvent.process.executable
                     )
                 }
-            }
-
-            // === Quarantine provenance enrichment for file events ===
-            if let filePath = enrichedEvent.file?.path {
-                await state.quarantineEnricher.enrich(
-                    &enrichedEvent.enrichments,
-                    forFile: filePath,
-                    userID: enrichedEvent.process.userId
-                )
             }
 
             // === DYLD injection detection ===
@@ -1768,23 +2122,9 @@ enum EventLoop {
                 }
             }
 
-            // === Phase-6 6B (leg 2): untrusted-content taint for the causal graph ===
-            // Stamp `untrusted_content` on an AGENT-attributed read of an
-            // agent-content file (skill / hook / config / workflow) that carries
-            // the shipped PLAINTEXT prompt-injection markers, so the bridge below
-            // records `FileNode.untrustedContent=true` — the load-bearing leg-2
-            // signal the lethal-trifecta graph rule keys on. Reuses the Phase-5
-            // InjectionEvidenceWeld path (same FileContentEnricher source +
-            // InjectionMarkerScanner) — no second scanner. Read events only
-            // (`open`), agent-content allowlist only; plaintext-marker fidelity
-            // (obfuscation-resistant taint needs forensicate — see the weld header).
-            if enrichedEvent.eventCategory == .file,
-               enrichedEvent.eventAction == "open",
-               enrichedEvent.enrichments["ai_tool"] != nil || enrichedEvent.enrichments["ai_tool_child"] != nil,
-               let injPath = enrichedEvent.file?.path,
-               await state.injectionEvidenceWeld.readsInjectedContent(path: injPath) {
-                enrichedEvent.enrichments["untrusted_content"] = "true"
-            }
+            // Phase-6 untrusted-content taint was resolved before immutable
+            // base admission. The graph bridge below consumes that frozen bit;
+            // no post-alert Event mutation is permitted here.
 
             // === Behavioral scoring: process-level indicators ===
             let proc = enrichedEvent.process
@@ -1847,16 +2187,6 @@ enum EventLoop {
                         forProcess: proc.pid, path: proc.executable
                     )
                 }
-            }
-
-            // Store event. v1.21.4 (F2/A1): hand off to the async batched writer
-            // (O(1)) instead of blocking this consumer on a per-event SQLite
-            // transaction — the write happens off the critical path in batches.
-            // Nothing below reads the event back from events.db (detection uses
-            // the in-memory enrichedEvent; alert evidence is snapshotted in
-            // memory), so deferring the write is detection-safe.
-            if !hasPendingHeavyEnrichment {
-                await state.eventWriter.enqueue(enrichedEvent, lane: lane)
             }
 
             // v1.10.0 TraceGraph ingestion. Bridge handles category/action
@@ -1998,44 +2328,32 @@ enum EventLoop {
             // notifications. Matches the consistency rationale
             // already documented at V2IntelligenceWorkspace.swift
             // for the Supply chain section.
-            let intentEvidence = IntentEvidenceClassifier.extract(enrichedEvent)
-            var latestPosterior: BayesianIntentEngine.Posterior?
-            // One canonical scope must feed observation, snapshot lookup,
-            // operator explanation, BehaviorBrief construction, and the LLM
-            // cache fallback. AI events use their durable session identity;
-            // non-AI events use an anti-PID-reuse process identity.
-            let intentScopeKey = IntentEvidenceClassifier.scopeKey(for: enrichedEvent)
-            if !intentEvidence.isEmpty {
-                for evidence in intentEvidence {
-                    latestPosterior = await state.bayesianIntent.observe(
-                        evidence,
-                        treeKey: intentScopeKey,
-                        observationToken: enrichedEvent.id.uuidString,
-                        observedAt: enrichedEvent.timestamp
+            if let posterior = latestIntentPosterior,
+               posterior.observationAddedIndependentEvidence,
+               posterior.topGoal != .benign,
+               posterior.topProbability >= state.intentPosteriorThreshold,
+               posterior.distinctEvidenceCount
+                    >= state.intentPosteriorMinDistinctEvidence {
+                let goalLabel = String(describing: posterior.topGoal)
+                let alert = Alert(
+                    ruleId: "maccrab.intent.bayesian-posterior",
+                    ruleTitle: "Intent advisory score crossed threshold (\(goalLabel))",
+                    severity: posterior.topProbability >= 0.95
+                        ? .high : .medium,
+                    eventId: enrichedEvent.id.uuidString,
+                    processPath: enrichedEvent.process.executable,
+                    processName: enrichedEvent.process.name,
+                    description: "Uncalibrated normalized advisory score for \(goalLabel) is \(String(format: "%.2f", posterior.topProbability)) for intent scope \(posterior.treeKey), based on \(posterior.distinctEvidenceCount) independent evidence types (\(posterior.evidenceLog.map { $0.rawValue }.sorted().joined(separator: ", "))). This is a deterministic ranking signal, not an empirical probability.",
+                    mitreTactics: nil,
+                    mitreTechniques: nil
+                )
+                do {
+                    _ = try await state.alertSink.submit(
+                        alert: alert,
+                        event: enrichedEvent
                     )
-                }
-                if let posterior = latestPosterior,
-                   posterior.observationAddedIndependentEvidence,
-                   posterior.topGoal != .benign,
-                   posterior.topProbability >= state.intentPosteriorThreshold,
-                   posterior.distinctEvidenceCount >= state.intentPosteriorMinDistinctEvidence {
-                    let goalLabel = String(describing: posterior.topGoal)
-                    let alert = Alert(
-                        ruleId: "maccrab.intent.bayesian-posterior",
-                        ruleTitle: "Intent advisory score crossed threshold (\(goalLabel))",
-                        severity: posterior.topProbability >= 0.95 ? .high : .medium,
-                        eventId: enrichedEvent.id.uuidString,
-                        processPath: enrichedEvent.process.executable,
-                        processName: enrichedEvent.process.name,
-                        description: "Uncalibrated normalized advisory score for \(goalLabel) is \(String(format: "%.2f", posterior.topProbability)) for intent scope \(posterior.treeKey), based on \(posterior.distinctEvidenceCount) independent evidence types (\(posterior.evidenceLog.map { $0.rawValue }.sorted().joined(separator: ", "))). This is a deterministic ranking signal, not an empirical probability.",
-                        mitreTactics: nil,
-                        mitreTechniques: nil
-                    )
-                    do {
-                        _ = try await state.alertSink.submit(alert: alert, event: enrichedEvent)
-                    } catch {
-                        await StorageErrorTracker.shared.recordAlertError(error)
-                    }
+                } catch {
+                    await StorageErrorTracker.shared.recordAlertError(error)
                 }
             }
 
@@ -2069,56 +2387,10 @@ enum EventLoop {
             // anyway, so for ~95% of events (file / network / non-exec
             // process) the prior code was burning an actor hop only to
             // discard the result. Gate up-front.
-            let isInstallExecCandidate = enrichedEvent.eventCategory == .process
-                && enrichedEvent.eventAction.caseInsensitiveCompare("exec") == .orderedSame
-            let posteriorForBrief: BayesianIntentEngine.Posterior?
-            if !isInstallExecCandidate {
-                posteriorForBrief = nil
-            } else if let latest = latestPosterior {
-                posteriorForBrief = latest
-            } else {
-                posteriorForBrief = await state.bayesianIntent.posterior(
-                    treeKey: intentScopeKey
-                )
-            }
-            if let brief = IntentBriefBuilder.brief(for: enrichedEvent, posterior: posteriorForBrief) {
-                let heuristicResult = IntentClassifier.heuristicClassifyPublic(brief)
-                // A refinement is valid only for this AI session AND these
-                // exact classifier inputs. The durable session id prevents PID
-                // reuse/cross-terminal pooling; legacy events fall back to the
-                // anti-reuse process scope. SHA-256(BehaviorBrief) prevents an
-                // asynchronous verdict for package A from labeling package B.
-                let refinementScope = IntentRefinementCache.scope(
-                    sessionID: enrichedEvent.enrichments["ai_tool_session_id"],
-                    fallbackTreeKey: intentScopeKey,
-                    brief: brief
-                )
-
-                // The deterministic classifier owns the rule-facing fields.
-                // A model result is uncalibrated advisory evidence: it is
-                // stamped under an explicit `IntentModel*` namespace and can
-                // add review context, but it must never erase or downgrade an
-                // observed deterministic signal before Sigma evaluation.
-                enrichedEvent.enrichments["IntentLabel"] = heuristicResult.label.rawValue
-                enrichedEvent.enrichments["IntentConfidence"] = String(
-                    format: "%.2f", heuristicResult.confidence
-                )
-                enrichedEvent.enrichments["IntentProvider"] = heuristicResult.provider
-                if let refinementScope,
-                   let refinement = await state.intentRefinementCache.refinement(for: refinementScope) {
-                    enrichedEvent.enrichments["IntentModelLabel"] = refinement.label
-                    enrichedEvent.enrichments["IntentModelScore"] = String(
-                        format: "%.2f", refinement.confidence
-                    )
-                    enrichedEvent.enrichments["IntentModelProvider"] = refinement.provider
-                    enrichedEvent.enrichments["IntentModelDisagrees"] = String(
-                        refinement.label != heuristicResult.label.rawValue
-                    )
-                    if !refinement.reasons.isEmpty {
-                        enrichedEvent.enrichments["IntentModelReasons"] = refinement.reasons
-                            .prefix(3).joined(separator: " | ")
-                    }
-
+            if let brief = intentBrief,
+               let heuristicResult = intentHeuristicResult {
+                let refinementScope = intentRefinementScope
+                if let refinement = intentCachedRefinement {
                     let advisoryLabels: Set<String> = [
                         IntentClassifier.IntentLabel.credentialHarvest.rawValue,
                         IntentClassifier.IntentLabel.exfiltration.rawValue,
@@ -2156,26 +2428,8 @@ enum EventLoop {
                         }
                     }
                 }
-                // v1.12.0 RC6 (Int-R6-N1) + RC7 fix (Int-R7-N1):
-                // stamp a boolean high-confidence flag so the Sigma
-                // rule can predicate on a numeric-equivalent threshold
-                // via plain string equality.
-                //
-                // RC6 set the threshold at 0.7 — but the heuristic
-                // classifier's max score per single-label-path is 4-5
-                // (credentialHarvest=4, lateralMovement=5), divided by
-                // 8 = confidence 0.5-0.625. So a 0.7 gate was
-                // unreachable by the headline worm scenario (cat creds
-                // → npm install). RC7 lowers the threshold to 0.5,
-                // which the credentialHarvest path can clear exactly,
-                // and which lateralMovement (creds + publish-endpoint)
-                // clears with margin. The heuristic's design treats
-                // 0.5 as the "moderate confidence" tier — same value
-                // as `unknown` fallback's confidence, distinct from
-                // `benign` (0.8). CHANGELOG updated to match.
-                if heuristicResult.confidence >= 0.5 {
-                    enrichedEvent.enrichments["IntentHighConfidence"] = "true"
-                }
+                // The rule-facing high-confidence bit and all other intent
+                // fields were stamped before immutable base admission.
 
                 // v1.12.6 (wire-the-orphans Wave 3A): LLM-aware
                 // tie-breaker. The synchronous heuristic above stays
@@ -2354,12 +2608,30 @@ enum EventLoop {
                 primaryMatches.append(baselineMatch)
             }
 
-            await dispatchReviewedMatches(
+            let reviewedDispatch = prepareReviewedMatches(
                 state: state,
                 event: enrichedEvent,
                 primaryMatches: primaryMatches,
                 sequenceMatches: sequenceMatches
             )
+            enrichedEvent = reviewedDispatch.event
+
+            if !hasPendingHeavyEnrichment {
+                let terminalAdmission = await settleTerminalJournalRevision(
+                    enrichedEvent,
+                    lane: lane,
+                    admission: journalAdmission,
+                    unchangedFrom: journalBaseEvent,
+                    state: state
+                )
+                enrichedEvent = await EventJournalAdmissionContext
+                    .$terminalRevision.withValue(terminalAdmission) {
+                        await dispatchReviewedMatches(
+                            state: state,
+                            reviewed: reviewedDispatch
+                        )
+                    }
+            }
 
             // Replay cannot overtake the initial evaluation. Publish the final
             // synchronous event revision now, apply any terminal patches that
@@ -2367,10 +2639,19 @@ enum EventLoop {
             if hasPendingHeavyEnrichment {
                 await DeferredEnrichmentDispatcher.markReadyAndDispatch(
                     event: enrichedEvent,
+                    initialPrimaryMatches:
+                        reviewedDispatch.primaryMatches,
+                    initialSequenceMatches:
+                        reviewedDispatch.sequenceMatches,
                     state: state
                 )
             }
             await DeferredEnrichmentDispatcher.drainAvailable(state: state)
+
+            // Establish the lexical lifetime after every terminal/deferred path.
+            // Merely assigning the lease above would allow ARC to release it at
+            // its last optimizer-visible use before the raw Event dies.
+            _ = eventLoopSourceLease?.bytes
 
             // v1.10.2 (audit BLOCKER): the for-await body has many
             // Foundation calls (enricher, ruleEngine, JSONEncoder via
@@ -2387,9 +2668,57 @@ enum EventLoop {
             // chunks — that variant doesn't fit here because the body
             // is interleaved async).
             await Task.yield()
+                    }
+                }
+            }
         }
 
         logger.info("Event stream ended. Daemon exiting.")
+    }
+
+    struct ReviewedMatchDispatch: Sendable {
+        let event: Event
+        let primaryMatches: [RuleMatch]
+        let sequenceMatches: [RuleMatch]
+    }
+
+    /// Deterministically apply NoiseFilter and fold reviewed matches into the
+    /// terminal Event without causing alerts, promotion, behavior scoring, or
+    /// any other externally visible effect. Callers must journal that exact
+    /// returned Event before passing the value to `dispatchReviewedMatches`.
+    static func prepareReviewedMatches(
+        state: DaemonState,
+        event sourceEvent: Event,
+        primaryMatches initialPrimaryMatches: [RuleMatch],
+        sequenceMatches: [RuleMatch]
+    ) -> ReviewedMatchDispatch {
+        var event = sourceEvent
+        var primaryMatches = initialPrimaryMatches
+        NoiseFilter.apply(
+            &primaryMatches,
+            event: event,
+            isWarmingUp: state.isWarmingUp
+        )
+        primaryMatches = ReviewedRuleMatches.normalized(primaryMatches)
+        let normalizedSequenceMatches = ReviewedRuleMatches.normalized(
+            sequenceMatches
+        )
+        event.ruleMatches = ReviewedRuleMatches.merged(
+            event.ruleMatches,
+            primaryMatches
+        )
+        if let reviewedSeverity = event.ruleMatches.map(\.severity).max(),
+           reviewedSeverity > event.severity {
+            event.severity = reviewedSeverity
+        }
+        let survivingPrimaryMatches = Set(primaryMatches)
+        return ReviewedMatchDispatch(
+            event: event,
+            primaryMatches: primaryMatches,
+            sequenceMatches: normalizedSequenceMatches.filter {
+                survivingPrimaryMatches.contains($0)
+            }
+        )
     }
 
     /// The one reviewed rule-match path for both first-pass and deferred
@@ -2399,30 +2728,18 @@ enum EventLoop {
     /// deferred evidence from acquiring a smaller or less-reviewed alert path.
     static func dispatchReviewedMatches(
         state: DaemonState,
-        event: Event,
-        primaryMatches initialPrimaryMatches: [RuleMatch],
-        sequenceMatches: [RuleMatch]
-    ) async {
-        var primaryMatches = initialPrimaryMatches
-        // Filter PRIMARY detections before they can mutate behavioral state or
-        // spawn advisory work. The old ordering filtered only after sequence,
-        // baseline, and BehaviorScoring had consumed the raw candidates. A
-        // match suppressed as warm-up/trusted/self noise could therefore taint
-        // a process score, consume its one-shot threshold latch, and launch
-        // child analyses even though the primary alert never existed.
-        NoiseFilter.apply(
-            &primaryMatches,
-            event: event,
-            isWarmingUp: state.isWarmingUp
-        )
-
-        // RuleMatch is Hashable, so preserve the exact filtered sequence
-        // candidates without duplicating NoiseFilter's trust semantics here.
-        // Deterministic sequence derivatives below must never outlive a
-        // primary that the shared filter removed.
-        let survivingPrimaryMatches = Set(primaryMatches)
-        let survivingSequenceMatches = sequenceMatches.filter {
-            survivingPrimaryMatches.contains($0)
+        reviewed: ReviewedMatchDispatch
+    ) async -> Event {
+        let event = reviewed.event
+        let primaryMatches = reviewed.primaryMatches
+        let survivingSequenceMatches = reviewed.sequenceMatches
+        if !event.ruleMatches.isEmpty,
+           EventJournalAdmissionContext.terminalRevision?.status == .verified {
+            _ = await state.eventWriter.promoteProjection(
+                event: event,
+                reviewedMatches: event.ruleMatches,
+                admission: EventJournalAdmissionContext.current
+            )
         }
 
         // Layer 4: Behavioral scoring -- escalate score on surviving rule
@@ -2915,6 +3232,7 @@ enum EventLoop {
             }
         }
 
+        return event
     }
 
     // NoiseFilter logic lives in MacCrabCore/Detection/NoiseFilter.swift

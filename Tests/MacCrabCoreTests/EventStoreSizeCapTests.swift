@@ -1,476 +1,467 @@
 // EventStoreSizeCapTests.swift
 //
-// v1.6.12: regression coverage for the new `pruneOldest(count:)` and
-// `vacuum()` APIs that back the hourly DB size-cap enforcer.
-//
-// The caller (DaemonTimers.enforceDatabaseSizeCap) is exercised via
-// an integration test that writes to a live sqlite file and asserts
-// the on-disk file shrinks. Here we cover the primitive behaviour:
-//   - pruneOldest deletes exactly `count` rows from the oldest end
-//   - vacuum runs without error
-//   - prune + vacuum together actually shrinks the file on disk
+// rc.13 stores canonical evidence in authenticated, admission-time journal
+// blocks. Legacy row pruning remains available for migration tails, but it
+// must never delete a fresh journal row. Retention converges by expiring whole
+// blocks only after their durable 15-minute floor and rolling their exact
+// counts into the aggregate tier in the same transaction.
 
-import Testing
 import Foundation
+import Testing
 @testable import MacCrabCore
 
-@Suite("EventStore: pruneOldest + vacuum (v1.6.12)")
+@Suite("EventStore: rc.13 journal retention and size-cap maintenance")
 struct EventStoreSizeCapTests {
+    private static let bytesPerMiB = SQLitePersistentStorePolicy.bytesPerMiB
 
-    private func makeTempStore() async throws -> (EventStore, URL) {
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+    private func makeTempStore(
+        capMiB: Int64 = 128
+    ) throws -> (
+        store: EventStore,
+        directory: URL,
+        databasePath: String,
+        policy: SQLitePersistentStorePolicy
+    ) {
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-sizecap-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        let store = try EventStore(directory: tmp.path)
-        return (store, tmp)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let databasePath = directory.appendingPathComponent("events.db").path
+        let policy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: capMiB * Self.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes:
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: directory.path
+        )
+        let store = try EventStore(
+            directory: directory.path,
+            storagePolicy: policy
+        )
+        return (store, directory, databasePath, policy)
     }
 
-    private func insertSample(_ store: EventStore, count: Int, base: Date = Date()) async throws {
-        for i in 0..<count {
-            let proc = ProcessInfo(
-                pid: Int32(1000 + i), ppid: 1, rpid: 1,
-                name: "sample\(i)", executable: "/bin/sample\(i)",
-                commandLine: "/bin/sample\(i)", args: [],
-                workingDirectory: "/",
-                userId: 501, userName: "t", groupId: 20,
-                startTime: base,
-                ancestors: [],
-                isPlatformBinary: false
+    private func event(
+        index: Int,
+        category: EventCategory = .process,
+        timestamp: Date,
+        payloadBytes: Int = 0
+    ) -> Event {
+        let suffix = payloadBytes > 0
+            ? " " + String(repeating: "a", count: payloadBytes)
+            : ""
+        let executable = "/usr/bin/retention-fixture"
+        let process = MacCrabCore.ProcessInfo(
+            pid: Int32(10_000 + index),
+            ppid: 1,
+            rpid: Int32(10_000 + index),
+            name: "retention-fixture",
+            executable: executable,
+            commandLine: executable + suffix,
+            args: ["--fixture", "\(index)", suffix],
+            workingDirectory: "/",
+            userId: 501,
+            userName: "tester",
+            groupId: 20,
+            startTime: timestamp,
+            ancestors: [],
+            isPlatformBinary: false
+        )
+        return Event(
+            timestamp: timestamp,
+            eventCategory: category,
+            eventType: category == .process ? .start : .creation,
+            eventAction: "fixture",
+            process: process
+        )
+    }
+
+    private func insertProcessBlock(
+        _ store: EventStore,
+        range: Range<Int>,
+        sourceTime: Date,
+        payloadBytes: Int = 0
+    ) async throws {
+        let events = range.map {
+            event(
+                index: $0,
+                timestamp: sourceTime.addingTimeInterval(Double($0)),
+                payloadBytes: payloadBytes
             )
-            let ev = Event(
-                timestamp: base.addingTimeInterval(Double(i)),
-                eventCategory: .process, eventType: .start,
-                eventAction: "exec", process: proc
-            )
-            try await store.insert(event: ev)
         }
+        _ = try await store.insert(events: events, lane: .priority)
     }
 
-    @Test("pruneOldest deletes rows starting with the oldest timestamp")
-    func pruneOldestOrdering() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        try await insertSample(store, count: 100)
-        let beforeCount = try await store.count()
-        #expect(beforeCount == 100)
-
-        let deleted = try await store.pruneOldest(count: 30)
-        #expect(deleted == 30)
-        let afterCount = try await store.count()
-        #expect(afterCount == 70)
-
-        // After pruning the 30 oldest, the remaining rows are the
-        // newer 70. We don't assert ordering of the returned slice
-        // because `events()` ordering is an orthogonal concern —
-        // the count invariant is what this test guards.
-        let remaining = try await store.events(since: Date.distantPast, limit: 1)
-        #expect(remaining.count == 1)
+    private func aggregateCount(_ store: EventStore) async throws -> Int {
+        try await store.aggregates(sinceDay: "0000-00-00")
+            .reduce(0) { $0 + $1.count }
     }
 
-    @Test("pruneOldest with count > total deletes everything, returns actual-deleted")
-    func pruneOldestOverflow() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("generic pruning cannot delete fresh journal evidence")
+    func genericPrunePreservesJournal() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        try await insertSample(store, count: 50)
-        let deleted = try await store.pruneOldest(count: 1_000_000)
-        #expect(deleted == 50)
-        #expect(try await store.count() == 0)
+        // Source time is intentionally old. The retention floor is based on
+        // durable admission, so attacker-controlled timestamps cannot bypass it.
+        let oldSourceTime = Date().addingTimeInterval(-2 * 60 * 60)
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<32,
+            sourceTime: oldSourceTime
+        )
+
+        #expect(try await fixture.store.count() == 32)
+        #expect(try await fixture.store.maintenanceRetainedRecordCount() == 32)
+        #expect(try await fixture.store.pruneOldest(count: 1_000_000) == 0)
+        #expect(
+            try await fixture.store.rollUpAndPrune(
+                olderThan: Date().addingTimeInterval(60 * 60)
+            ) == 0
+        )
+        #expect(try await fixture.store.count() == 32)
+        #expect(try await aggregateCount(fixture.store) == 0)
     }
 
-    @Test("pruneOldest with count=0 is a no-op")
-    func pruneOldestZero() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("whole-block expiry enforces the durable 15-minute floor")
+    func retentionFloorThenWholeBlockExpiry() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        try await insertSample(store, count: 10)
-        let deleted = try await store.pruneOldest(count: 0)
-        #expect(deleted == 0)
-        #expect(try await store.count() == 10)
+        let admissionStart = Date()
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<10,
+            sourceTime: admissionStart.addingTimeInterval(-24 * 60 * 60)
+        )
+
+        let beforeFloor = admissionStart.addingTimeInterval(
+            EventStore.journalRetentionSeconds - 1
+        )
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: beforeFloor,
+                maximumBlocks: 8
+            ) == 0
+        )
+        #expect(try await fixture.store.count() == 10)
+
+        let afterFloor = Date().addingTimeInterval(
+            EventStore.journalRetentionSeconds + 1
+        )
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: afterFloor,
+                maximumBlocks: 8
+            ) == 10
+        )
+        #expect(try await fixture.store.count() == 0)
+        #expect(try await fixture.store.maintenanceRetainedRecordCount() == 0)
+        #expect(try await aggregateCount(fixture.store) == 10)
     }
 
-    @Test("vacuum runs without error and doesn't corrupt the DB")
-    func vacuumSafe() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("maximumBlocks bounds expiry without splitting a journal block")
+    func expiryIsWholeBlockAndBounded() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        try await insertSample(store, count: 50)
-        try await store.vacuum()
+        let sourceTime = Date().addingTimeInterval(-60 * 60)
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<8,
+            sourceTime: sourceTime
+        )
+        try await insertProcessBlock(
+            fixture.store,
+            range: 8..<13,
+            sourceTime: sourceTime
+        )
+        let cutoff = Date().addingTimeInterval(
+            EventStore.journalRetentionSeconds + 1
+        )
 
-        // Reads still work after VACUUM.
-        let count = try await store.count()
-        #expect(count == 50)
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: cutoff,
+                maximumBlocks: 1
+            ) == 8
+        )
+        #expect(try await fixture.store.count() == 5)
+        #expect(try await aggregateCount(fixture.store) == 8)
+
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: cutoff,
+                maximumBlocks: 1
+            ) == 5
+        )
+        #expect(try await fixture.store.count() == 0)
+        #expect(try await aggregateCount(fixture.store) == 13)
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: cutoff,
+                maximumBlocks: 1
+            ) == 0
+        )
     }
 
-    // MARK: - v1.6.13 hardening tests
-
-    @Test("beginSizeCapPrune returns false while another sweep holds the guard")
+    @Test("size-cap guard is exclusive and releases cleanly")
     func reentrancyGuard() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        let first = await store.beginSizeCapPrune()
-        #expect(first == true, "first acquire must succeed")
-
-        let second = await store.beginSizeCapPrune()
-        #expect(second == false, "second acquire while first holds must fail")
-
-        await store.endSizeCapPrune()
-        let third = await store.beginSizeCapPrune()
-        #expect(third == true, "acquire after release must succeed")
-
-        await store.endSizeCapPrune()
+        #expect(await fixture.store.beginSizeCapPrune())
+        #expect(await fixture.store.beginSizeCapPrune() == false)
+        await fixture.store.endSizeCapPrune()
+        #expect(await fixture.store.beginSizeCapPrune())
+        await fixture.store.endSizeCapPrune()
     }
 
-    @Test("walCheckpoint runs without error on a fresh store")
-    func walCheckpointSafe() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("generic pruning remains retention-safe while the advisory guard is held")
+    func guardCannotBypassJournalRetention() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        // Empty WAL — checkpoint should be a no-op that returns
-        // true (trivially drained).
-        let drained = await store.walCheckpoint()
-        #expect(drained == true)
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<16,
+            sourceTime: Date().addingTimeInterval(-60 * 60)
+        )
+        #expect(await fixture.store.beginSizeCapPrune())
+        let deleted = try await fixture.store.pruneOldest(count: 16)
+        await fixture.store.endSizeCapPrune()
+
+        #expect(deleted == 0)
+        #expect(try await fixture.store.count() == 16)
     }
 
-    @Test("walCheckpoint drains WAL after inserts")
-    func walCheckpointDrainsWAL() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("vacuum and checkpoint preserve unexpired journal evidence")
+    func vacuumAndCheckpointPreserveJournal() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        try await insertSample(store, count: 100)
-        // WAL now has uncommitted pages. Checkpoint should move
-        // them into the main .db.
-        let drained = await store.walCheckpoint()
-        #expect(drained == true)
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<40,
+            sourceTime: Date()
+        )
+        #expect(await fixture.store.walCheckpoint())
+        try await fixture.store.vacuum()
+        #expect(await fixture.store.walCheckpointTruncate())
+        #expect(try await fixture.store.count() == 40)
 
-        // All data still present after checkpoint.
-        #expect(try await store.count() == 100)
+        try await insertProcessBlock(
+            fixture.store,
+            range: 40..<48,
+            sourceTime: Date()
+        )
+        #expect(try await fixture.store.count() == 48)
+        #expect(
+            try SQLitePersistentStoreAdmission.measureFamily(
+                fixture.databasePath
+            ) <= fixture.policy.maxFootprintBytes
+        )
     }
 
-    @Test("vacuum followed by checkpoint leaves DB queryable")
-    func vacuumThenCheckpointSafe() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("bounded expiry converges under the configured SQLite family cap")
+    func expiryConvergesWithinFamilyCap() async throws {
+        let fixture = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        try await insertSample(store, count: 200)
-        _ = await store.walCheckpoint()
-        try await store.vacuum()
-        _ = await store.walCheckpoint()
-        #expect(try await store.count() == 200)
+        let admissionStart = Date()
+        try await insertProcessBlock(
+            fixture.store,
+            range: 0..<128,
+            sourceTime: admissionStart,
+            payloadBytes: 2_048
+        )
+        try await insertProcessBlock(
+            fixture.store,
+            range: 128..<256,
+            sourceTime: admissionStart,
+            payloadBytes: 2_048
+        )
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: admissionStart.addingTimeInterval(
+                    EventStore.journalRetentionSeconds - 1
+                ),
+                maximumBlocks: 1
+            ) == 0
+        )
 
-        // Inserts continue to work after vacuum + checkpoint.
-        try await insertSample(store, count: 50, base: Date().addingTimeInterval(1000))
-        #expect(try await store.count() == 250)
-    }
-
-    @Test("pruneOldest + endSizeCapPrune cycle works when wrapped in defer")
-    func guardDeferReleasesOnError() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Simulate the enforcer pattern: acquire, defer release,
-        // then do work that might throw.
-        let acquired = await store.beginSizeCapPrune()
-        #expect(acquired == true)
-        // Release explicitly (simulating the defer path).
-        await store.endSizeCapPrune()
-
-        // A second cycle should succeed — no stale state carried
-        // across defer.
-        let acquired2 = await store.beginSizeCapPrune()
-        #expect(acquired2 == true)
-        await store.endSizeCapPrune()
-    }
-
-    @Test("Reentrancy guard holds across pruneOldest invocation")
-    func reentrancyDuringWork() async throws {
-        // Start a long-running prune behind the guard. A second
-        // acquire during the work must return false. Tests the
-        // intended use pattern: timer fires, enforcer acquires
-        // guard, then calls pruneOldest which can take time.
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        try await insertSample(store, count: 500)
-
-        let firstAcquired = await store.beginSizeCapPrune()
-        #expect(firstAcquired == true)
-
-        // Kick off the prune. While it's in-flight, try to acquire
-        // the guard again.
-        async let workResult: () = {
-            _ = try? await store.pruneOldest(count: 200)
-        }()
-
-        // Can't reliably observe in-progress state across actor
-        // hops; the invariant we care about is that after the
-        // first acquire, the second acquire returns false until
-        // the first calls end.
-        let secondAcquired = await store.beginSizeCapPrune()
-        #expect(secondAcquired == false)
-
-        _ = await workResult
-        await store.endSizeCapPrune()
-    }
-
-    @Test("pruneOldest is not blocked by endSizeCapPrune not yet called")
-    func pruneWorksEvenWithGuardHeld() async throws {
-        // The guard is advisory — callers check it to avoid
-        // redundant work, but pruneOldest itself doesn't depend on
-        // guard state. This keeps the low-level API usable from
-        // retention pruning (which has its own dedup in timers).
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        try await insertSample(store, count: 100)
-
-        _ = await store.beginSizeCapPrune()
-        let pruned = try await store.pruneOldest(count: 10)
-        #expect(pruned == 10)
-        await store.endSizeCapPrune()
-    }
-
-    @Test("prune + vacuum shrinks disk usage (db + wal + shm combined)")
-    func pruneVacuumShrinks() async throws {
-        let (store, tmp) = try await makeTempStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        // Insert a non-trivial amount so the store has something to
-        // shrink. 5,000 events with realistic command lines gets the
-        // cumulative file footprint into the MB range reliably.
-        try await insertSample(store, count: 5_000)
-        try await store.vacuum()  // force write-out before measuring
-
-        let dbPath = tmp.appendingPathComponent("events.db").path
-        let walPath = dbPath + "-wal"
-        let shmPath = dbPath + "-shm"
-
-        func totalDiskUsage() -> UInt64 {
-            var total: UInt64 = 0
-            for path in [dbPath, walPath, shmPath] {
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                   let size = attrs[.size] as? UInt64 {
-                    total += size
-                }
-            }
-            return total
+        let cutoff = Date().addingTimeInterval(
+            EventStore.journalRetentionSeconds + 1
+        )
+        var expired = 0
+        while true {
+            let count = try await fixture.store.expireJournalBlocks(
+                retainedThrough: cutoff,
+                maximumBlocks: 1
+            )
+            guard count > 0 else { break }
+            expired += count
+            #expect(
+                try SQLitePersistentStoreAdmission.measureFamily(
+                    fixture.databasePath
+                ) <= fixture.policy.maxFootprintBytes
+            )
         }
 
-        let sizeBefore = totalDiskUsage()
-        _ = try await store.pruneOldest(count: 4_500)
-        try await store.vacuum()
-        let sizeAfter = totalDiskUsage()
-
-        // Cumulative disk use of the DB triplet should fall after
-        // pruning 90% of rows + VACUUM. Exact bytes-per-row depend on
-        // SQLite page alignment and FTS overhead, so the assertion is
-        // a monotone bound, not a specific ratio.
-        #expect(sizeAfter < sizeBefore,
-                "VACUUM after pruneOldest must shrink cumulative disk usage (was \(sizeBefore), now \(sizeAfter))")
+        #expect(expired == 256)
+        #expect(try await fixture.store.count() == 0)
+        #expect(try await aggregateCount(fixture.store) == 256)
+        try await fixture.store.vacuum()
+        #expect(await fixture.store.walCheckpointTruncate())
+        #expect(
+            try SQLitePersistentStoreAdmission.measureFamily(
+                fixture.databasePath
+            ) <= fixture.policy.maxFootprintBytes
+        )
     }
 }
 
-// MARK: - v1.21.4: per-category retention floor
-
-/// A cheap file-write flood collapses the events.db retention window
-/// uniformly (~30×) and evicts the low-volume process/exec channel as
-/// collateral. The per-category floor makes eviction category-aware:
-/// non-process rows go first, and process rows newer than the floor cutoff
-/// are spared — UNLESS the protected rows alone breach the cap, in which case
-/// the soft-floor valve falls back to oldest-first so the DB always converges.
-///
-/// These pin the store-level primitives (`pruneOldest` + `rollUpAndPrune`
-/// with the new `protecting:`/`newerThan:` arguments). The end-to-end sweep
-/// integration lives in `EventsSizeCapIntervalTests`.
-@Suite("EventStore: per-category retention floor (v1.21.4)")
+@Suite("EventStore: category-neutral journal retention floor")
 struct EventStoreProcessFloorTests {
-
-    private func makeStore() async throws -> (EventStore, URL) {
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+    private func makeStore() throws -> (store: EventStore, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-procfloor-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        let store = try EventStore(directory: tmp.path)
-        return (store, tmp)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return (
+            try EventStore(directory: directory.path),
+            directory
+        )
     }
 
-    private func insert(
-        _ store: EventStore, category: EventCategory, at ts: Date, tag: String
-    ) async throws {
-        let proc = ProcessInfo(
-            pid: 1, ppid: 1, rpid: 1,
-            name: tag, executable: "/bin/\(tag)",
-            commandLine: "/bin/\(tag)", args: [],
+    private func event(
+        category: EventCategory,
+        index: Int,
+        timestamp: Date
+    ) -> Event {
+        let process = MacCrabCore.ProcessInfo(
+            pid: Int32(20_000 + index),
+            ppid: 1,
+            rpid: Int32(20_000 + index),
+            name: "category-\(category.rawValue)",
+            executable: "/usr/bin/category-fixture",
+            commandLine: "/usr/bin/category-fixture",
+            args: [category.rawValue],
             workingDirectory: "/",
-            userId: 501, userName: "t", groupId: 20,
-            startTime: ts, ancestors: [], isPlatformBinary: false
+            userId: 501,
+            userName: "tester",
+            groupId: 20,
+            startTime: timestamp,
+            ancestors: [],
+            isPlatformBinary: false
         )
-        let type: EventType = category == .process ? .start : .creation
-        let ev = Event(
-            timestamp: ts, eventCategory: category, eventType: type,
-            eventAction: "x", process: proc
+        return Event(
+            timestamp: timestamp,
+            eventCategory: category,
+            eventType: category == .process ? .start : .creation,
+            eventAction: "fixture",
+            process: process
         )
-        try await store.insert(event: ev)
     }
 
-    @Test("pruneOldest spares process rows within the floor even when they are the OLDEST rows")
-    func pruneOldestProtectsProcessWithinFloor() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let base = Date()
-        // The 10 process rows are the OLDEST rows in the store — a
-        // category-BLIND oldest-first prune would evict exactly these first.
-        for i in 0..<10 {
-            try await insert(store, category: .process, at: base.addingTimeInterval(-100 + Double(i)), tag: "exec\(i)")
-        }
-        // 100 file rows, all newer than the process rows (the "flood").
-        for i in 0..<100 {
-            try await insert(store, category: .file, at: base.addingTimeInterval(-90 + Double(i)), tag: "file\(i)")
-        }
-        #expect(try await store.count() == 110)
-
-        // Floor cutoff older than everything → all 10 process rows are
-        // within-floor and must survive. Drop exactly the 100 file rows' worth.
-        let floor = base.addingTimeInterval(-1000)
-        let deleted = try await store.pruneOldest(count: 100, protecting: .process, newerThan: floor)
-
-        #expect(deleted == 100)
-        let byCat = try await store.eventCountsByCategory(since: .distantPast)
-        #expect(byCat["process"] == 10, "all process rows survive despite being the oldest")
-        #expect((byCat["file"] ?? 0) == 0, "all file rows evicted first")
-    }
-
-    @Test("pruneOldest soft-floor valve spills into process rows when eligible rows are exhausted")
-    func pruneOldestValveSpillsIntoProcess() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let base = Date()
-        // 5 file rows (eligible) + 20 process rows (protected), all within floor.
-        for i in 0..<5 {
-            try await insert(store, category: .file, at: base.addingTimeInterval(Double(i)), tag: "file\(i)")
-        }
-        for i in 0..<20 {
-            try await insert(store, category: .process, at: base.addingTimeInterval(100 + Double(i)), tag: "exec\(i)")
-        }
-        #expect(try await store.count() == 25)
-
-        let floor = base.addingTimeInterval(-1000) // every process row within floor
-        // Ask to drop 15 but only 5 rows are eligible → the valve MUST engage
-        // and spill into protected process rows so the count is still met.
-        let deleted = try await store.pruneOldest(count: 15, protecting: .process, newerThan: floor)
-
-        #expect(deleted == 15, "convergence: the full requested count is removed despite the floor")
-        let byCat = try await store.eventCountsByCategory(since: .distantPast)
-        #expect((byCat["file"] ?? 0) == 0, "the 5 eligible file rows are dropped first")
-        #expect(byCat["process"] == 10, "valve evicted the 10 oldest process rows to honor the drop count")
-        #expect(try await store.count() == 10)
-    }
-
-    @Test("pruneOldest with a floor but no protected rows over-quota behaves like plain oldest-first")
-    func pruneOldestFloorNoOverflow() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let base = Date()
-        for i in 0..<50 {
-            try await insert(store, category: .file, at: base.addingTimeInterval(Double(i)), tag: "file\(i)")
-        }
-        let floor = base.addingTimeInterval(-1000)
-        // No process rows at all → the floor predicate is inert; the valve is
-        // never reached; all requested rows come from the eligible set.
-        let deleted = try await store.pruneOldest(count: 20, protecting: .process, newerThan: floor)
-        #expect(deleted == 20)
-        #expect(try await store.count() == 30)
-    }
-
-    @Test("hard forensic floor stops both prune phases across every category")
-    func hardFloorPreservesEveryRecentCategoryAndReturnsShortCount() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let now = Date()
-        let hardFloor = now.addingTimeInterval(-15 * 60)
+    private func insertEveryCategory(
+        into store: EventStore,
+        timestamp: Date
+    ) async throws {
         for (index, category) in EventCategory.allCases.enumerated() {
-            try await insert(
-                store,
-                category: category,
-                at: now.addingTimeInterval(-30 * 60 - Double(index)),
-                tag: "old-\(category.rawValue)"
-            )
-            try await insert(
-                store,
-                category: category,
-                at: now.addingTimeInterval(-60 - Double(index)),
-                tag: "recent-\(category.rawValue)"
+            try await store.insert(
+                event: event(
+                    category: category,
+                    index: index,
+                    timestamp: timestamp.addingTimeInterval(Double(index))
+                )
             )
         }
-
-        let requested = 10_000
-        let deleted = try await store.pruneOldest(
-            count: requested,
-            protecting: .process,
-            newerThan: now.addingTimeInterval(-60 * 60),
-            preservingAllNewerThan: hardFloor
-        )
-
-        #expect(deleted == EventCategory.allCases.count)
-        #expect(deleted < requested,
-                "the hard floor must stop pruning rather than manufacture convergence")
-        let survivors = try await store.events(
-            since: .distantPast,
-            limit: EventCategory.allCases.count * 2
-        )
-        #expect(survivors.count == EventCategory.allCases.count)
-        #expect(survivors.allSatisfy { $0.timestamp >= hardFloor })
-        #expect(Set(survivors.map(\.eventCategory)) == Set(EventCategory.allCases),
-                "every category inside the hard floor survives both prune phases")
     }
 
-    @Test("rollUpAndPrune spares process rows within the floor from the time-based rollup")
-    func rollUpAndPruneSparesProcessWithinFloor() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("legacy category floors cannot prune newly admitted journal blocks")
+    func genericCategoryPruneCannotBypassFloor() async throws {
+        let fixture = try makeStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        let now = Date()
-        let aged = now.addingTimeInterval(-30 * 60)  // 30 min old
-        for i in 0..<8 {
-            try await insert(store, category: .file, at: aged, tag: "file\(i)")
+        let oldSourceTime = Date().addingTimeInterval(-2 * 60 * 60)
+        try await insertEveryCategory(
+            into: fixture.store,
+            timestamp: oldSourceTime
+        )
+
+        #expect(
+            try await fixture.store.pruneOldest(
+                count: 10_000,
+                protecting: .process,
+                newerThan: Date().addingTimeInterval(-60 * 60),
+                preservingAllNewerThan: Date().addingTimeInterval(-15 * 60)
+            ) == 0
+        )
+        #expect(
+            try await fixture.store.rollUpAndPrune(
+                olderThan: Date().addingTimeInterval(60 * 60),
+                protecting: .process,
+                newerThan: Date().addingTimeInterval(-60 * 60)
+            ) == 0
+        )
+        #expect(try await fixture.store.count() == EventCategory.allCases.count)
+
+        // The typed snapshot is explicitly partial for a request before the
+        // retained admission window, but its effective counts are exact.
+        let snapshot = try await fixture.store.eventCategoryCountSnapshot(
+            since: .distantPast
+        )
+        #expect(snapshot.requestedWindowComplete == false)
+        #expect(snapshot.gaps.total == 0)
+        for category in EventCategory.allCases {
+            #expect(snapshot.counts[category.rawValue] == 1)
         }
-        for i in 0..<6 {
-            try await insert(store, category: .process, at: aged, tag: "exec\(i)")
-        }
-        #expect(try await store.count() == 14)
-
-        // cutoff = 15 min ago → everything (all 30-min-old rows) is a rollup
-        // candidate. floor = 60 min ago → the 30-min-old process rows are
-        // WITHIN the floor and must be spared from BOTH aggregation and delete.
-        let cutoff = now.addingTimeInterval(-15 * 60)
-        let floor = now.addingTimeInterval(-60 * 60)
-        let deleted = try await store.rollUpAndPrune(olderThan: cutoff, protecting: .process, newerThan: floor)
-
-        #expect(deleted == 8, "only the 8 file rows are rolled up + deleted")
-        let byCat = try await store.eventCountsByCategory(since: .distantPast)
-        #expect((byCat["file"] ?? 0) == 0, "file rows rolled up + evicted")
-        #expect(byCat["process"] == 6, "process rows within the floor survive the rollup")
     }
 
-    @Test("rollUpAndPrune with no floor rolls up every category (unchanged behavior)")
-    func rollUpAndPruneNoFloorIsCategoryBlind() async throws {
-        let (store, tmp) = try await makeStore()
-        defer { try? FileManager.default.removeItem(at: tmp) }
+    @Test("eligible whole-block expiry rolls every category atomically")
+    func expiryIsCategoryNeutral() async throws {
+        let fixture = try makeStore()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        let now = Date()
-        let aged = now.addingTimeInterval(-30 * 60)
-        for i in 0..<8 { try await insert(store, category: .file, at: aged, tag: "file\(i)") }
-        for i in 0..<6 { try await insert(store, category: .process, at: aged, tag: "exec\(i)") }
+        let admissionStart = Date()
+        try await insertEveryCategory(
+            into: fixture.store,
+            timestamp: admissionStart.addingTimeInterval(-24 * 60 * 60)
+        )
+        #expect(
+            try await fixture.store.expireJournalBlocks(
+                retainedThrough: admissionStart.addingTimeInterval(
+                    EventStore.journalRetentionSeconds - 1
+                ),
+                maximumBlocks: 32
+            ) == 0
+        )
 
-        let cutoff = now.addingTimeInterval(-15 * 60)
-        // Default args (no protecting:/newerThan:) → both categories rolled up.
-        let deleted = try await store.rollUpAndPrune(olderThan: cutoff)
-        #expect(deleted == 14)
-        #expect(try await store.count() == 0)
+        let expired = try await fixture.store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 32
+        )
+        #expect(expired == EventCategory.allCases.count)
+        #expect(try await fixture.store.count() == 0)
+
+        let aggregates = try await fixture.store.aggregates(
+            sinceDay: "0000-00-00"
+        )
+        let byCategory = Dictionary(
+            grouping: aggregates,
+            by: \.category
+        ).mapValues { rows in
+            rows.reduce(0) { $0 + $1.count }
+        }
+        for category in EventCategory.allCases {
+            #expect(byCategory[category] == 1)
+        }
     }
 }

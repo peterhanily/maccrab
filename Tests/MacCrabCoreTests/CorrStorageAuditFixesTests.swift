@@ -5,8 +5,8 @@
 //        Fix: vacuum() sets PRAGMA auto_vacuum=INCREMENTAL before VACUUM, so a
 //        legacy mode-0 file converts on its next full VACUUM.
 //   #2  events_fts drift on re-insert. Fix: event ids are immutable evidence
-//        keys (`INSERT OR IGNORE`), so a duplicate is an idempotent no-op and
-//        cannot delete or rewrite the original external-content FTS posting.
+//        keys, so reuse with different canonical evidence is a typed conflict
+//        and cannot delete or rewrite the original projection or FTS posting.
 //   #3  alert_evidence "forward window" was never populated. Fix: capture is
 //        explicitly backward-looking ([alertTs - window, alertTs]).
 //   #4  delete(alertId:) orphaned the evidence copy. Fix: EventStore.deleteEvidence.
@@ -139,22 +139,66 @@ struct AutoVacuumConversionTests {
 
 // MARK: - #2 events_fts consistency on duplicate immutable event id
 
-@Suite("corr-storage #2: re-inserting the same event id keeps events_fts consistent")
+@Suite("corr-storage #2: conflicting reuse of an event id keeps events_fts consistent")
 struct EventsFTSReinsertTests {
 
-    @Test("Duplicate id is a no-op; original row and FTS posting remain immutable")
+    @Test("Conflicting duplicate id is rejected; original exact event, projection, and FTS posting remain immutable")
     func duplicateIDPreservesOriginalFTS() async throws {
         let (store, tmp, path) = try await makeEventStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let id = UUID()
-        try await store.insert(event: makeEvent(id: id, commandLine: "/bin/tool zzzalphamarker"))
+        let timestamp = Date()
+        let originalCommandLine = "/bin/tool zzzalphamarker"
+        let conflictingCommandLine = "/bin/tool zzzbetamarker"
+        try await store.insert(event: makeEvent(
+            id: id,
+            at: timestamp,
+            commandLine: originalCommandLine
+        ))
+        let exactBeforeConflict = try await store.exactEventSnapshot(id: id)
+
         // Re-insert the SAME id with a different command line. Event IDs are
-        // evidence identities, not mutable record keys.
-        try await store.insert(event: makeEvent(id: id, commandLine: "/bin/tool zzzbetamarker"))
+        // immutable evidence identities, not mutable record keys.
+        do {
+            try await store.insert(event: makeEvent(
+                id: id,
+                at: timestamp,
+                commandLine: conflictingCommandLine
+            ))
+            Issue.record("different canonical evidence for one UUID must be rejected")
+        } catch let failure as EventBatchInsertFailure {
+            #expect(failure.progress.persistedCount == 0)
+            #expect(failure.uncommittedEvents.map(\.id) == [id])
+            guard let error = failure.underlyingError as? EventStoreError,
+                  case .immutableEventConflict(let conflictingID) = error else {
+                Issue.record(
+                    "expected underlying immutableEventConflict, got \(failure.underlyingError)"
+                )
+                return
+            }
+            #expect(conflictingID == id)
+        } catch {
+            Issue.record("expected EventBatchInsertFailure, got \(error)")
+            return
+        }
+
+        let exactAfterConflict = try await store.exactEventSnapshot(id: id)
+        #expect(exactAfterConflict == exactBeforeConflict)
+        #expect(exactAfterConflict.event?.process.commandLine == originalCommandLine)
 
         // Exactly one immutable original row, not a duplicate or replacement.
         #expect(rawInt(at: path, "SELECT count(*) FROM events") == 1)
+        #expect(rawInt(
+            at: path,
+            "SELECT count(*) FROM events WHERE process_commandline = ?1",
+            bindText: originalCommandLine
+        ) == 1)
+        #expect(rawInt(
+            at: path,
+            "SELECT count(*) FROM events WHERE process_commandline = ?1",
+            bindText: conflictingCommandLine
+        ) == 0)
 
         // FTS continues to describe the authoritative original row.
         #expect(rawInt(at: path, "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?1",

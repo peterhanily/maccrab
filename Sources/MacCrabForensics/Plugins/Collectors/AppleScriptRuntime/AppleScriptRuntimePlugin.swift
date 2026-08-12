@@ -111,8 +111,24 @@ public struct AppleScriptRuntimePlugin: Collector {
 
         let store = try await EventStore(path: eventStorePath)
         let events: [Event]
+        let snapshot: ExactEventQuerySnapshot
         do {
-            events = try await store.events(since: since, limit: 50_000)
+            snapshot = try await store.exactEventsSnapshot(
+                since: since,
+                limit: 50_000
+            )
+            guard snapshot.poisonRecords.isEmpty,
+                  snapshot.corruptLegacyRecords == 0,
+                  snapshot.inheritedLegacyLossRecords == 0 else {
+                throw EventStoreError.exactEvidenceGap(
+                    poisonRecords: snapshot.poisonRecords.count,
+                    corruptLegacyRecords: snapshot.corruptLegacyRecords,
+                    inheritedLegacyLossRecords:
+                        snapshot.inheritedLegacyLossRecords,
+                    resourceLimitedRecords: snapshot.resourceLimitedRecords
+                )
+            }
+            events = snapshot.events
         } catch {
             return CollectionResult(
                 artifactsCommitted: 0,
@@ -121,6 +137,7 @@ public struct AppleScriptRuntimePlugin: Collector {
                 status: .error
             )
         }
+        defer { withExtendedLifetime(snapshot) {} }
 
         var committed = 0
         var rejected = 0
@@ -196,6 +213,12 @@ public struct AppleScriptRuntimePlugin: Collector {
 
         var notes: [String] = []
         notes.append("Scanned \(events.count) exec events; \(committed) matched AppleScript-runtime binaries.")
+        if snapshot.resourceLimitedRecords > 0 {
+            notes.append(
+                "The exact event snapshot reached its bounded result limit; "
+                    + "older matching runtime events are unknown."
+            )
+        }
         if rejected > 0 {
             notes.append("\(rejected) AppleScript invocations rejected at INSERT — plaintext case can't hold content-class artifacts (Pass 2026-D). Create an encrypted case to capture these.")
         }
@@ -203,7 +226,8 @@ public struct AppleScriptRuntimePlugin: Collector {
             artifactsCommitted: committed,
             artifactsRejected: rejected,
             notes: notes,
-            status: rejected > 0 ? .partial : .ok
+            status: rejected > 0 || snapshot.resourceLimitedRecords > 0
+                ? .partial : .ok
         )
     }
 

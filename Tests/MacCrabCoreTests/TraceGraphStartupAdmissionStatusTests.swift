@@ -24,6 +24,7 @@ struct TraceGraphStartupAdmissionStatusTests {
 
         let heartbeat = status.heartbeatDictionary
         #expect(heartbeat["enabled"] as? Bool == true)
+        #expect(heartbeat["accepting_mutations"] as? Bool == false)
         #expect(heartbeat["blocked"] as? Bool == true)
         #expect(heartbeat["store_available"] as? Bool == false)
         #expect(heartbeat["startup_blocked"] as? Bool == true)

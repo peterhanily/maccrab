@@ -27,6 +27,13 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let residentMemoryMB: Int?
     public let sysextHasFDA: Bool
     public let schemaVersion: Int
+    /// Exact admission-time counts paired with the daemon's retained-window
+    /// proof. Unlike the compatibility `_1h` alias, this remains populated
+    /// when only a shorter interval is provable.
+    public let eventTypeCounts: [String: Int]
+    public let eventTypeCountWindow: EventTypeCountWindow?
+    /// Compatibility payload from older daemons, or from a new daemon only
+    /// when it proved the complete requested hour.
     public let eventTypeCounts1h: [String: Int]
     public let collectors: [Collector]
     // v1.12.6 Wave 9O: Wave-9K added these counters to
@@ -106,6 +113,32 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         }
     }
 
+    public struct EventTypeCountWindow: Sendable, Equatable {
+        public let queryAvailable: Bool
+        public let requestedDurationSeconds: Int
+        public let effectiveDurationSeconds: Int
+        public let requestedWindowComplete: Bool
+        public let complete: Bool
+        public let gapRecords: Int
+
+        fileprivate init?(from raw: [String: Any]?) {
+            guard let raw else { return nil }
+            self.queryAvailable = raw["query_available"] as? Bool ?? false
+            self.requestedDurationSeconds = max(
+                0,
+                raw["requested_duration_seconds"] as? Int ?? 0
+            )
+            self.effectiveDurationSeconds = max(
+                0,
+                raw["effective_duration_seconds"] as? Int ?? 0
+            )
+            self.requestedWindowComplete =
+                raw["requested_window_complete"] as? Bool ?? false
+            self.complete = raw["complete"] as? Bool ?? false
+            self.gapRecords = max(0, raw["gap_records"] as? Int ?? 0)
+        }
+    }
+
     /// Live prevention state parsed from the heartbeat `prevention` block.
     public struct Prevention: Sendable, Equatable {
         public struct Module: Sendable, Equatable {
@@ -141,10 +174,25 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
 
     public struct TraceGraphStorageAdmission: Sendable, Equatable {
         public let enabled: Bool
+        public let acceptingMutations: Bool?
         public let blocked: Bool
         public let storeAvailable: Bool?
         public let startupBlocked: Bool
         public let reason: String?
+        public let recovering: Bool?
+        public let recoveryMutationWaiters: Int?
+        public let recoveryMutationWaiterLimit: Int?
+        public let recoveryMutationQueueSaturated: Bool?
+        public let recoveryMutationWaiterHighWatermark: Int?
+        public let recoveryMutationWaitsTotal: Int64?
+        public let recoveryMutationWaitReleasesTotal: Int64?
+        public let recoveryMutationWaitCancellationsTotal: Int64?
+        public let recoveryMutationWaitClosedTotal: Int64?
+        public let recoveryMutationWaitSaturationsTotal: Int64?
+        public let recoveryMutationWaitNanosecondsTotal: Int64?
+        public let recoveryMutationMaxWaitNanoseconds: Int64?
+        public let recoveryMutationOldestWaitNanoseconds: Int64?
+        public let recoveryWriterPreemptionsTotal: Int64?
         public let footprintBytes: Int64?
         public let freeSpaceBytes: Int64?
         public let maxFootprintBytes: Int64?
@@ -169,10 +217,25 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         init?(from raw: [String: Any]?) {
             guard let raw else { return nil }
             enabled = raw["enabled"] as? Bool ?? false
+            acceptingMutations = raw["accepting_mutations"] as? Bool
             blocked = raw["blocked"] as? Bool ?? false
             storeAvailable = raw["store_available"] as? Bool
             startupBlocked = raw["startup_blocked"] as? Bool ?? false
             reason = (raw["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            recovering = raw["recovering"] as? Bool
+            recoveryMutationWaiters = Self.int(raw["recovery_mutation_waiters"])
+            recoveryMutationWaiterLimit = Self.int(raw["recovery_mutation_waiter_limit"])
+            recoveryMutationQueueSaturated = raw["recovery_mutation_queue_saturated"] as? Bool
+            recoveryMutationWaiterHighWatermark = Self.int(raw["recovery_mutation_waiter_high_watermark"])
+            recoveryMutationWaitsTotal = Self.int64(raw["recovery_mutation_waits_total"])
+            recoveryMutationWaitReleasesTotal = Self.int64(raw["recovery_mutation_wait_releases_total"])
+            recoveryMutationWaitCancellationsTotal = Self.int64(raw["recovery_mutation_wait_cancellations_total"])
+            recoveryMutationWaitClosedTotal = Self.int64(raw["recovery_mutation_wait_closed_total"])
+            recoveryMutationWaitSaturationsTotal = Self.int64(raw["recovery_mutation_wait_saturations_total"])
+            recoveryMutationWaitNanosecondsTotal = Self.int64(raw["recovery_mutation_wait_nanoseconds_total"])
+            recoveryMutationMaxWaitNanoseconds = Self.int64(raw["recovery_mutation_max_wait_nanoseconds"])
+            recoveryMutationOldestWaitNanoseconds = Self.int64(raw["recovery_mutation_oldest_wait_nanoseconds"])
+            recoveryWriterPreemptionsTotal = Self.int64(raw["recovery_writer_preemptions_total"])
             footprintBytes = Self.int64(raw["footprint_bytes"])
             freeSpaceBytes = Self.int64(raw["free_space_bytes"])
             maxFootprintBytes = Self.int64(raw["max_footprint_bytes"])
@@ -194,6 +257,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
 
         public var evidenceUnavailable: Bool {
             !enabled
+                || acceptingMutations == false
                 || blocked
                 || storeAvailable == false
                 || writeTelemetry?.graphWriteDegraded == true
@@ -216,10 +280,22 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 return "TraceGraph persistence is disabled (\(readableReason)). Detection continues, but new causal evidence is not being recorded."
             }
             if blocked {
-                return "TraceGraph persistence is paused (\(readableReason)). Detection continues, but new causal evidence is currently being shed while bounded recovery runs."
+                return "TraceGraph hard storage admission is blocked (\(readableReason)). Detection continues, but new causal evidence is being shed until bounded maintenance restores write headroom."
+            }
+            if acceptingMutations == false {
+                if recoveryMutationQueueSaturated == true {
+                    return "TraceGraph recovery is still running, but its bounded foreground mutation queue is saturated. New causal evidence cannot currently enter the store; queued \(recoveryMutationWaiters ?? -1) of \(recoveryMutationWaiterLimit ?? -1), with \(recoveryMutationWaitSaturationsTotal ?? -1) saturation refusal(s) since boot."
+                }
+                return "TraceGraph is not accepting new causal mutations even though no hard storage block was reported. The recovery handoff or writer handle is degraded."
             }
             if let telemetry = writeTelemetry, telemetry.graphWriteDegraded {
                 var failures: [String] = []
+                if telemetry.recoveryMutationWaitConservationMaintained == false {
+                    failures.append("the recovery-wait ledger does not conserve")
+                }
+                if (telemetry.recoveryMutationWaitSaturationsTotal ?? 0) > 0 {
+                    failures.append("the bounded recovery queue saturated")
+                }
                 if let events = telemetry.ingestEventsFailedTotal, events > 0 {
                     failures.append("\(events) input event(s) failed")
                 }
@@ -250,6 +326,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 "startup_blocked": startupBlocked,
                 "write_degraded": graphWriteDegraded,
             ]
+            if let acceptingMutations {
+                value["accepting_mutations"] = acceptingMutations
+            }
             if let storeAvailable { value["store_available"] = storeAvailable }
             if let reason { value["reason"] = reason }
             if let telemetry = writeTelemetry,
@@ -265,6 +344,15 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 }
                 if let backlog = telemetry.hasOutstandingBacklog {
                     value["outstanding_backlog"] = backlog
+                }
+                if let conserving =
+                    telemetry.recoveryMutationWaitConservationMaintained {
+                    value["recovery_mutation_wait_conservation_maintained"] =
+                        conserving
+                }
+                if telemetry.recoveryMutationTelemetryPresent {
+                    value["recovery_mutation_barrier_degraded"] = telemetry
+                        .recoveryMutationBarrierDegraded
                 }
             }
             return value
@@ -898,8 +986,14 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
                 lastTickUnix: c["last_tick_unix"] as? Double
             )
         }
-        let counts: [String: Int] = (raw["event_type_counts_1h"] as? [String: Any])?
+        let legacyCounts: [String: Int] = (raw["event_type_counts_1h"] as? [String: Any])?
             .compactMapValues { $0 as? Int } ?? [:]
+        let eventTypeCounts: [String: Int] =
+            (raw["event_type_counts"] as? [String: Any])?
+                .compactMapValues { $0 as? Int } ?? legacyCounts
+        let eventTypeCountWindow = EventTypeCountWindow(
+            from: raw["event_type_count_window"] as? [String: Any]
+        )
         let llm = (raw["llm"] as? [String: Any]).map(LLMHealth.init(from:))
         let prevention = Prevention(from: raw["prevention"] as? [String: Any])
         let traceGraphStorageAdmission = TraceGraphStorageAdmission(
@@ -944,7 +1038,9 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             residentMemoryMB: raw["resident_memory_mb"] as? Int,
             sysextHasFDA: raw["sysext_has_fda"] as? Bool ?? false,
             schemaVersion: raw["schema_version"] as? Int ?? 0,
-            eventTypeCounts1h: counts,
+            eventTypeCounts: eventTypeCounts,
+            eventTypeCountWindow: eventTypeCountWindow,
+            eventTypeCounts1h: legacyCounts,
             collectors: collectors,
             // Wave 9O: pre-9O these keys were emitted by DaemonTimers
             // (Wave 9K) but silently dropped here. Default to 0 when
@@ -998,8 +1094,20 @@ extension V2HeartbeatSnapshot {
         return h > 0 ? "\(d)d \(h)h" : "\(d)d"
     }
 
-    /// Rolling event rate in events/sec, derived from the 1h counts.
-    public var eventsPerSecond1h: Double {
+    /// Rolling event rate in events/sec only when the daemon proves the full
+    /// requested interval. `nil` means unknown, never an observed zero.
+    public var eventsPerSecond1h: Double? {
+        if let window = eventTypeCountWindow {
+            guard window.queryAvailable,
+                  window.complete,
+                  window.requestedWindowComplete,
+                  window.requestedDurationSeconds > 0 else { return nil }
+            let total = eventTypeCounts.values.reduce(0, +)
+            return Double(total) / Double(window.requestedDurationSeconds)
+        }
+        // A pre-window-contract heartbeat's `_1h` field is its compatibility
+        // proof. Empty counts still represent an observed zero for that old
+        // schema, not a failed new query.
         let total = eventTypeCounts1h.values.reduce(0, +)
         return Double(total) / 3600.0
     }
