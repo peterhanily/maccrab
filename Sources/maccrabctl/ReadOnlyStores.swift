@@ -15,8 +15,11 @@ extension MacCrabCtl {
     /// Keep every shipped `maccrabctl` query on these factories.  Maintenance
     /// commands that intentionally mutate a store (currently `rollup`) must
     /// continue to construct their writer explicitly instead.
-    static func openEventStoreForReading(directory: String) throws -> EventStore {
-        try EventStore(directory: directory, forceReadOnly: true)
+    static func openEventStoreForReading(
+        directory: String,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
+    ) throws -> EventStore {
+        try EventStore(directory: directory, forceReadOnly: true, liveMemoryBudget: liveMemoryBudget)
     }
 
     static func openAlertStoreForReading(directory: String) throws -> AlertStore {

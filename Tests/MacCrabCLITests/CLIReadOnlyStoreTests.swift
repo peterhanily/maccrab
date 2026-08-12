@@ -22,6 +22,18 @@ struct CLIReadOnlyStoreTests {
         return directory
     }
 
+    private func isolatedEventMemoryBudget() -> EventPipelineLiveMemoryBudget {
+        EventPipelineLiveMemoryBudget(
+            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
+            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
+                .productionForwardProgressReserveBytes,
+            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
+                .productionEventStoreWorkspaceReserveBytes,
+            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
+                .productionCompactReceiptReserveBytes
+        )
+    }
+
     private func event(sessionID: String) -> Event {
         let process = MacCrabCore.ProcessInfo(
             pid: 4_242,
@@ -76,8 +88,15 @@ struct CLIReadOnlyStoreTests {
         )
     }
 
-    private func seedEvents(at directory: URL, sessionID: String) async throws {
-        let writer = try EventStore(directory: directory.path)
+    private func seedEvents(
+        at directory: URL,
+        sessionID: String,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget
+    ) async throws {
+        let writer = try EventStore(
+            directory: directory.path,
+            liveMemoryBudget: liveMemoryBudget
+        )
         try await writer.insert(event: event(sessionID: sessionID))
         #expect(await writer.walCheckpointTruncate())
     }
@@ -181,6 +200,7 @@ struct CLIReadOnlyStoreTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let sessionID = UUID().uuidString
+        let liveMemoryBudget = isolatedEventMemoryBudget()
         let fixtureEvent = event(sessionID: sessionID)
         let rejectedAlert = alert(
             id: "must-not-write",
@@ -189,7 +209,11 @@ struct CLIReadOnlyStoreTests {
             sessionID: sessionID
         )
 
-        try await seedEvents(at: directory, sessionID: sessionID)
+        try await seedEvents(
+            at: directory,
+            sessionID: sessionID,
+            liveMemoryBudget: liveMemoryBudget
+        )
         try await seedAlerts(at: directory, sessionID: sessionID)
         try makeOwnerUnwritable(directory)
 
@@ -199,7 +223,8 @@ struct CLIReadOnlyStoreTests {
 
         do {
             let events = try MacCrabCtl.openEventStoreForReading(
-                directory: directory.path
+                directory: directory.path,
+                liveMemoryBudget: liveMemoryBudget
             )
 
             // `status`, `events tail/stats/search`, attribution status, and all
@@ -260,7 +285,8 @@ struct CLIReadOnlyStoreTests {
 
         do {
             let events = try maccrab_mcp.openMCPEventStoreForReading(
-                directory: directory.path
+                directory: directory.path,
+                liveMemoryBudget: liveMemoryBudget
             )
             #expect(try await events.count() == 1)
             let sessionEvents = try await events

@@ -5,8 +5,11 @@ import MacCrabCore
 /// main DB file does not imply authority to create or mutate its root-owned WAL
 /// family, and discovering that mismatch during a startup PRAGMA makes an
 /// otherwise harmless read tool fail.
-func openMCPEventStoreForReading(directory: String) throws -> EventStore {
-    try EventStore(directory: directory, forceReadOnly: true)
+func openMCPEventStoreForReading(
+    directory: String,
+    liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
+) throws -> EventStore {
+    try EventStore(directory: directory, forceReadOnly: true, liveMemoryBudget: liveMemoryBudget)
 }
 
 func openMCPAlertStoreForReading(directory: String) throws -> AlertStore {

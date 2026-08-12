@@ -719,6 +719,10 @@ public actor EventStore {
     private var db: OpaquePointer?
     private var checkpointController: SQLiteControlledCheckpointController?
     private let databasePath: String
+    /// Production stores share one process-wide envelope. Tests may inject an
+    /// equivalent isolated envelope so independently scheduled fixture suites
+    /// cannot manufacture cross-suite backpressure.
+    private let liveMemoryBudget: EventPipelineLiveMemoryBudget
     private var storagePolicy: SQLitePersistentStorePolicy?
     private var storageAdmission: SQLitePersistentStoreAdmission?
     /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
@@ -3156,7 +3160,8 @@ public actor EventStore {
     public init(
         directory: String = "/Library/Application Support/MacCrab",
         forceReadOnly: Bool = false,
-        storagePolicy: SQLitePersistentStorePolicy? = nil
+        storagePolicy: SQLitePersistentStorePolicy? = nil,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
     ) throws {
         let maccrabDir = URL(fileURLWithPath: directory)
 
@@ -3176,6 +3181,7 @@ public actor EventStore {
 
         let databasePath = maccrabDir.appendingPathComponent("events.db").path
         self.databasePath = databasePath
+        self.liveMemoryBudget = liveMemoryBudget
         let effectiveStoragePolicy = forceReadOnly
             ? nil
             : (storagePolicy ?? Self.defaultStoragePolicy(for: databasePath))
@@ -3234,9 +3240,11 @@ public actor EventStore {
     public init(
         path: String,
         forceReadOnly: Bool = false,
-        storagePolicy: SQLitePersistentStorePolicy? = nil
+        storagePolicy: SQLitePersistentStorePolicy? = nil,
+        liveMemoryBudget: EventPipelineLiveMemoryBudget = .processShared
     ) throws {
         self.databasePath = path
+        self.liveMemoryBudget = liveMemoryBudget
         let effectiveStoragePolicy = forceReadOnly
             ? nil
             : (storagePolicy ?? Self.defaultStoragePolicy(for: path))
@@ -5306,7 +5314,7 @@ public actor EventStore {
     private func acquireEventStoreWorkspace(
         context: String
     ) throws -> EventPipelineMemoryLease {
-        guard let lease = EventPipelineLiveMemoryBudget.processShared.tryAcquire(
+        guard let lease = liveMemoryBudget.tryAcquire(
             bytes: EventJournalCodec.maximumWorkspaceBytes,
             owner: .eventStoreWorkspace
         ) else {
@@ -5467,7 +5475,7 @@ public actor EventStore {
                     return destination.count
                 },
                 recordLeaseProvider: { _, _ in
-                    EventPipelineLiveMemoryBudget.processShared.tryAcquire(
+                    self.liveMemoryBudget.tryAcquire(
                         bytes: EventJournalAdmissionValidator
                             .maximumPreparationWorkspaceBytes,
                         owner: .journalPrepared
@@ -5658,12 +5666,11 @@ public actor EventStore {
                 shouldDecodeRecord: { $0 == location.ordinal },
                 recordLeaseProvider: { ordinal, _ in
                     guard ordinal == location.ordinal else { return nil }
-                    return EventPipelineLiveMemoryBudget.processShared
-                        .tryAcquire(
-                            bytes: EventJournalAdmissionValidator
-                                .maximumPreparationWorkspaceBytes,
-                            owner: .journalPrepared
-                        )
+                    return self.liveMemoryBudget.tryAcquire(
+                        bytes: EventJournalAdmissionValidator
+                            .maximumPreparationWorkspaceBytes,
+                        owner: .journalPrepared
+                    )
                 },
                 as: Event.self,
                 decoder: decoder,
@@ -5902,7 +5909,7 @@ public actor EventStore {
                 return destination.count
             },
             recordLeaseProvider: { _, _ in
-                EventPipelineLiveMemoryBudget.processShared.tryAcquire(
+                self.liveMemoryBudget.tryAcquire(
                     bytes: EventJournalAdmissionValidator
                         .maximumPreparationWorkspaceBytes,
                     owner: .journalPrepared
@@ -14322,11 +14329,10 @@ public actor EventStore {
                 }
                 var ownershipLeases = candidate.ownershipLeases
                 if ownershipLeases.isEmpty {
-                    guard let lease = EventPipelineLiveMemoryBudget
-                        .processShared.tryAcquire(
-                            bytes: max(1, charge),
-                            owner: .journalPrepared
-                        ) else {
+                    guard let lease = liveMemoryBudget.tryAcquire(
+                        bytes: max(1, charge),
+                        owner: .journalPrepared
+                    ) else {
                         resourceLimitedRecords += 1
                         return
                     }
@@ -15242,11 +15248,10 @@ public actor EventStore {
             var rows: [Event] = []
             var resultLease: EventPipelineMemoryLease?
             if !trimmed.isEmpty {
-                guard let lease = EventPipelineLiveMemoryBudget.processShared
-                    .tryAcquire(
-                        bytes: Self.exactQueryResultByteLimit,
-                        owner: .journalPrepared
-                    ) else {
+                guard let lease = liveMemoryBudget.tryAcquire(
+                    bytes: Self.exactQueryResultByteLimit,
+                    owner: .journalPrepared
+                ) else {
                     return EventSearchSnapshot(
                         events: [],
                         mutationGeneration: generation,
@@ -15488,11 +15493,10 @@ public actor EventStore {
                     }
                     let charge = try EventJournalAdmissionValidator
                         .preflight(decoded.event).sourceRetainedByteEstimate
-                    guard let lease = EventPipelineLiveMemoryBudget
-                        .processShared.tryAcquire(
-                            bytes: max(1, charge),
-                            owner: .journalPrepared
-                        ) else {
+                    guard let lease = liveMemoryBudget.tryAcquire(
+                        bytes: max(1, charge),
+                        owner: .journalPrepared
+                    ) else {
                         throw EventStoreError.exactEvidenceGap(
                             poisonRecords: 0,
                             corruptLegacyRecords: 0,

@@ -15,6 +15,18 @@ struct AlertEvidenceOwnershipTests {
         return url
     }
 
+    private func isolatedEventMemoryBudget() -> EventPipelineLiveMemoryBudget {
+        EventPipelineLiveMemoryBudget(
+            maximumBytes: EventPipelineLiveMemoryBudget.productionMaximumBytes,
+            forwardProgressReserveBytes: EventPipelineLiveMemoryBudget
+                .productionForwardProgressReserveBytes,
+            eventStoreWorkspaceReserveBytes: EventPipelineLiveMemoryBudget
+                .productionEventStoreWorkspaceReserveBytes,
+            compactReceiptReserveBytes: EventPipelineLiveMemoryBudget
+                .productionCompactReceiptReserveBytes
+        )
+    }
+
     private func event(
         id: UUID = UUID(),
         timestamp: Date,
@@ -90,7 +102,10 @@ struct AlertEvidenceOwnershipTests {
     func boundedSelection() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let store = try EventStore(directory: dir.path)
+        let store = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: isolatedEventMemoryBudget()
+        )
         let alertTime = Date(timeIntervalSince1970: 10_000)
         for index in 0..<80 {
             let e = event(
@@ -384,7 +399,10 @@ struct AlertEvidenceOwnershipTests {
     func legacyFallback() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let events = try EventStore(directory: dir.path)
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: isolatedEventMemoryBudget()
+        )
         let alerts = try AlertStore(directory: dir.path)
         let legacy = event(timestamp: Date(timeIntervalSince1970: 40_000))
         try await events.insert(event: legacy)
@@ -519,7 +537,10 @@ struct AlertEvidenceOwnershipTests {
     func writerPrefixBarrier() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let events = try EventStore(directory: dir.path)
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: isolatedEventMemoryBudget()
+        )
         let alerts = try AlertStore(directory: dir.path)
         let writer = BatchedEventWriter(
             store: events,
@@ -563,7 +584,10 @@ struct AlertEvidenceOwnershipTests {
     func writerPrefixTimeoutFallback() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let events = try EventStore(directory: dir.path)
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: isolatedEventMemoryBudget()
+        )
         let alerts = try AlertStore(directory: dir.path)
         let sink = AlertSink(
             alertStore: alerts,
