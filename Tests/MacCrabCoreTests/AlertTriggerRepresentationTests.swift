@@ -59,7 +59,7 @@ struct AlertTriggerRepresentationTests {
 
     @Test("one deterministic sanitized value feeds snapshot and evidence")
     func sharedSanitizedValue() throws {
-        let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"
+        let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890" // secret-scan:allow — synthetic redaction fixture.
         let source = event(
             commandLine: "/usr/bin/fixture --api-key=\(secret)",
             args: ["/usr/bin/fixture", "--api-key=\(secret)"],
@@ -222,7 +222,7 @@ struct AlertTriggerRepresentationTests {
 
     @Test("an oversized current trigger compacts to a valid Event under 64 KiB")
     func oversizedTriggerCompacts() throws {
-        let secret = "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ123456"
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ123456" // secret-scan:allow — synthetic redaction fixture.
         let huge = String(repeating: "payload-\(secret)-", count: 2_000)
         let source = event(
             commandLine: "/usr/bin/fixture --token \(secret) \(huge)",

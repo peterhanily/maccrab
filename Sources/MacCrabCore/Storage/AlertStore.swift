@@ -2179,6 +2179,15 @@ public actor AlertStore {
                 "alert evidence parent does not exist"
             )
         }
+        // `alerts.timestamp` is persisted as Unix seconds. Converting that
+        // Double back to Date and then subtracting in Date's reference-date
+        // epoch can move the value by one ULP. At either inclusive boundary
+        // that used to reject a legitimate trigger or an event exactly one
+        // lookback old. Compare in the database's Unix-seconds coordinate so
+        // the validation agrees with EventStore's source-window selection.
+        let parentTimestampSeconds = parentTimestamp.timeIntervalSince1970
+        let lowerTimestampSeconds = parentTimestampSeconds
+            - AlertEvidencePolicy.lookbackSeconds
         // Seed exact accounting once per store-open. Subsequent captures update
         // logical ownership and a conservative allocated-page upper bound in
         // O(inserted rows); they do not rescan the complete evidence table.
@@ -2193,11 +2202,15 @@ public actor AlertStore {
                   byteCount <= AlertEvidencePolicy.maximumRawPayloadBytes,
                   seenInput.insert(candidate.eventId).inserted,
                   let data = candidate.rawJSON.data(using: .utf8),
-                  let event = try? decoder.decode(Event.self, from: data),
-                  event.timestamp <= parentTimestamp,
-                  event.timestamp >= parentTimestamp.addingTimeInterval(
-                    -AlertEvidencePolicy.lookbackSeconds
-                  ),
+                  let event = try? decoder.decode(Event.self, from: data) else {
+                continue
+            }
+            let eventTimestampSeconds = event.timestamp.timeIntervalSince1970
+            guard parentTimestampSeconds.isFinite,
+                  lowerTimestampSeconds.isFinite,
+                  eventTimestampSeconds.isFinite,
+                  eventTimestampSeconds <= parentTimestampSeconds,
+                  eventTimestampSeconds >= lowerTimestampSeconds,
                   event.id.uuidString.caseInsensitiveCompare(candidate.eventId)
                     == .orderedSame else {
                 continue

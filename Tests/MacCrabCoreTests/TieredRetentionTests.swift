@@ -86,7 +86,12 @@ struct TieredRetentionTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let alerts = try AlertStore(directory: tmp.path)
 
-        let alertTime = Date()
+        // This value rounds one ULP upward through the alerts.db Unix-seconds
+        // representation. Date-epoch arithmetic used to exclude the event at
+        // the inclusive -30-second boundary deterministically.
+        let alertTime = Date(
+            timeIntervalSinceReferenceDate: 800_000_000.1234568
+        )
         let alertId = UUID().uuidString
         var expectedIDs: [UUID] = []
         var trigger: Event?
@@ -122,7 +127,11 @@ struct TieredRetentionTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = try AlertStore(directory: tmp.path)
 
-        let alertTime = Date()
+        // This value rounds one ULP downward through alerts.db, which used to
+        // make the exact trigger appear later than its own parent alert.
+        let alertTime = Date(
+            timeIntervalSinceReferenceDate: 807_000_000.1
+        )
         let alertId = UUID().uuidString
         let event = sampleEvent(at: alertTime)
         try await store.insert(alert: sampleAlert(id: alertId, event: event))
