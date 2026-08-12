@@ -13,7 +13,10 @@ struct EventEnricherHashingTests {
         // This suite verifies hash evidence and stable-file binding, not the
         // production 50 ms work budget. Full-suite utility-executor contention
         // must not convert the fixture into a deliberate timeout test.
-        HeavyEnrichmentPlane(configuration: .init(operationTimeoutSeconds: 30))
+        HeavyEnrichmentPlane(
+            configuration: .init(operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
     }
 
     private func applyingHashPatch(

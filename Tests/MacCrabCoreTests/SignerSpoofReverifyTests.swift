@@ -52,7 +52,8 @@ struct SignerSpoofReverifyTests {
         let enricher = EventEnricher(heavyEnrichmentPlane: HeavyEnrichmentPlane(
             // Security.framework verification is the contract under test; a
             // saturated utility executor is not. Keep a coarse test-only cap.
-            configuration: .init(operationTimeoutSeconds: 30)
+            configuration: .init(operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
         ))
         let initiallyEnriched = await enricher.enrich(event)
         if let signer = initiallyEnriched.process.codeSignature?.signerType {

@@ -60,7 +60,8 @@ struct EventEnricherUserNameTests {
             // The test verifies getpwuid evidence, not the production 50 ms
             // admission budget. Utility workers can be starved in the full
             // parallel suite, so use a coarse test-only hang detector.
-            configuration: .init(operationTimeoutSeconds: 30)
+            configuration: .init(operationTimeoutSeconds: 30),
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
         ))
         let event = Event(
             eventCategory: .process,

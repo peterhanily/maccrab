@@ -60,7 +60,7 @@ struct FileContentEnricherRevivalTests {
             maximumOutstandingResults: 8,
             // Test stable identity + replay, not the production deadline.
             operationTimeoutSeconds: 30
-        ))
+        ), liveMemoryBudget: .isolatedProductionEquivalentForTesting())
         let enricher = EventEnricher(
             fileContentEnricher: FileContentEnricher(),
             heavyEnrichmentPlane: plane
