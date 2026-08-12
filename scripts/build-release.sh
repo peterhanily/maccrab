@@ -1413,13 +1413,18 @@ ATTESTATION_EOF
         #
         # The real stripped baseline is ~154 MiB, NOT the ~136 MiB an earlier
         # comment here claimed: v1.21.6-rc.6, the first artifact this gate ever
-        # measured, came in at 157,620 KiB. That 18 MiB error mattered, because
-        # an engineer reading it would believe ~24 MiB of headroom existed when
-        # the true margin was ~6 MiB. Print the margin on every build so the
-        # number people act on is measured, not remembered — and so the squeeze
-        # is visible long before the gate fires. It fires late and expensively:
-        # after the universal build, lipo, strip, and every signature.
-        APP_FOOTPRINT_BUDGET_KIB=163840
+        # measured, came in at 157,620 KiB. rc.12 was 159,508 KiB. rc.13's
+        # authenticated event journal and terminal-evidence pipeline increased
+        # the four statically linked universal Swift executables by 13.4 MiB in
+        # aggregate; its final signed app measured 173,552 KiB after the local-
+        # symbol and debug-map guards passed. The deliberate 180 MiB rebaseline
+        # leaves 10,768 KiB of measured headroom while still catching a return
+        # of the ~207 MiB unstripped regression. Print the margin on every build
+        # so the number people act on is measured, not remembered — and so the
+        # squeeze is visible long before the gate fires. It fires late and
+        # expensively: after the universal build, lipo, strip, and every
+        # signature.
+        APP_FOOTPRINT_BUDGET_KIB=184320
         APP_FOOTPRINT_KIB=$(/usr/bin/du -sk "$APP" | /usr/bin/cut -f1)
         case "$APP_FOOTPRINT_KIB" in
             ''|*[!0-9]*)

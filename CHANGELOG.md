@@ -31,6 +31,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   the physical family budget under the SQLite writer lock. A finalized database
   can still open in shed-only mode under disk pressure so maintenance can make
   it writable again.
+- **The installed-footprint release guard was rebaselined from measured
+  artifacts.** The new journal and terminal-evidence implementation grows the
+  four statically linked universal executables by 13.4 MiB in aggregate. After
+  symbol and debug-map checks passed, the hard ceiling moved from 160 MiB to
+  180 MiB, leaving about 10.5 MiB of headroom over the signed rc.13 candidate.
 - **Read-only tools stay read-only.** The CLI and MCP server open their event and
   alert stores without replaying migrations or writing connection metadata.
 
