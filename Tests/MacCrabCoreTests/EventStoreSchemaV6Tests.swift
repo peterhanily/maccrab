@@ -366,6 +366,122 @@ struct EventStoreSchemaV6Tests {
         #expect(Self.userVersion(of: db) == 8)
     }
 
+    @Test("Finalized journal reopen bypasses transition-only pinned-WAL gate")
+    func finalizedJournalReopensWithPinnedWAL() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("finalized-journal-reopen-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("events.db").path
+        let policy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 256 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes:
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: directory.path
+        )
+
+        var bootstrap: EventStore? = try EventStore(
+            path: path,
+            storagePolicy: policy
+        )
+        _ = try await bootstrap?.recoverJournalBeforeProducers()
+        #expect(await bootstrap?.walCheckpointTruncate() == true)
+
+        var reader: OpaquePointer?
+        #expect(sqlite3_open_v2(
+            path,
+            &reader,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK)
+        let readerHandle = try #require(reader)
+        defer { sqlite3_close(readerHandle) }
+        #expect(sqlite3_exec(
+            readerHandle,
+            "BEGIN",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        defer { sqlite3_exec(readerHandle, "ROLLBACK", nil, nil, nil) }
+        var pinnedStatement: OpaquePointer?
+        #expect(sqlite3_prepare_v2(
+            readerHandle,
+            "SELECT COUNT(*) FROM event_journal_blocks",
+            -1,
+            &pinnedStatement,
+            nil
+        ) == SQLITE_OK)
+        let pinnedHandle = try #require(pinnedStatement)
+        defer { sqlite3_finalize(pinnedHandle) }
+        #expect(sqlite3_step(pinnedHandle) == SQLITE_ROW)
+
+        try await bootstrap?.insert(event: Self.makeEvent(
+            process: Self.makeProcess()
+        ))
+        #expect(await bootstrap?.walCheckpointTruncate() == false)
+        let walSize = (try FileManager.default.attributesOfItem(
+            atPath: path + "-wal"
+        )[.size] as? NSNumber)?.int64Value ?? 0
+        #expect(walSize > 0)
+        bootstrap = nil
+
+        // schema_finalized=1 means no transition statement remains. The
+        // active reader may pin those healthy WAL frames, but it must not turn
+        // every daemon cold start into storage_not_ready.
+        let reopened = try EventStore(path: path, storagePolicy: policy)
+        #expect(try await reopened.count() == 1)
+    }
+
+    @Test("Finalized marker cannot bypass an incomplete journal schema")
+    func finalizedJournalInventoryStillFailsClosed() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("forged-finalized-journal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("events.db").path
+
+        var bootstrap: EventStore? = try EventStore(path: path)
+        _ = try await bootstrap?.recoverJournalBeforeProducers()
+        bootstrap = nil
+
+        var raw: OpaquePointer?
+        #expect(sqlite3_open_v2(
+            path,
+            &raw,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK)
+        let rawHandle = try #require(raw)
+        #expect(sqlite3_exec(
+            rawHandle,
+            "DROP INDEX idx_event_projection_locator",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        sqlite3_close(rawHandle)
+        raw = nil
+
+        do {
+            _ = try EventStore(path: path)
+            Issue.record(
+                "an incomplete schema with schema_finalized=1 unexpectedly reopened"
+            )
+        } catch EventStoreError.storageNotReady(let reason) {
+            #expect(reason.contains(
+                "missing index idx_event_projection_locator"
+            ))
+        }
+    }
+
     // MARK: - Insert column projection
 
     @Test("insert(event:) populates all v6 columns from a fully-fleshed Event")

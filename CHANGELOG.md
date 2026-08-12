@@ -3,6 +3,25 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.15] — 2026-08-12
+
+### Cold-restart audit correction
+- **Finalized schema-v8 stores no longer re-enter transition-only storage
+  gates.** EventStore now checks the durable `schema_finalized` marker and
+  validates the complete journal schema, rollback barrier and DML guards before
+  bypassing obsolete transition DDL, scratch-space and TRUNCATE-checkpoint
+  requirements. A healthy dashboard reader can therefore pin retained WAL
+  frames without turning every daemon cold start into `storage_not_ready`.
+- **A finalization marker never weakens fail-closed validation.** Portable
+  regressions prove that a finalized store reopens with a genuinely pinned WAL
+  while a forged or incomplete finalized schema is rejected. A disposable copy
+  of the installed rc.14 334-MiB event family also completed the full journal
+  and FTS pre-producer recovery under rc.14's measured transition ceiling.
+
+rc.14 passed clean CI, signing, notarization and containment, but its installed
+cold-restart audit exposed this ordering defect. It was rejected and never
+published; rc.15 supersedes it.
+
 ## [1.21.6-rc.14] — 2026-08-12
 
 ### Audit retest corrections

@@ -796,6 +796,26 @@ public actor EventStore {
         "idx_events_parent_exe_ts",
         "idx_events_ai_session",
     ]
+    /// Read-only inventory that a durable `schema_finalized = 1` marker must
+    /// prove before routine reopen may bypass rc.12 -> rc.13 transition work.
+    /// The pre-producer recovery path repeats this validation and adds the
+    /// full FTS external-content integrity check before any producer starts.
+    private static let finalizedJournalSchemaObjects: [(String, String)] = [
+        ("idx_events_timestamp", "view"),
+        ("idx_events_cat_sev_ts", "index"),
+        ("idx_event_projection_timestamp", "index"),
+        ("idx_event_projection_locator", "index"),
+        ("idx_event_projection_victim", "index"),
+        ("event_journal_blocks", "table"),
+        ("event_journal_terminal_revisions", "table"),
+        ("event_journal_projection_promotions", "table"),
+        ("event_journal_payload_poison", "table"),
+        ("event_journal_inherited_loss", "table"),
+        ("event_aggregate_gaps", "table"),
+        ("event_projection_coverage", "table"),
+        ("event_projection_block_coverage", "table"),
+        ("event_storage_state", "table"),
+    ]
     private static let rollbackBarrierViewSQL =
         "CREATE VIEW idx_events_timestamp AS SELECT 'maccrab_rc13_write_barrier' AS marker"
     private struct RollbackGuardDefinition: Sendable {
@@ -2295,6 +2315,18 @@ public actor EventStore {
         // admission; then install the bounded additive v8 metadata/tables the
         // same way. Every boundary is idempotent and crash-resumable.
         if !isReadOnly, existingEventSubstrate {
+            // A completed schema-v8 transition is a validation-only reopen.
+            // Probe its durable marker before any TRUNCATE checkpoint or
+            // transaction-reserve gate: a dashboard reader may legitimately
+            // pin a healthy WAL, and no transition mutation remains to justify
+            // making that pin a permanent cold-start failure. Never trust the
+            // marker alone; its exact final schema inventory and rollback
+            // guards must still be present before this fast path is allowed.
+            let journalSchemaIsFinalized = try Self
+                .journalSchemaIsFinalized(on: handle)
+            if journalSchemaIsFinalized {
+                try Self.validateFinalizedJournalSchemaInventory(on: handle)
+            }
             // Daemon startup historically opens with the full 420-MiB combined
             // transition envelope and narrows it only after measuring legacy
             // evidence. Never let journal DDL borrow that later alert-owned
@@ -2412,7 +2444,11 @@ public actor EventStore {
                 return try transitionBoundaryIsDrained()
             }
 
-            journalTransitionReady = try transitionBoundaryIsDrained()
+            if journalSchemaIsFinalized {
+                journalTransitionReady = true
+            } else {
+                journalTransitionReady = try transitionBoundaryIsDrained()
+            }
             func installRollbackBarrier() throws -> Bool {
                 if let legacyAlerts = try Self.schemaObject(
                     on: handle,
@@ -2564,14 +2600,14 @@ public actor EventStore {
                 )
                 return try transitionBoundaryIsDrained()
             }
-            if journalTransitionReady {
+            if !journalSchemaIsFinalized, journalTransitionReady {
                 journalTransitionReady = try installRollbackBarrier()
             }
             // Install the additive journal substrate first. If one legacy
             // index is too large to drop within the transaction reserve, a
             // later pre-producer transcode can empty it before retrying the
             // idempotent DROP; the upgrade never has to guess at scratch.
-            if journalTransitionReady,
+            if !journalSchemaIsFinalized, journalTransitionReady,
                let journalMigration = Self.schemaMigrations.first(where: {
                 $0.version == 8
             }) {
@@ -2586,7 +2622,7 @@ public actor EventStore {
                     }
                 }
             }
-            if journalTransitionReady {
+            if !journalSchemaIsFinalized, journalTransitionReady {
                 var singletonStatement: OpaquePointer?
                 let singletonPrepare = sqlite3_prepare_v2(
                     handle,
@@ -2610,7 +2646,7 @@ public actor EventStore {
                     )
                 }
             }
-            if journalTransitionReady {
+            if !journalSchemaIsFinalized, journalTransitionReady {
                 func indexDropEstimate(_ name: String) throws -> Int64 {
                     var statement: OpaquePointer?
                     let rc = sqlite3_prepare_v2(
@@ -2677,37 +2713,6 @@ public actor EventStore {
                     "event journal transition is waiting for a drained, cap-bounded boundary"
                 )
             }
-            var finalizedStatement: OpaquePointer?
-            let finalizedPrepare = sqlite3_prepare_v2(
-                handle,
-                "SELECT schema_finalized FROM event_journal_migration WHERE singleton = 1",
-                -1,
-                &finalizedStatement,
-                nil
-            )
-            guard finalizedPrepare == SQLITE_OK, let finalizedStatement else {
-                sqlite3_finalize(finalizedStatement)
-                throw EventStoreError.prepareFailed(
-                    "event journal finalization admission probe failed"
-                )
-            }
-            let finalizedStep = sqlite3_step(finalizedStatement)
-            guard finalizedStep == SQLITE_ROW || finalizedStep == SQLITE_DONE else {
-                sqlite3_finalize(finalizedStatement)
-                throw EventStoreError.stepFailed(
-                    "event journal finalization admission probe failed"
-                )
-            }
-            let journalSchemaIsFinalized = finalizedStep == SQLITE_ROW
-                && sqlite3_column_int(finalizedStatement, 0) == 1
-            guard finalizedStep == SQLITE_DONE
-                    || sqlite3_step(finalizedStatement) == SQLITE_DONE else {
-                sqlite3_finalize(finalizedStatement)
-                throw EventStoreError.decodingFailed(
-                    "event journal finalization admission marker is duplicated"
-                )
-            }
-            sqlite3_finalize(finalizedStatement)
             if !writerInitializationAllowed, !journalSchemaIsFinalized,
                var current = admission {
                 do {
@@ -3086,6 +3091,81 @@ public actor EventStore {
             .joined(separator: " ")
             .replacingOccurrences(of: "if not exists ", with: "")
             .trimmingCharacters(in: CharacterSet(charactersIn: ";"))
+    }
+
+    /// Read the crash-resumable journal finalization marker without changing
+    /// the database. A pre-v8 or partial-v8 store legitimately has no table or
+    /// singleton yet and must take the ordinary transition path.
+    private static func journalSchemaIsFinalized(
+        on db: OpaquePointer
+    ) throws -> Bool {
+        guard let object = try schemaObject(
+            on: db,
+            named: "event_journal_migration"
+        ) else { return false }
+        guard object.type == "table" else {
+            throw EventStoreError.decodingFailed(
+                "event_journal_migration is not a table"
+            )
+        }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT schema_finalized FROM event_journal_migration WHERE singleton = 1",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            sqlite3_finalize(statement)
+            throw EventStoreError.prepareFailed(
+                "event journal finalization admission probe failed"
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+        let first = sqlite3_step(statement)
+        if first == SQLITE_DONE { return false }
+        guard first == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "event journal finalization admission probe failed"
+            )
+        }
+        let value = sqlite3_column_int(statement, 0)
+        guard value == 0 || value == 1 else {
+            throw EventStoreError.decodingFailed(
+                "event journal finalization marker is invalid"
+            )
+        }
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw EventStoreError.decodingFailed(
+                "event journal finalization admission marker is duplicated"
+            )
+        }
+        return value == 1
+    }
+
+    /// A finalization marker authorizes bypassing transition-only checkpoint
+    /// and scratch gates only when its immutable schema claims are still true.
+    /// This is deliberately read-only; full FTS/content validation remains at
+    /// the bounded pre-producer recovery boundary.
+    private static func validateFinalizedJournalSchemaInventory(
+        on db: OpaquePointer
+    ) throws {
+        for name in supersededEventIndexes {
+            guard try schemaObject(on: db, named: name) == nil else {
+                throw EventStoreError.storageNotReady(
+                    "superseded event index \(name) remains after finalized transcode"
+                )
+            }
+        }
+        for (name, expectedType) in finalizedJournalSchemaObjects {
+            guard let object = try schemaObject(on: db, named: name),
+                  object.type == expectedType else {
+                throw EventStoreError.storageNotReady(
+                    "final event journal schema is missing \(expectedType) \(name)"
+                )
+            }
+        }
+        try validateRollbackProtection(on: db)
     }
 
     private static func missingRollbackGuards(
@@ -13001,39 +13081,8 @@ public actor EventStore {
             try requireJournalRecoveryBoundary()
         }
 
-        for name in Self.supersededEventIndexes {
-            guard try Self.schemaObject(on: db, named: name) == nil else {
-                throw EventStoreError.storageNotReady(
-                    "superseded event index \(name) remains after transcode"
-                )
-            }
-        }
-        let required: [(String, String)] = [
-            ("idx_events_timestamp", "view"),
-            ("idx_events_cat_sev_ts", "index"),
-            ("idx_event_projection_timestamp", "index"),
-            ("idx_event_projection_locator", "index"),
-            ("idx_event_projection_victim", "index"),
-            ("event_journal_blocks", "table"),
-            ("event_journal_terminal_revisions", "table"),
-            ("event_journal_projection_promotions", "table"),
-            ("event_journal_payload_poison", "table"),
-            ("event_journal_inherited_loss", "table"),
-            ("event_aggregate_gaps", "table"),
-            ("event_projection_coverage", "table"),
-            ("event_projection_block_coverage", "table"),
-            ("event_storage_state", "table"),
-        ]
-        for (name, expectedType) in required {
-            guard let object = try Self.schemaObject(on: db, named: name),
-                  object.type == expectedType else {
-                throw EventStoreError.storageNotReady(
-                    "final event journal schema is missing \(expectedType) \(name)"
-                )
-            }
-        }
+        try Self.validateFinalizedJournalSchemaInventory(on: db)
         try validateFTSExternalContentIntegrity()
-        try Self.validateRollbackProtection(on: db)
         guard !alreadyFinalized else { return }
 
         // This path is also taken after a crash immediately following the last
