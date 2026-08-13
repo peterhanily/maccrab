@@ -399,7 +399,9 @@ struct EventStoreSchemaV6Tests {
             nil
         ) == SQLITE_OK)
         let readerHandle = try #require(reader)
-        defer { sqlite3_close(readerHandle) }
+        defer {
+            if let reader { sqlite3_close(reader) }
+        }
         #expect(sqlite3_exec(
             readerHandle,
             "BEGIN",
@@ -407,7 +409,11 @@ struct EventStoreSchemaV6Tests {
             nil,
             nil
         ) == SQLITE_OK)
-        defer { sqlite3_exec(readerHandle, "ROLLBACK", nil, nil, nil) }
+        defer {
+            if let reader {
+                sqlite3_exec(reader, "ROLLBACK", nil, nil, nil)
+            }
+        }
         var pinnedStatement: OpaquePointer?
         #expect(sqlite3_prepare_v2(
             readerHandle,
@@ -417,7 +423,9 @@ struct EventStoreSchemaV6Tests {
             nil
         ) == SQLITE_OK)
         let pinnedHandle = try #require(pinnedStatement)
-        defer { sqlite3_finalize(pinnedHandle) }
+        defer {
+            if let pinnedStatement { sqlite3_finalize(pinnedStatement) }
+        }
         #expect(sqlite3_step(pinnedHandle) == SQLITE_ROW)
 
         try await bootstrap?.insert(event: Self.makeEvent(
@@ -434,7 +442,37 @@ struct EventStoreSchemaV6Tests {
         // active reader may pin those healthy WAL frames, but it must not turn
         // every daemon cold start into storage_not_ready.
         let reopened = try EventStore(path: path, storagePolicy: policy)
+        let recovery = try await reopened.recoverJournalBeforeProducers()
+        #expect(recovery.complete)
+        // Startup immediately drains expired blocks after journal recovery.
+        // A dashboard reader pinning the healthy retained WAL must defer that
+        // routine retention sweep rather than crash-loop the system extension.
+        #expect(try await reopened.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 1_024
+        ) == 0)
         #expect(try await reopened.count() == 1)
+
+        sqlite3_finalize(pinnedHandle)
+        pinnedStatement = nil
+        #expect(sqlite3_exec(
+            readerHandle,
+            "ROLLBACK",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        sqlite3_close(readerHandle)
+        reader = nil
+        #expect(try await reopened.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 1_024
+        ) == 1)
+        #expect(try await reopened.count() == 0)
     }
 
     @Test("Finalized marker cannot bypass an incomplete journal schema")

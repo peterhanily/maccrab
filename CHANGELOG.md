@@ -3,6 +3,25 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.16] — 2026-08-13
+
+### Reader-pinned startup retention correction
+- **Routine journal expiry now defers cleanly behind a read-only WAL pin.** The
+  pre-producer retention sweep proves the SQLite-family cap and requires a
+  drained WAL before beginning any rollup/delete transaction. If a dashboard
+  or other reader still owns the prior snapshot, expiry returns no work and a
+  later sweep retries after the reader releases it; the Endpoint Security
+  extension no longer treats that normal read concurrency as fatal storage
+  corruption or enters a restart loop.
+- **Pinned-WAL coverage now exercises the complete startup sequence.** The
+  regression reopens a finalized journal, runs pre-producer recovery, attempts
+  startup expiry while a real SQLite reader pins retained WAL frames, proves
+  that no evidence moved, releases the reader, and proves expiry then converges.
+
+rc.15 passed clean CI, signing and notarization, but its installed-host cold
+restart exposed the separate startup-expiry boundary above. It was rejected and
+never published; rc.16 supersedes it.
+
 ## [1.21.6-rc.15] — 2026-08-12
 
 ### Cold-restart audit correction

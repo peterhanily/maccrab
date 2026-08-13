@@ -12979,12 +12979,8 @@ public actor EventStore {
         return snapshot
     }
 
-    private func requireJournalRecoveryBoundary() throws {
-        guard walCheckpointTruncate() else {
-            throw EventStoreError.storageNotReady(
-                "event journal recovery is waiting for a reader-pinned WAL boundary"
-            )
-        }
+    private func journalRecoveryBoundaryIsDrained() throws -> Bool {
+        let drained = walCheckpointTruncate()
         let footprint = try SQLitePersistentStoreAdmission.measureFamily(
             databasePath
         )
@@ -12993,6 +12989,15 @@ public actor EventStore {
         guard footprint <= cap else {
             throw EventStoreError.storageNotReady(
                 "event journal recovery family footprint \(footprint) exceeds transition cap \(cap)"
+            )
+        }
+        return drained
+    }
+
+    private func requireJournalRecoveryBoundary() throws {
+        guard try journalRecoveryBoundaryIsDrained() else {
+            throw EventStoreError.storageNotReady(
+                "event journal recovery is waiting for a reader-pinned WAL boundary"
             )
         }
     }
@@ -13516,6 +13521,13 @@ public actor EventStore {
             )
         }
         try ensureJournalIndex()
+        // Expiry is routine retention, not schema recovery. A dashboard or
+        // other read-only client may pin healthy WAL frames indefinitely. Do
+        // not begin a WAL-producing rollup transaction until the prior
+        // boundary drains; returning zero makes the startup/timer caller stop
+        // this sweep without treating an ordinary reader as storage failure.
+        // The family-cap measurement remains fail-closed.
+        guard try journalRecoveryBoundaryIsDrained() else { return 0 }
         if journalExpirySummaryCutoff != cutoff {
             journalExpirySummaryCutoff = cutoff
             journalExpirySummaryCursor = 0
