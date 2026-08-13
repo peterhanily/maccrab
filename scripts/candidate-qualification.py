@@ -32,12 +32,59 @@ import shutil
 import signal
 import socket
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
 import time
 from typing import Any, Dict, Iterable, List, Mapping, NoReturn, Sequence, Tuple
+
+
+class DarwinRUsageInfoV4(ctypes.Structure):
+    """Exact macOS ``struct rusage_info_v4`` from ``sys/resource.h``.
+
+    Keep this typed instead of using an oversized byte guess: ``proc_pid_rusage``
+    writes the complete 296-byte structure. A 256-byte buffer corrupts Python's
+    heap by 40 bytes and can surface only later during interpreter finalization.
+    """
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_cpu_time_qos_default", ctypes.c_uint64),
+        ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+        ("ri_cpu_time_qos_background", ctypes.c_uint64),
+        ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+        ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+        ("ri_billed_system_time", ctypes.c_uint64),
+        ("ri_serviced_system_time", ctypes.c_uint64),
+        ("ri_logical_writes", ctypes.c_uint64),
+        ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+        ("ri_instructions", ctypes.c_uint64),
+        ("ri_cycles", ctypes.c_uint64),
+        ("ri_billed_energy", ctypes.c_uint64),
+        ("ri_serviced_energy", ctypes.c_uint64),
+        ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+        ("ri_runnable_time", ctypes.c_uint64),
+    ]
 
 
 CANDIDATE_SCHEMA = "com.maccrab.release-candidate.v1"
@@ -3563,6 +3610,14 @@ def normalized_runtime_sample(
     boundaries["sequence-journal"] = published_conservation_boundary(
         heartbeat, "sequence_journal_conservation", "heartbeat"
     )
+    pending_steps_current = heartbeat_counter(
+        heartbeat, "sequence_pending_steps_current", "heartbeat"
+    )
+    if boundaries["sequence-journal"]["queued"] != pending_steps_current:
+        fail(
+            "heartbeat.sequence_journal_conservation.queued does not match "
+            "heartbeat.sequence_pending_steps_current"
+        )
 
     graph = object_value(
         heartbeat.get("tracegraph_storage_admission"),
@@ -3831,7 +3886,13 @@ def runtime_readiness_failures(
         in_flight = int_value(
             row.get("in_flight"), f"{path}.conservation.{name}.in_flight"
         )
-        if queued or in_flight:
+        # The sequence journal's `queued` gauge is the durable working set of
+        # out-of-order later steps waiting for an earlier step. Those entries
+        # can legitimately span the entire qualification epoch and are not an
+        # asynchronous writer backlog. Its producer is actor-synchronous and
+        # publishes `in_flight=0`; conservation, shed/eviction, continuity and
+        # the exact queued/current cross-check above gate its health.
+        if in_flight or (queued and name != "sequence-journal"):
             pending.append(f"{name} queued={queued} in_flight={in_flight}")
 
     if sample.get("event_terminal_revision_conservation") is not True:
@@ -5063,22 +5124,20 @@ def darwin_process_metrics(pid: int) -> Dict[str, Any]:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     except OSError as exc:
         fail(f"libproc is unavailable: {exc}")
-    buffer = ctypes.create_string_buffer(256)
+    usage = DarwinRUsageInfoV4()
     libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     libproc.proc_pid_rusage.restype = ctypes.c_int
-    if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:
+    if libproc.proc_pid_rusage(pid, 4, ctypes.byref(usage)) != 0:
         fail(f"cannot read rusage for engine PID {pid}")
-    raw = buffer.raw
-
-    def u64(offset: int) -> int:
-        return int(struct.unpack_from("=Q", raw, offset)[0])
 
     if path.is_symlink() or not path.is_file():
         fail("installed engine executable is missing, non-regular, or redirected")
     return {
-        "engine_cpu_seconds_total": (u64(16) + u64(24)) / 1_000_000_000.0,
-        "engine_rss_bytes": u64(64),
-        "engine_disk_write_bytes_total": u64(152),
+        "engine_cpu_seconds_total": (
+            int(usage.ri_user_time) + int(usage.ri_system_time)
+        ) / 1_000_000_000.0,
+        "engine_rss_bytes": int(usage.ri_resident_size),
+        "engine_disk_write_bytes_total": int(usage.ri_diskio_byteswritten),
         "executable_path": str(path),
         "executable_sha256": sha256_file(path),
     }

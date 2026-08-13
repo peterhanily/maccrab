@@ -3,6 +3,24 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6-rc.17] — 2026-08-13
+
+### Installed-host qualification correction
+- **Durable sequence working state no longer masquerades as an undrained
+  writer queue.** The runtime recorder now permits nonzero
+  `sequence_journal_conservation.queued` while continuing to require exact
+  producer conservation, equality with `sequence_pending_steps_current`, zero
+  in-flight work, zero shed/eviction, and nominal continuity. Long-window
+  out-of-order detection state can therefore survive qualification as intended.
+- **Native process sampling now uses the exact macOS rusage-v4 layout.** The
+  recorder replaces its undersized 256-byte buffer with the complete 296-byte
+  `rusage_info_v4` structure, preventing the 40-byte heap overwrite that made
+  Apple Python crash during final garbage collection after a failed capture.
+
+rc.16 passed clean CI, signing, notarization, containment and its installed
+cold-start audit, but the live qualification preflight exposed both recorder
+defects above. It was rejected and never published; rc.17 supersedes it.
+
 ## [1.21.6-rc.16] — 2026-08-13
 
 ### Reader-pinned startup retention correction

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import ctypes
 import datetime as dt
 import hashlib
 import importlib.util
@@ -392,6 +393,9 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "sequence_pending_steps_evicted_total": sample[
                 "sequence_pending_steps_evicted_total"
             ],
+            "sequence_pending_steps_current": boundaries[
+                "sequence-journal"
+            ]["queued"],
             "sequence_journal_conservation": boundaries["sequence-journal"],
             "sequence_state_continuity_maintained": True,
             "sequence_state_continuity_detail": "nominal",
@@ -1195,6 +1199,13 @@ class CandidateQualificationTests(unittest.TestCase):
     def test_complete_report_passes_every_threshold(self) -> None:
         self.validate_runtime()
 
+    def test_darwin_rusage_v4_layout_covers_native_write(self) -> None:
+        self.assertEqual(ctypes.sizeof(qualification.DarwinRUsageInfoV4), 296)
+        self.assertEqual(
+            qualification.DarwinRUsageInfoV4.ri_diskio_byteswritten.offset,
+            152,
+        )
+
     def test_pre_prewarm_readiness_allows_only_uninitialized_llm(self) -> None:
         report = copy.deepcopy(self.runtime)
         observation = report["recorder_observations"][0]
@@ -1238,6 +1249,28 @@ class CandidateQualificationTests(unittest.TestCase):
                 require_drained=True, expected_pid=4321,
                 require_llm_ready=False,
             )
+
+    def test_readiness_allows_durable_sequence_pending_history(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        journal = observation["heartbeat"]["sequence_journal_conservation"]
+        journal["offered"] += 2
+        journal["queued"] += 2
+        observation["heartbeat"]["sequence_pending_steps_current"] += 2
+        self.rederive_sample(report, 0)
+
+        qualification.validate_runtime_readiness(
+            observation, "fixture durable sequence history",
+            phase="fixture durable sequence history", require_drained=True,
+            expected_pid=4321,
+        )
+
+        observation["heartbeat"]["sequence_pending_steps_current"] -= 1
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "sequence_pending_steps_current",
+        ):
+            self.rederive_sample(report, 0)
 
     def test_initial_loss_fails_before_source_probes_or_epoch_sleep(self) -> None:
         report = copy.deepcopy(self.runtime)

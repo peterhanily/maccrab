@@ -208,9 +208,12 @@ queues before prewarm. It permits the one expected never-used-backend state:
 configured schema-2 telemetry with no prior successful request may still report
 `healthy=false`. The recorder then runs the exact alert-only prewarm outside the
 measured epoch. It requires the causal persisted row, accepted telemetry, full
-LLM health, and a complete queue
-drain before setting `start_wall` and capturing offset 0, so prewarm work is not
-counted as an epoch delta. All later samples require full LLM readiness.
+LLM health, and a complete transient-work queue drain before setting
+`start_wall` and capturing offset 0, so prewarm work is not counted as an epoch
+delta. The sequence journal's `queued` gauge is durable detection working state,
+not transient writer work: it may remain nonzero while its conservation ledger,
+exact pending-depth cross-check, continuity state, and zero shed/eviction gates
+hold. All later samples require full LLM readiness.
 
 The recorder fails before starting the 900-second timer when the running engine
 has any cumulative loss/shed/eviction or failed-write counter, an unreachable
