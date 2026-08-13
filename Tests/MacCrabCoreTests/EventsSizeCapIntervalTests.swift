@@ -444,9 +444,39 @@ struct EventsSizeCapIntervalTests {
             encoding: .utf8
         )
         #expect(timers.contains("events_retention_below_forensic_floor"))
+        #expect(timers.contains(
+            "events_retained_lookback_seconds_by_category"
+        ))
         #expect(timers.contains("SequenceEngine does not currently rehydrate from events.db"))
         #expect(!timers.contains("events_retention_below_sequence_floor"))
         #expect(!timers.localizedCaseInsensitiveContains("sequence-rebuild floor"))
+    }
+
+    @Test("retention health uses oldest lookback, not inter-observation span")
+    func retentionHealthUsesOldestLookback() async throws {
+        let (store, directory) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let asOf = Date(timeIntervalSince1970: 100_000)
+        try await insertCat(
+            store,
+            category: .tcc,
+            at: asOf.addingTimeInterval(-900),
+            tag: "tcc-oldest"
+        )
+        try await insertCat(
+            store,
+            category: .tcc,
+            at: asOf.addingTimeInterval(-5),
+            tag: "tcc-newest"
+        )
+
+        let window = try #require(
+            await store.retainedWindowSecondsByCategory(asOf: asOf)[
+                EventCategory.tcc.rawValue
+            ]
+        )
+        #expect(window.spanSeconds == 895)
+        #expect(window.lookbackSeconds == 900)
     }
 
     @Test("setup proves event and alert storage before every producer activation")

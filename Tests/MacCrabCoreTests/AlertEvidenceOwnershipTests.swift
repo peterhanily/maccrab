@@ -6,6 +6,18 @@ import CSQLCipher
 
 @Suite("Alert-owned evidence budget split")
 struct AlertEvidenceOwnershipTests {
+    private actor LeaseHolder {
+        private var lease: EventPipelineMemoryLease?
+
+        init(_ lease: EventPipelineMemoryLease) {
+            self.lease = lease
+        }
+
+        func release() {
+            lease = nil
+        }
+    }
+
     private func tempDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("maccrab-alert-evidence-\(UUID().uuidString)")
@@ -435,6 +447,93 @@ struct AlertEvidenceOwnershipTests {
         ))
         #expect(context.status == .captureFailed)
         #expect(try await store.pendingEvidenceContextCount() == 0)
+    }
+
+    @Test("decode ownership pressure is transient rather than corruption")
+    func decodeOwnershipPressureIsTransient() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: budget
+        )
+        let timestamp = Date(timeIntervalSince1970: 44_500)
+        try await events.insert(event: event(timestamp: timestamp))
+
+        var blocker: EventPipelineMemoryLease? = budget.tryAcquire(
+            bytes: 50 * 1_048_576,
+            owner: .journalPrepared
+        )
+        _ = try #require(blocker)
+        do {
+            _ = try await events.exactAlertEvidenceSnapshot(
+                alertTimestamp: timestamp
+            )
+            Issue.record("expected bounded decode ownership pressure")
+        } catch let error as EventStoreError {
+            guard case .busy = error else {
+                Issue.record("pressure was misclassified as \(error)")
+                return
+            }
+        }
+        blocker = nil
+
+        let recovered = try await events.exactAlertEvidenceSnapshot(
+            alertTimestamp: timestamp
+        )
+        #expect(recovered.candidates.count == 1)
+    }
+
+    @Test("evidence worker retries transient decode ownership pressure")
+    func evidenceRetriesDecodeOwnershipPressure() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: budget
+        )
+        let alerts = try AlertStore(directory: dir.path)
+        let timestamp = Date(timeIntervalSince1970: 44_600)
+        let trigger = event(timestamp: timestamp)
+        try await events.insert(event: trigger)
+
+        var blocker: EventPipelineMemoryLease? = budget.tryAcquire(
+            bytes: 50 * 1_048_576,
+            owner: .journalPrepared
+        )
+        let holder = LeaseHolder(try #require(blocker))
+        blocker = nil
+        let release = Task {
+            try await Task.sleep(for: .milliseconds(75))
+            await holder.release()
+        }
+        let sink = AlertSink(
+            alertStore: alerts,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            eventStore: events,
+            liveMemoryBudget: budget
+        )
+        #expect(try await sink.submit(alert: alert(
+            id: "transient-decode-pressure",
+            event: trigger
+        )))
+        await sink.flushEvidenceCapture()
+        try await release.value
+
+        let stats = await sink.evidenceStats()
+        #expect(stats.failures == 0)
+        #expect(stats.exactContextQueryFailures == 0)
+        #expect(try await alerts.evidenceFor(
+            alertId: "transient-decode-pressure"
+        ).map(\.id) == [trigger.id])
+        let context = try #require(await alerts.evidenceContext(
+            alertId: "transient-decode-pressure"
+        ))
+        #expect(context.status != .captureFailed)
     }
 
     @Test("post-commit evidence uses a bounded single-worker conservation lane")

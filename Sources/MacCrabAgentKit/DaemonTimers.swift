@@ -2747,8 +2747,16 @@ enum DaemonTimers {
             // Publish the actual span, and warn when a category with real volume
             // has fallen under the 15-minute raw-event forensic/correlation floor.
             var retainedSpanByCategory: [String: Int] = [:]
+            var retainedLookbackByCategory: [String: Int] = [:]
             do {
-                retainedSpanByCategory = try await state.eventStore.retainedSpanSecondsByCategory()
+                let retainedWindows = try await state.eventStore
+                    .retainedWindowSecondsByCategory(asOf: categoryCountUntil)
+                retainedSpanByCategory = retainedWindows.mapValues(
+                    \.spanSeconds
+                )
+                retainedLookbackByCategory = retainedWindows.mapValues(
+                    \.lookbackSeconds
+                )
             } catch {
                 // Same rule as above: never block the heartbeat write.
             }
@@ -2758,12 +2766,12 @@ enum DaemonTimers {
             // explicitly avoiding). 1000 retained rows inside 15 minutes is the
             // signature of a pruned firehose, not of a quiet channel.
             let forensicFloorSeconds = EventRetentionFloor.minutes * 60
-            let starvedCategories = retainedSpanByCategory
+            let starvedCategories = retainedLookbackByCategory
                 .filter { $0.value < forensicFloorSeconds && (eventTypeCounts[$0.key] ?? 0) >= 1000 }
                 .keys.sorted()
             if !starvedCategories.isEmpty {
                 let detail = starvedCategories
-                    .map { "\($0)=\(retainedSpanByCategory[$0] ?? 0)s" }
+                    .map { "\($0)=\(retainedLookbackByCategory[$0] ?? 0)s" }
                     .joined(separator: ", ")
                 logger.warning("Event retention BELOW the 15-minute raw-event forensic/correlation floor: \(detail, privacy: .public). Graph reconstruction, cross-process correlation and `hunt` are blind past that window for those categories — the size-cap sweep or storage admission has created an evidence gap. SequenceEngine does not currently rehydrate from events.db; its restart continuity is tracked separately. Do not read this as a quiet host.")
             }
@@ -3955,6 +3963,8 @@ enum DaemonTimers {
                 // categories under the 15-minute raw-event forensic/correlation
                 // floor despite holding real volume.
                 "events_retained_span_seconds_by_category": retainedSpanByCategory,
+                "events_retained_lookback_seconds_by_category":
+                    retainedLookbackByCategory,
                 "events_retention_below_forensic_floor": starvedCategories,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,

@@ -527,6 +527,35 @@ public actor AlertSink {
         startEvidenceWorkerIfNeeded()
     }
 
+    /// Evidence selection shares the process-wide bounded decode budget with
+    /// the live ingestion pipeline. A synchronous offer may therefore lose a
+    /// short race without implying corruption. Keep the durable context row
+    /// pending and retry only explicitly transient EventStore failures; codec,
+    /// authentication, and schema failures remain terminal on their first try.
+    private func exactEvidenceSnapshotWithBoundedRetry(
+        eventStore: EventStore,
+        alertTimestamp: Date,
+        maxRows: Int
+    ) async throws -> ExactAlertEvidenceSnapshot {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        var delay = Duration.milliseconds(10)
+        while true {
+            do {
+                return try await eventStore.exactAlertEvidenceSnapshot(
+                    alertTimestamp: alertTimestamp,
+                    maxRows: maxRows
+                )
+            } catch let error as EventStoreError {
+                guard case .busy = error, clock.now < deadline else {
+                    throw error
+                }
+                try await Task.sleep(for: delay)
+                delay = min(delay * 2, .milliseconds(100))
+            }
+        }
+    }
+
     private func captureEvidence(_ request: EvidenceCaptureRequest) async {
         do {
             try Task.checkCancellation()
@@ -567,8 +596,9 @@ public actor AlertSink {
                 let exactSnapshot: ExactAlertEvidenceSnapshot?
                 var selectionError: (any Error)?
                 do {
-                    exactSnapshot = try await eventStore
-                        .exactAlertEvidenceSnapshot(
+                    exactSnapshot = try await
+                        exactEvidenceSnapshotWithBoundedRetry(
+                        eventStore: eventStore,
                         alertTimestamp: request.timestamp,
                         maxRows: remaining
                     )

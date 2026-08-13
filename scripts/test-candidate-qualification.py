@@ -1726,7 +1726,12 @@ class CandidateQualificationTests(unittest.TestCase):
             time.sleep(0.05)
             qualification.terminate_process_group(process)
             self.assertIsNotNone(process.poll())
-            with self.assertRaises(ProcessLookupError):
+            # The parent is reaped before this probe. On macOS the numeric
+            # process-group ID may already have been reused by an inaccessible
+            # group, in which case signal 0 reports EPERM instead of ESRCH.
+            # Either result proves none of our same-UID workload children
+            # remain signalable in the original group.
+            with self.assertRaises((ProcessLookupError, PermissionError)):
                 os.killpg(process.pid, 0)
         finally:
             if process.poll() is None:

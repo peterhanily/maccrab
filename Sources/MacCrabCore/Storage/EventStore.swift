@@ -481,6 +481,17 @@ public struct EventCategoryCountSnapshot: Sendable, Equatable {
     }
 }
 
+/// Source-time bounds for one retained event category. `spanSeconds` describes
+/// the distance between retained observations; `lookbackSeconds` describes how
+/// far the oldest observation reaches back from the caller's snapshot time.
+/// Retention-health decisions use lookback: an active stream's newest event is
+/// normally behind `asOf`, so its inter-observation span is necessarily shorter
+/// than the retention window even when the full window is present.
+public struct EventCategoryRetentionWindow: Sendable, Equatable {
+    public let spanSeconds: Int
+    public let lookbackSeconds: Int
+}
+
 public struct EventHistogramBin: Sendable, Equatable {
     public let start: Date
     public let count: Int
@@ -5574,6 +5585,10 @@ public actor EventStore {
                     records.append(owned)
                 }
             )
+        } catch EventJournalCodecError.recordWorkspaceUnavailable {
+            throw EventStoreError.busy(
+                "event journal block \(blockID) decode is waiting for bounded record ownership"
+            )
         } catch {
             throw EventStoreError.decodingFailed(
                 "event journal block \(blockID): \(error.localizedDescription)"
@@ -5765,6 +5780,10 @@ public actor EventStore {
                     }
                     selected = owned
                 }
+            )
+        } catch EventJournalCodecError.recordWorkspaceUnavailable {
+            throw EventStoreError.busy(
+                "targeted event journal block \(location.blockID) decode is waiting for bounded record ownership"
             )
         } catch {
             throw EventStoreError.decodingFailed(
@@ -5966,39 +5985,45 @@ public actor EventStore {
         )
         defer { sqlite3_blob_close(payloadBlob) }
         var ownedDelta: OwnedDecodedJournalRecord<EventTerminalDelta>?
-        _ = try EventJournalCodec.decodeRecordsStreaming(
-            codec: codec,
-            rawBytes: rawBytes,
-            expectedDigest: framedDigest,
-            payloadBytes: payloadBytes,
-            expectedRecordCount: 1,
-            workspaceLease: workspace,
-            reader: { offset, destination in
-                guard let base = destination.baseAddress else { return 0 }
-                let rc = sqlite3_blob_read(
-                    payloadBlob,
-                    base,
-                    Int32(destination.count),
-                    Int32(offset)
-                )
-                guard rc == SQLITE_OK else {
-                    throw EventStoreError.stepFailed(
-                        "terminal revision incremental read failed"
+        do {
+            _ = try EventJournalCodec.decodeRecordsStreaming(
+                codec: codec,
+                rawBytes: rawBytes,
+                expectedDigest: framedDigest,
+                payloadBytes: payloadBytes,
+                expectedRecordCount: 1,
+                workspaceLease: workspace,
+                reader: { offset, destination in
+                    guard let base = destination.baseAddress else { return 0 }
+                    let rc = sqlite3_blob_read(
+                        payloadBlob,
+                        base,
+                        Int32(destination.count),
+                        Int32(offset)
                     )
-                }
-                return destination.count
-            },
-            recordLeaseProvider: { _, _ in
-                self.liveMemoryBudget.tryAcquire(
-                    bytes: EventJournalAdmissionValidator
-                        .maximumPreparationWorkspaceBytes,
-                    owner: .journalPrepared
-                )
-            },
-            as: EventTerminalDelta.self,
-            decoder: decoder,
-            consume: { record in ownedDelta = record }
-        )
+                    guard rc == SQLITE_OK else {
+                        throw EventStoreError.stepFailed(
+                            "terminal revision incremental read failed"
+                        )
+                    }
+                    return destination.count
+                },
+                recordLeaseProvider: { _, _ in
+                    self.liveMemoryBudget.tryAcquire(
+                        bytes: EventJournalAdmissionValidator
+                            .maximumPreparationWorkspaceBytes,
+                        owner: .journalPrepared
+                    )
+                },
+                as: EventTerminalDelta.self,
+                decoder: decoder,
+                consume: { record in ownedDelta = record }
+            )
+        } catch EventJournalCodecError.recordWorkspaceUnavailable {
+            throw EventStoreError.busy(
+                "terminal journal revision decode is waiting for bounded record ownership"
+            )
+        }
         guard let ownedDelta,
               !ownedDelta.value.isEmpty,
               let event = try? ownedDelta.value.applying(to: base),
@@ -15717,8 +15742,16 @@ public actor EventStore {
     /// Cheap: MIN/MAX + GROUP BY over the covering `idx_events_cat_sev_ts` /
     /// `idx_events_ts_category` indexes, called at the 30 s heartbeat cadence,
     /// never on the insert path.
-    public func retainedSpanSecondsByCategory() throws -> [String: Int] {
-        try withExactReadSnapshot { _ in
+    public func retainedWindowSecondsByCategory(
+        asOf: Date = Date()
+    ) throws -> [String: EventCategoryRetentionWindow] {
+        let asOfSeconds = asOf.timeIntervalSince1970
+        guard asOfSeconds.isFinite else {
+            throw EventStoreError.decodingFailed(
+                "retained category window has a non-finite snapshot time"
+            )
+        }
+        return try withExactReadSnapshot { _ in
             try ensureJournalIndex()
             try requireGloballyCompleteExactCorpus()
             var bounds: [EventCategory: (minimum: TimeInterval, maximum: TimeInterval)] = [:]
@@ -15750,9 +15783,25 @@ public actor EventStore {
                 )
             }
             return Dictionary(uniqueKeysWithValues: bounds.map {
-                ($0.key.rawValue, Int(max(0, $0.value.maximum - $0.value.minimum)))
+                (
+                    $0.key.rawValue,
+                    EventCategoryRetentionWindow(
+                        spanSeconds: Int(max(
+                            0,
+                            $0.value.maximum - $0.value.minimum
+                        )),
+                        lookbackSeconds: Int(max(
+                            0,
+                            asOfSeconds - $0.value.minimum
+                        ))
+                    )
+                )
             })
         }
+    }
+
+    public func retainedSpanSecondsByCategory() throws -> [String: Int] {
+        try retainedWindowSecondsByCategory().mapValues(\.spanSeconds)
     }
 
     /// Returns the total number of events in the store.
