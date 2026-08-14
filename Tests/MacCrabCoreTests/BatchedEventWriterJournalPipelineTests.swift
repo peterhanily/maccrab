@@ -24,6 +24,9 @@ struct BatchedEventWriterJournalPipelineTests {
 
         let baseMode: BaseMode
         let ensureDelay: Duration?
+        private var ensureBusyAttemptsRemaining: Int
+        private var projectionBusyAttemptsRemaining: Int
+        private var verifyBusyAttemptsRemaining: Int
         private var terminalDeltaBusy: Bool
         private var bases: [UUID: EventJournalIngressPreparation] = [:]
         private var terminals: [UUID: EventJournalIngressPreparation] = [:]
@@ -35,15 +38,25 @@ struct BatchedEventWriterJournalPipelineTests {
         private(set) var terminalAppendCalls = 0
         private(set) var terminalDeltaAppendCalls = 0
         private(set) var ensureCalls = 0
+        private(set) var projectionCalls = 0
         private(set) var verifyCalls = 0
 
         init(
             baseMode: BaseMode = .durable,
             ensureDelay: Duration? = nil,
+            ensureBusyAttempts: Int = 0,
+            projectionBusyAttempts: Int = 0,
+            verifyBusyAttempts: Int = 0,
             terminalDeltaInitiallyBusy: Bool = false
         ) {
             self.baseMode = baseMode
             self.ensureDelay = ensureDelay
+            ensureBusyAttemptsRemaining = max(0, ensureBusyAttempts)
+            projectionBusyAttemptsRemaining = max(
+                0,
+                projectionBusyAttempts
+            )
+            verifyBusyAttemptsRemaining = max(0, verifyBusyAttempts)
             terminalDeltaBusy = terminalDeltaInitiallyBusy
         }
 
@@ -102,6 +115,12 @@ struct BatchedEventWriterJournalPipelineTests {
             reason: EventJournalEnsureReason
         ) async throws -> EventJournalEnsureOutcome {
             ensureCalls += 1
+            if ensureBusyAttemptsRemaining > 0 {
+                ensureBusyAttemptsRemaining -= 1
+                throw EventStoreError.busy(
+                    "fixture bounded record ownership"
+                )
+            }
             if let ensureDelay {
                 try await Task.sleep(for: ensureDelay)
             }
@@ -251,6 +270,13 @@ struct BatchedEventWriterJournalPipelineTests {
             eventID: UUID,
             reviewedMatches: [RuleMatch]
         ) async throws -> ProjectionPromotionOutcome {
+            projectionCalls += 1
+            if projectionBusyAttemptsRemaining > 0 {
+                projectionBusyAttemptsRemaining -= 1
+                throw EventStoreError.busy(
+                    "fixture projection ownership contention"
+                )
+            }
             let merged = ReviewedRuleMatches.merged(
                 promoted[eventID] ?? [],
                 reviewedMatches
@@ -272,6 +298,12 @@ struct BatchedEventWriterJournalPipelineTests {
             canonicalSHA256: Data
         ) async throws -> EventJournalVerification {
             verifyCalls += 1
+            if verifyBusyAttemptsRemaining > 0 {
+                verifyBusyAttemptsRemaining -= 1
+                throw EventStoreError.busy(
+                    "fixture verification ownership contention"
+                )
+            }
             guard let base = bases[eventID] else {
                 return EventJournalVerification(
                     disposition: .missing(eventID: eventID),
@@ -659,6 +691,92 @@ struct BatchedEventWriterJournalPipelineTests {
         )
         #expect(await writer.awaitJournalAdmission(publicLookalike)
             == .mismatchedReceipt)
+    }
+
+    @Test("transient exact ensure contention retries without an evidence gap")
+    func transientExactEnsureContentionRetries() async throws {
+        let store = JournalStoreFake(ensureBusyAttempts: 4)
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
+        let target = event(90)
+
+        #expect(await writer.ensureJournalAdmission(
+            target,
+            timeout: .seconds(1)
+        ) == .verified)
+        #expect(await store.ensureCalls == 5)
+    }
+
+    @Test("transient security repair contention retries the identity receipt")
+    func transientSecurityRepairContentionRetries() async throws {
+        let store = JournalStoreFake(
+            baseMode: .fail,
+            ensureBusyAttempts: 4
+        )
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
+        let receipt = try #require(await writer.enqueuePrepared(
+            EventJournalAdmissionValidator.prepare(event(91))
+        ))
+        await writer.shutdown()
+
+        #expect(await writer.awaitJournalAdmission(
+            receipt,
+            timeout: .seconds(1)
+        ) == .verified)
+        #expect(await store.ensureCalls == 5)
+        #expect((await writer.telemetrySnapshot())
+            .earliestJournalGapGeneration == nil)
+    }
+
+    @Test("transient verification and projection contention both retry")
+    func transientVerificationAndProjectionContentionRetry() async throws {
+        let store = JournalStoreFake(
+            projectionBusyAttempts: 4,
+            verifyBusyAttempts: 4
+        )
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            admissionResolutionCapacity: 1,
+            liveMemoryBudget: .isolatedProductionEquivalentForTesting()
+        )
+        let target = event(92)
+        let receipt = try #require(await writer.enqueuePrepared(
+            EventJournalAdmissionValidator.prepare(target)
+        ))
+        _ = await writer.enqueuePrepared(
+            try EventJournalAdmissionValidator.prepare(event(93))
+        )
+        await writer.shutdown()
+
+        #expect(await writer.awaitJournalAdmission(
+            receipt,
+            timeout: .seconds(1)
+        ) == .verified)
+        #expect(await store.verifyCalls == 5)
+
+        let reviewed = RuleMatch(
+            ruleId: "retry.projection",
+            ruleName: "Retry projection",
+            severity: .medium,
+            description: "fixture",
+            mitreTechniques: [],
+            tags: []
+        )
+        #expect(await writer.promoteProjection(
+            event: target,
+            reviewedMatches: [reviewed],
+            admission: receipt
+        ))
+        #expect(await store.projectionCalls == 5)
+        #expect(await store.reviewedMatches(target.id) == [reviewed])
     }
 
     @Test("sustained permanent failure keeps repair metadata bounded")

@@ -13035,6 +13035,17 @@ public actor EventStore {
         let cap = storagePolicy?.maxFootprintBytes
             ?? Self.defaultStoragePolicy(for: databasePath).maxFootprintBytes
         guard footprint <= cap else {
+            // A reader can pin otherwise checkpointable WAL bytes above the
+            // transition cap.  That condition is operational contention, not
+            // a permanent cap violation: startup may retry the same
+            // crash-resumable boundary without beginning another mutation.
+            // Once the checkpoint drains, an over-cap family is real and must
+            // continue to fail closed as storageNotReady.
+            if !drained {
+                throw EventStoreError.busy(
+                    "reader-pinned event journal recovery family footprint \(footprint) exceeds transition cap \(cap)"
+                )
+            }
             throw EventStoreError.storageNotReady(
                 "event journal recovery family footprint \(footprint) exceeds transition cap \(cap)"
             )

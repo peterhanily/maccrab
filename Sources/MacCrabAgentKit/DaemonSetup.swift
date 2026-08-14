@@ -763,8 +763,19 @@ enum DaemonSetup {
         // active and before any collector can produce a new Event.
         let journalRecovery: EventStore.EventJournalRecoverySnapshot
         do {
-            journalRecovery = try await eventStore
-                .recoverJournalBeforeProducers()
+            journalRecovery = try await
+                retryTransientEventStoreStartupOperation(
+                    onRetry: { _ in
+                        Self.writeBootPhase(
+                            supportDir: supportDir,
+                            phase: "starting",
+                            startedAt: startedAt
+                        )
+                    },
+                    operation: {
+                        try await eventStore.recoverJournalBeforeProducers()
+                    }
+                )
         } catch {
             try DaemonBootstrap.failPreIngestionStorage(
                 supportDir: supportDir,
@@ -785,13 +796,34 @@ enum DaemonSetup {
         logger.notice("EventStore journal migration and integrity proved before generic cap recovery: source=\(journalRecovery.sourceEvents), migrated=\(journalRecovery.migratedEvents), expired=\(journalRecovery.rolledExpiredEvents), corrupt_preserved=\(journalRecovery.corruptPreservedEvents)")
         do {
             var expired = 0
+            var batches = 0
             while true {
-                let batch = try await eventStore.expireJournalBlocks(
-                    retainedThrough: Date(),
-                    maximumBlocks: 1_024
+                let batch = try await
+                    retryTransientEventStoreStartupOperation(
+                        onRetry: { _ in
+                            Self.writeBootPhase(
+                                supportDir: supportDir,
+                                phase: "starting",
+                                startedAt: startedAt
+                            )
+                        },
+                        operation: {
+                            try await eventStore.expireJournalBlocks(
+                                retainedThrough: Date(),
+                                maximumBlocks: 1_024
+                            )
+                        }
                 )
                 expired += batch
                 if batch == 0 { break }
+                batches += 1
+                if batches.isMultiple(of: 64) {
+                    Self.writeBootPhase(
+                        supportDir: supportDir,
+                        phase: "starting",
+                        startedAt: startedAt
+                    )
+                }
                 await Task.yield()
             }
             if expired > 0 {
@@ -810,7 +842,14 @@ enum DaemonSetup {
             dbPath: supportDir + "/events.db",
             boundary: eventStartupBoundary,
             processFloorMinutes: bootStorage.processEventsFloorMinutes,
-            retentionBudgetHealth: eventRetentionBudgetHealth
+            retentionBudgetHealth: eventRetentionBudgetHealth,
+            onTransientPinRetry: { _ in
+                Self.writeBootPhase(
+                    supportDir: supportDir,
+                    phase: "starting",
+                    startedAt: startedAt
+                )
+            }
         )
         guard eventStartupRecovery.writableBeforeProducers else {
             let detail = [

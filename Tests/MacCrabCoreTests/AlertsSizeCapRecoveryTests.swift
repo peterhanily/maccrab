@@ -83,6 +83,7 @@ struct AlertsSizeCapRecoveryTests {
         private let maintenanceResult:
             PreIngestionStorageMaintenanceResult
         private let succeedsOnPass: Int?
+        private let transientPinPasses: Int
 
         init(
             footprint: Int64,
@@ -90,19 +91,24 @@ struct AlertsSizeCapRecoveryTests {
             didRun: Bool = true,
             maintenanceResult:
                 PreIngestionStorageMaintenanceResult? = nil,
-            succeedsOnPass: Int? = nil
+            succeedsOnPass: Int? = nil,
+            transientPinPasses: Int = 0
         ) {
             self.footprint = footprint
             self.decrementBytes = decrementBytes
             self.maintenanceResult = maintenanceResult
                 ?? (didRun ? .ran : .didNotRun)
             self.succeedsOnPass = succeedsOnPass
+            self.transientPinPasses = max(0, transientPinPasses)
         }
 
         func measure() -> Int64 { footprint }
 
         func maintain() -> PreIngestionStorageMaintenanceResult {
             maintenancePasses += 1
+            if maintenancePasses <= transientPinPasses {
+                return .transientlyPinned
+            }
             if maintenanceResult == .ran {
                 footprint = max(0, footprint - decrementBytes)
             }
@@ -299,6 +305,76 @@ struct AlertsSizeCapRecoveryTests {
                 "a pinned preflight must never enter the deletion path")
         #expect(await pinned.maintenancePasses == 3)
         #expect(await pinned.reprobes == 3)
+    }
+
+    @Test("reader-pin grace converges when a dashboard snapshot releases")
+    func boundedRecoveryOutwaitsReleasedReaderWithoutDeletingDuringPin() async {
+        let pinned = RecoveryLoopFixture(
+            footprint: 300,
+            decrementBytes: 50,
+            succeedsOnPass: 5,
+            transientPinPasses: 4
+        )
+        let result = await runBoundedPreIngestionStorageRecovery(
+            component: "released-reader",
+            maximumPasses: 6,
+            maximumPinnedRetries: 5,
+            pinnedRetryDelayNanoseconds: 0,
+            measureFootprint: { await pinned.measure() },
+            maintenance: { await pinned.maintain() },
+            reprobeOrdinaryAdmission: { try await pinned.reprobe() }
+        )
+
+        #expect(result.writableBeforeProducers)
+        #expect(result.passes == 5)
+        #expect(result.lastFootprintBytes == 250,
+                "only the post-release maintenance pass may reclaim bytes")
+        #expect(await pinned.maintenancePasses == 5)
+        #expect(await pinned.reprobes == 5)
+    }
+
+    @Test("startup operation retries busy but never permanent storage failure")
+    func startupOperationRetriesOnlyTypedBusy() async throws {
+        let busy = RecoveryLoopFixture(
+            footprint: 0,
+            decrementBytes: 0,
+            succeedsOnPass: 3
+        )
+        let value: Int = try await retryTransientEventStoreStartupOperation(
+            maximumAttempts: 4,
+            retryDelayNanoseconds: 0,
+            operation: {
+                let attempt = await busy.maintain()
+                _ = attempt
+                do {
+                    try await busy.reprobe()
+                    return 42
+                } catch {
+                    throw EventStoreError.busy("fixture reader pin")
+                }
+            }
+        )
+        #expect(value == 42)
+        #expect(await busy.maintenancePasses == 3)
+
+        var permanentAttempts = 0
+        do {
+            let _: Int = try await retryTransientEventStoreStartupOperation(
+                maximumAttempts: 4,
+                retryDelayNanoseconds: 0,
+                operation: {
+                    permanentAttempts += 1
+                    throw EventStoreError.storageNotReady("fixture permanent")
+                }
+            )
+            Issue.record("permanent startup failure unexpectedly succeeded")
+        } catch let error as EventStoreError {
+            guard case .storageNotReady = error else {
+                Issue.record("wrong permanent error: \(error)")
+                return
+            }
+        }
+        #expect(permanentAttempts == 1)
     }
 
     @Test("startup reclaims the writable target-to-hard interval")

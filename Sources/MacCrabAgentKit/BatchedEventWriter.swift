@@ -1828,6 +1828,31 @@ actor BatchedEventWriter {
         return false
     }
 
+    /// Journal evidence reads and idempotent ensures can briefly contend with
+    /// another bounded record decode. That contention is not an insert loss:
+    /// retry it inside the caller's finite evidence window and let only a
+    /// permanent failure reach StorageErrorTracker.
+    private func retryTransientJournalOperation<T>(
+        timeout: Duration,
+        operation: () async throws -> T
+    ) async throws -> T {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        var delayMilliseconds: Int64 = 10
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await operation()
+            } catch let error as EventStoreError where isTransient(error) {
+                guard clock.now < deadline else { throw error }
+                try await Task.sleep(
+                    for: .milliseconds(delayMilliseconds)
+                )
+                delayMilliseconds = min(delayMilliseconds * 2, 100)
+            }
+        }
+    }
+
     /// Drain the buffer to SQLite in batch transactions until empty.
     /// Reentrancy-safe: each pass snapshots + clears the buffer BEFORE the
     /// `await`, so concurrent `enqueue`s append to a fresh buffer and a second
@@ -2480,11 +2505,15 @@ actor BatchedEventWriter {
         guard let journalStore else { return .unavailable }
         let current: EventJournalContextStatus
         do {
-            let outcome = try await journalStore.ensureJournaled(
-                preparedHandle.preparation,
-                lane: EventPipelineLane.finalLane(for: event),
-                reason: .securityRelevant
-            )
+            let outcome = try await retryTransientJournalOperation(
+                timeout: timeout
+            ) {
+                try await journalStore.ensureJournaled(
+                    preparedHandle.preparation,
+                    lane: EventPipelineLane.finalLane(for: event),
+                    reason: .securityRelevant
+                )
+            }
             switch outcome {
             case .durable(let eventID):
                 current = eventID == event.id ? .verified : .failed
@@ -2494,6 +2523,10 @@ actor BatchedEventWriter {
             case .filtered(let eventID):
                 current = eventID == event.id ? .filtered : .failed
             }
+        } catch let error as EventStoreError where isTransient(error) {
+            return .timedOut
+        } catch is CancellationError {
+            return .timedOut
         } catch {
             await StorageErrorTracker.shared.recordEventError(error)
             return .failed
@@ -2532,11 +2565,19 @@ actor BatchedEventWriter {
             }
         }
         do {
-            _ = try await journalStore.promoteProjection(
-                eventID: event.id,
-                reviewedMatches: reviewed
-            )
+            _ = try await retryTransientJournalOperation(
+                timeout: .seconds(2)
+            ) {
+                try await journalStore.promoteProjection(
+                    eventID: event.id,
+                    reviewedMatches: reviewed
+                )
+            }
             return true
+        } catch let error as EventStoreError where isTransient(error) {
+            return false
+        } catch is CancellationError {
+            return false
         } catch {
             await StorageErrorTracker.shared.recordEventError(error)
             return false
@@ -2602,12 +2643,18 @@ actor BatchedEventWriter {
                     // the still-live copied preparation.
                     defer { _ = borrow.preparation.canonicalJSON.count }
                     let prepared = borrow.preparation
-                    let outcome = try await journalStore.ensureJournaled(
-                        prepared,
-                        lane: EventPipelineLane.finalLane(for: prepared.event),
-                        reason: securityRelevant
-                            ? .securityRelevant : .ordinary
-                    )
+                    let outcome = try await retryTransientJournalOperation(
+                        timeout: timeout
+                    ) {
+                        try await journalStore.ensureJournaled(
+                            prepared,
+                            lane: EventPipelineLane.finalLane(
+                                for: prepared.event
+                            ),
+                            reason: securityRelevant
+                                ? .securityRelevant : .ordinary
+                        )
+                    }
                     switch outcome {
                     case .durable(let eventID):
                         guard eventID == receipt.eventID else { return .failed }
@@ -2627,10 +2674,14 @@ actor BatchedEventWriter {
                             ? .filtered : .failed
                     }
                 }
-                let verification = try await journalStore.verifyJournaled(
-                    eventID: receipt.eventID,
-                    canonicalSHA256: receiptDigest
-                )
+                let verification = try await retryTransientJournalOperation(
+                    timeout: timeout
+                ) {
+                    try await journalStore.verifyJournaled(
+                        eventID: receipt.eventID,
+                        canonicalSHA256: receiptDigest
+                    )
+                }
                 switch verification.disposition {
                 case .durable(let eventID):
                     return eventID == receipt.eventID ? .verified : .failed
@@ -2641,6 +2692,10 @@ actor BatchedEventWriter {
                     return eventID == receipt.eventID
                         ? .mismatchedReceipt : .failed
                 }
+            } catch let error as EventStoreError where isTransient(error) {
+                return .timedOut
+            } catch is CancellationError {
+                return .timedOut
             } catch {
                 await StorageErrorTracker.shared.recordEventError(error)
                 return .failed
@@ -2697,11 +2752,15 @@ actor BatchedEventWriter {
         // while EventStore still owns the value argument.
         defer { _ = borrow.preparation.canonicalJSON.count }
         do {
-            let outcome = try await journalStore.ensureJournaled(
-                prepared,
-                lane: EventPipelineLane.finalLane(for: prepared.event),
-                reason: .securityRelevant
-            )
+            let outcome = try await retryTransientJournalOperation(
+                timeout: .seconds(2)
+            ) {
+                try await journalStore.ensureJournaled(
+                    prepared,
+                    lane: EventPipelineLane.finalLane(for: prepared.event),
+                    reason: .securityRelevant
+                )
+            }
             if case .poisoned(let evidence) = outcome {
                 return evidence.originalEventID == receipt.eventID
                     ? .poisoned : .failed
@@ -2721,6 +2780,10 @@ actor BatchedEventWriter {
             handle.compactAfterDurableVerification()
             repairJournalGap(generation: receipt.generation)
             return .verified
+        } catch let error as EventStoreError where isTransient(error) {
+            return .timedOut
+        } catch is CancellationError {
+            return .timedOut
         } catch {
             await StorageErrorTracker.shared.recordEventError(error)
             return .failed

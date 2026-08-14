@@ -352,9 +352,38 @@ struct AlertsSizeCapBoundary: Sendable, Equatable {
     }
 }
 
-let preIngestionStorageRecoveryMaximumPasses = 6
-let preIngestionStoragePinnedRetryPasses = 3
-let preIngestionStoragePinnedRetryDelayNanoseconds: UInt64 = 250_000_000
+let preIngestionStorageRecoveryMaximumPasses = 120
+let preIngestionStoragePinnedRetryPasses = 120
+let preIngestionStoragePinnedRetryDelayNanoseconds: UInt64 = 500_000_000
+
+/// Retry only EventStore's typed lock-contention signal during the
+/// pre-producer transaction. The operation must be crash-resumable or
+/// read/checkpoint-only; permanent storage/corruption errors escape
+/// immediately. The callback keeps the independent boot heartbeat fresh while
+/// an installed dashboard holds a legitimate read snapshot.
+func retryTransientEventStoreStartupOperation<T>(
+    maximumAttempts: Int = preIngestionStoragePinnedRetryPasses,
+    retryDelayNanoseconds: UInt64 =
+        preIngestionStoragePinnedRetryDelayNanoseconds,
+    onRetry: @Sendable (Int) -> Void = { _ in },
+    operation: () async throws -> T
+) async throws -> T {
+    let attemptLimit = max(1, maximumAttempts)
+    for attempt in 1...attemptLimit {
+        do {
+            return try await operation()
+        } catch let error as EventStoreError {
+            guard case .busy = error, attempt < attemptLimit else {
+                throw error
+            }
+            onRetry(attempt)
+            if retryDelayNanoseconds > 0 {
+                try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            }
+        }
+    }
+    preconditionFailure("startup retry loop exhausted without returning")
+}
 
 /// Setup distinguishes a real maintenance pass from a checkpoint preflight
 /// that found a transient reader pin. Only the latter may retry without a
@@ -441,6 +470,7 @@ func runBoundedPreIngestionStorageRecovery(
     maximumPinnedRetries: Int = preIngestionStoragePinnedRetryPasses,
     pinnedRetryDelayNanoseconds: UInt64 =
         preIngestionStoragePinnedRetryDelayNanoseconds,
+    onTransientPinRetry: @Sendable (Int) -> Void = { _ in },
     measureFootprint: @Sendable () async throws -> Int64,
     maintenance: @Sendable () async
         -> PreIngestionStorageMaintenanceResult,
@@ -532,6 +562,7 @@ func runBoundedPreIngestionStorageRecovery(
                     reason: "reader-pinned checkpoint did not clear after \(pinnedRetries) bounded no-delete retries (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
                 )
             }
+            onTransientPinRetry(pinnedRetries)
             if pinnedRetryDelayNanoseconds > 0 {
                 try? await Task.sleep(
                     nanoseconds: pinnedRetryDelayNanoseconds
@@ -6977,12 +7008,14 @@ func recoverEventStoreBeforeProducers(
     boundary: EventsSizeCapBoundary,
     processFloorMinutes: Int,
     retentionBudgetHealth: EventRetentionBudgetHealth,
-    maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses
+    maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses,
+    onTransientPinRetry: @Sendable (Int) -> Void = { _ in }
 ) async -> PreIngestionStorageRecoveryResult {
     let reserve = SQLitePersistentStorePolicy.eventTransactionReserveBytes
     return await runBoundedPreIngestionStorageRecovery(
         component: "EventStore",
         maximumPasses: maximumPasses,
+        onTransientPinRetry: onTransientPinRetry,
         measureFootprint: {
             try measureDatabaseFootprintBytes(dbPath: dbPath)
         },
