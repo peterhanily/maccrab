@@ -6,6 +6,18 @@ import Testing
 
 @Suite("BatchedEventWriter exact journal pipeline")
 struct BatchedEventWriterJournalPipelineTests {
+    private actor LeaseHolder {
+        private var leases: [EventPipelineMemoryLease] = []
+
+        func hold(_ lease: EventPipelineMemoryLease?) {
+            if let lease { leases.append(lease) }
+        }
+
+        func releaseAll() {
+            leases.removeAll()
+        }
+    }
+
     private actor JournalStoreFake: EventBatchInserting,
         EventPreparedBatchInserting, EventJournalMutating {
         enum BaseMode: Sendable, Equatable { case durable, filtered, fail }
@@ -455,6 +467,72 @@ struct BatchedEventWriterJournalPipelineTests {
         #expect(snapshot.terminalRevisionPoisonedCount == 0)
         #expect(snapshot.terminalRevisionDroppedCount == 0)
         #expect(snapshot.terminalRevisionConservationHolds)
+    }
+
+    @Test("terminal storage lease growth waits behind an older S waiter")
+    func terminalStorageLeaseGrowthRetriesLosslessly() async throws {
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let store = JournalStoreFake()
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            hardCap: 100,
+            liveMemoryBudget: budget
+        )
+        let base = event(22)
+        let receipt = try #require(await writer.enqueuePrepared(
+            EventJournalAdmissionValidator.prepare(base)
+        ))
+        var terminal = base
+        terminal.enrichments["reviewed"] = "after-storage-waiter"
+        let holder = LeaseHolder()
+
+        await writer.setTerminalDeltaStorageLeaseGrowthHookForTesting {
+            let snapshot = budget.snapshot()
+            let storageBytes = snapshot.bytesByOwner[
+                EventPipelineMemoryOwner.eventStoreWorkspace.rawValue,
+                default: 0
+            ]
+            let journalLimit = snapshot.maximumBytes
+                - snapshot.eventStoreWorkspaceReserveBytes
+                + storageBytes
+            guard let blocker = budget.tryAcquire(
+                bytes: journalLimit - snapshot.currentBytes,
+                owner: .journalPrepared
+            ) else { return }
+            await holder.hold(blocker)
+            Task {
+                await holder.hold(await budget.acquire(
+                    bytes: snapshot.eventStoreWorkspaceReserveBytes,
+                    owner: .eventStoreWorkspace
+                ))
+            }
+            while budget.snapshot().waitingAcquisitions == 0 {
+                await Task.yield()
+            }
+        }
+        let release = Task {
+            try await Task.sleep(for: .milliseconds(100))
+            await holder.releaseAll()
+        }
+        let proof = await writer.prepareAndSettleTerminalDelta(
+            base: base,
+            terminal: terminal,
+            admission: receipt,
+            timeout: .seconds(1)
+        )
+        _ = try await release.value
+        await writer.setTerminalDeltaStorageLeaseGrowthHookForTesting(nil)
+        await holder.releaseAll()
+
+        #expect(proof.status == .verified)
+        #expect(await store.terminalDeltaAppendCalls == 1)
+        let telemetry = await writer.telemetrySnapshot()
+        #expect(telemetry.terminalRevisionRetriedCount > 0)
+        #expect(telemetry.terminalRevisionPoisonedCount == 0)
+        #expect(telemetry.terminalRevisionDroppedCount == 0)
+        #expect(telemetry.terminalRevisionConservationHolds)
     }
 
     @Test("wrong or missing receipt digest cannot append a terminal revision")

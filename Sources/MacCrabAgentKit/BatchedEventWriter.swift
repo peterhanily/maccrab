@@ -263,6 +263,8 @@ actor BatchedEventWriter {
     private let hardByteCap: Int
     private let ownershipBudget: EventJournalPreparedOwnershipBudget
     private let liveMemoryBudget: EventPipelineLiveMemoryBudget
+    private var terminalDeltaStorageLeaseGrowthHookForTesting:
+        (@Sendable () async -> Void)?
     /// Volume to probe for free space before writing, or nil to disable the
     /// admission check (tests, and any consumer with no on-disk store).
     private let volumePath: String?
@@ -1045,6 +1047,12 @@ actor BatchedEventWriter {
         )
     }
 
+    internal func setTerminalDeltaStorageLeaseGrowthHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        terminalDeltaStorageLeaseGrowthHookForTesting = hook
+    }
+
     /// Lossless bounded hand-off from the hot consumer. The explicit pipeline
     /// lane is preserved through storage rather than re-inferred from a broader
     /// "file category = cheap" rule (credential OPEN is a file-category event
@@ -1635,18 +1643,33 @@ actor BatchedEventWriter {
               workspaceLease.resize(
                 to: storagePrepared.compactRetainedByteEstimate
               ),
-              workspaceLease.transfer(to: .eventStoreWorkspace),
-              workspaceLease.resize(
-                to: EventPipelineLiveMemoryBudget
-                    .productionEventStoreWorkspaceReserveBytes
-              ) else {
+              workspaceLease.transfer(to: .eventStoreWorkspace) else {
             recordTerminalOffered(lane: lane)
             recordTerminalDrop(lane: lane)
             return proof(status: .mismatchedReceipt)
         }
 
-        let inFlightBytes = workspaceLease.bytes
+        // A concurrent owner can take the J credit released by compaction
+        // before this transferred S lease grows to its codec reserve. That is
+        // live pressure, not a malformed receipt or terminal evidence loss.
+        // Keep the compact digest-bound value charged and wait until S can
+        // reclaim its release-valve workspace.
         recordTerminalOffered(lane: lane)
+        await terminalDeltaStorageLeaseGrowthHookForTesting?()
+        while !Task.isCancelled,
+              !workspaceLease.resize(
+                to: EventPipelineLiveMemoryBudget
+                    .productionEventStoreWorkspaceReserveBytes
+              ) {
+            recordTerminalRetry(1, lane: lane)
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard !Task.isCancelled else {
+            recordTerminalDrop(lane: lane)
+            return proof(status: .dropped)
+        }
+
+        let inFlightBytes = workspaceLease.bytes
         beginSparseTerminalInFlight(lane: lane, bytes: inFlightBytes)
         defer {
             endSparseTerminalInFlight(lane: lane, bytes: inFlightBytes)
