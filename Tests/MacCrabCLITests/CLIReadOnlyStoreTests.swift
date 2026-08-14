@@ -205,8 +205,18 @@ struct CLIReadOnlyStoreTests {
                 liveMemoryBudget: liveMemoryBudget
             )
 
-            // `status`, `events tail/stats/search`, attribution status, and all
-            // three session readers collectively use these query shapes.
+            // `status` uses physical cardinality and must not decode journal
+            // blocks. Explicit evidence commands and all three session readers
+            // use the exact query shapes below.
+            let statusDecodesBefore = await events
+                .journalExactQueryBlockDecodeCount()
+            #expect(
+                try await MacCrabCtl.retainedEventCountForStatus(events) == 1
+            )
+            #expect(
+                await events.journalExactQueryBlockDecodeCount()
+                    == statusDecodesBefore
+            )
             #expect(try await events.count() == 1)
             let eventRows = try await events.exactEventsSnapshot(
                 since: .distantPast,
@@ -361,10 +371,10 @@ struct CLIReadOnlyStoreTests {
         #expect(campaignConstructors.isEmpty,
                 "maccrabctl currently reads campaign alerts through AlertStore")
 
-        // Excludes the factory declarations themselves: 8 EventStore read
-        // callsites and 15 AlertStore read callsites are the complete shipped
-        // command surface at this revision, including both watch setup paths.
-        #expect(eventReaderCalls == 9)
+        // Seven EventStore and 15 AlertStore shipped callsites, plus each
+        // factory declaration, are the complete command surface at this
+        // revision (including both watch setup paths).
+        #expect(eventReaderCalls == 8)
         #expect(alertReaderCalls == 16)
 
         // TraceGraph and agent-span query clients already had the correct

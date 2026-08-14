@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "具有机器归因的事件";
 "agentTraces.statTraces" = "追踪";
-"agentTraces.statsLegend" = "Span = OTLP接收器活动。已评分/总数/准确率 = 经操作员审查的、具有机器归因的内核事件。";
+"agentTraces.statsLegend" = "跟踪 = OTLP 接收器活动。已评分/准确率 = 操作员已审查的机器归因。";
 "agentTraces.statusNotResponding" = "守护进程无响应";
 "agentTraces.statusNotRespondingHelp" = "自启用接收器以来，仪表盘尚未收到守护进程的状态快照。守护进程可能未运行，系统扩展可能需要重新激活（设置 → 系统扩展），或者守护进程为不支持智能体追踪协议的v1.8.x版本。请在Console.app中过滤com.maccrab.agentkit查看详情。";
 "agentTraces.statusStopped" = "已停止";

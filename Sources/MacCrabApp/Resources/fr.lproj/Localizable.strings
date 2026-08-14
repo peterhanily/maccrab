@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Événements avec attribution machine";
 "agentTraces.statTraces" = "Traces";
-"agentTraces.statsLegend" = "Spans = activité du récepteur OTLP. Évalués / total / précision = événements du noyau avec attribution machine examinés par un opérateur.";
+"agentTraces.statsLegend" = "Traces = activité du récepteur OTLP. Évaluées / précision = attributions machine examinées par un opérateur.";
 "agentTraces.statusNotResponding" = "Le démon ne répond pas";
 "agentTraces.statusNotRespondingHelp" = "Le tableau de bord n'a reçu aucun instantané d'état du démon depuis l'activation du récepteur. Le démon n'est peut-être pas en cours d'exécution, l'extension système peut nécessiter une réactivation (Réglages → Extension système), ou le démon est peut-être une version v1.8.x qui ne prend pas en charge le protocole agent-traces. Consultez Console.app filtrée sur com.maccrab.agentkit pour plus de détails.";
 "agentTraces.statusStopped" = "Arrêté";

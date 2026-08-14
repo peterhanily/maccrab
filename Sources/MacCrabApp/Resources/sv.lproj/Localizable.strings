@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Händelser med maskinattribuering";
 "agentTraces.statTraces" = "Spår";
-"agentTraces.statsLegend" = "Spans = aktivitet i OTLP-mottagaren. Bedömda / totalt / träffsäkerhet = kärnhändelser med maskinattribuering som en operatör har granskat.";
+"agentTraces.statsLegend" = "Spår = aktivitet i OTLP-mottagaren. Bedömda / träffsäkerhet = maskinattribueringar som en operatör har granskat.";
 "agentTraces.statusNotResponding" = "Daemonen svarar inte";
 "agentTraces.statusNotRespondingHelp" = "Instrumentpanelen har inte sett någon statusögonblicksbild från daemonen sedan du aktiverade mottagaren. Daemonen kanske inte körs, systemtillägget kan behöva återaktiveras (Inställningar → Systemtillägg), eller så är daemonen en v1.8.x-version som inte talar agentspårsprotokollet. Se Console.app filtrerad på com.maccrab.agentkit för detaljer.";
 "agentTraces.statusStopped" = "Stoppad";

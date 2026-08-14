@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Gebeurtenissen met machine-attributie";
 "agentTraces.statTraces" = "Traces";
-"agentTraces.statsLegend" = "Spans = activiteit van de OTLP-ontvanger. Beoordeeld / totaal / nauwkeurigheid = kernelgebeurtenissen met machine-attributie die een operator heeft beoordeeld.";
+"agentTraces.statsLegend" = "Traces = activiteit van de OTLP-ontvanger. Beoordeeld / nauwkeurigheid = machine-attributies die een operator heeft beoordeeld.";
 "agentTraces.statusNotResponding" = "Daemon reageert niet";
 "agentTraces.statusNotRespondingHelp" = "Het dashboard heeft geen statussnapshot van de daemon gezien sinds je de ontvanger hebt ingeschakeld. Mogelijk draait de daemon niet, moet de systeemextensie opnieuw worden geactiveerd (Instellingen → Systeemextensie), of is de daemon een v1.8.x-build die het agent-traces-protocol niet ondersteunt. Controleer Console.app gefilterd op com.maccrab.agentkit voor details.";
 "agentTraces.statusStopped" = "Gestopt";

@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Zdarzenia z atrybucją maszynową";
 "agentTraces.statTraces" = "Ślady";
-"agentTraces.statsLegend" = "Spany = aktywność odbiornika OTLP. Ocenione / łącznie / trafność = zdarzenia jądra z atrybucją maszynową przejrzane przez operatora.";
+"agentTraces.statsLegend" = "Ślady = aktywność odbiornika OTLP. Ocenione / trafność = atrybucje maszynowe przejrzane przez operatora.";
 "agentTraces.statusNotResponding" = "Demon nie odpowiada";
 "agentTraces.statusNotRespondingHelp" = "Panel nie otrzymał migawki stanu od demona od momentu włączenia odbiornika. Demon może nie działać, rozszerzenie systemowe może wymagać ponownej aktywacji (Ustawienia → Rozszerzenie systemowe) albo demon to kompilacja v1.8.x, która nie obsługuje protokołu śladów agentów. Szczegóły znajdziesz w Console.app po przefiltrowaniu do com.maccrab.agentkit.";
 "agentTraces.statusStopped" = "Zatrzymano";

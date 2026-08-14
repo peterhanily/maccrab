@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Eventos com atribuição automática";
 "agentTraces.statTraces" = "Traces";
-"agentTraces.statsLegend" = "Spans = atividade do receptor OTLP. Avaliados / total / precisão = eventos do kernel com atribuição automática revisados por um operador.";
+"agentTraces.statsLegend" = "Rastreamentos = atividade do receptor OTLP. Avaliadas / precisão = atribuições automáticas revisadas por um operador.";
 "agentTraces.statusNotResponding" = "Daemon não está respondendo";
 "agentTraces.statusNotRespondingHelp" = "O painel não recebeu um snapshot de status do daemon desde que você ativou o receptor. O daemon pode não estar em execução, a extensão de sistema pode precisar ser reativada (Ajustes → Extensão de Sistema) ou o daemon pode ser uma versão v1.8.x que não fala o protocolo de traces de agente. Verifique o Console.app filtrado por com.maccrab.agentkit para detalhes.";
 "agentTraces.statusStopped" = "Parado";

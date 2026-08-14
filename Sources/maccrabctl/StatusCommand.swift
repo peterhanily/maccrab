@@ -86,37 +86,14 @@ extension MacCrabCtl {
         // ── Events ────────────────────────────────────────────────────────
         do {
             let eventStore = try openEventStoreForReading(directory: supportDir)
-            let eventCount = try await eventStore.count()
-            let recentSnapshot = try await eventStore.exactEventsSnapshot(
-                since: Date.distantPast,
-                limit: 1
-            )
-            guard recentSnapshot.isComplete else {
-                throw EventStoreError.exactEvidenceGap(
-                    poisonRecords: recentSnapshot.poisonRecords.count,
-                    corruptLegacyRecords:
-                        recentSnapshot.corruptLegacyRecords,
-                    inheritedLegacyLossRecords:
-                        recentSnapshot.inheritedLegacyLossRecords,
-                    resourceLimitedRecords:
-                        recentSnapshot.resourceLimitedRecords
-                )
-            }
-            let recentEvents = recentSnapshot.events
-            print("Events:          \(eventCount) stored")
-            if let latest = recentEvents.first {
-                print("Last Event:      \(formatDate(latest.timestamp))")
-
-                // Warn if last event is more than 5 minutes old and daemon is running
-                if daemonRunning && Date().timeIntervalSince(latest.timestamp) > 300 {
-                    let minutes = Int(Date().timeIntervalSince(latest.timestamp) / 60)
-                    print("                 ⚠  No new events for \(minutes)m — collectors may have stalled")
-                    print("                    Check: log stream --predicate 'subsystem==\"com.maccrab.agent\"'")
-                }
-            } else {
-                print("Last Event:      None recorded")
-            }
-            withExtendedLifetime(recentSnapshot) {}
+            // Keep `status` a constant-cost health probe. Exact corpus reads
+            // authenticate and index every retained journal block; using one
+            // merely to print a count/latest row consumed a core for minutes
+            // on production-sized stores. This bounded physical cardinality
+            // deliberately makes no evidence-completeness claim.
+            let eventCount = try await retainedEventCountForStatus(eventStore)
+            print("Events:          \(eventCount) retained")
+            print("Last Event:      See Events dashboard or `maccrabctl events tail 1`")
         } catch {
             print("Events:          (error reading: \(error))")
         }
@@ -227,39 +204,20 @@ extension MacCrabCtl {
                 anyTraceLine = true
             }
         }
-        // Quality metric line — Plan v3 review #11 fixed label format.
-        // v1.9 PR-5 audit (B3): rated counts now live in
-        // attribution_overrides.db at the user-writable path; total
-        // count of machine-attributed events comes from events.db.
-        // Probe both at user + system paths.
+        // Operator verdicts live in attribution_overrides.db. Do not compute
+        // the former retained-event denominator here: it requires a full exact
+        // journal scan and compares a pruning-bounded population with verdicts
+        // that are never pruned. Report stable local verdict counts only.
         let candidateDirs = Array(Set([supportDir, userSupport]))
-        var total = 0
-        for dir in candidateDirs {
-            guard FileManager.default.fileExists(atPath: dir + "/events.db") else { continue }
-            if let es = try? openEventStoreForReading(directory: dir),
-               let n = try? await es.eventCountWithMachineAttribution() {
-                total = max(total, n)
-            }
-        }
         for dir in candidateDirs {
             guard FileManager.default.fileExists(atPath: dir + "/attribution_overrides.db") else { continue }
             if let store = try? AttributionOverrideStore(directory: dir),
-               let stats = try? await store.stats(totalEventsWithMachineAttribution: total),
-               (stats.ratedCount > 0 || total > 0) {
-                print("                 \(stats.formattedAccuracyLine)")
+               let counts = try? await store.verdictCounts(),
+               counts.rated > 0 {
+                print("                 attribution_verdicts: rated=\(counts.rated), confirmed=\(counts.confirmed), wrong_tool=\(counts.wrongTool), no_agent=\(counts.noAgent), unknown=\(counts.unknown)")
                 anyTraceLine = true
                 break
             }
-        }
-        // Even with no overrides, surface the total if non-zero.
-        if !anyTraceLine, total > 0 {
-            let zero = AttributionOverrideStats(
-                ratedCount: 0, confirmedCount: 0,
-                wrongToolCount: 0, noAgentCount: 0, unknownVerdictCount: 0,
-                totalEventsWithMachineAttribution: total
-            )
-            print("                 \(zero.formattedAccuracyLine)")
-            anyTraceLine = true
         }
         if !anyTraceLine {
             if isDaemonRunning() {
@@ -322,6 +280,15 @@ extension MacCrabCtl {
             if process.terminationStatus == 0 { return true }
         }
         return false
+    }
+
+    /// Fast physical cardinality for the overview command. Keep this helper
+    /// separate so tests can prove the status path never initializes or
+    /// decodes the exact retained journal index.
+    static func retainedEventCountForStatus(
+        _ store: EventStore
+    ) async throws -> Int {
+        try await store.maintenanceRetainedRecordCount()
     }
 
     /// v1.21.5: the effective `rule_profile`, used to compute sequence-rule

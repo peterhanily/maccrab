@@ -1214,8 +1214,7 @@ final class AppState: ObservableObject {
     /// Currently-selected trace_id, or nil when the trace list shows no
     /// detail pane.
     @Published var selectedTraceId: String?
-    /// Aggregate stats for the dashboard's reattribute-quality metric.
-    /// Always reflects the current EventStore snapshot.
+    /// Aggregate stats for the dashboard's operator-verdict metric.
     @Published var attributionStats: AttributionOverrideStats = AttributionOverrideStats(
         ratedCount: 0, confirmedCount: 0,
         wrongToolCount: 0, noAgentCount: 0, unknownVerdictCount: 0,
@@ -1225,11 +1224,10 @@ final class AppState: ObservableObject {
     // v1.9 audit Phase-1.7: mtime-skip state for refreshAgentTraces.
     // Pre-fix the comment promised mtime-skip but unconditionally
     // queried both stores every 5 s tick. Now we re-poll only when
-    // traces.db, events.db, or attribution_overrides.db have been
-    // re-written since the last successful poll. Pattern mirrors
+    // traces.db or attribution_overrides.db has been re-written since
+    // the last successful poll. Pattern mirrors
     // refreshStorageHealth / refreshRuleTamper.
     private var lastTracesDbMtime: Date?
-    private var lastEventsDbMtimeForAgent: Date?
     private var lastOverridesDbMtime: Date?
 
     // MARK: - v1.9 Phase-3: agent-traces receiver toggle
@@ -1853,12 +1851,11 @@ final class AppState: ObservableObject {
 
     // MARK: - PR-4: trace queries surfaced for AgentTracesView
 
-    /// Refresh `recentTraceIds` + `attributionStats` from disk.
-    /// v1.9 audit Phase-1.7: real mtime-skip across all three sources.
-    /// Pre-fix the comment claimed the pattern but the code re-queried
-    /// every poll. Now: if none of {traces.db, events.db,
-    /// attribution_overrides.db} has changed since last successful
-    /// read, skip the SQLite roundtrips entirely.
+    /// Refresh `recentTraceIds` + operator verdict counts from disk.
+    /// Only the two stores this surface actually renders participate in the
+    /// mtime cache. `events.db` changes continuously and the former refresh
+    /// path authenticated/scanned the entire retained corpus merely to render
+    /// a semantically incompatible denominator.
     @MainActor
     func refreshAgentTraces(limit: Int = 200, force: Bool = false) async {
         let userDir = FileManager.default.urls(
@@ -1877,29 +1874,29 @@ final class AppState: ObservableObject {
         }
 
         let tracesMtime = newestMtime(for: "traces.db")
-        let eventsMtime = newestMtime(for: "events.db")
         let overridesMtime = newestMtime(for: "attribution_overrides.db")
 
         // Skip when nothing changed AND we have at least one prior good read.
         if !force,
-           let _ = lastEventsDbMtimeForAgent ?? lastTracesDbMtime ?? lastOverridesDbMtime,
+           let _ = lastTracesDbMtime ?? lastOverridesDbMtime,
            tracesMtime == lastTracesDbMtime,
-           eventsMtime == lastEventsDbMtimeForAgent,
            overridesMtime == lastOverridesDbMtime {
             return
         }
 
-        // v1.9 PR-5 audit (B3): stats roll up from TWO sources — the
-        // dashboard's user-writable override store (verdict counts)
-        // and the daemon's events.db (total events with machine
-        // attribution).
-        var total = 0
-        if let es = try? eventStore() {
-            total = (try? await es.eventCountWithMachineAttribution()) ?? 0
-        }
+        // Verdicts are durable operator judgements and are never pruned.
+        // Keep this surface in that single population; the old total came from
+        // a retention-bounded corpus and was neither valid nor cheap to scan.
         if let overrides = try? overrideStore() {
-            if let stats = try? await overrides.stats(totalEventsWithMachineAttribution: total) {
-                self.attributionStats = stats
+            if let counts = try? await overrides.verdictCounts() {
+                self.attributionStats = AttributionOverrideStats(
+                    ratedCount: counts.rated,
+                    confirmedCount: counts.confirmed,
+                    wrongToolCount: counts.wrongTool,
+                    noAgentCount: counts.noAgent,
+                    unknownVerdictCount: counts.unknown,
+                    totalEventsWithMachineAttribution: 0
+                )
             }
         }
         if let store = traceStoreOrNil() {
@@ -1911,7 +1908,6 @@ final class AppState: ObservableObject {
         }
 
         lastTracesDbMtime = tracesMtime
-        lastEventsDbMtimeForAgent = eventsMtime
         lastOverridesDbMtime = overridesMtime
     }
 

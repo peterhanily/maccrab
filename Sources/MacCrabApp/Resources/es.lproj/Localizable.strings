@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Eventos con atribución de máquina";
 "agentTraces.statTraces" = "Trazas";
-"agentTraces.statsLegend" = "Spans = actividad del receptor OTLP. Valorados / total / precisión = eventos del kernel con atribución de máquina que un operador ha revisado.";
+"agentTraces.statsLegend" = "Trazas = actividad del receptor OTLP. Valoradas / precisión = atribuciones de máquina que un operador ha revisado.";
 "agentTraces.statusNotResponding" = "El daemon no responde";
 "agentTraces.statusNotRespondingHelp" = "El panel no ha recibido una instantánea de estado del daemon desde que activó el receptor. Puede que el daemon no esté en ejecución, que la extensión del sistema deba reactivarse (Ajustes → Extensión del sistema) o que el daemon sea una compilación v1.8.x que no admite el protocolo de trazas de agente. Consulte Console.app filtrado por com.maccrab.agentkit para más detalles.";
 "agentTraces.statusStopped" = "Detenido";

@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "머신 어트리뷰션이 적용된 이벤트";
 "agentTraces.statTraces" = "트레이스";
-"agentTraces.statsLegend" = "스팬 = OTLP 수신기 활동. 평가됨 / 전체 / 정확도 = 운영자가 검토한, 머신 어트리뷰션이 적용된 커널 이벤트.";
+"agentTraces.statsLegend" = "트레이스 = OTLP 수신기 활동. 평가됨 / 정확도 = 운영자가 검토한 머신 어트리뷰션.";
 "agentTraces.statusNotResponding" = "데몬이 응답하지 않습니다";
 "agentTraces.statusNotRespondingHelp" = "수신기를 활성화한 이후 대시보드가 데몬의 상태 스냅샷을 받지 못했습니다. 데몬이 실행 중이 아니거나, 시스템 확장 프로그램을 다시 활성화해야 하거나(설정 → 시스템 확장 프로그램), 데몬이 에이전트 트레이스 프로토콜을 지원하지 않는 v1.8.x 빌드일 수 있습니다. 자세한 내용은 Console.app에서 com.maccrab.agentkit으로 필터링하여 확인하세요.";
 "agentTraces.statusStopped" = "중지됨";

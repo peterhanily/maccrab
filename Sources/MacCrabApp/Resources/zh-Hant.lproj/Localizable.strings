@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "具機器歸因的事件";
 "agentTraces.statTraces" = "追蹤";
-"agentTraces.statsLegend" = "Span = OTLP 接收器活動。已評定／總數／準確率 = 操作員已審閱、具機器歸因的核心事件。";
+"agentTraces.statsLegend" = "追蹤 = OTLP 接收器活動。已評定／準確率 = 操作員已審閱的機器歸因。";
 "agentTraces.statusNotResponding" = "常駐程式無回應";
 "agentTraces.statusNotRespondingHelp" = "自您啟用接收器後，儀表板尚未收到常駐程式的狀態快照。常駐程式可能未在執行、系統延伸功能可能需要重新啟用（設定 → 系統延伸功能），或常駐程式為不支援代理程式追蹤協定的 v1.8.x 版本。請在「主控台」中篩選 com.maccrab.agentkit 以查看詳細資訊。";
 "agentTraces.statusStopped" = "已停止";

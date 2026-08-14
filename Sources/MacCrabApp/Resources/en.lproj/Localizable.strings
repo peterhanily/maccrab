@@ -574,7 +574,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "Events with machine attribution";
 "agentTraces.statTraces" = "Traces";
-"agentTraces.statsLegend" = "Spans = OTLP receiver activity. Rated / total / accuracy = kernel events with machine attribution that an operator has reviewed.";
+"agentTraces.statsLegend" = "Traces = OTLP receiver activity. Rated / accuracy = machine attributions an operator has reviewed.";
 "agentTraces.statusNotResponding" = "Daemon not responding";
 "agentTraces.statusNotRespondingHelp" = "The dashboard hasn't seen a status snapshot from the daemon since you enabled the receiver. The daemon may not be running, the system extension may need to be re-activated (Settings → System Extension), or the daemon may be a v1.8.x build that doesn't speak the agent-traces protocol. Check Console.app filtered to com.maccrab.agentkit for details.";
 "agentTraces.statusStopped" = "Stopped";

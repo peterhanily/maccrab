@@ -84,7 +84,7 @@ struct AgentTracesView: View {
                 .foregroundStyle(.secondary)
 
             Text(String(localized: "agentTraces.statsLegend",
-                         defaultValue: "Spans = OTLP receiver activity. Rated / total / accuracy = kernel events with machine attribution that an operator has reviewed."))
+                         defaultValue: "Traces = OTLP receiver activity. Rated / accuracy = machine attributions an operator has reviewed."))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
@@ -260,11 +260,9 @@ struct AgentTracesView: View {
 
     private var statsBar: some View {
         let stats = appState.attributionStats
-        // Span count comes from `traces.db` (OTLP receiver activity);
-        // attribution counts come from `events.db` (kernel events the
-        // detection engine machine-attributed). Showing both side-by-
-        // side so a populated trace list and "0 rated" stats no longer
-        // look contradictory.
+        // Trace count comes from `traces.db`; rating counts come from the
+        // durable operator-verdict store. A retained-events total is a
+        // different, pruning-bounded population and does not belong here.
         let spanCount = appState.recentTraceIds.count
         return HStack(spacing: 16) {
             statCell(
@@ -276,13 +274,6 @@ struct AgentTracesView: View {
             )
             Divider().frame(height: 28)
             statCell(
-                title: String(localized: "agentTraces.statTotal",
-                              defaultValue: "Events with machine attribution"),
-                value: "\(stats.totalEventsWithMachineAttribution)",
-                source: String(localized: "agentTraces.statSourceEs",
-                                defaultValue: "ES")
-            )
-            statCell(
                 title: String(localized: "agentTraces.statRated",
                               defaultValue: "Rated"),
                 value: "\(stats.ratedCount)",
@@ -291,7 +282,12 @@ struct AgentTracesView: View {
             statCell(
                 title: String(localized: "agentTraces.statAcc",
                               defaultValue: "Accuracy among rated"),
-                value: stats.accuracyAmongRated.map { String(format: "%.0f%%", $0 * 100) } ?? "—",
+                value: stats.ratedCount >= AttributionOverrideStats
+                    .minimumRatedForAccuracy
+                    ? stats.accuracyAmongRated.map {
+                        String(format: "%.0f%%", $0 * 100)
+                    } ?? "—"
+                    : "—",
                 source: nil
             )
             Spacer()

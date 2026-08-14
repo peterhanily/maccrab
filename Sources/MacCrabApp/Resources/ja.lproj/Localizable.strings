@@ -544,7 +544,7 @@
 "agentTraces.statSourceOtlp" = "OTLP";
 "agentTraces.statTotal" = "自動帰属付きイベント";
 "agentTraces.statTraces" = "トレース";
-"agentTraces.statsLegend" = "スパン = OTLPレシーバーの活動。評価済み / 合計 / 精度 = オペレーターがレビューした自動帰属付きカーネルイベント。";
+"agentTraces.statsLegend" = "トレース = OTLPレシーバーの活動。評価済み / 精度 = オペレーターがレビューした自動帰属。";
 "agentTraces.statusNotResponding" = "デーモンが応答していません";
 "agentTraces.statusNotRespondingHelp" = "レシーバーを有効にして以降、ダッシュボードはデーモンからのステータススナップショットを受信していません。デーモンが動作していない、システム機能拡張の再有効化が必要（設定 → システム機能拡張）、またはデーモンがエージェントトレースのプロトコルに対応していないv1.8.x系ビルドである可能性があります。詳細は Console.app で com.maccrab.agentkit にフィルタして確認してください。";
 "agentTraces.statusStopped" = "停止中";
