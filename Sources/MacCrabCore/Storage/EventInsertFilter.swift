@@ -17,9 +17,12 @@
 // time and prevents the disk-cap pressure entirely.
 //
 // Safe-by-default: an empty filter is the identity — nothing gets dropped.
-// The default filter built by `defaultFilter(supportDir:)` only drops
-// the daemon's own self-monitoring loop (always-correct exclusion).
-// Operators add additional patterns via daemon_config.json.
+// The default filter built by `defaultFilter(supportDir:)` drops only
+// measured, path-specific maintenance churn: the daemon's own self-monitoring
+// loop, selected developer-tool state databases, and Apple-owned search-index
+// internals. Detection still evaluates every Event in memory, and a later
+// security-relevant journal ensure explicitly bypasses this routine-noise
+// filter. Operators add additional patterns via daemon_config.json.
 
 import Foundation
 
@@ -122,6 +125,19 @@ public struct EventInsertFilter: Sendable {
                 // --- Apple internal log/data daemons ---
                 "/private/var/log/com.apple.xpc.launchd/", // launchd's own log churn
                 "/private/var/db/systemstats/",      // systemstats coalitions/memory dumps
+                // --- Path-specific developer-tool database churn ---
+                // Field qualification on a Codex-active host measured dozens
+                // of ES WRITE callbacks per logical state mutation. Preserve
+                // session JSONL and every other ~/.codex path; suppress only
+                // the three replaceable local SQLite families.
+                "/.codex/state_",
+                "/.codex/thread_history_",
+                "/.codex/logs_",
+                // --- Apple-owned derived search/embedding indexes ---
+                // These are replaceable SpotlightKnowledge internals, not the
+                // user documents being indexed. The exact subtree prevents a
+                // broad Library/Metadata or CoreSpotlight blind spot.
+                "/Library/Metadata/CoreSpotlight/SpotlightKnowledge/",
             ],
             processNames: [
                 "maccrabctl",                        // own CLI

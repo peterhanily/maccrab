@@ -111,6 +111,74 @@ struct EventInsertFilterTests {
         #expect(filter.shouldDrop(event: console))
     }
 
+    @Test("Default filter drops only Codex database churn, not session evidence")
+    func defaultFilterDropsCodexDatabaseChurn() {
+        let filter = EventInsertFilter.defaultFilter(
+            supportDir: "/Library/Application Support/MacCrab"
+        )
+        for path in [
+            "/Users/alice/.codex/state_5.sqlite-wal",
+            "/Users/alice/.codex/thread_history_1.sqlite-shm",
+            "/Users/alice/.codex/logs_2.sqlite",
+        ] {
+            #expect(filter.shouldDrop(event: makeProcessEvent(
+                name: "codex",
+                filePath: path
+            )))
+        }
+        #expect(!filter.shouldDrop(event: makeProcessEvent(
+            name: "codex",
+            filePath: "/Users/alice/.codex/sessions/2026/08/15/rollout.jsonl"
+        )))
+        #expect(!filter.shouldDrop(event: makeProcessEvent(
+            name: "codex",
+            filePath: "/Users/alice/Documents/incident-notes.md"
+        )))
+    }
+
+    @Test("Default filter drops only the derived SpotlightKnowledge subtree")
+    func defaultFilterDropsSpotlightKnowledgeChurn() {
+        let filter = EventInsertFilter.defaultFilter(
+            supportDir: "/Library/Application Support/MacCrab"
+        )
+        #expect(filter.shouldDrop(event: makeProcessEvent(
+            name: "spotlightknowledged.updater",
+            filePath: "/Users/alice/Library/Metadata/CoreSpotlight/SpotlightKnowledge/index.V2/embedding_cache/4.map.header"
+        )))
+        #expect(!filter.shouldDrop(event: makeProcessEvent(
+            name: "mdworker_shared",
+            filePath: "/Users/alice/Library/Metadata/CoreSpotlight/UserDocuments/index.db"
+        )))
+        #expect(!filter.shouldDrop(event: makeProcessEvent(
+            name: "TextEdit",
+            filePath: "/Users/alice/Documents/search-notes.txt"
+        )))
+    }
+
+    @Test("Measured maintenance flood is filtered without a broad path blind spot")
+    func measuredMaintenanceFloodIsFiltered() {
+        let filter = EventInsertFilter.defaultFilter(
+            supportDir: "/Library/Application Support/MacCrab"
+        )
+        for _ in 0..<10_000 {
+            #expect(filter.shouldDrop(event: makeProcessEvent(
+                name: "codex",
+                filePath: "/Users/alice/.codex/state_5.sqlite-wal"
+            )))
+            #expect(filter.shouldDrop(event: makeProcessEvent(
+                name: "spotlightknowledged.updater",
+                filePath: "/Users/alice/Library/Metadata/CoreSpotlight/SpotlightKnowledge/index.V2/embedding_cache/4.map.header"
+            )))
+        }
+        #expect(!filter.shouldDrop(event: makeProcessEvent(
+            name: "sqlite3",
+            filePath: "/Users/alice/Documents/case-evidence.sqlite-wal"
+        )))
+        let counters = filter.counters.snapshot()
+        #expect(counters.dropped == 20_000)
+        #expect(counters.passed == 1)
+    }
+
     @Test("Default filter drops events whose actor is maccrabctl or maccrabd")
     // Field measurement showed maccrabctl invocations alone produced
     // 24% of events on a dev box (test runs, status checks, hunt queries
