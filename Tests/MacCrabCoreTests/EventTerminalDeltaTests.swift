@@ -4,6 +4,32 @@ import Testing
 
 @Suite("Immutable event terminal delta")
 struct EventTerminalDeltaTests {
+    private final class LeaseBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lease: EventPipelineMemoryLease?
+
+        func store(_ value: EventPipelineMemoryLease?) {
+            lock.lock()
+            lease = value
+            lock.unlock()
+        }
+
+        func release() {
+            store(nil)
+        }
+    }
+
+    private func tempDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "maccrab-terminal-delta-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        return url
+    }
+
     private func replacing(
         _ event: Event,
         commandLine: String? = nil,
@@ -86,6 +112,72 @@ struct EventTerminalDeltaTests {
             from: encoded
         )
         #expect(try decoded.applying(to: base) == terminal)
+    }
+
+    @Test("live ownership contention is retryable and never durable poison")
+    func ownershipContentionIsTransient() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let store = try EventStore(
+            directory: directory.path,
+            liveMemoryBudget: budget
+        )
+        let basePrepared = try EventJournalAdmissionValidator.prepare(
+            makeEvent()
+        )
+        try await store.insert(event: basePrepared.event)
+        var terminal = basePrepared.event
+        terminal.enrichments["reviewed"] = "after-pressure"
+        let prepared = EventTerminalDeltaStoragePreparation(
+            compacting: try EventTerminalDeltaValidator.prepare(
+                base: basePrepared.event,
+                terminal: terminal,
+                baseCanonicalSHA256: basePrepared.canonicalSHA256,
+                sourceIdentitySHA256: basePrepared.sourceIdentitySHA256
+            )
+        )
+        let workspace = try #require(budget.tryAcquire(
+            bytes: EventPipelineLiveMemoryBudget
+                .productionEventStoreWorkspaceReserveBytes,
+            owner: .eventStoreWorkspace
+        ))
+        let blocker = LeaseBox()
+        await store.setTerminalDeltaOwnershipGrowthHookForTesting {
+            let snapshot = budget.snapshot()
+            blocker.store(budget.tryAcquire(
+                bytes: snapshot.maximumBytes - snapshot.currentBytes,
+                owner: .journalPrepared
+            ))
+        }
+
+        do {
+            _ = try await store.appendTerminalDeltas(
+                preparedDeltas: [prepared],
+                lane: .priority,
+                workspaceLease: workspace
+            )
+            Issue.record("live ownership pressure unexpectedly persisted")
+        } catch let error as EventStoreError {
+            guard case .busy(let message, _) = error else {
+                Issue.record("ownership pressure was not typed transient: \(error)")
+                return
+            }
+            #expect(message.contains("base-and-delta ownership"))
+        }
+        #expect(try await store.payloadPoisonTotalSnapshot() == 0)
+
+        blocker.release()
+        await store.setTerminalDeltaOwnershipGrowthHookForTesting(nil)
+        let retry = try await store.appendTerminalDeltas(
+            preparedDeltas: [prepared],
+            lane: .priority,
+            workspaceLease: workspace
+        )
+        #expect(retry.outcomes.count == 1)
+        #expect(retry.outcomes.first?.disposition == .inserted)
+        #expect(try await store.payloadPoisonTotalSnapshot() == 0)
     }
 
     @Test("one late enrichment does not repeat a maximum-like base payload")

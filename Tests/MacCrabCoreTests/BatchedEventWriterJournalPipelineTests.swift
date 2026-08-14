@@ -12,6 +12,7 @@ struct BatchedEventWriterJournalPipelineTests {
 
         let baseMode: BaseMode
         let ensureDelay: Duration?
+        private var terminalDeltaBusy: Bool
         private var bases: [UUID: EventJournalIngressPreparation] = [:]
         private var terminals: [UUID: EventJournalIngressPreparation] = [:]
         private var terminalDeltas: [
@@ -26,10 +27,12 @@ struct BatchedEventWriterJournalPipelineTests {
 
         init(
             baseMode: BaseMode = .durable,
-            ensureDelay: Duration? = nil
+            ensureDelay: Duration? = nil,
+            terminalDeltaInitiallyBusy: Bool = false
         ) {
             self.baseMode = baseMode
             self.ensureDelay = ensureDelay
+            terminalDeltaBusy = terminalDeltaInitiallyBusy
         }
 
         func insert(
@@ -159,6 +162,11 @@ struct BatchedEventWriterJournalPipelineTests {
                         .productionEventStoreWorkspaceReserveBytes
             )
             terminalDeltaAppendCalls += 1
+            if terminalDeltaBusy {
+                throw EventStoreError.busy(
+                    "fixture terminal ownership pressure"
+                )
+            }
             var outcomes: [EventTerminalDeltaOutcome] = []
             var committed = 0
             for prepared in preparedDeltas {
@@ -297,6 +305,10 @@ struct BatchedEventWriterJournalPipelineTests {
         func reviewedMatches(_ id: UUID) -> [RuleMatch] {
             promoted[id] ?? []
         }
+
+        func releaseTerminalDeltaPressure() {
+            terminalDeltaBusy = false
+        }
     }
 
     private func event(
@@ -405,6 +417,43 @@ struct BatchedEventWriterJournalPipelineTests {
         #expect(snapshot.terminalRevisionBufferDepth == 0)
         #expect(snapshot.terminalRevisionInFlightDepth == 0)
         #expect(snapshot.terminalRevisionDurableCount == 1)
+        #expect(snapshot.terminalRevisionConservationHolds)
+    }
+
+    @Test("terminal delta outlives transient storage pressure without poisoning")
+    func terminalDeltaRetriesTransientPressureLosslessly() async throws {
+        let store = JournalStoreFake(terminalDeltaInitiallyBusy: true)
+        let writer = BatchedEventWriter(
+            store: store,
+            flushThreshold: 10_000,
+            hardCap: 100
+        )
+        let base = event(21)
+        let receipt = try #require(await writer.enqueuePrepared(
+            EventJournalAdmissionValidator.prepare(base)
+        ))
+        var terminal = base
+        terminal.enrichments["reviewed"] = "after-pressure"
+
+        let release = Task {
+            // Exceeds the former five-second sparse-settlement deadline.
+            try await Task.sleep(for: .milliseconds(5_250))
+            await store.releaseTerminalDeltaPressure()
+        }
+        let proof = await writer.prepareAndSettleTerminalDelta(
+            base: base,
+            terminal: terminal,
+            admission: receipt,
+            timeout: .seconds(1)
+        )
+        _ = try await release.value
+
+        #expect(proof.status == .verified)
+        #expect(await store.terminalDeltaAppendCalls > 1)
+        let snapshot = await writer.telemetrySnapshot()
+        #expect(snapshot.terminalRevisionRetriedCount > 0)
+        #expect(snapshot.terminalRevisionPoisonedCount == 0)
+        #expect(snapshot.terminalRevisionDroppedCount == 0)
         #expect(snapshot.terminalRevisionConservationHolds)
     }
 

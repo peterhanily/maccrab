@@ -734,6 +734,10 @@ public actor EventStore {
     /// equivalent isolated envelope so independently scheduled fixture suites
     /// cannot manufacture cross-suite backpressure.
     private let liveMemoryBudget: EventPipelineLiveMemoryBudget
+    /// Deterministic actor-isolated seam for proving that a concurrent owner
+    /// taking freshly released decode credit is transient, never poison.
+    private var terminalDeltaOwnershipGrowthHookForTesting:
+        (@Sendable () -> Void)?
     private var storagePolicy: SQLitePersistentStorePolicy?
     private var storageAdmission: SQLitePersistentStoreAdmission?
     /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
@@ -3443,6 +3447,12 @@ public actor EventStore {
             )
         }
         return Int(value)
+    }
+
+    internal func setTerminalDeltaOwnershipGrowthHookForTesting(
+        _ hook: (@Sendable () -> Void)?
+    ) {
+        terminalDeltaOwnershipGrowthHookForTesting = hook
     }
 
     public func insert(event: Event) throws {
@@ -10247,10 +10257,7 @@ public actor EventStore {
             guard !combined.overflow,
                   combined.partialValue
                     <= EventJournalAdmissionValidator
-                        .maximumPreparationWorkspaceBytes,
-                  owned.record.ownershipLease.resize(
-                    to: combined.partialValue
-                  ) else {
+                        .maximumPreparationWorkspaceBytes else {
                 return poisonPlan(
                     location: location,
                     framedSHA256: owned.framedSHA256,
@@ -10258,6 +10265,14 @@ public actor EventStore {
                     digest: prepared.canonicalDeltaSHA256,
                     reason: .storageCapacity,
                     digestKind: .structuralPreflight
+                )
+            }
+            terminalDeltaOwnershipGrowthHookForTesting?()
+            guard owned.record.ownershipLease.resize(
+                to: combined.partialValue
+            ) else {
+                throw EventStoreError.busy(
+                    "terminal delta for journal block \(location.blockID) is waiting for bounded base-and-delta ownership"
                 )
             }
             var decodedDelta: EventTerminalDelta? = try decoder.decode(
@@ -10284,13 +10299,8 @@ public actor EventStore {
                 to: EventJournalAdmissionValidator
                     .maximumPreparationWorkspaceBytes
             ) else {
-                return poisonPlan(
-                    location: location,
-                    framedSHA256: owned.framedSHA256,
-                    bytes: prepared.compactRetainedByteEstimate,
-                    digest: prepared.canonicalDeltaSHA256,
-                    reason: .storageCapacity,
-                    digestKind: .structuralPreflight
+                throw EventStoreError.busy(
+                    "terminal delta for journal block \(location.blockID) is waiting for bounded terminal encoding ownership"
                 )
             }
             let terminalJSON = try journalEncoder.encode(terminal)

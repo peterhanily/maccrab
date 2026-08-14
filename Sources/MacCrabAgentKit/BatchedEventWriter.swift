@@ -1651,9 +1651,11 @@ actor BatchedEventWriter {
         defer {
             endSparseTerminalInFlight(lane: lane, bytes: inFlightBytes)
         }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while !Task.isCancelled, clock.now < deadline {
+        // Once the exact compact delta and its S lease exist, transient live-
+        // memory or SQLite contention is not a terminal evidence result. Keep
+        // the causal barrier pending until storage succeeds, a permanent error
+        // occurs, or shutdown cancels this task.
+        while !Task.isCancelled {
             do {
                 let result = try await journalStore.appendTerminalDeltas(
                     preparedDeltas: [storagePrepared],
@@ -1709,7 +1711,6 @@ actor BatchedEventWriter {
                 }
             } catch let error as EventStoreError where isTransient(error) {
                 recordTerminalRetry(1, lane: lane)
-                await StorageErrorTracker.shared.recordEventError(error)
                 try? await Task.sleep(for: .milliseconds(10))
             } catch {
                 recordTerminalDrop(lane: lane)
@@ -1718,7 +1719,7 @@ actor BatchedEventWriter {
             }
         }
         recordTerminalDrop(lane: lane)
-        return proof(status: Task.isCancelled ? .dropped : .timedOut)
+        return proof(status: .dropped)
     }
 
     private func enqueueTerminalRevisionLosslessly(
@@ -2018,6 +2019,14 @@ actor BatchedEventWriter {
                     recordTerminalDrop([item])
                     return true
                 }
+            } catch let error as EventStoreError where isTransient(error) {
+                clearTerminalRevisionInFlight(lane: item.lane)
+                if prependTerminalRevisionsForRetry([item], lane: item.lane) {
+                    recordTerminalRetry(1, lane: item.lane)
+                    return false
+                }
+                recordTerminalDrop([item])
+                await StorageErrorTracker.shared.recordEventError(error)
             } catch {
                 clearTerminalRevisionInFlight(lane: item.lane)
                 recordTerminalDrop([item])
