@@ -132,9 +132,32 @@ struct KillChainFireTests {
     func npmPostinstallToRat() async throws {
         #expect(try await fires("e1f2a3b4-0020-4000-b000-000000000020", [
             proc("/bin/sh", parent: "/usr/local/bin/npm", at: 0),
-            file("/tmp/rat", at: 1),
+            file("/tmp/rat", actor: "/bin/sh", at: 1),
             net(at: 2),
         ]))
+    }
+
+    @Test("npm RAT rule does not journal unrelated compiler temp traffic")
+    func npmRatIgnoresCompilerTempTraffic() async throws {
+        ensureRulesCompiled()
+        let engine = SequenceEngine(lineage: ProcessLineage())
+        _ = try await engine.loadRules(
+            from: URL(fileURLWithPath: seqDir),
+            enabledStatuses: ["stable", "experimental"]
+        )
+        let ruleID = "e1f2a3b4-0020-4000-b000-000000000020"
+        for index in 0..<2_048 {
+            _ = await engine.evaluate(file(
+                "/private/tmp/swift-build-\(index).o",
+                actor: "/usr/bin/swift-frontend",
+                at: TimeInterval(index) / 1_000
+            ))
+        }
+        let ledger = await engine.pendingStepConservationByRule()[ruleID]
+        #expect((ledger?.offered ?? 0) == 0)
+        #expect((ledger?.queued ?? 0) == 0)
+        #expect((ledger?.explicitlyShed ?? 0) == 0)
+        #expect(await engine.pendingStepsEvictedTotal == 0)
     }
 
     @Test("pip_install_to_credential_harvest fires: pip install → read ~/.ssh key")

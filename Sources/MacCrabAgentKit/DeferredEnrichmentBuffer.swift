@@ -776,6 +776,16 @@ actor DeferredEnrichmentBuffer {
                     UInt64(item.retainedByteCharge),
                     to: &patchBytesConsumedTotal
                 )
+                if let terminalized = patch.terminalizingRejectedEvidence(
+                    in: event
+                ) {
+                    retained.terminalDelta = composeTerminalDelta(
+                        retained.terminalDelta,
+                        from: event,
+                        to: terminalized
+                    )
+                    event = terminalized
+                }
                 continue
             }
             retained.terminalDelta = composeTerminalDelta(

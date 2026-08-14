@@ -65,7 +65,7 @@ struct FileContentEnricherRevivalTests {
             fileContentEnricher: FileContentEnricher(),
             heavyEnrichmentPlane: plane
         )
-        func fileEvent(action: String) -> Event {
+        func fileEvent(action: String, reportedSize: UInt64? = nil) -> Event {
             let proc = MacCrabCore.ProcessInfo(
                 pid: 4242, ppid: 1, rpid: 4242, name: "curl", executable: "/usr/bin/curl",
                 commandLine: "curl", args: [], workingDirectory: "/",
@@ -75,7 +75,8 @@ struct FileContentEnricherRevivalTests {
             return Event(eventCategory: .file, eventType: .creation, eventAction: action,
                          process: proc, file: FileInfo(
                             path: wf.path,
-                            size: UInt64((try? Data(contentsOf: wf).count) ?? 0),
+                            size: reportedSize
+                                ?? UInt64((try? Data(contentsOf: wf).count) ?? 0),
                             action: .create
                          ))
         }
@@ -104,6 +105,35 @@ struct FileContentEnricherRevivalTests {
         #expect(completed.outcome == .completed)
         let reEvaluated = try #require(completed.applying(to: enrichedClose))
         #expect(reEvaluated.enrichments["FileContent"] != nil)
+
+        let staleEvent = fileEvent(
+            action: "close_modified",
+            reportedSize: UInt64(Data("stale-size".utf8).count)
+        )
+        let enrichedStale = await enricher.enrich(staleEvent)
+        var stalePatch: DeferredEventEnrichment?
+        let staleAddition = DispatchTime.now().uptimeNanoseconds
+            .addingReportingOverflow(30_000_000_000)
+        let staleDeadline = staleAddition.overflow
+            ? UInt64.max : staleAddition.partialValue
+        while stalePatch == nil,
+              DispatchTime.now().uptimeNanoseconds < staleDeadline {
+            stalePatch = await enricher.drainDeferredEnrichments(limit: 8).first {
+                $0.component == .fileContent
+            }
+            if stalePatch == nil {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        let staleTerminal = try #require(stalePatch)
+        let staleRevision = try #require(staleTerminal.applying(
+            to: enrichedStale
+        ))
+        #expect(staleRevision.enrichments["FileContent"] == nil)
+        #expect(DeferredEventEnrichment.coverageState(
+            for: .fileContent,
+            in: staleRevision
+        ) == .unavailable)
 
         let enrichedOpen = await enricher.enrich(fileEvent(action: "open"))
         #expect(enrichedOpen.enrichments["FileContent"] == nil)

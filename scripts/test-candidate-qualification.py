@@ -518,6 +518,16 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
             "es_kernel_dropped_total": 0,
             "es_copy_backpressure_dropped_total": 0,
             "es_stream_yield_dropped_total": 0,
+            "deferred_enrichment_buffer": {
+                "identity_rejected_patches_total": 0,
+                "reservation_conserved": True,
+                "slots_conserved": True,
+                "events_conserved": True,
+                "raw_event_bytes_conserved": True,
+                "patches_conserved": True,
+                "patch_bytes_conserved": True,
+                "within_capacity": True,
+            },
             "llm": llm_heartbeat_payload(
                 healthy=True,
                 started=11 if sample["offset_seconds"] >= 330 else 10,
@@ -1271,6 +1281,23 @@ class CandidateQualificationTests(unittest.TestCase):
             "sequence_pending_steps_current",
         ):
             self.rederive_sample(report, 0)
+
+    def test_readiness_rejects_deferred_enrichment_identity_failure(self) -> None:
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+        observation["heartbeat"]["deferred_enrichment_buffer"][
+            "identity_rejected_patches_total"
+        ] = 1
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "identity-rejected patches=1",
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture rejected enrichment",
+                phase="fixture rejected enrichment", require_drained=True,
+                expected_pid=4321,
+            )
 
     def test_initial_loss_fails_before_source_probes_or_epoch_sleep(self) -> None:
         report = copy.deepcopy(self.runtime)

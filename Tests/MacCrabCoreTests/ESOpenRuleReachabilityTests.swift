@@ -364,14 +364,17 @@ struct ESOpenRuleReachabilityTests {
             "d1a2b3c4-2031-4000-a000-000000002031", // config content write
             "21a8021e-abb7-4791-8d68-eab80a49edb4", // node-ipc package content write
         ]
+        let expectedSequenceWriteCloseRules: Set<String> = [
+            "e1f2a3b4-0020-4000-b000-000000000020", // npm descendant payload write
+        ]
         let singleClose = try stableHighRulesUsingClose(in: compiledDir)
         let sequenceClose = try stableHighRulesUsingClose(
             in: compiledDir.appendingPathComponent("sequences")
         )
         #expect(singleClose == expectedWriteCloseRules,
                 "stable/HIGH CLOSE census changed; classify new entries as read vs modified-write")
-        #expect(sequenceClose.isEmpty,
-                "stable/HIGH sequence steps cannot depend on unmodified CLOSE reads")
+        #expect(sequenceClose == expectedSequenceWriteCloseRules,
+                "stable/HIGH sequence CLOSE census changed; entries must require modified-write actions")
 
         let traceRule = try jsonObject(
             at: compiledDir.appendingPathComponent("agent_traceparent_credential_access.json")

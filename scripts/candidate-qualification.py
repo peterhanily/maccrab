@@ -3864,6 +3864,31 @@ def runtime_readiness_failures(
     fatal: List[str] = []
     pending: List[str] = []
 
+    heartbeat = object_value(
+        observation.get("heartbeat"), f"{path}.heartbeat"
+    )
+    deferred_buffer = object_value(
+        heartbeat.get("deferred_enrichment_buffer"),
+        f"{path}.heartbeat.deferred_enrichment_buffer",
+    )
+    rejected_patches = int_value(
+        deferred_buffer.get("identity_rejected_patches_total"),
+        f"{path}.heartbeat.deferred_enrichment_buffer."
+        "identity_rejected_patches_total",
+    )
+    if rejected_patches:
+        fatal.append(
+            "cumulative deferred-enrichment identity-rejected patches="
+            f"{rejected_patches}"
+        )
+    for key in (
+        "reservation_conserved", "slots_conserved", "events_conserved",
+        "raw_event_bytes_conserved", "patches_conserved",
+        "patch_bytes_conserved", "within_capacity",
+    ):
+        if deferred_buffer.get(key) is not True:
+            fatal.append(f"deferred-enrichment {key} is not holding")
+
     pid = int_value(sample.get("engine_pid"), f"{path}.engine_pid", minimum=1)
     if expected_pid is not None and pid != expected_pid:
         fatal.append(f"engine PID changed from {expected_pid} to {pid}")

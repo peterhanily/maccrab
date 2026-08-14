@@ -549,11 +549,21 @@ public actor EventEnricher {
         ) {
             let maximumBytes = scanner.maxBytes
             let maximumFileSize = scanner.maxFileSize
-            return .fileContent(HeavyFileContentEvidence.read(
+            let evidence = HeavyFileContentEvidence.read(
                 path: path,
                 maximumBytes: maximumBytes,
                 maximumFileSize: maximumFileSize
-            ))
+            )
+            // The path may legitimately be replaced or rewritten after the ES
+            // close event but before this deferred descriptor read. Reject that
+            // stale snapshot inside the worker as an ordinary unavailable
+            // result, before it becomes an identity-rejected terminal patch.
+            guard let evidence else { return .fileContent(nil) }
+            if let expectedSize = binding.eventFileSize,
+               UInt64(exactly: evidence.fileIdentity.sizeBytes) != expectedSize {
+                return .fileContent(nil)
+            }
+            return .fileContent(evidence)
         }
         switch offer {
         case .cacheHit(.fileContent(let evidence)):

@@ -589,6 +589,32 @@ public struct DeferredEventEnrichment: Sendable, Equatable {
         )
     }
 
+    /// Consumes a terminal patch whose evidence failed identity or contract
+    /// validation without attaching any of its value. The heavy-plane offer
+    /// has nevertheless terminated, so leaving this component `.pending`
+    /// would permanently retain the Event and eventually deadlock ingestion.
+    ///
+    /// Event UUID is the only patch field trusted here. No evidence or binding
+    /// metadata crosses into the returned Event; the component is recorded as
+    /// explicit degraded coverage instead.
+    public func terminalizingRejectedEvidence(in event: Event) -> Event? {
+        guard binding.eventID == event.id else { return nil }
+        var coverage = Self.parseCoverage(event.enrichments[Self.coverageKey])
+        guard coverage[component] == .pending else { return nil }
+
+        switch outcome {
+        case .timedOut:
+            coverage[component] = .timedOut
+        case .cancelled:
+            coverage[component] = .cancelled
+        case .completed:
+            coverage[component] = .unavailable
+        }
+        var revised = event
+        Self.storeCoverage(coverage, in: &revised.enrichments)
+        return revised
+    }
+
     public static let coverageKey = "HeavyEnrichmentCoverage"
 
     public static func coverage(

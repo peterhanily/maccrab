@@ -51,7 +51,21 @@ steps:
                   - '/Library/Application Support/'
                   - '/tmp/'
                   - '/private/tmp/'
-          condition: selection
+          postinstall_writer:
+              Image|endswith:
+                  - '/node'
+                  - '/npm'
+                  - '/npx'
+                  - '/sh'
+                  - '/bash'
+                  - '/curl'
+                  - '/wget'
+          payload_write:
+              FileAction:
+                  - 'create'
+                  - 'write'
+                  - 'close'
+          condition: selection and postinstall_writer and payload_write
       process: postinstall.descendant
 
     - id: c2_callback

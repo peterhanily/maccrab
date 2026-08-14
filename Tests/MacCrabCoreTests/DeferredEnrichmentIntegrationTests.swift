@@ -336,6 +336,92 @@ struct DeferredEnrichmentIntegrationTests {
         #expect((await buffer.snapshot()).retainedEvents == 0)
     }
 
+    @Test("rejected terminal evidence cannot exhaust retained-event capacity")
+    func rejectedTerminalEvidenceReleasesCapacity() async throws {
+        let first = event(pending: [.userName])
+        let second = event(pending: [.environment])
+        let reservationCharge = max(
+            try EventJournalAdmissionValidator.prepare(first)
+                .sourceRetainedByteEstimate,
+            try EventJournalAdmissionValidator.prepare(second)
+                .sourceRetainedByteEstimate
+        )
+        let buffer = DeferredEnrichmentBuffer(
+            eventCapacity: 2,
+            patchCapacity: 2,
+            reservationRawEventByteCharge: reservationCharge,
+            liveMemoryBudget: isolatedMemoryBudget()
+        )
+        let firstReservation = try #require(await buffer.reserveEventSlot())
+        let secondReservation = try #require(await buffer.reserveEventSlot())
+        #expect(await buffer.retain(first, using: firstReservation))
+        #expect(await buffer.retain(second, using: secondReservation))
+        #expect((await buffer.markReady(first)).isEmpty)
+        #expect((await buffer.markReady(second)).isEmpty)
+
+        let waiting = Task { await buffer.reserveEventSlot() }
+        for _ in 0..<100 {
+            if (await buffer.snapshot()).waitingReservations == 1 { break }
+            await Task.yield()
+        }
+        #expect((await buffer.snapshot()).waitingReservations == 1)
+
+        // Both terminal patches violate their component/value contract. Their
+        // values must never attach, but each accepted offer must still close
+        // the matching pending component and return its retained slot.
+        let batches = await transfer([
+            patch(
+                event: first,
+                component: .userName,
+                value: .environment(["UNTRUSTED": "1"])
+            ),
+            patch(
+                event: second,
+                component: .environment,
+                value: .userName("untrusted")
+            ),
+        ], to: buffer)
+        #expect(batches.count == 2)
+        for batch in batches {
+            #expect(batch.terminal)
+            #expect(batch.completedComponents.isEmpty)
+            #expect(!DeferredEventEnrichment.hasPendingCoverage(in: batch.event))
+            if batch.event.id == first.id {
+                #expect(DeferredEventEnrichment.coverageState(
+                    for: .userName,
+                    in: batch.event
+                ) == .unavailable)
+                #expect(batch.event.process.userName.isEmpty)
+            } else if batch.event.id == second.id {
+                #expect(DeferredEventEnrichment.coverageState(
+                    for: .environment,
+                    in: batch.event
+                ) == .unavailable)
+                #expect(batch.event.process.envVars == nil)
+            } else {
+                Issue.record("unexpected replay event identity")
+            }
+            await buffer.completeTerminalReplay(eventID: batch.event.id)
+        }
+
+        let thirdReservation = try #require(await waiting.value)
+        #expect(await buffer.retain(
+            event(pending: []),
+            using: thirdReservation
+        ) == false)
+        await buffer.seal()
+        let snapshot = await buffer.snapshot()
+        #expect(snapshot.identityRejectedPatchesTotal == 2)
+        #expect(snapshot.retainedEvents == 0)
+        #expect(snapshot.waitingReservations == 0)
+        #expect(snapshot.reservationConserved)
+        #expect(snapshot.slotsConserved)
+        #expect(snapshot.eventsConserved)
+        #expect(snapshot.patchesConserved)
+        #expect(snapshot.patchBytesConserved)
+        #expect(snapshot.cleanlyDrained)
+    }
+
     @Test("plane shutdown terminalizes then buffer drains the accepted prefix")
     func shutdownDrain() async throws {
         let budget = isolatedMemoryBudget()
