@@ -355,12 +355,21 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             return false
         }
         if reservation.owner != owner {
-            // Re-labelling does not change total bytes, but it still must obey
-            // the destination owner's aggregate ceiling. In particular, an S
-            // lease at the full 96 MiB envelope cannot become J/noncritical
-            // ownership and erase the next codec workspace reserve.
-            if reservation.bytes > maximumIndividualRequestBytes(for: owner)
-                || currentBytes > maximumAggregateBytes(for: owner) {
+            // R/P/H are stages of the same noncritical ownership class. Their
+            // admission ceiling reserves J+S forward-progress space, but J/S
+            // may legitimately occupy that space after the noncritical lease
+            // was admitted. Relabelling H -> P (or another in-class handoff)
+            // changes neither total nor noncritical bytes and must therefore
+            // remain possible at the hard envelope; reapplying admission to
+            // currentBytes here would strand an already-owned terminal result.
+            //
+            // A transfer across ownership classes still must obey the
+            // destination ceiling. In particular, an S/J lease at the full
+            // envelope cannot become noncritical ownership and erase reserved
+            // codec/journal progress.
+            if !sameAdmissionClass(reservation.owner, owner),
+               (reservation.bytes > maximumIndividualRequestBytes(for: owner)
+                    || currentBytes > maximumAggregateBytes(for: owner)) {
                 increment(&nonblockingRejectionsTotal)
                 lock.unlock()
                 return false
@@ -372,6 +381,26 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
         }
         lock.unlock()
         return true
+    }
+
+    private func sameAdmissionClass(
+        _ lhs: EventPipelineMemoryOwner,
+        _ rhs: EventPipelineMemoryOwner
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (.eventSource, .eventSource),
+             (.eventSource, .deferredPatch),
+             (.eventSource, .heavyResult),
+             (.deferredPatch, .eventSource),
+             (.deferredPatch, .deferredPatch),
+             (.deferredPatch, .heavyResult),
+             (.heavyResult, .eventSource),
+             (.heavyResult, .deferredPatch),
+             (.heavyResult, .heavyResult):
+            return true
+        default:
+            return lhs == rhs
+        }
     }
 
     fileprivate func split(

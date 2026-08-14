@@ -318,6 +318,41 @@ struct EventPipelineLiveMemoryBudgetTests {
         #expect(drained.leasesConserved)
     }
 
+    @Test("terminal heavy-result handoff survives journal use of reserved headroom")
+    func inClassTransferSurvivesCriticalPressure() async throws {
+        let budget = EventPipelineLiveMemoryBudget(
+            maximumBytes: 100,
+            forwardProgressReserveBytes: 40
+        )
+        var result: EventPipelineMemoryLease? = try #require(
+            budget.tryAcquire(bytes: 10, owner: .heavyResult)
+        )
+        var journal: EventPipelineMemoryLease? = try #require(
+            await budget.acquire(bytes: 70, owner: .journalPrepared)
+        )
+        var snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 80)
+        #expect(snapshot.currentBytes > 60,
+                "critical work must reproduce total pressure above the noncritical ceiling")
+
+        #expect(result?.transfer(to: .deferredPatch) == true,
+                "an already-owned terminal result must not be stranded by a zero-byte handoff")
+        snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 80)
+        #expect(snapshot.bytesByOwner["deferred_patch"] == 10)
+        #expect(snapshot.bytesByOwner["heavy_result"] == 0)
+        #expect(snapshot.nonblockingRejectionsTotal == 0)
+        #expect(snapshot.withinCapacity)
+        #expect(snapshot.leasesConserved)
+
+        result = nil
+        journal = nil
+        snapshot = budget.snapshot()
+        #expect(snapshot.currentBytes == 0)
+        #expect(snapshot.activeLeases == 0)
+        #expect(snapshot.leasesConserved)
+    }
+
     @Test("derived tasks inherit one source charge until their Event capture exits")
     func taskLocalSourceOwnership() async throws {
         let budget = EventPipelineLiveMemoryBudget(maximumBytes: 1_024)

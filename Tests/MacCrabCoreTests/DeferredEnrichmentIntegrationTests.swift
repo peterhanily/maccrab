@@ -483,6 +483,65 @@ struct DeferredEnrichmentIntegrationTests {
         #expect(bufferSnapshot.rawEventBytesConserved)
     }
 
+    @Test("owned terminal patch reaches replay while journal uses reserved headroom")
+    func ownedPatchTransferUnderJournalPressure() async throws {
+        let budget = isolatedMemoryBudget()
+        let buffer = DeferredEnrichmentBuffer(
+            eventCapacity: 1,
+            patchCapacity: 1,
+            liveMemoryBudget: budget
+        )
+        let original = event(pending: [.userName])
+        let reservation = try #require(await buffer.reserveEventSlot())
+        #expect(await buffer.retain(original, using: reservation))
+        #expect((await buffer.markReady(original)).isEmpty)
+
+        let terminal = patch(
+            event: original,
+            component: .userName,
+            value: .userName("operator")
+        )
+        let resultLease = try #require(budget.tryAcquire(
+            bytes: terminal.retainedByteEstimate,
+            owner: .heavyResult
+        ))
+        let noncriticalCeiling = EventPipelineLiveMemoryBudget
+            .productionMaximumBytes
+            - EventPipelineLiveMemoryBudget.productionForwardProgressReserveBytes
+        var journalPressure: EventPipelineMemoryLease? = try #require(
+            await budget.acquire(
+                bytes: noncriticalCeiling,
+                owner: .journalPrepared
+            )
+        )
+        #expect(budget.snapshot().currentBytes > noncriticalCeiling,
+                "the fixture must cross the ceiling that rejected rc.25's H-to-P transfers")
+
+        #expect(await buffer.claimDrainCapacity(limit: 1) == 1)
+        let batches = await buffer.acceptOwnedDrained([
+            OwnedDeferredEventEnrichment(
+                patch: terminal,
+                memoryLease: resultLease
+            ),
+        ])
+        let batch = try #require(batches.first)
+        #expect(batches.count == 1)
+        #expect(batch.terminal)
+        #expect(batch.event.process.userName == "operator")
+        var snapshot = await buffer.snapshot()
+        #expect(snapshot.identityRejectedPatchesTotal == 0)
+        #expect(snapshot.patchesConserved)
+        #expect(snapshot.patchBytesConserved)
+
+        await buffer.completeTerminalReplay(eventID: original.id)
+        journalPressure = nil
+        await buffer.seal()
+        snapshot = await buffer.snapshot()
+        #expect(snapshot.cleanlyDrained)
+        #expect(snapshot.identityRejectedPatchesTotal == 0)
+        #expect(budget.snapshot().leasesConserved)
+    }
+
     @Test("512-slot buffer backpressures on raw Event bytes and conserves ownership")
     func rawEventByteBackpressure() async throws {
         let first = event(
