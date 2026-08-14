@@ -530,24 +530,27 @@ public actor AlertSink {
     /// Evidence selection shares the process-wide bounded decode budget with
     /// the live ingestion pipeline. A synchronous offer may therefore lose a
     /// short race without implying corruption. Keep the durable context row
-    /// pending and retry only explicitly transient EventStore failures; codec,
-    /// authentication, and schema failures remain terminal on their first try.
-    private func exactEvidenceSnapshotWithBoundedRetry(
+    /// pending and retry only explicitly transient EventStore failures. There
+    /// is deliberately no wall-clock cutoff: continuous ingestion may keep a
+    /// non-blocking reader behind FIFO memory waiters for an arbitrary period,
+    /// which is pressure rather than evidence loss. Codec, authentication, and
+    /// schema failures remain terminal on their first try; shutdown cancellation
+    /// leaves the durable pending row as honest, restart-stable unfinished work.
+    private func exactEvidenceSnapshotWithTransientRetry(
         eventStore: EventStore,
         alertTimestamp: Date,
         maxRows: Int
     ) async throws -> ExactAlertEvidenceSnapshot {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
         var delay = Duration.milliseconds(10)
         while true {
+            try Task.checkCancellation()
             do {
                 return try await eventStore.exactAlertEvidenceSnapshot(
                     alertTimestamp: alertTimestamp,
                     maxRows: maxRows
                 )
             } catch let error as EventStoreError {
-                guard case .busy = error, clock.now < deadline else {
+                guard case .busy = error else {
                     throw error
                 }
                 try await Task.sleep(for: delay)
@@ -597,7 +600,7 @@ public actor AlertSink {
                 var selectionError: (any Error)?
                 do {
                     exactSnapshot = try await
-                        exactEvidenceSnapshotWithBoundedRetry(
+                        exactEvidenceSnapshotWithTransientRetry(
                         eventStore: eventStore,
                         alertTimestamp: request.timestamp,
                         maxRows: remaining
@@ -676,6 +679,12 @@ public actor AlertSink {
             evidenceRowsCaptured += result.insertedRows
             evidenceRowsPruned += result.prunedRows
             evidenceCaptureCompleted += 1
+        } catch is CancellationError {
+            // Shutdown has a fixed deadline. A transiently blocked selection
+            // cancelled at that boundary must retain the alert's atomic
+            // `.pending` context as restart-stable unfinished work; it is not
+            // evidence of a terminal capture failure.
+            return
         } catch {
             // The parent insert's atomic `.pending` row is already fail-visible.
             // Advance it to a terminal failure when possible; if this write also

@@ -486,7 +486,7 @@ struct AlertEvidenceOwnershipTests {
         #expect(recovered.candidates.count == 1)
     }
 
-    @Test("evidence worker retries transient decode ownership pressure")
+    @Test("evidence worker outlives sustained transient decode ownership pressure")
     func evidenceRetriesDecodeOwnershipPressure() async throws {
         let dir = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -508,7 +508,10 @@ struct AlertEvidenceOwnershipTests {
         let holder = LeaseHolder(try #require(blocker))
         blocker = nil
         let release = Task {
-            try await Task.sleep(for: .milliseconds(75))
+            // This deliberately exceeds the former five-second cutoff. A
+            // pressure interval is not a terminal evidence result merely
+            // because it crosses an arbitrary wall-clock boundary.
+            try await Task.sleep(for: .milliseconds(5_250))
             await holder.release()
         }
         let sink = AlertSink(
@@ -534,6 +537,55 @@ struct AlertEvidenceOwnershipTests {
             alertId: "transient-decode-pressure"
         ))
         #expect(context.status != .captureFailed)
+    }
+
+    @Test("shutdown preserves transiently blocked evidence as pending")
+    func shutdownPreservesTransientEvidencePending() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let events = try EventStore(
+            directory: dir.path,
+            liveMemoryBudget: budget
+        )
+        let alerts = try AlertStore(directory: dir.path)
+        let timestamp = Date(timeIntervalSince1970: 44_700)
+        let trigger = event(timestamp: timestamp)
+        try await events.insert(event: trigger)
+
+        var blocker: EventPipelineMemoryLease? = budget.tryAcquire(
+            bytes: 50 * 1_048_576,
+            owner: .journalPrepared
+        )
+        let holder = LeaseHolder(try #require(blocker))
+        blocker = nil
+        let sink = AlertSink(
+            alertStore: alerts,
+            deduplicator: AlertDeduplicator(suppressionWindow: 60),
+            eventStore: events,
+            liveMemoryBudget: budget
+        )
+        #expect(try await sink.submit(alert: alert(
+            id: "shutdown-transient-pressure",
+            event: trigger
+        )))
+
+        let shutdown = await sink.shutdownEvidenceCapture(
+            timeout: .milliseconds(50)
+        )
+        await holder.release()
+        await sink.flushEvidenceCapture()
+
+        #expect(shutdown.deadlineExpired)
+        #expect(shutdown.durablePendingContexts >= 1)
+        let stats = await sink.evidenceStats()
+        #expect(stats.failures == 0)
+        #expect(stats.exactContextQueryFailures == 0)
+        let context = try #require(await alerts.evidenceContext(
+            alertId: "shutdown-transient-pressure"
+        ))
+        #expect(context.status == .pending)
     }
 
     @Test("post-commit evidence uses a bounded single-worker conservation lane")
