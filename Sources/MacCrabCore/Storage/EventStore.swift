@@ -5935,15 +5935,14 @@ public actor EventStore {
             WHERE block_id = ?1 AND ordinal = ?2
             """
         )
+        defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, location.blockID)
         sqlite3_bind_int(statement, 2, Int32(location.ordinal))
         let rc = sqlite3_step(statement)
         if rc == SQLITE_DONE {
-            sqlite3_finalize(statement)
             return nil
         }
         guard rc == SQLITE_ROW else {
-            sqlite3_finalize(statement)
             throw EventStoreError.stepFailed(
                 "terminal journal revision lookup failed"
             )
@@ -5971,7 +5970,6 @@ public actor EventStore {
         let rawBytes = Int(sqlite3_column_int64(statement, 5))
         let codec = Int(sqlite3_column_int(statement, 6))
         let payloadBytes = Int(sqlite3_column_int64(statement, 7))
-        sqlite3_finalize(statement)
 
         let workspace = try acquireEventStoreWorkspace(
             context: "terminal journal revision decode"
@@ -6336,7 +6334,8 @@ public actor EventStore {
             let sourceIdentity: Data
             let hasTerminalRevision: Bool
         }
-        let statement = try prepare(
+        var rows: [Row] = []
+        try withPreparedStatement(
             """
             SELECT p.ordinal, p.poison_kind, p.event_id,
                    p.source_identity_sha256,
@@ -6347,38 +6346,36 @@ public actor EventStore {
             WHERE p.block_id = ?1
             ORDER BY p.ordinal, p.poison_kind
             """
-        )
-        sqlite3_bind_int64(statement, 1, blockID)
-        var rows: [Row] = []
-        while true {
-            let rc = sqlite3_step(statement)
-            if rc == SQLITE_DONE { break }
-            guard rc == SQLITE_ROW,
-                  Int(sqlite3_column_bytes(statement, 2)) == 16,
-                  Int(sqlite3_column_bytes(statement, 3)) == SHA256.byteCount,
-                  let kindBytes = sqlite3_column_text(statement, 1),
-                  let kind = EventJournalPoisonRecord.Kind(
-                    rawValue: String(cString: kindBytes)
-                  ),
-                  let eventIDBytes = sqlite3_column_blob(statement, 2),
-                  let sourceIdentityBytes = sqlite3_column_blob(statement, 3) else {
-                sqlite3_finalize(statement)
-                throw EventStoreError.decodingFailed(
-                    "journal poison ledger row is malformed"
-                )
+        ) { statement in
+            sqlite3_bind_int64(statement, 1, blockID)
+            while true {
+                let rc = sqlite3_step(statement)
+                if rc == SQLITE_DONE { break }
+                guard rc == SQLITE_ROW,
+                      Int(sqlite3_column_bytes(statement, 2)) == 16,
+                      Int(sqlite3_column_bytes(statement, 3)) == SHA256.byteCount,
+                      let kindBytes = sqlite3_column_text(statement, 1),
+                      let kind = EventJournalPoisonRecord.Kind(
+                        rawValue: String(cString: kindBytes)
+                      ),
+                      let eventIDBytes = sqlite3_column_blob(statement, 2),
+                      let sourceIdentityBytes = sqlite3_column_blob(statement, 3) else {
+                    throw EventStoreError.decodingFailed(
+                        "journal poison ledger row is malformed"
+                    )
+                }
+                rows.append(Row(
+                    ordinal: Int(sqlite3_column_int(statement, 0)),
+                    kind: kind,
+                    eventID: Data(bytes: eventIDBytes, count: 16),
+                    sourceIdentity: Data(
+                        bytes: sourceIdentityBytes,
+                        count: SHA256.byteCount
+                    ),
+                    hasTerminalRevision: sqlite3_column_int(statement, 4) != 0
+                ))
             }
-            rows.append(Row(
-                ordinal: Int(sqlite3_column_int(statement, 0)),
-                kind: kind,
-                eventID: Data(bytes: eventIDBytes, count: 16),
-                sourceIdentity: Data(
-                    bytes: sourceIdentityBytes,
-                    count: SHA256.byteCount
-                ),
-                hasTerminalRevision: sqlite3_column_int(statement, 4) != 0
-            ))
         }
-        sqlite3_finalize(statement)
 
         var basePoisonOrdinals = Set<Int>()
         for row in rows {
@@ -6740,12 +6737,13 @@ public actor EventStore {
         let terminals = try prepare(
             "SELECT ordinal FROM event_journal_terminal_revisions WHERE block_id = ?1 ORDER BY ordinal"
         )
+        defer { sqlite3_finalize(terminals) }
         sqlite3_bind_int64(terminals, 1, blockID)
-        while sqlite3_step(terminals) == SQLITE_ROW {
+        var terminalRC = sqlite3_step(terminals)
+        while terminalRC == SQLITE_ROW {
             let ordinal = Int(sqlite3_column_int(terminals, 0))
             let location = JournalLocation(blockID: blockID, ordinal: ordinal)
             guard ordinal >= 0, ordinal < events.count else {
-                sqlite3_finalize(terminals)
                 throw EventStoreError.decodingFailed(
                     "terminal revision block scan has an invalid ordinal"
                 )
@@ -6754,7 +6752,6 @@ public actor EventStore {
                 at: location,
                 base: baseEvents[ordinal]
             ) else {
-                sqlite3_finalize(terminals)
                 throw EventStoreError.decodingFailed(
                     "terminal revision block scan has an invalid ordinal"
                 )
@@ -6769,7 +6766,6 @@ public actor EventStore {
                     base: baseEvents[ordinal],
                     terminal: revision.event
                   ) else {
-                sqlite3_finalize(terminals)
                 throw EventStoreError.decodingFailed(
                     "terminal revision block scan is not source-bound"
                 )
@@ -6778,8 +6774,13 @@ public actor EventStore {
             ownershipLeasesByOrdinal[ordinal].append(
                 revision.ownershipLease
             )
+            terminalRC = sqlite3_step(terminals)
         }
-        sqlite3_finalize(terminals)
+        guard terminalRC == SQLITE_DONE else {
+            throw EventStoreError.stepFailed(
+                "terminal revision block scan failed"
+            )
+        }
 
         var promoted: [Int: [RuleMatch]] = [:]
         let promotions = try prepare(
@@ -6789,8 +6790,10 @@ public actor EventStore {
             WHERE block_id = ?1 ORDER BY ordinal
             """
         )
+        defer { sqlite3_finalize(promotions) }
         sqlite3_bind_int64(promotions, 1, blockID)
-        while sqlite3_step(promotions) == SQLITE_ROW {
+        var promotionRC = sqlite3_step(promotions)
+        while promotionRC == SQLITE_ROW {
             let ordinal = Int(sqlite3_column_int(promotions, 0))
             let idCount = Int(sqlite3_column_bytes(promotions, 1))
             let digestCount = Int(sqlite3_column_bytes(promotions, 2))
@@ -6804,7 +6807,6 @@ public actor EventStore {
                   let jsonBytes = sqlite3_column_blob(promotions, 3),
                   Data(bytes: idBytes, count: 16)
                     == Self.uuidData(events[ordinal].id) else {
-                sqlite3_finalize(promotions)
                 throw EventStoreError.decodingFailed(
                     "projection promotion block scan is malformed"
                 )
@@ -6817,7 +6819,6 @@ public actor EventStore {
                     from: json
                   ),
                   matches == ReviewedRuleMatches.normalized(matches) else {
-                sqlite3_finalize(promotions)
                 throw EventStoreError.decodingFailed(
                     "projection promotion block checksum/canonical mismatch"
                 )
@@ -6826,8 +6827,13 @@ public actor EventStore {
                 promoted[ordinal] ?? [],
                 matches
             )
+            promotionRC = sqlite3_step(promotions)
         }
-        sqlite3_finalize(promotions)
+        guard promotionRC == SQLITE_DONE else {
+            throw EventStoreError.stepFailed(
+                "projection promotion block scan failed"
+            )
+        }
         for (ordinal, matches) in promoted {
             events[ordinal] = event(
                 events[ordinal],
@@ -6847,8 +6853,10 @@ public actor EventStore {
             WHERE block_id = ?1 ORDER BY ordinal, poison_kind
             """
         )
+        defer { sqlite3_finalize(poison) }
         sqlite3_bind_int64(poison, 1, blockID)
-        while sqlite3_step(poison) == SQLITE_ROW {
+        var poisonRC = sqlite3_step(poison)
+        while poisonRC == SQLITE_ROW {
             let ordinal = Int(sqlite3_column_int(poison, 0))
             let idCount = Int(sqlite3_column_bytes(poison, 1))
             let digestCount = Int(sqlite3_column_bytes(poison, 4))
@@ -6866,7 +6874,6 @@ public actor EventStore {
                   let digestKind = EventJournalOverflowEvidence.DigestKind(
                     rawValue: String(cString: digestKindBytes)
                   ) else {
-                sqlite3_finalize(poison)
                 throw EventStoreError.decodingFailed(
                     "journal poison block scan is malformed"
                 )
@@ -6883,8 +6890,13 @@ public actor EventStore {
                     digestKind: digestKind
                 )
             )
+            poisonRC = sqlite3_step(poison)
         }
-        sqlite3_finalize(poison)
+        guard poisonRC == SQLITE_DONE else {
+            throw EventStoreError.stepFailed(
+                "journal poison block scan failed"
+            )
+        }
 
         var inheritedLossOrdinals = Set<Int>()
         let inheritedLoss = try prepare(
@@ -6896,8 +6908,10 @@ public actor EventStore {
             WHERE block_id = ?1 ORDER BY ordinal
             """
         )
+        defer { sqlite3_finalize(inheritedLoss) }
         sqlite3_bind_int64(inheritedLoss, 1, blockID)
-        while sqlite3_step(inheritedLoss) == SQLITE_ROW {
+        var inheritedLossRC = sqlite3_step(inheritedLoss)
+        while inheritedLossRC == SQLITE_ROW {
             let ordinal = Int(sqlite3_column_int(inheritedLoss, 0))
             func blob(_ column: Int32) throws -> Data {
                 let count = Int(sqlite3_column_bytes(inheritedLoss, column))
@@ -6920,7 +6934,6 @@ public actor EventStore {
                   eventID == Self.uuidData(baseEvents[ordinal].id),
                   let kindPointer = sqlite3_column_text(inheritedLoss, 2)
             else {
-                sqlite3_finalize(inheritedLoss)
                 throw EventStoreError.decodingFailed(
                     "legacy inherited-loss ledger has an invalid identity"
                 )
@@ -6928,7 +6941,6 @@ public actor EventStore {
             let kind = String(cString: kindPointer)
             guard kind == "structured_truncation"
                     || kind == "sanitizer_rebuild" else {
-                sqlite3_finalize(inheritedLoss)
                 throw EventStoreError.decodingFailed(
                     "legacy inherited-loss ledger has an invalid kind"
                 )
@@ -6939,7 +6951,6 @@ public actor EventStore {
             } else {
                 let value = sqlite3_column_int64(inheritedLoss, 3)
                 guard value > 0, value <= Int64(Int.max) else {
-                    sqlite3_finalize(inheritedLoss)
                     throw EventStoreError.decodingFailed(
                         "legacy inherited-loss byte count is invalid"
                     )
@@ -6952,7 +6963,6 @@ public actor EventStore {
             } else {
                 let value = try blob(4)
                 guard value.count == SHA256.byteCount else {
-                    sqlite3_finalize(inheritedLoss)
                     throw EventStoreError.decodingFailed(
                         "legacy inherited-loss source digest is invalid"
                     )
@@ -6976,7 +6986,6 @@ public actor EventStore {
                   recoveredFields == Array(Set(recoveredFields)).sorted(),
                   unavailableFields
                     == Array(Set(unavailableFields)).sorted() else {
-                sqlite3_finalize(inheritedLoss)
                 throw EventStoreError.decodingFailed(
                     "legacy inherited-loss field ledger is malformed"
                 )
@@ -7002,13 +7011,17 @@ public actor EventStore {
                     || baseEvents[ordinal]
                         .enrichments["payload.truncated"] == "true"
             else {
-                sqlite3_finalize(inheritedLoss)
                 throw EventStoreError.decodingFailed(
                     "legacy inherited-loss ledger checksum/source binding failed"
                 )
             }
+            inheritedLossRC = sqlite3_step(inheritedLoss)
         }
-        sqlite3_finalize(inheritedLoss)
+        guard inheritedLossRC == SQLITE_DONE else {
+            throw EventStoreError.stepFailed(
+                "legacy inherited-loss block scan failed"
+            )
+        }
         return ExactJournalBlock(
             events: events,
             ownershipLeasesByOrdinal: ownershipLeasesByOrdinal,
@@ -18941,6 +18954,19 @@ public actor EventStore {
             throw EventStoreError.prepareFailed(msg)
         }
         return stmt
+    }
+
+    /// Runs a short-lived statement and guarantees finalization on every
+    /// success and throw path. Exact-evidence reads deliberately use this
+    /// instead of branch-local finalization: a surviving reader can pin the
+    /// WAL indefinitely and prevent the retention controller from recovering.
+    private func withPreparedStatement<T>(
+        _ sql: String,
+        _ body: (OpaquePointer) throws -> T
+    ) throws -> T {
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        return try body(statement)
     }
 
     /// Binds a non-nil text value to a prepared statement parameter.

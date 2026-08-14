@@ -478,12 +478,72 @@ struct AlertEvidenceOwnershipTests {
                 return
             }
         }
+        // A transient exact-read throw must close every incremental blob,
+        // finalize every statement, and roll back its deferred transaction.
+        // Otherwise this connection pins its own WAL and retention can never
+        // recover even after the memory pressure has passed.
+        #expect(await events.walCheckpointTruncate())
         blocker = nil
 
         let recovered = try await events.exactAlertEvidenceSnapshot(
             alertTimestamp: timestamp
         )
         #expect(recovered.candidates.count == 1)
+    }
+
+    @Test("malformed terminal evidence cannot leave a WAL-pinning statement")
+    func malformedTerminalEvidenceReleasesReader() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let events = try EventStore(directory: dir.path)
+        let timestamp = Date(timeIntervalSince1970: 44_550)
+        let base = event(timestamp: timestamp)
+        try await events.insert(event: base)
+        var terminal = base
+        terminal.enrichments["reviewed"] = "true"
+        _ = try await events.appendTerminalRevision(
+            terminal,
+            lane: EventPipelineLane.finalLane(for: terminal)
+        )
+
+        let path = dir.appendingPathComponent("events.db").path
+        var raw: OpaquePointer?
+        try #require(sqlite3_open_v2(
+            path,
+            &raw,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK)
+        let database = try #require(raw)
+        #expect(sqlite3_exec(
+            database,
+            "PRAGMA ignore_check_constraints=ON",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        #expect(sqlite3_exec(
+            database,
+            "UPDATE event_journal_terminal_revisions SET event_id=X'00'",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        sqlite3_close(database)
+        raw = nil
+
+        do {
+            _ = try await events.exactAlertEvidenceSnapshot(
+                alertTimestamp: timestamp
+            )
+            Issue.record("expected malformed terminal evidence to be rejected")
+        } catch let error as EventStoreError {
+            guard case .decodingFailed = error else {
+                Issue.record("terminal evidence was misclassified as \(error)")
+                return
+            }
+        }
+        #expect(await events.walCheckpointTruncate())
     }
 
     @Test("evidence worker outlives sustained transient decode ownership pressure")
