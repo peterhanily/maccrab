@@ -578,6 +578,7 @@ verify_release_executor_blobs "$SOURCE_COMMIT"
 reclaim_clean_ci_architecture_products() {
     local build_root="$PROJECT_DIR/.build"
     local architecture target
+    reclaimed_architecture_products=0
     if [ -L "$build_root" ] || { [ -e "$build_root" ] && [ ! -d "$build_root" ]; }; then
         echo "ERROR: refusing to reclaim clean-CI products through invalid .build: $build_root" >&2
         return 1
@@ -590,24 +591,31 @@ reclaim_clean_ci_architecture_products() {
                 return 1
             fi
             /bin/rm -rf "$target"
+            reclaimed_architecture_products=$((reclaimed_architecture_products + 1))
         fi
     done
 }
 
-reclaim_clean_ci_architecture_products
-release_free_kib=$(/bin/df -Pk "$PROJECT_DIR" | /usr/bin/awk 'NR == 2 { print $4 }')
-case "$release_free_kib" in
-    ''|*[!0-9]*)
-        echo "ERROR: could not measure free space for the exact release build" >&2
-        exit 1
-        ;;
-esac
-minimum_release_free_kib=$((3 * 1024 * 1024))
-if [ "$release_free_kib" -lt "$minimum_release_free_kib" ]; then
-    echo "ERROR: exact dual-architecture release build requires at least 3 GiB free after CI-product reclamation; found $release_free_kib KiB" >&2
-    exit 1
+if [ "$CANDIDATE_READY" != "1" ]; then
+    reclaim_clean_ci_architecture_products
+    if [ "$reclaimed_architecture_products" -gt 0 ]; then
+        release_free_kib=$(/bin/df -Pk "$PROJECT_DIR" | /usr/bin/awk 'NR == 2 { print $4 }')
+        case "$release_free_kib" in
+            ''|*[!0-9]*)
+                echo "ERROR: could not measure free space for the exact release build" >&2
+                exit 1
+                ;;
+        esac
+        minimum_release_free_kib=$((3 * 1024 * 1024))
+        if [ "$release_free_kib" -lt "$minimum_release_free_kib" ]; then
+            echo "ERROR: exact dual-architecture release build requires at least 3 GiB free after CI-product reclamation; found $release_free_kib KiB" >&2
+            exit 1
+        fi
+        echo "Clean CI products reclaimed ($reclaimed_architecture_products architecture tree(s)); exact release build headroom: $release_free_kib KiB"
+    else
+        echo "No clean-CI architecture products required reclamation."
+    fi
 fi
-echo "Clean CI products reclaimed; exact release build headroom: $release_free_kib KiB"
 
 # All build stages run from an exact Git-object export, never from the live
 # worktree. Ignored .swiftpm configuration, nested ignored resources, local
