@@ -738,6 +738,10 @@ public actor EventStore {
     /// taking freshly released decode credit is transient, never poison.
     private var terminalDeltaOwnershipGrowthHookForTesting:
         (@Sendable () -> Void)?
+    /// Deterministic seam for pinning the WAL after an expiry COMMIT but
+    /// before its checkpoint. Production leaves this nil.
+    private var journalExpiryPostCommitHookForTesting:
+        (@Sendable () -> Void)?
     private var storagePolicy: SQLitePersistentStorePolicy?
     private var storageAdmission: SQLitePersistentStoreAdmission?
     /// Authoritative PRAGMA page_size captured at each open/reopen. Transaction
@@ -3453,6 +3457,12 @@ public actor EventStore {
         _ hook: (@Sendable () -> Void)?
     ) {
         terminalDeltaOwnershipGrowthHookForTesting = hook
+    }
+
+    internal func setJournalExpiryPostCommitHookForTesting(
+        _ hook: (@Sendable () -> Void)?
+    ) {
+        journalExpiryPostCommitHookForTesting = hook
     }
 
     public func insert(event: Event) throws {
@@ -14069,10 +14079,17 @@ public actor EventStore {
                     journalIndexLoaded = false
                 }
                 projectionOwnedUpperBoundBytes = nil
+                journalExpiryPostCommitHookForTesting?()
                 // A crash after COMMIT is bounded by the preflight above. A
-                // pinned reader is typed retention failure, never permission
-                // to stack another WAL-producing expiry transaction.
-                try requireJournalRecoveryBoundary()
+                // reader that arrives after that commit may pin its healthy
+                // WAL boundary. Stop this sweep at the durable commit instead
+                // of turning ordinary dashboard activity into a daemon-start
+                // failure or stacking another WAL-producing transaction.
+                // A genuinely over-cap family still throws fail-closed from
+                // journalRecoveryBoundaryIsDrained().
+                guard try journalRecoveryBoundaryIsDrained() else {
+                    return expiredEvents
+                }
             } catch {
                 try? execute("ROLLBACK")
                 throw error

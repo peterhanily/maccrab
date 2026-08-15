@@ -578,6 +578,12 @@ struct EventsSizeCapIntervalTests {
         ))
         #expect(pinPreflight.lowerBound < destructiveEnforcer.lowerBound,
                 "startup must detect a reader pin before pruning event rows")
+        let pinPostflight = try #require(helper.range(
+            of: "eventStore.walCheckpointTruncate()",
+            range: destructiveEnforcer.upperBound..<helper.endIndex
+        ))
+        #expect(destructiveEnforcer.lowerBound < pinPostflight.lowerBound,
+                "startup must detect a reader that arrives during maintenance")
     }
 
     // MARK: - 3. Integration: runAdaptiveRollupSweep drives prune end-to-end

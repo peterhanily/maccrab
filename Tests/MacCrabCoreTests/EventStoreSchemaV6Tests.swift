@@ -22,6 +22,65 @@ import CSQLCipher
 @Suite("EventStore: schema v6 column projection + Sigma aliases (v1.12.6 Wave 2A)")
 struct EventStoreSchemaV6Tests {
 
+    private final class PinnedSQLiteReader: @unchecked Sendable {
+        private let lock = NSLock()
+        private var handle: OpaquePointer?
+        private var statement: OpaquePointer?
+
+        func pin(path: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard handle == nil else { return }
+            var opened: OpaquePointer?
+            guard sqlite3_open_v2(
+                path,
+                &opened,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                nil
+            ) == SQLITE_OK, let opened else { return }
+            guard sqlite3_exec(opened, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+                sqlite3_close(opened)
+                return
+            }
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                opened,
+                "SELECT COUNT(*) FROM event_journal_blocks",
+                -1,
+                &prepared,
+                nil
+            ) == SQLITE_OK, let prepared,
+                  sqlite3_step(prepared) == SQLITE_ROW else {
+                sqlite3_finalize(prepared)
+                sqlite3_exec(opened, "ROLLBACK", nil, nil, nil)
+                sqlite3_close(opened)
+                return
+            }
+            handle = opened
+            statement = prepared
+        }
+
+        var isPinned: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return handle != nil && statement != nil
+        }
+
+        func close() {
+            lock.lock()
+            defer { lock.unlock() }
+            if let statement { sqlite3_finalize(statement) }
+            if let handle {
+                sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+                sqlite3_close(handle)
+            }
+            statement = nil
+            handle = nil
+        }
+
+        deinit { close() }
+    }
+
     // MARK: - Helpers
 
     private static func tempPath() -> String {
@@ -473,6 +532,57 @@ struct EventStoreSchemaV6Tests {
             maximumBlocks: 1_024
         ) == 1)
         #expect(try await reopened.count() == 0)
+    }
+
+    @Test("Journal expiry stops cleanly when a reader pins its committed WAL")
+    func journalExpiryPostCommitReaderPinIsDeferred() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "journal-expiry-post-commit-pin-\(UUID().uuidString)"
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("events.db").path
+        let policy = SQLitePersistentStorePolicy(
+            maxFootprintBytes: 256 * SQLitePersistentStorePolicy.bytesPerMiB,
+            freeSpaceFloorBytes: 0,
+            transactionReserveBytes:
+                SQLitePersistentStorePolicy.eventTransactionReserveBytes,
+            storageVolumePath: directory.path
+        )
+        let store = try EventStore(path: path, storagePolicy: policy)
+        _ = try await store.recoverJournalBeforeProducers()
+        try await store.insert(event: Self.makeEvent(
+            process: Self.makeProcess()
+        ))
+
+        let reader = PinnedSQLiteReader()
+        defer { reader.close() }
+        await store.setJournalExpiryPostCommitHookForTesting {
+            reader.pin(path: path)
+        }
+        let expired = try await store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 1_024
+        )
+
+        #expect(expired == 1)
+        #expect(reader.isPinned)
+        #expect(try await store.count() == 0)
+        await store.setJournalExpiryPostCommitHookForTesting(nil)
+        reader.close()
+        #expect(await store.walCheckpointTruncate() == true)
+        #expect(try await store.expireJournalBlocks(
+            retainedThrough: Date().addingTimeInterval(
+                EventStore.journalRetentionSeconds + 1
+            ),
+            maximumBlocks: 1_024
+        ) == 0)
     }
 
     @Test("Finalized marker cannot bypass an incomplete journal schema")

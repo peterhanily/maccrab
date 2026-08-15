@@ -300,7 +300,9 @@ struct AlertsSizeCapRecoveryTests {
         #expect(!result.writableBeforeProducers)
         #expect(result.passes == 3)
         #expect(result.lastFootprintBytes == 300)
-        #expect(result.reason.contains("reader-pinned checkpoint"))
+        #expect(result.reason.contains(
+            "reader-pinned pre-maintenance checkpoint"
+        ))
         #expect(await pinned.measure() == 300,
                 "a pinned preflight must never enter the deletion path")
         #expect(await pinned.maintenancePasses == 3)
@@ -331,6 +333,29 @@ struct AlertsSizeCapRecoveryTests {
                 "only the post-release maintenance pass may reclaim bytes")
         #expect(await pinned.maintenancePasses == 5)
         #expect(await pinned.reprobes == 5)
+    }
+
+    @Test("post-maintenance reader pin is not misclassified as no progress")
+    func boundedRecoveryRetriesPostMaintenanceReaderPin() async {
+        let pinned = RecoveryLoopFixture(
+            footprint: 600,
+            decrementBytes: 0,
+            maintenanceResult: .ranThenTransientlyPinned
+        )
+        let result = await runBoundedPreIngestionStorageRecovery(
+            component: "post-maintenance-pin",
+            maximumPasses: 4,
+            maximumPinnedRetries: 3,
+            pinnedRetryDelayNanoseconds: 0,
+            measureFootprint: { await pinned.measure() },
+            maintenance: { await pinned.maintain() },
+            reprobeOrdinaryAdmission: { try await pinned.reprobe() }
+        )
+
+        #expect(!result.writableBeforeProducers)
+        #expect(result.passes == 3)
+        #expect(result.reason.contains("post-maintenance checkpoint"))
+        #expect(!result.reason.contains("no physical family progress"))
     }
 
     @Test("startup operation retries busy but never permanent storage failure")

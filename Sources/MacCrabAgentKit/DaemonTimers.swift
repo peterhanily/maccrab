@@ -392,6 +392,7 @@ func retryTransientEventStoreStartupOperation<T>(
 enum PreIngestionStorageMaintenanceResult: Sendable, Equatable {
     case ran
     case transientlyPinned
+    case ranThenTransientlyPinned
     case didNotRun
 }
 
@@ -462,8 +463,10 @@ private enum PreIngestionStorageRecoveryError: LocalizedError {
 /// Run a finite number of maintenance passes, stopping immediately when the
 /// helper cannot run, an exact family measurement fails, or a failed normal
 /// reprobe follows a real maintenance pass with no physical progress. A
-/// checkpoint-only reader-pin outcome gets a short no-delete grace; all other
-/// no-progress outcomes stop before another full-file rewrite.
+/// reader-pin outcome gets a short grace. A preflight pin guarantees no delete;
+/// a post-maintenance pin records that one bounded mutation pass already ran,
+/// and the next pass repeats the preflight before any further deletion. All
+/// other no-progress outcomes stop before another full-file rewrite.
 func runBoundedPreIngestionStorageRecovery(
     component: String,
     maximumPasses: Int = preIngestionStorageRecoveryMaximumPasses,
@@ -550,16 +553,18 @@ func runBoundedPreIngestionStorageRecovery(
                     reason: "no physical family progress on pass \(pass) (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
                 )
             }
-        case .transientlyPinned:
+        case .transientlyPinned, .ranThenTransientlyPinned:
             pinnedRetries += 1
             guard pinnedRetries < pinnedRetryLimit else {
+                let phase = maintenanceResult == .transientlyPinned
+                    ? "pre-maintenance" : "post-maintenance"
                 return PreIngestionStorageRecoveryResult(
                     component: component,
                     writableBeforeProducers: false,
                     passes: pass,
                     lastFootprintBytes: after,
                     lastProbeError: lastProbeError,
-                    reason: "reader-pinned checkpoint did not clear after \(pinnedRetries) bounded no-delete retries (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
+                    reason: "reader-pinned \(phase) checkpoint did not clear after \(pinnedRetries) bounded retries (before=\(before), after=\(after)); ordinary admission remained blocked: \(lastProbeError ?? "unknown probe failure")"
                 )
             }
             onTransientPinRetry(pinnedRetries)
@@ -7048,6 +7053,20 @@ func recoverEventStoreBeforeProducers(
                         try? measureDatabaseFootprintBytes(dbPath: dbPath),
                     boundary: boundary
                 )
+                // The UI can acquire a new read snapshot after the safe
+                // preflight but while prune/vacuum maintenance is running.
+                // A partial checkpoint then temporarily materializes the same
+                // committed pages in both the main file and its pinned WAL.
+                // Detect that post-maintenance race explicitly so the bounded
+                // outer loop gives the reader its no-delete grace instead of
+                // misclassifying the doubled family as permanent no-progress.
+                if let after = try? measureDatabaseFootprintBytes(
+                    dbPath: dbPath
+                ), boundary.requiresStartupConvergence(
+                    footprintBytes: after
+                ), await eventStore.walCheckpointTruncate() == false {
+                    return .ranThenTransientlyPinned
+                }
             }
             return ran ? .ran : .didNotRun
         },
