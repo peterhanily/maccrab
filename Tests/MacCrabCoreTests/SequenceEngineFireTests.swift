@@ -1120,7 +1120,13 @@ struct SequenceEngineFireTests {
     @Test("pending-step journal conserves admission across replacement and retirement")
     func pendingStepJournalConservation() async throws {
         let engine = SequenceEngine(lineage: ProcessLineage(), sweepInterval: 3_600)
-        let rule = fileThenProcessRule(id: "seq-pending-conservation", window: 600)
+        // This test isolates capacity/accounting. A host wall-clock correction
+        // must not turn it into an expiration test midway through the 8K-event
+        // workload; expiration behavior has dedicated coverage above.
+        let rule = fileThenProcessRule(
+            id: "seq-pending-conservation",
+            window: 365 * 24 * 60 * 60
+        )
         try await engine.addRule(rule)
 
         // The later rc.10 epoch added ~68 aggregate pending evictions/s. Stress
