@@ -569,6 +569,46 @@ if [ "$($GIT_BIN rev-parse HEAD)" != "$SOURCE_COMMIT" ] \
 fi
 verify_release_executor_blobs "$SOURCE_COMMIT"
 
+# Clean CI intentionally builds in the live worktree, while the release below
+# builds again from an exact tracked-object export. Keeping both architecture
+# trees resident at once adds several GiB of disposable peak usage and can make
+# the second architecture fail after every source/test gate has passed. Remove
+# only SwiftPM's explicitly named architecture products; release DMGs live at
+# .build's top level and must remain byte-for-byte untouched.
+reclaim_clean_ci_architecture_products() {
+    local build_root="$PROJECT_DIR/.build"
+    local architecture target
+    if [ -L "$build_root" ] || { [ -e "$build_root" ] && [ ! -d "$build_root" ]; }; then
+        echo "ERROR: refusing to reclaim clean-CI products through invalid .build: $build_root" >&2
+        return 1
+    fi
+    for architecture in arm64-apple-macosx x86_64-apple-macosx; do
+        target="$build_root/$architecture"
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            if [ -L "$target" ] || [ ! -d "$target" ]; then
+                echo "ERROR: refusing to reclaim redirected/non-directory CI product: $target" >&2
+                return 1
+            fi
+            /bin/rm -rf "$target"
+        fi
+    done
+}
+
+reclaim_clean_ci_architecture_products
+release_free_kib=$(/bin/df -Pk "$PROJECT_DIR" | /usr/bin/awk 'NR == 2 { print $4 }')
+case "$release_free_kib" in
+    ''|*[!0-9]*)
+        echo "ERROR: could not measure free space for the exact release build" >&2
+        exit 1
+        ;;
+esac
+minimum_release_free_kib=$((3 * 1024 * 1024))
+if [ "$release_free_kib" -lt "$minimum_release_free_kib" ]; then
+    echo "ERROR: exact dual-architecture release build requires at least 3 GiB free after CI-product reclamation; found $release_free_kib KiB" >&2
+    exit 1
+fi
+echo "Clean CI products reclaimed; exact release build headroom: $release_free_kib KiB"
+
 # All build stages run from an exact Git-object export, never from the live
 # worktree. Ignored .swiftpm configuration, nested ignored resources, local
 # package caches, and hidden-index modifications therefore cannot influence the

@@ -409,6 +409,9 @@ fi
     "$PROJECT_DIR/scripts/release.sh"
 /usr/bin/grep -q 'export-release-source.py' "$PROJECT_DIR/scripts/release.sh"
 /usr/bin/grep -q 'tracked-git-object-export' "$PROJECT_DIR/scripts/build-release.sh"
+/usr/bin/grep -q 'reclaim_clean_ci_architecture_products' "$PROJECT_DIR/scripts/release.sh"
+/usr/bin/grep -q 'minimum_release_free_kib' "$PROJECT_DIR/scripts/release.sh"
+/usr/bin/grep -q 'Last 200 build-log lines' "$PROJECT_DIR/scripts/build-release.sh"
 /usr/bin/grep -q 'repository-local SwiftPM configuration must not be a release input' \
     "$PROJECT_DIR/scripts/release.sh"
 /usr/bin/grep -q 'Tools/AssessmentHarness/.build' "$PROJECT_DIR/scripts/ci-local.sh"

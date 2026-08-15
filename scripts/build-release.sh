@@ -585,23 +585,34 @@ STAGE_ENV_EOF
     "$SCRIPT_DIR/prepare-release-pyyaml.sh" "$STAGING_DIR/release-python" >/dev/null
 
     # ─── Compile for both architectures ──────────────────────────────
-    # Each arch MUST build. `| tail -1` collapses the log to its last line,
-    # so we TEST the pipeline (pipefail-adjusted) explicitly and ABORT loud
-    # if either arch fails — never silently fall back to a single-arch build.
+    # Each arch MUST build. Keep the full output in private staging so a failure
+    # prints actionable compiler/resource diagnostics instead of the former
+    # blank final line. Successful builds retain the concise final-line output.
     # Pre-fix, a failed x86_64 compile left arm64-only binaries that the lipo
     # loop below copied as "arm64 only" while stage_publish still labeled the
     # DMG "universal" — handing Intel users an un-runnable app with no gate.
+    build_release_architecture() {
+        local architecture="$1"
+        local failure_message="$2"
+        local build_log="$STAGING_DIR/build-$architecture.log"
+        if $SWIFT_BIN build -c release --arch "$architecture" >"$build_log" 2>&1; then
+            /usr/bin/tail -1 "$build_log"
+            /bin/rm -f "$build_log"
+            return 0
+        fi
+        echo "  ✗ ABORT: $failure_message" >&2
+        echo "  Last 200 build-log lines:" >&2
+        /usr/bin/tail -200 "$build_log" >&2
+        return 1
+    }
+
     echo "  Building arm64..."
-    if ! $SWIFT_BIN build -c release --arch arm64 2>&1 | /usr/bin/tail -1; then
-        echo "  ✗ ABORT: arm64 release build failed — refusing to ship." >&2
-        exit 1
-    fi
+    build_release_architecture arm64 \
+        "arm64 release build failed — refusing to ship." || exit 1
 
     echo "  Building x86_64..."
-    if ! $SWIFT_BIN build -c release --arch x86_64 2>&1 | /usr/bin/tail -1; then
-        echo "  ✗ ABORT: x86_64 release build failed — refusing to ship a single-arch build mislabeled \"universal\"." >&2
-        exit 1
-    fi
+    build_release_architecture x86_64 \
+        "x86_64 release build failed — refusing to ship a single-arch build mislabeled \"universal\"." || exit 1
 
     # `swift build` resolved the exact Sparkle pin. Authenticate the checkout,
     # binary-artifact checksum and release helper hashes now, while this clean
