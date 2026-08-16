@@ -69,6 +69,10 @@ public final class DatabaseEncryption: Sendable {
     /// The AES-256 encryption key (32 bytes).
     private let key: Data
 
+    /// Module-internal access for the authenticated dashboard-key wrapping
+    /// protocol. Never expose this as public raw key material.
+    var establishedKeyMaterial: Data { key }
+
     /// Whether encryption is enabled.
     public let isEnabled: Bool
 

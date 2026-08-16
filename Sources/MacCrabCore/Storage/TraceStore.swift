@@ -2545,10 +2545,21 @@ public actor TraceStore {
             let storedAttrs: String? = sqlite3_column_type(stmt, 10) == SQLITE_NULL
                 ? nil
                 : String(cString: sqlite3_column_text(stmt, 10))
-            // v1.9 Phase-2.2: decrypt-on-read. decrypt() is a passthrough
-            // for legacy plaintext rows (no ENC: prefix), so backfill is
-            // automatic — pre-encryption rows still readable.
-            let attrs: String? = storedAttrs.map { encryption?.decrypt($0, expectingEncrypted: true) ?? $0 }
+            // Decrypt-on-read, but never surface an encrypted envelope as
+            // application data. DatabaseEncryption deliberately returns the
+            // original value on an authenticated-decryption failure so the
+            // caller can preserve evidence; passing that raw `ENC2:` blob to a
+            // dashboard or API is not an acceptable presentation policy.
+            // Legacy plaintext remains readable.
+            let attrs: String? = storedAttrs.flatMap { stored in
+                let isEnvelope = stored.hasPrefix("ENC2:") || stored.hasPrefix("ENC:")
+                guard isEnvelope else { return stored }
+                guard let encryption else { return nil }
+                let decrypted = encryption.decrypt(stored, expectingEncrypted: true)
+                guard !decrypted.hasPrefix("ENC2:"),
+                      !decrypted.hasPrefix("ENC:") else { return nil }
+                return decrypted
+            }
             let trustRaw = sqlite3_column_type(stmt, 11) == SQLITE_NULL
                 ? AgentTraceTrust.unauthenticatedSelfReported.rawValue
                 : String(cString: sqlite3_column_text(stmt, 11))

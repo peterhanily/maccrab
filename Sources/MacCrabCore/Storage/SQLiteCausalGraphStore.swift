@@ -5649,6 +5649,27 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     // MARK: - Decoders
 
+    private func decryptPresentationJSON(
+        _ stored: String,
+        context: String
+    ) throws -> String {
+        let isEnvelope = stored.hasPrefix("ENC2:") || stored.hasPrefix("ENC:")
+        guard isEnvelope else { return stored }
+        guard let encryption else {
+            throw CausalGraphStoreError.decodeFailed(
+                "\(context): encrypted value unavailable without a read key"
+            )
+        }
+        let decrypted = encryption.decrypt(stored, expectingEncrypted: true)
+        guard !decrypted.hasPrefix("ENC2:"),
+              !decrypted.hasPrefix("ENC:") else {
+            throw CausalGraphStoreError.decodeFailed(
+                "\(context): authenticated decryption failed"
+            )
+        }
+        return decrypted
+    }
+
     private func decodeEntityRow(_ stmt: OpaquePointer) throws -> TraceEntity {
         guard let id = Self.columnText(stmt, 0),
               let entityType = Self.columnText(stmt, 1),
@@ -5658,7 +5679,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
               let source = Self.columnText(stmt, 7) else {
             throw CausalGraphStoreError.decodeFailed("trace_entities: required column null")
         }
-        let attributesJson = encryption?.decrypt(attributesJsonRaw, expectingEncrypted: true) ?? attributesJsonRaw
+        let attributesJson = try decryptPresentationJSON(
+            attributesJsonRaw,
+            context: "trace_entities.attributes_json"
+        )
         return TraceEntity(
             id: id,
             entityType: entityType,
@@ -5683,7 +5707,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
               let eventIdsJson = Self.columnText(stmt, 9) else {
             throw CausalGraphStoreError.decodeFailed("trace_edges: required column null")
         }
-        let evidenceJson = encryption?.decrypt(evidenceJsonRaw, expectingEncrypted: true) ?? evidenceJsonRaw
+        let evidenceJson = try decryptPresentationJSON(
+            evidenceJsonRaw,
+            context: "trace_edges.evidence_json"
+        )
         return TraceEdge(
             id: id,
             sourceEntityId: sourceId,

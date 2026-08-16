@@ -109,4 +109,41 @@ struct AppStateRateAndInboxTests {
         defer { try? FileManager.default.removeItem(atPath: tmpFile) }
         #expect(!AppState.writeAgentTracesRequest(inboxDir: tmpFile + "/inbox", receiverEnabled: false, port: 4318))
     }
+
+    @Test("trace dashboard key request carries only the public recipient key")
+    func writesTraceDashboardKeyRequest() throws {
+        let tmp = NSTemporaryDirectory() + "maccrab-trace-key-test-" + UUID().uuidString
+        let inbox = tmp + "/inbox"
+        try FileManager.default.createDirectory(atPath: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        let publicKey = Data(repeating: 0x42, count: 32)
+
+        #expect(AppState.writeTraceDashboardKeyRequest(
+            inboxDir: inbox,
+            publicKey: publicKey
+        ))
+        let names = try FileManager.default.contentsOfDirectory(atPath: inbox)
+        let request = try #require(names.first {
+            $0.hasPrefix("trace-dashboard-key-") && $0.hasSuffix(".json")
+        })
+        let path = inbox + "/" + request
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(object["publicKey"] as? String == publicKey.base64EncodedString())
+        #expect(object["requester"] as? String == "MacCrabApp")
+        #expect(object["privateKey"] == nil)
+        #expect(object["databaseKey"] == nil)
+        let mode = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+    }
+
+    @Test("trace dashboard key request rejects malformed public keys")
+    func rejectsMalformedTraceDashboardPublicKey() {
+        #expect(!AppState.writeTraceDashboardKeyRequest(
+            inboxDir: NSTemporaryDirectory(),
+            publicKey: Data(repeating: 0x01, count: 31)
+        ))
+    }
 }

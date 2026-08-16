@@ -1265,7 +1265,7 @@ enum DaemonTimers {
         "llm-config-", "flush-request-", "record-clipboard-",
         "builtin-rule-setting-", "set-daemon-config-", "install-rule-",
         "remove-rule-", "set-agent-capabilities-", "prune-alerts-",
-        "apply-agent-traces-", "prevention-config-",
+        "apply-agent-traces-", "prevention-config-", "trace-dashboard-key-",
     ]
 
     static func isClaimedInboxRequestName(_ name: String) -> Bool {
@@ -4510,6 +4510,7 @@ enum DaemonTimers {
                 // routes through the same authorized inbox IPC as delete-alert.
                 let pruneAlertsReqs = files.filter { $0.hasPrefix("prune-alerts-") && $0.hasSuffix(".json") }
                 let agentTracesReqs = files.filter { $0.hasPrefix("apply-agent-traces-") && $0.hasSuffix(".json") }
+                let traceDashboardKeyReqs = files.filter { $0.hasPrefix("trace-dashboard-key-") && $0.hasSuffix(".json") }
                 // v1.21.4: the Prevention tab's per-module enable/disable toggle.
                 // The app (uid-501) can't mutate the root-owned prevention state
                 // nor SIGHUP the sysext, so it routes through this same
@@ -4532,6 +4533,7 @@ enum DaemonTimers {
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
                 await handlePruneAlertsRequests(pruneAlertsReqs, inboxDir: inboxDir, state: state)
                 await handleApplyAgentTracesRequests(agentTracesReqs, inboxDir: inboxDir, state: state)
+                await handleTraceDashboardKeyRequests(traceDashboardKeyReqs, inboxDir: inboxDir, state: state)
                 await handlePreventionConfigRequests(preventionConfigReqs, inboxDir: inboxDir, state: state)
             }
         }
@@ -5594,6 +5596,72 @@ enum DaemonTimers {
         )
         print("[inbox] apply-agent-traces receiver=\(receiverEnabled) port=\(port) uid=\(chosen.uid) applied")
         auditLogInbox(state: state, prefix: "apply-agent-traces", id: "-", uid: chosen.uid, result: "receiver=\(receiverEnabled) port=\(port)")
+    }
+
+    /// Issue the root process's trace-database AES key only as an X25519/AES-GCM
+    /// envelope addressed to the requesting dashboard's public key. The request
+    /// passes the same regular-file, owner-UID and local-admin gate as every
+    /// privileged inbox verb. The private recipient key never leaves the login
+    /// user's Keychain and the response contains no plaintext key material.
+    private static func handleTraceDashboardKeyRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { removeInboxEntry(at: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "trace-dashboard-key", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = safeReadInboxRequestData(at: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let encodedPublicKey = json["publicKey"] as? String,
+                  let publicKey = Data(base64Encoded: encodedPublicKey),
+                  publicKey.count == 32
+            else {
+                auditLogInbox(state: state, prefix: "trace-dashboard-key", id: "-", uid: uid, result: "malformed")
+                continue
+            }
+
+            do {
+                let envelope = try state.dbEncryption.dashboardKeyEnvelope(
+                    for: publicKey
+                )
+                let response = try JSONEncoder().encode(envelope)
+                let responsePath = state.supportDir
+                    + "/dashboard_trace_key_\(uid).json"
+                var existing = stat()
+                if lstat(responsePath, &existing) == 0,
+                   ((existing.st_mode & S_IFMT) != S_IFREG
+                    || existing.st_nlink != 1) {
+                    throw TraceDashboardKeyExchangeError.invalidEnvelope
+                }
+                try response.write(
+                    to: URL(fileURLWithPath: responsePath),
+                    options: [.atomic]
+                )
+                guard chmod(responsePath, 0o644) == 0 else {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                auditLogInbox(
+                    state: state,
+                    prefix: "trace-dashboard-key",
+                    id: envelope.recipientKeyID,
+                    uid: uid,
+                    result: "issued"
+                )
+            } catch {
+                auditLogInbox(
+                    state: state,
+                    prefix: "trace-dashboard-key",
+                    id: "-",
+                    uid: uid,
+                    result: "failed:\(error)"
+                )
+            }
+        }
     }
 
     /// v1.21.4: apply the Prevention tab's per-module enable/disable toggle.

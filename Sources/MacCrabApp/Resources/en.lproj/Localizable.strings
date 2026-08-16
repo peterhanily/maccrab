@@ -554,6 +554,7 @@
 /* RC W1: keys anchored from String(localized:defaultValue:) so they are translatable. Values are English; translate per locale. */
 "addRuleAction.requireConfirm" = "Require operator confirmation before executing";
 "agentTraces.attributes" = "attributes";
+"agentTraces.attributesUnavailable" = "Encrypted attributes are hidden until MacCrab establishes a secure connection to the system service.";
 "agentTraces.emptyHint" = "Toggle the receiver on with the switch above, then point your AI tool's OTel exporter at http://127.0.0.1:4318. Claude Code: set CLAUDE_CODE_ENABLE_TELEMETRY=1, OTEL_TRACES_EXPORTER=otlp, OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf, OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318. See docs/AGENT_TRACES.md.";
 "agentTraces.emptyTitle" = "No agent traces yet";
 "agentTraces.privacyBody" = "Span attribute values pass through the secret-shape sanitiser, then are AES-GCM-encrypted with the installation's trace database key. This protects at-rest ciphertext, not source authenticity. Spans only ever leave your Mac if you configure your AI tool to export to this receiver.";
@@ -566,6 +567,8 @@
 "system.traceStoreStoragePausedTitle" = "Agent Trace persistence paused";
 "agentTraces.refresh" = "Refresh";
 "agentTraces.searchPlaceholder" = "Search by trace_id…";
+"agentTraces.secureConnectionHint" = "MacCrab is securely requesting access to the root-owned trace database. Trace attributes remain hidden until the key exchange completes.";
+"agentTraces.secureConnectionTitle" = "Establishing secure connection";
 "agentTraces.selectTrace" = "Select a trace to view its spans";
 "agentTraces.spansLegend" = "Ordered by start time, indented by parent depth.";
 "agentTraces.statAcc" = "Accuracy among rated";

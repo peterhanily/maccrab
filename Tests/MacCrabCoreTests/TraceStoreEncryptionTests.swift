@@ -113,8 +113,8 @@ struct TraceStoreEncryptionTests {
         #expect(read.first?.attributesJson?.contains("tool_name") == true)
     }
 
-    @Test("Tampered ciphertext: decrypt logs and returns the raw blob")
-    func tamperReturnsRaw() async throws {
+    @Test("Tampered ciphertext is withheld and never returned to presentation callers")
+    func tamperIsWithheld() async throws {
         let path = Self.tempDB()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let enc = deterministicEncryption()
@@ -143,15 +143,23 @@ struct TraceStoreEncryptionTests {
         sqlite3_step(ustmt)
         sqlite3_finalize(ustmt)
 
-        // Decrypt fails the AES-GCM tag check; read returns the raw
-        // (untouched) ciphertext blob — a visible signal in the UI
-        // and a logged warning rather than silent garbage.
+        // Decrypt fails the AES-GCM tag check. The store retains/logs the
+        // evidence but presentation callers must never receive the raw blob.
         let read = try await store.spansForTrace("4bf92f3577b34da6a3ce929d0e0e4736")
-        // Either: still has the ENC2: prefix (tamper detected and the
-        // raw value bubbled), OR (less likely on a single-byte flip)
-        // didn't decrypt to anything that LOOKS like the original.
-        let attrs = read.first?.attributesJson ?? ""
-        #expect(!attrs.contains("hello") || attrs.hasPrefix("ENC2:"),
-                "tamper must either bubble raw ENC2: or scramble the plaintext; got \(attrs)")
+        #expect(read.first?.attributesJson == nil)
+        #expect(enc.authenticatedDecryptFailures == 1)
+    }
+
+    @Test("Encrypted row opened without a key never leaks its envelope")
+    func missingKeyWithholdsCiphertext() async throws {
+        let path = Self.tempDB()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        do {
+            let encrypted = try TraceStore(path: path, encryption: deterministicEncryption())
+            try await encrypted.insertSpan(Self.sample())
+        }
+        let keyless = try TraceStore(path: path)
+        let read = try await keyless.spansForTrace("4bf92f3577b34da6a3ce929d0e0e4736")
+        #expect(read.first?.attributesJson == nil)
     }
 }

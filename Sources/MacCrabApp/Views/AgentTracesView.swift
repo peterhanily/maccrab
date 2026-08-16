@@ -318,14 +318,20 @@ struct AgentTracesView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "scope")
+            Image(systemName: appState.agentTraceDecryptionPending ? "lock.shield" : "scope")
                 .scaledSystem(48)
                 .foregroundStyle(.secondary)
-            Text(String(localized: "agentTraces.emptyTitle",
-                         defaultValue: "No agent traces yet"))
+            Text(appState.agentTraceDecryptionPending
+                 ? String(localized: "agentTraces.secureConnectionTitle",
+                          defaultValue: "Establishing secure connection")
+                 : String(localized: "agentTraces.emptyTitle",
+                          defaultValue: "No agent traces yet"))
                 .font(.headline)
-            Text(String(localized: "agentTraces.emptyHint",
-                         defaultValue: "Toggle the receiver on with the switch above, then point your AI tool's OTel exporter at http://127.0.0.1:4318. Claude Code: set CLAUDE_CODE_ENABLE_TELEMETRY=1, OTEL_TRACES_EXPORTER=otlp, OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf, OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318. See docs/AGENT_TRACES.md."))
+            Text(appState.agentTraceDecryptionPending
+                 ? String(localized: "agentTraces.secureConnectionHint",
+                          defaultValue: "MacCrab is securely connecting the dashboard to the root agent's encrypted trace store. Attributes remain hidden until authentication completes.")
+                 : String(localized: "agentTraces.emptyHint",
+                          defaultValue: "Toggle the receiver on with the switch above, then point your AI tool's OTel exporter at http://127.0.0.1:4318. Claude Code: set CLAUDE_CODE_ENABLE_TELEMETRY=1, OTEL_TRACES_EXPORTER=otlp, OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf, OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318. See docs/AGENT_TRACES.md."))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -560,6 +566,15 @@ struct AgentTracesView: View {
     /// isn't valid JSON (e.g. legacy plaintext rows that pre-date the
     /// sanitiser, or partially-corrupted data).
     private static func prettyJson(_ raw: String) -> String {
+        // Defense in depth: TraceStore already withholds undecryptable
+        // envelopes. Never render raw ciphertext if another data source or a
+        // future regression hands this view an encrypted value directly.
+        if raw.hasPrefix("ENC2:") || raw.hasPrefix("ENC:") {
+            return String(
+                localized: "agentTraces.attributesUnavailable",
+                defaultValue: "Encrypted attributes are unavailable. Refresh after the dashboard establishes a secure connection to the MacCrab agent."
+            )
+        }
         guard let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data, options: []),
               let pretty = try? JSONSerialization.data(

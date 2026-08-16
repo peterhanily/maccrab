@@ -8,6 +8,7 @@ import Foundation
 import AppKit
 import Combine
 import CSQLCipher
+import Darwin
 import MacCrabCore
 import os.log
 
@@ -1208,6 +1209,9 @@ final class AppState: ObservableObject {
     /// first. Empty when the feature isn't enabled or no spans have been
     /// ingested yet.
     @Published var recentTraceIds: [String] = []
+    /// True while root-owned encrypted trace attributes are intentionally
+    /// withheld pending the authenticated daemon→dashboard key envelope.
+    @Published var agentTraceDecryptionPending = false
     /// Spans for the currently-selected trace. Refreshed on selection
     /// change in AgentTracesView; cleared when nothing is selected.
     @Published var selectedTraceSpans: [SpanRecord] = []
@@ -1364,6 +1368,22 @@ final class AppState: ObservableObject {
 
     init() {
         startPolling()
+        // Start the root→dashboard trace-key handshake at launch rather than
+        // waiting for the operator to open Agent Traces. The same envelope also
+        // unlocks the V2 causal-graph reader after its normal reconnect probe.
+        Task.detached(priority: .utility) {
+            guard FileManager.default.fileExists(
+                atPath: "/Library/Application Support/MacCrab/traces.db"
+            ) || FileManager.default.fileExists(
+                atPath: "/Library/Application Support/MacCrab/tracegraph.db"
+            ), let recipient = try? TraceDashboardKeyExchange
+                .loadOrCreateDashboardPrivateKey()
+            else { return }
+            _ = AppState.writeTraceDashboardKeyRequest(
+                inboxDir: "/Library/Application Support/MacCrab/inbox",
+                publicKey: recipient.publicKey.rawRepresentation
+            )
+        }
         // v1.11.1 (audit launch-perf): suppression file reads
         // deferred to a Task so init() returns immediately. Pre-fix
         // these two ran sync on @MainActor at init time, contributing
@@ -1759,16 +1779,93 @@ final class AppState: ObservableObject {
         return store
     }
 
-    /// v1.9 Phase-2.3: shared DatabaseEncryption. Looks up the same
-    /// keychain item as the daemon (v1.8.1 access-groups make this
-    /// cross-bundle), so attributes_json encrypted by the daemon
-    /// decrypts cleanly here. Lazy + cached.
-    private var cachedDbEncryption: DatabaseEncryption?
-    private func dbEncryption() -> DatabaseEncryption {
-        if let e = cachedDbEncryption { return e }
+    /// A user-context dev daemon and the dashboard share the login user's
+    /// Keychain. The installed root system extension does not: Keychain access
+    /// groups cross bundle identities, not login-user domains. Root-owned trace
+    /// databases therefore use the authenticated X25519 envelope below.
+    private var cachedUserDbEncryption: DatabaseEncryption?
+    private var cachedSystemDbEncryption: DatabaseEncryption?
+    private var lastTraceDashboardKeyRequestAt: Date?
+
+    private func userDbEncryption() -> DatabaseEncryption {
+        if let e = cachedUserDbEncryption { return e }
         let e = DatabaseEncryption(enabled: true)
-        cachedDbEncryption = e
+        cachedUserDbEncryption = e
         return e
+    }
+
+    private func traceEncryption(forDatabasePath path: String) -> DatabaseEncryption? {
+        guard path.hasPrefix("/Library/Application Support/MacCrab/") else {
+            agentTraceDecryptionPending = false
+            return userDbEncryption()
+        }
+        if let cachedSystemDbEncryption {
+            agentTraceDecryptionPending = false
+            return cachedSystemDbEncryption
+        }
+
+        do {
+            let recipient = try TraceDashboardKeyExchange
+                .loadOrCreateDashboardPrivateKey()
+            let uid = getuid()
+            let responsePath = "/Library/Application Support/MacCrab/"
+                + "dashboard_trace_key_\(uid).json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: responsePath)),
+               let encryption = try? TraceDashboardKeyExchange
+                .dashboardEncryption(from: data) {
+                cachedSystemDbEncryption = encryption
+                agentTraceDecryptionPending = false
+                return encryption
+            }
+
+            let now = Date()
+            if lastTraceDashboardKeyRequestAt.map({
+                now.timeIntervalSince($0) >= 5
+            }) ?? true {
+                lastTraceDashboardKeyRequestAt = now
+                _ = Self.writeTraceDashboardKeyRequest(
+                    inboxDir: "/Library/Application Support/MacCrab/inbox",
+                    publicKey: recipient.publicKey.rawRepresentation
+                )
+            }
+        } catch {
+            Logger(subsystem: "com.maccrab.app", category: "agent-traces")
+                .error("Trace dashboard decryption key unavailable: \(String(describing: error), privacy: .public)")
+        }
+        agentTraceDecryptionPending = true
+        return nil
+    }
+
+    /// Queue only the dashboard's public X25519 key. The daemon authenticates
+    /// the request-file owner before wrapping its database key to this
+    /// recipient; no private or symmetric key material enters the 1777 inbox.
+    nonisolated static func writeTraceDashboardKeyRequest(
+        inboxDir: String,
+        publicKey: Data
+    ) -> Bool {
+        guard publicKey.count == 32 else { return false }
+        let payload: [String: Any] = [
+            "publicKey": publicKey.base64EncodedString(),
+            "requestedAt": ISO8601DateFormatter().string(from: Date()),
+            "requester": "MacCrabApp",
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys]
+        ), data.count <= 16 * 1024 else { return false }
+        let url = URL(fileURLWithPath: inboxDir)
+            .appendingPathComponent("trace-dashboard-key-\(UUID().uuidString).json")
+        do {
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            return false
+        }
     }
 
     /// v1.9 PR-5 audit (B3): override store always lives at the
@@ -1835,12 +1932,16 @@ final class AppState: ObservableObject {
             return store
         }
 
-        // Path flip or expired TTL — rebuild. Pass the shared
-        // encryption instance so the dashboard can decrypt
-        // attributes_json written by the daemon.
+        // Path flip or expired TTL — rebuild. A root-owned database is not
+        // opened until its authenticated dashboard envelope is available;
+        // falling back to the login-user Keychain would use the wrong AES key.
+        guard let encryption = traceEncryption(forDatabasePath: path) else {
+            cachedTraceStore = nil
+            return nil
+        }
         let store = try? TraceStore(
             path: path,
-            encryption: dbEncryption(),
+            encryption: encryption,
             forceReadOnly: true
         )
         cachedTraceStore = store
@@ -1899,15 +2000,21 @@ final class AppState: ObservableObject {
                 )
             }
         }
+        var traceReadSucceeded = false
         if let store = traceStoreOrNil() {
             if let ids = try? await store.recentTraceIds(limit: limit) {
                 self.recentTraceIds = ids
+                traceReadSucceeded = true
             }
         } else {
             self.recentTraceIds = []
         }
 
-        lastTracesDbMtime = tracesMtime
+        // If the root→dashboard key handshake is still pending, do not memoize
+        // the traces mtime: the database itself will not change when the key
+        // envelope arrives, and an mtime cache hit would otherwise suppress the
+        // retry forever until the operator clicked Force Refresh.
+        lastTracesDbMtime = traceReadSucceeded ? tracesMtime : nil
         lastOverridesDbMtime = overridesMtime
     }
 

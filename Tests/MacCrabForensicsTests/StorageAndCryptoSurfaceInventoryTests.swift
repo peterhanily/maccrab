@@ -101,13 +101,18 @@ struct StorageAndCryptoSurfaceInventoryTests {
         }
     }
 
-    @Test("DatabaseEncryption has exactly one daemon owner and one cached app reader")
+    @Test("DatabaseEncryption constructors stay on audited daemon and dashboard surfaces")
     func databaseEncryptionCallersCannotDriftSilently() throws {
         let files = try swiftFiles(under: "Sources")
         let found = Set(files.compactMap { path, text in
             text.contains("DatabaseEncryption(") ? path : nil
         })
-        #expect(found == ["MacCrabAgentKit/DaemonSetup.swift", "MacCrabApp/AppState.swift"],
+        #expect(found == [
+            "MacCrabAgentKit/DaemonSetup.swift",
+            "MacCrabApp/AppState.swift",
+            "MacCrabApp/V2/Data/V2LiveDataProvider.swift",
+            "MacCrabCore/Storage/TraceDashboardKeyExchange.swift",
+        ],
                 "a DatabaseEncryption constructor was added; verify persistent-key policy and cross-process key identity")
     }
 

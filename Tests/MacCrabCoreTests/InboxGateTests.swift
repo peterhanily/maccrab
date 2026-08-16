@@ -212,6 +212,7 @@ struct InboxGateTests {
         ("handleSetAgentCapabilitiesRequests", "set-agent-capabilities-", false),
         ("handlePruneAlertsRequests", "prune-alerts-", false),
         ("handleApplyAgentTracesRequests", "apply-agent-traces-", false),
+        ("handleTraceDashboardKeyRequests", "trace-dashboard-key-", false),
         ("handlePreventionConfigRequests", "prevention-config-", false),
     ]
 

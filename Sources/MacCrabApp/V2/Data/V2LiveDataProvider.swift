@@ -10,6 +10,7 @@
 // pin to a stale system-dir copy from a prior sysext install.
 
 import Foundation
+import Darwin
 import MacCrabCore
 
 @MainActor
@@ -75,6 +76,21 @@ public final class V2LiveDataProvider: V2DataProvider {
         let campaignDir = dir.flatMap { Self.fileExists(at: $0 + "/campaigns.db")  ? $0 : nil }
         let traceDir    = dir.flatMap { Self.fileExists(at: $0 + "/tracegraph.db") ? $0 : nil }
 
+        let causalEncryption: DatabaseEncryption? = {
+            guard let traceDir else { return nil }
+            if traceDir.hasPrefix("/Library/Application Support/MacCrab") {
+                let responsePath = traceDir
+                    + "/dashboard_trace_key_\(getuid()).json"
+                guard let envelope = try? Data(
+                    contentsOf: URL(fileURLWithPath: responsePath)
+                ) else { return nil }
+                return try? TraceDashboardKeyExchange.dashboardEncryption(
+                    from: envelope
+                )
+            }
+            return DatabaseEncryption(enabled: true)
+        }()
+
         guard alertsDir != nil || eventsDir != nil
                 || campaignDir != nil || traceDir != nil else {
             return nil
@@ -119,7 +135,17 @@ public final class V2LiveDataProvider: V2DataProvider {
         // still want it to run in parallel with the other three.
         async let causalStoreT: SQLiteCausalGraphStore? = {
             guard let dir = traceDir else { return nil }
-            return try? await SQLiteCausalGraphStore(databasePath: dir + "/tracegraph.db", forceReadOnly: true)
+            // A root-owned encrypted graph must not open under a login-user
+            // Keychain key. Remaining nil marks this provider degraded; the
+            // normal re-probe adopts a healthy provider after the daemon emits
+            // the authenticated key envelope.
+            if dir.hasPrefix("/Library/Application Support/MacCrab"),
+               causalEncryption == nil { return nil }
+            return try? await SQLiteCausalGraphStore(
+                databasePath: dir + "/tracegraph.db",
+                encryption: causalEncryption,
+                forceReadOnly: true
+            )
         }()
 
         self.alertStore = await alertStoreT
