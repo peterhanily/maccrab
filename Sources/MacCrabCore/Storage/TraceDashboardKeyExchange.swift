@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import Security
 
 /// A public, non-secret envelope carrying the root daemon's trace-database key
 /// to one dashboard-held Curve25519 recipient key. Only the corresponding
@@ -31,7 +30,6 @@ public enum TraceDashboardKeyExchangeError: Error, LocalizedError {
     case invalidRecipientKey
     case invalidEnvelope
     case recipientMismatch
-    case keychain(OSStatus)
 
     public var errorDescription: String? {
         switch self {
@@ -43,17 +41,20 @@ public enum TraceDashboardKeyExchangeError: Error, LocalizedError {
             return "The dashboard trace-key envelope is malformed."
         case .recipientMismatch:
             return "The trace-key envelope was issued to a different dashboard key."
-        case .keychain(let status):
-            return "The dashboard key-agreement private key is unavailable (OSStatus \(status))."
         }
     }
 }
 
 public enum TraceDashboardKeyExchange {
-    private static let keychainService = "com.maccrab.trace-dashboard-key-agreement"
-    private static let keychainAccount = "dashboard-x25519-v1"
-    private static let keychainAccessGroup = "79S425CW99.com.maccrab.shared"
     private static let derivationSalt = Data("MacCrab trace dashboard key envelope v1".utf8)
+
+    /// One recipient per dashboard process. This key only authenticates the
+    /// daemon-to-dashboard handoff; it does not encrypt data at rest and does
+    /// not need to survive an app restart. Keeping it in memory avoids login
+    /// Keychain ACL/authentication UI while narrowing the lifetime of a key
+    /// that can unwrap the root daemon's response.
+    private static let dashboardSessionPrivateKey =
+        Curve25519.KeyAgreement.PrivateKey()
 
     public static func keyID(for publicKey: Data) -> String {
         SHA256.hash(data: publicKey).map { String(format: "%02x", $0) }.joined()
@@ -71,79 +72,13 @@ public enum TraceDashboardKeyExchange {
         )
     }
 
-    /// Load the dashboard's persistent X25519 private key, creating it in the
-    /// login user's Keychain on first use. The raw private bytes never enter an
-    /// inbox request or a root-owned response file.
-    public static func loadOrCreateDashboardPrivateKey() throws
+    /// Return this dashboard process's X25519 recipient key. The raw private
+    /// bytes remain in process memory and never enter the Keychain, an inbox
+    /// request, or a root-owned response file.
+    public static func dashboardPrivateKeyForCurrentSession() throws
         -> Curve25519.KeyAgreement.PrivateKey
     {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecAttrAccessGroup as String: keychainAccessGroup,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let loadStatus = SecItemCopyMatching(query as CFDictionary, &result)
-        if loadStatus == errSecSuccess {
-            guard let bytes = result as? Data,
-                  let key = try? Curve25519.KeyAgreement.PrivateKey(
-                    rawRepresentation: bytes
-                  ) else {
-                // A malformed dashboard recipient key can be replaced safely:
-                // it never encrypted database rows, and the daemon can issue a
-                // fresh envelope to the replacement public key.
-                let generated = Curve25519.KeyAgreement.PrivateKey()
-                var base = query
-                base.removeValue(forKey: kSecReturnData as String)
-                base.removeValue(forKey: kSecMatchLimit as String)
-                let update = SecItemUpdate(
-                    base as CFDictionary,
-                    [kSecValueData as String: generated.rawRepresentation]
-                        as CFDictionary
-                )
-                guard update == errSecSuccess else {
-                    throw TraceDashboardKeyExchangeError.keychain(update)
-                }
-                return generated
-            }
-            return key
-        }
-        if loadStatus != errSecItemNotFound && loadStatus != errSecSuccess {
-            throw TraceDashboardKeyExchangeError.keychain(loadStatus)
-        }
-
-        let generated = Curve25519.KeyAgreement.PrivateKey()
-        query.removeValue(forKey: kSecReturnData as String)
-        query.removeValue(forKey: kSecMatchLimit as String)
-        query[kSecValueData as String] = generated.rawRepresentation
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let addStatus = SecItemAdd(query as CFDictionary, nil)
-        if addStatus == errSecSuccess { return generated }
-
-        // A second dashboard process may have won the create race. Perform one
-        // bounded reload and adopt the persisted winner; never recurse on a
-        // malformed/unauthorised duplicate.
-        if addStatus == errSecDuplicateItem {
-            var raced: AnyObject?
-            var reload = query
-            reload.removeValue(forKey: kSecValueData as String)
-            reload.removeValue(forKey: kSecAttrAccessible as String)
-            reload[kSecReturnData as String] = true
-            reload[kSecMatchLimit as String] = kSecMatchLimitOne
-            let status = SecItemCopyMatching(reload as CFDictionary, &raced)
-            guard status == errSecSuccess,
-                  let bytes = raced as? Data,
-                  let winner = try? Curve25519.KeyAgreement.PrivateKey(
-                    rawRepresentation: bytes
-                  ) else {
-                throw TraceDashboardKeyExchangeError.keychain(status)
-            }
-            return winner
-        }
-        throw TraceDashboardKeyExchangeError.keychain(addStatus)
+        dashboardSessionPrivateKey
     }
 
     public static func unwrap(
@@ -175,8 +110,8 @@ public enum TraceDashboardKeyExchange {
         )
     }
 
-    /// Resolve a root-issued envelope using the login user's persistent
-    /// dashboard private key and return a read-side DatabaseEncryption.
+    /// Resolve a root-issued envelope using this process's session recipient
+    /// key and return a read-side DatabaseEncryption.
     public static func dashboardEncryption(from envelopeData: Data) throws
         -> DatabaseEncryption
     {
@@ -185,7 +120,7 @@ public enum TraceDashboardKeyExchange {
                 TraceDashboardKeyEnvelope.self,
                 from: envelopeData
               ) else { throw TraceDashboardKeyExchangeError.invalidEnvelope }
-        let recipient = try loadOrCreateDashboardPrivateKey()
+        let recipient = try dashboardPrivateKeyForCurrentSession()
         let key = try unwrap(envelope, with: recipient)
         guard let encryption = DatabaseEncryption(establishedKey: key) else {
             throw TraceDashboardKeyExchangeError.invalidEnvelope
@@ -236,7 +171,7 @@ extension DatabaseEncryption {
         self.init(
             enabled: true,
             keyLoader: { establishedKey },
-            keySaver: { _ in errSecSuccess },
+            keySaver: { _ in 0 },
             keyGenerator: { establishedKey }
         )
     }

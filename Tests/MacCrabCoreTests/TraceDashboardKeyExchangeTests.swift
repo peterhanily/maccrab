@@ -14,6 +14,16 @@ struct TraceDashboardKeyExchangeTests {
         )
     }
 
+    @Test("Dashboard recipient is stable for one process session")
+    func sessionRecipientIsStable() throws {
+        let first = try TraceDashboardKeyExchange
+            .dashboardPrivateKeyForCurrentSession()
+        let second = try TraceDashboardKeyExchange
+            .dashboardPrivateKeyForCurrentSession()
+
+        #expect(first.rawRepresentation == second.rawRepresentation)
+    }
+
     @Test("Root wraps its established key only to the dashboard recipient")
     func roundTrip() throws {
         let rootKey = Data((0..<32).map(UInt8.init))

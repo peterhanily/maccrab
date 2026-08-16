@@ -5602,7 +5602,7 @@ enum DaemonTimers {
     /// envelope addressed to the requesting dashboard's public key. The request
     /// passes the same regular-file, owner-UID and local-admin gate as every
     /// privileged inbox verb. The private recipient key never leaves the login
-    /// user's Keychain and the response contains no plaintext key material.
+    /// dashboard process and the response contains no plaintext key material.
     private static func handleTraceDashboardKeyRequests(
         _ names: [String], inboxDir: String, state: DaemonState
     ) async {

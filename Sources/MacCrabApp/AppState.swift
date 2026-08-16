@@ -1377,7 +1377,7 @@ final class AppState: ObservableObject {
             ) || FileManager.default.fileExists(
                 atPath: "/Library/Application Support/MacCrab/tracegraph.db"
             ), let recipient = try? TraceDashboardKeyExchange
-                .loadOrCreateDashboardPrivateKey()
+                .dashboardPrivateKeyForCurrentSession()
             else { return }
             _ = AppState.writeTraceDashboardKeyRequest(
                 inboxDir: "/Library/Application Support/MacCrab/inbox",
@@ -1779,10 +1779,11 @@ final class AppState: ObservableObject {
         return store
     }
 
-    /// A user-context dev daemon and the dashboard share the login user's
-    /// Keychain. The installed root system extension does not: Keychain access
-    /// groups cross bundle identities, not login-user domains. Root-owned trace
-    /// databases therefore use the authenticated X25519 envelope below.
+    /// A user-context dev daemon and the dashboard can share the login user's
+    /// database Keychain item. The installed root system extension cannot
+    /// safely depend on that login context. Root-owned trace databases use the
+    /// authenticated X25519 envelope below; its dashboard recipient is scoped
+    /// to this app process and never invokes Keychain authentication UI.
     private var cachedUserDbEncryption: DatabaseEncryption?
     private var cachedSystemDbEncryption: DatabaseEncryption?
     private var lastTraceDashboardKeyRequestAt: Date?
@@ -1806,7 +1807,7 @@ final class AppState: ObservableObject {
 
         do {
             let recipient = try TraceDashboardKeyExchange
-                .loadOrCreateDashboardPrivateKey()
+                .dashboardPrivateKeyForCurrentSession()
             let uid = getuid()
             let responsePath = "/Library/Application Support/MacCrab/"
                 + "dashboard_trace_key_\(uid).json"

@@ -116,6 +116,18 @@ struct StorageAndCryptoSurfaceInventoryTests {
                 "a DatabaseEncryption constructor was added; verify persistent-key policy and cross-process key identity")
     }
 
+    @Test("Dashboard trace-key handoff never reaches into Keychain")
+    func dashboardTraceKeyHandoffIsSessionOnly() throws {
+        let source = try String(
+            contentsOfFile: "Sources/MacCrabCore/Storage/TraceDashboardKeyExchange.swift",
+            encoding: .utf8
+        )
+        #expect(!source.contains("SecItem"))
+        #expect(!source.contains("kSec"))
+        #expect(!source.contains("import Security"))
+        #expect(source.contains("dashboardSessionPrivateKey"))
+    }
+
     @Test("Every SQLite backup copy has a page cap and free-space admission")
     func sqliteBackupCopiesCannotDriftToUnbounded() throws {
         let files = try swiftFiles(under: "Sources")
