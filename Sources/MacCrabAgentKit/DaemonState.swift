@@ -6,8 +6,10 @@ import os.log
 ///
 /// Candidate ownership and the actually-applied hard ceiling are deliberately
 /// separate. A candidate can shrink only after a generation-matched,
-/// post-checkpoint measurement proves that the complete events.db family plus
-/// the 32 MiB event transaction reserve fits below the proposed ceiling.
+/// post-checkpoint measurement proves that the complete events.db family fits
+/// the startup-convergence target for the proposed ceiling. That target is
+/// stricter than ordinary hard-write admission and already preserves both the
+/// transaction and priority-lane headroom required before producers start.
 struct LegacyEvidenceTransitionBudgetSnapshot: Sendable, Equatable {
     var rowCount: Int?
     var chargedBytes: Int64?
@@ -215,14 +217,14 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                 : Int(
                     (charged - 1) / SQLitePersistentStorePolicy.bytesPerMiB + 1
                 )
-            // DBSTAT ownership and the whole-family admission boundary are
-            // independently rounded.  On a retained store the evidence-only
-            // ceiling can therefore be one MiB too small even though the
-            // complete transition still fits inside the configured evidence
-            // allowance.  Charge the smallest reserve that proves both facts:
-            // the legacy table's ownership and the exact family footprint plus
-            // the fixed event transaction reserve.  Do not manufacture a
-            // transition reserve for an evidence-empty store; its ordinary
+            // DBSTAT ownership and whole-family startup admission are
+            // independent. A retained store can own only 33 MiB of legacy
+            // evidence while authenticated journal history keeps the physical
+            // family well above the 80% startup target selected by that
+            // evidence-only reserve. Charge the smallest bounded reserve that
+            // proves both facts: legacy-table ownership and the exact family
+            // footprint at the startup-convergence target. Do not manufacture
+            // a transition reserve for an evidence-empty store; its ordinary
             // over-cap recovery remains a separate, fail-closed path.
             let steadyBoundary = SQLitePersistentStorePolicy.capBytes(
                 maxSizeMiB: state.storage.effectiveEventsFamilyMaxSizeMB
@@ -241,7 +243,26 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
                     (physicalReserveBytes - 1)
                         / SQLitePersistentStorePolicy.bytesPerMiB + 1
                 )
-            let candidate = max(evidenceCandidate, physicalCandidate)
+            let startupCandidate: Int
+            if evidenceCandidate > 0 {
+                startupCandidate = (0...maximum).first { reserveMiB in
+                    let liveCapMiB = state.storage
+                        .effectiveEventsFamilyMaxSizeMB(
+                            appliedLegacyEvidenceTransitionReserveMiB:
+                                reserveMiB
+                        )
+                    return measurement.familyFootprintBytes
+                        <= EventsSizeCapBoundary(
+                            maxSizeMiB: liveCapMiB
+                        ).targetBytes
+                } ?? maximum
+            } else {
+                startupCandidate = 0
+            }
+            let candidate = max(
+                evidenceCandidate,
+                max(physicalCandidate, startupCandidate)
+            )
             let boundedCandidate = min(maximum, max(0, candidate))
             let proposedCapMiB = state.storage
                 .effectiveEventsFamilyMaxSizeMB(
@@ -259,6 +280,10 @@ final class LegacyEvidenceTransitionBudget: @unchecked Sendable {
             let shrinkIsSafe = physicalMeasurementValid
                 && measurement.walCheckpointDrained
                 && required <= proposedBoundary
+                && measurement.familyFootprintBytes
+                    <= EventsSizeCapBoundary(
+                        maxSizeMiB: proposedCapMiB
+                    ).targetBytes
 
             if boundedCandidate == state.snapshot.appliedReserveMiB {
                 state.snapshot.pendingReserveMiB = nil

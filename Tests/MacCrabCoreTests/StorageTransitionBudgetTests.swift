@@ -49,7 +49,7 @@ struct StorageTransitionBudgetTests {
         )
     }
 
-    @Test("reserve shrink requires family plus transaction reserve below boundary")
+    @Test("reserve shrink requires family below startup convergence target")
     func failSafeAccounting() {
         let storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
         let budget = LegacyEvidenceTransitionBudget(storageConfig: storage)
@@ -75,11 +75,11 @@ struct StorageTransitionBudgetTests {
         )
         #expect(measured.reserveMiB == 100)
         #expect(!measured.measurementFailed)
-        #expect(measured.pendingReserveMiB == 2)
+        #expect(measured.pendingReserveMiB == 23)
         #expect(measured.pendingReserveFitsHardBoundary == true)
-        let appliedTwo = budget.commitPendingReserve(2, ticket: ticket)
-        #expect(appliedTwo.reserveMiB == 2)
-        #expect(appliedTwo.pendingReserveMiB == nil)
+        let applied = budget.commitPendingReserve(23, ticket: ticket)
+        #expect(applied.reserveMiB == 23)
+        #expect(applied.pendingReserveMiB == nil)
 
         let empty = AlertEvidenceBudgetSnapshot(
             rowCount: 0,
@@ -91,27 +91,27 @@ struct StorageTransitionBudgetTests {
         let oneByteOver = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 308
+                familyFootprintBytes: 272
                     * SQLitePersistentStorePolicy.bytesPerMiB + 1,
                 freelistCount: 1
             ),
             ticket: ticket
         )
-        #expect(oneByteOver.reserveMiB == 2)
+        #expect(oneByteOver.reserveMiB == 23)
         #expect(oneByteOver.pendingReserveMiB == 0)
         #expect(oneByteOver.pendingReserveFitsHardBoundary == false)
         #expect(oneByteOver.freelistBytes == 4_096)
-        #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 2)
+        #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 23)
 
         let exactSteadyBoundary = budget.update(
             measurement: transitionMeasurement(
                 evidence: empty,
-                familyFootprintBytes: 308
+                familyFootprintBytes: 272
                     * SQLitePersistentStorePolicy.bytesPerMiB
             ),
             ticket: ticket
         )
-        #expect(exactSteadyBoundary.reserveMiB == 2)
+        #expect(exactSteadyBoundary.reserveMiB == 23)
         #expect(exactSteadyBoundary.pendingReserveMiB == 0)
         #expect(exactSteadyBoundary.pendingReserveFitsHardBoundary == true)
         #expect(budget.commitPendingReserve(0, ticket: ticket).reserveMiB == 0)
@@ -138,10 +138,10 @@ struct StorageTransitionBudgetTests {
             maxBytes: 100 * mib
         )
 
-        // Evidence ownership rounds to 33 MiB, but the installed family plus
-        // the fixed transaction reserve is one byte above the 353-MiB
-        // boundary.  The bounded transition must select 34 MiB rather than
-        // crash-looping or granting the full 100-MiB allowance.
+        // Evidence ownership rounds to 33 MiB, but the installed family needs
+        // 82 MiB of bounded transition reserve to fit the startup-convergence
+        // target. Hard-write admission alone would incorrectly choose 34 MiB
+        // and leave boot trapped in destructive, impossible vacuum retries.
         let family = (320 + 33) * mib
             - SQLitePersistentStorePolicy.eventTransactionReserveBytes + 1
         let ticket = budget.measurementTicket()
@@ -153,10 +153,45 @@ struct StorageTransitionBudgetTests {
             ticket: ticket
         )
         #expect(measured.appliedReserveMiB == 100)
-        #expect(measured.pendingReserveMiB == 34)
+        #expect(measured.pendingReserveMiB == 82)
         #expect(measured.pendingReserveFitsHardBoundary == true)
-        #expect(measured.proposedHardAdmissionBoundaryBytes == 354 * mib)
-        #expect(budget.commitPendingReserve(34, ticket: ticket).reserveMiB == 34)
+        #expect(measured.proposedHardAdmissionBoundaryBytes == 402 * mib)
+        #expect(budget.commitPendingReserve(82, ticket: ticket).reserveMiB == 82)
+    }
+
+    @Test("installed retained family selects a startup-safe bounded reserve")
+    func installedRetainedFamilyStartupBoundary() {
+        let storage = DaemonConfig.StorageConfig().clampedToSafeFloors()
+        let budget = LegacyEvidenceTransitionBudget(storageConfig: storage)
+        let mib = SQLitePersistentStorePolicy.bytesPerMiB
+        let charged: Int64 = 34_492_416
+        let evidence = AlertEvidenceBudgetSnapshot(
+            rowCount: 11_651,
+            logicalBytes: 21_386_393,
+            allocatedBytes: charged,
+            chargedBytes: charged,
+            maxBytes: 100 * mib
+        )
+        // Exact compacted footprint from the disqualified rc.29 retained-store
+        // probe. It is healthy, but cannot fit the 34-MiB reserve's startup
+        // target. A 70-MiB reserve is the smallest bounded value whose 410-MiB
+        // live cap has a 328-MiB startup target.
+        let family: Int64 = 343_535_616
+        let ticket = budget.measurementTicket()
+        let measured = budget.update(
+            measurement: transitionMeasurement(
+                evidence: evidence,
+                familyFootprintBytes: family
+            ),
+            ticket: ticket
+        )
+
+        #expect(measured.appliedReserveMiB == 100)
+        #expect(measured.pendingReserveMiB == 70)
+        #expect(measured.pendingReserveFitsHardBoundary == true)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 409).targetBytes < family)
+        #expect(EventsSizeCapBoundary(maxSizeMiB: 410).targetBytes >= family)
+        #expect(budget.commitPendingReserve(70, ticket: ticket).reserveMiB == 70)
     }
 
     @Test("stale sweep cannot overwrite a newer storage config generation")
