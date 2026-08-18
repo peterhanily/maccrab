@@ -3509,6 +3509,27 @@ def normalized_runtime_sample(
             path=f"recorder.{lane}-event-persistence",
         )
 
+    # v1.21.6-rc.34: LIVENESS, not merely conservation.
+    #
+    # Every boundary above is an accounting identity, and a completely stalled
+    # pipeline satisfies all of them: an installed host conserved exactly at
+    # offered=1099, completed=0, in_flight=1098 while persisting nothing at all.
+    # `completed` also folds in `filtered`, so a build that filters everything
+    # passes the drain gate with zero rows written. Ten candidates reached an
+    # installed host without this check, and every one of them was accepted by
+    # the identities right up until somebody read the row count by hand.
+    #
+    # A candidate that stored no events is not a candidate.
+    total_persisted = sum(storage_persisted[lane] for lane in ("priority", "file"))
+    total_offered = sum(storage_offered[lane] for lane in ("priority", "file"))
+    if total_offered > 0 and total_persisted <= 0:
+        fail(
+            "recorder.event-persistence: the engine offered "
+            f"{total_offered} event(s) and persisted {total_persisted}. "
+            "Conservation can hold across a fully stalled pipeline; "
+            "persistence cannot. The candidate is not ingesting."
+        )
+
     terminal_offered, terminal_offered_total = heartbeat_lane_counter_map(
         heartbeat,
         "event_terminal_revision_offered_by_lane",

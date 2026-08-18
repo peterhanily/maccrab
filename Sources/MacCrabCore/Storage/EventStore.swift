@@ -13599,6 +13599,12 @@ public actor EventStore {
             )
         }
         try ensureJournalIndex()
+        // rc.34: expiry itself is what exhausts the FTS index (one tombstone
+        // segment per block, with automerge disabled), and an exhausted index
+        // then makes expiry fail — permanently, because the only compaction
+        // path runs after a readiness this failure prevents. Break that loop
+        // here, before the first delete needs a segid.
+        try recoverExhaustedFTSIndexIfNeeded()
         // Expiry is routine retention, not schema recovery. A dashboard or
         // other read-only client may pin healthy WAL frames indefinitely. Do
         // not begin a WAL-producing rollup transaction until the prior
@@ -14003,10 +14009,23 @@ public actor EventStore {
                 let projectionRC = sqlite3_step(deleteProjection)
                 let deletedProjection = sqlite3_changes(db)
                 sqlite3_finalize(deleteProjection)
-                guard projectionRC == SQLITE_DONE,
-                      deletedProjection == Int32(coverage.materialized) else {
+                // Reported separately since rc.34. These were one compound
+                // guard whose message described only the second clause, so a
+                // SQLITE_FULL step failure surfaced as "projection count
+                // disagrees with coverage" — sending every investigation after
+                // a coverage skew that did not exist.
+                guard projectionRC == SQLITE_DONE else {
+                    throw EventStoreError.stepFailed(
+                        "journal expiry projection delete failed for block "
+                            + "\(blockID) (sqlite rc \(projectionRC)): "
+                            + String(cString: sqlite3_errmsg(db))
+                    )
+                }
+                guard deletedProjection == Int32(coverage.materialized) else {
                     throw EventStoreError.decodingFailed(
-                        "journal expiry projection count disagrees with coverage"
+                        "journal expiry projection count disagrees with coverage "
+                            + "(deleted \(deletedProjection), coverage "
+                            + "\(coverage.materialized))"
                     )
                 }
 
@@ -18127,6 +18146,91 @@ public actor EventStore {
         return Int(StoragePragmas.readAutoVacuumMode(db))
     }
 
+    // MARK: - FTS5 segment-ceiling recovery (v1.21.6-rc.34)
+    //
+    // FTS5 has a HARD compile-time ceiling of 2000 live segments
+    // (`FTS5_MAX_SEGMENT`). At the ceiling every operation that must allocate a
+    // segid fails with SQLITE_FULL — including `optimize`, so the index cannot
+    // compact its way out. Only `rebuild` escapes, because it resets the index
+    // structure before allocating.
+    //
+    // This store reaches that ceiling through its OWN retention path. Writes run
+    // with `automerge=0` (see openDatabase) so segments never merge inline, and
+    // each expired journal block issues a `DELETE FROM events_fts`, which writes
+    // a tombstone segment. Enough expiries and the index is full: an installed
+    // host reached 2000 segments holding only 635 events.
+    //
+    // Left alone that is a CLOSED LOOP, and an unrecoverable one:
+    //
+    //   segments accumulate -> ceiling -> boot expiry fails SQLITE_FULL
+    //     -> boot never reaches ready -> the background sweep that calls
+    //     mergeFTS/optimizeFTS never runs -> ceiling persists forever
+    //
+    // The compaction that would fix it is driven only from DaemonTimers' post-
+    // ready sweep, so it can never run on an affected host. Recovery therefore
+    // has to happen HERE, on the boot path, before expiry needs a segid.
+    //
+    // DETECTION-SAFE: `events_fts` is an external-content index over `events`,
+    // read only by `search()`/hunt and never by the detection engine. A rebuild
+    // regenerates it from the content table; it changes physical layout only,
+    // never which rows a MATCH returns, and cannot lose event data.
+
+    /// FTS5's hard `FTS5_MAX_SEGMENT` ceiling.
+    static let ftsSegmentCeiling = 2_000
+
+    /// Recover well before the ceiling. At 2000 the index is frozen, so waiting
+    /// for the wall leaves no working escape.
+    static let ftsSegmentRecoveryThreshold = 1_500
+
+    /// Live segment count, or nil if it cannot be determined.
+    func liveFTSSegmentCount() -> Int? {
+        guard db != nil else { return nil }
+        guard let stmt = try? prepare(
+            "SELECT count(DISTINCT (id >> 37)) FROM events_fts_data WHERE id > 10"
+        ) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Rebuild `events_fts` when its segment count is close enough to the
+    /// ceiling that the next segid allocation could fail. Returns true when a
+    /// rebuild ran.
+    ///
+    /// Deliberately uses `rebuild` rather than `optimize`: at or near the
+    /// ceiling `optimize` needs a fresh segid and fails with SQLITE_FULL, so it
+    /// cannot be the escape hatch.
+    @discardableResult
+    func recoverExhaustedFTSIndexIfNeeded() throws -> Bool {
+        guard let db = db, !isReadOnly else { return false }
+        guard let segments = liveFTSSegmentCount(),
+              segments >= Self.ftsSegmentRecoveryThreshold else { return false }
+
+        Logger(subsystem: "com.maccrab.storage", category: "event-store").warning(
+            "events_fts is at \(segments) of \(Self.ftsSegmentCeiling) FTS5 segments; rebuilding the index before it can no longer allocate one"
+        )
+        try withSerializedWrite(
+            estimatedBytes: storageTransactionReserveBytes,
+            maintenance: true
+        ) {
+            let rc = sqlite3_exec(
+                db,
+                "INSERT INTO events_fts(events_fts) VALUES('rebuild')",
+                nil, nil, nil
+            )
+            guard rc == SQLITE_OK else {
+                throw EventStoreError.stepFailed(
+                    "events_fts rebuild failed (sqlite rc \(rc)): "
+                        + String(cString: sqlite3_errmsg(db))
+                )
+            }
+        }
+        Logger(subsystem: "com.maccrab.storage", category: "event-store").warning(
+            "events_fts rebuilt; segments now \(self.liveFTSSegmentCount() ?? -1)"
+        )
+        return true
+    }
+
     // MARK: - FTS5 index merge (v1.21.4 Tier-A perf)
     //
     // Companion to the `automerge=0` setting in `openDatabase`. With
@@ -18150,6 +18254,18 @@ public actor EventStore {
     @discardableResult
     public func mergeFTS(pages: Int = 1000) async -> Bool {
         guard let db = db, !isReadOnly else { return false }
+        // rc.34: bounded merge cannot rescue an index that has already run out
+        // of segids — it needs one itself and fails with SQLITE_FULL. Measured
+        // against the real schema, ordinary batched ingestion produces roughly
+        // one segment per two rows with automerge=0, so the ceiling is reachable
+        // without any expiry at all. Check for exhaustion before merging.
+        do {
+            if try recoverExhaustedFTSIndexIfNeeded() { return true }
+        } catch {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "events_fts exhaustion recovery failed: \(String(describing: error), privacy: .public)"
+            )
+        }
         let plan = SQLitePersistentStoreAdmission.boundedPageOperationPlan(
             requestedPages: max(1, pages),
             reserveBytes: storageTransactionReserveBytes,
@@ -18169,11 +18285,19 @@ public actor EventStore {
                 guard rc == SQLITE_OK else {
                     _ = latchStoragePressureIfPresent(resultCode: rc)
                     throw EventStoreError.stepFailed(
-                        "bounded FTS merge failed"
+                        "bounded FTS merge failed (sqlite rc \(rc)): "
+                            + String(cString: sqlite3_errmsg(db))
                     )
                 }
             }
         } catch {
+            // rc.34: previously a bare `return false`. This is the maintenance
+            // that exists to keep events_fts away from its segment ceiling, so
+            // silently swallowing its failures removed the only warning that it
+            // had stopped working — and the index filled anyway.
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "bounded FTS merge failed, segment pressure will keep growing: \(String(describing: error), privacy: .public)"
+            )
             return false
         }
         return true
