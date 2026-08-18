@@ -33,4 +33,22 @@ import MacCrabAgentKit
 // autoreleased objects (NSDictionary/NSError/_NSJSONReader/NSConcreteData)
 // that previously accumulated in long-running async Tasks — fixed a
 // 1+ GB/hour heap growth observed in the field on v1.7.6.
-try await DaemonBootstrap.runForever(printBanner: false)
+// v1.21.6-rc.32: this was a bare `try await`. Any error escaping the bootstrap
+// propagated out of async main as `swift_errorInMain`, which traps — so a root
+// Endpoint Security extension answered a recoverable storage condition by
+// dying, and sysextd relaunched it into a crash loop (five SIGTRAP reports on
+// one installed rc.31 host in a single morning). The exception carried no
+// reason, so the surviving evidence was an opaque `EXC_BREAKPOINT`.
+//
+// Failing is still correct — the startup marker written by `runForever` is what
+// tells the dashboard "launched but failed in init". Failing *legibly* is the
+// fix: log the classified reason, then exit non-zero so sysextd's own relaunch
+// provides the retry instead of a trap.
+do {
+    try await DaemonBootstrap.runForever(printBanner: false)
+} catch {
+    Logger(subsystem: "com.maccrab.agent", category: "lifecycle").critical(
+        "Daemon bootstrap failed, exiting for sysextd relaunch: \(String(describing: error), privacy: .public)"
+    )
+    exit(1)
+}

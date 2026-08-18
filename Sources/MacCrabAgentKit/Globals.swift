@@ -270,6 +270,21 @@ actor StorageErrorTracker {
             }
         }
 
+        // Typed classification beats substring sniffing: in-process pipeline
+        // credit exhaustion is neither SQLite contention nor disk pressure, and
+        // conflating it with `lock_timeout` sent rc.31 triage at the WAL for a
+        // condition that had nothing to do with SQLite.
+        if let storeError = error as? EventStoreError {
+            switch storeError {
+            case .memoryLeaseUnavailable:
+                return "memory_lease_unavailable"
+            case .busy:
+                return "lock_timeout"
+            default:
+                break
+            }
+        }
+
         let raw = error.localizedDescription
         let lower = raw.lowercased()
         // Closed-vocabulary SQLite kinds, ordered by specificity. The
@@ -281,7 +296,11 @@ actor StorageErrorTracker {
         if lower.contains("database or disk is full") || lower.contains("disk full") || lower.contains("sqlite_full") {
             return "disk_full"
         }
-        if lower.contains("database is locked") || lower.contains("database table is locked") || lower.contains("sqlite_busy") || lower.contains("sqlite_locked") || lower.contains("lock") {
+        // NOTE: no bare `contains("lock")` here. That disjunct matched "block",
+        // so every journal message mentioning a blocked/blocking condition was
+        // filed as lock contention and `last_event_insert_error_kind` became
+        // unusable for triage.
+        if lower.contains("database is locked") || lower.contains("database table is locked") || lower.contains("sqlite_busy") || lower.contains("sqlite_locked") {
             return "lock_timeout"
         }
         if lower.contains("constraint") {

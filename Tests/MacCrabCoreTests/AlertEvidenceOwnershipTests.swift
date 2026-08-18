@@ -473,7 +473,9 @@ struct AlertEvidenceOwnershipTests {
             )
             Issue.record("expected bounded decode ownership pressure")
         } catch let error as EventStoreError {
-            guard case .busy = error else {
+            // rc.32: bounded decode ownership pressure is in-process credit
+            // exhaustion, so it surfaces as `memoryLeaseUnavailable`.
+            guard case .memoryLeaseUnavailable = error else {
                 Issue.record("pressure was misclassified as \(error)")
                 return
             }

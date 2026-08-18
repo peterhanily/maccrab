@@ -1807,3 +1807,59 @@ struct BatchedEventWriterTests {
         #expect(writer.droppedCount == events.count)
     }
 }
+
+// MARK: - rc.32 regressions: unbounded waits on in-process credit exhaustion
+//
+// rc.31 shipped with `EventStoreError.busy` covering BOTH SQLITE_BUSY/LOCKED and
+// in-process pipeline credit exhaustion. Every retry path keyed off that single
+// case, so waits that could only be satisfied by ANOTHER owner releasing credit
+// were retried as if they were clearing lock contention. On an installed host the
+// priority lane drained at ~11% of its offered rate and evicted ~98,000 events
+// while the storage budget still reported `converged`.
+@Suite("rc.32 bounded credit-pressure waits", .serialized)
+struct BoundedCreditPressureRegressionTests {
+
+    @Test("In-process credit exhaustion is not typed as SQLite lock contention")
+    func memoryLeaseIsNotLockTimeout() {
+        let lease = EventStoreError.memoryLeaseUnavailable(
+            "terminal delta for journal block 7 is waiting for bounded terminal encoding ownership"
+        )
+        let kind = StorageErrorTracker.classifyEventInsertError(lease)
+
+        #expect(kind == "memory_lease_unavailable")
+        // The whole point of the split: this must NOT read as SQLite contention,
+        // or triage goes to the WAL for a condition SQLite is not involved in.
+        #expect(kind != "lock_timeout")
+    }
+
+    @Test("Real SQLITE_BUSY still classifies as lock contention")
+    func sqliteBusyStillLockTimeout() {
+        #expect(
+            StorageErrorTracker.classifyEventInsertError(
+                EventStoreError.busy("database is locked")
+            ) == "lock_timeout"
+        )
+    }
+
+    @Test("A blocked-journal message is not mistaken for a lock")
+    func blockedIsNotLock() {
+        // `lower.contains("lock")` matched "block", so any journal message about
+        // a blocked condition was filed as lock_timeout and
+        // last_event_insert_error_kind stopped being usable for triage.
+        let kind = StorageErrorTracker.classifyEventInsertError(
+            EventStoreError.stepFailed(
+                "event journal block 42 is blocked behind a pending writer"
+            )
+        )
+        #expect(kind != "lock_timeout")
+    }
+
+    @Test("Terminal settlement carries a finite deadline")
+    func terminalSettlementDeadlineIsFinite() {
+        // A deadline that is absent or non-positive reintroduces the stall: the
+        // per-event lane consumer awaits terminal settlement inline, so an
+        // unbounded wait stops the entire lane rather than shedding one event.
+        #expect(BatchedEventWriter.terminalSettlementDeadline > .zero)
+        #expect(BatchedEventWriter.terminalSettlementDeadline <= .seconds(10))
+    }
+}

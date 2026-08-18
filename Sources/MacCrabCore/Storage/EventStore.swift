@@ -98,6 +98,13 @@ public enum EventStoreError: Error, LocalizedError {
     /// instead of dropping the batch (retrying a transient lock succeeds once the
     /// contention clears; retrying a permanent failure does not).
     case busy(String, failure: SQLiteFailureDetails? = nil)
+    /// v1.21.6-rc.32: in-process event-pipeline memory/ownership lease
+    /// exhaustion. Previously reported as `busy`, which made every caller treat
+    /// it as clearing SQLite contention and retry it — but no amount of retrying
+    /// releases a credit the retrying task is itself holding, so those retries
+    /// burned their whole deadline per event and collapsed priority-lane
+    /// throughput. Callers must take a BOUNDED, accounted exit instead.
+    case memoryLeaseUnavailable(String, failure: SQLiteFailureDetails? = nil)
     case sqliteFailure(
         context: String,
         message: String,
@@ -113,6 +120,8 @@ public enum EventStoreError: Error, LocalizedError {
         case .stepFailed(let msg):          return "Step failed: \(msg)"
         case .diskFull(let msg, _):         return "Disk full: \(msg)"
         case .busy(let msg, _):             return "Database busy (transient): \(msg)"
+        case .memoryLeaseUnavailable(let msg, _):
+            return "Event pipeline memory lease unavailable: \(msg)"
         case let .sqliteFailure(context, message, rc, extended, systemErrno):
             return "SQLite \(context) failed (rc=\(rc), extended=\(extended), system_errno=\(systemErrno)): \(message)"
         case .encodingFailed(let msg):      return "Encoding failed: \(msg)"
@@ -5429,7 +5438,7 @@ public actor EventStore {
             bytes: EventJournalCodec.maximumWorkspaceBytes,
             owner: .eventStoreWorkspace
         ) else {
-            throw EventStoreError.busy(
+            throw EventStoreError.memoryLeaseUnavailable(
                 "\(context) is waiting for bounded event-store workspace"
             )
         }
@@ -5606,7 +5615,7 @@ public actor EventStore {
                 }
             )
         } catch EventJournalCodecError.recordWorkspaceUnavailable {
-            throw EventStoreError.busy(
+            throw EventStoreError.memoryLeaseUnavailable(
                 "event journal block \(blockID) decode is waiting for bounded record ownership"
             )
         } catch {
@@ -5701,7 +5710,7 @@ public actor EventStore {
         guard workspaceLease.owner == .eventStoreWorkspace,
               workspaceLease.bytes >= EventJournalCodec.maximumWorkspaceBytes
         else {
-            throw EventStoreError.busy(
+            throw EventStoreError.memoryLeaseUnavailable(
                 "targeted journal decode has no adopted EventStore workspace"
             )
         }
@@ -5802,7 +5811,7 @@ public actor EventStore {
                 }
             )
         } catch EventJournalCodecError.recordWorkspaceUnavailable {
-            throw EventStoreError.busy(
+            throw EventStoreError.memoryLeaseUnavailable(
                 "targeted event journal block \(location.blockID) decode is waiting for bounded record ownership"
             )
         } catch {
@@ -6038,7 +6047,7 @@ public actor EventStore {
                 consume: { record in ownedDelta = record }
             )
         } catch EventJournalCodecError.recordWorkspaceUnavailable {
-            throw EventStoreError.busy(
+            throw EventStoreError.memoryLeaseUnavailable(
                 "terminal journal revision decode is waiting for bounded record ownership"
             )
         }
@@ -10281,7 +10290,7 @@ public actor EventStore {
             guard owned.record.ownershipLease.resize(
                 to: combined.partialValue
             ) else {
-                throw EventStoreError.busy(
+                throw EventStoreError.memoryLeaseUnavailable(
                     "terminal delta for journal block \(location.blockID) is waiting for bounded base-and-delta ownership"
                 )
             }
@@ -10309,7 +10318,7 @@ public actor EventStore {
                 to: EventJournalAdmissionValidator
                     .maximumPreparationWorkspaceBytes
             ) else {
-                throw EventStoreError.busy(
+                throw EventStoreError.memoryLeaseUnavailable(
                     "terminal delta for journal block \(location.blockID) is waiting for bounded terminal encoding ownership"
                 )
             }

@@ -373,7 +373,15 @@ func retryTransientEventStoreStartupOperation<T>(
         do {
             return try await operation()
         } catch let error as EventStoreError {
-            guard case .busy = error, attempt < attemptLimit else {
+            // Already attempt-bounded, so retrying in-process credit exhaustion
+            // here is safe and preserves the pre-rc.32 startup behaviour that
+            // `.busy` used to cover before the two conditions were split.
+            let retryable: Bool
+            switch error {
+            case .busy, .memoryLeaseUnavailable: retryable = true
+            default: retryable = false
+            }
+            guard retryable, attempt < attemptLimit else {
                 throw error
             }
             onRetry(attempt)

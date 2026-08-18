@@ -542,6 +542,13 @@ public actor AlertSink {
         maxRows: Int
     ) async throws -> ExactAlertEvidenceSnapshot {
         var delay = Duration.milliseconds(10)
+        // Bounded since rc.32. This was `while true`, so a pressure condition
+        // that never cleared held an evidence capture forever. Both retryable
+        // classes are waited out, but only inside a finite window: in-process
+        // credit exhaustion (`memoryLeaseUnavailable`) in particular cannot be
+        // cleared by the waiter itself.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: Self.exactEvidenceRetryWindow)
         while true {
             try Task.checkCancellation()
             do {
@@ -550,7 +557,10 @@ public actor AlertSink {
                     maxRows: maxRows
                 )
             } catch let error as EventStoreError {
-                guard case .busy = error else {
+                switch error {
+                case .busy, .memoryLeaseUnavailable:
+                    guard clock.now < deadline else { throw error }
+                default:
                     throw error
                 }
                 try await Task.sleep(for: delay)
@@ -558,6 +568,13 @@ public actor AlertSink {
             }
         }
     }
+
+    /// Finite window for waiting out storage/credit pressure on an exact
+    /// evidence read. Past it the capture fails honestly rather than pinning a
+    /// capture slot indefinitely. Generous by intent: it exists to guarantee the
+    /// wait terminates, not to cut short a genuinely transient pressure interval
+    /// (the ownership suite exercises ~5s intervals deliberately).
+    private static let exactEvidenceRetryWindow: Duration = .seconds(8)
 
     private func captureEvidence(_ request: EvidenceCaptureRequest) async {
         do {

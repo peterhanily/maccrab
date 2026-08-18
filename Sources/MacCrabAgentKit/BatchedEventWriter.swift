@@ -1169,7 +1169,14 @@ actor BatchedEventWriter {
             recordDrop(1, lane: lane)
             return nil
         }
-        while !Task.isCancelled {
+        // Bounded since rc.32, same reasoning as the terminal adoption wait:
+        // adoption depends on another owner releasing, so without a deadline
+        // this parks the lane consumer that awaits base admission inline.
+        // Falling through takes the accounted `recordDrop` exit below.
+        let admitClock = ContinuousClock()
+        let admitDeadline = admitClock.now
+            .advanced(by: Self.terminalSettlementDeadline)
+        while !Task.isCancelled, admitClock.now < admitDeadline {
             if let acquired = ownershipBudget.adopt(
                 prepared,
                 workspaceLease: workspaceLease
@@ -1656,11 +1663,21 @@ actor BatchedEventWriter {
         // reclaim its release-valve workspace.
         recordTerminalOffered(lane: lane)
         await terminalDeltaStorageLeaseGrowthHookForTesting?()
+        let growthClock = ContinuousClock()
+        let growthDeadline = growthClock.now
+            .advanced(by: Self.terminalSettlementDeadline)
         while !Task.isCancelled,
               !workspaceLease.resize(
                 to: EventPipelineLiveMemoryBudget
                     .productionEventStoreWorkspaceReserveBytes
               ) {
+            // Bounded since rc.32. This wait can only clear when a DIFFERENT
+            // owner releases credit, so waiting forever here parks the lane
+            // consumer that awaits this call inline.
+            guard growthClock.now < growthDeadline else {
+                recordTerminalDrop(lane: lane)
+                return proof(status: .dropped)
+            }
             recordTerminalRetry(1, lane: lane)
             try? await Task.sleep(for: .milliseconds(10))
         }
@@ -1677,7 +1694,15 @@ actor BatchedEventWriter {
         // Once the exact compact delta and its S lease exist, transient live-
         // memory or SQLite contention is not a terminal evidence result. Keep
         // the causal barrier pending until storage succeeds, a permanent error
-        // occurs, or shutdown cancels this task.
+        // occurs, the settlement deadline expires, or shutdown cancels this task.
+        //
+        // rc.32: the deadline is mandatory. Without it this loop retried
+        // `.memoryLeaseUnavailable` — which retrying alone can never clear —
+        // forever, and because the lane consumer awaits this inline the whole
+        // lane stopped draining.
+        let storageClock = ContinuousClock()
+        let storageDeadline = storageClock.now
+            .advanced(by: Self.terminalSettlementDeadline)
         while !Task.isCancelled {
             do {
                 let result = try await journalStore.appendTerminalDeltas(
@@ -1732,7 +1757,18 @@ actor BatchedEventWriter {
                             result.storageMutationGeneration
                     )
                 }
-            } catch let error as EventStoreError where isTransient(error) {
+            } catch let error as EventStoreError
+                        where isTransient(error) || isLeaseContention(error) {
+                // Bounded since rc.32, and the loss is REPORTED. ab5e05b had
+                // removed the deadline and the StorageErrorTracker call
+                // together, so a stalled lane showed an
+                // `event_insert_errors_total` of a few hundred while it was
+                // actually shedding tens of thousands of events.
+                guard storageClock.now < storageDeadline else {
+                    recordTerminalDrop(lane: lane)
+                    await StorageErrorTracker.shared.recordEventError(error)
+                    return proof(status: .dropped)
+                }
                 recordTerminalRetry(1, lane: lane)
                 try? await Task.sleep(for: .milliseconds(10))
             } catch {
@@ -1771,7 +1807,14 @@ actor BatchedEventWriter {
             return .rejected
         }
         var adopted: EventJournalPreparedHandle?
-        while adopted == nil, !Task.isCancelled {
+        // Bounded since rc.32. `startDrain()` below makes this wait more
+        // productive than a bare spin, but adoption still depends on another
+        // owner releasing, so it needs a deadline. Falling through leaves
+        // `adopted` nil and the guard beneath takes the accounted lossy exit.
+        let adoptClock = ContinuousClock()
+        let adoptDeadline = adoptClock.now
+            .advanced(by: Self.terminalSettlementDeadline)
+        while adopted == nil, !Task.isCancelled, adoptClock.now < adoptDeadline {
             adopted = ownershipBudget.adopt(
                 prepared,
                 workspaceLease: workspaceLease
@@ -1827,6 +1870,34 @@ actor BatchedEventWriter {
         if case .busy = e { return true }
         return false
     }
+
+    /// In-process event-pipeline credit exhaustion, surfaced as
+    /// `.memoryLeaseUnavailable`. It can clear when another owner releases, but
+    /// never through this task retrying alone — the retrier is often holding the
+    /// very credit it waits on. Bounded-retryable ONLY: every wait on it must
+    /// carry a deadline and an accounted lossy exit, or the serialized lane
+    /// consumer that awaits it inline stops draining its lane.
+    private func isLeaseContention(_ e: EventStoreError) -> Bool {
+        if case .memoryLeaseUnavailable = e { return true }
+        return false
+    }
+
+    /// Ceiling on how long ONE event may wait for storage or pipeline credit
+    /// before the lane sheds it. The per-event lane consumer awaits terminal
+    /// settlement inline, so an unbounded wait here stalls the entire lane: in
+    /// rc.31 priority-lane throughput collapsed to ~11% of the offered rate and
+    /// the 100k-slot buffer evicted ~98k events while the budget still read
+    /// `converged`. Shedding one event is strictly better than stopping the lane.
+    ///
+    /// This is a HANG BACKSTOP, not a throughput governor, so it is deliberately
+    /// generous. The rc.31 throughput collapse came from retrying
+    /// `.memoryLeaseUnavailable` as though it were clearing SQLite contention;
+    /// splitting that case is what restores throughput. Keeping the ceiling well
+    /// above the ~5s pressure intervals the journal-pipeline and alert-evidence
+    /// suites exercise preserves the deliberate design property those tests
+    /// protect — a transient pressure interval is not an evidence result — while
+    /// still guaranteeing the wait terminates.
+    static let terminalSettlementDeadline: Duration = .seconds(8)
 
     /// Journal evidence reads and idempotent ensures can briefly contend with
     /// another bounded record decode. That contention is not an insert loss:

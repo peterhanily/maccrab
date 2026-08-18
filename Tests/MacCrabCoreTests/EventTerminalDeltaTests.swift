@@ -160,8 +160,14 @@ struct EventTerminalDeltaTests {
             )
             Issue.record("live ownership pressure unexpectedly persisted")
         } catch let error as EventStoreError {
-            guard case .busy(let message, _) = error else {
-                Issue.record("ownership pressure was not typed transient: \(error)")
+            // rc.32: in-process ownership pressure is `memoryLeaseUnavailable`,
+            // NOT `busy`. `busy` means SQLITE_BUSY/LOCKED, which clears on its
+            // own; this does not, so callers must bound their wait rather than
+            // retry it as if it were lock contention.
+            guard case .memoryLeaseUnavailable(let message, _) = error else {
+                Issue.record(
+                    "ownership pressure was not typed as a memory lease failure: \(error)"
+                )
                 return
             }
             #expect(message.contains("base-and-delta ownership"))
