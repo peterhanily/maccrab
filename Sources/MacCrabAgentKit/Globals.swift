@@ -239,9 +239,15 @@ actor StorageErrorTracker {
     /// per-kind escalation and surfaces into heartbeat as
     /// `last_event_insert_error_kind`.
     ///
-    /// Order matters here: SQLite step failures embed the underlying
-    /// errno in their string body, so we inspect the message before
-    /// falling back to the enum case.
+    /// Order matters here. Typed cases that are UNAMBIGUOUS are matched first
+    /// (admission failures, and the two EventStore cases whose construction
+    /// sites are exhaustively known). Everything else falls through to message
+    /// inspection, because SQLite step failures embed the underlying errno in
+    /// their string body rather than in the enum case.
+    ///
+    /// The typed short-circuit is only safe while `.busy` is constructed
+    /// exclusively where `rc == SQLITE_BUSY || rc == SQLITE_LOCKED`
+    /// (EventStore.swift, two sites). Widen that and this ordering must change.
     internal static func classifyEventInsertError(_ error: Error) -> String {
         // Admission failures are typed and should stay typed all the way to
         // the heartbeat.  Matching only their prose made the live

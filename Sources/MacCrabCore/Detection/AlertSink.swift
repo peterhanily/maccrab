@@ -530,10 +530,12 @@ public actor AlertSink {
     /// Evidence selection shares the process-wide bounded decode budget with
     /// the live ingestion pipeline. A synchronous offer may therefore lose a
     /// short race without implying corruption. Keep the durable context row
-    /// pending and retry only explicitly transient EventStore failures. There
-    /// is deliberately no wall-clock cutoff: continuous ingestion may keep a
-    /// non-blocking reader behind FIFO memory waiters for an arbitrary period,
-    /// which is pressure rather than evidence loss. Codec, authentication, and
+    /// pending and retry only explicitly transient EventStore failures.
+    /// Continuous ingestion may keep a non-blocking reader behind FIFO memory
+    /// waiters for a long period, which is pressure rather than evidence loss —
+    /// so the cutoff below is deliberately generous. It is NOT absent, though:
+    /// before rc.32 this retried forever, and an unrelieved pressure condition
+    /// pinned an evidence capture for the life of the process. Codec, authentication, and
     /// schema failures remain terminal on their first try; shutdown cancellation
     /// leaves the durable pending row as honest, restart-stable unfinished work.
     private func exactEvidenceSnapshotWithTransientRetry(

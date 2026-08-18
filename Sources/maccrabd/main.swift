@@ -80,4 +80,14 @@ if args.contains("--background") || args.contains("--bg") || args.contains("-b")
 // bootstrap (component wiring, timers, event loop) lives in
 // DaemonBootstrap so the MacCrabAgent system extension target can
 // share identical behaviour without maintaining a parallel copy.
-try await DaemonBootstrap.runForever(printBanner: true)
+// Same reasoning as the system extension entry point: a bare top-level
+// try-await turns any bootstrap error into `swift_errorInMain`, which traps with
+// an opaque EXC_BREAKPOINT and no logged reason. Fail legibly instead.
+do {
+    try await DaemonBootstrap.runForever(printBanner: true)
+} catch {
+    FileHandle.standardError.write(
+        Data("maccrabd: bootstrap failed: \(String(describing: error))\n".utf8)
+    )
+    exit(1)
+}

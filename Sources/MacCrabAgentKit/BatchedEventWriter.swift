@@ -1196,6 +1196,15 @@ actor BatchedEventWriter {
         }
         offeredByLane[lane.rawValue] += 1
         recordDrop(1, lane: lane)
+        // Only a real deadline expiry is an error worth reporting; shutdown
+        // cancellation is not a storage fault.
+        if !Task.isCancelled {
+            await StorageErrorTracker.shared.recordEventError(
+                EventStoreError.memoryLeaseUnavailable(
+                    "base journal admission timed out waiting for bounded ownership"
+                )
+            )
+        }
         return nil
     }
 
@@ -1676,6 +1685,14 @@ actor BatchedEventWriter {
             // consumer that awaits this call inline.
             guard growthClock.now < growthDeadline else {
                 recordTerminalDrop(lane: lane)
+                // Report it, for the same reason the storage-loop exit does: a
+                // shed that only moves a private counter is invisible in
+                // `event_insert_errors_total` and `last_event_insert_error_kind`.
+                await StorageErrorTracker.shared.recordEventError(
+                    EventStoreError.memoryLeaseUnavailable(
+                        "terminal delta workspace lease growth timed out"
+                    )
+                )
                 return proof(status: .dropped)
             }
             recordTerminalRetry(1, lane: lane)
@@ -1700,9 +1717,12 @@ actor BatchedEventWriter {
         // `.memoryLeaseUnavailable` — which retrying alone can never clear —
         // forever, and because the lane consumer awaits this inline the whole
         // lane stopped draining.
-        let storageClock = ContinuousClock()
-        let storageDeadline = storageClock.now
-            .advanced(by: Self.terminalSettlementDeadline)
+        // Shares the growth loop's start instant on purpose. Arming a FRESH
+        // deadline here would make the documented per-event ceiling a per-LOOP
+        // ceiling, so one event could hold the inline lane consumer for
+        // 8s (growth) + 8s (storage) and still be "within" an 8s budget.
+        let storageClock = growthClock
+        let storageDeadline = growthDeadline
         while !Task.isCancelled {
             do {
                 let result = try await journalStore.appendTerminalDeltas(
@@ -1758,7 +1778,7 @@ actor BatchedEventWriter {
                     )
                 }
             } catch let error as EventStoreError
-                        where isTransient(error) || isLeaseContention(error) {
+                        where isTransient(error) {
                 // Bounded since rc.32, and the loss is REPORTED. ab5e05b had
                 // removed the deadline and the StorageErrorTracker call
                 // together, so a stalled lane showed an
@@ -1826,6 +1846,13 @@ actor BatchedEventWriter {
         }
         guard let handle = adopted else {
             recordTerminalDrop(lane: lane)
+            if !Task.isCancelled {
+                await StorageErrorTracker.shared.recordEventError(
+                    EventStoreError.memoryLeaseUnavailable(
+                        "terminal revision adoption timed out waiting for bounded ownership"
+                    )
+                )
+            }
             return .rejected
         }
         terminalRevisionBuffers[lane.rawValue].append(
@@ -1864,22 +1891,25 @@ actor BatchedEventWriter {
         return .unchanged
     }
 
-    /// A retryable batch failure: SQLITE_BUSY / SQLITE_LOCKED contention, surfaced
-    /// distinctly by EventStore as `.busy`. Everything else is permanent.
+    /// A retryable batch failure. Two distinct conditions qualify:
+    ///
+    /// - `.busy` — SQLITE_BUSY / SQLITE_LOCKED contention.
+    /// - `.memoryLeaseUnavailable` — in-process pipeline credit exhaustion.
+    ///
+    /// Both are retryable because callers of this predicate release their own
+    /// leases when they return, so the credit a retry needs genuinely can become
+    /// available. The split between the two cases exists for DIAGNOSIS — so
+    /// `last_event_insert_error_kind` stops blaming SQLite for a condition SQLite
+    /// is not involved in — and deliberately NOT for control flow. Treating the
+    /// new case as permanent here converts a recoverable pressure interval into
+    /// dropped batches and `.failed` evidence, which is strictly worse than the
+    /// unbounded retry it replaced. Boundedness is supplied by the callers'
+    /// deadlines, not by narrowing this predicate.
     private func isTransient(_ e: EventStoreError) -> Bool {
-        if case .busy = e { return true }
-        return false
-    }
-
-    /// In-process event-pipeline credit exhaustion, surfaced as
-    /// `.memoryLeaseUnavailable`. It can clear when another owner releases, but
-    /// never through this task retrying alone — the retrier is often holding the
-    /// very credit it waits on. Bounded-retryable ONLY: every wait on it must
-    /// carry a deadline and an accounted lossy exit, or the serialized lane
-    /// consumer that awaits it inline stops draining its lane.
-    private func isLeaseContention(_ e: EventStoreError) -> Bool {
-        if case .memoryLeaseUnavailable = e { return true }
-        return false
+        switch e {
+        case .busy, .memoryLeaseUnavailable: return true
+        default: return false
+        }
     }
 
     /// Ceiling on how long ONE event may wait for storage or pipeline credit

@@ -400,3 +400,91 @@ struct EventPipelineLiveMemoryBudgetTests {
         #expect(budget.snapshot().leasesConserved)
     }
 }
+
+// MARK: - rc.33 regression: drain-side priority inversion
+//
+// EventStore acquires exclusively through `tryAcquire` (7 call sites, zero
+// `acquire`), so it can never become a FIFO waiter. When the waiter-fairness
+// gate applied to it unconditionally, a single parked waiter locked out the only
+// actor able to finish a write and release the credit that waiter needed. An
+// installed host sat at events_storage_write_persisted_total = 0 with 36 MiB of
+// its 96 MiB envelope free and 46 non-blocking rejections recorded.
+@Suite("rc.33 drain-side forward progress", .serialized)
+struct DrainSidePriorityInversionTests {
+
+    @Test("A parked drain-side waiter cannot block the drain side out of free capacity")
+    func drainSideProceedsDespiteParkedWaiter() async {
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let maximum = budget.snapshot().maximumBytes
+
+        // The waiter MUST be a drain-side owner. The old fairness gate only
+        // blocked `.journalPrepared` behind `.eventStoreWorkspace` /
+        // `.journalPrepared` waiters, so parking a source-side waiter would let
+        // this test pass with or without the fix and prove nothing.
+        let held = budget.tryAcquire(bytes: maximum / 2, owner: .journalPrepared)
+        #expect(held != nil, "precondition: first drain reservation should fit")
+
+        // Parks: the remaining envelope cannot satisfy another half.
+        let parked = Task {
+            await budget.acquire(bytes: maximum / 2, owner: .journalPrepared)
+        }
+        for _ in 0..<2_000 where budget.snapshot().waitingAcquisitions == 0 {
+            await Task.yield()
+        }
+        #expect(budget.snapshot().waitingAcquisitions >= 1)
+
+        // A SMALL drain-side request that the envelope can still satisfy. This is
+        // the shape of the live failure: 36 MiB free, one waiter parked, and
+        // EventStore refused 46 times. EventStore never calls the blocking
+        // `acquire`, so being refused here is terminal — it is the only actor
+        // that can finish a write and release the credit the waiter needs.
+        let progress = budget.tryAcquire(bytes: 1_024 * 1_024, owner: .journalPrepared)
+        #expect(
+            progress != nil,
+            "drain side refused with free capacity while a drain waiter was parked — priority inversion"
+        )
+
+        parked.cancel()
+        _ = await parked.value
+    }
+
+    @Test("Source-side owners still queue behind parked waiters")
+    func sourceSideStillRespectsFairness() async {
+        let budget = EventPipelineLiveMemoryBudget
+            .isolatedProductionEquivalentForTesting()
+        let snapshot = budget.snapshot()
+
+        let sourceCeiling = snapshot.maximumBytes
+            - snapshot.forwardProgressReserveBytes
+        // Deliberately leave headroom. Filling to the exact ceiling would make
+        // the assertion below pass because of byte exhaustion rather than
+        // fairness, which would not test what it claims to.
+        let headroom = 4 * 1_024 * 1_024
+        let hog = budget.tryAcquire(
+            bytes: sourceCeiling - headroom,
+            owner: .eventSource
+        )
+        #expect(hog != nil)
+
+        // Parks: it wants more than the headroom that remains.
+        let parked = Task {
+            await budget.acquire(bytes: headroom * 2, owner: .eventSource)
+        }
+        for _ in 0..<2_000 where budget.snapshot().waitingAcquisitions == 0 {
+            await Task.yield()
+        }
+        #expect(budget.snapshot().waitingAcquisitions >= 1)
+
+        // 4 KiB fits in the remaining headroom, so ONLY the fairness gate can
+        // refuse it. The exemption is deliberately narrow: it must not hand
+        // source-side owners a queue-jumping path, or FIFO is gone.
+        #expect(
+            budget.tryAcquire(bytes: 4_096, owner: .eventSource) == nil,
+            "source side jumped the queue — fairness exemption is too broad"
+        )
+
+        parked.cancel()
+        _ = await parked.value
+    }
+}

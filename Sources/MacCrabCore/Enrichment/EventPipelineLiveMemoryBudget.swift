@@ -208,8 +208,26 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             lock.unlock()
             return nil
         }
-        guard canAcquireAheadOfWaitersLocked(owner: owner),
-              canAcquireLocked(bytes: bytes, owner: owner) else {
+        // The byte check runs FIRST and the fairness gate can be bypassed by a
+        // drain-side owner. Before v1.21.6-rc.33 the fairness gate was evaluated
+        // first and applied unconditionally, which deadlocked the pipeline:
+        // EventStore is the only participant that acquires exclusively through
+        // `tryAcquire` (7 call sites, zero `acquire`), so it can never become a
+        // waiter — yet it is the only actor that can finish a write and release
+        // the credit the waiters are parked on. One parked waiter therefore
+        // locked out the sole releaser permanently. An installed host showed
+        // 46 non-blocking rejections with 36 MiB of the 96 MiB envelope free and
+        // `events_storage_write_persisted_total = 0`.
+        //
+        // Bypassing is safe because the byte ceilings already encode the
+        // carve-out this gate was trying to enforce: `maximumIndividualRequestBytes`
+        // withholds `forwardProgressReserveBytes` from every source-side owner,
+        // and `maximumAggregateBytes` withholds the eventStoreWorkspace reserve
+        // from `.journalPrepared`. Fairness ordering adds no protection the byte
+        // accounting does not already provide — it only created the inversion.
+        guard canAcquireLocked(bytes: bytes, owner: owner),
+              canAcquireAheadOfWaitersLocked(owner: owner)
+                || isDrainSideOwner(owner) else {
             increment(&nonblockingRejectionsTotal)
             lock.unlock()
             return nil
@@ -622,6 +640,21 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             )
         case .eventSource, .deferredPatch, .heavyResult:
             return maximumBytes - forwardProgressReserveBytes
+        }
+    }
+
+    /// Owners on the DRAIN side of the pipeline — the ones whose completion
+    /// releases credit back to the envelope. They may take a non-blocking
+    /// reservation ahead of parked waiters, because making them queue behind
+    /// tasks that are themselves waiting on the drain is a priority inversion
+    /// with no exit. This applies to `tryAcquire` ONLY; the blocking `acquire`
+    /// path keeps strict FIFO ordering for everyone.
+    private func isDrainSideOwner(_ owner: EventPipelineMemoryOwner) -> Bool {
+        switch owner {
+        case .eventStoreWorkspace, .journalPrepared:
+            return true
+        case .eventSource, .deferredPatch, .heavyResult:
+            return false
         }
     }
 
