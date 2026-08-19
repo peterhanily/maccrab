@@ -18217,10 +18217,39 @@ public actor EventStore {
         guard db != nil else { return nil }
         guard let stmt = try? prepare(
             "SELECT count(DISTINCT (id >> 37)) FROM events_fts_data WHERE id > 10"
-        ) else { return nil }
+        ) else {
+            // rc.36: a failed probe is not "no pressure". Returning nil silently
+            // makes recovery decline to run and walk into SQLITE_FULL with
+            // nothing in the log naming the check that opted out — the same
+            // failure-invisibility this release removed elsewhere.
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "could not probe events_fts segment count; ceiling recovery cannot evaluate this store"
+            )
+            return nil
+        }
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "events_fts segment-count probe returned no row; ceiling recovery cannot evaluate this store"
+            )
+            return nil
+        }
         return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Sweep-facing wrapper: never throws, always reports. The background sweep
+    /// must be able to call ceiling recovery unconditionally without a throw
+    /// aborting the rest of its maintenance.
+    @discardableResult
+    public func recoverExhaustedFTSIndexIfNeededForSweep() async -> Bool {
+        do {
+            return try recoverExhaustedFTSIndexIfNeeded()
+        } catch {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "events_fts ceiling recovery failed in sweep; the index may be unable to allocate a segment: \(String(describing: error), privacy: .public)"
+            )
+            return false
+        }
     }
 
     /// Rebuild `events_fts` when its segment count is close enough to the
@@ -18389,6 +18418,13 @@ public actor EventStore {
                 }
             }
         } catch {
+            // rc.36: log rather than swallow. mergeFTS's identical bare
+            // `return false` is what hid the fact that FTS compaction had
+            // stopped working while the index filled to its ceiling; this
+            // sibling kept the same blind spot 60 lines away.
+            Logger(subsystem: "com.maccrab.storage", category: "event-store").error(
+                "full FTS optimize failed; segment pressure will keep growing: \(String(describing: error), privacy: .public)"
+            )
             return false
         }
         return true

@@ -3530,6 +3530,17 @@ def normalized_runtime_sample(
             "persistence cannot. The candidate is not ingesting."
         )
 
+    # NOTE: shedding at this boundary is deliberately NOT re-checked here. The
+    # epoch gate already rejects it — see the `explicitly_shed` first-vs-last
+    # comparison that fails with "event persistence shed during the qualification
+    # epoch", whose `explicitly_shed` input is exactly `storage_dropped[lane]`.
+    # An absolute check here duplicates that protection and fires earlier in the
+    # pipeline, which masks the more precise epoch diagnosis.
+    #
+    # What was genuinely missing was LIVENESS, not loss detection: every gate in
+    # this file was an accounting identity, and identities hold across a totally
+    # stalled pipeline.
+
     terminal_offered, terminal_offered_total = heartbeat_lane_counter_map(
         heartbeat,
         "event_terminal_revision_offered_by_lane",

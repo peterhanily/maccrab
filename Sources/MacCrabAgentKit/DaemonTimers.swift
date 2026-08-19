@@ -6376,6 +6376,15 @@ func measureWalMB(dbPath: String) -> Int {
     return Int(b / 1_000_000)
 }
 
+/// Exact WAL size in bytes, for comparison against byte-denominated limits.
+/// `measureWalMB` is decimal MB and is display-only: comparing it to a MiB
+/// limit misclassified a normally-parked WAL as reader-pinned.
+func measureWalBytes(dbPath: String) -> Int64 {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal"),
+          let b = attrs[.size] as? UInt64 else { return 0 }
+    return Int64(b)
+}
+
 // MARK: - Adaptive rollup sweep (v1.8.0)
 
 /// Three-layer storage discipline: pre-insert filter (Layer 1) → adaptive
@@ -6594,9 +6603,21 @@ func runAdaptiveRollupSweep(
     // (the prune above already bounded the working set).
     await eventStore.walCheckpointTruncate()
     let walPinnedMB = measureWalMB(dbPath: dbPath)
-    let walPinned = walPinnedMB > 64
+    // rc.36: compare against the WAL's own configured limit, in the same units.
+    // This was `walPinnedMB > 64`, but measureWalMB returns DECIMAL MB while
+    // journalSizeLimitBytes is 67_108_864 (64 MiB). SQLite truncates an
+    // oversized WAL down to exactly that limit, which measures as 67 decimal MB
+    // — so a WAL resting at its designed ceiling reported itself as
+    // reader-pinned, and incremental_vacuum / VACUUM / FTS merge were skipped
+    // on every sweep with no reader involved at all.
+    // Mirrors StoragePragmas.journalSizeLimitBytes (64 MiB). That type is
+    // internal to MacCrabCore, so the value is restated rather than widening
+    // its visibility for one comparison.
+    let walLimitBytes: Int64 = 64 * 1_024 * 1_024
+    let walBytes = measureWalBytes(dbPath: dbPath)
+    let walPinned = walBytes > walLimitBytes
     if walPinned {
-        logger.warning("Tier-rollup: events.db-wal pinned at \(walPinnedMB) MB — a reader holds a read transaction on events.db (typically the dashboard's read-only connection). incremental_vacuum / full VACUUM / FTS-merge are SKIPPED this sweep (they cannot reclaim a reader-pinned WAL and would only grow it); they resume once the reader releases.")
+        logger.warning("Tier-rollup: events.db-wal measured \(walPinnedMB) MB, above its \(walLimitBytes / 1_048_576) MiB limit — consistent with a reader holding a read transaction on events.db (typically the dashboard's read-only connection), though this is a size measurement rather than a confirmed reader. incremental_vacuum / full VACUUM / FTS-merge are SKIPPED this sweep (they cannot reclaim a reader-pinned WAL and would only grow it); they resume once the WAL drains.")
     }
 
     // Power/thermal gate for the heavy maintenance below (also gates the FTS
@@ -6730,6 +6751,13 @@ func runAdaptiveRollupSweep(
     // detection engine — this changes hunt latency, never any detection result.
     // #21: skipped under a reader pin — its merge frames can't be checkpointed
     // out of a pinned WAL and would only grow it; deferred to an unpinned sweep.
+    // rc.36: ceiling recovery runs UNCONDITIONALLY, ahead of the walPinned gate.
+    // rc.34 put `recoverExhaustedFTSIndexIfNeeded()` inside mergeFTS, which sits
+    // behind this gate — so the one operation that rescues an index stuck at its
+    // 2000-segid ceiling was skipped exactly when a pinned WAL made the store
+    // most stressed. A rebuild is not a merge: it is the escape hatch, and
+    // deferring it can leave the engine unable to boot at all.
+    await eventStore.recoverExhaustedFTSIndexIfNeededForSweep()
     if !walPinned {
         await eventStore.mergeFTS()
     }

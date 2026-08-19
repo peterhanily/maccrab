@@ -2560,3 +2560,113 @@ struct SQLitePersistentStoreAdmissionTests {
         ) == 2, "every bounded recovery reopen must receive a fresh lane check")
     }
 }
+
+// MARK: - rc.36: retention must be able to write its way back under the cap
+//
+// The family footprint cap was enforced against EVERY write, including the
+// maintenance writes whose entire purpose is to shrink the family. A delete or
+// rollup appends to the WAL before a checkpoint can reclaim anything, so once
+// the family exceeded its cap the only work capable of fixing that was the
+// first thing refused — a closed loop with no exit.
+//
+// Observed on an installed host: ingestion paused at 289.7 MiB of a 320 MiB
+// cap, "Adaptive rollup at cutoff 15m failed: SQLite writes paused", and
+// 906,509 events dropped while the store sat unable to prune itself.
+@Suite("rc.36 maintenance admission headroom", .serialized)
+struct MaintenanceAdmissionHeadroomTests {
+
+    private func tempDirectory() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-admit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        return dir
+    }
+
+    /// A live, mutable footprint so the admission can be CONSTRUCTED healthy and
+    /// then pushed over cap — the initializer probes and refuses to build an
+    /// already-over-cap instance, which is exactly the state under test.
+    private final class FootprintBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int64
+        init(_ value: Int64) { self.value = value }
+        var current: Int64 {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
+    }
+
+    private func admission(
+        directory: URL, max: Int64, reserve: Int64, footprint: FootprintBox
+    ) throws -> SQLitePersistentStoreAdmission {
+        try SQLitePersistentStoreAdmission(
+            databasePath: directory.appendingPathComponent("admit.db").path,
+            policy: SQLitePersistentStorePolicy(
+                maxFootprintBytes: max,
+                freeSpaceFloorBytes: 0,
+                transactionReserveBytes: reserve,
+                storageVolumePath: directory.path
+            ),
+            footprintProbe: { _ in footprint.current },
+            freeSpaceProbe: { _ in Int64.max }
+        )
+    }
+
+    @Test("Ingestion is still refused when the family is over cap")
+    func ingestionRefusedOverCap() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let max: Int64 = 128 * 1_048_576
+        let reserve: Int64 = 1_048_576
+        let footprint = FootprintBox(0)
+        var admission = try admission(
+            directory: dir, max: max, reserve: reserve, footprint: footprint
+        )
+        footprint.current = max + 1
+        // The cap must keep meaning what it says for ordinary writes.
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            try admission.admitWrite(estimatedTransactionBytes: 4_096)
+        }
+    }
+
+    @Test("Maintenance may write one reserve above the cap to make progress")
+    func maintenanceAdmittedOverCap() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let max: Int64 = 128 * 1_048_576
+        let reserve: Int64 = 1_048_576
+        let footprint = FootprintBox(0)
+        var admission = try admission(
+            directory: dir, max: max, reserve: reserve, footprint: footprint
+        )
+        footprint.current = max + 1
+        // Retention/rollup/prune must be able to run here. Refusing this is the
+        // deadlock: the store can never shrink back under its own cap.
+        try admission.admitSerializedWrite(
+            estimatedTransactionBytes: 4_096,
+            maintenance: true
+        )
+    }
+
+    @Test("Maintenance headroom is bounded, not a blank cheque")
+    func maintenanceHeadroomIsBounded() throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let max: Int64 = 128 * 1_048_576
+        let reserve: Int64 = 1_048_576
+        let footprint = FootprintBox(0)
+        var admission = try admission(
+            directory: dir, max: max, reserve: reserve, footprint: footprint
+        )
+        footprint.current = max + 1
+        // One transaction reserve of overshoot, and no more — otherwise
+        // "maintenance" becomes an unbounded exemption from the family budget.
+        #expect(throws: SQLitePersistentStoreAdmissionError.self) {
+            try admission.admitSerializedWrite(
+                estimatedTransactionBytes: reserve + 1,
+                maintenance: true
+            )
+        }
+    }
+}

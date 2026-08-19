@@ -496,10 +496,21 @@ public struct SQLitePersistentStoreAdmission {
     /// reserve set aside for them. Once the writer lock is held, the complete
     /// conservative estimate for this transaction is authoritative instead.
     ///
-    /// Maintenance still has no free-space floor (it is the route back to a
-    /// healthy footprint), but both modes prove that the current family plus
-    /// the transaction's complete peak estimate stays within the hard family
-    /// cap. No caller may perform DML between `BEGIN IMMEDIATE` and this probe.
+    /// Maintenance has no free-space floor (it is the route back to a healthy
+    /// footprint) and, since rc.36, is admitted up to ONE TRANSACTION RESERVE
+    /// above the family cap.
+    ///
+    /// That relaxation is deliberate. Requiring maintenance to stay under the
+    /// cap sounds stricter but is self-defeating: a prune, rollup or VACUUM must
+    /// append to the WAL before a checkpoint can reclaim anything, so an
+    /// over-cap family refused the only writes able to shrink it. An installed
+    /// host paused ingestion at 289.7 MiB of a 320 MiB cap and dropped 906,509
+    /// events while unable to prune itself back under budget.
+    ///
+    /// Ingestion is still bounded by the cap exactly as before, and the
+    /// maintenance overshoot is bounded by the single transaction it needs to
+    /// make progress. No caller may perform DML between `BEGIN IMMEDIATE` and
+    /// this probe.
     public mutating func admitSerializedWrite(
         estimatedTransactionBytes: Int64,
         postCommitHeadroomBytes: Int64 = 0,
@@ -526,9 +537,31 @@ public struct SQLitePersistentStoreAdmission {
             )
             let requiredFootprint = afterTransaction.partialValue
                 .addingReportingOverflow(postCommitHeadroomBytes)
+            // v1.21.6-rc.36: maintenance gets BOUNDED headroom above the cap.
+            //
+            // Retention, rollup, prune and VACUUM are the operations that make
+            // the family smaller — but each must WRITE before it can shrink
+            // anything (a delete appends to the WAL before a checkpoint reclaims
+            // it). Enforcing the family cap against them meant that once the
+            // family exceeded its cap, the only work able to fix that was the
+            // first thing refused. Observed on an installed host: ingestion
+            // paused at 289.7 MiB of a 320 MiB cap, "Adaptive rollup at cutoff
+            // 15m failed: SQLite writes paused", and 906,509 events dropped
+            // while the store sat unable to prune itself back under budget.
+            //
+            // The headroom is one transaction reserve, not a blank cheque: a
+            // maintenance pass may overshoot by the size of the single
+            // transaction it needs to make progress, and no more. Ingestion
+            // remains capped exactly as before.
+            let admissionCeiling = maintenance
+                ? Self.saturatingAdd(
+                    policy.maxFootprintBytes,
+                    policy.transactionReserveBytes
+                )
+                : policy.maxFootprintBytes
             guard !afterTransaction.overflow,
                   !requiredFootprint.overflow,
-                  requiredFootprint.partialValue <= policy.maxFootprintBytes
+                  requiredFootprint.partialValue <= admissionCeiling
             else {
                 throw SQLitePersistentStoreAdmissionError.footprintLimit(
                     footprintBytes: footprint,
@@ -536,7 +569,7 @@ public struct SQLitePersistentStoreAdmission {
                         estimatedTransactionBytes,
                         postCommitHeadroomBytes
                     ),
-                    maxFootprintBytes: policy.maxFootprintBytes
+                    maxFootprintBytes: admissionCeiling
                 )
             }
 

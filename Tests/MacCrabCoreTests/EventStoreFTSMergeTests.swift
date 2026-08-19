@@ -348,7 +348,17 @@ struct EventStoreFTSMergeTests {
 
         let blocksBefore = Self.readFtsBlockCount(at: path)
         let sizeBefore = Self.fileSizeMB(at: path)
-        #expect(blocksBefore > 3, "churn should have left multiple FTS segments (got \(blocksBefore))")
+        // rc.35 restored automerge=4, so ordinary churn no longer LEAVES the
+        // index fragmented — inline merging compacts it as it goes, which is the
+        // entire point of that change. This assertion was written when automerge
+        // was 0 and fragmentation accumulated on its own.
+        //
+        // What optimizeFTS must still guarantee is unchanged and is asserted
+        // below: whatever fragmentation exists, it compacts to a handful of
+        // segments and search results are identical afterwards. Requiring the
+        // index to be fragmented FIRST would now be asserting the absence of the
+        // fix.
+        #expect(blocksBefore >= 1, "the FTS index should exist before optimize (got \(blocksBefore))")
 
         // Optimize + reclaim, mirroring the size-cap sweep.
         #expect(await store.optimizeFTS())

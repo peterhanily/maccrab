@@ -1304,16 +1304,39 @@ enum DaemonSetup {
             causalStoreOuter = causalStore
             logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
         } else {
+            // v1.21.6-rc.36: DEGRADE, do not abort.
+            //
+            // This branch used to call failPreIngestionStorage, which writes
+            // boot_phase=storage_not_ready and throws before any producer
+            // starts — killing the whole daemon and leaving launchd to relaunch
+            // it into the same failure forever, with no consecutive-failure
+            // backoff anywhere in Sources.
+            //
+            // That is disproportionate and contradicts this code's own intent:
+            // every non-corruption exit in openCausalStore logs "trace
+            // materialization is disabled this run", i.e. it expects to degrade.
+            // The key wired at the call below column-encrypts ONLY the trace and
+            // causal-graph stores, so a Keychain or admission failure here kills
+            // an engine whose events.db and alerts.db are entirely healthy —
+            // trading all endpoint detection for one optional feature.
+            //
+            // The genuinely fail-closed case (writable convergence could not be
+            // restored, above) still aborts. This one does not.
             let unavailable = CausalGraphStartupRecoveryResult.unavailable(
                 reason: causalStoreStartupAdmission?.reason,
                 detail: "TraceGraph store actor could not open before collector construction"
             )
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
-                component: "TraceGraph",
-                reason: unavailable.failureDetail ?? "store unavailable"
+            logger.fault(
+                "TraceGraph unavailable: \(unavailable.failureDetail ?? "store unavailable", privacy: .public). Trace materialization is disabled this run; event detection, alerting and storage continue unaffected."
             )
+            causalGraphBridge = nil
+            causalStoreOuter = nil
+            // Required now that this branch falls through instead of throwing:
+            // the compiler previously proved the variable was only read on the
+            // success path. Recording the unavailable result also keeps the
+            // typed startup status flowing to the heartbeat, so a degraded run
+            // is observable rather than merely quiet.
+            causalStoreStartupRecovery = unavailable
         }
 
         // FINAL_PRE_INGESTION_STORAGE_ACTIVATION_BOUNDARY
@@ -1360,35 +1383,40 @@ enum DaemonSetup {
         }
         logger.notice("AlertStore activation-boundary proof refreshed immediately before producers; footprint=\(alertActivationProof.footprintBytes), target=\(alertStartupBoundary.recoveryTargetBytes)")
 
-        guard let activationCausalStore = causalStoreOuter else {
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
-                component: "TraceGraph",
-                reason: "store handle disappeared before producer activation"
+        // rc.36: the activation-boundary proof only applies when TraceGraph is
+        // actually running. When the store is unavailable this run, materialization
+        // is already disabled and there is nothing to prove writable — so this
+        // whole section is skipped rather than aborting a daemon whose events.db
+        // and alerts.db are healthy. Previously the `guard let` below turned an
+        // optional-feature outage into a permanent boot failure, defeating the
+        // degrade decided above.
+        if let activationCausalStore = causalStoreOuter {
+            let activationAdmission = await activationCausalStore.storageAdmissionStatus()
+            let activationProof = causalStoreStartupRecovery.refreshed(
+                finalAdmission: activationAdmission
+            )
+            guard activationProof.writableBeforeProducers else {
+                let detail = [
+                    "activation-boundary reprobe failed",
+                    "block=\(activationAdmission.reason?.rawValue ?? "none")",
+                    "footprint=\(activationAdmission.footprintBytes ?? -1)",
+                    "target=\(activationAdmission.resumeBelowBytes ?? -1)",
+                    "deficit=\(activationAdmission.recoveryDeficitBytes ?? -1)",
+                    "one-hour evidence floor preserved",
+                ].joined(separator: ", ")
+                try DaemonBootstrap.failPreIngestionStorage(
+                    supportDir: supportDir,
+                    startedAt: startedAt,
+                    component: "TraceGraph",
+                    reason: detail
+                )
+            }
+            causalStoreStartupRecovery = activationProof
+        } else {
+            logger.warning(
+                "TraceGraph activation-boundary proof skipped: materialization is disabled this run. Event detection, alerting and storage are unaffected."
             )
         }
-        let activationAdmission = await activationCausalStore.storageAdmissionStatus()
-        let activationProof = causalStoreStartupRecovery.refreshed(
-            finalAdmission: activationAdmission
-        )
-        guard activationProof.writableBeforeProducers else {
-            let detail = [
-                "activation-boundary reprobe failed",
-                "block=\(activationAdmission.reason?.rawValue ?? "none")",
-                "footprint=\(activationAdmission.footprintBytes ?? -1)",
-                "target=\(activationAdmission.resumeBelowBytes ?? -1)",
-                "deficit=\(activationAdmission.recoveryDeficitBytes ?? -1)",
-                "one-hour evidence floor preserved",
-            ].joined(separator: ", ")
-            try DaemonBootstrap.failPreIngestionStorage(
-                supportDir: supportDir,
-                startedAt: startedAt,
-                component: "TraceGraph",
-                reason: detail
-            )
-        }
-        causalStoreStartupRecovery = activationProof
 
         if let deceptionStartupWork {
             startupWorkLifecycle.submit(
