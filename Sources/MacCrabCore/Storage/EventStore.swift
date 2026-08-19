@@ -2833,10 +2833,12 @@ public actor EventStore {
         }
 
         // Sparse FTS maintenance is never allowed to turn one admitted row
-        // into an unbounded hot-path segment rewrite. Disable automerge and set
-        // crisismerge to the vendored FTS5 maximum (1999); bounded explicit
-        // merge work runs off-path well before that threshold. Probe the
-        // persisted config first so a routine fully-v8 reopen is read-only.
+        // into an unbounded hot-path segment rewrite. rc.35 note: the fix for
+        // that was originally to disable automerge entirely and raise
+        // crisismerge to 1999, relying on off-path merges. That produced a
+        // WORSE failure — see the rc.35 comment on the config write below — so
+        // the defaults are now asserted instead. Probe the persisted config
+        // first so a routine fully-v8 reopen is read-only.
         //
         // DETECTION-SAFE: `events_fts` is read ONLY by `search()` (threat
         // hunting) — the detection engine never queries it. `automerge` /
@@ -2876,21 +2878,49 @@ public actor EventStore {
                 guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
                 return sqlite3_column_int64(statement, 0)
             }
-            let needsFTSConfig = ftsConfig("automerge") != 0
-                || ftsConfig("crisismerge") != 1_999
+            // v1.21.6-rc.35: RESTORED TO FTS5's DEFAULTS. The v1.21.4 tuning
+            // above (automerge=0, crisismerge=1999) traded a bounded per-insert
+            // merge cost for unbounded segment growth, on the assumption that
+            // "bounded explicit merge work runs off-path well before that
+            // threshold". Measured on an installed host, it does not:
+            //
+            //   - segments accrue at roughly one per two rows with automerge=0
+            //   - ingestion drove 1165 -> 1999 segments in ~30 seconds
+            //   - the off-path sweep runs on a far slower cadence, so the index
+            //     hit the 2000-segid ceiling every ~4 minutes
+            //   - at the ceiling every write fails SQLITE_FULL: persistence
+            //     stalled and ~1000 events were dropped per cycle
+            //
+            // crisismerge=1999 also disabled the safety net, leaving a margin of
+            // exactly one below a hard ceiling. automerge=4 / crisismerge=16 are
+            // FTS5's defaults; they keep segment count bounded during writes,
+            // which is the only thing that actually holds at real event rates.
+            // The explicit off-path mergeFTS remains as an optimisation and the
+            // rebuild path remains as a safety net — but neither can substitute
+            // for inline merging.
+            let needsFTSConfig = ftsConfig("automerge") != 4
+                || ftsConfig("crisismerge") != 16
             if needsFTSConfig,
                (try? admission?.admitWrite(
                     estimatedTransactionBytes:
                         SQLitePersistentStoreAdmission.conservativeRowMutationBytes,
                     on: handle
                )) != nil {
-                try Self.exec(
+                // Best-effort, as this block's own comment has always claimed —
+                // but `try Self.exec` made it load-bearing, so a refused write
+                // aborted the open. That is exactly backwards on the store this
+                // matters most for: one already wedged by an older build, where
+                // failing the open denies the recovery path a chance to run.
+                // Perf tuning must never be the reason a store cannot be opened.
+                _ = sqlite3_exec(
                     handle,
-                    "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 0)"
+                    "INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 4)",
+                    nil, nil, nil
                 )
-                try Self.exec(
+                _ = sqlite3_exec(
                     handle,
-                    "INSERT INTO events_fts(events_fts, rank) VALUES('crisismerge', 1999)"
+                    "INSERT INTO events_fts(events_fts, rank) VALUES('crisismerge', 16)",
+                    nil, nil, nil
                 )
             }
         }

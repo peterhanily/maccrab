@@ -81,6 +81,16 @@ struct FTSSegmentCeilingTests {
             }
         }
 
+        // Reproduce the LEGACY tuning that created these stores. Builds up to
+        // rc.34 set automerge=0 / crisismerge=1999, which is what let the index
+        // reach its ceiling; rc.35 restores FTS5's defaults so new stores no
+        // longer get there. Recovery still has to work for stores wedged by an
+        // older build, which is precisely the field upgrade path — and without
+        // this the fixture could no longer build a saturated index at all, so
+        // the recovery tests would pass vacuously.
+        try exec("INSERT INTO events_fts(events_fts, rank) VALUES('automerge', 0)")
+        try exec("INSERT INTO events_fts(events_fts, rank) VALUES('crisismerge', 1999)")
+
         func segmentCount() -> Int {
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(
@@ -244,6 +254,68 @@ struct FTSSegmentCeilingTests {
         #expect(
             after < EventStore.ftsSegmentRecoveryThreshold,
             "expiry left events_fts at \(after) segments; the boot path did not relieve segment pressure"
+        )
+    }
+}
+
+// MARK: - rc.35: inline merging must stay enabled
+//
+// The ceiling is only reachable because segments are never merged during
+// writes. Recovery (rebuild) makes that survivable; inline merging is what
+// makes it rare. Disabling automerge again would restore a sawtooth that
+// stalls persistence and drops ~1000 events per cycle on a real host, so the
+// configuration is asserted here rather than left to a comment.
+@Suite("FTS5 merge configuration", .serialized)
+struct FTSMergeConfigurationTests {
+
+    private func ftsConfig(
+        _ key: String, databasePath: String
+    ) throws -> Int64? {
+        var handle: OpaquePointer?
+        guard sqlite3_open(databasePath, &handle) == SQLITE_OK,
+              let db = handle else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db, "SELECT v FROM events_fts_config WHERE k = ?1", -1, &stmt, nil
+        ) == SQLITE_OK, let stmt else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(
+            stmt, 1, key, -1,
+            unsafeBitCast(
+                OpaquePointer(bitPattern: -1)!,
+                to: sqlite3_destructor_type.self
+            )
+        )
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
+    @Test("A new store enables inline segment merging")
+    func inlineMergingIsEnabled() throws {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("maccrab-ftscfg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: tmp, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do { _ = try EventStore(directory: tmp.path) }
+
+        let path = tmp.appendingPathComponent("events.db").path
+        let automerge = try ftsConfig("automerge", databasePath: path)
+        let crisismerge = try ftsConfig("crisismerge", databasePath: path)
+
+        // automerge=0 means segments are NEVER merged on the write path, which
+        // walks the index into its 2000-segid ceiling under ordinary ingestion.
+        #expect(
+            automerge != 0,
+            "automerge is disabled; segment count is unbounded during writes"
+        )
+        // crisismerge is the emergency compaction threshold. Parking it just
+        // below the hard ceiling (it was 1999) removes the last safety net.
+        #expect(
+            (crisismerge ?? 0) < EventStore.ftsSegmentRecoveryThreshold,
+            "crisismerge (\(crisismerge ?? -1)) must leave real headroom below the ceiling"
         )
     }
 }
