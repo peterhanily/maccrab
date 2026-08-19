@@ -658,18 +658,42 @@ enum DaemonSetup {
             measurement: legacyEvidenceMeasurement,
             ticket: legacyEvidenceTicket
         )
-        if transition.measurementFailed
-            || transition.walCheckpointDrained != true
-            || (transition.pendingReserveMiB != nil
-                && transition.pendingReserveFitsHardBoundary != true) {
+        // v1.21.6-rc.37: these three conditions are NOT equally fatal.
+        //
+        // `measurementFailed` and an undrained WAL are genuine unknown-state
+        // cases: we cannot reason about the store, so refusing to start is
+        // correct. A reserve that does not fit the hard boundary is different —
+        // it means the retained family has outgrown the transition headroom,
+        // which is a CAPACITY condition that retention is designed to relieve.
+        //
+        // Treating it as fatal created an unrecoverable loop. Retention,
+        // checkpointing and compaction all run only AFTER a successful boot, so
+        // a store that is merely too large can never be reduced: the engine
+        // exits, sysextd relaunches it ~10s later, and it exits again. An
+        // installed host logged 55 such relaunches in 90 minutes with protection
+        // entirely off and no operator-free way back — the machine was
+        // indistinguishable from "installed and healthy" to everything except
+        // `maccrabctl status`.
+        //
+        // Booting with the already-proven applied reserve and letting the
+        // ordinary retention path shrink the family is strictly better: the
+        // engine protects the machine while it recovers, instead of protecting
+        // nothing while it cannot.
+        let bootDecision = transition.bootDecision
+        if case .fail(let reason) = bootDecision {
             try DaemonBootstrap.failPreIngestionStorage(
                 supportDir: supportDir,
                 startedAt: startedAt,
                 component: "EventStore",
-                reason: "measured legacy-evidence reserve cannot satisfy the hard transition boundary"
+                reason: reason
             )
         }
-        let policyReserve = transition.pendingReserveMiB
+        if case .degrade(let reserve, let reason) = bootDecision {
+            logger.fault(
+                "Legacy-evidence transition degraded: \(reason, privacy: .public). Booting with the applied \(reserve) MiB reserve so retention can reduce the family. Detection and alerting start normally; retained event history may be trimmed."
+            )
+        }
+        let policyReserve = bootDecision.reserveMiB
             ?? transition.appliedReserveMiB
         let measuredEventsFamilyCap = bootStorage
             .effectiveEventsFamilyMaxSizeMB(

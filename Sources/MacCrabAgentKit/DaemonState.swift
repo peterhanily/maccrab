@@ -32,6 +32,54 @@ struct LegacyEvidenceTransitionBudgetSnapshot: Sendable, Equatable {
     var reserveMiB: Int { appliedReserveMiB }
 
     var transitionPending: Bool { pendingReserveMiB != nil }
+
+    /// What boot should do with this measurement.
+    ///
+    /// v1.21.6-rc.37. These conditions are NOT equally fatal, and treating them
+    /// as one predicate produced an unrecoverable relaunch loop: retention,
+    /// checkpointing and compaction all run only AFTER a successful boot, so a
+    /// store that had merely outgrown its transition headroom could never be
+    /// reduced. An installed host logged 55 relaunches in 90 minutes with
+    /// protection entirely off.
+    var bootDecision: LegacyEvidenceTransitionBootDecision {
+        // Unknown state: we cannot reason about the store, so refuse. These stay
+        // fail-closed on purpose.
+        if measurementFailed {
+            return .fail(reason: "legacy-evidence transition measurement failed")
+        }
+        if walCheckpointDrained != true {
+            return .fail(reason: "legacy-evidence transition WAL was not drained")
+        }
+        // Capacity, not corruption. The proposed reserve does not fit, so do not
+        // adopt it — but the store is intelligible and retention can shrink it.
+        // Booting degraded protects the machine while it recovers; refusing to
+        // boot protects nothing and cannot recover.
+        if pendingReserveMiB != nil, pendingReserveFitsHardBoundary != true {
+            return .degrade(
+                reserveMiB: appliedReserveMiB,
+                reason: "proposed reserve \(pendingReserveMiB ?? -1) MiB does not fit the hard boundary"
+            )
+        }
+        return .proceed(reserveMiB: pendingReserveMiB ?? appliedReserveMiB)
+    }
+}
+
+/// Outcome of evaluating a legacy-evidence transition measurement at boot.
+enum LegacyEvidenceTransitionBootDecision: Equatable {
+    /// Adopt this reserve and start normally.
+    case proceed(reserveMiB: Int)
+    /// Start with this (already-proven) reserve and let retention reduce the
+    /// family. Detection and alerting run; retained history may be trimmed.
+    case degrade(reserveMiB: Int, reason: String)
+    /// The store cannot be reasoned about. Refuse to start.
+    case fail(reason: String)
+
+    var reserveMiB: Int? {
+        switch self {
+        case .proceed(let r), .degrade(let r, _): return r
+        case .fail: return nil
+        }
+    }
 }
 
 struct LegacyEvidenceTransitionMeasurementTicket: Sendable, Equatable {

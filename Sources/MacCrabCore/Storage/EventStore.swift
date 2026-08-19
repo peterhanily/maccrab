@@ -1932,6 +1932,39 @@ public actor EventStore {
     /// checkpoint ownership hook and configured policy as the real store. A
     /// pinned reader is a typed startup-not-ready result, never permission to
     /// fall back to the historical 100-MiB transition allowance.
+    /// Whether a WAL checkpoint left the store safe to open.
+    ///
+    /// "Drained" means no un-checkpointed frames remain — NOT that the WAL file
+    /// also shrank. `SQLITE_CHECKPOINT_TRUNCATE` copies every frame into the
+    /// main database and then resets the file; the reset needs a moment with no
+    /// readers and returns SQLITE_BUSY *without undoing the copy*.
+    ///
+    /// Requiring `rc == SQLITE_OK` therefore refused stores that were completely
+    /// consistent. An installed host returned `busy=1, log=31225,
+    /// checkpointed=31225` — every frame durable in the main database, only the
+    /// truncate blocked by the dashboard's read connection — and the daemon
+    /// refused to boot, relaunching every ~10s. Each relaunch then took the lock
+    /// the truncate needed, so the loop sustained itself and the machine
+    /// collected nothing until an operator ran a checkpoint by hand.
+    ///
+    /// A still-allocated WAL file is a space concern the ordinary checkpoint
+    /// path reclaims later. It is not a reason to refuse to start.
+    nonisolated static func walDrainSatisfied(
+        resultCode: Int32,
+        logFrames: Int32,
+        checkpointedFrames: Int32
+    ) -> Bool {
+        if resultCode == SQLITE_OK,
+           logFrames == 0 || logFrames == checkpointedFrames {
+            return true
+        }
+        if resultCode == SQLITE_BUSY || resultCode == SQLITE_LOCKED,
+           logFrames > 0, logFrames == checkpointedFrames {
+            return true
+        }
+        return false
+    }
+
     public nonisolated static func preopenLegacyAlertEvidenceTransitionMeasurement(
         path: String,
         maxBytes: Int64,
@@ -2002,7 +2035,27 @@ public actor EventStore {
         // daemon upgrades. Give that benign race the same bounded grace as the
         // pre-producer no-delete recovery path: three probes separated by
         // 250 ms. A persistent pin still fails before any v8 schema/data write.
-        for attempt in 0..<3 {
+        // v1.21.6-rc.37: DRAINED means "no un-checkpointed frames remain", not
+        // "the file also shrank".
+        //
+        // `SQLITE_CHECKPOINT_TRUNCATE` does two things: copy every WAL frame
+        // into the main database, then reset the file to zero length. The second
+        // step needs a moment with no readers, and returns SQLITE_BUSY without
+        // undoing the first. On an installed host this returned
+        // `busy=1, log=31225, checkpointed=31225` — every frame durable in the
+        // main DB, only the truncate lost the race — and boot refused to start,
+        // relaunching every ~10s. Each relaunch then took the lock the truncate
+        // needed, so the loop sustained itself.
+        //
+        // Frames copied is the correctness condition and is what this check
+        // exists to establish. A WAL file that is merely still allocated is a
+        // space concern the ordinary checkpoint path reclaims later.
+        //
+        // The window also has to be realistic: three attempts 250 ms apart is
+        // 750 ms, while a dashboard snapshot holds a read transaction for far
+        // longer. Manual recovery on the same host needed a 20-second timeout.
+        var backoffMicroseconds: useconds_t = 250_000
+        for attempt in 0..<6 {
             logFrames = 0
             checkpointedFrames = 0
             checkpointRC = sqlite3_wal_checkpoint_v2(
@@ -2012,8 +2065,11 @@ public actor EventStore {
                 &logFrames,
                 &checkpointedFrames
             )
-            if checkpointRC == SQLITE_OK,
-               logFrames == 0 || logFrames == checkpointedFrames {
+            if Self.walDrainSatisfied(
+                resultCode: checkpointRC,
+                logFrames: logFrames,
+                checkpointedFrames: checkpointedFrames
+            ) {
                 checkpointDrained = true
                 break
             }
@@ -2021,12 +2077,16 @@ public actor EventStore {
                     || checkpointRC == SQLITE_LOCKED else {
                 break
             }
-            if attempt < 2 { usleep(250_000) }
+            if attempt < 5 {
+                usleep(backoffMicroseconds)
+                backoffMicroseconds = min(backoffMicroseconds * 2, 4_000_000)
+            }
         }
         guard checkpointDrained else {
             let detail = checkpointRC == SQLITE_BUSY
                     || checkpointRC == SQLITE_LOCKED
-                ? "a reader pinned WAL frames after three bounded attempts"
+                ? "a reader pinned WAL frames after six bounded attempts "
+                    + "(\(checkpointedFrames) of \(logFrames) frames copied)"
                 : "checkpoint rc=\(checkpointRC)"
             throw EventStoreError.storageNotReady(
                 "pre-open evidence measurement did not fully drain WAL: \(detail)"

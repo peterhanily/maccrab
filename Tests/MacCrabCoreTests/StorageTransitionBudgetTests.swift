@@ -389,3 +389,139 @@ struct StorageTransitionBudgetTests {
         #expect(pending.walCheckpointDrained == false)
     }
 }
+
+// MARK: - rc.37: a reader must not be able to stop the engine booting
+//
+// `SQLITE_CHECKPOINT_TRUNCATE` copies every WAL frame into the main database and
+// then resets the file. The reset needs a moment with no readers and returns
+// SQLITE_BUSY *without undoing the copy*. Boot required rc == SQLITE_OK, so an
+// installed host that returned `busy=1, log=31225, checkpointed=31225` — every
+// frame durable, only the truncate blocked — refused to start and relaunched
+// every ~10s, each relaunch taking the lock the truncate needed. The dashboard
+// holds exactly this kind of read transaction, so running the UI could stop the
+// engine from starting.
+//
+// These exercise the decision directly rather than trying to provoke SQLite's
+// locking race, which is not deterministic enough to assert on.
+@Suite("rc.37 boot WAL drain decision")
+struct BootWALDrainDecisionTests {
+
+    @Test("The exact installed-host result counts as drained")
+    func installedHostResultIsDrained() {
+        // busy=1, log=31225, checkpointed=31225 — observed verbatim on the host
+        // that could not boot.
+        #expect(EventStore.walDrainSatisfied(
+            resultCode: SQLITE_BUSY, logFrames: 31_225, checkpointedFrames: 31_225
+        ))
+    }
+
+    @Test("A clean truncate is drained")
+    func cleanTruncateIsDrained() {
+        #expect(EventStore.walDrainSatisfied(
+            resultCode: SQLITE_OK, logFrames: 0, checkpointedFrames: 0
+        ))
+        #expect(EventStore.walDrainSatisfied(
+            resultCode: SQLITE_OK, logFrames: 128, checkpointedFrames: 128
+        ))
+    }
+
+    @Test("A partial copy is NOT drained")
+    func partialCopyIsNotDrained() {
+        // This is the case the guard exists for: frames left un-checkpointed
+        // means the main database is genuinely incomplete.
+        #expect(!EventStore.walDrainSatisfied(
+            resultCode: SQLITE_BUSY, logFrames: 31_225, checkpointedFrames: 12_000
+        ))
+        #expect(!EventStore.walDrainSatisfied(
+            resultCode: SQLITE_BUSY, logFrames: 100, checkpointedFrames: 0
+        ))
+    }
+
+    @Test("A hard error is never drained")
+    func hardErrorIsNotDrained() {
+        #expect(!EventStore.walDrainSatisfied(
+            resultCode: SQLITE_CORRUPT, logFrames: 10, checkpointedFrames: 10
+        ))
+        #expect(!EventStore.walDrainSatisfied(
+            resultCode: SQLITE_IOERR, logFrames: 0, checkpointedFrames: 0
+        ))
+    }
+}
+
+// MARK: - rc.37: a store that is merely too large must still boot
+//
+// Boot treated three conditions as one fatal predicate. Two are genuine
+// unknown-state cases; the third — a proposed reserve that does not fit the hard
+// boundary — is a CAPACITY condition. Retention, checkpointing and compaction
+// all run only AFTER a successful boot, so a store that had merely outgrown its
+// transition headroom could never be reduced: the engine exited, sysextd
+// relaunched it ~10s later, and it exited again. An installed host logged 55
+// relaunches in 90 minutes with protection entirely off and no operator-free
+// route back.
+@Suite("rc.37 legacy-evidence transition boot decision")
+struct LegacyEvidenceBootDecisionTests {
+
+    private func snapshot(
+        measurementFailed: Bool = false,
+        walDrained: Bool? = true,
+        applied: Int = 0,
+        pending: Int? = nil,
+        pendingFits: Bool? = nil
+    ) -> LegacyEvidenceTransitionBudgetSnapshot {
+        LegacyEvidenceTransitionBudgetSnapshot(
+            rowCount: 0,
+            chargedBytes: 0,
+            appliedReserveMiB: applied,
+            pendingReserveMiB: pending,
+            pendingReserveFitsHardBoundary: pendingFits,
+            maximumReserveMiB: 100,
+            measurementFailed: measurementFailed,
+            familyFootprintBytes: 0,
+            proposedHardAdmissionBoundaryBytes: nil,
+            transactionReserveBytes: 32 * 1_048_576,
+            walCheckpointDrained: walDrained,
+            freelistBytes: 0,
+            configurationGeneration: 1,
+            staleMeasurementsDiscarded: 0,
+            measuredAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    }
+
+    @Test("An oversized family degrades instead of refusing to boot")
+    func oversizedFamilyDegrades() {
+        // This is the installed-host case: the store outgrew its headroom.
+        let decision = snapshot(applied: 70, pending: 100, pendingFits: false)
+            .bootDecision
+        #expect(decision == .degrade(
+            reserveMiB: 70,
+            reason: "proposed reserve 100 MiB does not fit the hard boundary"
+        ))
+        // It must fall back to the already-proven reserve, never adopt the one
+        // that does not fit.
+        #expect(decision.reserveMiB == 70)
+    }
+
+    @Test("A fitting reserve is adopted normally")
+    func fittingReserveProceeds() {
+        #expect(
+            snapshot(applied: 70, pending: 100, pendingFits: true).bootDecision
+                == .proceed(reserveMiB: 100)
+        )
+        #expect(
+            snapshot(applied: 70).bootDecision == .proceed(reserveMiB: 70)
+        )
+    }
+
+    @Test("Genuine unknown-state conditions still refuse to boot")
+    func unknownStateStillFails() {
+        // These must stay fail-closed: without a usable measurement or a drained
+        // WAL the store cannot be reasoned about, and starting anyway risks
+        // writing on top of state we do not understand.
+        #expect(snapshot(measurementFailed: true).bootDecision
+            == .fail(reason: "legacy-evidence transition measurement failed"))
+        #expect(snapshot(walDrained: false).bootDecision
+            == .fail(reason: "legacy-evidence transition WAL was not drained"))
+        #expect(snapshot(walDrained: nil).bootDecision
+            == .fail(reason: "legacy-evidence transition WAL was not drained"))
+    }
+}
