@@ -576,7 +576,7 @@ public actor AlertSink {
     /// capture slot indefinitely. Generous by intent: it exists to guarantee the
     /// wait terminates, not to cut short a genuinely transient pressure interval
     /// (the ownership suite exercises ~5s intervals deliberately).
-    private static let exactEvidenceRetryWindow: Duration = .seconds(8)
+    private static let exactEvidenceRetryWindow: Duration = .seconds(30)
 
     private func captureEvidence(_ request: EvidenceCaptureRequest) async {
         do {

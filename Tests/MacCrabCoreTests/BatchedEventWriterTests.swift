@@ -1860,6 +1860,10 @@ struct BoundedCreditPressureRegressionTests {
         // per-event lane consumer awaits terminal settlement inline, so an
         // unbounded wait stops the entire lane rather than shedding one event.
         #expect(BatchedEventWriter.terminalSettlementDeadline > .zero)
-        #expect(BatchedEventWriter.terminalSettlementDeadline <= .seconds(10))
+        // Generous on purpose: wall-clock includes scheduling delay, so a tight
+        // ceiling fires from CPU starvation on a busy host and manufactures the
+        // loss it exists to bound. It only has to guarantee termination.
+        #expect(BatchedEventWriter.terminalSettlementDeadline >= .seconds(10))
+        #expect(BatchedEventWriter.terminalSettlementDeadline <= .seconds(120))
     }
 }

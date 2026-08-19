@@ -31,12 +31,45 @@ private struct bpf_program {
     var bf_insns: UnsafeMutablePointer<bpf_insn>?
 }
 
-// bpf_hdr structure
+// bpf_hdr structure.
+//
+// v1.21.6-rc.38 ABI FIX. This declared `bh_tstamp` as `timeval`, which is
+// WRONG on every 64-bit Mac. `<net/bpf.h>` uses:
+//
+//     #ifdef __LP64__
+//     #define BPF_TIMEVAL struct timeval32     // 8 bytes
+//     #else
+//     #define BPF_TIMEVAL struct timeval
+//     #endif
+//
+// On LP64 `struct timeval` is 16 bytes (Int64 tv_sec + Int32 tv_usec + pad)
+// while `timeval32` is 8 (two Int32). Measured against the real system header
+// on an arm64 Mac:
+//
+//     real  sizeof(struct bpf_hdr) = 20, offsetof(bh_caplen) = 8
+//     this  struct as declared     = 28, offsetof(bh_caplen) = 16
+//
+// So every field was read from the wrong offset and the read loop advanced by
+// the wrong stride. `bh_caplen` picked up timestamp bytes, the `packetStart +
+// packetLen <= bytesRead` bounds check then rejected the frame, and DNSCollector
+// yielded ZERO packets on every 64-bit Mac since it shipped — the collector has
+// never worked, which is why its live event_count is 0 with no error logged.
+//
+// The fields are spelled out rather than using `timeval32` so the layout is
+// explicit and cannot silently follow a platform typedef again.
 private struct bpf_hdr {
-    var bh_tstamp: timeval
+    var bh_tstamp_sec: Int32
+    var bh_tstamp_usec: Int32
     var bh_caplen: UInt32
     var bh_datalen: UInt32
     var bh_hdrlen: UInt16
+
+    var timestamp: Date {
+        Date(
+            timeIntervalSince1970: Double(bh_tstamp_sec)
+                + Double(bh_tstamp_usec) / 1_000_000
+        )
+    }
 }
 
 /// DNS query/response data extracted from captured packets.

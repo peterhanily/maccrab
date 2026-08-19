@@ -1927,7 +1927,21 @@ actor BatchedEventWriter {
     /// suites exercise preserves the deliberate design property those tests
     /// protect — a transient pressure interval is not an evidence result — while
     /// still guaranteeing the wait terminates.
-    static let terminalSettlementDeadline: Duration = .seconds(8)
+    ///
+    /// rc.38 raised this from 8s. WALL-CLOCK IS A POOR PROXY FOR "STUCK": it
+    /// also counts scheduling delay, so on a loaded machine the deadline fired
+    /// from CPU starvation rather than credit starvation and turned "slow" into
+    /// "dropped". A basic settlement test failed with `.dropped` instead of
+    /// `.verified` purely because the host was busy — which is exactly the
+    /// machine a security product runs on.
+    ///
+    /// The genuine causes of an unbounded wait are fixed elsewhere (the
+    /// drain-side fairness exemption in EventPipelineLiveMemoryBudget and the
+    /// maintenance admission headroom in SQLitePersistentStoreAdmission), so
+    /// this only has to guarantee termination. A larger ceiling costs nothing in
+    /// the healthy case and stops the backstop manufacturing the very loss it
+    /// exists to bound.
+    static let terminalSettlementDeadline: Duration = .seconds(30)
 
     /// Journal evidence reads and idempotent ensures can briefly contend with
     /// another bounded record decode. That contention is not an insert loss:

@@ -2630,10 +2630,36 @@ final class AppState: ObservableObject {
             }
             withExtendedLifetime(exactOwnership) {}
             withExtendedLifetime(searchOwnership) {}
+        } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
+            // v1.21.6-rc.38: transient pressure is not a coverage failure.
+            //
+            // Decoding a journal block needs a bounded record-ownership lease,
+            // and a momentary shortage surfaced here as "Event evidence could
+            // not be read completely", which reads like permanent data loss.
+            // It is not: the next poll almost always succeeds. Leave the prior
+            // warning state untouched and let the refresh timer retry rather
+            // than alarming the user about a condition that has already passed.
+            //
+            // A genuinely persistent shortage still reaches the user, because
+            // every subsequent poll takes this path and the Events view stays
+            // empty — the honest signal — instead of showing a scary string for
+            // a hiccup.
+            Logger(subsystem: "com.maccrab.app", category: "events")
+                .debug("Event read deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
         } catch {
             eventSearchCoverageWarning =
                 "Event evidence could not be read completely: "
                 + error.localizedDescription
+        }
+    }
+
+    /// Pipeline back-pressure that clears on its own, as opposed to a real
+    /// storage fault. Both cases are bounded waits inside the store; neither
+    /// means the evidence is gone.
+    nonisolated static func isTransientReadPressure(_ error: EventStoreError) -> Bool {
+        switch error {
+        case .busy, .memoryLeaseUnavailable: return true
+        default: return false
         }
     }
 
@@ -3303,6 +3329,15 @@ final class AppState: ObservableObject {
                     + "are unknown, not zero."
             }
             return snapshot.bins.map { ($0.start, $0.count) }
+        } catch let error as EventStoreError where Self.isTransientReadPressure(error) {
+            // rc.38: same reasoning as loadEvents — a momentary record-ownership
+            // shortage is not a coverage failure, and reporting it as one made
+            // the histogram look broken during ordinary pressure. Return no bins
+            // for this pass and let the refresh timer retry; do NOT overwrite the
+            // coverage warning with a message about evidence that is still there.
+            Logger(subsystem: "com.maccrab.app", category: "events")
+                .debug("Histogram deferred on transient pipeline pressure: \(String(describing: error), privacy: .public)")
+            return []
         } catch {
             eventHistogramEffectiveSince = nil
             eventHistogramEffectiveUntil = nil
