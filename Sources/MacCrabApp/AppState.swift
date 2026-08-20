@@ -1198,10 +1198,6 @@ final class AppState: ObservableObject {
     /// bounded age releases the stale mark, so the pin can last at most this
     /// long and the WAL stays bounded. Reopen cost (an FTS5 quick_check) is thus
     /// amortized to at most once per interval, not per access.
-    private var cachedEventStoreOpenedAt: Date?
-    /// How long a cached read-only events.db connection may live before it is
-    /// recycled to release its WAL read-mark.
-    private let eventStoreMaxAge: TimeInterval = 60
 
     // MARK: - v1.9 PR-4: Agent traces dashboard surface
 
@@ -1466,7 +1462,6 @@ final class AppState: ObservableObject {
         if let store = event {
             cachedEventStore = store
             cachedEventStorePath = eventDir
-            cachedEventStoreOpenedAt = Date()   // v1.21.5: bound the WAL-pin age (see the getter)
         }
     }
 
@@ -1660,18 +1655,15 @@ final class AppState: ObservableObject {
     func stopPolling() {
         pollTimer?.cancel()
         pollTimer = nil
-        // v1.21.5-rc.3 (WAL-pin idle fix, mother-of-all-audits #4): release the
-        // cached read-only events.db connection when polling stops. The getter-
-        // driven recycle (see `cachedEventStoreOpenedAt`) only fires while the
-        // dashboard is ACTIVELY querying; when the window is backgrounded the
-        // timer is cancelled here but that connection — and its WAL read-mark —
-        // would otherwise stay open, pinning the sysext's WAL so checkpoint can't
-        // truncate it. That idle-but-open reader is the exact 512 MB-WAL scenario
-        // the rc.2 fix targeted and the getter path missed. Dropping the reference
-        // runs EventStore.deinit → sqlite3_close, releasing the mark; the getter
+        // Release the cached read-only events.db connection when polling stops.
+        // rc.41 note: with read transactions now bounded to milliseconds
+        // (EventStore.withVerifiedExactReadSnapshot + chunked journal scan), an
+        // idle connection holds no WAL read-mark — this release is no longer
+        // load-bearing for WAL truncation. It stays because dropping a
+        // connection the UI is not using remains free, and it keeps the file
+        // handle count honest while the window is backgrounded. The getter
         // transparently reopens on next use.
         cachedEventStore = nil
-        cachedEventStoreOpenedAt = nil
         // NOTE: the ClickFix clipboard bridge is deliberately NOT stopped here.
         // It's process-lifetime (started once at launch by the AppDelegate), so
         // ClickFix keeps watching the clipboard whenever the menubar app is
@@ -1688,7 +1680,6 @@ final class AppState: ObservableObject {
     /// without the getter's live directory probing.
     func primeCachedEventStoreForTesting(_ store: EventStore) {
         cachedEventStore = store
-        cachedEventStoreOpenedAt = Date()
     }
     #endif
 
@@ -1757,16 +1748,22 @@ final class AppState: ObservableObject {
         // v1.12.0 fix: see alertStore() — reopen only on path change,
         // not every 30s. FTS5 quick_check on a 962 MB events.db blocks
         // main thread for seconds.
-        // v1.21.5 (WAL-pin fix): also recycle after `eventStoreMaxAge` so a
-        // read-only connection that went idle can't pin the sysext's WAL
-        // indefinitely (see cachedEventStoreOpenedAt). Dropping the reference
-        // runs EventStore.deinit → sqlite3_close → the stale WAL read-mark is
-        // released, letting the writer's checkpoint drain the -wal sidecar.
-        let fresh = cachedEventStoreOpenedAt.map { Date().timeIntervalSince($0) < eventStoreMaxAge } ?? false
-        if let store = cachedEventStore, cachedEventStorePath == chosen, fresh {
+        // v1.21.6-rc.41: the v1.21.5 60-second age recycle is REMOVED — it was
+        // making the WAL pin it claimed to fix. A connection with no open
+        // transaction holds no WAL read-mark, so recycling an idle connection
+        // released nothing; what the forced re-open actually did was guarantee
+        // a COLD store whose next read re-verified the entire retained journal
+        // — for minutes, inside a read transaction — once per minute, on top of
+        // burning 99-109% CPU. The real fix bounds the transaction instead
+        // (EventStore.withVerifiedExactReadSnapshot + the chunked journal
+        // scan), after which a warm cached connection is exactly what keeps
+        // reads cheap: its index refreshes append-only. The idle release in
+        // stopPolling stays — dropping the reference when the UI goes quiet
+        // remains correct and free.
+        if let store = cachedEventStore, cachedEventStorePath == chosen {
             return store
         }
-        cachedEventStore = nil   // release the old connection (and its WAL mark) before reopening
+        cachedEventStore = nil   // path changed: release before reopening
         // Wave 9A.1 (v1.12.6 RC2): dashboard event store is read-only.
         let store = try EventStore(
             directory: chosen,
@@ -1775,7 +1772,6 @@ final class AppState: ObservableObject {
         )
         cachedEventStore = store
         cachedEventStorePath = chosen
-        cachedEventStoreOpenedAt = Date()
         return store
     }
 

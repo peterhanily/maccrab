@@ -801,6 +801,22 @@ public actor EventStore {
     // qualification ceiling use a partitioned Bloom + roster scan restricted
     // to overflow blocks.
     private static let journalInMemoryLocationLimit = 1_600_000
+
+    /// rc.41: rows collected per journal-scan statement before it is finalized
+    /// and its implicit read transaction (and WAL read-mark) released. Small
+    /// enough that each statement lives milliseconds; large enough that a full
+    /// 100k-block rebuild needs only a few hundred statements.
+    private static let journalScanBatchBlocks = 256
+
+    /// rc.41 test seam: invoked once per verified scan batch with whether the
+    /// connection is currently inside a SQLite transaction. The WAL-pin
+    /// regression test asserts this is FALSE during heavy verification — the
+    /// entire point of the chunked scan and the hoisted verify.
+    var journalIndexRebuildHookForTesting: ((Bool) -> Void)?
+
+    func setJournalIndexRebuildHookForTesting(_ hook: ((Bool) -> Void)?) {
+        journalIndexRebuildHookForTesting = hook
+    }
     private static let maximumPackedJournalBlockID: Int64 = (1 << 56) - 1
     /// Array-returning exact APIs are bounded by owned decoded graphs as well
     /// as row count. A caller that asks for more receives a typed evidence gap;
@@ -5070,266 +5086,316 @@ public actor EventStore {
         }
         let scanLowerBound = appendOnlyRefresh
             ? journalIndexedMaximumBlockID : nil
-        let statement = try prepare(
-            """
-            SELECT block_id, min_timestamp, max_timestamp, retained_until,
-                   admission_bucket, event_count,
-                   process_count, process_min_timestamp, process_max_timestamp,
-                   file_count, file_min_timestamp, file_max_timestamp,
-                   network_count, network_min_timestamp, network_max_timestamp,
-                   authentication_count, authentication_min_timestamp, authentication_max_timestamp,
-                   tcc_count, tcc_min_timestamp, tcc_max_timestamp,
-                   registry_count, registry_min_timestamp, registry_max_timestamp,
-                   event_ids, source_identity_sha256s,
-                   projection_dispositions,
-                   projection_dispositions_sha256,
-                   raw_bytes, codec, sha256, metadata_sha256
-            FROM event_journal_blocks
-            WHERE (?1 IS NULL OR block_id > ?1)
-            ORDER BY block_id ASC
-            """
-        )
-        if let scanLowerBound {
-            sqlite3_bind_int64(statement, 1, scanLowerBound)
-        } else {
-            sqlite3_bind_null(statement, 1)
+        // rc.41: CHUNKED scan, verification outside any open statement.
+        //
+        // This loop used to run `loadJournalBlock` / `loadExactJournalBlock`
+        // (nested SELECTs + full payload decode + SHA256) per row WHILE STEPPING
+        // one scan statement over every retained block. In autocommit an
+        // implicit read transaction lasts for the statement's whole lifetime,
+        // so the WAL read-mark was held for the entire multi-minute
+        // verification even with no BEGIN in sight — the same pin the explicit
+        // dashboard transaction had, in a different coat. The scan now steps a
+        // bounded batch of row-local data, FINALIZES the statement (releasing
+        // the read-mark), and only then verifies that batch; between batches
+        // the writer can checkpoint. A writer landing a topology change across
+        // batches is caught by the scanned-count guard below and by the
+        // caller's in-transaction generation recheck, which retries.
+        struct ScannedJournalRow {
+            let blockID: Int64
+            let storedSummary: JournalBlockMetadata
+            let count: Int
+            let admissionBucket: Int64
+            let roster: Data
+            let dispositionData: Data
         }
-        defer { sqlite3_finalize(statement) }
         var scannedBlocks: Int64 = 0
-        while true {
-            let rc = sqlite3_step(statement)
-            if rc == SQLITE_DONE { break }
-            guard rc == SQLITE_ROW else {
-                throw EventStoreError.stepFailed(
-                    "event journal UUID roster scan failed"
+        var scanCursor: Int64? = scanLowerBound
+        scanLoop: while true {
+            var batch: [ScannedJournalRow] = []
+            batch.reserveCapacity(Self.journalScanBatchBlocks)
+            do {
+                let statement = try prepare(
+                    """
+                    SELECT block_id, min_timestamp, max_timestamp, retained_until,
+                           admission_bucket, event_count,
+                           process_count, process_min_timestamp, process_max_timestamp,
+                           file_count, file_min_timestamp, file_max_timestamp,
+                           network_count, network_min_timestamp, network_max_timestamp,
+                           authentication_count, authentication_min_timestamp, authentication_max_timestamp,
+                           tcc_count, tcc_min_timestamp, tcc_max_timestamp,
+                           registry_count, registry_min_timestamp, registry_max_timestamp,
+                           event_ids, source_identity_sha256s,
+                           projection_dispositions,
+                           projection_dispositions_sha256,
+                           raw_bytes, codec, sha256, metadata_sha256
+                    FROM event_journal_blocks
+                    WHERE (?1 IS NULL OR block_id > ?1)
+                    ORDER BY block_id ASC
+                    LIMIT ?2
+                    """
                 )
+                defer { sqlite3_finalize(statement) }
+                if let scanCursor {
+                    sqlite3_bind_int64(statement, 1, scanCursor)
+                } else {
+                    sqlite3_bind_null(statement, 1)
+                }
+                sqlite3_bind_int64(statement, 2, Int64(Self.journalScanBatchBlocks))
+                while true {
+                    let rc = sqlite3_step(statement)
+                    if rc == SQLITE_DONE { break }
+                    guard rc == SQLITE_ROW else {
+                        throw EventStoreError.stepFailed(
+                            "event journal UUID roster scan failed"
+                        )
+                    }
+                    let blockID = sqlite3_column_int64(statement, 0)
+                    scannedBlocks += 1
+                    guard blockID > 0,
+                          blockID <= Self.maximumPackedJournalBlockID else {
+                        throw EventStoreError.decodingFailed(
+                            "event journal block id is outside the packed locator range"
+                        )
+                    }
+                    let minimum = sqlite3_column_double(statement, 1)
+                    let maximum = sqlite3_column_double(statement, 2)
+                    let retainedUntil = sqlite3_column_double(statement, 3)
+                    let admissionBucket = sqlite3_column_int64(statement, 4)
+                    let count = Int(sqlite3_column_int(statement, 5))
+                    var categoryMetadata: [EventCategory: JournalCategoryMetadata] = [:]
+                    var categoryColumn: Int32 = 6
+                    var categoryTotal = 0
+                    for category in EventCategory.allCases {
+                        let categoryCount = Int(
+                            sqlite3_column_int(statement, categoryColumn)
+                        )
+                        let minimumType = sqlite3_column_type(
+                            statement, categoryColumn + 1
+                        )
+                        let maximumType = sqlite3_column_type(
+                            statement, categoryColumn + 2
+                        )
+                        let categoryMinimum = minimumType == SQLITE_NULL
+                            ? nil : sqlite3_column_double(statement, categoryColumn + 1)
+                        let categoryMaximum = maximumType == SQLITE_NULL
+                            ? nil : sqlite3_column_double(statement, categoryColumn + 2)
+                        guard categoryCount >= 0,
+                              (categoryCount == 0)
+                                == (categoryMinimum == nil && categoryMaximum == nil),
+                              categoryMinimum?.isFinite ?? true,
+                              categoryMaximum?.isFinite ?? true,
+                              categoryMinimum.map { low in
+                                  categoryMaximum.map { low <= $0 } ?? false
+                              } ?? true else {
+                            throw EventStoreError.decodingFailed(
+                                "event journal block \(blockID) has invalid category metadata"
+                            )
+                        }
+                        categoryTotal += categoryCount
+                        categoryMetadata[category] = JournalCategoryMetadata(
+                            count: categoryCount,
+                            minimum: categoryMinimum,
+                            maximum: categoryMaximum
+                        )
+                        categoryColumn += 3
+                    }
+                    let byteCount = Int(sqlite3_column_bytes(statement, 24))
+                    let sourceIdentityByteCount = Int(
+                        sqlite3_column_bytes(statement, 25)
+                    )
+                    let dispositionByteCount = Int(
+                        sqlite3_column_bytes(statement, 26)
+                    )
+                    let dispositionDigestCount = Int(
+                        sqlite3_column_bytes(statement, 27)
+                    )
+                    let rawBytes = Int(sqlite3_column_int64(statement, 28))
+                    let codec = Int(sqlite3_column_int(statement, 29))
+                    let payloadDigestCount = Int(sqlite3_column_bytes(statement, 30))
+                    let metadataDigestCount = Int(sqlite3_column_bytes(statement, 31))
+                    guard count > 0,
+                          count <= EventJournalCodec.maximumEventsPerBlock,
+                          categoryTotal == count,
+                          minimum.isFinite, maximum.isFinite, minimum <= maximum,
+                          retainedUntil.isFinite,
+                          retainedUntil >= Double(admissionBucket) + Self.journalRetentionSeconds,
+                          retainedUntil < Double(admissionBucket) + Self.journalRetentionSeconds + 1,
+                          byteCount == count * 16,
+                          sourceIdentityByteCount == count * SHA256.byteCount,
+                          dispositionByteCount == (count * 3 + 7) / 8,
+                          dispositionDigestCount == SHA256.byteCount,
+                          rawBytes > 0,
+                          rawBytes <= EventJournalCodec.maximumUncompressedBytes,
+                          codec == EventJournalCodec.rawCodec
+                            || codec == EventJournalCodec.lzfseCodec,
+                          payloadDigestCount == 32,
+                          metadataDigestCount == 32,
+                          let pointer = sqlite3_column_blob(statement, 24),
+                          let sourceIdentityPointer = sqlite3_column_blob(statement, 25),
+                          let dispositionPointer = sqlite3_column_blob(statement, 26),
+                          let dispositionDigestPointer = sqlite3_column_blob(statement, 27),
+                          let payloadDigestPointer = sqlite3_column_blob(statement, 30),
+                          let metadataDigestPointer = sqlite3_column_blob(statement, 31) else {
+                        throw EventStoreError.decodingFailed(
+                            "event journal block \(blockID) has an invalid UUID roster"
+                        )
+                    }
+                    let roster = Data(bytes: pointer, count: byteCount)
+                    let sourceIdentityRoster = Data(
+                        bytes: sourceIdentityPointer,
+                        count: sourceIdentityByteCount
+                    )
+                    let dispositionData = Data(
+                        bytes: dispositionPointer,
+                        count: dispositionByteCount
+                    )
+                    let dispositionDigest = Data(
+                        bytes: dispositionDigestPointer,
+                        count: dispositionDigestCount
+                    )
+                    guard Data(SHA256.hash(data: dispositionData))
+                            == dispositionDigest else {
+                        throw EventStoreError.decodingFailed(
+                            "event journal block \(blockID) disposition checksum mismatch"
+                        )
+                    }
+                    let storedMetadataDigest = Data(
+                        bytes: metadataDigestPointer,
+                        count: metadataDigestCount
+                    )
+                    let calculatedMetadataDigest = try Self.journalMetadataDigest(
+                        metadata: JournalBlockMetadata(
+                            minimum: minimum,
+                            maximum: maximum,
+                            retainedUntil: retainedUntil,
+                            admissionBucket: admissionBucket,
+                            byCategory: categoryMetadata
+                        ),
+                        eventCount: count,
+                        roster: roster,
+                        sourceIdentityRoster: sourceIdentityRoster,
+                        rawBytes: rawBytes,
+                        codec: codec,
+                        payloadDigest: Data(
+                            bytes: payloadDigestPointer,
+                            count: payloadDigestCount
+                        )
+                    )
+                    guard calculatedMetadataDigest == storedMetadataDigest else {
+                        journalIntegrityFailures += 1
+                        throw EventStoreError.decodingFailed(
+                            "event journal block \(blockID) metadata checksum mismatch"
+                        )
+                    }
+                    batch.append(ScannedJournalRow(
+                        blockID: blockID,
+                        storedSummary: JournalBlockMetadata(
+                            minimum: minimum,
+                            maximum: maximum,
+                            retainedUntil: retainedUntil,
+                            admissionBucket: admissionBucket,
+                            byCategory: categoryMetadata
+                        ),
+                        count: count,
+                        admissionBucket: admissionBucket,
+                        roster: roster,
+                        dispositionData: dispositionData
+                    ))
+                }
             }
-            let blockID = sqlite3_column_int64(statement, 0)
-            scannedBlocks += 1
-            guard blockID > 0,
-                  blockID <= Self.maximumPackedJournalBlockID else {
-                throw EventStoreError.decodingFailed(
-                    "event journal block id is outside the packed locator range"
-                )
-            }
-            let minimum = sqlite3_column_double(statement, 1)
-            let maximum = sqlite3_column_double(statement, 2)
-            let retainedUntil = sqlite3_column_double(statement, 3)
-            let admissionBucket = sqlite3_column_int64(statement, 4)
-            let count = Int(sqlite3_column_int(statement, 5))
-            var categoryMetadata: [EventCategory: JournalCategoryMetadata] = [:]
-            var categoryColumn: Int32 = 6
-            var categoryTotal = 0
-            for category in EventCategory.allCases {
-                let categoryCount = Int(
-                    sqlite3_column_int(statement, categoryColumn)
-                )
-                let minimumType = sqlite3_column_type(
-                    statement, categoryColumn + 1
-                )
-                let maximumType = sqlite3_column_type(
-                    statement, categoryColumn + 2
-                )
-                let categoryMinimum = minimumType == SQLITE_NULL
-                    ? nil : sqlite3_column_double(statement, categoryColumn + 1)
-                let categoryMaximum = maximumType == SQLITE_NULL
-                    ? nil : sqlite3_column_double(statement, categoryColumn + 2)
-                guard categoryCount >= 0,
-                      (categoryCount == 0)
-                        == (categoryMinimum == nil && categoryMaximum == nil),
-                      categoryMinimum?.isFinite ?? true,
-                      categoryMaximum?.isFinite ?? true,
-                      categoryMinimum.map { low in
-                          categoryMaximum.map { low <= $0 } ?? false
-                      } ?? true else {
+            guard let lastRow = batch.last else { break scanLoop }
+            scanCursor = lastRow.blockID
+            journalIndexRebuildHookForTesting?(
+                db.map { sqlite3_get_autocommit($0) == 0 } ?? false
+            )
+            // Phase 2: heavy verification and index population with NO scan
+            // statement open — every nested load below is its own short-lived
+            // implicit transaction, so the writer can checkpoint between them.
+            for row in batch {
+                let blockID = row.blockID
+                let decodedBlock: OwnedJournalBlock
+                do {
+                    decodedBlock = try loadJournalBlock(blockID: blockID)
+                } catch {
+                    journalIntegrityFailures += 1
+                    throw error
+                }
+                guard try Self.journalSummaryMatchesPayload(
+                    stored: row.storedSummary,
+                    decoded: decodedBlock.events
+                ) else {
+                    journalIntegrityFailures += 1
                     throw EventStoreError.decodingFailed(
-                        "event journal block \(blockID) has invalid category metadata"
+                        "event journal block \(blockID) summary does not match its payload"
                     )
                 }
-                categoryTotal += categoryCount
-                categoryMetadata[category] = JournalCategoryMetadata(
-                    count: categoryCount,
-                    minimum: categoryMinimum,
-                    maximum: categoryMaximum
-                )
-                categoryColumn += 3
-            }
-            let byteCount = Int(sqlite3_column_bytes(statement, 24))
-            let sourceIdentityByteCount = Int(
-                sqlite3_column_bytes(statement, 25)
-            )
-            let dispositionByteCount = Int(
-                sqlite3_column_bytes(statement, 26)
-            )
-            let dispositionDigestCount = Int(
-                sqlite3_column_bytes(statement, 27)
-            )
-            let rawBytes = Int(sqlite3_column_int64(statement, 28))
-            let codec = Int(sqlite3_column_int(statement, 29))
-            let payloadDigestCount = Int(sqlite3_column_bytes(statement, 30))
-            let metadataDigestCount = Int(sqlite3_column_bytes(statement, 31))
-            guard count > 0,
-                  count <= EventJournalCodec.maximumEventsPerBlock,
-                  categoryTotal == count,
-                  minimum.isFinite, maximum.isFinite, minimum <= maximum,
-                  retainedUntil.isFinite,
-                  retainedUntil >= Double(admissionBucket) + Self.journalRetentionSeconds,
-                  retainedUntil < Double(admissionBucket) + Self.journalRetentionSeconds + 1,
-                  byteCount == count * 16,
-                  sourceIdentityByteCount == count * SHA256.byteCount,
-                  dispositionByteCount == (count * 3 + 7) / 8,
-                  dispositionDigestCount == SHA256.byteCount,
-                  rawBytes > 0,
-                  rawBytes <= EventJournalCodec.maximumUncompressedBytes,
-                  codec == EventJournalCodec.rawCodec
-                    || codec == EventJournalCodec.lzfseCodec,
-                  payloadDigestCount == 32,
-                  metadataDigestCount == 32,
-                  let pointer = sqlite3_column_blob(statement, 24),
-                  let sourceIdentityPointer = sqlite3_column_blob(statement, 25),
-                  let dispositionPointer = sqlite3_column_blob(statement, 26),
-                  let dispositionDigestPointer = sqlite3_column_blob(statement, 27),
-                  let payloadDigestPointer = sqlite3_column_blob(statement, 30),
-                  let metadataDigestPointer = sqlite3_column_blob(statement, 31) else {
-                throw EventStoreError.decodingFailed(
-                    "event journal block \(blockID) has an invalid UUID roster"
-                )
-            }
-            let roster = Data(bytes: pointer, count: byteCount)
-            let sourceIdentityRoster = Data(
-                bytes: sourceIdentityPointer,
-                count: sourceIdentityByteCount
-            )
-            let dispositionData = Data(
-                bytes: dispositionPointer,
-                count: dispositionByteCount
-            )
-            let dispositionDigest = Data(
-                bytes: dispositionDigestPointer,
-                count: dispositionDigestCount
-            )
-            guard Data(SHA256.hash(data: dispositionData))
-                    == dispositionDigest else {
-                throw EventStoreError.decodingFailed(
-                    "event journal block \(blockID) disposition checksum mismatch"
-                )
-            }
-            let storedMetadataDigest = Data(
-                bytes: metadataDigestPointer,
-                count: metadataDigestCount
-            )
-            let calculatedMetadataDigest = try Self.journalMetadataDigest(
-                metadata: JournalBlockMetadata(
-                    minimum: minimum,
-                    maximum: maximum,
-                    retainedUntil: retainedUntil,
-                    admissionBucket: admissionBucket,
-                    byCategory: categoryMetadata
-                ),
-                eventCount: count,
-                roster: roster,
-                sourceIdentityRoster: sourceIdentityRoster,
-                rawBytes: rawBytes,
-                codec: codec,
-                payloadDigest: Data(
-                    bytes: payloadDigestPointer,
-                    count: payloadDigestCount
-                )
-            )
-            guard calculatedMetadataDigest == storedMetadataDigest else {
-                journalIntegrityFailures += 1
-                throw EventStoreError.decodingFailed(
-                    "event journal block \(blockID) metadata checksum mismatch"
-                )
-            }
-            let storedSummary = JournalBlockMetadata(
-                minimum: minimum,
-                maximum: maximum,
-                retainedUntil: retainedUntil,
-                admissionBucket: admissionBucket,
-                byCategory: categoryMetadata
-            )
-            let decodedBlock: OwnedJournalBlock
-            do {
-                decodedBlock = try loadJournalBlock(blockID: blockID)
-            } catch {
-                journalIntegrityFailures += 1
-                throw error
-            }
-            guard try Self.journalSummaryMatchesPayload(
-                stored: storedSummary,
-                decoded: decodedBlock.events
-            ) else {
-                journalIntegrityFailures += 1
-                throw EventStoreError.decodingFailed(
-                    "event journal block \(blockID) summary does not match its payload"
-                )
-            }
-            do {
-                try validatePoisonIntegrity(
-                    blockID: blockID,
-                    baseEvents: decodedBlock.events
-                )
-            } catch {
-                journalIntegrityFailures += 1
-                throw error
-            }
-            do {
-                let exact = try loadExactJournalBlock(blockID: blockID)
-                try validateProjectionIntegrity(
-                    blockID: blockID,
-                    admissionBucket: admissionBucket,
-                    eventCount: count,
-                    roster: roster,
-                    dispositionData: dispositionData,
-                    exactEvents: exact.events,
-                    poisonByOrdinal: exact.poisonByOrdinal
-                )
-            } catch {
-                journalIntegrityFailures += 1
-                throw error
-            }
-            journalVerifiedBlocks += 1
-            verifiedJournalSummaries.append(
-                VerifiedJournalSummary(
-                    blockID: blockID,
-                    eventCount: count,
-                    metadata: storedSummary
-                )
-            )
-            try roster.withUnsafeBytes { bytes in
-                for ordinal in 0..<count {
-                    let id = try Self.uuid(
-                        from: bytes,
-                        offset: ordinal * 16
-                    )
-                    let location = JournalLocation(
+                do {
+                    try validatePoisonIntegrity(
                         blockID: blockID,
-                        ordinal: ordinal
+                        baseEvents: decodedBlock.events
                     )
-                    if journalIndexedLocationCount < maximumIndexEvents {
-                        let entry = PackedJournalEntry(id: id, location: location)
-                        if appendOnlyRefresh {
-                            guard indexedJournalLocation(for: id) == nil else {
-                                throw EventStoreError.decodingFailed(
-                                    "event journal contains a duplicate UUID roster entry"
-                                )
-                            }
-                            journalDeltaLocations.insert(entry)
-                        } else {
-                            journalBaseLocations.append(entry)
-                        }
-                        journalIndexedLocationCount += 1
-                    } else {
-                        journalIndexOverflowed = true
-                        journalOverflowBloom.insert(id)
-                        journalOverflowFirstBlockID = min(
-                            journalOverflowFirstBlockID ?? blockID,
-                            blockID
+                } catch {
+                    journalIntegrityFailures += 1
+                    throw error
+                }
+                do {
+                    let exact = try loadExactJournalBlock(blockID: blockID)
+                    try validateProjectionIntegrity(
+                        blockID: blockID,
+                        admissionBucket: row.admissionBucket,
+                        eventCount: row.count,
+                        roster: row.roster,
+                        dispositionData: row.dispositionData,
+                        exactEvents: exact.events,
+                        poisonByOrdinal: exact.poisonByOrdinal
+                    )
+                } catch {
+                    journalIntegrityFailures += 1
+                    throw error
+                }
+                journalVerifiedBlocks += 1
+                verifiedJournalSummaries.append(
+                    VerifiedJournalSummary(
+                        blockID: blockID,
+                        eventCount: row.count,
+                        metadata: row.storedSummary
+                    )
+                )
+                try row.roster.withUnsafeBytes { bytes in
+                    for ordinal in 0..<row.count {
+                        let id = try Self.uuid(
+                            from: bytes,
+                            offset: ordinal * 16
                         )
+                        let location = JournalLocation(
+                            blockID: blockID,
+                            ordinal: ordinal
+                        )
+                        if journalIndexedLocationCount < maximumIndexEvents {
+                            let entry = PackedJournalEntry(id: id, location: location)
+                            if appendOnlyRefresh {
+                                guard indexedJournalLocation(for: id) == nil else {
+                                    throw EventStoreError.decodingFailed(
+                                        "event journal contains a duplicate UUID roster entry"
+                                    )
+                                }
+                                journalDeltaLocations.insert(entry)
+                            } else {
+                                journalBaseLocations.append(entry)
+                            }
+                            journalIndexedLocationCount += 1
+                        } else {
+                            journalIndexOverflowed = true
+                            journalOverflowBloom.insert(id)
+                            journalOverflowFirstBlockID = min(
+                                journalOverflowFirstBlockID ?? blockID,
+                                blockID
+                            )
+                        }
                     }
                 }
             }
+            if batch.count < Self.journalScanBatchBlocks { break scanLoop }
         }
         let expectedScannedBlocks = appendOnlyRefresh
             ? blockCount - journalIndexedBlockCount : blockCount
@@ -9773,8 +9839,7 @@ public actor EventStore {
                 "journal receipt digest must be 32 bytes"
             )
         }
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             guard let location = try existingJournalLocations(
                 for: Set([eventID])
             )[eventID] else {
@@ -14236,8 +14301,90 @@ public actor EventStore {
             return result
         } catch {
             try? Self.exec(db, "ROLLBACK")
+            // rc.41 fail-safe: a swallowed ROLLBACK on this process-lifetime
+            // connection would leave it permanently inside a read transaction —
+            // a silent WAL pin that no later call would ever clear, because the
+            // autocommit==0 branch above happily piggybacks on the stuck
+            // transaction forever. Make that state loud and try once more,
+            // unswallowed, so the failure is at least visible and attributable.
+            if sqlite3_get_autocommit(db) == 0 {
+                Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                    .fault("exact read snapshot ROLLBACK left the connection inside a transaction; retrying rollback so the WAL read-mark is not pinned for the connection lifetime")
+                try Self.exec(db, "ROLLBACK")
+            }
             throw error
         }
+    }
+
+    /// rc.41: exact reads with journal verification hoisted OUTSIDE the read
+    /// transaction.
+    ///
+    /// Every dashboard read used to run `ensureJournalIndex()` as its first
+    /// statement INSIDE `withExactReadSnapshot`'s BEGIN DEFERRED. On a cold
+    /// connection or after a topology change that verifies (SHA256 + double
+    /// JSON-decode) the entire retained journal while holding a WAL read-mark —
+    /// minutes, not milliseconds. Two dashboard connections doing this on
+    /// overlapping 5s/60s cadences left the writer NO reader-free window: the
+    /// WAL could never truncate, grew to 2-5x its 64 MiB limit (147.5 MiB and
+    /// 353 MiB measured live), pushed the db+WAL family through the 320 MiB
+    /// cap, paused writes, silently dropped ~14k events in 80 minutes — and
+    /// once prevented the engine from booting at all. Twice-proven live: the
+    /// moment the dashboard process died, the next checkpoint truncated.
+    ///
+    /// The verify-inside-txn placement existed for one reason: the in-memory
+    /// index must match the snapshot the transaction reads. That proof is kept,
+    /// cheaply: verify outside any transaction, then inside the transaction
+    /// re-check only the single-row topology generation. On a mismatch (a
+    /// writer landed a topology change in the microsecond gap) commit out,
+    /// re-verify, retry. Under pathological topology churn, fall back to the
+    /// exact pre-rc.41 verify-inside behaviour — identical correctness, and
+    /// the long read-mark only in a race that retries could not clear.
+    private func withVerifiedExactReadSnapshot<T>(
+        _ body: (UInt64) throws -> T
+    ) throws -> T {
+        if let db, sqlite3_get_autocommit(db) == 0 {
+            // Ambient transaction owned by the caller: its lifetime is not
+            // ours to bound, and verification must see its snapshot.
+            return try withExactReadSnapshot { generation in
+                try ensureJournalIndex()
+                return try body(generation)
+            }
+        }
+        for _ in 0..<4 {
+            try ensureJournalIndex()
+            let outcome: T? = try withExactReadSnapshot { generation in
+                guard try journalIndexMatchesCurrentTopology() else {
+                    return nil
+                }
+                return try body(generation)
+            }
+            if let outcome { return outcome }
+        }
+        return try withExactReadSnapshot { generation in
+            try ensureJournalIndex()
+            return try body(generation)
+        }
+    }
+
+    /// Single-row staleness probe for `withVerifiedExactReadSnapshot`: does the
+    /// in-memory journal index correspond to the topology generation visible to
+    /// the current snapshot? Microseconds, so holding a read-mark across it is
+    /// harmless — unlike the full verification it stands in for.
+    private func journalIndexMatchesCurrentTopology() throws -> Bool {
+        guard journalIndexLoaded else { return false }
+        guard try hasJournalSchema() else {
+            return journalIndexTopologyGeneration == nil
+        }
+        let statement = try prepare(
+            "SELECT journal_topology_generation FROM event_storage_state WHERE singleton = 1"
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw EventStoreError.stepFailed(
+                "event journal topology probe failed"
+            )
+        }
+        return journalIndexTopologyGeneration == sqlite3_column_int64(statement, 0)
     }
 
     private struct ExactEventCandidate {
@@ -14492,8 +14639,7 @@ public actor EventStore {
             }
         }
         let boundedLimit = max(1, min(limit, 10_000))
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             var candidates: [ExactEventCandidate] = []
             candidates.reserveCapacity(min(boundedLimit * 2, 4_000))
             var unscopedCorruptLegacyRecords = 0
@@ -15123,8 +15269,7 @@ public actor EventStore {
     /// from the kernel-work AI-tool root), so callers should label it as
     /// ppid-correlated, not trace-confirmed.
     public func agentSessionForPid(_ pid: Int32) throws -> String? {
-        try withExactReadSnapshot { _ in
-            try ensureJournalIndex()
+        try withVerifiedExactReadSnapshot { _ in
             try requireGloballyCompleteExactCorpus()
             var best: (timestamp: Date, id: String, session: String)?
             func consider(_ event: Event) {
@@ -15183,8 +15328,7 @@ public actor EventStore {
     /// Wave-3 P1b: enumerate agent sessions for list_agent_sessions.
     public func agentSessions(limit: Int = 100) throws -> [AgentSessionSummary] {
         let boundedLimit = max(1, min(limit, 1_000))
-        return try withExactReadSnapshot { _ in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { _ in
             try requireGloballyCompleteExactCorpus()
             struct Accumulator {
                 var tool: String?
@@ -15445,8 +15589,7 @@ public actor EventStore {
         // retention can still breach the process envelope. One fixed 16-MiB
         // J/result lease safely covers the compact 100-row page.
         let boundedLimit = Int32(min(requestedLimit, 100))
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             let truth = try retainedWindowTruth(
                 requestedSince: since,
                 requestedUntil: until,
@@ -15645,8 +15788,7 @@ public actor EventStore {
     public func exactEventSnapshot(
         id: UUID
     ) throws -> ExactEventLookupSnapshot {
-        try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        try withVerifiedExactReadSnapshot { generation in
             if let location = try existingJournalLocations(
                 for: Set([id])
             )[id] {
@@ -15822,8 +15964,7 @@ public actor EventStore {
         since: Date,
         until: Date = Date()
     ) throws -> EventCategoryCountSnapshot {
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             let asOf = Date()
             let truth = try retainedWindowTruth(
                 requestedSince: since,
@@ -15920,8 +16061,7 @@ public actor EventStore {
                 "retained category window has a non-finite snapshot time"
             )
         }
-        return try withExactReadSnapshot { _ in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { _ in
             try requireGloballyCompleteExactCorpus()
             var bounds: [EventCategory: (minimum: TimeInterval, maximum: TimeInterval)] = [:]
             func include(_ timestamp: TimeInterval, category: EventCategory) {
@@ -15975,8 +16115,7 @@ public actor EventStore {
 
     /// Returns the total number of events in the store.
     public func count() throws -> Int {
-        try withExactReadSnapshot { _ in
-            try ensureJournalIndex()
+        try withVerifiedExactReadSnapshot { _ in
             try requireGloballyCompleteExactCorpus()
             var total = 0
             for summary in verifiedJournalSummaries where
@@ -16674,8 +16813,7 @@ public actor EventStore {
         func bucket(_ timestamp: TimeInterval) -> Int64 {
             Int64(floor(timestamp / step)) * Int64(stepSeconds)
         }
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             let truth = try retainedWindowTruth(
                 requestedSince: Date(timeIntervalSince1970: lo),
                 requestedUntil: endingAt,
@@ -16882,8 +17020,7 @@ public actor EventStore {
             }
             return lhs.id < rhs.id
         }
-        return try withExactReadSnapshot { generation in
-            try ensureJournalIndex()
+        return try withVerifiedExactReadSnapshot { generation in
             var ranked: [RankedCandidate] = []
             ranked.reserveCapacity(requestedRows * 2)
             var unscopedCorruptLegacyRecords = 0
@@ -19672,8 +19809,7 @@ public actor EventStore {
     /// root-owned `events.db`. Counts events that received any machine
     /// attribution (either via TRACEPARENT or lineage).
     public func eventCountWithMachineAttribution() throws -> Int {
-        try withExactReadSnapshot { _ in
-            try ensureJournalIndex()
+        try withVerifiedExactReadSnapshot { _ in
             try requireGloballyCompleteExactCorpus()
             var total = 0
             func include(_ event: Event) throws {
