@@ -62,7 +62,17 @@ fi
 # deduplication is keyed by rule ID plus executable path for one hour, so a
 # byte-for-byte copy of Apple's echo at this unique path cannot be suppressed
 # by an earlier qualification run.
-/bin/cp -p /bin/echo "$ALERT_EXECUTABLE"
+#
+# Deliberately NOT `cp -p`: /bin/echo ships with the `restricted,compressed`
+# file flags, and -p tries to replicate them onto the copy — a chflags the
+# kernel refuses for everyone, root included. Whether cp then exits non-zero
+# depends on the OS build's flag set, so this worked for months and then
+# failed the recorder before its first sample after an OS update recompressed
+# /bin/echo (rc.39, 2026-08-20). Only the bytes and the exec bit matter to the
+# detection rule; content reads are transparently decompressed, so the copy
+# stays byte-for-byte.
+/bin/cp /bin/echo "$ALERT_EXECUTABLE"
+/bin/chmod 0755 "$ALERT_EXECUTABLE"
 "$ALERT_EXECUTABLE" '/dev/tcp/maccrab-qualification.invalid/1' >/dev/null
 
 echo "IDENTITY: run_id=$RUN_ID alert_executable=$ALERT_EXECUTABLE bulk_path=$BULK_DIR"
