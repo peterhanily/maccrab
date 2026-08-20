@@ -223,3 +223,139 @@ struct EventInsertFilterTests {
         #expect(snap.passed == 2)
     }
 }
+
+// MARK: - v1.21.6 Layer 1b: duplicate-window suppression
+//
+// Measured on a wedged installed host: the exact journal (78% of the events
+// family, 267 MiB) was dominated by near-identical platform-daemon chatter at
+// a 16.4x duplication ratio — bluetoothd 5,171 rows, secd 3,582, mDNSResponder
+// 1,631 — each copy hash-chained at ~1.4 KiB. Journaling every copy is what
+// made the default family cap unreachable on a busy Mac.
+//
+// The window keeps the FIRST occurrence as the exact exemplar and suppresses
+// in-window repeats. Detection is upstream of persistence and sees every
+// instance; suppression costs replay of the Nth copy, never coverage.
+@Suite("EventInsertFilter duplicate window (v1.21.6 Layer 1b)")
+struct EventInsertFilterDuplicateWindowTests {
+
+    private func chatterEvent(
+        name: String = "bluetoothd",
+        executable: String = "/usr/sbin/bluetoothd",
+        platform: Bool = true,
+        category: MacCrabCore.EventCategory = .process,
+        action: String = "unified_log_event",
+        at seconds: TimeInterval = 1_700_000_000,
+        destinationIp: String? = nil
+    ) -> Event {
+        let proc = ProcessInfo(
+            pid: 100, ppid: 1, rpid: 1,
+            name: name, executable: executable,
+            commandLine: executable, args: [],
+            workingDirectory: "/",
+            userId: 0, userName: "root", groupId: 0,
+            startTime: Date(timeIntervalSince1970: seconds),
+            ancestors: [],
+            isPlatformBinary: platform
+        )
+        let network = destinationIp.map {
+            NetworkInfo(
+                sourceIp: "192.168.1.2", sourcePort: 5_000,
+                destinationIp: $0, destinationPort: 443,
+                destinationHostname: nil,
+                direction: .outbound, transport: "tcp"
+            )
+        }
+        return Event(
+            timestamp: Date(timeIntervalSince1970: seconds),
+            eventCategory: category, eventType: .info,
+            eventAction: action, process: proc,
+            network: network
+        )
+    }
+
+    private func windowFilter() -> EventInsertFilter {
+        EventInsertFilter(duplicateWindowSeconds: 300)
+    }
+
+    @Test("First occurrence journals; in-window repeats are suppressed")
+    func repeatsSuppressed() {
+        let filter = windowFilter()
+        #expect(!filter.shouldDrop(event: chatterEvent(at: 1_700_000_000)),
+                "the exemplar must always be journaled")
+        #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_010)))
+        #expect(filter.shouldDrop(event: chatterEvent(at: 1_700_000_200)))
+        #expect(filter.counters.duplicateSnapshot() == 2)
+    }
+
+    @Test("The window lapses: a repeat after expiry becomes a fresh exemplar")
+    func windowExpiryReadmits() {
+        let filter = windowFilter()
+        #expect(!filter.shouldDrop(event: chatterEvent(at: 1_700_000_000)))
+        #expect(!filter.shouldDrop(event: chatterEvent(at: 1_700_000_301)),
+                "past the window the same tuple is a new forensic fact")
+    }
+
+    @Test("Non-platform binaries are never deduplicated")
+    func nonPlatformAlwaysExact() {
+        // Adversary tooling is by definition not platform-signed. Every
+        // occurrence journals exactly, no matter how repetitive.
+        let filter = windowFilter()
+        for i in 0..<5 {
+            #expect(!filter.shouldDrop(event: chatterEvent(
+                name: "implant", executable: "/tmp/implant",
+                platform: false, at: 1_700_000_000 + Double(i)
+            )))
+        }
+    }
+
+    @Test("TCC and network events are never deduplicated")
+    func highSignalCategoriesAlwaysExact() {
+        let filter = windowFilter()
+        for i in 0..<3 {
+            #expect(!filter.shouldDrop(event: chatterEvent(
+                category: .network, action: "connect",
+                at: 1_700_000_000 + Double(i), destinationIp: "203.0.113.7"
+            )), "every network flow is high-signal per-instance")
+        }
+        for i in 0..<3 {
+            #expect(!filter.shouldDrop(event: chatterEvent(
+                category: .tcc, action: "tcc_decision",
+                at: 1_700_000_000 + Double(i)
+            )), "every TCC decision is high-signal per-instance")
+        }
+    }
+
+    @Test("Distinct tuples do not suppress each other")
+    func distinctTuplesIndependent() {
+        let filter = windowFilter()
+        #expect(!filter.shouldDrop(event: chatterEvent(name: "bluetoothd", executable: "/usr/sbin/bluetoothd")))
+        #expect(!filter.shouldDrop(event: chatterEvent(name: "secd", executable: "/usr/libexec/secd")))
+        #expect(!filter.shouldDrop(event: chatterEvent(action: "exit")))
+    }
+
+    @Test("Capacity eviction fails open: novel events are never lost")
+    func capacityFailsOpen() {
+        let filter = EventInsertFilter(
+            duplicateWindowSeconds: 300,
+            duplicateWindowCapacity: 16
+        )
+        // Flood far past capacity with distinct tuples; every one is novel and
+        // every one must pass. Eviction may forget old exemplars (admitting an
+        // extra exemplar later) but must never suppress a first occurrence.
+        for i in 0..<200 {
+            #expect(!filter.shouldDrop(event: chatterEvent(
+                name: "daemon\(i)", executable: "/usr/sbin/daemon\(i)",
+                at: 1_700_000_000 + Double(i)
+            )))
+        }
+    }
+
+    @Test("The default filter enables the window; bare init does not")
+    func defaultEnablesWindow() {
+        #expect(EventInsertFilter.defaultFilter(
+            supportDir: "/Library/Application Support/MacCrab"
+        ).duplicateWindow != nil)
+        // The v1.8.0 identity contract for a bare filter is preserved.
+        #expect(EventInsertFilter().duplicateWindow == nil)
+    }
+}
