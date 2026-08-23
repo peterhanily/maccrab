@@ -73,6 +73,18 @@ fi
 # stays byte-for-byte.
 /bin/cp /bin/echo "$ALERT_EXECUTABLE"
 /bin/chmod 0755 "$ALERT_EXECUTABLE"
+# rc.43: ad-hoc re-sign the copy before running it. /bin/echo is a platform
+# binary whose code signature is only valid in place; a plain copy is an
+# invalid-signature Mach-O, and on macOS 26 (arm64) AMFI SIGKILLs it on exec
+# (exit 137 "Killed: 9"), so the alert never fired and the recorder failed at
+# the prewarm trigger. An ad-hoc signature makes the copy a legitimately
+# runnable executable at its unique path without changing the bytes the
+# detection rule matches. `codesign` is present on every host that can build
+# and qualify the product.
+/usr/bin/codesign --sign - --force "$ALERT_EXECUTABLE" >/dev/null 2>&1 || {
+    echo "FAIL: could not ad-hoc sign the qualification alert executable" >&2
+    exit 1
+}
 "$ALERT_EXECUTABLE" '/dev/tcp/maccrab-qualification.invalid/1' >/dev/null
 
 echo "IDENTITY: run_id=$RUN_ID alert_executable=$ALERT_EXECUTABLE bulk_path=$BULK_DIR"

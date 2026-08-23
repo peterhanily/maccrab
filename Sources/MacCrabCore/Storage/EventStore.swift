@@ -817,6 +817,10 @@ public actor EventStore {
     func setJournalIndexRebuildHookForTesting(_ hook: ((Bool) -> Void)?) {
         journalIndexRebuildHookForTesting = hook
     }
+
+    func setJournalRebuildFailAfterPartialForTesting(_ on: Bool) {
+        journalRebuildFailAfterPartialForTesting = on
+    }
     private static let maximumPackedJournalBlockID: Int64 = (1 << 56) - 1
     /// Array-returning exact APIs are bounded by owned decoded graphs as well
     /// as row count. A caller that asks for more receives a typed evidence gap;
@@ -4990,6 +4994,36 @@ public actor EventStore {
     /// to silently omit evidence. The ceiling bounds hostile/corrupt startup
     /// allocation while covering a sustained 1,274/s fifteen-minute epoch.
     private func ensureJournalIndex() throws {
+        // rc.43: any throw out of the rebuild INVALIDATES the in-memory index.
+        // The chunked scan populates journalBaseLocations/journalDeltaLocations
+        // incrementally, so a mid-rebuild failure (a torn concurrent-append
+        // scan, an integrity throw) can leave them partially filled with
+        // journalIndexLoaded still false. Left as-is the next call would
+        // append-refresh onto that partial state and trip the duplicate-UUID
+        // guard forever. Forcing journalIndexLoaded=false and clearing the
+        // partial locators guarantees the next attempt is a clean full rebuild.
+        do {
+            try rebuildJournalIndex()
+        } catch {
+            journalIndexLoaded = false
+            journalIndexTopologyGeneration = nil
+            journalIndexedBlockCount = 0
+            journalIndexedMinimumBlockID = nil
+            journalIndexedMaximumBlockID = nil
+            journalBaseLocations.removeAll(keepingCapacity: false)
+            journalDeltaLocations.removeAll()
+            journalIndexedLocationCount = 0
+            throw error
+        }
+    }
+
+    /// rc.43 test seam: when set, the next `rebuildJournalIndex` throws AFTER
+    /// it has begun populating the in-memory locators, simulating a torn scan
+    /// (e.g. a concurrent-append count mismatch). The retry must then perform a
+    /// clean full rebuild rather than tripping the duplicate-UUID guard.
+    var journalRebuildFailAfterPartialForTesting = false
+
+    private func rebuildJournalIndex() throws {
         guard try hasJournalSchema() else {
             journalBaseLocations.removeAll(keepingCapacity: false)
             journalDeltaLocations.removeAll()
@@ -5130,6 +5164,7 @@ public actor EventStore {
                            raw_bytes, codec, sha256, metadata_sha256
                     FROM event_journal_blocks
                     WHERE (?1 IS NULL OR block_id > ?1)
+                      AND (?3 IS NULL OR block_id <= ?3)
                     ORDER BY block_id ASC
                     LIMIT ?2
                     """
@@ -5141,6 +5176,22 @@ public actor EventStore {
                     sqlite3_bind_null(statement, 1)
                 }
                 sqlite3_bind_int64(statement, 2, Int64(Self.journalScanBatchBlocks))
+                // rc.43: cap the chunked scan at the block-id the topology read
+                // reported. Without snapshot isolation between batches a writer
+                // that APPENDS mid-scan would otherwise be pulled in, making the
+                // final scanned-count disagree with the topology, aborting the
+                // pass with the append-only index only PARTIALLY populated — and
+                // the next retry re-inserts the same entries and trips the
+                // duplicate-UUID guard ("event journal contains a duplicate UUID
+                // roster entry"). Bounding the scan to blocks that existed at
+                // topology-read time makes concurrent appends invisible to this
+                // pass; the very next read observes the new generation and
+                // append-refreshes them.
+                if let maximumBlockID {
+                    sqlite3_bind_int64(statement, 3, maximumBlockID)
+                } else {
+                    sqlite3_bind_null(statement, 3)
+                }
                 while true {
                     let rc = sqlite3_step(statement)
                     if rc == SQLITE_DONE { break }
@@ -5305,6 +5356,12 @@ public actor EventStore {
             }
             guard let lastRow = batch.last else { break scanLoop }
             scanCursor = lastRow.blockID
+            if journalRebuildFailAfterPartialForTesting {
+                journalRebuildFailAfterPartialForTesting = false
+                throw EventStoreError.decodingFailed(
+                    "test-injected torn journal scan after partial population"
+                )
+            }
             journalIndexRebuildHookForTesting?(
                 db.map { sqlite3_get_autocommit($0) == 0 } ?? false
             )
