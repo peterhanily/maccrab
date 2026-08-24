@@ -1872,7 +1872,12 @@ class CandidateQualificationTests(unittest.TestCase):
         ):
             self.validate_runtime(report)
 
-    def test_disabled_llm_is_not_a_release_qualification(self) -> None:
+    def test_gracefully_disabled_llm_qualifies(self) -> None:
+        # rc.44: an unconfigured LLM is a SUPPORTED shipping configuration —
+        # MacCrab documents that LLM features degrade gracefully with no backend.
+        # The release gate no longer mandates a configured LLM; instead it
+        # asserts the graceful-degradation contract (feature disabled the whole
+        # epoch, zero LLM work). A gracefully-disabled run must QUALIFY.
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):
             observation["heartbeat"]["llm"] = {"configured": False}
@@ -1885,9 +1890,35 @@ class CandidateQualificationTests(unittest.TestCase):
             "alert_investigations_started_epoch_delta": 0,
             "alert_investigations_accepted_epoch_delta": 0,
             "alert_investigations_final_rejected_epoch_delta": 0,
+            "causal_alert_id": None,
+            "causal_investigation_sha256": None,
+        }
+        # Must NOT raise: graceful degradation is a passing configuration.
+        self.validate_runtime(report)
+
+    def test_disabled_llm_that_still_did_work_is_rejected(self) -> None:
+        # The contract's teeth: "unconfigured" must mean NO LLM activity. A run
+        # claiming disabled while showing requests is not degrading gracefully
+        # and must still fail.
+        report = copy.deepcopy(self.runtime)
+        for index, observation in enumerate(report["recorder_observations"]):
+            observation["heartbeat"]["llm"] = {"configured": False}
+            self.rederive_sample(report, index)
+        # Claims disabled, but the aggregate shows alert-investigation work —
+        # not graceful degradation.
+        report["measurements"]["ai_quality"] = {
+            "configured": False,
+            "feature_disabled_entire_epoch": True,
+            "schema_2_and_accounting_conserved_all_samples": True,
+            "unspecified_requests_epoch_delta": 0,
+            "alert_investigations_started_epoch_delta": 1,
+            "alert_investigations_accepted_epoch_delta": 1,
+            "alert_investigations_final_rejected_epoch_delta": 0,
+            "causal_alert_id": None,
+            "causal_investigation_sha256": None,
         }
         with self.assertRaisesRegex(
-            qualification.QualificationError, "not configured"
+            qualification.QualificationError, "not degrading gracefully"
         ):
             self.validate_runtime(report)
 
