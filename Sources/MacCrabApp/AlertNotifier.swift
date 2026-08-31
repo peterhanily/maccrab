@@ -94,6 +94,61 @@ final class AlertNotifier: NSObject {
     /// Pure handoff-gate decision, extracted for unit testing. True while
     /// `suppressUntil` is a future instant. It's an ABSOLUTE deadline, so it
     /// lapses (fail-open) once `now` passes it; nil means not gated.
+    // MARK: - Self-report (v1.21.6-rc.45)
+    //
+    // Every early return in `tick()` used to be a bare `return`. That made a
+    // dead notification channel indistinguishable from a quiet one: on an
+    // installed host the cursor sat frozen for six days while 2,091 alerts
+    // accrued — 380 at or above the configured floor — and not one counter,
+    // log line or health field said so. For the only user-facing alert surface
+    // in the product, silence must be a reported state, not an absence.
+
+    /// Why a tick ended. Recorded on every path, including the happy one.
+    enum TickOutcome: String, Sendable {
+        case handoffGated        = "handoff_gated"
+        case storeUnavailable    = "store_unavailable"
+        case fetchFailed         = "fetch_failed"
+        case cursorSeeded        = "cursor_seeded"
+        case nothingFresh        = "nothing_fresh"
+        case authorizationPending = "authorization_pending"
+        case delivered           = "delivered"
+    }
+
+    struct NotifierStatus: Sendable, Equatable {
+        var ticksTotal: UInt64 = 0
+        var deliveredTotal: UInt64 = 0
+        var droppedByGateTotal: UInt64 = 0
+        var fallbackTotal: UInt64 = 0
+        /// Alerts past the cursor that this tick did not get to. Non-zero here
+        /// with a stalled cursor is the exact shape of the six-day outage.
+        var pendingBacklog: Int = 0
+        var lastOutcome: String = "never_ticked"
+        var lastTickAt: Date?
+        var lastDeliveryAt: Date?
+        var authorizationDenied: Bool = false
+    }
+
+    private(set) var status = NotifierStatus()
+
+    /// Record the tick's outcome and say so out loud when the channel is silent
+    /// while work exists. `.notice`, not `.debug` — this is the line that would
+    /// have caught the outage.
+    private func finish(_ outcome: TickOutcome, backlog: Int = 0) {
+        status.ticksTotal &+= 1
+        status.pendingBacklog = backlog
+        status.lastOutcome = outcome.rawValue
+        status.lastTickAt = Date()
+        status.authorizationDenied = authorizationDenied
+        switch outcome {
+        case .delivered, .cursorSeeded, .nothingFresh:
+            break
+        case .handoffGated, .storeUnavailable, .fetchFailed, .authorizationPending:
+            logger.notice(
+                "alert notifier silent: \(outcome.rawValue, privacy: .public), backlog=\(backlog, privacy: .public), cursor=\(self.cursor?.description ?? "nil", privacy: .public)"
+            )
+        }
+    }
+
     nonisolated static func isHandoffGated(suppressUntil: Date?, now: Date) -> Bool {
         guard let until = suppressUntil else { return false }
         return now < until
@@ -105,9 +160,15 @@ final class AlertNotifier: NSObject {
         // Upgrade-handoff gate (fail-open, absolute deadline). See
         // `suppressUntil`. Return without advancing the cursor so any
         // alert that fired during the window is re-evaluated once it lifts.
-        if Self.isHandoffGated(suppressUntil: suppressUntil, now: Date()) { return }
+        if Self.isHandoffGated(suppressUntil: suppressUntil, now: Date()) {
+            finish(.handoffGated)
+            return
+        }
         reloadConfig()
-        guard let store = openStoreIfNeeded() else { return }
+        guard let store = openStoreIfNeeded() else {
+            finish(.storeUnavailable)
+            return
+        }
 
         let since = cursor ?? Date.distantPast
         // `AlertStore.alerts(since:limit:)` is `ORDER BY timestamp DESC LIMIT n`
@@ -123,7 +184,10 @@ final class AlertNotifier: NSObject {
         // pathological storm cannot pull an unbounded result set into the GUI.
         var fetchLimit = 200
         var raw: [Alert]
-        guard let first = try? await store.alerts(since: since, limit: fetchLimit) else { return }
+        guard let first = try? await store.alerts(since: since, limit: fetchLimit) else {
+            finish(.fetchFailed)
+            return
+        }
         raw = first
         while raw.count == fetchLimit && fetchLimit < 5_000 {
             fetchLimit = min(fetchLimit * 4, 5_000)
@@ -140,9 +204,13 @@ final class AlertNotifier: NSObject {
         if cursor == nil {
             cursor = raw.map(\.timestamp).max() ?? Date()
             persistCursor()
+            finish(.cursorSeeded)
             return
         }
-        guard !fresh.isEmpty else { return }
+        guard !fresh.isEmpty else {
+            finish(.nothingFresh)
+            return
+        }
 
         let status = await center.notificationSettings().authorizationStatus
         authorizationDenied = (status == .denied)
@@ -153,26 +221,55 @@ final class AlertNotifier: NSObject {
         // the few seconds before the prompt is answered are silently lost.
         // (Denied is treated as determined: we process + fall back to the
         // in-app popover so a user who said "no" isn't stuck retrying forever.)
-        if status == .notDetermined { return }
+        if status == .notDetermined {
+            finish(.authorizationPending, backlog: fresh.count)
+            return
+        }
 
-        for alert in fresh {
+        // Drain a BOUNDED slice, oldest first, and always persist what we got
+        // through.
+        //
+        // This is hardening, not the outage fix — be precise about which. The
+        // six-day silence was caused by the channel never being CONSTRUCTED
+        // (see MacCrabApp.startNotificationChannel); the unbounded loop here
+        // did advance the cursor when it ran. What it also did was post one
+        // banner per fresh alert in a single MainActor turn: recovering from a
+        // 2,091-alert backlog would have fired 2,091 banners at once. A cap of
+        // 50 per 5s tick drains 600/min, bounds the burst a storm can produce,
+        // and bounds the MainActor time one tick can hold.
+        let slice = fresh.prefix(Self.maximumDeliveriesPerTick)
+        for alert in slice {
             switch gate.evaluate(alert: alert) {
             case .deliver(let title, let body, let sound),
                  .stormSummary(let title, let body, let sound):
                 post(title: title, body: body, sound: sound, alert: alert, status: status)
+                self.status.deliveredTotal &+= 1
+                self.status.lastDeliveryAt = Date()
             case .drop:
-                break
+                self.status.droppedByGateTotal &+= 1
             }
             cursor = max(cursor ?? alert.timestamp, alert.timestamp)
         }
         persistCursor()
+        let remaining = fresh.count - slice.count
+        if remaining > 0 {
+            logger.notice(
+                "alert notifier draining backlog: delivered slice of \(slice.count, privacy: .public), \(remaining, privacy: .public) still pending"
+            )
+        }
+        finish(.delivered, backlog: remaining)
     }
+
+    /// Per-tick delivery cap. Bounds both the banner burst a storm can produce
+    /// and the MainActor time one tick can consume.
+    static let maximumDeliveriesPerTick = 50
 
     // MARK: - Delivery
 
     private func post(title: String, body: String, sound: String, alert: Alert, status: UNAuthorizationStatus) {
         // Not authorized → don't silently no-op; show the in-app popover.
         guard status == .authorized || status == .provisional else {
+            self.status.fallbackTotal &+= 1
             onFallback?(alert)
             return
         }

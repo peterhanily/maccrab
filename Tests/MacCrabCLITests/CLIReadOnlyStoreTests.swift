@@ -385,7 +385,34 @@ struct CLIReadOnlyStoreTests {
             contentsOf: sourceDirectory.appendingPathComponent("TraceCommands.swift"),
             encoding: .utf8
         )
-        #expect(traceCommands.contains("databasePath: path,\n                forceReadOnly: true"))
+        // v1.21.6-rc.45: assert the INVARIANT, not argument adjacency. This
+        // used to pin the literal "databasePath: path,\n                forceReadOnly: true",
+        // so adding the `encryption:` argument between them failed a test whose
+        // actual contract — the CLI never opens the causal graph read-write —
+        // was untouched. Check every construction instead, which is stricter
+        // than the adjacency it replaces.
+        #expect(!traceCommands.contains("forceReadOnly: false"))
+        let causalOpens = traceCommands.components(
+            separatedBy: "SQLiteCausalGraphStore("
+        ).dropFirst().map { String($0.prefix(400)) }
+        // Exactly two constructions, and each must be classifiable:
+        //   - the query surface `openStore()` — read-only;
+        //   - `traceDemo` — the ONE intentional writer, a DEBUG seeding path
+        //     that must still carry the daemon's footprint and free-space
+        //     admission so a developer tool cannot bypass it.
+        #expect(causalOpens.count == 2, "a new causal-graph open must be classified here")
+        let readOnly = causalOpens.filter { $0.contains("forceReadOnly: true") }
+        let writers = causalOpens.filter { !$0.contains("forceReadOnly: true") }
+        #expect(readOnly.count == 1, "the query surface must be read-only")
+        #expect(writers.count == 1, "traceDemo is the only intentional writer")
+        #expect(
+            writers[0].contains("maxFootprintBytes:")
+                && writers[0].contains("freeSpaceFloorBytes:"),
+            "the intentional writer must stay under the daemon's admission budget"
+        )
+        // The read key is required too: opening keyless decodes nothing, which
+        // is what made `trace export` impossible before rc.45.
+        #expect(traceCommands.contains("encryption: encryption"))
         let agentSpans = try String(
             contentsOf: sourceDirectory.appendingPathComponent("AgentSpansCommand.swift"),
             encoding: .utf8

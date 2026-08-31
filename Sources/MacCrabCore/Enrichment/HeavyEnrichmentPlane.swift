@@ -745,6 +745,7 @@ public struct HeavyEnrichmentPlaneSnapshot: Sendable, Equatable {
     public let retainedResultBytesHighWatermark: Int
     public let maximumRetainedResultBytes: Int
     public let oversizedResultValuesTotal: UInt64
+    public let lingeringReservationSplitRefusalsTotal: UInt64
     public let cachedResults: Int
     public let maximumConcurrentWorkers: Int
 
@@ -900,6 +901,11 @@ public actor HeavyEnrichmentPlane {
     private var coalescedRequestsTotal: UInt64 = 0
     private var lateWorkerExitsTotal: UInt64 = 0
     private var oversizedResultValuesTotal: UInt64 = 0
+    /// Times a lingering-reservation split was refused and the terminal marker
+    /// had to share the subscriber's reservation instead of carving its own.
+    /// Non-zero means bounded over-charging, never lost evidence — and it must
+    /// stay observable, because the refusal it replaces used to be a crash.
+    private var lingeringReservationSplitRefusalsTotal: UInt64 = 0
 
     public init(
         configuration: HeavyEnrichmentPlaneConfiguration = .init(),
@@ -1088,6 +1094,8 @@ public actor HeavyEnrichmentPlane {
             maximumRetainedResultBytes:
                 configuration.maximumRetainedResultBytes,
             oversizedResultValuesTotal: oversizedResultValuesTotal,
+            lingeringReservationSplitRefusalsTotal:
+                lingeringReservationSplitRefusalsTotal,
             cachedResults: cache.count,
             maximumConcurrentWorkers: configuration.maximumConcurrentWorkers
         )
@@ -1295,10 +1303,46 @@ public actor HeavyEnrichmentPlane {
             precondition(markerCharge <= subscriber.reservedResultBytes)
             let markerLease: EventPipelineMemoryLease
             if retainLingeringReservation {
-                markerLease = subscriber.memoryLease.split(
+                // v1.21.6-rc.45: this used to force-unwrap.
+                //
+                // `split` divides credit already granted to this subscriber, so
+                // it succeeds in the ordinary case — but it is an Optional for
+                // real reasons (a reservation released underneath us, a charge
+                // larger than what the source still holds, a per-request bound).
+                // A refusal here is a BOUNDED ACCOUNTING DEGRADATION: the
+                // terminal marker and the lingering worker share one reservation
+                // instead of two, which over-charges slightly until the worker
+                // exits. That is never a reason to trap the whole engine.
+                //
+                // The `!` killed installed hosts 16 times between 2026-08-23 and
+                // 2026-08-30 (identical EXC_BREAKPOINT, rc.43 and rc.44), reached
+                // from `scheduleDeadline`'s detached utility task -> deadlineFired
+                // -> terminalize(.timedOut, retainLingeringReservation: true).
+                // With a 50 ms `operationTimeoutSeconds` over code-signing and
+                // hashing work, that path is hot, not exotic. The refusal that
+                // triggered it is fixed at its source in
+                // EventPipelineLiveMemoryBudget.split; this removes the crash
+                // even when a refusal is legitimate.
+                if let carved = subscriber.memoryLease.split(
                     bytes: markerCharge,
                     owner: .heavyResult
-                )!
+                ) {
+                    markerLease = carved
+                } else {
+                    increment(&lingeringReservationSplitRefusalsTotal)
+                    // The marker and the lingering worker now SHARE one
+                    // reservation (ARC copies of one lease id). Be precise about
+                    // what that costs: `appendDeferred` resizes the terminal
+                    // subscriber's lease down to the marker charge, and because
+                    // the lingering copy is the same reservation it shrinks too.
+                    // So a refusal degrades this subscriber to exactly the
+                    // non-lingering accounting — the lingering worker stops being
+                    // charged until it physically exits. That is an UNDER-count,
+                    // bounded by one operation's reservation, and it is visible
+                    // through the counter above. It is strictly better than the
+                    // `!` this replaces, which trapped the whole engine.
+                    markerLease = subscriber.memoryLease
+                }
             } else {
                 precondition(subscriber.memoryLease.resize(to: markerCharge))
                 markerLease = subscriber.memoryLease

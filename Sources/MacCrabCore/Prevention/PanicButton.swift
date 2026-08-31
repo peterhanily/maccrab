@@ -158,6 +158,10 @@ public actor PanicButton {
             timeout: 10,
             maximumOutputBytes: nil
         )?.succeeded == true
+        // v1.21.6-rc.45: `pfctl -f` exits 0 even when PF is DISABLED, so a
+        // successful load is not evidence of enforcement. Require the anchor to
+        // be reachable and PF to be running before reporting a block.
+            && PFEnforcement.probe(anchorName: "com.maccrab.emergency").enforcing
     }
 
     private nonisolated func flushDNS() -> Bool {

@@ -110,6 +110,106 @@ public enum TraceDashboardKeyExchange {
         )
     }
 
+    // MARK: - Requesting an envelope (v1.21.6-rc.45)
+    //
+    // The recipient key above is a PER-PROCESS ephemeral: it is generated in
+    // memory, never persisted, and never enters the Keychain. That is a good
+    // property, and it has a consequence that was not accounted for — an
+    // envelope on disk is bound to exactly one process. `maccrabctl` cannot
+    // borrow the dashboard's envelope; it must request its own.
+    //
+    // Before this, `maccrabctl` opened tracegraph.db with no key at all, so
+    // every entity/edge decode failed and `trace export` — the ONLY producer of
+    // `.maccrabtrace` bundles, and the only point at which the signed,
+    // unified-log-anchored chain head is emitted — could never succeed. The
+    // dashboard's Export button shells out to that same command, so no surface
+    // in the product could export evidence. Measured on an installed host:
+    // 21,805 traces, all `evidence_bundle_status = not_created`, zero signed
+    // chain heads.
+    //
+    // The daemon writes one envelope per uid, so a second requester replaces
+    // the first one's file. That is safe because it is self-healing on both
+    // sides: the dashboard caches its resolved encryption in memory after the
+    // first success, and re-requests whenever an unwrap fails.
+
+    /// Queue this process's PUBLIC recipient key in the privileged inbox. No
+    /// private or symmetric key material is written; the daemon authenticates
+    /// the request file's owner uid before sealing anything to it.
+    public static func writeKeyRequest(
+        inboxDir: String,
+        publicKey: Data,
+        requester: String
+    ) -> Bool {
+        guard publicKey.count == 32 else { return false }
+        let payload: [String: Any] = [
+            "publicKey": publicKey.base64EncodedString(),
+            "requestedAt": ISO8601DateFormatter().string(from: Date()),
+            "requester": requester,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys]
+        ), data.count <= 16 * 1024 else { return false }
+        let url = URL(fileURLWithPath: inboxDir)
+            .appendingPathComponent("trace-dashboard-key-\(UUID().uuidString).json")
+        do {
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            return false
+        }
+    }
+
+    /// Resolve a read-side encryption for the root-owned trace stores: use an
+    /// envelope already addressed to this process if one exists, otherwise ask
+    /// the daemon for one and wait a bounded time for the reply.
+    ///
+    /// Returns nil only when the daemon did not answer — the caller should say
+    /// so plainly rather than opening keyless and failing later as an opaque
+    /// decode error, which read as store corruption.
+    public static func resolveEncryption(
+        supportDir: String,
+        requester: String,
+        timeout: TimeInterval = 10
+    ) async -> DatabaseEncryption? {
+        let responsePath = supportDir + "/dashboard_trace_key_\(getuid()).json"
+
+        func tryExisting() -> DatabaseEncryption? {
+            // Bounded read: the envelope is a small root-written JSON file, and
+            // `dashboardEncryption(from:)` rejects anything over 16 KiB anyway —
+            // but it does so AFTER the bytes are in memory. Read through the
+            // project's bounded reader so a replaced or padded file cannot be
+            // pulled in whole first.
+            guard let data = BoundedRegularFileReader.read(
+                at: responsePath,
+                maximumBytes: 16 * 1024
+            ) else { return nil }
+            return try? dashboardEncryption(from: data)
+        }
+
+        if let ready = tryExisting() { return ready }
+
+        guard let recipient = try? dashboardPrivateKeyForCurrentSession(),
+              writeKeyRequest(
+                inboxDir: supportDir + "/inbox",
+                publicKey: recipient.publicKey.rawRepresentation,
+                requester: requester
+              )
+        else { return nil }
+
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if let issued = tryExisting() { return issued }
+        }
+        return nil
+    }
+
     /// Resolve a root-issued envelope using this process's session recipient
     /// key and return a read-side DatabaseEncryption.
     public static func dashboardEncryption(from envelopeData: Data) throws

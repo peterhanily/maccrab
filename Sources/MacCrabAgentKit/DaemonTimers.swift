@@ -3050,6 +3050,8 @@ enum DaemonTimers {
                     "error_count": s.errorCount,
                     "expected_interval_seconds": s.expectedIntervalSeconds,
                     "healthy": s.healthy,
+                    // v1.21.6-rc.45: a boolean cannot say "never started".
+                    "reason": s.reason,
                 ]
                 if let lt = s.lastTick { d["last_tick_unix"] = lt.timeIntervalSince1970 }
                 if let le = s.lastError { d["last_error"] = le }
@@ -3433,7 +3435,15 @@ enum DaemonTimers {
             let guardStats = await state.persistenceGuard.stats()
             let preventionDict: [String: Any] = [
                 "sinkhole": ["enabled": sinkholeStats.enabled, "count": sinkholeStats.domainCount],
-                "network_blocker": ["enabled": blockerStats.enabled, "count": blockerStats.blockedCount],
+                // `enabled` is operator intent; `enforcing` is whether packets
+                // are actually being dropped. Publishing only the former made
+                // the dashboard claim protection that PF was not providing.
+                "network_blocker": [
+                    "enabled": blockerStats.enabled,
+                    "count": blockerStats.blockedCount,
+                    "enforcing": blockerStats.enforcing,
+                    "enforcement_reason": blockerStats.reason,
+                ],
                 "persistence_guard": ["enabled": guardStats.enabled, "count": guardStats.protectedCount],
             ]
 
@@ -3751,6 +3761,9 @@ enum DaemonTimers {
                     heavyEnrichmentPlane.maximumRetainedResultBytes,
                 "oversized_result_values_total":
                     heavyEnrichmentPlane.oversizedResultValuesTotal,
+                "lingering_reservation_split_refusals_total":
+                    heavyEnrichmentPlane
+                        .lingeringReservationSplitRefusalsTotal,
                 "cached_results": heavyEnrichmentPlane.cachedResults,
                 "maximum_concurrent_workers":
                     heavyEnrichmentPlane.maximumConcurrentWorkers,
@@ -6387,6 +6400,53 @@ func measureWalBytes(dbPath: String) -> Int64 {
 
 // MARK: - Adaptive rollup sweep (v1.8.0)
 
+/// Freelist slack at or above which the size-cap sweep runs `incremental_vacuum`
+/// regardless of where its instantaneous footprint sample landed.
+///
+/// 16 MiB is deliberately well above what one sweep of ordinary retention churn
+/// frees (hundreds of pages on a measured installed host) and far below the
+/// hundreds of megabytes a store strands once its high-water mark and its live
+/// working set diverge. Raising it strands more space; lowering it toward zero
+/// makes the file truncate and regrow every sweep for no gain.
+let reclaimableSlackFloorBytes: Int64 = 16 * 1_024 * 1_024
+
+/// Whether the size-cap sweep should run `incremental_vacuum` this pass.
+///
+/// Pure so the decision can be discriminated deterministically instead of being
+/// inferred from a 300-line sweep whose only reclaim log fires on success. Three
+/// independent reasons to reclaim, any one sufficient:
+///
+///   1. `totalPruned > 0` — retention just freed pages; return them.
+///   2. `footprintBytes > targetBytes` — over target on this sample.
+///   3. `reclaimableSlackBytes >= slackFloorBytes` — the file is holding space it
+///      does not use, whatever this sample says.
+///
+/// Reason 3 exists because reasons 1 and 2 can BOTH be false while the store is
+/// stranding hundreds of megabytes: the footprint is sampled straight after a
+/// WAL truncate (the trough), while storage admission judges the family at its
+/// peak, and a store whose retained rows all sit inside the forensic floor
+/// prunes nothing. See the call site for the measured installed-host case.
+///
+/// A reader-pinned WAL still vetoes everything: the reclaim cannot truncate
+/// pages the pin holds alive and would only grow the sidecar.
+enum StorageReclaimDecision {
+    static func shouldReclaim(
+        totalPruned: Int,
+        footprintBytes: Int64,
+        targetBytes: Int64,
+        reclaimableSlackBytes: Int64,
+        slackFloorBytes: Int64 = reclaimableSlackFloorBytes,
+        walPinned: Bool
+    ) -> Bool {
+        guard !walPinned else { return false }
+        if totalPruned > 0 { return true }
+        if footprintBytes > targetBytes { return true }
+        guard slackFloorBytes > 0 else { return false }
+        return reclaimableSlackBytes >= slackFloorBytes
+    }
+}
+
+
 /// Three-layer storage discipline: pre-insert filter (Layer 1) → adaptive
 /// retention (this function, Layer 2) → defense-in-depth size cap (also
 /// here, Layer 3).
@@ -6664,7 +6724,47 @@ func runAdaptiveRollupSweep(
         }
     }
 
-    if (totalPruned > 0 || overCap) && !walPinned {
+    // v1.21.6-rc.45: reclaim ALSO when the file is holding reclaimable slack,
+    // even if this sample says we are under target.
+    //
+    // `overCap` is measured immediately after `walCheckpointTruncate()` above —
+    // the TROUGH of the cycle. Storage admission judges the family at its PEAK
+    // (main + a regrown WAL + one transaction reserve). A store can therefore
+    // sit permanently a megabyte or two under `targetSizeBytes` at this sample
+    // instant, skip the reclaim on every sweep, and still pause ingestion
+    // seconds later when the WAL grows back.
+    //
+    // Measured on an installed host (rc.44, 2026-08-30): events.db was
+    // 350,703,616 bytes of which 79,300 of 85,621 pages were freelist — 311 MiB
+    // of reclaimable slack behind live data of 23 MiB. The post-truncate
+    // footprint landed at 350,834,688 against a 352,321,536 target, i.e. 1.4 MiB
+    // UNDER, so `overCap` was false; nothing was prunable either, because every
+    // retained row was inside the 15-minute forensic floor, so `totalPruned` was
+    // 0. The gate below was therefore false on 309 consecutive sweeps across 8
+    // hours while the engine shed 48,193 events under `footprint_limit`. One
+    // unbounded `incremental_vacuum` on a byte-identical copy returned all of it
+    // in 3.0 s (350,703,616 -> 31,264,768 bytes).
+    //
+    // This is the same failure class the FTS-optimize condition twelve lines
+    // above was corrected for ("gating compaction on already being over cap
+    // creates a failure class where a host that stays under cap never
+    // compacts"), and the same aliased-instant error as the runtime drain fix.
+    // Free pages must never be the reason admission refuses a write.
+    //
+    // The floor keeps ordinary retention churn from truncating and regrowing the
+    // file every sweep: slack has to accumulate to `reclaimableSlackFloorBytes`
+    // again before this fires a second time. Each call is independently bounded
+    // by EventStore's admission-derived page plan (~one transaction reserve),
+    // so a large backlog drains over several sweeps rather than in one stall.
+    let reclaimableSlackBytes = await eventStore.reclaimableFreelistBytes()
+    let hasReclaimableSlack = reclaimableSlackBytes >= reclaimableSlackFloorBytes
+    if StorageReclaimDecision.shouldReclaim(
+        totalPruned: totalPruned,
+        footprintBytes: footprintBeforeReclaimBytes,
+        targetBytes: targetSizeBytes,
+        reclaimableSlackBytes: reclaimableSlackBytes,
+        walPinned: walPinned
+    ) {
         guard let dbSizeBeforePrune = currentFootprint("before incremental vacuum") else {
             return
         }
@@ -6674,6 +6774,11 @@ func runAdaptiveRollupSweep(
         }
         if reclaimed > 0 {
             logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) bytes → \(dbSizeAfterIncremental) bytes")
+        } else if hasReclaimableSlack {
+            // Never let this be invisible again. The old code logged only on
+            // success, so a reclaim that was skipped and a reclaim that failed
+            // produced byte-identical logs: nothing at all.
+            logger.warning("Tier-rollup: incremental_vacuum reclaimed NOTHING while \(reclaimableSlackBytes) bytes of freelist slack were available (footprint \(dbSizeBeforePrune) bytes, target \(targetSizeBytes) bytes). The store cannot return space it already owns; ingestion may pause under a footprint limit that is mostly reclaimable slack.")
         }
 
         let vacuumHeadroom = fullVacuumHeadroom(dbPath: dbPath)

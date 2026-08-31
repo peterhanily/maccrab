@@ -400,6 +400,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Create the status bar item immediately — don't wait for window onAppear
         createStatusBarItem()
+        // ...and for the same reason, start the notification channel here too.
+        // The status item stopped waiting for window onAppear in v1.4.3; the
+        // alert channel did not, and stayed silent on any windowless launch.
+        startNotificationChannel()
         // v1.18: forensic-scan retention. The "Scan retention" setting
         // (forensics.retentionDays) promised cleanup "the next time the
         // dashboard opens", but only the manual "Run cleanup now" button was
@@ -497,26 +501,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {
-        self.appState = appState
-        if let updater { self.updater = updater }
-        // v1.21.4: `AlertNotifier` is the SOLE per-alert surface owner. It posts
-        // the OS banner when it can and falls back to the in-app popover (below)
-        // only when it can't (auth denied/undetermined). AppState no longer
-        // fires the popover independently — that second, uncoordinated trigger
-        // was the double-notification bug (banner AND bubble for the same
-        // critical). Surfacing is now uniformly governed by the notification
-        // severity floor (min_severity), not a hardcoded critical/high popover.
-        // v1.17 (issue #2): OS banners are now posted by the app via
-        // UNUserNotificationCenter (attributed to MacCrab, controllable
-        // in System Settings, and gone on uninstall) rather than the
-        // daemon's osascript → "System Events". Falls back to the in-app
-        // popover when notification authorization is denied/undetermined.
+    /// Build the OS-banner delivery channel and its process-lifetime timer.
+    ///
+    /// Idempotent, and deliberately independent of AppState and of any window:
+    /// MacCrab is `LSUIElement = true`, so a launch that never opens the
+    /// dashboard must still notify. Everything here needs only the AppDelegate
+    /// itself; the popover fallback that needs AppState is attached later by
+    /// `setupStatusBar`.
+    @MainActor func startNotificationChannel() {
+        guard alertNotifier == nil else { return }
         let notifier = AlertNotifier()
-        notifier.onFallback = { [weak self] alert in
-            guard let self, let vm = self.appState?.alertToViewModel(alert) else { return }
-            self.showAlertPopover(alert: vm)
-        }
         // Banner tap → bring the dashboard window forward THEN hand off to
         // V2 via the same bridge the in-app popover uses
         // (AlertPopoverView.onShowDashboard). showDashboard() first so the
@@ -532,16 +526,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.alertNotifier = notifier
         Task { await notifier.requestAuthorization() }
-        // Start the statusbar health poller. Uses a 5s cadence so the
-        // icon updates quickly after the first refresh() but doesn't
-        // fight the 10s AppState poll. Fires immediately on setup so a
-        // degraded cold-start state is visible without waiting. This is
-        // a process-lifetime timer (NOT scenePhase-gated), so it also
-        // drives the notifier's poll while the dashboard window is closed.
+        // 5s cadence: quick enough that a degraded cold start is visible
+        // without waiting, slow enough not to fight AppState's 10s poll. NOT
+        // scenePhase-gated — it drives the notifier while the window is closed.
         statusBarHealthTimer?.invalidate()
         statusBarHealthTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.updateStatusBarIcon()
             Task { await self?.alertNotifier?.tick() }
+        }
+    }
+
+    @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {
+        self.appState = appState
+        if let updater { self.updater = updater }
+        // v1.21.4: `AlertNotifier` is the SOLE per-alert surface owner. It posts
+        // the OS banner when it can and falls back to the in-app popover (below)
+        // only when it can't (auth denied/undetermined). AppState no longer
+        // fires the popover independently — that second, uncoordinated trigger
+        // was the double-notification bug (banner AND bubble for the same
+        // critical). Surfacing is now uniformly governed by the notification
+        // severity floor (min_severity), not a hardcoded critical/high popover.
+        // v1.17 (issue #2): OS banners are now posted by the app via
+        // UNUserNotificationCenter (attributed to MacCrab, controllable
+        // in System Settings, and gone on uninstall) rather than the
+        // daemon's osascript → "System Events". Falls back to the in-app
+        // popover when notification authorization is denied/undetermined.
+        // v1.21.6-rc.45: the notifier and its timer are NO LONGER built here.
+        // `startNotificationChannel()` owns them and runs from
+        // `applicationDidFinishLaunching`, so the delivery channel's lifetime
+        // matches the PROCESS, as AlertNotifier's own design comment claims.
+        // Building them here tied the only user-facing alert surface to a
+        // SwiftUI view's `.onAppear` in an `LSUIElement = true` app: until the
+        // operator opened the dashboard window there was no notifier and no
+        // timer, so no banner could ever be posted. Measured on an installed
+        // host: the persisted cursor sat frozen for six days while 2,091 alerts
+        // accrued, 380 of them at or above the configured floor.
+        //
+        // This call stays only so a window-first launch order still converges;
+        // it is idempotent.
+        startNotificationChannel()
+        // The in-app popover fallback is the one piece that genuinely needs
+        // AppState, so it attaches here, when the UI exists. Until then the
+        // banner path — the primary surface — already works.
+        alertNotifier?.onFallback = { [weak self] alert in
+            guard let self, let vm = self.appState?.alertToViewModel(alert) else { return }
+            self.showAlertPopover(alert: vm)
         }
         updateStatusBarIcon()
         // ClickFix clipboard bridge: process-lifetime (like the timer above), so

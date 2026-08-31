@@ -106,6 +106,14 @@ public actor TravelMode {
         ) == nil {
             Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
                 .error("Failed to load travel mode firewall rules: trusted pfctl could not be launched")
+            return
+        }
+        // v1.21.6-rc.45: `pfctl -f` exits 0 even when PF is DISABLED, so
+        // loading the anchor is not evidence that travel-mode rules apply.
+        let pf = PFEnforcement.probe(anchorName: "com.maccrab.travel")
+        if !pf.enforcing {
+            Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
+                .warning("Travel mode firewall rules loaded but NOT enforcing — \(pf.reason, privacy: .public). Network restrictions are not in effect.")
         }
     }
 

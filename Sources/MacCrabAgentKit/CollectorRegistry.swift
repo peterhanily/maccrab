@@ -43,10 +43,18 @@ public actor CollectorRegistry {
         /// expected interval (or `lastTick` is nil because the
         /// collector is event-driven and quiet by default).
         public let healthy: Bool
+        /// v1.21.6-rc.45: WHY the collector is in this state, in operator
+        /// words. `healthy` alone cannot distinguish "running and quiet" from
+        /// "never started" — and an install shipped both
+        /// FSEventsCollector and UltrasonicMonitor registered, never started,
+        /// and rendered Healthy. A boolean that cannot express "I was never
+        /// asked to run" is not a health signal.
+        public let reason: String
 
         public init(name: String, lastTick: Date?, eventCount: UInt64,
                     errorCount: UInt64, lastError: String?,
-                    expectedIntervalSeconds: Int, healthy: Bool) {
+                    expectedIntervalSeconds: Int, healthy: Bool,
+                    reason: String = "") {
             self.name = name
             self.lastTick = lastTick
             self.eventCount = eventCount
@@ -54,6 +62,7 @@ public actor CollectorRegistry {
             self.lastError = lastError
             self.expectedIntervalSeconds = expectedIntervalSeconds
             self.healthy = healthy
+            self.reason = reason
         }
     }
 
@@ -95,6 +104,14 @@ public actor CollectorRegistry {
         /// continuous-traffic to get liveness coverage would ship false reds on
         /// every quiet machine.
         var streamEnded: Bool = false
+        /// v1.21.6-rc.45: `start()` was actually called for this collector.
+        /// Registration is not evidence of running: FSEventsCollector starts
+        /// only `if !isRoot` (the shipped sysext IS root) and UltrasonicMonitor
+        /// only under an opt-in flag, so both were registered and never started
+        /// on every release install — and reported Healthy throughout, because
+        /// a never-ticked event-driven collector was judged solely on
+        /// `errorCount == 0` and `recordError` had no call sites.
+        var started: Bool = false
     }
 
     private var entries: [String: InternalEntry] = [:]
@@ -123,11 +140,18 @@ public actor CollectorRegistry {
     /// startup before the collector's event loop runs. Idempotent —
     /// re-registering with the same name just refreshes the
     /// `expectedIntervalSeconds` and clears any pre-existing error.
+    /// - Parameter started: whether this collector is actually started for this
+    ///   boot. Defaults to `true` because most collectors start
+    ///   unconditionally; pass `false` at a registration whose start is GATED
+    ///   (platform check, opt-in flag, missing permission) and call
+    ///   `recordStarted` where the gate opens. A gated collector that reports
+    ///   `healthy` is worse than one that reports nothing.
     public func register(
         name: String,
         expectedIntervalSeconds: Int,
         eventDriven: Bool = false,
-        expectsContinuousTraffic: Bool = false
+        expectsContinuousTraffic: Bool = false,
+        started: Bool = true
     ) {
         entries[name] = InternalEntry(
             lastTick: nil,
@@ -137,11 +161,22 @@ public actor CollectorRegistry {
             expectedIntervalSeconds: max(1, expectedIntervalSeconds),
             eventDriven: eventDriven,
             expectsContinuousTraffic: expectsContinuousTraffic,
-            registeredAt: Date()
+            registeredAt: Date(),
+            started: started
         )
     }
 
     // MARK: - Tick / error / drop
+
+    /// Mark that this collector's `start()` was actually invoked. Callers that
+    /// register a collector but then skip starting it (platform gate, opt-in
+    /// flag, missing permission) must NOT call this — that is exactly the state
+    /// the operator needs to see.
+    public func recordStarted(name: String) {
+        guard var entry = entries[name] else { return }
+        entry.started = true
+        entries[name] = entry
+    }
 
     /// Record one event tick from a collector. Increments the event
     /// counter and refreshes `lastTick`.
@@ -239,26 +274,38 @@ public actor CollectorRegistry {
     public func snapshot(now: Date = Date()) -> [Status] {
         entries.map { (name, entry) in
             let healthy: Bool
+            var reason: String
             // A continuous-traffic collector is judged on LIVENESS (did anything
             // arrive recently), not just on whether an error was recorded — the
             // silence of a dead sensor is otherwise indistinguishable from health.
             // Grace window is 10× the expected interval, measured from the last
             // tick or, if it never ticked, from registration.
             let silenceBudget = Double(entry.expectedIntervalSeconds) * 10
-            if entry.streamEnded {
+            if !entry.started {
+                // Registered but never started. Previously indistinguishable
+                // from "event-driven and quiet", which is how two permanently
+                // dead sensors shipped green.
+                healthy = false
+                reason = "not started"
+            } else if entry.streamEnded {
                 // v1.21.6 (RES-11): terminal. The stream finished while the daemon
                 // was running, so no future tick is possible and no supervisor
                 // will restart it. Checked FIRST so a collector that ticked
                 // recently and then died cannot report healthy on the strength of
                 // its last tick.
                 healthy = false
+                reason = "stream ended"
             } else if let last = entry.lastTick {
                 let age = now.timeIntervalSince(last)
                 if entry.eventDriven {
                     healthy = entry.errorCount == 0
                         && (!entry.expectsContinuousTraffic || age < silenceBudget)
+                    reason = healthy
+                        ? "receiving events"
+                        : (entry.errorCount > 0 ? "errors reported" : "silent past grace window")
                 } else {
                     healthy = age < Double(entry.expectedIntervalSeconds) * 5
+                    reason = healthy ? "ticking" : "no tick within 5x its interval"
                 }
             } else if entry.eventDriven {
                 // No tick yet. A bursty event-driven collector (USB, browser
@@ -268,8 +315,15 @@ public actor CollectorRegistry {
                 healthy = entry.errorCount == 0
                     && (!entry.expectsContinuousTraffic
                         || now.timeIntervalSince(entry.registeredAt) < silenceBudget)
+                // Say plainly that this is an absence of evidence, not evidence
+                // of health. The dashboard can then show "started, no events
+                // yet" instead of a green check.
+                reason = healthy
+                    ? "started, no events yet"
+                    : (entry.errorCount > 0 ? "errors reported" : "no events past grace window")
             } else {
                 healthy = false   // polling collector, no tick yet — pending
+                reason = "started, awaiting first tick"
             }
             return Status(
                 name: name,
@@ -278,7 +332,8 @@ public actor CollectorRegistry {
                 errorCount: entry.errorCount,
                 lastError: entry.lastError,
                 expectedIntervalSeconds: entry.expectedIntervalSeconds,
-                healthy: healthy
+                healthy: healthy,
+                reason: reason
             )
         }
         .sorted { $0.name < $1.name }

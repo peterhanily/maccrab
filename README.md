@@ -542,7 +542,7 @@ Rules can trigger configurable response actions ranging from passive to active:
 | `kill` | Terminate the process that triggered the alert |
 | `quarantine` | Move the triggering file to a quarantine vault |
 | `script` | Run a custom shell script with alert context as environment variables |
-| `blockNetwork` | Block the destination IP via a PF (packet-filter) anchor rule (requires the privileged engine / root) |
+| `blockNetwork` | Writes the destination IP into MacCrab's PF (packet-filter) anchor (requires the privileged engine / root). **Not enforcing by default** — macOS evaluates that anchor only when PF is enabled and the anchor is referenced from `/etc/pf.conf`. MacCrab configures neither, and reports the action as not in effect when it is not. See [PREVENTION_RESEARCH.md](PREVENTION_RESEARCH.md#macCrab-current-usage). |
 | `escalateNotification` | Send a high-priority macOS notification with the alert's action details |
 
 </details>

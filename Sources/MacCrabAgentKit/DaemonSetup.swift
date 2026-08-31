@@ -1567,12 +1567,22 @@ enum DaemonSetup {
         await collectorRegistry.register(
             name: "DNSCollector", expectedIntervalSeconds: 30,
             eventDriven: true, expectsContinuousTraffic: true)
-        await collectorRegistry.register(name: "FSEventsCollector", expectedIntervalSeconds: 30, eventDriven: true)
+        // FSEvents is the NON-ROOT fallback for ES; the shipped sysext is root, so
+        // it is registered-but-never-started on every release install. It
+        // reported Healthy there for the life of the feature.
+        await collectorRegistry.register(
+            name: "FSEventsCollector", expectedIntervalSeconds: 30,
+            eventDriven: true, started: false)
         await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: 10, eventDriven: true)
         await collectorRegistry.register(name: "ClipboardMonitor", expectedIntervalSeconds: 3, eventDriven: true)
-        await collectorRegistry.register(name: "UltrasonicMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        // Ultrasonic requires microphone access and is opt-in; its consumer task
+        // is started unconditionally but the monitor behind it is not, so it
+        // must not claim health until the opt-in gate actually opens.
+        await collectorRegistry.register(
+            name: "UltrasonicMonitor", expectedIntervalSeconds: 60,
+            eventDriven: true, started: false)
         await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: true)
@@ -1677,6 +1687,7 @@ enum DaemonSetup {
         let ultrasonicMonitor = UltrasonicMonitor(pollInterval: config.ultrasonicPollInterval)
         if ultrasonicEnabled {
             await ultrasonicMonitor.start()
+            await collectorRegistry.recordStarted(name: "UltrasonicMonitor")
             print("Ultrasonic attack monitor active (DolphinAttack, NUIT, SurfingAttack)")
         } else {
             print("Ultrasonic attack monitor: disabled (set MACCRAB_ULTRASONIC=1 to enable)")
@@ -2139,6 +2150,7 @@ enum DaemonSetup {
         let fsEventsCollector = FSEventsCollector()
         if !isRoot {
             await fsEventsCollector.start()
+            await collectorRegistry.recordStarted(name: "FSEventsCollector")
             print("FSEvents file monitor active (non-root fallback for ES)")
         }
 

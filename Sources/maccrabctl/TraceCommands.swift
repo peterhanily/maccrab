@@ -65,6 +65,42 @@ extension MacCrabCtl {
             print("(Trace materialization runs in the daemon — start it via the system extension, or build a synthetic trace via the Swift API.)")
             return nil
         }
+        // v1.21.6-rc.45: resolve the read key BEFORE opening.
+        //
+        // This used to open with no `encryption:` argument at all, and the
+        // parameter defaults to nil. Every entity and edge row in a shipped
+        // store is an `ENC2:` envelope, so `decodeEntityRow` threw
+        // "encrypted value unavailable without a read key" for anything that
+        // decoded one — killing `trace graph`, `trace from-agent`,
+        // `trace from-process-key` and, critically, `trace export`. Export is
+        // the ONLY producer of `.maccrabtrace` bundles and the only point at
+        // which the signed, unified-log-anchored chain head is emitted, so the
+        // entire tamper-evidence story was unreachable from the shipped CLI.
+        // Measured on an installed host: 21,805 traces, every one
+        // `evidence_bundle_status = not_created`, and zero signed chain heads.
+        //
+        // Mirrors the dashboard's resolution (V2LiveDataProvider): the
+        // root-owned store is read through the daemon's authenticated
+        // per-uid key envelope; a dev/user-home store uses the local key.
+        let directory = maccrabDataDir()
+        let encryption: DatabaseEncryption?
+        if directory.hasPrefix("/Library/Application Support/MacCrab") {
+            guard let resolved = await TraceDashboardKeyExchange.resolveEncryption(
+                supportDir: directory,
+                requester: "maccrabctl"
+            ) else {
+                // Fail loudly and specifically. Opening keyless "worked" and
+                // then failed on every query with an opaque decode error, which
+                // read as store corruption rather than a missing key.
+                print("Cannot read tracegraph.db: no trace read key for uid \(getuid()).")
+                print("Asked the engine for one via \(directory)/inbox and it did not answer within 10s.")
+                print("(The engine seals the key to this process. Check it is running: pgrep -x com.maccrab.agent)")
+                return nil
+            }
+            encryption = resolved
+        } else {
+            encryption = DatabaseEncryption(enabled: true)
+        }
         do {
             // Every caller of openStore() is a query/export surface.  A
             // read-write handle here can pin the daemon's WAL and obstruct
@@ -72,6 +108,7 @@ extension MacCrabCtl {
             // the live graph through this helper.
             return try await SQLiteCausalGraphStore(
                 databasePath: path,
+                encryption: encryption,
                 forceReadOnly: true
             )
         } catch {

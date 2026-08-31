@@ -24,6 +24,10 @@ public actor NetworkBlocker {
     /// Feed-driven repopulation now goes through `refreshFromFeed`.
     private var operatorDisabled: Bool = false
 
+    /// Cached result of the last enforcement probe, so `stats()` on the
+    /// heartbeat path does not shell out to pfctl every tick.
+    private var lastEnforcement: PFEnforcement.Status?
+
     public init() {}
 
     /// Drop IPs that must never be blocked — loopback, RFC1918/link-local, the
@@ -58,7 +62,16 @@ public actor NetworkBlocker {
         isEnabled = true
         writeAnchorFile()
         reloadPF()
-        logger.info("Network blocker enabled: \(self.blockedIPs.count) IPs blocked")
+        // v1.21.6-rc.45: do not claim a block that is not happening. This used
+        // to log "Network blocker enabled: N IPs blocked" unconditionally,
+        // because `pfctl -f` exits 0 even when PF is disabled.
+        let pf = PFEnforcement.probe(anchorName: anchorName)
+        lastEnforcement = pf
+        if pf.enforcing {
+            logger.info("Network blocker enforcing: \(self.blockedIPs.count) IPs blocked")
+        } else {
+            logger.warning("Network blocker CONFIGURED with \(self.blockedIPs.count) IPs but NOT enforcing — \(pf.reason, privacy: .public). No traffic is being blocked.")
+        }
     }
 
     /// Feed-driven repopulation, for the threat-intel refresh callback ONLY.
@@ -114,8 +127,20 @@ public actor NetworkBlocker {
         logger.info("Network blocker disabled")
     }
 
-    public func stats() -> (enabled: Bool, blockedCount: Int) {
-        (isEnabled, blockedIPs.count)
+    /// `enabled` is OPERATOR INTENT (the module is switched on). It is NOT a
+    /// claim that packets are being dropped — read `enforcing` for that. The
+    /// two were conflated until v1.21.6-rc.45, which is how the product
+    /// reported blocking on a host where PF was disabled.
+    public func stats() -> (enabled: Bool, blockedCount: Int, enforcing: Bool, reason: String) {
+        let pf = lastEnforcement ?? PFEnforcement.probe(anchorName: anchorName)
+        return (isEnabled, blockedIPs.count, isEnabled && pf.enforcing, pf.reason)
+    }
+
+    /// Live enforcement truth for this anchor.
+    public func enforcement() -> PFEnforcement.Status {
+        let pf = PFEnforcement.probe(anchorName: anchorName)
+        lastEnforcement = pf
+        return pf
     }
 
     /// Verify that `path` is NOT a symlink. Prevents symlink attacks where a

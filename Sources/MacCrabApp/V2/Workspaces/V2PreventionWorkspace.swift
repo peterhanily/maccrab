@@ -208,7 +208,7 @@ struct V2PreventionWorkspace: View {
                 Divider()
                 moduleRow(title: String(localized: "prevention.module.networkBlocker", defaultValue: "Network Blocker"),
                           key: "network_blocker", module: p.networkBlocker,
-                          detail: String(localized: "prevention.module.networkBlocker.detail", defaultValue: "PF-blocks known-malicious IPs. Loopback / RFC1918 / the default gateway are never blocked."))
+                          detail: String(localized: "prevention.module.networkBlocker.detail", defaultValue: "Writes known-malicious IPs into the com.maccrab PF anchor. NOT enforcing on its own: macOS evaluates that anchor only when PF is enabled and the anchor is referenced from /etc/pf.conf, neither of which MacCrab configures. Loopback / RFC1918 / the default gateway are never listed."))
                 Divider()
                 moduleRow(title: String(localized: "prevention.module.persistenceGuard", defaultValue: "Persistence Guard"),
                           key: "persistence_guard", module: p.persistenceGuard,

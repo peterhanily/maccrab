@@ -432,8 +432,31 @@ public final class EventPipelineLiveMemoryBudget: @unchecked Sendable {
             lock.unlock()
             return nil
         }
+        // v1.21.6-rc.45: the reserve gate applies to RELABELING, not to a
+        // same-owner divide.
+        //
+        // `split` moves `bytes` from `source.owner` to `owner`. When those
+        // differ it is a relabel, and relabeling into an owner whose ceiling
+        // global usage already exceeds would consume that owner's reserve —
+        // the protection `growthHonorsForwardProgressReserve` pins, and it
+        // stays. When they are the SAME owner, `bytesByOwner` is provably
+        // unchanged for every owner (the decrement and increment below cancel),
+        // `currentBytes` is unchanged, and no reserve can be consumed. Gating
+        // that case is a check against growth an operation cannot cause.
+        //
+        // The sole production caller — HeavyEnrichmentPlane.terminalize, carving
+        // a terminal marker out of a `.heavyResult` subscriber lease into
+        // `.heavyResult` — is exactly the same-owner case, and it force-unwrapped
+        // the result. Because `maximumAggregateBytes(.heavyResult)` is
+        // `maximumBytes - forwardProgressReserveBytes` and the clause compared
+        // GLOBAL `currentBytes` against it, every heavy-result split failed once
+        // total pipeline usage crossed the forward-progress line — which is
+        // precisely when operations time out and that path runs. Result: 16
+        // identical SIGTRAPs on installed hosts between 2026-08-23 and
+        // 2026-08-30, across rc.43 and rc.44.
+        let relabels = owner != source.owner
         if bytes > maximumIndividualRequestBytes(for: owner)
-            || currentBytes > maximumAggregateBytes(for: owner) {
+            || (relabels && currentBytes > maximumAggregateBytes(for: owner)) {
             increment(&nonblockingRejectionsTotal)
             lock.unlock()
             return nil

@@ -286,6 +286,14 @@ public enum ManualResponse {
             }
             throw ActionError.failed("pfctl failed: \(errStr.prefix(200))")
         }
+        // v1.21.6-rc.45: this string is shown to the operator as the outcome of
+        // an action they just took, so it must not claim a block that is not
+        // happening. `pfctl -f` exits 0 with PF disabled.
+        let pf = PFEnforcement.probe(anchorName: dashboardAnchor)
+        guard pf.enforcing else {
+            logger.warning("PF rule for \(trimmed, privacy: .public) loaded into anchor \(self.dashboardAnchor, privacy: .public) but NOT enforcing — \(pf.reason, privacy: .public)")
+            return "Rule written for \(trimmed), but NOT in effect — \(pf.reason)"
+        }
         logger.notice("Blocked \(trimmed, privacy: .public) via PF anchor \(dashboardAnchor, privacy: .public)")
         return "Blocked \(trimmed) via PF (\(ips.count) total)"
     }

@@ -48,6 +48,10 @@ Sources/MacCrabCore/
   Detection/      Rule engine, sequence engine, baseline, campaign detector, behavior scoring, response actions
   Enrichment/     Process lineage, code signing, threat intel, CDHash, cert transparency, file hasher
   Prevention/     DNS sinkhole, network blocker, persistence guard, response-action safety validators
+                  NOTE: PF paths AUTHOR rules only — they do not enforce. MacCrab never runs
+                  `pfctl -E` and never registers its anchors in /etc/pf.conf, and `pfctl -f`
+                  exits 0 with PF disabled. Since v1.21.6 every PF path probes `PFEnforcement`
+                  and reports not-enforcing with a reason instead of claiming a block.
   Fleet/          Fleet telemetry client and data models
   AIGuard/        AI coding tool monitoring (AIToolRegistry, MCPAttributor, AgentLineageService)
   LLM/            LLM backends (Ollama, Claude, OpenAI, Mistral, Gemini), prompts, cache, sanitizer

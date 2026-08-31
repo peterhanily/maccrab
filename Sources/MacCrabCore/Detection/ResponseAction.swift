@@ -693,12 +693,17 @@ public actor ResponseEngine {
 
     /// Reload the PF anchor using pfctl. Requires root.
     private nonisolated func reloadPFAnchor() async -> Bool {
-        BoundedPrivilegedProcessRunner.run(
+        // v1.21.6-rc.45: `pfctl -f` exits 0 even when PF is DISABLED, so a
+        // successful load is not evidence of enforcement. Require the anchor to
+        // be reachable and PF to be running before reporting a block.
+        let loaded = BoundedPrivilegedProcessRunner.run(
             executable: "/sbin/pfctl",
             arguments: ["-a", "com.maccrab", "-f", pfAnchorPath],
             timeout: 10,
             maximumOutputBytes: nil
         )?.succeeded == true
+        guard loaded else { return false }
+        return PFEnforcement.probe(anchorName: "com.maccrab").enforcing
     }
 
     /// Remove expired network blocks and rewrite the anchor file.

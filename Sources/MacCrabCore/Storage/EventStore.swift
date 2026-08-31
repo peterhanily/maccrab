@@ -1062,6 +1062,24 @@ public actor EventStore {
             }
         }
 
+        /// v1.21.6-rc.45: drop every slot whose block id is below `minimum`.
+        ///
+        /// The sibling `remove(blockIDs:)` takes an explicit expired set, which
+        /// only the WRITER has (it created the tombstones). A read-only handle
+        /// learns about expiry as a raised `journal_min_block_id` in the
+        /// topology row and has no such list, so it needs the threshold form.
+        /// Same rebuild-in-place shape, same invariants.
+        mutating func removeBlocks(below minimum: Int64) {
+            guard !slots.isEmpty else { return }
+            let old = slots
+            slots = [PackedJournalEntry](repeating: .empty, count: old.count)
+            count = 0
+            for entry in old where entry.packedLocation != 0 {
+                guard entry.location.blockID >= minimum else { continue }
+                insertWithoutGrowing(entry)
+            }
+        }
+
         func location(for key: PackedJournalEntry) -> JournalLocation? {
             guard !slots.isEmpty else { return nil }
             var index = Int(key.hash & UInt64(slots.count - 1))
@@ -4993,6 +5011,51 @@ public actor EventStore {
     /// roster, duplicate UUID, or count mismatch is corruption, never a reason
     /// to silently omit evidence. The ceiling bounds hostile/corrupt startup
     /// allocation while covering a sustained 1,274/s fifteen-minute epoch.
+    // MARK: - Journal-index refresh cost (v1.21.6-rc.45)
+    //
+    // Measured on an installed host: with the dashboard window open, its 5s
+    // poll cost MORE than five seconds of CPU, so the app never left this path.
+    // All 33 microstackshots in the OS-generated cpu_resource.diag rooted at
+    // `exactEventsSnapshot`, descending into JSONDecoder -> Event.init(from:).
+    // One `fs_usage` sample caught 52,188 preads in 3s, touching 9,663 distinct
+    // pages at a 5.4x re-read factor to serve a request for the newest 200 rows.
+    //
+    // The cause is that the cheap append-only refresh in `rebuildJournalIndex`
+    // requires `minimumBlockID == journalIndexedMinimumBlockID`, so ANY journal
+    // expiry forces a full rebuild — and expiry is continuous under a 15-minute
+    // retention floor. Fixing that needs prefix eviction across the packed
+    // locator structures and is deliberately NOT attempted here.
+    //
+    // What IS fixed here is that the cost was completely invisible: no counter,
+    // no log, nothing. A rebuild that takes seconds must say so.
+
+    /// Full rebuilds are expected occasionally; one that takes longer than this
+    /// is a performance fault worth naming.
+    static let journalIndexSlowRefreshNanoseconds: UInt64 = 250_000_000
+    private var journalIndexRefreshesTotal: UInt64 = 0
+    private var journalIndexSlowRefreshesTotal: UInt64 = 0
+    /// Full rebuilds vs cheap append refreshes. This ratio IS the defect
+    /// signature: before rc.45 a reader on an expiring journal took the full
+    /// rebuild essentially every time, and nothing measured it.
+    private var journalIndexFullRebuildsTotal: UInt64 = 0
+    private var journalIndexAppendRefreshesTotal: UInt64 = 0
+    private var journalIndexLastRefreshNanoseconds: UInt64 = 0
+    private var journalIndexLastSlowLogUptimeNanoseconds: UInt64 = 0
+
+    /// Refresh cost, for the heartbeat and for tests.
+    public func journalIndexRefreshDiagnostics() -> (
+        refreshes: UInt64, slowRefreshes: UInt64, lastNanoseconds: UInt64,
+        fullRebuilds: UInt64, appendRefreshes: UInt64
+    ) {
+        (
+            journalIndexRefreshesTotal,
+            journalIndexSlowRefreshesTotal,
+            journalIndexLastRefreshNanoseconds,
+            journalIndexFullRebuildsTotal,
+            journalIndexAppendRefreshesTotal
+        )
+    }
+
     private func ensureJournalIndex() throws {
         // rc.43: any throw out of the rebuild INVALIDATES the in-memory index.
         // The chunked scan populates journalBaseLocations/journalDeltaLocations
@@ -5002,6 +5065,8 @@ public actor EventStore {
         // append-refresh onto that partial state and trip the duplicate-UUID
         // guard forever. Forcing journalIndexLoaded=false and clearing the
         // partial locators guarantees the next attempt is a clean full rebuild.
+        let refreshStartedAt = DispatchTime.now().uptimeNanoseconds
+        defer { recordJournalIndexRefresh(startedAt: refreshStartedAt) }
         do {
             try rebuildJournalIndex()
         } catch {
@@ -5022,6 +5087,76 @@ public actor EventStore {
     /// (e.g. a concurrent-append count mismatch). The retry must then perform a
     /// clean full rebuild rather than tripping the duplicate-UUID guard.
     var journalRebuildFailAfterPartialForTesting = false
+
+    private func recordJournalIndexRefresh(startedAt: UInt64) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsed = now >= startedAt ? now &- startedAt : 0
+        journalIndexRefreshesTotal &+= 1
+        journalIndexLastRefreshNanoseconds = elapsed
+        guard elapsed >= Self.journalIndexSlowRefreshNanoseconds else { return }
+        journalIndexSlowRefreshesTotal &+= 1
+        // Rate-limit to once per 30s: under the pathological case this fires on
+        // every read, and a log line per read would itself become the problem.
+        let sinceLastLog = now >= journalIndexLastSlowLogUptimeNanoseconds
+            ? now &- journalIndexLastSlowLogUptimeNanoseconds
+            : 0
+        guard journalIndexLastSlowLogUptimeNanoseconds == 0
+                || sinceLastLog >= 30_000_000_000 else { return }
+        journalIndexLastSlowLogUptimeNanoseconds = now
+        Logger(subsystem: "com.maccrab.storage", category: "event-store")
+            .notice(
+                "event journal index refresh took \(elapsed / 1_000_000, privacy: .public) ms (\(self.journalIndexSlowRefreshesTotal, privacy: .public) slow of \(self.journalIndexRefreshesTotal, privacy: .public) refreshes). A reader polling faster than this cannot keep up; expiry forces a full rebuild because the append-only path requires an unchanged minimum block id."
+            )
+    }
+
+    /// Evict every indexed entry below `minimum`, so a journal expiry no longer
+    /// forces a full index rebuild.
+    ///
+    /// v1.21.6-rc.45. The append-only refresh used to require
+    /// `minimumBlockID == journalIndexedMinimumBlockID`, so ANY expiry sent the
+    /// reader down the full-rebuild path — and under a 15-minute retention floor
+    /// expiry is continuous. Measured on an installed host: the dashboard's 5s
+    /// poll cost more than five seconds of CPU, 52,188 preads in 3 s, 9,663
+    /// distinct pages at a 5.4x re-read factor, to serve a request for the
+    /// newest 200 rows. Every one of the OS-captured microstackshots rooted in
+    /// this rebuild.
+    ///
+    /// The writer already had this compaction (in `expireJournalBlocks`, keyed
+    /// on the tombstones it created); a read-only handle could not reach it,
+    /// because it learns about expiry only as a raised `journal_min_block_id`.
+    /// This is the same eviction keyed on that threshold instead.
+    ///
+    /// `journalBaseLocations` is sorted by UUID, not by block id, so expired
+    /// entries are scattered rather than a contiguous prefix — hence a filter
+    /// rather than a range drop. `removeAll(where:)` preserves relative order,
+    /// so the UUID sort survives and the binary search stays valid.
+    ///
+    /// Returns false when the caller must fall back to a full rebuild.
+    private func compactJournalIndex(below minimum: Int64) -> Bool {
+        // An overflowed index only knows its surplus through a bloom filter,
+        // which cannot un-insert. Evicting under it would leave the filter
+        // claiming ids the index no longer holds, so refuse and rebuild.
+        guard !journalIndexOverflowed else { return false }
+
+        journalBaseLocations.removeAll { $0.location.blockID < minimum }
+        journalDeltaLocations.removeBlocks(below: minimum)
+        verifiedJournalSummaries.removeAll { $0.blockID < minimum }
+        journalExpiredBlockTombstones.removeAll { $0 < minimum }
+
+        // Recompute every derived value from the surviving set, exactly as the
+        // writer-side compaction does — never by subtracting an assumed delta.
+        journalIndexedLocationCount = journalBaseLocations.count
+            + journalDeltaLocations.count
+        journalVerifiedBlocks = verifiedJournalSummaries.count
+        journalIndexedBlockCount = Int64(verifiedJournalSummaries.count)
+        journalIndexedMinimumBlockID = verifiedJournalSummaries.first?.blockID
+        journalIndexedMaximumBlockID = verifiedJournalSummaries.last?.blockID
+
+        // These cache positions index into the array we just rewrote.
+        journalExpirySummaryCursor = 0
+        journalExpirySummaryCutoff = nil
+        return true
+    }
 
     private func rebuildJournalIndex() throws {
         guard try hasJournalSchema() else {
@@ -5081,11 +5216,41 @@ public actor EventStore {
            journalIndexTopologyGeneration == topologyGeneration {
             return
         }
-        let appendOnlyRefresh = journalIndexLoaded
+        // v1.21.6-rc.45: tolerate expiry.
+        //
+        // This used to require `minimumBlockID == journalIndexedMinimumBlockID`
+        // AND judge appendability by the NET `blockCount`. Both fail the moment
+        // the journal expires anything: the net count can be flat while the tail
+        // grew, and the minimum advances on every expiry. Under a 15-minute
+        // retention floor that meant a full rebuild on essentially every read.
+        //
+        // Now an advanced minimum is handled by evicting the expired entries
+        // (`compactJournalIndex(below:)`) and continuing with the append scan.
+        // Appendability is judged by the tail advancing, which is the property
+        // the scan actually depends on — `scanLowerBound` is
+        // `journalIndexedMaximumBlockID`. The reconciliation below still holds
+        // because the compaction recomputes `journalIndexedBlockCount` from the
+        // surviving blocks, so `blockCount - journalIndexedBlockCount` is
+        // exactly the number of appended blocks the scan will see.
+        var appendOnlyRefresh = journalIndexLoaded
             && journalIndexedBlockCount > 0
-            && blockCount > journalIndexedBlockCount
-            && minimumBlockID == journalIndexedMinimumBlockID
+            && !journalIndexOverflowed
+            && (minimumBlockID ?? 0) >= (journalIndexedMinimumBlockID ?? 0)
             && (maximumBlockID ?? 0) > (journalIndexedMaximumBlockID ?? 0)
+        if appendOnlyRefresh,
+           let minimumBlockID,
+           minimumBlockID > (journalIndexedMinimumBlockID ?? 0) {
+            // Expiry happened alongside the appends. Evict, then continue; if
+            // the index cannot be compacted safely, fall back to a full rebuild.
+            if !compactJournalIndex(below: minimumBlockID) {
+                appendOnlyRefresh = false
+            } else if journalIndexedBlockCount == 0 {
+                // Everything previously indexed expired — there is no surviving
+                // base to append onto, so rebuild rather than scan from a
+                // lower bound that no longer exists.
+                appendOnlyRefresh = false
+            }
+        }
         if !appendOnlyRefresh {
             journalBaseLocations.removeAll(keepingCapacity: false)
             journalDeltaLocations.removeAll()
@@ -5100,6 +5265,11 @@ public actor EventStore {
             journalVerifiedTerminalRevisions = 0
             journalIntegrityFailures = 0
             verifiedJournalSummaries.removeAll(keepingCapacity: false)
+        }
+        if appendOnlyRefresh {
+            journalIndexAppendRefreshesTotal &+= 1
+        } else {
+            journalIndexFullRebuildsTotal &+= 1
         }
         let maximumIndexEvents = Self.journalInMemoryLocationLimit
         if !appendOnlyRefresh {
@@ -18417,6 +18587,30 @@ public actor EventStore {
             )
             throw error
         }
+    }
+
+    /// Bytes the file owns but does not use — `freelist_count * page_size`.
+    ///
+    /// These pages are charged in full to `page_count`, to the on-disk file
+    /// size, and therefore to every family-footprint measurement the size-cap
+    /// sweep and storage admission take. `incrementalVacuum` returns them to
+    /// the OS with no scratch disk, so a large value here is reclaimable slack,
+    /// NOT consumed budget. The sweep consults this so the reclaim is driven by
+    /// what is actually reclaimable rather than by where one instantaneous
+    /// footprint sample happened to land.
+    ///
+    /// Returns 0 when the store is closed or is not in `auto_vacuum =
+    /// INCREMENTAL` mode — in either case the reclaim path cannot act on the
+    /// freelist, so reporting slack would only invite a no-op sweep.
+    public func reclaimableFreelistBytes() -> Int64 {
+        guard let db else { return 0 }
+        guard StoragePragmas.readAutoVacuumMode(db) == 2 else { return 0 }
+        let pages = Int64(StoragePragmas.readFreelistCount(db))
+        guard pages > 0, sqlitePageSizeBytes > 0 else { return 0 }
+        return SQLitePersistentStoreAdmission.saturatingMultiply(
+            pages,
+            by: sqlitePageSizeBytes
+        )
     }
 
     /// Read the file's `PRAGMA auto_vacuum` mode at runtime. Returns

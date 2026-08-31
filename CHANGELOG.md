@@ -3,6 +3,47 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.6] — 2026-08-31
+
+### Fixed
+- **Engine crash on the heavy-enrichment timeout path.** A budget split that
+  divides already-granted credit was gated as though it were new growth, and
+  keyed on a global gauge, so it was refused precisely when operations time out.
+  The caller force-unwrapped the refusal. Same-owner splits are now exempt from
+  the growth gate — cross-owner relabeling keeps the reserve protection — and a
+  refusal degrades instead of trapping.
+- **Event storage counted reclaimable free space against its own cap.** The
+  reclaim was gated on a footprint sampled immediately after the sweep's WAL
+  truncate, while storage admission judges the family at its peak. A store could
+  therefore sit just under target at the sample instant, skip the reclaim on
+  every sweep, and shed new events while holding hundreds of megabytes of
+  reusable space. The reclaim now also fires on reclaimable freelist slack.
+- **Reading recent events rebuilt the entire journal index whenever older events
+  expired.** The append-only refresh required an unchanged minimum block id, and
+  expiry is continuous under the retention floor. Expired entries are now evicted
+  and the append path continues.
+- **Alert banners never started on a windowless launch.** The notifier and its
+  timer were created from a window's appearance callback, in an app that
+  normally runs without a window. The delivery channel now starts with the
+  process. Backlog drains are bounded, and every tick reports its outcome.
+- **`maccrabctl trace export` could not read the causal-graph store.** It opened
+  without a read key, so every encrypted row failed to decode and no evidence
+  bundle could be produced by any surface. The CLI now performs its own key
+  handshake.
+- **Packet-filter blocks reported success without enforcing.** `pfctl -f`
+  succeeds even when the packet filter is disabled, and MacCrab neither enables
+  it nor registers its anchor. All five affected paths now probe enforcement and
+  report truthfully; the UI, heartbeat and documentation state the limitation.
+- **Collector health reported never-started collectors as healthy.** Health now
+  distinguishes "not started" from "started and quiet", and every status carries
+  a reason.
+
+### Added
+- Journal-index refresh telemetry: full-rebuild and append-refresh counters, a
+  named slow-refresh threshold, and a rate-limited log when a refresh is slow.
+- `heartbeat_rich` publishes network-blocker enforcement state and reason,
+  per-collector health reasons, and heavy-enrichment lease-refusal counts.
+
 ## [1.21.6-rc.17] — 2026-08-13
 
 ### Installed-host qualification correction

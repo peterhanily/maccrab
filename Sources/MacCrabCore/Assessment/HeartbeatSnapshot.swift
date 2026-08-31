@@ -409,10 +409,14 @@ public struct HeartbeatSnapshot: Codable, Sendable, Equatable {
         public let eventCount: Int?
         public let errorCount: Int?
         public let lastError: String?
+        /// v1.21.6-rc.45: why the collector is in this state, in operator
+        /// words. Optional so older heartbeats still decode.
+        public let reason: String?
 
         private enum CodingKeys: String, CodingKey {
             case name
             case healthy
+            case reason
             case lastTick = "last_tick_unix"
             case eventCount = "event_count"
             case errorCount = "error_count"

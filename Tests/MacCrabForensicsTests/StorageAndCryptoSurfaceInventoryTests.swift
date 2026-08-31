@@ -112,6 +112,21 @@ struct StorageAndCryptoSurfaceInventoryTests {
             "MacCrabApp/AppState.swift",
             "MacCrabApp/V2/Data/V2LiveDataProvider.swift",
             "MacCrabCore/Storage/TraceDashboardKeyExchange.swift",
+            // v1.21.6-rc.45: maccrabctl gained a read key so `trace export`
+            // could work at all — before this it opened tracegraph.db with no
+            // encryption and every ENC2 row failed to decode, which made
+            // evidence bundles impossible from EVERY surface (the dashboard's
+            // Export button shells out to this command).
+            //
+            // Key policy checked against this test's contract: for the
+            // root-owned store the CLI does NOT construct a key — it runs the
+            // inbox handshake and unwraps a daemon-sealed envelope addressed to
+            // its own per-process ephemeral. The constructor below is reached
+            // only for a USER-OWNED dev store, and is the same
+            // `DatabaseEncryption(enabled: true)` local-key path
+            // V2LiveDataProvider uses for that case, so cross-process key
+            // identity is unchanged.
+            "maccrabctl/TraceCommands.swift",
         ],
                 "a DatabaseEncryption constructor was added; verify persistent-key policy and cross-process key identity")
     }
