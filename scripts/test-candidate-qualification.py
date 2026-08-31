@@ -1527,6 +1527,120 @@ class CandidateQualificationTests(unittest.TestCase):
                 triggered_after_unix=100.0,
             )
 
+    def test_multiple_detection_tiers_do_not_fail_the_causal_proof(self) -> None:
+        # rc.45: ONE trigger legitimately produces SEVERAL alerts. This used to
+        # `fail("unique qualification executable produced ambiguous duplicate
+        # alerts")` on more than one row, which rejects the product for
+        # detecting well. Observed on an installed host 2026-08-31 — one exec of
+        # the qualification executable, five alerts in the same second across
+        # five detection tiers (targeted rule, second rule, baseline anomaly,
+        # behaviour composite, campaign correlation). The 2026-08-23 run
+        # produced four; an earlier one produced a single alert, which is the
+        # only reason this check ever passed.
+        #
+        # Empty investigation JSON returns before observation validation, which
+        # isolates exactly the behaviour under test: multiplicity is accepted
+        # and the bound identity is deterministic.
+        database = (self.root / "multi-alerts.db").resolve()
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE alerts (id TEXT, timestamp REAL, rule_id TEXT, "
+            "severity TEXT, process_path TEXT, llm_investigation_json TEXT)"
+        )
+        exact_path, _ = qualification.workload_paths("e" * 32)
+        connection.executemany(
+            "INSERT INTO alerts VALUES (?1,?2,?3,?4,?5,?6)",
+            [
+                (
+                    "11111111-1111-4111-8111-111111111111", 200.0,
+                    "d1a2b3c4-0042", "critical", exact_path, "",
+                ),
+                (
+                    "22222222-2222-4222-8222-222222222222", 200.0,
+                    "baseline-anomaly", "medium", exact_path, "",
+                ),
+                (
+                    "33333333-3333-4333-8333-333333333333", 200.0,
+                    "maccrab.campaign.coordinated_attack", "high", exact_path, "",
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        rows, _ = qualification.readonly_alert_rows_for_process(
+            database_path=database, process_path=exact_path,
+            triggered_after_unix=100.0,
+        )
+        self.assertEqual(len(rows), 3, "fixture must present the multi-tier case")
+
+        proof, alert_id = qualification.causal_alert_proof_if_ready(
+            phase="fixture",
+            database_path=database,
+            process_path=exact_path,
+            trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
+            telemetry_before={},
+            observation={},
+            stable_alert_id=None,
+        )
+        # No investigation yet, so no proof — but crucially, no ambiguity abort.
+        self.assertIsNone(proof)
+        self.assertEqual(alert_id, "11111111-1111-4111-8111-111111111111")
+
+        # The pin must survive across polls while other tiers are present.
+        _, pinned_id = qualification.causal_alert_proof_if_ready(
+            phase="fixture",
+            database_path=database,
+            process_path=exact_path,
+            trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
+            telemetry_before={},
+            observation={},
+            stable_alert_id="22222222-2222-4222-8222-222222222222",
+        )
+        self.assertEqual(
+            pinned_id, "22222222-2222-4222-8222-222222222222",
+            "a pinned alert must stay bound even when it is not the first row",
+        )
+
+    def test_causal_proof_records_every_tier_that_fired(self) -> None:
+        # The uniqueness check discarded the fact that several tiers caught the
+        # trigger. That is evidence, not noise: keep it in the proof.
+        source = inspect.getsource(qualification.causal_alert_proof_if_ready)
+        self.assertIn('"observed_alerts"', source)
+        self.assertNotIn("ambiguous duplicate", source)
+
+    def test_causal_proof_rejects_a_vanished_pinned_alert(self) -> None:
+        # Loosening the uniqueness check must not loosen identity stability: a
+        # pinned alert that disappears mid-run is still a hard failure.
+        database = (self.root / "vanished-alert.db").resolve()
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE alerts (id TEXT, timestamp REAL, rule_id TEXT, "
+            "severity TEXT, process_path TEXT, llm_investigation_json TEXT)"
+        )
+        exact_path, _ = qualification.workload_paths("f" * 32)
+        connection.execute(
+            "INSERT INTO alerts VALUES (?1,?2,?3,?4,?5,?6)",
+            (
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 300.0,
+                "fixture.rule", "high", exact_path, '{"summary": "fixture"}',
+            ),
+        )
+        connection.commit()
+        connection.close()
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "identity disappeared"
+        ):
+            qualification.causal_alert_proof_if_ready(
+                phase="fixture",
+                database_path=database,
+                process_path=exact_path,
+                trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
+                telemetry_before={},
+                observation=self.runtime["recorder_observations"][0],
+                stable_alert_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+
     def test_tracegraph_physical_suppression_is_conserving_not_loss(self) -> None:
         report = copy.deepcopy(self.runtime)
         for index, observation in enumerate(report["recorder_observations"]):

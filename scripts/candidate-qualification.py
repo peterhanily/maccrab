@@ -6303,16 +6303,38 @@ def causal_alert_proof_if_ready(
         database_path=database_path, process_path=process_path,
         triggered_after_unix=trigger_started_at.timestamp(),
     )
-    if len(rows) > 1:
-        fail("unique qualification executable produced ambiguous duplicate alerts")
     if not rows:
         return None, stable_alert_id
-    row = rows[0]
+    # rc.45: one trigger legitimately produces SEVERAL alerts.
+    #
+    # This required exactly one row and failed the whole run on more. That
+    # assumption only ever held by luck: the qualification executable is
+    # deliberately suspicious, so it can trip any of the five detection tiers,
+    # and which ones fire depends on the host's accumulated history. Observed
+    # 2026-08-31 on an installed host — ONE exec, five alerts in the same
+    # second: a targeted rule (critical), a second rule (low),
+    # `baseline-anomaly`, `maccrab.behavior.composite`, and
+    # `maccrab.campaign.coordinated_attack`. The 2026-08-23 run produced four
+    # (no campaign); an earlier one produced a single alert, which is the only
+    # reason this check ever passed.
+    #
+    # Failing there rejects the product for detecting well, which is the
+    # opposite of what this gate is for. Every row is already constrained to the
+    # exact per-run executable path by the query, so multiplicity is richness,
+    # not ambiguity: bind ONE alert for the causal proof and record them all.
+    if stable_alert_id is not None:
+        pinned = next(
+            (row for row in rows if row.get("id") == stable_alert_id), None
+        )
+        if pinned is None:
+            fail("causal alert identity disappeared while awaiting investigation")
+        row = pinned
+    else:
+        # Deterministic: the query orders by timestamp ASC, id ASC.
+        row = rows[0]
     alert_id = string_value(row.get("id"), "causal alert id")
     if not UUID_RE.fullmatch(alert_id):
         fail("causal alert id is not a UUID")
-    if stable_alert_id is not None and alert_id != stable_alert_id:
-        fail("causal alert identity changed while awaiting investigation")
     if row.get("process_path") != process_path:
         fail("causal alert query returned a different process path")
     investigation = row.get("llm_investigation_json")
@@ -6334,6 +6356,21 @@ def causal_alert_proof_if_ready(
             "rule_id": string_value(row.get("rule_id"), "causal alert rule id"),
             "severity": string_value(row.get("severity"), "causal alert severity"),
         },
+        # Every alert the one trigger produced. The bound alert above carries
+        # the causal proof; this records how many detection tiers actually
+        # caught it, which the previous uniqueness check discarded.
+        "observed_alerts": [
+            {
+                "id": string_value(other.get("id"), "observed alert id"),
+                "rule_id": string_value(
+                    other.get("rule_id"), "observed alert rule id"
+                ),
+                "severity": string_value(
+                    other.get("severity"), "observed alert severity"
+                ),
+            }
+            for other in rows
+        ],
         "investigation_json": investigation,
         "investigation_sha256": sha256_bytes(investigation.encode("utf-8")),
         "telemetry_before": copy.deepcopy(

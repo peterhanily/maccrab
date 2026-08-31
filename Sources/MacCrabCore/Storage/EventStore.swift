@@ -5020,14 +5020,16 @@ public actor EventStore {
     // One `fs_usage` sample caught 52,188 preads in 3s, touching 9,663 distinct
     // pages at a 5.4x re-read factor to serve a request for the newest 200 rows.
     //
-    // The cause is that the cheap append-only refresh in `rebuildJournalIndex`
-    // requires `minimumBlockID == journalIndexedMinimumBlockID`, so ANY journal
-    // expiry forces a full rebuild — and expiry is continuous under a 15-minute
-    // retention floor. Fixing that needs prefix eviction across the packed
-    // locator structures and is deliberately NOT attempted here.
+    // The cause was that the cheap append-only refresh in `rebuildJournalIndex`
+    // required `minimumBlockID == journalIndexedMinimumBlockID`, so ANY journal
+    // expiry forced a full rebuild — and expiry is continuous under a 15-minute
+    // retention floor. `compactJournalIndex(below:)` now evicts the expired
+    // entries and the append scan continues.
     //
-    // What IS fixed here is that the cost was completely invisible: no counter,
-    // no log, nothing. A rebuild that takes seconds must say so.
+    // This telemetry stays because the cost was previously invisible — no
+    // counter, no log, nothing — and because the rebuild-to-append RATIO is the
+    // signature of the defect recurring. A rebuild that takes seconds must say
+    // so, and it must report which path it took rather than assert a cause.
 
     /// Full rebuilds are expected occasionally; one that takes longer than this
     /// is a performance fault worth naming.
@@ -5105,7 +5107,7 @@ public actor EventStore {
         journalIndexLastSlowLogUptimeNanoseconds = now
         Logger(subsystem: "com.maccrab.storage", category: "event-store")
             .notice(
-                "event journal index refresh took \(elapsed / 1_000_000, privacy: .public) ms (\(self.journalIndexSlowRefreshesTotal, privacy: .public) slow of \(self.journalIndexRefreshesTotal, privacy: .public) refreshes). A reader polling faster than this cannot keep up; expiry forces a full rebuild because the append-only path requires an unchanged minimum block id."
+                "event journal index refresh took \(elapsed / 1_000_000, privacy: .public) ms (\(self.journalIndexSlowRefreshesTotal, privacy: .public) slow of \(self.journalIndexRefreshesTotal, privacy: .public) refreshes; \(self.journalIndexFullRebuildsTotal, privacy: .public) full rebuilds, \(self.journalIndexAppendRefreshesTotal, privacy: .public) append refreshes). A reader polling faster than this cannot keep up. One slow refresh at startup is the initial build; rebuilds climbing WITH append refreshes flat means expiry is again forcing full rebuilds."
             )
     }
 
@@ -19245,9 +19247,21 @@ public actor EventStore {
             reserve
         )
         if required > cap {
+            // v1.21.6-rc.46: report every term the test actually used.
+            //
+            // This threw `reserveBytes: reserve`, omitting
+            // `estimatedTransactionBytes` — so the operator-visible message
+            // read "family footprint 266848656 plus 33554432 reserve exceeds
+            // 335544320 bytes", an arithmetic claim that is false on its face
+            // (286.5 MiB does not exceed 320 MiB; 33.5 MiB was spare). A
+            // refusal whose stated numbers do not justify it teaches the
+            // operator to distrust the message rather than the condition.
             throw SQLitePersistentStoreAdmissionError.footprintLimit(
                 footprintBytes: footprint,
-                reserveBytes: reserve,
+                reserveBytes: SQLitePersistentStoreAdmission.saturatingAdd(
+                    estimatedTransactionBytes,
+                    reserve
+                ),
                 maxFootprintBytes: cap
             )
         }
