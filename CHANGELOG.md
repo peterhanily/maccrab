@@ -50,7 +50,11 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `memoryLeaseUnavailable` is distinct from `busy`: that case exists because the
   per-event write path retries credit it is itself holding. A maintenance sweep
   holds none when its acquisition fails, and releases the maintenance exclusion
-  before waiting.
+  before waiting. The budget counts WAITING, not elapsed pass time, and its
+  consecutive half resets on every quantum that makes progress: anchoring it to
+  the pass's start spent it on the minutes a pass spends draining, so the pass
+  still abandoned on its first refusal. A cumulative bound keeps a pass that
+  alternates between progress and waiting inside the sweep's overhang.
 - **LLM backend startup decisions were unobtainable on release builds.** Every
   reason the subsystem enables or disables itself was `print()`, which a System
   Extension discards, so an operator whose configured backend failed to load had

@@ -30,16 +30,34 @@ public enum JournalExpiryTickDecision: Equatable, Sendable {
 /// `backpressureDeadline` and accounted by a published deferral counter, which
 /// is what that contract asks for; it is not an unbounded retry.
 public enum JournalExpiryBackpressurePolicy {
+    /// - Parameters:
+    ///   - consecutiveWaitSeconds: time spent waiting since the last quantum
+    ///     that made progress. Resets to zero whenever one succeeds.
+    ///   - cumulativeWaitSeconds: total time this pass has spent waiting.
+    ///
+    /// Two bounds, because one is not enough. The consecutive bound is the one
+    /// that decides whether the budget is still worth spending: a pass runs for
+    /// minutes draining quanta, so anchoring the budget to the pass's start
+    /// means that by the time backpressure first appears the budget is already
+    /// spent and the pass abandons on its first refusal -- the exact behaviour
+    /// this policy exists to remove. Measured on the reference host, that
+    /// anchoring produced 8 abandoned passes against a single recorded
+    /// deferral. The cumulative bound then keeps a pass that alternates between
+    /// progress and waiting from running unboundedly, so a pass still cannot
+    /// outlive the sweep's documented five-minute overhang.
     public static func decide(
         error: EventStoreError,
-        now: Date,
-        backpressureDeadline: Date
+        consecutiveWaitSeconds: TimeInterval,
+        cumulativeWaitSeconds: TimeInterval,
+        maximumConsecutiveWaitSeconds: TimeInterval,
+        maximumCumulativeWaitSeconds: TimeInterval
     ) -> JournalExpiryTickDecision {
         guard error.isTransientBackpressure else { return .abandonPass }
-        // Bounded: a permanently starved budget gives the cadence back instead
-        // of spinning, and can never push this cutoff past the sweep's
-        // documented overhang.
-        return now < backpressureDeadline ? .conserveAndRetry : .abandonPass
+        guard consecutiveWaitSeconds < maximumConsecutiveWaitSeconds,
+              cumulativeWaitSeconds < maximumCumulativeWaitSeconds else {
+            return .abandonPass
+        }
+        return .conserveAndRetry
     }
 }
 

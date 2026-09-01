@@ -1180,11 +1180,15 @@ enum DaemonTimers {
     /// small blocks. The timer immediately yields and continues bounded turns
     /// until the store itself proves no eligible block remains.
     static let journalExpiryMaximumBlocksPerQuantum = 64
-    /// How long one expiry tick may spend waiting out committed record
-    /// ownership before giving the cadence back. Well inside the sweep's
-    /// documented five-minute overhang, so conserving the tick cannot push a
-    /// cutoff past the window it was taken for.
-    static let journalExpiryLeaseBackpressureBudgetSeconds: TimeInterval = 30
+    /// How long a pass may wait out committed record ownership with no quantum
+    /// making progress before it gives the cadence back.
+    static let journalExpiryConsecutiveBackpressureBudgetSeconds: TimeInterval = 30
+    /// Total waiting one pass may accumulate across all of its quanta. Well
+    /// inside the sweep's documented five-minute overhang, so a pass that keeps
+    /// alternating between progress and backpressure still cannot carry its
+    /// cutoff outside the window it was taken for.
+    static let journalExpiryCumulativeBackpressureBudgetSeconds: TimeInterval = 120
+    static let journalExpiryBackpressureRetryMilliseconds = 250
 
     /// Progressively tighter retention windows for TraceGraph recovery, used
     /// only after the store proves the current cutoff has no eligible backlog
@@ -2249,8 +2253,12 @@ enum DaemonTimers {
                 var reportedLeaseBackpressure = false
                 var totalExpired = 0
                 var leaseDeferrals = 0
-                let leaseBackpressureDeadline = retainedThrough
-                    .addingTimeInterval(journalExpiryLeaseBackpressureBudgetSeconds)
+                // Consecutive waiting resets whenever a quantum makes progress;
+                // cumulative waiting never does. Anchoring either to the pass's
+                // start would spend the budget on the minutes the pass spends
+                // draining, leaving nothing for the refusal it exists to absorb.
+                var consecutiveWaitSeconds: TimeInterval = 0
+                var cumulativeWaitSeconds: TimeInterval = 0
                 while !Task.isCancelled {
                     var acquired = false
                     while !Task.isCancelled {
@@ -2302,21 +2310,37 @@ enum DaemonTimers {
                         // to consider 1,091 blocks to return 200 rows.
                         if JournalExpiryBackpressurePolicy.decide(
                             error: error,
-                            now: Date(),
-                            backpressureDeadline: leaseBackpressureDeadline
+                            consecutiveWaitSeconds: consecutiveWaitSeconds,
+                            cumulativeWaitSeconds: cumulativeWaitSeconds,
+                            maximumConsecutiveWaitSeconds:
+                                journalExpiryConsecutiveBackpressureBudgetSeconds,
+                            maximumCumulativeWaitSeconds:
+                                journalExpiryCumulativeBackpressureBudgetSeconds
                         ) == .conserveAndRetry {
                             leaseDeferrals += 1
                             if !reportedLeaseBackpressure {
                                 reportedLeaseBackpressure = true
                                 await state.eventStore
                                     .recordJournalExpiryLeaseDeferral()
-                                logger.info("Event journal expiry: bounded record ownership is committed; conserving this tick for prompt retry.")
+                                // notice, not info: macOS does not persist
+                                // info-level to disk, so an info here is as
+                                // unobtainable as the print() it replaced.
+                                logger.notice("Event journal expiry: bounded record ownership is committed; conserving this pass for prompt retry.")
                             }
                             do {
-                                try await Task.sleep(for: .milliseconds(250))
+                                try await Task.sleep(
+                                    for: .milliseconds(
+                                        journalExpiryBackpressureRetryMilliseconds
+                                    )
+                                )
                             } catch {
                                 return
                             }
+                            let waited = Double(
+                                journalExpiryBackpressureRetryMilliseconds
+                            ) / 1000.0
+                            consecutiveWaitSeconds += waited
+                            cumulativeWaitSeconds += waited
                             continue
                         }
                         await state.eventStore.recordJournalExpiryFailure()
@@ -2329,6 +2353,9 @@ enum DaemonTimers {
                         return
                     }
                     await state.eventStore.endSizeCapPrune()
+                    // Progress earns a fresh consecutive budget. Cumulative is
+                    // deliberately not reset, so the pass stays bounded overall.
+                    consecutiveWaitSeconds = 0
                     totalExpired += expired
                     guard expired > 0 else { break }
                     // Release the shared maintenance exclusion after every
@@ -2338,7 +2365,7 @@ enum DaemonTimers {
                     await Task.yield()
                 }
                 if totalExpired > 0, !Task.isCancelled {
-                    logger.info("Event journal expiry: aggregate-rolled and expired \(totalExpired, privacy: .public) authenticated event records across bounded quanta (lease deferrals \(leaseDeferrals, privacy: .public)).")
+                    logger.notice("Event journal expiry: aggregate-rolled and expired \(totalExpired, privacy: .public) authenticated event records across bounded quanta (lease deferrals \(leaseDeferrals, privacy: .public)).")
                 }
             }
         }
