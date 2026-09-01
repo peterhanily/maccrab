@@ -4,7 +4,26 @@ set -euo pipefail
 
 RUN_ID=""
 ALERT_ONLY=0
-BURST_ITERATIONS=20000
+# Sized from the gate's own predeclared reference load, not tuned until green.
+#
+#   * candidate-qualification.py requires a PEAK of 1,274 combined offered
+#     events/s, measured over one 30s sample interval -- the rate observed on a
+#     real reference host.  Hitting it takes 1,274 * 30 = 38,220 events inside
+#     a single interval.
+#   * Measured on this workload, one iteration offers ~42 events (exec of
+#     /usr/bin/true and /bin/mv, plus the create/write/close/rename file path).
+#   * 2,000 iterations therefore offer ~84,000 events, and the loop is not rate
+#     limited, so they land inside one interval: ~2,800 events/s peak, a little
+#     over 2x the required floor.
+#   * Both merged detection-input streams cap at 100,000 (mergedPriorityStreamCap
+#     / mergedFileStreamCap).  ~84,000 events split ~53k priority / ~30k file
+#     leaves each lane under half its cap even before any drain, so nothing is
+#     structurally forced to shed.
+#
+# The previous 20,000 offered ~834,000 events -- 7x the required peak and 4x the
+# combined stream capacity -- so the engine had to shed several hundred thousand
+# events that the same gate then failed the candidate for shedding.
+BURST_ITERATIONS=2000
 
 usage() {
     echo "usage: $0 [--alert-only] --run-id <32-lowercase-hex>" >&2

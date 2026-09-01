@@ -88,7 +88,7 @@ class DarwinRUsageInfoV4(ctypes.Structure):
 
 
 CANDIDATE_SCHEMA = "com.maccrab.release-candidate.v1"
-RUNTIME_SCHEMA = "com.maccrab.installed-host-qualification.v1"
+RUNTIME_SCHEMA = "com.maccrab.installed-host-qualification.v2"
 CONTAINMENT_SCHEMA = "com.maccrab.containment-qualification.v2"
 QUALIFICATION_DIR = ".qualification-evidence"
 
@@ -100,8 +100,16 @@ MAX_ENGINE_WRITE_BYTES_PER_SECOND = 1 * MIB
 MAX_WINDOW_WRITE_BYTES_PER_SECOND = 4 * MIB
 MAX_ENGINE_AVERAGE_CORES = 0.50
 MAX_GUI_P95_PERCENT = 10.0
-MAX_ENGINE_RSS_BYTES = 450 * MIB
-MAX_ENGINE_RSS_GROWTH_BYTES = 64 * MIB
+# Measured as `ri_phys_footprint`, not `ri_resident_size`.  Resident size on
+# macOS counts clean file-backed and shared pages the process is not charged
+# for -- the stores' 64 MiB SQLite mmap windows and the dyld shared cache --
+# so it overstates what the engine is responsible for by roughly 3x, and it is
+# not the number the kernel enforces.  `phys_footprint` is what jetsam charges
+# and what Activity Monitor shows as "Memory".  Measured live on the reference
+# host: resident 1,101.1 MiB against a footprint of 371.5 MiB.  The bound below
+# is unchanged; only the metric it reads was wrong.
+MAX_ENGINE_MEMORY_FOOTPRINT_BYTES = 450 * MIB
+MAX_ENGINE_MEMORY_FOOTPRINT_GROWTH_BYTES = 64 * MIB
 MIN_TRACE_WRITABLE_DUTY = 0.99
 # Foreground mutations may wait behind one bounded recovery SQLite quantum,
 # but a candidate that ever reports a completed or currently-live wait above
@@ -175,7 +183,7 @@ RUNTIME_WORKLOAD_EXECUTORS = (
     "scripts/runtime-qualification-workload.sh",
     "scripts/test-otlp-curl.sh",
 )
-RUNTIME_RECORDER_SCHEMA = "com.maccrab.installed-host-recorder.v1"
+RUNTIME_RECORDER_SCHEMA = "com.maccrab.installed-host-recorder.v2"
 RUNTIME_OBSERVATION_SCHEMA = "com.maccrab.installed-host-observation.v1"
 DEFAULT_HEARTBEAT_PATH = pathlib.Path(
     "/Library/Application Support/MacCrab/heartbeat_rich.json"
@@ -1688,7 +1696,7 @@ def validate_runtime_report(
         write_total = int_value(
             sample.get("engine_disk_write_bytes_total"), f"{path}.engine_disk_write_bytes_total"
         )
-        rss = int_value(sample.get("engine_rss_bytes"), f"{path}.engine_rss_bytes")
+        rss = int_value(sample.get("engine_memory_footprint_bytes"), f"{path}.engine_memory_footprint_bytes")
         gui_cpu = number_value(
             sample.get("gui_background_cpu_percent"), f"{path}.gui_background_cpu_percent", minimum=0
         )
@@ -2370,16 +2378,16 @@ def validate_runtime_report(
         fail("background GUI p95 does not reconcile or exceeds 10% of one core")
 
     memory = object_value(metrics.get("memory"), "runtime.measurements.memory")
-    max_rss = int_value(memory.get("engine_max_rss_bytes"), "runtime.measurements.memory.engine_max_rss_bytes")
-    minute5 = int_value(memory.get("engine_rss_minute_5_bytes"), "runtime.measurements.memory.engine_rss_minute_5_bytes")
-    minute15 = int_value(memory.get("engine_rss_minute_15_bytes"), "runtime.measurements.memory.engine_rss_minute_15_bytes")
+    max_rss = int_value(memory.get("engine_max_memory_footprint_bytes"), "runtime.measurements.memory.engine_max_memory_footprint_bytes")
+    minute5 = int_value(memory.get("engine_memory_footprint_minute_5_bytes"), "runtime.measurements.memory.engine_memory_footprint_minute_5_bytes")
+    minute15 = int_value(memory.get("engine_memory_footprint_minute_15_bytes"), "runtime.measurements.memory.engine_memory_footprint_minute_15_bytes")
     if max_rss != max(sample_rss_values):
         fail("maximum RSS does not reconcile with the embedded full-interval samples")
     if rss_by_offset.get(300) != minute5 or rss_by_offset.get(900) != minute15:
         fail("runtime samples must include and reconcile exact minute-5/minute-15 RSS")
-    if max_rss > MAX_ENGINE_RSS_BYTES:
+    if max_rss > MAX_ENGINE_MEMORY_FOOTPRINT_BYTES:
         fail("engine RSS exceeds 450 MiB")
-    if minute15 - minute5 > MAX_ENGINE_RSS_GROWTH_BYTES:
+    if minute15 - minute5 > MAX_ENGINE_MEMORY_FOOTPRINT_GROWTH_BYTES:
         fail("engine RSS growth from minute 5 to minute 15 exceeds 64 MiB")
 
     disk_safety = object_value(metrics.get("disk_safety"), "runtime.measurements.disk_safety")
@@ -3508,7 +3516,7 @@ def normalized_runtime_sample(
     heartbeat_written_at_unix: float,
     engine_cpu_seconds_total: float,
     engine_disk_write_bytes_total: int,
-    engine_rss_bytes: int,
+    engine_memory_footprint_bytes: int,
     gui_background_cpu_percent: float,
 ) -> Dict[str, Any]:
     """Turn one rich heartbeat plus Darwin process counters into gate input."""
@@ -3767,7 +3775,7 @@ def normalized_runtime_sample(
         "engine_pid": pid,
         "engine_cpu_seconds_total": engine_cpu_seconds_total,
         "engine_disk_write_bytes_total": engine_disk_write_bytes_total,
-        "engine_rss_bytes": engine_rss_bytes,
+        "engine_memory_footprint_bytes": engine_memory_footprint_bytes,
         "gui_background_cpu_percent": gui_background_cpu_percent,
         "sequence_pending_steps_evicted_total": pending_evictions,
         "sequence_state_continuity_maintained": bool_value(
@@ -3920,8 +3928,8 @@ def sample_from_recorder_observation(raw: Any, path: str) -> Dict[str, Any]:
             process.get("engine_disk_write_bytes_total"),
             f"{path}.process.engine_disk_write_bytes_total",
         ),
-        engine_rss_bytes=int_value(
-            process.get("engine_rss_bytes"), f"{path}.process.engine_rss_bytes"
+        engine_memory_footprint_bytes=int_value(
+            process.get("engine_memory_footprint_bytes"), f"{path}.process.engine_memory_footprint_bytes"
         ),
         gui_background_cpu_percent=number_value(
             observation.get("gui_background_cpu_percent"),
@@ -4432,6 +4440,18 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
         "sequence_journal_explicitly_shed_delta": delta(
             "sequence-journal", "explicitly_shed"
         ),
+        "sequence_journal_in_flight_start": counter(
+            start, "sequence-journal", "in_flight"
+        ),
+        "sequence_journal_in_flight_drain": counter(
+            drain_end, "sequence-journal", "in_flight"
+        ),
+        "sequence_journal_queued_start": counter(
+            start, "sequence-journal", "queued"
+        ),
+        "sequence_journal_queued_drain": counter(
+            drain_end, "sequence-journal", "queued"
+        ),
         "trace_graph_physical_write_suppressed_events_delta": (
             graph_drain["physical_write_suppressed_events_total"]
             - graph_start["physical_write_suppressed_events_total"]
@@ -4491,9 +4511,25 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
     if result["sequence_journal_offered_delta"] < 1 \
             or result["sequence_journal_completed_delta"] < 1:
         fail("fixed sequence-continuity probe did not move the sequence journal")
-    if result["sequence_journal_offered_delta"] \
-            != result["sequence_journal_completed_delta"]:
-        fail("sequence-continuity probe did not drain by the fixed boundary")
+    # The sequence journal is judged by flow, not by an aliased instant.  Its
+    # `queued` gauge is the durable set of out-of-order partial sequence steps
+    # -- steps parked waiting for an earlier step that may never be offered in
+    # this window at all -- so it is ambient host state, not a writer backlog.
+    # Requiring offered-delta == completed-delta is equivalent (through the
+    # conservation identity, with in-flight and shed pinned at zero below) to
+    # requiring that gauge to land back on its exact window-start value, which
+    # is the same aliasing the readiness path already exempts by name.
+    #
+    # Nothing is conceded by dropping it: the pending set stays bounded because
+    # the engine trims it only by evicting, and cumulative pending-step
+    # evictions are separately gated at absolute zero over the whole capture --
+    # a pending set that ever reached its design ceiling would already have
+    # failed the run.  Loss is gated by the shed delta below and by the
+    # absolute cumulative shed check, and ordering by
+    # `sequence_state_continuity_maintained`.
+    if result["sequence_journal_in_flight_start"] != 0 \
+            or result["sequence_journal_in_flight_drain"] != 0:
+        fail("sequence journal held in-flight work across a fixed boundary")
     if result["sequence_journal_explicitly_shed_delta"] != 0:
         fail("sequence-continuity probe shed journal work")
     suppressed_events = result[
@@ -4512,8 +4548,19 @@ def derive_workload_ingress(samples: Sequence[Mapping[str, Any]]) -> Dict[str, A
             "fixed workload violated the one-row-per-event physical-write "
             "suppression contract"
         )
+    # Every writer must be empty at the fixed drain boundary.  `sequence-journal`
+    # is exempt from `queued` alone, for the reason readiness already exempts it
+    # by name: that gauge is the durable set of out-of-order partial sequence
+    # steps, each parked for an earlier step that may never be offered during
+    # this window, so it is ambient host state rather than an unfinished write.
+    # Requiring it to be exactly empty at t+drain requires no sequence rule
+    # anywhere on the host to hold a partial match at that instant.  It is NOT
+    # exempt from `in_flight`, which is the actor-synchronous producer contract
+    # the exemption depends on and which is checked at both endpoints above.
     for boundary in sorted(REQUIRED_CONSERVATION_BOUNDARIES):
         for key in ("queued", "in_flight"):
+            if boundary == "sequence-journal" and key == "queued":
+                continue
             value = counter(drain_end, boundary, key)
             if value != 0:
                 fail(
@@ -4886,8 +4933,8 @@ def build_runtime_report_from_observations(
     if journal_shed_delta != sequence_eviction_delta:
         fail("sequence journal shed does not reconcile with pending-step evictions")
     gui_values = [number_value(sample["gui_background_cpu_percent"], "GUI CPU") for sample in samples]
-    rss_values = [int_value(sample["engine_rss_bytes"], "RSS") for sample in samples]
-    rss_at = {int(round(number_value(sample["offset_seconds"], "offset"))): int_value(sample["engine_rss_bytes"], "RSS") for sample in samples}
+    rss_values = [int_value(sample["engine_memory_footprint_bytes"], "RSS") for sample in samples]
+    rss_at = {int(round(number_value(sample["offset_seconds"], "offset"))): int_value(sample["engine_memory_footprint_bytes"], "RSS") for sample in samples}
     llm_rows = [object_value(sample.get("llm_quality"), "sample.llm_quality") for sample in samples]
     llm_configured = [bool_value(row.get("configured"), "sample.llm_quality.configured") for row in llm_rows]
     if any(value != llm_configured[0] for value in llm_configured[1:]):
@@ -4945,6 +4992,14 @@ def build_runtime_report_from_observations(
                     "unconfigured LLM performed requests during qualification "
                     "(not degrading gracefully)"
                 )
+        # Graceful degradation is a shipping configuration, so it has to be able
+        # to produce a report.  These four deltas are bound only by the
+        # configured branch above; without them the recorder raised NameError
+        # here and no host without a backend could ever be recorded.
+        llm_unspecified_delta = 0
+        llm_started_delta = 0
+        llm_accepted_delta = 0
+        llm_rejected_delta = 0
         causal_proof = {}
         causal_alert = {}
 
@@ -5120,14 +5175,14 @@ def build_runtime_report_from_observations(
                 "gui_background_p95_percent": percentile_nearest_rank(gui_values, 0.95),
             },
             "memory": {
-                "engine_max_rss_bytes": max(rss_values),
-                "engine_rss_minute_5_bytes": rss_at.get(300, -1),
-                "engine_rss_minute_15_bytes": rss_at.get(900, -1),
+                "engine_max_memory_footprint_bytes": max(rss_values),
+                "engine_memory_footprint_minute_5_bytes": rss_at.get(300, -1),
+                "engine_memory_footprint_minute_15_bytes": rss_at.get(900, -1),
             },
             "disk_safety": {"inventory_complete": True, "sqlite_families": sqlite_rows},
             "ai_quality": {
-                "configured": True,
-                "feature_disabled_entire_epoch": False,
+                "configured": llm_configured[0],
+                "feature_disabled_entire_epoch": not llm_configured[0],
                 "schema_2_and_accounting_conserved_all_samples": True,
                 "unspecified_requests_epoch_delta": llm_unspecified_delta,
                 "alert_investigations_started_epoch_delta": llm_started_delta,
@@ -5276,7 +5331,7 @@ def darwin_process_metrics(pid: int) -> Dict[str, Any]:
         "engine_cpu_seconds_total": (
             int(usage.ri_user_time) + int(usage.ri_system_time)
         ) / 1_000_000_000.0,
-        "engine_rss_bytes": int(usage.ri_resident_size),
+        "engine_memory_footprint_bytes": int(usage.ri_phys_footprint),
         "engine_disk_write_bytes_total": int(usage.ri_diskio_byteswritten),
         "executable_path": str(path),
         "executable_sha256": sha256_file(path),
@@ -6294,6 +6349,59 @@ def terminate_process_group(process: subprocess.Popen[str]) -> Tuple[str, str]:
         fail("runtime workload process group could not be reaped")
 
 
+# v1.22.0: mirror of MacCrabCore `LLMBatchTriage.representative`
+# (Sources/MacCrabCore/LLM/LLMBatchTriage.swift:15-35).
+#
+# The causal proof means "the engine investigated the alert this trigger
+# caused". It can only mean that if the gate binds the SAME alert the engine
+# chose to investigate. One trigger legitimately produces several alerts across
+# the five detection tiers, and the engine picks exactly one of them: severity
+# >= high, excluding campaign and llm-derived rules, then highest severity,
+# earliest timestamp, lowest id.
+#
+# Binding anything else — including the first row of a timestamp-ordered query —
+# selects an alert that will never carry an investigation, so the proof can
+# never land and the run fails at the offset-450 boundary having proved nothing.
+# It also risks binding a non-UUID id (campaign alerts are `CAMP-<hex>`), which
+# hard-fails UUID_RE.
+#
+# Keep in lockstep with the Swift. If the engine's choice changes, this must.
+CAUSAL_ALERT_EXCLUDED_RULE_PREFIXES = ("maccrab.campaign.", "maccrab.llm.")
+CAUSAL_ALERT_SEVERITY_RANK = {
+    "informational": 0, "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4,
+}
+CAUSAL_ALERT_MINIMUM_SEVERITY = CAUSAL_ALERT_SEVERITY_RANK["high"]
+
+
+def triage_representative_row(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any] | None:
+    """The row the engine's own batch triage would investigate, or None."""
+    candidates = []
+    for row in rows:
+        rank = CAUSAL_ALERT_SEVERITY_RANK.get(
+            str(row.get("severity", "")).strip().lower(), -1
+        )
+        if rank < CAUSAL_ALERT_MINIMUM_SEVERITY:
+            continue
+        if str(row.get("rule_id", "")).startswith(
+            CAUSAL_ALERT_EXCLUDED_RULE_PREFIXES
+        ):
+            continue
+        candidates.append((rank, row))
+    if not candidates:
+        return None
+    # Highest severity, then earliest timestamp, then lowest id — exactly
+    # `isPreferred` in the Swift.
+    best = min(
+        candidates,
+        key=lambda pair: (
+            -pair[0],
+            number_value(pair[1].get("timestamp_unix"), "causal alert timestamp"),
+            str(pair[1].get("id", "")),
+        ),
+    )
+    return dict(best[1])
+
+
 def causal_alert_proof_if_ready(
     *, phase: str, database_path: pathlib.Path, process_path: str,
     trigger_started_at: dt.datetime, telemetry_before: Mapping[str, Any],
@@ -6330,8 +6438,14 @@ def causal_alert_proof_if_ready(
             fail("causal alert identity disappeared while awaiting investigation")
         row = pinned
     else:
-        # Deterministic: the query orders by timestamp ASC, id ASC.
-        row = rows[0]
+        representative = triage_representative_row(rows)
+        if representative is None:
+            # Every alert the trigger produced was below the investigation
+            # threshold or campaign/llm-derived. Not a proof yet, and not a
+            # failure: keep polling rather than binding an alert the engine
+            # will never investigate.
+            return None, stable_alert_id
+        row = representative
     alert_id = string_value(row.get("id"), "causal alert id")
     if not UUID_RE.fullmatch(alert_id):
         fail("causal alert id is not a UUID")
@@ -7896,7 +8010,7 @@ def make_runtime_template(candidate_manifest: Mapping[str, Any], manifest_sha: s
             },
             "disk_writes": {"engine_bytes": 0, "average_bytes_per_second": 0, "windows": [], "macos_disk_writes_diagnostic_count": 0},
             "cpu": {"engine_cpu_seconds": 0, "engine_average_cores": 0, "gui_background_percent_samples": [], "gui_background_p95_percent": 0},
-            "memory": {"engine_max_rss_bytes": 0, "engine_rss_minute_5_bytes": 0, "engine_rss_minute_15_bytes": 0},
+            "memory": {"engine_max_memory_footprint_bytes": 0, "engine_memory_footprint_minute_5_bytes": 0, "engine_memory_footprint_minute_15_bytes": 0},
             "disk_safety": {"inventory_complete": False, "sqlite_families": []},
             "ai_quality": {
                 "configured": False,

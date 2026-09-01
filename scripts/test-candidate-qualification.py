@@ -149,7 +149,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "engine_pid": 4321,
                 "engine_cpu_seconds_total": offset * 0.1,
                 "engine_disk_write_bytes_total": engine_write_bytes * offset // 900,
-                "engine_rss_bytes": rss,
+                "engine_memory_footprint_bytes": rss,
                 "gui_background_cpu_percent": 5.0,
                 "sequence_pending_steps_evicted_total": 0,
                 "sequence_state_continuity_maintained": True,
@@ -562,7 +562,7 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                     "engine_disk_write_bytes_total": sample[
                         "engine_disk_write_bytes_total"
                     ],
-                    "engine_rss_bytes": sample["engine_rss_bytes"],
+                    "engine_memory_footprint_bytes": sample["engine_memory_footprint_bytes"],
                     "executable_path": installed_identity["executable_path"],
                     "executable_sha256": installed_identity["executable_sha256"],
                 },
@@ -1214,6 +1214,16 @@ class CandidateQualificationTests(unittest.TestCase):
         self.assertEqual(
             qualification.DarwinRUsageInfoV4.ri_diskio_byteswritten.offset,
             152,
+        )
+        # The memory bound reads this field, so its offset is load-bearing:
+        # a wrong one silently gates on some other counter entirely.
+        self.assertEqual(
+            qualification.DarwinRUsageInfoV4.ri_phys_footprint.offset,
+            72,
+        )
+        self.assertEqual(
+            qualification.DarwinRUsageInfoV4.ri_resident_size.offset,
+            64,
         )
 
     def test_pre_prewarm_readiness_allows_only_uninitialized_llm(self) -> None:
@@ -2331,6 +2341,39 @@ class CandidateQualificationTests(unittest.TestCase):
         ):
             qualification.derive_workload_ingress(samples)
 
+    def test_unconfigured_llm_host_can_be_recorded_and_validated(self) -> None:
+        """Graceful degradation has to be able to produce evidence, not crash.
+
+        The validator has accepted an unconfigured backend since rc.44 -- the
+        product documents that LLM features degrade gracefully with no backend.
+        The recorder, though, bound its four LLM epoch deltas only on the
+        configured path, so building a report for a host without a backend
+        raised NameError and that shipping configuration could never be
+        qualified at all.  The unconfigured aggregate is also derived now
+        rather than hardcoded to the configured answer.
+        """
+        observations = copy.deepcopy(self.runtime["recorder_observations"])
+        for observation in observations:
+            observation["heartbeat"]["llm"] = {"configured": False}
+            self.rebind_observation_heartbeat(observation)
+        report = self.rebuild_runtime_from_observations(observations)
+
+        self.assertEqual(
+            report["measurements"]["ai_quality"],
+            {
+                "configured": False,
+                "feature_disabled_entire_epoch": True,
+                "schema_2_and_accounting_conserved_all_samples": True,
+                "unspecified_requests_epoch_delta": 0,
+                "alert_investigations_started_epoch_delta": 0,
+                "alert_investigations_accepted_epoch_delta": 0,
+                "alert_investigations_final_rejected_epoch_delta": 0,
+                "causal_alert_id": None,
+                "causal_investigation_sha256": None,
+            },
+        )
+        self.validate_runtime(report)
+
     def test_builder_rejects_short_actual_capture_coverage(self) -> None:
         observations = copy.deepcopy(self.runtime["recorder_observations"])
         observations[0]["captured_at"] = iso(5)
@@ -2929,14 +2972,90 @@ class CandidateQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(qualification.QualificationError, "explicitly_shed"):
             self.validate_runtime(report)
 
+    def test_durable_pending_steps_do_not_fail_the_fixed_drain_boundary(self) -> None:
+        """Out-of-order pending steps are durable state, not a writer backlog.
+
+        The journal's `queued` gauge holds partial sequence steps parked for an
+        earlier step that may never be offered inside this window at all.
+        Judging the drain by offered-delta == completed-delta silently required
+        that gauge to land back on its window-start value, which is a property
+        of ambient host activity rather than of journal health -- the same
+        aliasing readiness already exempts by name.  Loss and unbounded growth
+        stay gated by the shed and eviction checks, which stay zero here.
+        """
+        report = copy.deepcopy(self.runtime)
+        drained = [
+            index
+            for index, sample in enumerate(report["samples"])
+            if sample["offset_seconds"]
+            >= qualification.BURST_DRAIN_OFFSET_SECONDS
+        ]
+        self.assertTrue(drained)
+        for index in drained:
+            heartbeat = report["recorder_observations"][index]["heartbeat"]
+            heartbeat["sequence_journal_conservation"]["offered"] += 2
+            heartbeat["sequence_journal_conservation"]["queued"] += 2
+            heartbeat["sequence_pending_steps_current"] += 2
+            self.rederive_sample(report, index)
+        aggregate = next(
+            row
+            for row in report["measurements"]["conservation"]["boundaries"]
+            if row["name"] == "sequence-journal"
+        )
+        aggregate["offered"] += 2
+        aggregate["queued"] += 2
+        # The recorder derives this block from the same samples; the
+        # reconciliation exists to catch a forged aggregate, not a moved host.
+        report["measurements"]["workload_ingress"] = (
+            qualification.derive_workload_ingress(report["samples"])
+        )
+
+        self.validate_runtime(report)
+
+        window = qualification.derive_workload_ingress(report["samples"])
+        self.assertEqual(
+            window["sequence_journal_queued_drain"],
+            window["sequence_journal_queued_start"] + 2,
+        )
+        self.assertNotEqual(
+            window["sequence_journal_offered_delta"],
+            window["sequence_journal_completed_delta"],
+        )
+
+    def test_sequence_journal_in_flight_at_a_fixed_boundary_is_rejected(self) -> None:
+        """in_flight=0 is the assumption the readiness exemption rests on.
+
+        Readiness exempts `sequence-journal` from its queued check because the
+        producer is actor-synchronous and publishes in_flight=0.  Nothing used
+        to verify that, so an asynchronous journal would inherit the exemption
+        and hide a genuine writer backlog.  The fixed boundary pins it at both
+        ends of the window.
+        """
+        for boundary in (
+            qualification.BURST_START_OFFSET_SECONDS,
+            qualification.BURST_DRAIN_OFFSET_SECONDS,
+        ):
+            with self.subTest(boundary=boundary):
+                samples = copy.deepcopy(self.runtime["samples"])
+                for sample in samples:
+                    if sample["offset_seconds"] >= boundary:
+                        journal = sample["conservation"]["sequence-journal"]
+                        journal["offered"] += 1
+                        journal["in_flight"] = 1
+                with self.assertRaisesRegex(
+                    qualification.QualificationError,
+                    "in-flight work across a fixed boundary",
+                ):
+                    qualification.derive_workload_ingress(samples)
+
     def test_memory_growth_above_64_mib_is_rejected(self) -> None:
         report = copy.deepcopy(self.runtime)
         report["recorder_observations"][-1]["process"][
-            "engine_rss_bytes"
+            "engine_memory_footprint_bytes"
         ] = 300 * 1024 * 1024
         self.rederive_sample(report, -1)
-        report["measurements"]["memory"]["engine_max_rss_bytes"] = 300 * 1024 * 1024
-        report["measurements"]["memory"]["engine_rss_minute_15_bytes"] = 300 * 1024 * 1024
+        report["measurements"]["memory"]["engine_max_memory_footprint_bytes"] = 300 * 1024 * 1024
+        report["measurements"]["memory"]["engine_memory_footprint_minute_15_bytes"] = 300 * 1024 * 1024
         with self.assertRaisesRegex(qualification.QualificationError, "growth"):
             self.validate_runtime(report)
 

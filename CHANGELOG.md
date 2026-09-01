@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.21.6] — 2026-08-31
+## [1.22.0] — 2026-09-01
 
 ### Fixed
 - **Engine crash on the heavy-enrichment timeout path.** A budget split that

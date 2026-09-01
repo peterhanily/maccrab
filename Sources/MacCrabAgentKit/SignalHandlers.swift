@@ -105,8 +105,34 @@ enum SignalHandlers {
                     // covered the single-event reload too, and warn loudly when
                     // the two diverge.
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules (rule_profile \(freshConfig.ruleProfile) governs the sequence/graph reload)")
+                    // v1.22.0: ALSO emit through os.log.
+                    //
+                    // A System Extension's stdout is discarded — nothing in this
+                    // process's `print` output reaches the unified log. Proven on
+                    // an installed host: DaemonSetup emits every BOOT_TIMING label
+                    // via BOTH print and logger.notice, and only the os.log copies
+                    // appear in the log store.
+                    //
+                    // That made the operator-facing record of a live rule reload
+                    // invisible: an admin who sends SIGHUP had no way to confirm
+                    // from the logs that anything reloaded, or how many rules are
+                    // now active. It also made the release gate's live-reload
+                    // evidence unsatisfiable by construction, so a run could burn
+                    // its full 900-second epoch and then fail assembling a
+                    // transcript the product could never have written.
+                    //
+                    // Deliberately mirrors the existing line rather than replacing
+                    // it: `print` remains the transcript for a foreground
+                    // `swift run maccrabd`, where there is no os_log subsystem to
+                    // read. Counts only — no paths, no rule content.
+                    logger.notice(
+                        "[SIGHUP] Reloaded \(singleCount, privacy: .public) single + \(seqCount, privacy: .public) sequence rules (rule_profile \(freshConfig.ruleProfile, privacy: .public) governs the sequence/graph reload)"
+                    )
                     if freshConfig.ruleProfile != state.bootRuleProfile {
                         print("[SIGHUP] WARNING: rule_profile changed '\(state.bootRuleProfile)' → '\(freshConfig.ruleProfile)' since boot — single-event rules keep the boot profile until the daemon restarts")
+                        logger.warning(
+                            "[SIGHUP] rule_profile changed '\(state.bootRuleProfile, privacy: .public)' -> '\(freshConfig.ruleProfile, privacy: .public)' since boot — single-event rules keep the boot profile until the daemon restarts"
+                        )
                     }
 
                     // v1.12.0 RC3 (Int-HSig1): also reload graph rules so
