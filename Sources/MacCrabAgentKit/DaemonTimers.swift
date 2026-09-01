@@ -1180,6 +1180,11 @@ enum DaemonTimers {
     /// small blocks. The timer immediately yields and continues bounded turns
     /// until the store itself proves no eligible block remains.
     static let journalExpiryMaximumBlocksPerQuantum = 64
+    /// How long one expiry tick may spend waiting out committed record
+    /// ownership before giving the cadence back. Well inside the sweep's
+    /// documented five-minute overhang, so conserving the tick cannot push a
+    /// cutoff past the window it was taken for.
+    static let journalExpiryLeaseBackpressureBudgetSeconds: TimeInterval = 30
 
     /// Progressively tighter retention windows for TraceGraph recovery, used
     /// only after the store proves the current cutoff has no eligible backlog
@@ -2241,7 +2246,11 @@ enum DaemonTimers {
                 // and makes the five-minute overhang proof ill-defined.
                 let retainedThrough = Date()
                 var reportedCoalescing = false
+                var reportedLeaseBackpressure = false
                 var totalExpired = 0
+                var leaseDeferrals = 0
+                let leaseBackpressureDeadline = retainedThrough
+                    .addingTimeInterval(journalExpiryLeaseBackpressureBudgetSeconds)
                 while !Task.isCancelled {
                     var acquired = false
                     while !Task.isCancelled {
@@ -2274,6 +2283,45 @@ enum DaemonTimers {
                                 maximumBlocks:
                                     journalExpiryMaximumBlocksPerQuantum
                             )
+                    } catch let error as EventStoreError {
+                        await state.eventStore.endSizeCapPrune()
+                        // A memory lease is bounded backpressure, not a fault:
+                        // the pipeline's record ownership is fully committed at
+                        // this instant and will not be a moment later. Treat it
+                        // exactly as lock contention is already treated a few
+                        // lines above -- conserve the tick and retry promptly --
+                        // rather than discarding the rest of the backlog until
+                        // the next cadence, which meets the same contention.
+                        //
+                        // Discarding it compounds: expiry is the only thing that
+                        // removes journal blocks, and every exact read pays for
+                        // each surviving block. Measured on the reference host
+                        // after ~3h, 36,774 of 43,133 blocks (86% of retained
+                        // events) sat past `retained_until` while this fired
+                        // every few minutes, and a 5-minute dashboard query had
+                        // to consider 1,091 blocks to return 200 rows.
+                        if JournalExpiryBackpressurePolicy.decide(
+                            error: error,
+                            now: Date(),
+                            backpressureDeadline: leaseBackpressureDeadline
+                        ) == .conserveAndRetry {
+                            leaseDeferrals += 1
+                            if !reportedLeaseBackpressure {
+                                reportedLeaseBackpressure = true
+                                await state.eventStore
+                                    .recordJournalExpiryLeaseDeferral()
+                                logger.info("Event journal expiry: bounded record ownership is committed; conserving this tick for prompt retry.")
+                            }
+                            do {
+                                try await Task.sleep(for: .milliseconds(250))
+                            } catch {
+                                return
+                            }
+                            continue
+                        }
+                        await state.eventStore.recordJournalExpiryFailure()
+                        logger.fault("Event journal expiry failed: \(error.localizedDescription, privacy: .public)")
+                        return
                     } catch {
                         await state.eventStore.recordJournalExpiryFailure()
                         await state.eventStore.endSizeCapPrune()
@@ -2290,7 +2338,7 @@ enum DaemonTimers {
                     await Task.yield()
                 }
                 if totalExpired > 0, !Task.isCancelled {
-                    logger.info("Event journal expiry: aggregate-rolled and expired \(totalExpired) authenticated event records across bounded quanta.")
+                    logger.info("Event journal expiry: aggregate-rolled and expired \(totalExpired, privacy: .public) authenticated event records across bounded quanta (lease deferrals \(leaseDeferrals, privacy: .public)).")
                 }
             }
         }
@@ -3088,6 +3136,8 @@ enum DaemonTimers {
                 payloadPoisonTotal = nil
             }
             let eventInsertFilterCounters = await state.eventStore.insertFilterCounters()
+            let journalExpiryScheduling = await state.eventStore
+                .journalExpirySchedulingCounters()
             let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
 
             // v1.21.4 Phase-0 (D1 + D4): native ES kernel-drop accounting +
@@ -4254,6 +4304,17 @@ enum DaemonTimers {
                 payload["events_insert_filter_dropped_total"] = eventInsertFilterCounters.dropped
                 payload["events_insert_filter_passed_total"] = eventInsertFilterCounters.passed
             }
+            // Journal expiry is the ONLY thing that removes journal blocks, and
+            // every exact read pays for each block that survives. Its scheduling
+            // health was counted but never published, so a sweep that conserved
+            // or failed every tick for hours was invisible while the read cost
+            // it governs grew all day.
+            payload["event_journal_expiry_pending_ticks_total"] =
+                journalExpiryScheduling.pendingTicks
+            payload["event_journal_expiry_failed_passes_total"] =
+                journalExpiryScheduling.failedPasses
+            payload["event_journal_expiry_lease_deferrals_total"] =
+                journalExpiryScheduling.leaseDeferrals
             if let receiver = state.otlpReceiver {
                 let lifecycle = await receiver.lifecycleSnapshot()
                 var otlpLifecycle: [String: Any] = [

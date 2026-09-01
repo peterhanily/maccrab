@@ -2014,6 +2014,7 @@ enum DaemonSetup {
                 legacySecretMigration: .sharedKeychain(interaction: .disallowed),
                 onScrubFailure: { error in
                     print("LLM config: legacy-secret scrub failed: \(error)")
+                    logger.error("LLM config: legacy-secret scrub failed: \(String(describing: error), privacy: .public)")
                 }
             ) {
                 let trustedOllamaBaseline = llmConfig.ollamaURL
@@ -2036,6 +2037,7 @@ enum DaemonSetup {
                 interaction: .disallowed,
                 onError: { key, error in
                     print("LLM Keychain: \(key.displayName) unavailable: \(error)")
+                    logger.error("LLM Keychain: \(key.displayName, privacy: .public) unavailable: \(String(describing: error), privacy: .public)")
                 }
             )
 
@@ -2048,7 +2050,12 @@ enum DaemonSetup {
                 trustEnvironmentOllamaURL: true
             )
 
-            guard llmConfig.enabled else { return nil }
+            guard llmConfig.enabled else {
+                // The single most common "why is AI quiet?" answer, and until
+                // now the only one that produced no output at all.
+                logger.notice("LLM backend: disabled (no backend opted in) — AI features stay off. Enable one in Settings → AI Backend.")
+                return nil
+            }
 
             let backend: any LLMBackend
             switch llmConfig.provider {
@@ -2074,30 +2081,35 @@ enum DaemonSetup {
                 }
                 if installed == false {
                     print("LLM backend: configured Ollama model '\(llmConfig.ollamaModel)' not pulled — LLM disabled (pull it or pick an installed model in Settings → AI Backend)")
+                    logger.error("LLM backend: configured Ollama model '\(llmConfig.ollamaModel, privacy: .public)' is not pulled — LLM disabled. Pull it, or pick an installed model in Settings → AI Backend.")
                     return nil
                 }
                 backend = ollama
             case .claude:
                 guard let key = llmConfig.claudeAPIKey, !key.isEmpty else {
                     print("LLM backend: Claude requires API key")
+                    logger.error("LLM backend: Claude is selected but no API key is available — LLM disabled.")
                     return nil
                 }
                 backend = ClaudeBackend(apiKey: key, model: llmConfig.claudeModel)
             case .openai:
                 guard let key = llmConfig.openaiAPIKey, !key.isEmpty else {
                     print("LLM backend: OpenAI requires API key")
+                    logger.error("LLM backend: OpenAI is selected but no API key is available — LLM disabled.")
                     return nil
                 }
                 backend = OpenAIBackend(baseURL: llmConfig.openaiURL, apiKey: key, model: llmConfig.openaiModel)
             case .mistral:
                 guard let key = llmConfig.mistralAPIKey, !key.isEmpty else {
                     print("LLM backend: Mistral requires API key")
+                    logger.error("LLM backend: Mistral is selected but no API key is available — LLM disabled.")
                     return nil
                 }
                 backend = MistralBackend(apiKey: key, model: llmConfig.mistralModel)
             case .gemini:
                 guard let key = llmConfig.geminiAPIKey, !key.isEmpty else {
                     print("LLM backend: Gemini requires API key")
+                    logger.error("LLM backend: Gemini is selected but no API key is available — LLM disabled.")
                     return nil
                 }
                 backend = GeminiBackend(apiKey: key, model: llmConfig.geminiModel)
@@ -2122,6 +2134,7 @@ enum DaemonSetup {
             case .gemini:  model = llmConfig.geminiModel
             }
             print("LLM backend: \(llmConfig.provider.rawValue) (\(model)) — availability checked lazily")
+            logger.notice("LLM backend: \(llmConfig.provider.rawValue, privacy: .public) (\(model, privacy: .public)) enabled — availability checked lazily.")
             return service
         }()
         // RuleGenerator is constructed earlier with the deterministic engines.

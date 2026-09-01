@@ -18892,6 +18892,7 @@ public actor EventStore {
 
     private var _isPruningForSizeCap = false
     private var journalExpiryPendingTicks: UInt64 = 0
+    private var journalExpiryLeaseDeferrals: UInt64 = 0
     private var journalExpiryFailedPasses: UInt64 = 0
 
     /// Acquire the size-cap pruning exclusion. Returns `nil` if
@@ -18921,11 +18922,23 @@ public actor EventStore {
         journalExpiryFailedPasses &+= 1
     }
 
+    /// Count one tick that was conserved because the pipeline's bounded record
+    /// ownership was fully committed, not one that failed. Counted once per
+    /// tick rather than per 250-ms retry, matching `pendingTicks`.
+    public func recordJournalExpiryLeaseDeferral() {
+        journalExpiryLeaseDeferrals &+= 1
+    }
+
     public func journalExpirySchedulingCounters() -> (
         pendingTicks: UInt64,
-        failedPasses: UInt64
+        failedPasses: UInt64,
+        leaseDeferrals: UInt64
     ) {
-        (journalExpiryPendingTicks, journalExpiryFailedPasses)
+        (
+            journalExpiryPendingTicks,
+            journalExpiryFailedPasses,
+            journalExpiryLeaseDeferrals
+        )
     }
 
     /// Release the size-cap pruning exclusion. Must be called from
