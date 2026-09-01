@@ -14,7 +14,13 @@ ALERT_ONLY=0
 #     /usr/bin/true and /bin/mv, plus the create/write/close/rename file path).
 #   * 2,000 iterations therefore offer ~84,000 events, and the loop is not rate
 #     limited, so they land inside one interval: ~2,800 events/s peak, a little
-#     over 2x the required floor.
+#     over 2x the required floor. The recorder launches this script ON the
+#     minute-five sample boundary and the loop finishes in ~9s, so the burst
+#     falls inside a single interval rather than being halved across two.
+#   * The upper bound is drainability, not capacity: every lane must report
+#     queued=0 and in_flight=0 at the fixed drain boundary 150s after the burst
+#     starts, so offering more than the engine can retire in that window fails
+#     the run no matter how much headroom the caps have.
 #   * Both merged detection-input streams cap at 100,000 (mergedPriorityStreamCap
 #     / mergedFileStreamCap).  ~84,000 events split ~53k priority / ~30k file
 #     leaves each lane under half its cap even before any drain, so nothing is

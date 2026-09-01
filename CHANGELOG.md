@@ -37,12 +37,63 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **Collector health reported never-started collectors as healthy.** Health now
   distinguishes "not started" from "started and quiet", and every status carries
   a reason.
+- **Journal expiry discarded its pass on transient backpressure.** Expiry is the
+  only thing that removes journal blocks, and every exact read pays for each
+  block that survives. Both of the store's self-described transient conditions —
+  `busy`, and a momentarily committed record-ownership lease — reached a
+  catch-all that logged `fault` and returned the cadence, so a pass abandoned its
+  backlog until the next one, which met the same contention. Measured on an
+  installed host after ~3h, 36,774 of 43,133 blocks (86% of retained events) sat
+  past `retained_until` and a five-minute dashboard query had to consider 1,091
+  blocks to return 200 rows. Both are now waited out the way lock contention
+  already was, bounded to 30s and counted. This does not relax why
+  `memoryLeaseUnavailable` is distinct from `busy`: that case exists because the
+  per-event write path retries credit it is itself holding. A maintenance sweep
+  holds none when its acquisition fails, and releases the maintenance exclusion
+  before waiting.
+- **LLM backend startup decisions were unobtainable on release builds.** Every
+  reason the subsystem enables or disables itself was `print()`, which a System
+  Extension discards, so an operator whose configured backend failed to load had
+  no diagnostic at all. Observed live: an engine reporting
+  `llm.configured=false` with Ollama running and a valid config on disk.
+- **SIGHUP rule-reload confirmations were invisible on release builds.** Same
+  cause: the only signal that a reload took effect went to discarded stdout.
 
 ### Added
 - Journal-index refresh telemetry: full-rebuild and append-refresh counters, a
   named slow-refresh threshold, and a rate-limited log when a refresh is slow.
 - `heartbeat_rich` publishes network-blocker enforcement state and reason,
   per-collector health reasons, and heavy-enrichment lease-refusal counts.
+- Journal-expiry scheduling health: pending ticks, failed passes and lease
+  deferrals. These were counted internally and had no consumer, which is why a
+  sweep that gave up on every pass stayed invisible for hours while the read
+  cost it governs grew.
+
+### Changed
+- **Installed-host qualification measures memory as `phys_footprint`, not
+  `resident_size`.** Resident size counts clean file-backed and shared pages the
+  process is not charged for — the stores' 64 MiB SQLite mmap windows and the
+  dyld shared cache — and is not what the kernel enforces. Measured on the
+  reference host: 1,101.1 MiB resident against a 371.5 MiB footprint. The 450 MiB
+  bound is unchanged; only the metric it read was wrong. Report fields are
+  renamed accordingly and both evidence schema strings are bumped.
+- **The fixed qualification burst is sized from the gate's own reference load.**
+  It offered ~834,000 events against merged detection-input streams that cap at
+  100,000 each, so the engine had to shed several hundred thousand events and the
+  same gate then failed the candidate for shedding them. 2,000 iterations reach
+  ~2,800 events/s against the predeclared 1,274 events/s floor while leaving both
+  lanes under half their capacity.
+- **The qualification drain boundary judges the sequence journal by flow.** It
+  required every conservation boundary to report `queued=0` at the fixed drain
+  instant, including the journal's durable set of out-of-order partial sequence
+  steps — that is, it required no sequence rule anywhere on the host to hold a
+  partial match at one instant. Readiness already exempts that boundary by name.
+  The exemption now covers `queued` only; `in_flight` is newly checked at both
+  endpoints, so an asynchronous journal cannot inherit it and hide a real backlog.
+- **An unconfigured LLM backend can be recorded.** The validator has accepted
+  that supported configuration since rc.44, but the recorder bound its LLM epoch
+  deltas only on the configured path and raised `NameError`, so graceful
+  degradation could never be qualified.
 
 ## [1.21.6-rc.17] — 2026-08-13
 
