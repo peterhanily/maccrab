@@ -6528,6 +6528,40 @@ def causal_alert_proof_if_ready(
     )
     if pending.get("configured") is True and pending.get("healthy") is not True:
         return None, alert_id
+    # Same lag, second field. `healthy` is already true by the epoch (the
+    # prewarm made it so), but the investigation this proof cites can be
+    # persisted in alerts.db while the heartbeat still shows it started and not
+    # yet accepted -- heartbeats are ~30s apart. The validator then computes
+    # accepted_delta != started_delta and rejects a proof describing a perfectly
+    # good investigation. Observed on the reference host at the epoch boundary
+    # with started=2, accepted=2, final_rejection=0 by the time it was read
+    # back. Wait for the telemetry to agree instead of emitting the proof.
+    if pending.get("configured") is True and isinstance(telemetry_before, Mapping) \
+            and telemetry_before.get("alert_investigation") is not None:
+        before_alert = object_value(
+            telemetry_before.get("alert_investigation"),
+            f"{phase} causal LLM telemetry baseline.alert_investigation",
+        )
+        after_alert = object_value(
+            pending.get("alert_investigation"),
+            f"{phase} causal LLM telemetry result.alert_investigation",
+        )
+
+        def _moved(key: str) -> int:
+            return int_value(
+                after_alert.get(key), f"{phase} causal after.{key}", minimum=0
+            ) - int_value(
+                before_alert.get(key), f"{phase} causal before.{key}", minimum=0
+            )
+
+        started = _moved("operations_started_total")
+        accepted = _moved("accepted_total")
+        in_flight = int_value(
+            after_alert.get("current_operations"),
+            f"{phase} causal after.current_operations", minimum=0,
+        )
+        if in_flight != 0 or started < 1 or accepted != started:
+            return None, alert_id
     proof = {
         "phase": phase,
         "database": database,

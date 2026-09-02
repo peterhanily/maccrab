@@ -1831,6 +1831,55 @@ class CandidateQualificationTests(unittest.TestCase):
             "a proof must not be emitted while its own telemetry still lags",
         )
 
+    def test_causal_proof_waits_for_an_accepted_investigation(self) -> None:
+        """A started-but-not-yet-accepted investigation is not proof yet.
+
+        By the epoch the backend is already healthy (the prewarm made it so),
+        so the health guard does not help. The investigation can be persisted
+        in alerts.db while the ~30s heartbeat still reports it started and not
+        accepted; the validator then sees accepted_delta != started_delta and
+        rejects a proof describing a perfectly good investigation.
+        """
+        observation = copy.deepcopy(self.runtime["recorder_observations"][-1])
+        # healthy, one investigation started, none accepted yet, still running.
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=True, started=1, accepted=0, current=1
+        )
+        self.rebind_observation_heartbeat(observation)
+        before = qualification.llm_runtime_quality_sample(
+            {"llm": llm_heartbeat_payload(healthy=True, started=0, accepted=0)}
+        )
+        database = (self.root / "accept-lag.db").resolve()
+        exact_path, _ = qualification.workload_paths("a" * 32)
+        connection = sqlite3.connect(str(database))
+        connection.execute(
+            "CREATE TABLE alerts (id TEXT, timestamp REAL, rule_id TEXT, "
+            "severity TEXT, process_path TEXT, llm_investigation_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO alerts VALUES (?1,?2,?3,?4,?5,?6)",
+            ("55555555-5555-4555-8555-555555555555", 200.0,
+             "maccrab.qualification.reverse-shell", "critical", exact_path,
+             '{"summary":"x"}'),
+        )
+        connection.commit()
+        connection.close()
+
+        proof, _ = qualification.causal_alert_proof_if_ready(
+            phase="fixture",
+            database_path=database,
+            process_path=exact_path,
+            trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
+            telemetry_before=before,
+            observation=observation,
+            stable_alert_id=None,
+        )
+        self.assertIsNone(
+            proof,
+            "a proof must not be emitted while the investigation it cites is "
+            "still in flight",
+        )
+
     def test_causal_proof_rejects_a_vanished_pinned_alert(self) -> None:
         # Loosening the uniqueness check must not loosen identity stability: a
         # pinned alert that disappears mid-run is still a hard failure.
