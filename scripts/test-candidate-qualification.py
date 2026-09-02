@@ -1238,6 +1238,77 @@ class CandidateQualificationTests(unittest.TestCase):
             64,
         )
 
+    def test_prewarm_readiness_allows_a_first_investigation_in_flight(self) -> None:
+        """`healthy` means "has succeeded once", so the first one is in limbo.
+
+        Mirrors the live prewarm poll, which passes require_drained=False --
+        an investigation in flight is exactly what that phase is waiting for.
+
+        The prewarm phase exists to drive the first alert investigation. While
+        a local 7B model works on it (15-30s on the reference host) the backend
+        is unhealthy AND used -- the state this check used to call fatal, so
+        the prewarm tripped on its own action and only passed when some earlier
+        alert had already made the backend healthy. Judge by evidence of
+        failure, not by a success that is still pending.
+        """
+        report = copy.deepcopy(self.runtime)
+        observation = report["recorder_observations"][0]
+
+        # First investigation running: unhealthy, used, in flight, no failures.
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=1, accepted=0, current=1
+        )
+        self.rederive_sample(report, 0)
+        qualification.validate_runtime_readiness(
+            observation, "fixture prewarm", phase="fixture prewarm",
+            require_drained=False, expected_pid=4321, require_llm_ready=False,
+        )
+
+        # Used, unhealthy, and NOT in flight: it produced nothing. Still fatal.
+        # "Used" is marked by a prior success rather than a started count, so
+        # the fixture keeps downstreamValidation conserving
+        # (started == current + accepted + rejection).
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=0, accepted=0, current=0
+        )
+        observation["heartbeat"]["llm"]["last_success_unix"] = 1_786_363_200.0
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "not a first investigation still in flight"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture prewarm", phase="fixture prewarm",
+                require_drained=False, expected_pid=4321, require_llm_ready=False,
+            )
+
+        # In flight but the backend is already failing: still fatal.
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=1, accepted=0, current=1
+        )
+        observation["heartbeat"]["llm"]["consecutive_failures"] = 2
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "not a first investigation still in flight"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture prewarm", phase="fixture prewarm",
+                require_drained=False, expected_pid=4321, require_llm_ready=False,
+            )
+
+        # In flight but the circuit is open: still fatal.
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=1, accepted=0, current=1
+        )
+        observation["heartbeat"]["llm"]["circuit_open"] = True
+        self.rederive_sample(report, 0)
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "not a first investigation still in flight"
+        ):
+            qualification.validate_runtime_readiness(
+                observation, "fixture prewarm", phase="fixture prewarm",
+                require_drained=False, expected_pid=4321, require_llm_ready=False,
+            )
+
     def test_pre_prewarm_readiness_allows_only_uninitialized_llm(self) -> None:
         report = copy.deepcopy(self.runtime)
         observation = report["recorder_observations"][0]

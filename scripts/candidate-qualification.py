@@ -4194,9 +4194,37 @@ def runtime_readiness_failures(
                         f"{path}.llm_quality.totals_requested_total",
                     ) != 0
                 ):
-            fatal.append(
-                "unhealthy LLM is not the expected never-used/no-success state"
+            # `healthy` means "has succeeded at least once", so a first-ever
+            # investigation is unhealthy-but-used for as long as it runs -- on
+            # the reference host a local 7B model takes 15-30s. The prewarm
+            # phase exists precisely to drive that first investigation, so
+            # reading this state as a fault made the prewarm trip a check on
+            # its own action, and it only passed when some earlier alert had
+            # already made the backend healthy. Judge it by evidence of
+            # FAILURE, not by the absence of a success that is still pending.
+            alert_flight = object_value(
+                llm.get("alert_investigation"),
+                f"{path}.llm_quality.alert_investigation",
             )
+            in_flight = int_value(
+                alert_flight.get("current_operations"),
+                f"{path}.llm_quality.alert_investigation.current_operations",
+                minimum=0,
+            )
+            failures = int_value(
+                llm.get("consecutive_failures"),
+                f"{path}.llm_quality.consecutive_failures", minimum=0,
+            )
+            circuit_open = bool_value(
+                llm.get("circuit_open"), f"{path}.llm_quality.circuit_open"
+            )
+            if failures or circuit_open or in_flight == 0:
+                fatal.append(
+                    "unhealthy LLM is not the expected never-used/no-success "
+                    "state and is not a first investigation still in flight "
+                    f"(failures={failures} circuit_open={circuit_open} "
+                    f"in_flight={in_flight})"
+                )
         if int_value(
             llm.get("consecutive_failures"),
             f"{path}.llm_quality.consecutive_failures",
