@@ -534,3 +534,46 @@ struct AlertsSizeCapRecoveryTests {
         #expect(try await store.count() == countAfterMaintenance)
     }
 }
+
+@Suite("Alerts family headroom")
+struct AlertsFamilyHeadroomTests {
+    private let mib: Int64 = 1_048_576
+
+    @Test("The family blocks writes while both component budgets look satisfied")
+    func componentBudgetsCanBothPassWhileTheFamilyBlocks() {
+        // Reproduces the installed-host state that paused alert-evidence
+        // writes. The family cap is exactly alertsMaxSizeMB + evidenceMaxSizeMB
+        // (100 + 100), and the footprint additionally carries indexes, the WAL,
+        // free pages and the transaction reserve -- none of which count against
+        // either component budget. Measured on the reference host:
+        //   alert_evidence 99.9 MB (at its cap)   -> its enforcement no-ops
+        //   alerts         78.3 MB (under its cap) -> its enforcement no-ops
+        //   family        201,328,184 bytes > 201,326,592 admission boundary
+        // so only the FAMILY pass can clear it, and writes stay paused until it
+        // runs. That is what the early-fire watchdog now reacts to.
+        let boundary = AlertsSizeCapBoundary(
+            nominalCapBytes: 200 * mib,
+            transactionReserveBytes: 8 * mib
+        )
+        #expect(boundary.hardAdmissionBoundaryBytes == 201_326_592)
+        #expect(boundary.requiresMaintenance(footprintBytes: 201_328_184))
+
+        // One byte under the boundary must NOT drag the watchdog into work.
+        #expect(
+            !boundary.requiresMaintenance(
+                footprintBytes: boundary.hardAdmissionBoundaryBytes - 1
+            )
+        )
+    }
+
+    @Test("A family within its admission boundary needs no maintenance")
+    func settledFamilyIsQuiet() {
+        let boundary = AlertsSizeCapBoundary(
+            nominalCapBytes: 200 * mib,
+            transactionReserveBytes: 8 * mib
+        )
+        // 185.6 MB -- the footprint the reference host recovered to, which
+        // cleared the pause.
+        #expect(!boundary.requiresMaintenance(footprintBytes: 194_641_920))
+    }
+}

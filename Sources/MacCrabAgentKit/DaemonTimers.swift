@@ -2513,6 +2513,25 @@ enum DaemonTimers {
         }
         alertsSizeCapTimer.resume()
 
+        // v1.22.0: early-fire watchdog for the alerts family. The hourly pass
+        // above stays the scheduled enforcement; this only reacts to the state
+        // that pauses alert-evidence writes, so a host does not sit with
+        // evidence capture stopped for up to an hour after a restart. Mirrors
+        // the events size-cap watchdog: 2-minute first fire, 60s cadence, and
+        // it does no work at all unless writes are actually blocked.
+        let alertsSizeCapWatchdogTimer = DispatchSource.makeTimerSource(
+            queue: .global()
+        )
+        alertsSizeCapWatchdogTimer.schedule(deadline: .now() + 120, repeating: 60)
+        alertsSizeCapWatchdogTimer.setEventHandler {
+            timerLifecycle.submit(label: "alerts-size-watchdog") {
+                guard await alertsFamilyBlocksWrites(state: state) else { return }
+                logger.warning("Alerts family admission watchdog: evidence writes are blocked by family footprint; running the family pass now instead of waiting for the hourly sweep.")
+                _ = await enforceAlertsSizeCapNow(state: state)
+            }
+        }
+        alertsSizeCapWatchdogTimer.resume()
+
         // Same hourly defense for campaigns.db when present.
         //
         // Wave 9B (v1.12.6): incremental_vacuum + low-disk-safe full
@@ -4680,6 +4699,7 @@ enum DaemonTimers {
             sizeCapTimer,
             eventJournalExpiryTimer,
             sizeCapWatchdogTimer,
+            alertsSizeCapWatchdogTimer,
             maintenanceTimer,
             heartbeatTimer,
             tracegraphPruneTimer,
@@ -7164,6 +7184,38 @@ func enforceAlertsSizeCap(
 /// meaning. Derive the boundary from the actor's live admission snapshot so a
 /// SIGHUP policy and the maintenance decision cannot disagree about reserve.
 @discardableResult
+/// Whether the alerts family currently sits above the boundary that gates
+/// alert-evidence writes.
+///
+/// The scheduled family pass runs hourly with a one-hour first fire, but the
+/// condition it repairs PAUSES evidence persistence for as long as it lasts.
+/// Observed on the reference host: writes paused with the family 1,592 bytes
+/// over the admission boundary while BOTH component budgets were individually
+/// satisfied -- `alert_evidence` at its 100 MiB cap and `alerts` under its own
+/// -- because the family cap is exactly their sum and carries the indexes, WAL,
+/// free pages and transaction reserve on top. Only the family pass can clear
+/// that, so waiting up to an hour for it is a visible loss of evidence capture.
+func alertsFamilyBlocksWrites(state: DaemonState) async -> Bool {
+    let admission = await state.alertStore.storageAdmissionSnapshot()
+    let boundary = AlertsSizeCapBoundary(
+        nominalCapBytes: admission?.maxFootprintBytes
+            ?? AlertStore.combinedFamilyCapBytes(
+                alertsMaxSizeMiB: state.storage.alertsMaxSizeMB,
+                evidenceMaxSizeMiB: state.storage.evidenceMaxSizeMB
+            ),
+        transactionReserveBytes: admission?.transactionReserveBytes
+            ?? 8 * SQLitePersistentStorePolicy.bytesPerMiB
+    )
+    guard let footprint = try? measureDatabaseFootprintBytes(
+        dbPath: state.supportDir + "/alerts.db"
+    ) else {
+        // An unreadable probe is not evidence of pressure; the hourly pass owns
+        // that case and logs it.
+        return false
+    }
+    return boundary.requiresMaintenance(footprintBytes: footprint)
+}
+
 func enforceAlertsSizeCapNow(state: DaemonState) async -> Bool {
     let alertsPath = state.supportDir + "/alerts.db"
     let evidenceCapBytes = SQLitePersistentStorePolicy.capBytes(
