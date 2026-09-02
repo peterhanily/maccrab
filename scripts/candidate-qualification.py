@@ -6019,7 +6019,8 @@ def validate_alert_investigation_proof(raw: Any, path: str) -> Dict[str, int]:
     proof = object_value(raw, path)
     required = {
         "phase", "database", "process_path", "trigger_started_at",
-        "alert", "investigation_json", "investigation_sha256",
+        "alert", "observed_alerts", "investigation_json",
+        "investigation_sha256",
         "telemetry_before", "telemetry_after", "observed_at",
     }
     if set(proof) != required:
@@ -6071,6 +6072,29 @@ def validate_alert_investigation_proof(raw: Any, path: str) -> Dict[str, int]:
     string_value(alert.get("rule_id"), f"{path}.alert.rule_id")
     if alert.get("severity") not in ("high", "critical"):
         fail(f"{path}.alert did not persist as HIGH or CRITICAL")
+    # Every alert the one trigger produced. The bound alert above carries the
+    # causal proof; this records how many detection tiers actually caught it,
+    # which the removed uniqueness check used to discard. It is evidence, so it
+    # is validated as strictly as the rest: an unknown key here would otherwise
+    # be a free-form field inside a signed evidence document.
+    observed_alerts = list_value(
+        proof.get("observed_alerts"), f"{path}.observed_alerts", nonempty=True
+    )
+    for index, entry in enumerate(observed_alerts):
+        row = object_value(entry, f"{path}.observed_alerts[{index}]")
+        if set(row) != {"id", "rule_id", "severity"}:
+            fail(f"{path}.observed_alerts[{index}] inventory is incomplete or unknown")
+        observed_id = string_value(
+            row.get("id"), f"{path}.observed_alerts[{index}].id"
+        )
+        if not UUID_RE.fullmatch(observed_id):
+            fail(f"{path}.observed_alerts[{index}].id is not a UUID")
+        string_value(row.get("rule_id"), f"{path}.observed_alerts[{index}].rule_id")
+        string_value(row.get("severity"), f"{path}.observed_alerts[{index}].severity")
+    if alert_id not in {
+        string_value(row.get("id"), f"{path}.observed_alerts id") for row in observed_alerts
+    }:
+        fail(f"{path}.alert is not among the alerts the trigger was observed to produce")
     investigation = validate_investigation_json(
         proof.get("investigation_json"), alert_id, f"{path}.investigation_json"
     )

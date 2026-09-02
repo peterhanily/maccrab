@@ -9,6 +9,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import inspect
+import re
 import json
 import os
 import pathlib
@@ -647,6 +648,17 @@ def passing_runtime(manifest: dict, manifest_sha: str) -> dict:
                 "rule_id": "maccrab.qualification.reverse-shell",
                 "severity": "high",
             },
+            # Mirrors what causal_alert_proof_if_ready actually emits. This
+            # fixture used to build the proof by hand without it, so the suite
+            # stayed green while the real recorder failed its own inventory
+            # check on the first installed-host run.
+            "observed_alerts": [
+                {
+                    "id": alert_id,
+                    "rule_id": "maccrab.qualification.reverse-shell",
+                    "severity": "high",
+                },
+            ],
             "investigation_json": investigation,
             "investigation_sha256": qualification.sha256_bytes(
                 investigation.encode("utf-8")
@@ -1618,6 +1630,68 @@ class CandidateQualificationTests(unittest.TestCase):
         source = inspect.getsource(qualification.causal_alert_proof_if_ready)
         self.assertIn('"observed_alerts"', source)
         self.assertNotIn("ambiguous duplicate", source)
+
+    def test_proof_producer_and_proof_validator_agree_on_the_inventory(self) -> None:
+        """The producer's keys must be exactly the validator's required set.
+
+        This is the check that was missing. `observed_alerts` was added to the
+        producer and to the fixture, but the validator's inventory is strict
+        set-equality, so the first real installed-host run died on
+        `prewarm alert proof inventory is incomplete or unknown` while all 117
+        tests were green -- the fixture built proofs by hand and the only
+        assertion about the new field was a substring match on source text.
+        Compare the two directly so they cannot drift again.
+        """
+        producer = inspect.getsource(qualification.causal_alert_proof_if_ready)
+        validator = inspect.getsource(
+            qualification.validate_alert_investigation_proof
+        )
+        required = set(
+            re.findall(r'"([a-z0-9_]+)"', validator.split("required = {", 1)[1].split("}", 1)[0])
+        )
+        self.assertIn("observed_alerts", required)
+        # Every key the producer emits into the returned proof must be required.
+        emitted = set(
+            re.findall(r'^\s{8}"([a-z0-9_]+)":', producer, flags=re.MULTILINE)
+        )
+        self.assertTrue(emitted, "could not read the producer's emitted keys")
+        self.assertEqual(
+            emitted - required, set(),
+            "producer emits proof keys the validator will reject",
+        )
+        self.assertEqual(
+            required - emitted, set(),
+            "validator requires proof keys the producer never emits",
+        )
+
+    def test_fixture_proof_satisfies_the_real_validator(self) -> None:
+        # The fixture is only useful if it is the shape the validator accepts.
+        proof = copy.deepcopy(
+            self.runtime["recorder_probe_evidence"]["llm_prewarm"]
+                ["alert_investigation"]
+        )
+        qualification.validate_alert_investigation_proof(proof, "fixture proof")
+
+        missing = copy.deepcopy(proof)
+        del missing["observed_alerts"]
+        with self.assertRaisesRegex(
+            qualification.QualificationError, "inventory is incomplete or unknown"
+        ):
+            qualification.validate_alert_investigation_proof(missing, "fixture proof")
+
+        unbound = copy.deepcopy(proof)
+        unbound["observed_alerts"] = [
+            {
+                "id": "99999999-9999-4999-8999-999999999999",
+                "rule_id": "other-tier",
+                "severity": "high",
+            },
+        ]
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "not among the alerts the trigger was observed to produce",
+        ):
+            qualification.validate_alert_investigation_proof(unbound, "fixture proof")
 
     def test_causal_proof_rejects_a_vanished_pinned_alert(self) -> None:
         # Loosening the uniqueness check must not loosen identity stability: a
