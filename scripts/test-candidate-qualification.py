@@ -1772,6 +1772,50 @@ class CandidateQualificationTests(unittest.TestCase):
         ):
             qualification.validate_alert_investigation_proof(unbound, "fixture proof")
 
+    def test_causal_proof_waits_for_telemetry_to_catch_up(self) -> None:
+        """Evidence lands in alerts.db before the heartbeat reports the health flip.
+
+        Heartbeats are ~30s apart, so a persisted investigation is visible in
+        the database while `llm_quality` still says unhealthy. Emitting a proof
+        then embeds a stale `telemetry_after` and the validator rejects it for
+        `.after is not healthy` -- true of the snapshot, false of the engine.
+        The producer must report not-ready so the 180s poll continues.
+        """
+        observation = copy.deepcopy(self.runtime["recorder_observations"][-1])
+        observation["heartbeat"]["llm"] = llm_heartbeat_payload(
+            healthy=False, started=1, accepted=0, current=1
+        )
+        self.rebind_observation_heartbeat(observation)
+        database = (self.root / "telemetry-lag.db").resolve()
+        exact_path, _ = qualification.workload_paths("f" * 32)
+        connection = sqlite3.connect(str(database))
+        connection.execute(
+            "CREATE TABLE alerts (id TEXT, timestamp REAL, rule_id TEXT, "
+            "severity TEXT, process_path TEXT, llm_investigation_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO alerts VALUES (?1,?2,?3,?4,?5,?6)",
+            ("44444444-4444-4444-8444-444444444444", 200.0,
+             "maccrab.qualification.reverse-shell", "critical", exact_path,
+             '{"summary":"x"}'),
+        )
+        connection.commit()
+        connection.close()
+
+        proof, _ = qualification.causal_alert_proof_if_ready(
+            phase="fixture",
+            database_path=database,
+            process_path=exact_path,
+            trigger_started_at=dt.datetime.fromtimestamp(100.0, dt.timezone.utc),
+            telemetry_before={},
+            observation=observation,
+            stable_alert_id=None,
+        )
+        self.assertIsNone(
+            proof,
+            "a proof must not be emitted while its own telemetry still lags",
+        )
+
     def test_causal_proof_rejects_a_vanished_pinned_alert(self) -> None:
         # Loosening the uniqueness check must not loosen identity stability: a
         # pinned alert that disappears mid-run is still a hard failure.

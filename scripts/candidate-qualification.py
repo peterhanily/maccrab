@@ -6509,6 +6509,18 @@ def causal_alert_proof_if_ready(
     sample = sample_from_recorder_observation(
         observation, f"{phase} causal alert observation"
     )
+    # The persisted investigation appears in alerts.db BEFORE the next heartbeat
+    # publishes the health flip it caused -- heartbeats are ~30s apart, so the
+    # evidence is visible first and `telemetry_after` would embed a snapshot
+    # that still reports unhealthy. The validator then rejects the proof for
+    # `.after is not healthy`, which is true of that snapshot but not of the
+    # engine. This is a polling loop with a 180s budget: the proof is simply not
+    # ready until the telemetry it embeds agrees with the database it cites.
+    pending = object_value(
+        sample.get("llm_quality"), f"{phase} causal LLM telemetry result"
+    )
+    if pending.get("configured") is True and pending.get("healthy") is not True:
+        return None, alert_id
     proof = {
         "phase": phase,
         "database": database,
@@ -6542,6 +6554,8 @@ def causal_alert_proof_if_ready(
         "telemetry_before": copy.deepcopy(
             object_value(telemetry_before, "causal LLM telemetry baseline")
         ),
+        # NOTE: the caller must not reach here until `sample.llm_quality`
+        # reports healthy -- see the readiness gate above this return.
         "telemetry_after": copy.deepcopy(
             object_value(sample.get("llm_quality"), "causal LLM telemetry result")
         ),
