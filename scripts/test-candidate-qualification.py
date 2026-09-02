@@ -1695,6 +1695,21 @@ class CandidateQualificationTests(unittest.TestCase):
             "a pinned alert must stay bound even when it is not the first row",
         )
 
+    def test_fixed_workload_iterations_match_the_script(self) -> None:
+        """The burst size must not live in two places.
+
+        The reconciliation check spelled the count out as a literal, so
+        resizing BURST_ITERATIONS in the workload script left the gate
+        demanding the previous number and failing a correct run.
+        """
+        script = (ROOT / "scripts/runtime-qualification-workload.sh").read_text()
+        declared = re.search(r"^BURST_ITERATIONS=(\d+)$", script, re.M)
+        self.assertIsNotNone(declared, "workload script must declare BURST_ITERATIONS")
+        self.assertEqual(
+            int(declared.group(1)), qualification.FIXED_WORKLOAD_ITERATIONS,
+            "workload script and qualification gate disagree on the burst size",
+        )
+
     def test_causal_proof_records_every_tier_that_fired(self) -> None:
         # The uniqueness check discarded the fact that several tiers caught the
         # trigger. That is evidence, not noise: keep it in the proof.

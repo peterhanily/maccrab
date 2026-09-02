@@ -143,6 +143,13 @@ READINESS_POLL_SECONDS = 2
 # exercise at least the observed failure-state rate; a conserving idle engine
 # is not a load test.
 MIN_BURST_COMBINED_OFFERED_PER_SECOND = 1_274.0
+# The fixed burst size. This is the SAME number the workload script declares as
+# BURST_ITERATIONS; it was previously written out again as a literal inside the
+# output reconciliation, so resizing the burst in the script left the gate
+# demanding the old count and failing a correct run at
+# "fixed workload output does not reconcile with its bounded run".
+# `test_fixed_workload_iterations_match_the_script` pins the two together.
+FIXED_WORKLOAD_ITERATIONS = 2_000
 MIN_TRACE_STORE_INGEST_DELTA = 1
 CONTAINMENT_FIXTURE_PRODUCTS = (
     "maccrab-tierb-corpus-probe",
@@ -6950,7 +6957,7 @@ def live_runtime_recording(
                         or f"run_id={workload_run_id}" not in output \
                         or f"alert_executable={workload_alert_path}" not in output \
                         or f"bulk_path={workload_bulk_path}" not in output \
-                        or "iterations=20000" not in output \
+                        or f"iterations={FIXED_WORKLOAD_ITERATIONS}" not in output \
                         or "sequence_probes=1" not in output:
                     fail("fixed workload output does not reconcile with its bounded run")
 
